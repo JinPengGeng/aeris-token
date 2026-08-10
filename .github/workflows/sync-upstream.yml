@@ -19,6 +19,7 @@ jobs:
       contents: write
       pull-requests: write
     env:
+      GH_REPO: ${{ github.repository }}
       BASE_BRANCH: main
       SYNC_BRANCH: automation/sync-upstream
     steps:
