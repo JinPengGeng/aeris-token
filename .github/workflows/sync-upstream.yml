@@ -1,0 +1,241 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # 05:00 Asia/Shanghai (21:00 UTC on the previous day).
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync upstream / create PR
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    env:
+      BASE_BRANCH: main
+      SYNC_BRANCH: automation/sync-upstream
+    steps:
+      - name: Check out fork default branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream into automation branch
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          parent="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.full_name // empty')"
+          if [[ -z "${parent}" ]]; then
+            echo "${GITHUB_REPOSITORY} is not a fork" >&2
+            exit 1
+          fi
+
+          upstream_branch="$(gh api "repos/${parent}" --jq '.default_branch')"
+          git remote remove upstream >/dev/null 2>&1 || true
+          git remote add upstream "https://github.com/${parent}.git"
+          git fetch --no-tags upstream "${upstream_branch}"
+          upstream_sha="$(git rev-parse "upstream/${upstream_branch}")"
+
+          echo "parent=${parent}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_branch=${upstream_branch}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_sha=${upstream_sha}" >> "${GITHUB_OUTPUT}"
+
+          if git merge-base --is-ancestor "upstream/${upstream_branch}" "origin/${BASE_BRANCH}"; then
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+            echo "${BASE_BRANCH} already contains ${parent}:${upstream_branch}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --force-create "${SYNC_BRANCH}" "origin/${BASE_BRANCH}"
+
+          # Squash the upstream tree so protected squash merges remain idempotent
+          # and the automation token never pushes upstream workflow commits.
+          merge_failed=false
+          original_conflicts=""
+          if ! git merge --squash "upstream/${upstream_branch}"; then
+            merge_failed=true
+            original_conflicts="$(git diff --name-only --diff-filter=U)"
+          fi
+
+          # Keep workflow_dispatch definitions trusted and automatically resolve
+          # workflow-only conflicts in favor of the fork.
+          git restore \
+            --source="origin/${BASE_BRANCH}" \
+            --staged \
+            --worktree \
+            -- .github/workflows
+          remaining_conflicts="$(git diff --name-only --diff-filter=U)"
+
+          if [[ "${merge_failed}" == "true" ]] && \
+             { [[ -z "${original_conflicts}" ]] || [[ -n "${remaining_conflicts}" ]]; }; then
+            stale_pr="$(gh pr list \
+              --base "${BASE_BRANCH}" \
+              --head "${SYNC_BRANCH}" \
+              --state open \
+              --json url \
+              --jq '.[0].url // empty')"
+            if [[ -n "${stale_pr}" ]]; then
+              gh pr close "${stale_pr}" --comment \
+                "Closed because syncing upstream commit \`${upstream_sha}\` conflicts with \`${BASE_BRANCH}\`. A maintainer must resolve the conflict manually." || true
+            fi
+            echo "Upstream changes conflict with ${BASE_BRANCH}; manual resolution is required." >&2
+            exit 1
+          fi
+
+          if [[ "${merge_failed}" == "true" ]]; then
+            echo "Resolved upstream workflow conflicts in favor of fork-owned workflows"
+          fi
+
+          if git diff --cached --quiet; then
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+            echo "${BASE_BRANCH} already matches the applicable upstream content"
+            exit 0
+          fi
+
+          git commit -m "chore: sync ${parent}@${upstream_sha:0:12}"
+
+          local_sha="$(git rev-parse HEAD)"
+          remote_sha="$(git ls-remote --heads origin "refs/heads/${SYNC_BRANCH}" | awk '{print $1}')"
+
+          if [[ -n "${remote_sha}" ]]; then
+            git fetch --no-tags origin \
+              "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
+          fi
+
+          if [[ -n "${remote_sha}" ]] && \
+             git diff --quiet "${remote_sha}" "${local_sha}" && \
+             git merge-base --is-ancestor "origin/${BASE_BRANCH}" "${remote_sha}"; then
+            echo "${SYNC_BRANCH} already contains the desired tree"
+            local_sha="${remote_sha}"
+          else
+            if [[ -n "${remote_sha}" ]]; then
+              git push \
+                --force-with-lease="refs/heads/${SYNC_BRANCH}:${remote_sha}" \
+                origin "HEAD:refs/heads/${SYNC_BRANCH}"
+            else
+              git push --set-upstream origin "HEAD:refs/heads/${SYNC_BRANCH}"
+            fi
+          fi
+
+          echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+          echo "synced_sha=${local_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create or update sync pull request
+        id: pull_request
+        if: steps.sync.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PARENT: ${{ steps.sync.outputs.parent }}
+          UPSTREAM_BRANCH: ${{ steps.sync.outputs.upstream_branch }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pr_url="$(gh pr list \
+            --base "${BASE_BRANCH}" \
+            --head "${SYNC_BRANCH}" \
+            --state open \
+            --json url \
+            --jq '.[0].url // empty')"
+
+          body="$(cat <<EOF
+          Automated synchronization from \`${PARENT}:${UPSTREAM_BRANCH}\` at \`${UPSTREAM_SHA}\`.
+
+          This pull request intentionally requires the normal protected-branch checks and a maintainer decision before merging.
+          Fork-owned files under \`.github/workflows/\` are preserved and must be reconciled separately.
+          EOF
+          )"
+
+          if [[ -z "${pr_url}" ]]; then
+            pr_url="$(gh pr create \
+              --base "${BASE_BRANCH}" \
+              --head "${SYNC_BRANCH}" \
+              --title "chore: sync upstream" \
+              --body "${body}")"
+            echo "Created ${pr_url}"
+          else
+            gh pr edit "${pr_url}" \
+              --title "chore: sync upstream" \
+              --body "${body}"
+            echo "Updated ${pr_url}"
+          fi
+
+          echo "url=${pr_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Ensure required checks are dispatched
+        if: steps.sync.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNCED_SHA: ${{ steps.sync.outputs.synced_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ensure_check() {
+            local workflow="$1"
+            local context="$2"
+            local check_state
+            local dispatch_state
+
+            check_state="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/commits/${SYNCED_SHA}/check-runs?per_page=100" \
+              --jq "[.check_runs[] | select(.name == \"${context}\")] | sort_by(.started_at) | last | if . == null then \"missing\" else (.status + \"/\" + (.conclusion // \"pending\")) end")"
+
+            if [[ "${check_state}" == "completed/success" ]]; then
+              echo "${context}: ${check_state}; no dispatch needed"
+              return
+            fi
+
+            dispatch_state="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?event=workflow_dispatch&head_sha=${SYNCED_SHA}&per_page=20" \
+              --jq '[.workflow_runs[]] | sort_by(.created_at) | last | if . == null then "missing" else (.status + "/" + (.conclusion // "pending")) end')"
+
+            case "${dispatch_state}" in
+              requested/pending|queued/pending|in_progress/pending|waiting/pending|pending/pending)
+                echo "${context}: trusted dispatch is ${dispatch_state}"
+                ;;
+              *)
+                echo "${context}: ${check_state}; dispatching ${workflow}"
+                gh workflow run "${workflow}" --ref "${SYNC_BRANCH}"
+                ;;
+            esac
+          }
+
+          # A bot-created PR may leave pull_request runs awaiting approval. Only
+          # an active trusted workflow_dispatch run suppresses explicit dispatch.
+          ensure_check rust-ci.yml "Rust CI / check"
+          ensure_check frontend-ci.yml "Frontend CI / check"
+
+      - name: Write summary
+        if: always()
+        env:
+          HAS_CHANGES: ${{ steps.sync.outputs.has_changes }}
+          PARENT: ${{ steps.sync.outputs.parent }}
+          UPSTREAM_BRANCH: ${{ steps.sync.outputs.upstream_branch }}
+          PR_URL: ${{ steps.pull_request.outputs.url }}
+        shell: bash
+        run: |
+          {
+            echo "### Upstream sync"
+            echo
+            echo "- Source: \`${PARENT:-unknown}:${UPSTREAM_BRANCH:-unknown}\`"
+            echo "- Changes found: \`${HAS_CHANGES:-unknown}\`"
+            if [[ -n "${PR_URL}" ]]; then
+              echo "- Pull request: ${PR_URL}"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
