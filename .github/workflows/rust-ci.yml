@@ -661,6 +661,9 @@ jobs:
   check:
     name: Rust CI / check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
     needs:
       - fmt
       - clippy
@@ -669,11 +672,28 @@ jobs:
     if: ${{ always() }}
     steps:
       - name: Verify required jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          result=success
           if [ "${{ needs.fmt.result }}" != "success" ] || \
              [ "${{ needs.clippy.result }}" != "success" ] || \
              [ "${{ needs.test.result }}" != "success" ] || \
              [ "${{ needs.data_db_smoke.result }}" != "success" ]; then
+            result=failure
+          fi
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+              -f state="${result}" \
+              -f context="Rust CI / check" \
+              -f description="Rust CI ${result}" \
+              -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          fi
+
+          if [ "${result}" != "success" ]; then
             echo "Rust CI failed"
             exit 1
           fi
