@@ -97,5 +97,7 @@ jobs:
             echo "- Source: \`${PARENT:-unknown}:${UPSTREAM_BRANCH:-unknown}\`"
             echo "- State: \`${STATE:-failed}\`"
             echo "- Changes found: \`${HAS_CHANGES:-unknown}\`"
-            [[ -n "${PR_URL}" ]] && echo "- Pull request: ${PR_URL}"
+            if [[ -n "${PR_URL}" ]]; then
+              echo "- Pull request: ${PR_URL}"
+            fi
           } >>"${GITHUB_STEP_SUMMARY}"

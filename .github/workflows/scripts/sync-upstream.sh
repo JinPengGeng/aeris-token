@@ -389,6 +389,21 @@ close_obsolete_pr() {
   exit 0
 }
 
+wait_for_pr_head() {
+  local pr="$1" expected_sha="$2" attempt view_data
+  for attempt in 1 2 3 4 5 6; do
+    if view_data="$(gh pr view --repo "${GITHUB_REPOSITORY}" "${pr}" --json state,headRefOid)" &&
+       [[ "$(jq -r '.state' <<<"${view_data}")" == OPEN &&
+          "$(jq -r '.headRefOid' <<<"${view_data}")" == "${expected_sha}" ]]; then
+      printf '%s\n' "${view_data}"
+      return 0
+    fi
+    ((attempt == 6)) || sleep 2
+  done
+  echo "PR ${pr} did not expose synchronization tip ${expected_sha} in time." >&2
+  return 1
+}
+
 publish_pr() {
   local body number pr_url create_error create_output view_data
   require_gate
@@ -409,7 +424,7 @@ Fork-owned files under .github/workflows are preserved for separate review."
   if [[ -n "${tracked_pr}" ]]; then
     number="$(jq -r '.number' <<<"${tracked_pr}")"
     pr_url="$(jq -r '.url' <<<"${tracked_pr}")"
-    [[ "$(jq -r '.headRefOid' <<<"${tracked_pr}")" == "${published_sha}" ]] || return 1
+    view_data="$(wait_for_pr_head "${number}" "${published_sha}")" || return 1
   else
     create_error="$(mktemp)"
     if create_output="$(gh pr create \
@@ -429,9 +444,7 @@ Fork-owned files under .github/workflows are preserved for separate review."
         return 1
       fi
     fi
-    view_data="$(gh pr view --repo "${GITHUB_REPOSITORY}" "${pr_url}" --json state,headRefOid)"
-    [[ "$(jq -r '.state' <<<"${view_data}")" == OPEN &&
-       "$(jq -r '.headRefOid' <<<"${view_data}")" == "${published_sha}" ]] || return 1
+    view_data="$(wait_for_pr_head "${pr_url}" "${published_sha}")" || return 1
   fi
 
   gh pr edit \
