@@ -1,0 +1,55 @@
+name: Feature request
+description: Propose a user-visible capability or product improvement.
+title: "[Feature]: "
+labels:
+  - "type:feature"
+  - "status:triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem before proposing a solution. Keep credentials and production data out of the issue.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Who is affected, and what cannot they accomplish today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the expected behavior and user-facing result, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable conditions that prove the work is complete.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include workarounds or other approaches if known.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - Gateway or API protocol
+        - Scheduler, retry, or failover
+        - Pool, provider, or quota
+        - Frontend
+        - Tunnel
+        - Deployment or CI
+        - Documentation
+        - Other
+    validations:
+      required: true

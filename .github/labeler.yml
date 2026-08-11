@@ -1,0 +1,44 @@
+"area:frontend":
+  - changed-files:
+      - any-glob-to-any-file: "frontend/**"
+
+"area:scheduler":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "apps/aether-gateway/src/**/scheduler/**"
+          - "apps/aether-gateway/src/**/routing/**"
+          - "crates/**/scheduler/**"
+          - "crates/**/routing/**"
+
+"area:pool":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "apps/aether-gateway/src/**/pool/**"
+          - "crates/**/pool/**"
+          - "crates/aether-wallet/**"
+
+"area:protocol":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "apps/aether-gateway/src/**/protocol/**"
+          - "apps/aether-gateway/src/**/openai/**"
+          - "apps/aether-gateway/src/**/anthropic/**"
+          - "crates/**/protocol/**"
+          - "docs/api/**"
+
+"area:tunnel":
+  - changed-files:
+      - any-glob-to-any-file: "apps/aether-tunnel/**"
+
+"area:ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+          - "Dockerfile*"
+          - "docker-compose*.yml"
+
+"area:docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "README.md"

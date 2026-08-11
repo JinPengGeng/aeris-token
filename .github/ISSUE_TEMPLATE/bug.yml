@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a reproducible defect in aeris-token/Aether.
+title: "[Bug]: "
+labels:
+  - "type:bug"
+  - "status:triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a defect. Do not include API keys, tokens, customer data, or other secrets.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem summary
+      description: State the expected behavior and what happened instead.
+      placeholder: Expected ...; actual ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest repeatable sequence, including request payloads with secrets removed.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs or evidence
+      description: Include relevant sanitized logs, error responses, stack traces, or screenshots.
+      render: text
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Gateway or API protocol
+        - Scheduler, retry, or failover
+        - Pool, provider, or quota
+        - Frontend
+        - Tunnel
+        - Deployment or CI
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Release version, image tag, or commit SHA.
+      placeholder: vX.Y.Z or abc1234
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed secrets and personally identifiable data from this report.
+          required: true
+        - label: I searched existing issues for duplicates.
+          required: true

@@ -1,0 +1,19 @@
+# Ownership protects the default branch; repository administrators must retain
+# write access for these review requests to be actionable.
+
+* @JinPengGeng
+
+# Runtime and API behavior
+/apps/aether-gateway/ @JinPengGeng
+/crates/ @JinPengGeng
+
+# Tunnel distribution and operational surface
+/apps/aether-tunnel/ @JinPengGeng
+/deploy.sh @JinPengGeng
+/docker-compose*.yml @JinPengGeng
+/Dockerfile* @JinPengGeng
+
+# Frontend and developer workflow
+/frontend/ @JinPengGeng
+/.github/ @JinPengGeng
+/docs/ @JinPengGeng
