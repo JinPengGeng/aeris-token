@@ -1,4 +1,4 @@
-name: Release Aether
+name: Release aeris-token
 
 on:
   push:
@@ -10,13 +10,13 @@ permissions:
   packages: write
 
 concurrency:
-  group: release-aether-${{ github.ref }}
+  group: release-aeris-token-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
-  GHCR_IMAGE: fawney19/aether
-  DOCKERHUB_IMAGE: fawney19/aether
+  GHCR_IMAGE: ${{ vars.GHCR_IMAGE || github.repository }}
+  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
 
 jobs:
   preflight:
@@ -166,11 +166,33 @@ jobs:
 
   docker:
     name: Docker multi-arch
+    environment: release
     needs: [preflight, frontend, build]
     if: needs.preflight.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      - name: Classify optional Docker Hub publication
+        id: registry
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "publish=false" >> "${GITHUB_OUTPUT}"
+          # Keep metadata-action input valid even when Docker Hub is disabled.
+          echo "image=${DOCKERHUB_IMAGE:-disabled/aeris-token}" >> "${GITHUB_OUTPUT}"
+
+          if [[ -z "${DOCKERHUB_IMAGE}" ]]; then
+            echo "Docker Hub publication disabled: repository variable DOCKERHUB_IMAGE is not configured."
+          elif [[ -z "${DOCKERHUB_USERNAME}" || -z "${DOCKERHUB_TOKEN}" ]]; then
+            echo "Docker Hub publication disabled: DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets are both required."
+          else
+            echo "publish=true" >> "${GITHUB_OUTPUT}"
+            echo "Docker Hub publication enabled for the configured image."
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v5
@@ -199,6 +221,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
+        if: steps.registry.outputs.publish == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -210,7 +233,7 @@ jobs:
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.GHCR_IMAGE }}
-            docker.io/${{ env.DOCKERHUB_IMAGE }}
+            name=docker.io/${{ steps.registry.outputs.image }},enable=${{ steps.registry.outputs.publish == 'true' }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}},enable=${{ needs.preflight.outputs.make_latest == 'true' }}
