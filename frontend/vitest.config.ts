@@ -4,7 +4,16 @@ import path from 'path'
 import { legacyTemplateI18nPlugin } from './src/i18n/legacy-template-transform'
 
 export default defineConfig({
-  plugins: [legacyTemplateI18nPlugin(), vue()],
+  plugins: [
+    legacyTemplateI18nPlugin(),
+    vue({
+      template: {
+        transformAssetUrls: {
+          includeAbsolute: false,
+        },
+      },
+    }),
+  ],
   test: {
     globals: true,
     environment: 'jsdom',
