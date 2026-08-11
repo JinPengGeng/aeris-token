@@ -1,0 +1,39 @@
+name: Configuration change
+description: Propose a default, environment, deployment, or operational configuration change.
+title: "[Config]: "
+labels:
+  - "type:architecture"
+  - "status:triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste production credentials, API keys, tokens, private URLs, or customer data.
+  - type: textarea
+    id: change
+    attributes:
+      label: Requested configuration change
+      description: Name the setting, its current and proposed values, and affected environments.
+    validations:
+      required: true
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Rationale and expected behavior
+      description: Explain what changes for operators or users and why the new value is needed.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration
+      description: State default behavior, backward compatibility, migration steps, and rollback.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: Identify documentation, tests, and environment verification needed before release.
+    validations:
+      required: true

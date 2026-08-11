@@ -1,0 +1,54 @@
+name: Scheduler or failover change
+description: Propose a change to routing, scheduling, retry, health, quota, or failover behavior.
+title: "[Scheduler]: "
+labels:
+  - "type:architecture"
+  - "area:scheduler"
+  - "status:triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Scheduler changes can affect availability, billing, and provider safety. State the failure mode and rollback path explicitly.
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Current behavior and risk
+      description: Explain the observed or expected failure mode, affected traffic, and why it matters.
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Proposed policy or state-machine change
+      description: Specify selection order, state transitions, retries, timeouts, and any invariants.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and rollback
+      description: Define blast radius, feature flag or rollback method, and behavior under dependency failure.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan and acceptance criteria
+      description: Include unit, integration, load, or fault-injection coverage as applicable.
+      placeholder: |
+        - [ ] Deterministic selection is covered by tests.
+        - [ ] Failure and recovery transitions are covered by tests.
+        - [ ] Rollback behavior is verified.
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk level
+      options:
+        - P0 - outage, data, or billing risk
+        - P1 - material reliability or latency risk
+        - P2 - bounded behavior change
+    validations:
+      required: true
