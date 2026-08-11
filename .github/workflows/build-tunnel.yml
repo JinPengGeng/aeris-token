@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build-tunnel-${{ github.ref }}
@@ -137,6 +137,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v5
@@ -183,6 +185,10 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v5
         with:
@@ -193,7 +199,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION="${TAG#tunnel-v}"
-          BASE="https://github.com/fawney19/Aether/releases/download/${TAG}"
+          BASE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}"
 
           if [ -d apps/aether-tunnel ]; then
             TUNNEL_DIR="apps/aether-tunnel"
@@ -221,7 +227,11 @@ jobs:
             ' README.md > README.tmp && mv README.tmp README.md
           fi
 
-      - name: Commit and push
+      - name: Open README update pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
         run: |
           if [ -d apps/aether-tunnel ]; then
             TUNNEL_DIR="apps/aether-tunnel"
@@ -229,11 +239,32 @@ jobs:
             TUNNEL_DIR="aether-tunnel"
           fi
 
-          cd "$TUNNEL_DIR"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md
+          git add "${TUNNEL_DIR}/README.md"
           git diff --cached --quiet && exit 0
-          TAG="${GITHUB_REF#refs/tags/}"
-          git commit -m "chore(tunnel): update download links for ${TAG}"
-          git push
+
+          BRANCH="automation/tunnel-${TAG}-download-links"
+          EXISTING_PR="$(gh pr list --head "${BRANCH}" --state open --json url --jq '.[0].url // ""')"
+          if [ -n "${EXISTING_PR}" ]; then
+            echo "README update pull request already exists: ${EXISTING_PR}"
+            exit 0
+          fi
+
+          if ! git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+            git switch -c "${BRANCH}"
+            git commit -m "chore(tunnel): update download links for ${TAG}"
+            git push --set-upstream origin "${BRANCH}"
+          fi
+
+          PR_URL="$(gh pr create \
+            --base main \
+            --head "${BRANCH}" \
+            --title "chore(tunnel): update download links for ${TAG}" \
+            --body "Automated README download-link update for release \`${TAG}\`.")"
+          echo "Created ${PR_URL}"
+
+          # Pull requests created by GITHUB_TOKEN do not emit another pull_request
+          # event, so dispatch the required checks explicitly for this commit.
+          gh workflow run rust-ci.yml --ref "${BRANCH}"
+          gh workflow run frontend-ci.yml --ref "${BRANCH}"
