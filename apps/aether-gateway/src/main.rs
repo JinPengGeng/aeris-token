@@ -1763,6 +1763,10 @@ fn validate_deployment_topology(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| std::io::Error::other("Failed to install rustls CryptoProvider"))?;
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(GATEWAY_TOKIO_WORKER_STACK_SIZE_BYTES)
