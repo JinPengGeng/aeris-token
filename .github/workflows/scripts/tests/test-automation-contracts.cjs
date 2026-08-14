@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const repoRoot = path.resolve(__dirname, '..', '..', '..', '..');
 const yamlCandidates = [
@@ -147,6 +148,28 @@ assert(
 assert(state.schema_version === 1, 'state schema version changed');
 assert(state.policy_version === sync.version, 'state policy version differs from policy');
 assert(/^[0-9a-f]{40}$/.test(state.last_integrated_sha), 'checkpoint must be a full lowercase SHA');
+
+const directlyExecutedScripts = [
+  '.github/workflows/scripts/checkpoint-merge.sh',
+  '.github/workflows/scripts/prepare-checkpoint-sync.sh',
+];
+const trackedModes = execFileSync('git', ['ls-files', '--stage', '--', ...directlyExecutedScripts], {
+  cwd: repoRoot,
+  encoding: 'utf8',
+});
+const modesByPath = new Map(
+  trackedModes
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((entry) => {
+      const [metadata, file] = entry.split('\t');
+      return [file, metadata.split(' ')[0]];
+    }),
+);
+for (const script of directlyExecutedScripts) {
+  assert(modesByPath.get(script) === '100755', `${script} must be executable`);
+}
 
 console.log(
   JSON.stringify({
