@@ -1,0 +1,83 @@
+# Path ownership contract for checkpoint-based upstream sync. Rules use
+# gitignore-style globs and the precedence listed below.
+version: 1
+
+upstream:
+  repository: fawney19/Aether
+  branch: main
+
+sync:
+  base_branch: main
+  branch: automation/sync-upstream
+  state_file: .github/upstream-sync-state.json
+  pull_request_limit: 1
+  fail_closed: true
+
+matching:
+  syntax: gitignore
+  enforced_fork_owned_subset: exact_or_directory_recursive
+  precedence:
+    - fork_owned
+    - review_required
+    - generated
+    - upstream_owned
+  default: review_required
+
+fork_owned:
+  - .github/agents.yml
+  - .github/automation-policy.yml
+  - .github/automation/**
+  - .github/upstream-sync-policy.yml
+  - .github/upstream-sync-state.json
+  - .github/CODEOWNERS
+  - .github/ISSUE_TEMPLATE/**
+  - .github/dependabot.yml
+  - .github/labeler.yml
+  - .github/pull_request_template.md
+  - .github/workflows/**
+  - docs/automation-architecture.md
+  - docs/development-workflow.md
+
+review_required:
+  - .github/**
+  - Cargo.toml
+  - Cargo.lock
+  - "**/Cargo.toml"
+  - "**/Cargo.lock"
+  - frontend/package.json
+  - frontend/package-lock.json
+  - Dockerfile*
+  - docker-compose*.yml
+  - deploy.sh
+  - "**/auth/**"
+  - "**/migrations/**"
+  - "**/security/**"
+
+generated: []
+
+upstream_owned:
+  - apps/**
+  - crates/**
+  - frontend/**
+  - docs/**
+  - README*.md
+  - LICENSE*
+
+checkpoint:
+  require_repository_match: true
+  require_branch_match: true
+  require_previous_sha_ancestor: true
+  reject_history_rewrite: true
+  advance_only_in_merged_pull_request: true
+
+conflicts:
+  preserve_existing_pull_request: true
+  preserve_existing_branch: true
+  overwrite_unknown_tip: false
+  create_or_update_alert: true
+  require_explicit_resolution_adoption: true
+
+workflow_drift:
+  action: create_or_update_issue
+  title_prefix: "Upstream workflow review required"
+  deduplicate_by: upstream_workflow_tree

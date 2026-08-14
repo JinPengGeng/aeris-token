@@ -16,7 +16,7 @@
 | 领域 | `area:scheduler`、`area:pool`、`area:protocol`、`area:frontend`、`area:tunnel`、`area:ci`、`area:docs` |
 | 优先级 | `priority:P0`、`priority:P1`、`priority:P2` |
 | 状态 | `status:triage`、`status:ready`、`status:in-progress`、`status:blocked` |
-| Agent 准入 | `agent-ready` |
+| Agent 控制 | `agent-analyze`（允许分析外部 Issue）、`agent-ready`（允许代码实施） |
 
 `.github/workflows/labeler.yml` 读取 `.github/labeler.yml`，并为同仓库分支 PR 的改动路径自动添加 `area:*` 标签。外部 fork PR 不授予写 token，因此不会自动写标签，需要维护者人工分类。路径标签是辅助分类，代码作者仍需确认其准确性。
 
@@ -39,7 +39,9 @@
 
 ### Fork 上游同步
 
-`.github/workflows/sync-upstream.yml` 每天中国时间 05:00 检查 `fawney19/Aether` 的默认分支；发现上游新提交时，始终复用固定的 `automation/sync-upstream` 分支和唯一的开放同步 PR，不会因每日运行而重复创建 PR。维护者手工关闭该 PR 后，定时同步会持续暂停；只有手工运行工作流并设置 `resume=true` 才会尝试重新打开原 PR，无法重新打开时仅允许该次显式运行创建一个替代 PR。同步不会直接写入 `main`，非 workflow 冲突会保留现有 PR 和分支、记录告警并以失败状态结束；无法识别的同步分支提交也不会被强制覆盖。Fork 自有的 `.github/workflows/` 不自动接受上游覆盖，工作流变更会按上游 workflow tree 去重创建告警 Issue，由维护者单独审查。同步 PR 仍必须通过 `Rust CI / check` 和 `Frontend CI / check`。
+`.github/workflows/sync-upstream.yml` 每天中国时间 05:00 检查 `fawney19/Aether` 的默认分支；发现上游新提交时，从受保护 `main@SHA` 的 `.github/upstream-sync-state.json` 读取上次已合并 checkpoint，只计算 checkpoint 之后的上游增量。工作流始终复用固定的 `automation/sync-upstream` 分支和唯一的开放同步 PR，不会因每日运行而重复创建 PR。维护者手工关闭该 PR 后，定时同步会持续暂停；只有手工运行工作流并设置 `resume=true` 才会尝试重新打开原 PR，无法重新打开时仅允许该次显式运行创建一个替代 PR。
+
+同步不会直接写入 `main`。`.github/upstream-sync-policy.yml` 中的 fork-owned 路径在三方合并前被过滤并保留 fork 版本；上游 workflow 变化按上游 workflow tree 去重创建告警 Issue，由维护者单独审查。其他冲突、上游历史重写、非法 state/policy 和无法识别的同步分支 tip 均 fail closed，不会推进 checkpoint 或覆盖远端分支。人工解决真实冲突时，应使用普通维护者 PR 同时提交解决结果和新的 `last_integrated_sha`；同步 PR 仍必须通过 `Rust CI / check` 和 `Frontend CI / check`。
 
 ## 2. Issue 到 PR
 
@@ -48,6 +50,10 @@
 3. 只有维护者添加 `agent-ready` 后，AI Agent 才能创建分支和 Draft PR。Agent 不得直接写入 `main`、修改 Ruleset 或读取发布 secrets。
 4. 从 Issue 创建短生命周期分支，PR 描述使用 `Closes #<issue-number>`。PR 模板中的风险、回滚和验证项必须完成。
 5. CI、CODEOWNERS 审查和所有讨论通过后，以 Squash merge 合入。GitHub 自动关闭被 `Closes` 引用的 Issue，Project 将其移到 `Done`。
+
+Agent 的模型路由、权限隔离、事件幂等、上游同步 checkpoint 和自动合并门禁见 [GitHub 自动化与 Agent 架构](automation-architecture.md)。该架构默认关闭新 Agent；只有对应阶段的 workflow、测试和仓库设置全部完成后才可启用。
+
+当前只读 `triage`、`planner`、`reviewer` workflow 已有本地实现，但在合并并完成远端验证前仍保持双重关闭：仓库变量 `AERIS_AGENTS_ENABLED` 不启用，registry 中各 Agent 的 `enabled` 也保持 `false`。启用只读阶段不等于授权 `writer`、Policy Gate 或 Merger。
 
 Scheduler、重试、路由、池、额度或故障转移变更必须说明状态转换、确定性选择规则、依赖失败行为和回滚，并覆盖失败与恢复测试。
 

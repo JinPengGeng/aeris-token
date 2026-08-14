@@ -196,6 +196,9 @@ pyrightconfig.json
 .vscode/
 .idea/
 
+# JavaScript dependencies
+node_modules/
+
 # Captured requests (debugging data)
 captured_requests/
 

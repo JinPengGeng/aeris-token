@@ -1,0 +1,139 @@
+# Security and authorization policy for repository automation. Match and
+# authorization decisions must use the copy from the current protected main SHA.
+version: 1
+
+trusted_source:
+  ref: refs/heads/main
+  immutable_paths:
+    - .github/agents.yml
+    - .github/automation-policy.yml
+    - .github/automation/**
+    - .github/upstream-sync-policy.yml
+    - .github/upstream-sync-state.json
+    - .github/CODEOWNERS
+    - .github/workflows/**
+
+kill_switch:
+  repository_variable: AERIS_AGENTS_ENABLED
+  enabled_values: ["1", "true"]
+  default_enabled: false
+
+commands:
+  prefix: /agent
+  supported: [triage, plan, review, status, cancel, implement, retry-write, merge]
+  maintainer_only: [implement, retry-write, merge]
+  accepted_author_associations: [OWNER, MEMBER, COLLABORATOR]
+  ignore_actors:
+    - github-actions[bot]
+  ignore_markers:
+    - "<!-- aeris-agent-managed -->"
+
+authorization:
+  public_read_only_commands: [status]
+  trusted_read_only_commands: [triage, plan, review, status, cancel]
+  automatic_issue_analysis_author_associations: [OWNER, MEMBER, COLLABORATOR]
+  external_issue_analysis_requires_label: agent-analyze
+  external_pull_request_analysis_requires_label: agent-analyze
+  code_write_requires:
+    author_association: [OWNER, MEMBER, COLLABORATOR]
+    issue_labels: [agent-ready]
+  merge_requires:
+    author_association: [OWNER, MEMBER]
+
+limits:
+  maximum_issue_body_characters: 24000
+  maximum_comment_characters: 8000
+  maximum_runs_per_object_per_hour: 4
+  maximum_concurrent_runs_per_object: 1
+  maximum_handoffs: 4
+  maximum_fix_cycles: 2
+
+state:
+  delivery_semantics: at_least_once
+  canonical_object_generation: input_sha
+  input_fingerprint:
+    algorithm: sha256
+    source: bounded_canonical_model_input
+  github_generation_fast_check:
+    authoritative: false
+    fields:
+      issue: updated_at
+      pull_request: head_sha
+  reject_stale_results: true
+  managed_comment_marker: "<!-- aeris-agent-managed -->"
+  update_single_managed_comment: true
+  managed_comment_semantics: best_effort_projection
+  managed_comment_is_compare_and_swap: false
+  managed_comment_is_lock_or_lease: false
+  managed_comment_is_audit_log: false
+  strict_exactly_once: false
+  exact_rate_limiting: false
+
+prompt_security:
+  issue_and_comment_text_is_untrusted: true
+  require_structured_output: true
+  allow_model_supplied_tool_arguments: false
+  reveal_secrets_to_models: false
+  triage_shell_access: false
+  triage_network_access: false
+
+writer:
+  enabled: false
+  branch_prefix: agent/
+  draft_pull_requests_only: true
+  maximum_open_pull_requests_per_issue: 1
+  forbidden_paths:
+    - .github/**
+    - CODEOWNERS
+  release_secret_access: false
+  pull_request_target_checkout: false
+
+policy_gate:
+  enabled: false
+  check_name: Automation Policy / gate
+  mode: shadow
+  allowed_modes: [shadow, human, label, allowlist]
+  human_enable_label: automerge-approved
+  require_exact_head_sha: true
+  require_base_up_to_date: true
+  require_conversation_resolution: true
+  required_checks:
+    - Rust CI / check
+    - Frontend CI / check
+  always_require_human_review:
+    - .github/**
+    - CODEOWNERS
+    - Cargo.toml
+    - Cargo.lock
+    - "**/Cargo.toml"
+    - "**/Cargo.lock"
+    - frontend/package.json
+    - frontend/package-lock.json
+    - Dockerfile*
+    - docker-compose*.yml
+    - deploy.sh
+    - "**/auth/**"
+    - "**/migrations/**"
+    - "**/security/**"
+  allowlist_paths: []
+
+audit:
+  durable: false
+  phase_2_sink: workflow_log
+  record_fields:
+    - source_key
+    - object_id
+    - input_sha
+    - object_generation
+    - policy_sha
+    - agent
+    - model_alias
+    - model_id
+    - result
+    - reason_codes
+    - next_agent
+  redact_fields:
+    - authorization
+    - api_key
+    - cookies
+    - request_headers
