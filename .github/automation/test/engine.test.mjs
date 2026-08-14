@@ -990,7 +990,7 @@ test('the four phases exchange fingerprint-only artifacts and wire the connect t
     },
   });
   assert.equal(analysis.state, 'completed');
-  assert.equal(clientOptions.connectTimeoutMs, 30_000);
+  assert.equal(clientOptions.connectTimeoutMs, 60_000);
   assert.equal(analysis.reservation.preflight.input, null);
   const publication = await runPublishPhase({ ...common, artifact: analysis });
   assert.equal(publication.state, 'published');

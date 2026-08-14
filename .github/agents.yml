@@ -28,7 +28,7 @@ runtime:
     endpoint: /chat/completions
     default_model_variable: AERIS_AI_MODEL
     fallback_model_variable: AERIS_AI_MODEL_FALLBACK
-    connect_timeout_seconds: 30
+    connect_timeout_seconds: 60
     request_timeout_seconds: 120
     maximum_response_bytes: 1048576
   limits:
