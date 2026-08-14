@@ -276,13 +276,15 @@ test('generation change during model call prevents writeback', async () => {
 test('disabled agent does not construct or call the AI client', async () => {
   const github = new FakeGitHub();
   let constructed = false;
+  const disabledContracts = structuredClone(loadContracts(repoRoot));
+  disabledContracts.agents.agents.triage.enabled = false;
   const result = await runAutomation({
     kind: 'issue',
     eventName: 'issues',
     event: issueEvent,
     environment: environment(),
     repoRoot,
-    contracts: loadContracts(repoRoot),
+    contracts: disabledContracts,
     policySha,
     github,
     aiClientFactory: () => {
