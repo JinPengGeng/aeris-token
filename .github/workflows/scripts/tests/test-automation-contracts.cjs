@@ -46,9 +46,9 @@ assert(
 assert(agents.runtime.default_enabled === false, 'agent runtime must default off');
 assert(
   Object.entries(agents.agents).every(([name, agent]) =>
-    name === 'triage' ? agent.enabled === true : agent.enabled === false,
+    name === 'triage' || name === 'planner' ? agent.enabled === true : agent.enabled === false,
   ),
-  'only the triage agent may be enabled; every other agent must default off',
+  'only the triage and planner agents may be enabled; every other agent must default off',
 );
 assert(
   agents.model_policy.retryable_http_statuses.every(

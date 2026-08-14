@@ -31,7 +31,7 @@ AERIS_AGENTS_ENABLED != true
 
 Phase 2.1 采用 Actions-only，不部署常驻 Coordinator 或外部数据库。每条只读 workflow 分成四个权限隔离的 job：`preflight` 读取受信配置并验证调用，`reserve` 对 managed comment 做 best-effort 预约，`analyze` 以只读 GitHub 权限调用模型，`publish` 确定性写回。只有真正进入 reserved 分支的 `analyze` step 接收 AI Key；terminal passthrough step 不接收 Secret。阶段间只传递经过 schema 校验的有界 JSON artifact，运行器不会把输入正文或 PR patch 直接复制进 artifact；`analyze` 重新读取输入并核对 fingerprint，`publish` 再次获取目标输入并复核 fingerprint 后更新 managed comment。artifact 不得包含 Secret、Authorization、Cookie 或请求头，并受 registry 中的字节上限约束；模型输出还会在 artifact 写入前拒绝当前 AI Key 和常见认证头/Bearer 形态，但这属于针对已知运行 Secret 的防泄漏护栏，不是通用 DLP。结构化模型输出仍可能概括或引用输入内容，因此 artifact 按目标仓库数据同级处理。`reserve` 不是强租约，artifact 也不是锁或权威状态源。
 
-Phase 2.1 的 workflow 和运行器已合并并通过远端 CI。`triage` 是当前唯一显式启用的 Agent（kill switch 与 registry 双开）；`planner` 和 `reviewer` 保持关闭，待 triage 远端端到端验证后再逐个启用。`issue-triage.yml` 继续确定性添加 `status:triage`。当前 `triage`、`planner` 和 `reviewer` 的唯一 GitHub 写入投影是 managed comment；`reviewer` 不发布 Check Run。Writer、Policy 和 Merger 继续关闭。Phase 2.1 不修改业务标签、代码、审批或合并状态。
+Phase 2.1 的 workflow 和运行器已合并并通过远端 CI，triage 已完成端到端实证（真实模型分析发布 managed comment，修复链见 PR `#19`/`#20`/`#22`/`#23`）。当前显式启用的 Agent 是 `triage` 和 `planner`（kill switch 与 registry 双开）；`reviewer` 保持关闭，待 planner 命令路径与 handoff 验证后再启用。`issue-triage.yml` 继续确定性添加 `status:triage`。当前 `triage`、`planner` 和 `reviewer` 的唯一 GitHub 写入投影是 managed comment；`reviewer` 不发布 Check Run。Writer、Policy 和 Merger 继续关闭。Phase 2.1 不修改业务标签、代码、审批或合并状态。
 
 ## 3. 信任和配置来源
 

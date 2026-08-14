@@ -33,7 +33,7 @@ test('trusted contracts load with only enabled agents declared', () => {
   const enabled = Object.entries(contracts.agents.agents)
     .filter(([, agent]) => agent.enabled)
     .map(([name]) => name);
-  assert.deepEqual(enabled, ['triage']);
+  assert.deepEqual(enabled, ['triage', 'planner']);
 });
 
 test('contract validation rejects broad fallback statuses', () => {

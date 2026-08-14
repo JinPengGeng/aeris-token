@@ -65,7 +65,7 @@ agents:
     handoff_to: [planner]
 
   planner:
-    enabled: false
+    enabled: true
     phase: "2.1"
     mode: read_only
     model_variable: AERIS_AI_MODEL_PLANNER
