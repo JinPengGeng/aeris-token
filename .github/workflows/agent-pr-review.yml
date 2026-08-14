@@ -1,14 +1,15 @@
-name: Issue Triage
+name: Agent PR Review
 
 on:
-  issues:
-    types: [opened, reopened, edited, labeled]
+  workflow_run:
+    workflows: [Rust CI, Frontend CI]
+    types: [completed]
   issue_comment:
     types: [created]
   workflow_dispatch:
     inputs:
-      issue_number:
-        description: Issue number to analyze
+      pull_request_number:
+        description: Pull request number to review
         required: true
         type: number
       agent:
@@ -16,37 +17,22 @@ on:
         required: true
         type: choice
         options:
-          - triage
-          - plan
+          - review
 
 permissions:
   contents: read
 
-jobs:
-  label:
-    name: Apply triage status
-    if: github.event_name == 'issues' && github.event.action == 'opened'
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-    steps:
-      - name: Add status label
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        with:
-          script: |
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              labels: ['status:triage'],
-            });
+# Serialize workflow_run reviews for the same PR head so each completed event
+# can reevaluate the live required checks after an older run releases its
+# reservation. Manual and comment commands keep independent run-specific groups.
+concurrency:
+  group: agent-pr-run-${{ github.event_name == 'workflow_run' && format('{0}-{1}', github.event.workflow_run.pull_requests[0].number, github.event.workflow_run.head_sha) || github.run_id }}
+  cancel-in-progress: false
 
+jobs:
   preflight:
-    name: Validate Issue invocation
-    needs: [label]
+    name: Validate PR invocation
     if: >-
-      always() &&
-      (needs.label.result == 'success' || needs.label.result == 'skipped') &&
       ((vars.AERIS_AGENTS_ENABLED == 'true' || vars.AERIS_AGENTS_ENABLED == '1') ||
        (github.event_name == 'issue_comment' &&
         (github.event.comment.body == '/agent status' ||
@@ -55,13 +41,18 @@ jobs:
          github.event.comment.body == '/agent STATUS' ||
          github.event.comment.body == '/agent Cancel' ||
          github.event.comment.body == '/agent CANCEL'))) &&
-      (github.event_name != 'issue_comment' || !github.event.issue.pull_request) &&
-      (github.event_name != 'issue_comment' || github.actor != 'github-actions[bot]') &&
-      (github.event_name != 'issues' || github.event.action != 'labeled' || github.event.label.name == 'agent-analyze')
+      ((github.event_name == 'workflow_run' &&
+        github.event.workflow_run.pull_requests[0].number) ||
+       (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        github.actor != 'github-actions[bot]') ||
+       github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      issues: read
+      pull-requests: read
+      checks: read
+      statuses: read
     steps:
       - name: Check out trusted default branch
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -85,15 +76,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AERIS_PHASE: preflight
-          AERIS_OBJECT_KIND: issue
-          AERIS_ISSUE_NUMBER: ${{ inputs.issue_number || '' }}
+          AERIS_OBJECT_KIND: pull_request
+          AERIS_PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number || '' }}
           AERIS_AGENT: ${{ inputs.agent || '' }}
           AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
           AERIS_AI_API_KEY_PRESENT: ${{ secrets.AERIS_AI_API_KEY != '' && 'true' || 'false' }}
           AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
           AERIS_AI_MODEL: ${{ vars.AERIS_AI_MODEL }}
-          AERIS_AI_MODEL_TRIAGE: ${{ vars.AERIS_AI_MODEL_TRIAGE }}
-          AERIS_AI_MODEL_PLANNER: ${{ vars.AERIS_AI_MODEL_PLANNER }}
+          AERIS_AI_MODEL_REVIEWER: ${{ vars.AERIS_AI_MODEL_REVIEWER }}
           AERIS_AI_MODEL_FALLBACK: ${{ vars.AERIS_AI_MODEL_FALLBACK }}
           AERIS_OUTPUT_PATH: ${{ runner.temp }}/aeris-preflight/preflight.json
         run: node .github/automation/src/run-phase.mjs preflight
@@ -101,21 +91,21 @@ jobs:
       - name: Upload preflight artifact
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: issue-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          name: pr-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/aeris-preflight/preflight.json
           if-no-files-found: error
           retention-days: 1
 
   reserve:
-    name: Reserve Issue analysis
+    name: Reserve PR review
     needs: [preflight]
     if: always() && needs.preflight.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      issues: write
+      pull-requests: write
     concurrency:
-      group: agent-issue-${{ github.event.issue.number || inputs.issue_number || github.run_id }}
+      group: agent-pr-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pull_request_number || github.run_id }}
       cancel-in-progress: false
     steps:
       - name: Check out trusted default branch
@@ -139,15 +129,14 @@ jobs:
       - name: Download preflight artifact
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: issue-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          name: pr-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/aeris-preflight
 
       - name: Reserve managed comment
-        id: reserve_phase
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AERIS_PHASE: reserve
-          AERIS_OBJECT_KIND: issue
+          AERIS_OBJECT_KIND: pull_request
           AERIS_INPUT_PATH: ${{ runner.temp }}/aeris-preflight/preflight.json
           AERIS_OUTPUT_PATH: ${{ runner.temp }}/aeris-reservation/reservation.json
         run: node .github/automation/src/run-phase.mjs reserve
@@ -155,19 +144,21 @@ jobs:
       - name: Upload reservation artifact
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: issue-reservation-${{ github.run_id }}-${{ github.run_attempt }}
+          name: pr-reservation-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/aeris-reservation/reservation.json
           if-no-files-found: error
           retention-days: 1
 
   analyze:
-    name: Analyze Issue
+    name: Analyze PR
     needs: [reserve]
     if: always() && needs.reserve.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      issues: read
+      pull-requests: read
+      checks: read
+      statuses: read
     steps:
       - name: Check out trusted default branch
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -190,7 +181,7 @@ jobs:
       - name: Download reservation artifact
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: issue-reservation-${{ github.run_id }}-${{ github.run_attempt }}
+          name: pr-reservation-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/aeris-reservation
 
       - name: Read reservation state
@@ -206,15 +197,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AERIS_PHASE: analyze
-          AERIS_OBJECT_KIND: issue
+          AERIS_OBJECT_KIND: pull_request
           AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
           AERIS_INPUT_PATH: ${{ runner.temp }}/aeris-reservation/reservation.json
           AERIS_OUTPUT_PATH: ${{ runner.temp }}/aeris-analysis/analysis.json
           AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
           AERIS_AI_API_KEY: ${{ secrets.AERIS_AI_API_KEY }}
           AERIS_AI_MODEL: ${{ vars.AERIS_AI_MODEL }}
-          AERIS_AI_MODEL_TRIAGE: ${{ vars.AERIS_AI_MODEL_TRIAGE }}
-          AERIS_AI_MODEL_PLANNER: ${{ vars.AERIS_AI_MODEL_PLANNER }}
+          AERIS_AI_MODEL_REVIEWER: ${{ vars.AERIS_AI_MODEL_REVIEWER }}
           AERIS_AI_MODEL_FALLBACK: ${{ vars.AERIS_AI_MODEL_FALLBACK }}
         run: node .github/automation/src/run-phase.mjs analyze
 
@@ -222,7 +212,7 @@ jobs:
         if: ${{ steps.read_reservation.outputs.state != 'reserved' }}
         env:
           AERIS_PHASE: analyze
-          AERIS_OBJECT_KIND: issue
+          AERIS_OBJECT_KIND: pull_request
           AERIS_INPUT_PATH: ${{ runner.temp }}/aeris-reservation/reservation.json
           AERIS_OUTPUT_PATH: ${{ runner.temp }}/aeris-analysis/analysis.json
         run: node .github/automation/src/run-phase.mjs analyze
@@ -230,21 +220,23 @@ jobs:
       - name: Upload analysis artifact
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: issue-analysis-${{ github.run_id }}-${{ github.run_attempt }}
+          name: pr-analysis-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/aeris-analysis/analysis.json
           if-no-files-found: error
           retention-days: 1
 
   publish:
-    name: Publish Issue analysis
+    name: Publish PR review
     needs: [analyze]
     if: always() && needs.analyze.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      issues: write
+      pull-requests: write
+      checks: read
+      statuses: read
     concurrency:
-      group: agent-issue-${{ github.event.issue.number || inputs.issue_number || github.run_id }}
+      group: agent-pr-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pull_request_number || github.run_id }}
       cancel-in-progress: false
     steps:
       - name: Check out trusted default branch
@@ -268,14 +260,14 @@ jobs:
       - name: Download analysis artifact
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: issue-analysis-${{ github.run_id }}-${{ github.run_attempt }}
+          name: pr-analysis-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/aeris-analysis
 
       - name: Publish managed comment
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AERIS_PHASE: publish
-          AERIS_OBJECT_KIND: issue
+          AERIS_OBJECT_KIND: pull_request
           AERIS_INPUT_PATH: ${{ runner.temp }}/aeris-analysis/analysis.json
           AERIS_OUTPUT_PATH: ${{ runner.temp }}/aeris-publish/publish-result.json
         run: node .github/automation/src/run-phase.mjs publish

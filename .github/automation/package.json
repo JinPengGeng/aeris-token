@@ -1,0 +1,15 @@
+{
+  "name": "aeris-repository-automation",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs ../workflows/scripts/tests/test-agent-workflow-contracts.mjs"
+  },
+  "dependencies": {
+    "js-yaml": "4.3.1"
+  }
+}
