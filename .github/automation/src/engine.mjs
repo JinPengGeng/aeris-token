@@ -594,7 +594,11 @@ export async function runAnalysisPhase({
       timeoutMs: agents.runtime.api.request_timeout_seconds * 1000,
       maximumResponseBytes: agents.runtime.api.maximum_response_bytes,
     });
-    const completion = await ai.complete({ candidates, messages: buildMessages(context.agent, modelInput) });
+    const completion = await ai.complete({
+      candidates,
+      messages: buildMessages(context.agent, modelInput),
+      maxTokens: agents.runtime.limits.maximum_output_tokens,
+    });
     const repositoryLabels = context.kind === 'issue' ? modelInput.available_labels : [];
     const output = validateAgentOutput(context.agent, parseModelJson(completion.content), repositoryLabels);
     if (containsSensitiveModelOutput(output, environment.AERIS_AI_API_KEY)) {

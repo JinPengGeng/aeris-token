@@ -74,10 +74,10 @@ function parseSseEvents(text) {
 function aggregateSseCompletion(text) {
   let content = '';
   let usage = null;
-  let sawCompletion = false;
+  let finishReason = null;
   for (const payload of parseSseEvents(text)) {
     if (payload === '[DONE]') {
-      sawCompletion = true;
+      finishReason ??= 'stop';
       continue;
     }
     let event;
@@ -90,10 +90,16 @@ function aggregateSseCompletion(text) {
     if (typeof delta === 'string') content += delta;
     if (event.usage && typeof event.usage === 'object') usage = event.usage;
     if (Array.isArray(event.choices) && event.choices.length > 0 && event.choices[0].finish_reason) {
-      sawCompletion = true;
+      finishReason = event.choices[0].finish_reason;
     }
   }
-  if (!sawCompletion) {
+  if (finishReason === 'length') {
+    throw new AiRequestError('AI stream stopped at the token limit before completing', {
+      code: 'output_truncated',
+      retryable: false,
+    });
+  }
+  if (!finishReason) {
     throw new AiRequestError('AI stream ended without completion', {
       code: 'invalid_chat_response',
     });

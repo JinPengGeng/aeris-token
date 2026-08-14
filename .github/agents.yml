@@ -36,6 +36,7 @@ runtime:
     maximum_handoffs: 4
     maximum_fix_cycles: 2
     maximum_concurrent_runs_per_object: 1
+    maximum_output_tokens: 4000
 
 model_policy:
   # Values are GitHub Actions variable names. Their resolved model IDs form the

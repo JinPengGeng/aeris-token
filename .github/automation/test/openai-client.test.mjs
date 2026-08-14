@@ -311,6 +311,32 @@ test('stream that ends without DONE or finish_reason is invalid', async () => {
   );
 });
 
+test('stream truncated at the token limit fails without fallback', async () => {
+  const truncatedBody = [
+    `data: ${JSON.stringify({ choices: [{ delta: { content: '{"partial":' } }] })}`,
+    '',
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}`,
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n');
+  const sseResponse = () =>
+    new Response(truncatedBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  const calls = [];
+  const api = client(
+    [jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }), sseResponse()],
+    calls,
+  );
+  await assert.rejects(
+    () => api.complete({ candidates, messages: [] }),
+    (error) => error instanceof AiRequestError && error.code === 'output_truncated' && !error.retryable,
+  );
+  assert.equal(calls.length, 2);
+});
+
 test('non-stream JSON response still works when the gateway ignores stream', async () => {
   const calls = [];
   const api = client(
