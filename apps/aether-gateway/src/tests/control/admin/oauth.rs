@@ -48,6 +48,8 @@ use crate::constants::{
 };
 use crate::control::resolve_public_request_context;
 use crate::data::GatewayDataState;
+use crate::handlers::admin::provider::oauth::provisioning::rotate_codex_credential_generation;
+use crate::handlers::admin::provider::write::keys::update::build_provider_catalog_key_admin_cas_update;
 
 const ADMIN_OAUTH_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
 
@@ -8266,13 +8268,14 @@ async fn gateway_manual_oauth_refresh_prefers_fresher_transport_auth_config_over
         "Bearer cached-codex-access-token"
     );
 
-    let mut updated_key = provider_catalog_repository
+    let existing_key = provider_catalog_repository
         .list_keys_by_ids(&["key-codex-oauth-stale-cache".to_string()])
         .await
         .expect("keys should list")
         .into_iter()
         .next()
         .expect("key should exist");
+    let mut updated_key = existing_key.clone();
     updated_key.encrypted_auth_config = Some(
         encrypt_python_fernet_plaintext(
             DEVELOPMENT_ENCRYPTION_KEY,
@@ -8280,10 +8283,13 @@ async fn gateway_manual_oauth_refresh_prefers_fresher_transport_auth_config_over
         )
         .expect("updated auth config ciphertext should build"),
     );
-    provider_catalog_repository
-        .update_key(&updated_key)
+    rotate_codex_credential_generation(&mut updated_key, "codex");
+    let admin_update =
+        build_provider_catalog_key_admin_cas_update(&existing_key, updated_key, "codex");
+    assert!(provider_catalog_repository
+        .compare_and_update_key_admin_state(&admin_update)
         .await
-        .expect("key should update");
+        .expect("key should update"));
 
     let gateway = build_router_with_state(app_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
