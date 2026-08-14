@@ -370,7 +370,7 @@ export async function runReservationPhase({
   policySha = null,
   github = null,
   clock = () => new Date(),
-  randomToken = () => randomBytes(24).toString('base64url'),
+  randomToken = () => randomBytes(32).toString('base64url'),
 }) {
   if (artifact.state === 'terminal') {
     const context = artifact.context;
