@@ -48,8 +48,9 @@ use crate::constants::{
 };
 use crate::control::resolve_public_request_context;
 use crate::data::GatewayDataState;
-use crate::handlers::admin::provider::oauth::provisioning::rotate_codex_credential_generation;
-use crate::handlers::admin::provider::write::keys::update::build_provider_catalog_key_admin_cas_update;
+use crate::handlers::admin::{
+    build_provider_catalog_key_admin_cas_update, rotate_codex_credential_generation,
+};
 
 const ADMIN_OAUTH_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
 
