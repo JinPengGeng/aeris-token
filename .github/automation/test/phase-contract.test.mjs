@@ -87,6 +87,24 @@ test('preflight contract accepts a ready fingerprint without model source text',
   assert.equal(artifact.input, null);
 });
 
+test('preflight decision may carry an optional agent key for dispatched analysis', () => {
+  const dispatched = preflight({
+    decision: { action: 'analyze', agent: 'triage', reason: 'workflow_dispatch' },
+  });
+  assert.equal(validatePreflightArtifact(dispatched).decision.agent, 'triage');
+  assert.throws(
+    () => validatePreflightArtifact({ ...dispatched, decision: { ...dispatched.decision, extra: true } }),
+    /unexpected keys/,
+  );
+  assert.throws(
+    () => validatePreflightArtifact({
+      ...preflight(),
+      decision: { action: 'skip', agent: 'triage', reason: 'unsupported_event' },
+    }),
+    /unexpected keys|state and decision disagree/,
+  );
+});
+
 test('terminal preflight cannot carry model input or an analysis decision', () => {
   const terminal = preflight({
     state: 'terminal',
