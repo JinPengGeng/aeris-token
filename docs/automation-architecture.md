@@ -64,7 +64,7 @@ ${AERIS_AI_BASE_URL}/chat/completions
 
 模型解析顺序为角色专用模型、默认模型、fallback。实际模型 ID 必须来自 registry 声明的 GitHub Variables；用户输入不能直接指定任意模型 ID。
 
-Fallback 仅适用于连接失败、超时、429 和 5xx。认证失败、权限拒绝、请求错误、模型不存在和策略拒绝必须直接停止。客户端契约包含 10 秒连接/响应头超时、120 秒总请求超时和 1 MiB 响应上限；连接阶段超时可以进入受控 fallback，总超时仍覆盖响应体读取。每次调用记录 Agent、模型别名、模型 ID、耗时和用量，不记录 Key、Authorization 或 Cookie。
+Fallback 仅适用于连接失败、超时、429 和 5xx。认证失败、权限拒绝、请求错误、模型不存在和策略拒绝必须直接停止。客户端契约包含 30 秒连接/响应头超时（初始 10 秒在远端验证中证实对慢推理模型的首字节延迟过紧，见 run `31811444818` 与 runner 探针）、120 秒总请求超时和 1 MiB 响应上限；连接阶段超时可以进入受控 fallback，总超时仍覆盖响应体读取。每次调用记录 Agent、模型别名、模型 ID、耗时和用量，不记录 Key、Authorization 或 Cookie。
 
 模型调用或输出 schema 失败时，`analyze` 生成受约束的 `failed` artifact，`publish` 清理预约并把失败原因写入 managed comment。该预期失败路径允许四阶段 workflow 正常完成，避免只读 advisory 自动化成为 required CI 的阻断项；运行状态应从 managed comment 和 Actions 日志观察，而不是把 workflow 绿色解释为模型分析成功。
 
