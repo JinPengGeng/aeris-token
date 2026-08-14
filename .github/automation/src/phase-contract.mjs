@@ -115,7 +115,7 @@ function validateEnvelope(value, expectedType, keys) {
 }
 
 function validateDecision(value) {
-  exactKeys(value, ['action', 'reason'], 'preflight decision');
+  exactKeys(value, value.agent === undefined ? ['action', 'reason'] : ['action', 'reason', 'agent'], 'preflight decision');
   requireCondition(
     ['analyze', 'status', 'cancel', 'skip', 'disabled'].includes(value.action),
     'preflight decision action is invalid',
@@ -123,6 +123,9 @@ function validateDecision(value) {
   return {
     action: value.action,
     reason: boundedString(value.reason, 'preflight decision reason', 160, { pattern: SAFE_IDENTIFIER }),
+    ...(value.agent === undefined ? {} : {
+      agent: boundedString(value.agent, 'preflight decision agent', 160, { pattern: SAFE_IDENTIFIER }),
+    }),
   };
 }
 
