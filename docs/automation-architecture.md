@@ -126,7 +126,7 @@ U1 = 最新 upstream/main
 result = three_way_merge(base=U0, ours=M, theirs=U1)
 ```
 
-同步状态文件为 `.github/upstream-sync-state.json`，初始 checkpoint 是已由 PR `#5` 纳入的 `3a759fae8922de11b83cc98df4a79eb15a79a237`。该 SHA 位于上游历史；由于本仓库采用 squash-only 合并，它不在 fork `main` 的祖先链中，这是 checkpoint 模型的预期状态而非异常。状态和策略始终从当前受保护的 `main@SHA` 读取；checkpoint 只写入候选结果树，因此必须与同步 PR 一起合并后才会在下一轮生效。每次运行验证 schema、策略版本、上游仓库、分支以及 `U0` 是 `U1` 的祖先。上游历史重写、未知 checkpoint、状态篡改或不受支持的 fork-owned 规则均 fail closed。
+同步状态文件为 `.github/upstream-sync-state.json`，当前 checkpoint 是已由最近一次同步 PR（PR `#16`，经人工三方解决冲突）纳入的 `b7fca851b8c8c357d17d664433f061efaa37b0c9`。该 SHA 位于上游历史；由于本仓库采用 squash-only 合并，它不在 fork `main` 的祖先链中，这是 checkpoint 模型的预期状态而非异常。状态和策略始终从当前受保护的 `main@SHA` 读取；checkpoint 只写入候选结果树，因此必须与同步 PR 一起合并后才会在下一轮生效。每次运行验证 schema、策略版本、上游仓库、分支以及 `U0` 是 `U1` 的祖先。上游历史重写、未知 checkpoint、状态篡改或不受支持的 fork-owned 规则均 fail closed。
 
 路径分类按下列优先级执行：
 
@@ -186,7 +186,7 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 ## 11. 实施顺序
 
 1. Phase 0：策略契约、威胁模型、kill switch 和仓库设置审计（已实现，默认关闭）。
-2. Phase 1：checkpoint 同步 PoC、测试和迁移（已实现；初始 checkpoint 之后上游已有新增提交，合并后首次远端运行预期产出无冲突同步 PR 而非 no-op，需人工复核后合并）。
+2. Phase 1：checkpoint 同步 PoC、测试和迁移（已实现；首次冲突路径已经 PR `#16` 人工三方解决并实证，checkpoint 已追平 `upstream/main`，后续回到定时 no-op/自动 PR 循环）。
 3. Phase 2.1：Actions-only 的只读 triage/planner/reviewer；模型分析与确定性写回分 job，通过有界无 Secret 的 JSON artifact 交接（保持关闭，待合并及远端验证）。
 4. Phase 3：独立 Writer 身份和 Draft PR。
 5. Phase 4：独立 Policy 身份及 shadow/human gate。
