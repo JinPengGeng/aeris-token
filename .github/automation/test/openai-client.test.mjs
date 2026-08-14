@@ -264,3 +264,63 @@ test('base URL must use HTTPS', () => {
     (error) => error instanceof AiRequestError && error.code === 'invalid_base_url',
   );
 });
+
+test('streamed SSE completion aggregates deltas, usage, and DONE', async () => {
+  const calls = [];
+  const sseBody = [
+    `data: ${JSON.stringify({ choices: [{ delta: { content: '{"ok":' } }] })}`,
+    '',
+    `data: ${JSON.stringify({ choices: [{ delta: { content: 'true}' } }] })}`,
+    '',
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { total_tokens: 7 } })}`,
+    '',
+    'data: [DONE]',
+    '',
+    '',
+  ].join('\n');
+  const sseResponse = () =>
+    new Response(sseBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  const api = client(
+    [jsonResponse({ data: [{ id: 'fast-model' }] }), sseResponse()],
+    calls,
+  );
+  const result = await api.complete({ candidates: [{ alias: 'role', id: 'fast-model' }], messages: [] });
+  assert.equal(result.content, '{"ok":true}');
+  assert.deepEqual(result.usage, { total_tokens: 7 });
+  const body = JSON.parse(calls[1].init.body);
+  assert.equal(body.stream, true);
+  assert.deepEqual(body.stream_options, { include_usage: true });
+});
+
+test('stream that ends without DONE or finish_reason is invalid', async () => {
+  const sseResponse = () =>
+    new Response('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  const api = client(
+    [jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }), sseResponse()],
+    [],
+  );
+  await assert.rejects(
+    () => api.complete({ candidates, messages: [] }),
+    (error) => error instanceof AiRequestError && error.code === 'invalid_chat_response',
+  );
+});
+
+test('non-stream JSON response still works when the gateway ignores stream', async () => {
+  const calls = [];
+  const api = client(
+    [
+      jsonResponse({ data: [{ id: 'fast-model' }] }),
+      jsonResponse({ choices: [{ message: { content: '{"ok":true}' } }], usage: { total_tokens: 3 } }),
+    ],
+    calls,
+  );
+  const result = await api.complete({ candidates: [{ alias: 'role', id: 'fast-model' }], messages: [] });
+  assert.equal(result.content, '{"ok":true}');
+  assert.equal(JSON.parse(calls[1].init.body).stream, true);
+});
