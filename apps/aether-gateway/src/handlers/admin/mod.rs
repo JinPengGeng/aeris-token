@@ -28,6 +28,8 @@ pub(crate) use self::observability::{
 };
 pub(crate) use self::provider::oauth::duplicates::find_duplicate_provider_oauth_key;
 pub(crate) use self::provider::oauth::errors::build_internal_control_error_response;
+#[cfg(test)]
+pub(crate) use self::provider::oauth::provisioning::rotate_codex_credential_generation;
 pub(crate) use self::provider::oauth::provisioning::{
     create_provider_oauth_catalog_key, update_existing_provider_oauth_catalog_key,
 };
@@ -47,6 +49,8 @@ pub(crate) use self::provider::pool_admin::maybe_build_local_admin_pool_response
 pub(crate) use self::provider::shared::payloads::{
     OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_REQUEST_FAILED_PREFIX,
 };
+#[cfg(test)]
+pub(crate) use self::provider::write::keys::build_provider_catalog_key_admin_cas_update;
 pub(crate) use self::provider::write::provider::reconcile_admin_fixed_provider_template_endpoints;
 pub(crate) use self::provider::{
     maybe_build_local_admin_provider_oauth_response, maybe_build_local_admin_providers_response,
