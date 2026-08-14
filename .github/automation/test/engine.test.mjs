@@ -11,6 +11,7 @@ import {
   runPublishPhase,
   runReservationPhase,
 } from '../src/engine.mjs';
+import { validateReservationArtifact } from '../src/phase-contract.mjs';
 import {
   decodeMetadata,
   MANAGED_MARKER,
@@ -1239,6 +1240,18 @@ test('reservation rejects an issue whose input changes after preflight', async (
   assert.equal(reservation.state, 'terminal');
   assert.deepEqual(reservation.result, { state: 'stale', reason: 'input_fingerprint_changed', comment_id: null });
   assert.equal(github.comments.length, 0);
+});
+
+test('default lease tokens satisfy the reservation artifact contract', async () => {
+  const github = new FakeGitHub();
+  const common = {
+    environment: environment(), repoRoot, contracts: enabledContracts('triage'), policySha, github,
+  };
+  const preflight = await runPreflightPhase({ ...common, kind: 'issue', eventName: 'issues', event: issueEvent });
+  const reservation = await runReservationPhase({ ...common, artifact: preflight });
+  assert.equal(reservation.state, 'reserved');
+  const validated = validateReservationArtifact(reservation);
+  assert.equal(validated.reservation.lease_token.length >= 43, true);
 });
 
 test('publish rejects each mutable pull input component changed after analysis', async () => {
