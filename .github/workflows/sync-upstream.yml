@@ -39,6 +39,18 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: Validate checkpoint synchronization
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n .github/workflows/scripts/checkpoint-merge.sh
+          bash -n .github/workflows/scripts/prepare-checkpoint-sync.sh
+          bash -n .github/workflows/scripts/sync-upstream.sh
+          AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
+            bash .github/workflows/scripts/tests/test-checkpoint-merge.sh
+          AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
+            bash .github/workflows/scripts/tests/test-prepare-checkpoint-sync.sh
+
       - name: Build and publish automation branch
         id: sync
         env:
@@ -88,6 +100,8 @@ jobs:
           HAS_CHANGES: ${{ steps.sync.outputs.has_changes }}
           PARENT: ${{ steps.sync.outputs.parent }}
           UPSTREAM_BRANCH: ${{ steps.sync.outputs.upstream_branch }}
+          CHECKPOINT_SHA: ${{ steps.sync.outputs.checkpoint_sha }}
+          FILTERED_PATHS: ${{ steps.sync.outputs.filtered_paths }}
           PR_URL: ${{ steps.sync.outputs.pr_url }}
         shell: bash
         run: |
@@ -95,8 +109,10 @@ jobs:
             echo "### Upstream sync"
             echo
             echo "- Source: \`${PARENT:-unknown}:${UPSTREAM_BRANCH:-unknown}\`"
+            echo "- Checkpoint: \`${CHECKPOINT_SHA:-unknown}\`"
             echo "- State: \`${STATE:-failed}\`"
             echo "- Changes found: \`${HAS_CHANGES:-unknown}\`"
+            echo "- Fork-owned paths filtered: \`${FILTERED_PATHS:-0}\`"
             if [[ -n "${PR_URL}" ]]; then
               echo "- Pull request: ${PR_URL}"
             fi

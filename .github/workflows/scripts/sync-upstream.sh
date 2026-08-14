@@ -8,6 +8,10 @@ set -euo pipefail
 BASE_BRANCH="${BASE_BRANCH:-main}"
 SYNC_BRANCH="${SYNC_BRANCH:-automation/sync-upstream}"
 RESUME="${RESUME:-false}"
+STATE_FILE="${STATE_FILE:-.github/upstream-sync-state.json}"
+SYNC_POLICY_FILE="${SYNC_POLICY_FILE:-.github/upstream-sync-policy.yml}"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PREPARE_HELPER="${PREPARE_HELPER:-${SCRIPT_ROOT}/prepare-checkpoint-sync.sh}"
 
 MANAGED_MARKER='<!-- upstream-sync-managed -->'
 AUTO_CLOSED_MARKER='<!-- upstream-sync-auto-closed -->'
@@ -26,6 +30,7 @@ parent=''
 upstream_branch=''
 base_sha=''
 upstream_sha=''
+checkpoint_sha=''
 
 output() {
   printf '%s=%s\n' "$1" "$2" >>"${GITHUB_OUTPUT}"
@@ -82,14 +87,20 @@ pr_bot_comments() {
     --jq ".[] | select(.user.login == \"${BOT_LOGIN}\") | .body"
 }
 
-pr_comment_once() {
+issue_comment_once() {
   local number="$1" key="$2" message="$3" marker comments
   marker="<!-- upstream-sync-${key} -->"
-  comments="$(pr_bot_comments "${number}" || true)"
+  comments="$(pr_bot_comments "${number}")"
   if [[ "${comments}" != *"${marker}"* ]]; then
-    gh pr comment --repo "${GITHUB_REPOSITORY}" "${number}" --body "${marker}
+    gh api --method POST \
+      "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" \
+      -f body="${marker}
 ${message}" >/dev/null
   fi
+}
+
+pr_comment_once() {
+  issue_comment_once "$@"
 }
 
 # Authenticate the planned SHA before push so an interrupted publication can
@@ -329,24 +340,10 @@ require_gate() {
 }
 
 report_workflow_drift() {
-  local current_tree previous_source changed title existing
+  local current_tree changed title existing
+  [[ -n "${checkpoint_sha}" && "${checkpoint_sha}" != "${upstream_sha}" ]] || return 0
   current_tree="$(git rev-parse "${upstream_sha}:.github/workflows" 2>/dev/null || printf absent)"
-  previous_source="$(source_from_pr "${latest_pr}")"
-  [[ "${previous_source}" != "${parent}@${upstream_sha}" ]] || return 0
-
-  if [[ "${previous_source}" == "${parent}@"* ]]; then
-    previous_sha="${previous_source##*@}"
-    git cat-file -e "${previous_sha}^{commit}" 2>/dev/null ||
-      git fetch --no-tags upstream "${previous_sha}" >/dev/null 2>&1 || true
-  else
-    previous_sha=''
-  fi
-
-  if [[ -n "${previous_sha}" ]] && git cat-file -e "${previous_sha}^{commit}" 2>/dev/null; then
-    changed="$(git diff --name-only "${previous_sha}" "${upstream_sha}" -- .github/workflows || true)"
-  else
-    changed="$(git diff --name-only "${base_sha}" "${upstream_sha}" -- .github/workflows || true)"
-  fi
+  changed="$(git diff --name-only "${checkpoint_sha}" "${upstream_sha}" -- .github/workflows || true)"
   [[ -n "${changed}" ]] || return 0
 
   title="[sync-upstream] Review upstream workflow tree ${current_tree:0:12}"
@@ -367,6 +364,29 @@ Upstream changed fork-owned workflow files. Review these paths manually:
 ${changed}" >/dev/null
   fi
   echo "::warning title=Upstream workflow drift::${changed//$'\n'/, }"
+}
+
+report_sync_alert() {
+  local kind="$1" key="$2" message="$3" title existing number marker
+  title="[sync-upstream] ${kind}: ${key}"
+  marker="<!-- upstream-sync-alert:${kind}:${key} -->"
+  existing="$(gh issue list \
+    --repo "${GITHUB_REPOSITORY}" \
+    --state open \
+    --limit 100 \
+    --search "\"${title}\" in:title" \
+    --json number,title,body \
+    --jq ".[] | select(.title == \"${title}\" and ((.body // \"\") | contains(\"${marker}\"))) | .number" | head -n1)"
+  if [[ -z "${existing}" ]]; then
+    gh issue create \
+      --repo "${GITHUB_REPOSITORY}" \
+      --title "${title}" \
+      --body "${marker}
+${message}" >/dev/null
+    return 0
+  fi
+  number="${existing}"
+  issue_comment_once "${number}" "alert:${kind}:${key}" "${message}"
 }
 
 close_obsolete_pr() {
@@ -417,9 +437,10 @@ publish_pr() {
 <!-- upstream-sync-owned-tip:${published_sha} -->
 <!-- upstream-sync-source:${parent}@${upstream_sha} -->
 Automated synchronization from ${parent}:${upstream_branch} at ${upstream_sha}.
+Checkpoint advanced from ${checkpoint_sha} to ${upstream_sha}.
 
 This pull request requires protected branch checks and a maintainer decision.
-Fork-owned files under .github/workflows are preserved for separate review."
+Configured fork-owned paths are preserved; upstream workflow changes are reviewed separately."
 
   if [[ -n "${tracked_pr}" ]]; then
     number="$(jq -r '.number' <<<"${tracked_pr}")"
@@ -491,33 +512,70 @@ for attempt in 1 2 3; do
   fetch_remote_tip
   expected_remote_sha="${remote_sha}"
   assert_remote_owned "${base_sha}"
-  report_workflow_drift
 
-  if git merge-base --is-ancestor "${upstream_sha}" "${base_sha}"; then
-    close_obsolete_pr
-  fi
+  set +e
+  prepare_output="$("${PREPARE_HELPER}" \
+    "${base_sha}" \
+    "${upstream_sha}" \
+    "${parent}" \
+    "${upstream_branch}" \
+    "${STATE_FILE}" \
+    "${SYNC_POLICY_FILE}")"
+  prepare_status=$?
+  set -e
+  checkpoint_sha="$(sed -n 's/^checkpoint=//p' <<<"${prepare_output}" | tail -n1)"
+  prepare_state="$(sed -n 's/^state=//p' <<<"${prepare_output}" | tail -n1)"
 
-  git switch --force-create "${SYNC_BRANCH}" "${base_sha}"
-  merge_failed=false
-  original_conflicts=''
-  if ! git merge --squash "${upstream_sha}"; then
-    merge_failed=true
-    original_conflicts="$(git diff --name-only --diff-filter=U)"
-  fi
-  git restore --source="${base_sha}" --staged --worktree -- .github/workflows
-  remaining_conflicts="$(git diff --name-only --diff-filter=U)"
-  if [[ "${merge_failed}" == true ]] &&
-     { [[ -z "${original_conflicts}" ]] || [[ -n "${remaining_conflicts}" ]]; }; then
-    if [[ -n "${tracked_pr}" ]]; then
-      pr_comment_once \
-        "$(jq -r '.number' <<<"${tracked_pr}")" \
-        "conflict:${upstream_sha}" \
-        "Upstream ${upstream_sha} conflicts with base ${base_sha}. The PR and branch were preserved."
-    fi
-    output state conflict
+  if ((prepare_status != 0)); then
+    alert_key="${upstream_sha:0:12}"
+    case "${prepare_status}:${prepare_state}" in
+      1:conflict)
+        message="Upstream ${upstream_sha} conflicts with base ${base_sha} from checkpoint ${checkpoint_sha:-unknown}. The existing PR and branch were preserved."
+        if [[ -n "${tracked_pr}" ]]; then
+          pr_comment_once \
+            "$(jq -r '.number' <<<"${tracked_pr}")" \
+            "conflict:${upstream_sha}" \
+            "${message}"
+        fi
+        report_sync_alert conflict "${alert_key}" "${message}"
+        output state conflict
+        ;;
+      2:history_rewrite)
+        message="Checkpoint ${checkpoint_sha:-unknown} is not an ancestor of upstream ${upstream_sha}. Synchronization stopped without changing the branch, PR, or checkpoint."
+        report_sync_alert history-rewrite "${alert_key}" "${message}"
+        output state history_rewrite
+        ;;
+      *)
+        message="Checkpoint state or policy validation failed for base ${base_sha} and upstream ${upstream_sha}. Synchronization stopped without publication."
+        report_sync_alert invalid-state "${alert_key}" "${message}"
+        output state error
+        ;;
+    esac
     output has_changes false
     exit 1
   fi
+
+  [[ -n "${checkpoint_sha}" ]] || {
+    echo 'Checkpoint helper did not return a checkpoint.' >&2
+    exit 1
+  }
+  filtered_paths="$(sed -n 's/^filtered_paths=//p' <<<"${prepare_output}" | tail -n1)"
+  output checkpoint_sha "${checkpoint_sha}"
+  output filtered_paths "${filtered_paths:-0}"
+  if [[ "${prepare_state}" == noop ]]; then
+    close_obsolete_pr
+  fi
+  [[ "${prepare_state}" == clean ]] || {
+    echo "Unexpected checkpoint preparation state: ${prepare_state:-missing}" >&2
+    exit 1
+  }
+
+  prepared_tree="$(sed -n 's/^tree=//p' <<<"${prepare_output}" | tail -n1)"
+  git rev-parse --verify "${prepared_tree}^{tree}" >/dev/null
+  report_workflow_drift
+
+  git switch --force-create "${SYNC_BRANCH}" "${base_sha}"
+  git read-tree --reset -u "${prepared_tree}"
 
   git diff --cached --quiet && close_obsolete_pr
 
@@ -525,6 +583,7 @@ for attempt in 1 2 3; do
     -m "chore: sync ${parent}@${upstream_sha}" \
     -m 'Sync-Upstream-Automation: true' \
     -m "Sync-Upstream-Source: ${parent}@${upstream_sha}" \
+    -m "Sync-Upstream-Checkpoint: ${checkpoint_sha}->${upstream_sha}" \
     -m "Sync-Upstream-Base: ${base_sha}"
   local_sha="$(git rev-parse HEAD)"
 
