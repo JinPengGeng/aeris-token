@@ -28,9 +28,12 @@ const repoRoot = path.resolve(here, '..', '..', '..');
 const contracts = loadContracts(repoRoot);
 const policy = contracts.policy;
 
-test('trusted contracts load with every agent disabled', () => {
+test('trusted contracts load with only enabled agents declared', () => {
   assert.equal(Object.keys(contracts.agents.agents).length, 8);
-  assert.equal(Object.values(contracts.agents.agents).every((agent) => !agent.enabled), true);
+  const enabled = Object.entries(contracts.agents.agents)
+    .filter(([, agent]) => agent.enabled)
+    .map(([name]) => name);
+  assert.deepEqual(enabled, ['triage']);
 });
 
 test('contract validation rejects broad fallback statuses', () => {
