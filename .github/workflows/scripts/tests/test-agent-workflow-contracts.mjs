@@ -25,7 +25,7 @@ const workflowSpecs = [
   },
   {
     path: '.github/workflows/agent-pr-review.yml',
-    commentPermission: 'issues',
+    commentPermission: 'pull-requests',
     usesWorkflowRun: true,
   },
 ];
@@ -242,13 +242,6 @@ for (const spec of workflowSpecs) {
       );
     }
     if (spec.usesWorkflowRun) {
-      for (const phase of ['reserve', 'publish']) {
-        assert.equal(
-          jobs[phase].permissions['pull-requests'],
-          'read',
-          `${spec.path} ${phase} must keep PR metadata read-only`,
-        );
-      }
       assert.equal(jobs.publish.permissions.checks, 'read', `${spec.path} publish must recheck check runs`);
       assert.equal(jobs.publish.permissions.statuses, 'read', `${spec.path} publish must recheck commit statuses`);
     }
