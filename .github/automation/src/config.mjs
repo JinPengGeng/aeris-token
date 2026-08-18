@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import yaml from 'js-yaml';
 
+import { WRITER_FOUNDATION_LIMITS } from './writer-phase-contract.mjs';
+
 export class ContractError extends Error {
   constructor(message) {
     super(message);
@@ -18,7 +20,43 @@ const MINIMUM_REVIEWER_INPUT_CHARACTERS = 24_000;
 const MAXIMUM_REVIEWER_INPUT_CHARACTERS = 262_144;
 const MINIMUM_REVIEWER_PATCH_CHARACTERS = 1;
 const MAXIMUM_REVIEWER_PATCH_CHARACTERS = 65_536;
-
+const WRITER_PERMISSION_GRANTS = {
+  metadata: 'read',
+  contents: 'write',
+  pull_requests: 'write',
+};
+const WRITER_DENIED_PERMISSIONS = [
+  'checks', 'actions', 'workflows', 'administration', 'deployments', 'environments', 'secrets',
+  'members', 'packages', 'issues',
+];
+const WRITER_FORBIDDEN_PATHS = [
+  '.github/**', '**/CODEOWNERS', '.gitmodules', '**/.git', '**/.git/**',
+];
+const WRITER_CAPABILITY_RESIDUALS = {
+  pull_requests_write_can_review_or_merge: true,
+  contents_write_not_branch_scoped: true,
+  app_has_branch_protection_bypass: false,
+};
+const WRITER_ALLOWED_OPERATIONS = ['create_or_update_agent_ref', 'create_or_update_draft_pull_request'];
+const WRITER_DENIED_OPERATIONS = [
+  'review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch',
+];
+const WRITER_REQUIRED_ACTOR_PERMISSIONS = ['admin', 'maintain', 'write'];
+const WRITER_REQUIRED_COMMANDS = ['implement', 'retry-write'];
+const WRITER_REGISTRY_KEYS = [
+  'enabled', 'enabled_variable', 'phase', 'mode', 'identity', 'app_id_variable',
+  'private_key_secret', 'environment', 'credentials', 'permissions', 'capability_residuals',
+  'deterministic_client_mitigations', 'limits', 'model_variable', 'fallback_model_variable',
+  'triggers', 'required_issue_labels', 'required_actor_permissions', 'required_commands',
+  'allowed_branch_prefixes', 'tools', 'effects', 'denied_paths', 'handoff_to',
+];
+const WRITER_POLICY_KEYS = [
+  'enabled', 'enabled_variable', 'branch_prefix', 'draft_pull_requests_only',
+  'maximum_open_pull_requests_per_issue', 'identity', 'app_id_variable', 'private_key_secret',
+  'environment', 'credentials', 'permissions', 'capability_residuals',
+  'deterministic_client_mitigations', 'limits', 'forbidden_paths', 'release_secret_access',
+  'pull_request_target_checkout',
+];
 function requireCondition(condition, message) {
   if (!condition) throw new ContractError(message);
 }
@@ -72,6 +110,127 @@ function validateReviewerLimits(limits) {
       limits.maximum_patch_characters_per_file <= limits.maximum_input_characters,
     `reviewer maximum_patch_characters_per_file must be an integer between ${MINIMUM_REVIEWER_PATCH_CHARACTERS} and ${MAXIMUM_REVIEWER_PATCH_CHARACTERS} and not exceed maximum_input_characters`,
   );
+}
+
+function sameStringArray(actual, expected) {
+  return Array.isArray(actual) &&
+    actual.length === expected.length &&
+    actual.every((value, index) => value === expected[index]);
+}
+
+function sameStringSet(actual, expected) {
+  return Array.isArray(actual) && actual.length === expected.length &&
+    actual.every((value) => typeof value === 'string') &&
+    new Set(actual).size === actual.length && actual.every((value) => expected.includes(value));
+}
+
+function sameRecord(actual, expected) {
+  return actual && typeof actual === 'object' && !Array.isArray(actual) &&
+    sameStringSet(Object.keys(actual), Object.keys(expected)) &&
+    Object.entries(expected).every(([key, value]) => actual[key] === value);
+}
+
+function sameWriterField(field, actual, expected) {
+  if (field === 'permissions') {
+    return sameStringSet(Object.keys(actual ?? {}), Object.keys(expected ?? {})) &&
+      Object.keys(actual ?? {}).every((key) => JSON.stringify(actual[key]) === JSON.stringify(expected[key]));
+  }
+  return JSON.stringify(actual) === JSON.stringify(expected);
+}
+
+function validateWriterFoundation(writer, counterpart) {
+  requireCondition(writer && typeof writer === 'object', 'writer foundation is missing');
+  requireCondition(
+    sameStringSet(Object.keys(writer), WRITER_REGISTRY_KEYS),
+    'writer registry contains unapproved fields',
+  );
+  requireCondition(writer.enabled === false, 'writer must remain disabled during Phase 3 foundation');
+  requireCondition(writer.phase === 3, 'writer phase must remain 3');
+  requireCondition(writer.mode === 'draft_pull_request', 'writer must remain Draft PR only');
+  requireCondition(
+    writer.enabled_variable === 'AERIS_WRITER_ENABLED',
+    'writer must use the independent AERIS_WRITER_ENABLED switch',
+  );
+  requireCondition(writer.identity === 'github_app', 'writer must use a GitHub App identity');
+  requireCondition(
+    writer.app_id_variable === 'AERIS_WRITER_APP_ID',
+    'writer App ID must use AERIS_WRITER_APP_ID',
+  );
+  requireCondition(
+    writer.private_key_secret === 'AERIS_WRITER_PRIVATE_KEY',
+    'writer private key must use AERIS_WRITER_PRIVATE_KEY',
+  );
+  requireCondition(writer.environment === 'writer', 'writer must use the writer environment');
+  requireCondition(
+    sameStringArray(writer.credentials?.allowed_jobs, ['publish']) &&
+      writer.credentials.github_token_write === false,
+    'writer credentials must be limited to publish without GITHUB_TOKEN write access',
+  );
+  requireCondition(
+    Object.entries(WRITER_PERMISSION_GRANTS).every(
+      ([permission, level]) => writer.permissions?.[permission] === level,
+    ) &&
+      sameStringSet(Object.keys(writer.permissions ?? {}), [...Object.keys(WRITER_PERMISSION_GRANTS), 'denied']) &&
+      sameStringArray(writer.permissions?.denied, WRITER_DENIED_PERMISSIONS),
+    'writer App permissions exceed the approved minimum',
+  );
+  requireCondition(
+    sameRecord(writer.capability_residuals, WRITER_CAPABILITY_RESIDUALS),
+    'writer GitHub App capability residuals changed',
+  );
+  requireCondition(
+    sameStringArray(writer.deterministic_client_mitigations?.allowed_operations, WRITER_ALLOWED_OPERATIONS) &&
+      sameStringArray(writer.deterministic_client_mitigations?.denied_operations, WRITER_DENIED_OPERATIONS),
+    'writer deterministic client operations exceed the approved boundary',
+  );
+  requireCondition(
+    sameRecord(writer.limits, WRITER_FOUNDATION_LIMITS),
+    'writer limits must match the approved Phase 3 foundation values',
+  );
+  requireCondition(
+    sameStringArray(writer.denied_paths ?? writer.forbidden_paths, WRITER_FORBIDDEN_PATHS),
+    'writer forbidden paths must match the protected foundation boundary',
+  );
+  requireCondition(
+    writer.model_variable === 'AERIS_AI_MODEL_WRITER' &&
+      writer.fallback_model_variable === 'AERIS_AI_MODEL_FALLBACK' &&
+      sameStringArray(writer.triggers, ['maintainer_command_implement', 'maintainer_command_retry_write']) &&
+      sameStringArray(writer.required_issue_labels, ['agent-ready']) &&
+      sameStringArray(writer.required_actor_permissions, WRITER_REQUIRED_ACTOR_PERMISSIONS) &&
+      sameStringArray(writer.required_commands, WRITER_REQUIRED_COMMANDS) &&
+      sameStringArray(writer.allowed_branch_prefixes, ['agent/']) &&
+      sameStringArray(writer.tools, ['repository_read', 'isolated_shell', 'branch_write', 'draft_pull_request']) &&
+      sameStringArray(writer.effects, ['create_or_update_draft_pull_request']) &&
+      sameStringArray(writer.handoff_to, ['reviewer', 'tester', 'security']),
+    'writer registry capabilities exceed the approved Phase 3 boundary',
+  );
+  if (counterpart) {
+    requireCondition(
+      sameStringSet(Object.keys(counterpart), WRITER_POLICY_KEYS),
+      'writer policy contains unapproved fields',
+    );
+    requireCondition(
+      counterpart.branch_prefix === 'agent/' &&
+        counterpart.draft_pull_requests_only === true &&
+        counterpart.maximum_open_pull_requests_per_issue === 1 &&
+        counterpart.release_secret_access === false &&
+        counterpart.pull_request_target_checkout === false,
+      'writer policy capabilities exceed the approved Phase 3 boundary',
+    );
+    for (const field of [
+      'enabled', 'enabled_variable', 'identity', 'app_id_variable', 'private_key_secret', 'environment',
+      'credentials', 'permissions', 'capability_residuals', 'deterministic_client_mitigations', 'limits',
+    ]) {
+      requireCondition(
+        sameWriterField(field, writer[field], counterpart[field]),
+        `writer registry and policy ${field} differ`,
+      );
+    }
+    requireCondition(
+      JSON.stringify(writer.denied_paths) === JSON.stringify(counterpart.forbidden_paths),
+      'writer registry and policy forbidden paths differ',
+    );
+}
 }
 
 export function validateContracts(agents, policy) {
@@ -179,7 +338,31 @@ export function validateContracts(agents, policy) {
   );
   requireCondition(policy.prompt_security?.triage_shell_access === false, 'triage shell must remain off');
   requireCondition(policy.prompt_security?.triage_network_access === false, 'model network tools must remain off');
-  requireCondition(policy.writer?.enabled === false, 'writer must remain disabled during Phase 2');
+  const writer = agents.agents?.writer;
+  requireCondition(writer?.mode === 'draft_pull_request', 'writer must remain Draft PR only');
+  requireCondition(
+    sameStringArray(writer?.allowed_branch_prefixes, ['agent/']) && policy.writer?.branch_prefix === 'agent/',
+    'writer branch prefix must remain agent/',
+  );
+  requireCondition(policy.writer?.draft_pull_requests_only === true, 'writer must create Draft PRs only');
+  requireCondition(
+    policy.writer?.maximum_open_pull_requests_per_issue === 1,
+    'writer must allow exactly one open pull request per issue',
+  );
+  requireCondition(
+    sameStringArray(writer.required_actor_permissions, WRITER_REQUIRED_ACTOR_PERMISSIONS) &&
+      sameStringArray(writer.required_commands, WRITER_REQUIRED_COMMANDS) &&
+      sameStringArray(writer.required_issue_labels, ['agent-ready']) &&
+      sameStringArray(
+        policy.authorization?.code_write_requires?.actor_permission,
+        WRITER_REQUIRED_ACTOR_PERMISSIONS,
+      ) &&
+      sameStringArray(policy.authorization?.code_write_requires?.exact_commands, WRITER_REQUIRED_COMMANDS) &&
+      sameStringArray(policy.authorization?.code_write_requires?.issue_labels, writer.required_issue_labels) &&
+      policy.authorization?.code_write_requires?.author_association === undefined,
+    'writer code-write authorization must use exact commands and live actor permissions',
+  );
+  validateWriterFoundation(writer, policy.writer);
   requireCondition(policy.policy_gate?.enabled === false, 'policy gate must remain disabled during Phase 2');
   requireCondition(
     Array.isArray(policy.policy_gate?.required_checks) &&

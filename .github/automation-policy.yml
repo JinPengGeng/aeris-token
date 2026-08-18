@@ -35,7 +35,8 @@ authorization:
   external_issue_analysis_requires_label: agent-analyze
   external_pull_request_analysis_requires_label: agent-analyze
   code_write_requires:
-    author_association: [OWNER, MEMBER, COLLABORATOR]
+    actor_permission: [admin, maintain, write]
+    exact_commands: [implement, retry-write]
     issue_labels: [agent-ready]
   merge_requires:
     author_association: [OWNER, MEMBER]
@@ -79,12 +80,41 @@ prompt_security:
 
 writer:
   enabled: false
+  enabled_variable: AERIS_WRITER_ENABLED
   branch_prefix: agent/
   draft_pull_requests_only: true
   maximum_open_pull_requests_per_issue: 1
+  identity: github_app
+  app_id_variable: AERIS_WRITER_APP_ID
+  private_key_secret: AERIS_WRITER_PRIVATE_KEY
+  environment: writer
+  credentials:
+    allowed_jobs: [publish]
+    github_token_write: false
+  permissions:
+    metadata: read
+    contents: write
+    pull_requests: write
+    denied: [checks, actions, workflows, administration, deployments, environments, secrets, members, packages, issues]
+  capability_residuals:
+    pull_requests_write_can_review_or_merge: true
+    contents_write_not_branch_scoped: true
+    app_has_branch_protection_bypass: false
+  deterministic_client_mitigations:
+    allowed_operations: [create_or_update_agent_ref, create_or_update_draft_pull_request]
+    denied_operations: [review, approve, merge, enable_auto_merge, mark_ready, close_pr, delete_branch]
+  limits:
+    maximum_files: 50
+    maximum_patch_bytes: 65536
+    maximum_file_size_bytes: 524288
+    maximum_total_file_bytes: 2097152
+    maximum_fix_cycles: 2
   forbidden_paths:
     - .github/**
-    - CODEOWNERS
+    - "**/CODEOWNERS"
+    - .gitmodules
+    - "**/.git"
+    - "**/.git/**"
   release_secret_access: false
   pull_request_target_checkout: false
 

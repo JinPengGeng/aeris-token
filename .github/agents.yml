@@ -97,18 +97,49 @@ agents:
 
   writer:
     enabled: false
+    enabled_variable: AERIS_WRITER_ENABLED
     phase: 3
     mode: draft_pull_request
+    identity: github_app
+    app_id_variable: AERIS_WRITER_APP_ID
+    private_key_secret: AERIS_WRITER_PRIVATE_KEY
+    environment: writer
+    credentials:
+      allowed_jobs: [publish]
+      github_token_write: false
+    permissions:
+      metadata: read
+      contents: write
+      pull_requests: write
+      denied: [checks, actions, workflows, administration, deployments, environments, secrets, members, packages, issues]
+    capability_residuals:
+      pull_requests_write_can_review_or_merge: true
+      contents_write_not_branch_scoped: true
+      app_has_branch_protection_bypass: false
+    deterministic_client_mitigations:
+      allowed_operations: [create_or_update_agent_ref, create_or_update_draft_pull_request]
+      denied_operations: [review, approve, merge, enable_auto_merge, mark_ready, close_pr, delete_branch]
+    limits:
+      maximum_files: 50
+      maximum_patch_bytes: 65536
+      maximum_file_size_bytes: 524288
+      maximum_total_file_bytes: 2097152
+      maximum_fix_cycles: 2
     model_variable: AERIS_AI_MODEL_WRITER
     fallback_model_variable: AERIS_AI_MODEL_FALLBACK
-    triggers: [maintainer_command_implement, authorized_fix_cycle]
+    triggers: [maintainer_command_implement, maintainer_command_retry_write]
     required_issue_labels: [agent-ready]
+    required_actor_permissions: [admin, maintain, write]
+    required_commands: [implement, retry-write]
     allowed_branch_prefixes: [agent/]
     tools: [repository_read, isolated_shell, branch_write, draft_pull_request]
     effects: [create_or_update_draft_pull_request]
     denied_paths:
       - .github/**
-      - CODEOWNERS
+      - "**/CODEOWNERS"
+      - .gitmodules
+      - "**/.git"
+      - "**/.git/**"
     handoff_to: [reviewer, tester, security]
 
   tester:
