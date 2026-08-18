@@ -1,38 +1,43 @@
 use crate::ai_serving::{
-    hydrate_response_history, normalize_api_format_alias, record_converted_response_history,
-    response_history_is_loaded, response_history_storage_key, ResponseHistoryRecord,
+    conversation_history_scope, hydrate_response_history, record_converted_response_history,
+    response_history_is_loaded, response_history_storage_key, ConversationHistoryCapability,
+    ConversationHistoryResolutionError, ConversationHistoryResolver, ResponseHistoryRecord,
 };
 use aether_runtime_state::RuntimeState;
+use axum::http::StatusCode;
 use serde_json::Value;
 use tracing::warn;
 
 use crate::GatewayError;
 
-pub(crate) async fn hydrate_openai_response_history(
+pub(crate) async fn resolve_openai_response_history(
     runtime_state: &RuntimeState,
     request: &Value,
     client_api_format: &str,
     provider_api_format: &str,
-    history_scope: &str,
+    user_id: &str,
+    api_key_id: &str,
 ) -> Result<(), GatewayError> {
-    if normalize_api_format_alias(client_api_format) != "openai:responses"
-        || normalize_api_format_alias(provider_api_format) != "openai:chat"
-    {
-        return Ok(());
-    }
-    let Some(previous_response_id) = request
-        .get("previous_response_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let resolution =
+        ConversationHistoryResolver::resolve(request, client_api_format, provider_api_format)
+            .map_err(map_history_resolution_error)?;
+    let Some(resolution) = resolution else {
         return Ok(());
     };
-    if response_history_is_loaded(previous_response_id, Some(history_scope)) {
+    let history_scope = conversation_history_scope(user_id, api_key_id).ok_or_else(|| {
+        GatewayError::Internal("conversation history requester identity is incomplete".to_string())
+    })?;
+    if response_history_is_loaded(
+        resolution.previous_response_id,
+        Some(history_scope.as_str()),
+    ) {
         return Ok(());
     }
 
-    let storage_key = response_history_storage_key(previous_response_id, Some(history_scope));
+    let storage_key = response_history_storage_key(
+        resolution.previous_response_id,
+        Some(history_scope.as_str()),
+    );
     let payload = runtime_state.kv_get(&storage_key).await.map_err(|error| {
         warn!(
             event_name = "openai_response_history_read_failed",
@@ -44,11 +49,19 @@ pub(crate) async fn hydrate_openai_response_history(
         GatewayError::Internal("OpenAI response history lookup failed".to_string())
     })?;
     let Some(payload) = payload else {
-        return Ok(());
+        return Err(GatewayError::Client {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "conversation history is unavailable for this tenant and API key ({})",
+                history_capability_name(resolution.capability)
+            ),
+        });
     };
-    if let Err(error) =
-        hydrate_response_history(previous_response_id, Some(history_scope), &payload)
-    {
+    if let Err(error) = hydrate_response_history(
+        resolution.previous_response_id,
+        Some(history_scope.as_str()),
+        &payload,
+    ) {
         let _ = runtime_state.kv_delete(&storage_key).await;
         warn!(
             event_name = "openai_response_history_invalid",
@@ -62,6 +75,26 @@ pub(crate) async fn hydrate_openai_response_history(
         ));
     }
     Ok(())
+}
+
+fn map_history_resolution_error(error: ConversationHistoryResolutionError) -> GatewayError {
+    let status = match &error {
+        ConversationHistoryResolutionError::InvalidPreviousResponseId => StatusCode::BAD_REQUEST,
+        ConversationHistoryResolutionError::Unsupported { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    GatewayError::Client {
+        status,
+        message: error.to_string(),
+    }
+}
+
+const fn history_capability_name(capability: ConversationHistoryCapability) -> &'static str {
+    match capability {
+        ConversationHistoryCapability::Native => "native",
+        ConversationHistoryCapability::Hydrate => "hydrate",
+        ConversationHistoryCapability::Translate => "translate",
+        ConversationHistoryCapability::Unsupported => "unsupported",
+    }
 }
 
 pub(crate) async fn persist_response_history_record(

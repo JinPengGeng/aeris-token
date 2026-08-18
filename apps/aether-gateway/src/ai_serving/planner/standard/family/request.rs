@@ -585,14 +585,22 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             return Ok(None);
         }
     };
-    crate::ai_serving::hydrate_openai_response_history(
+    crate::ai_serving::resolve_openai_response_history(
         state.runtime_state(),
         body_json,
         spec_metadata.api_format,
         provider_api_format,
+        input.auth_context.user_id.as_str(),
         input.auth_context.api_key_id.as_str(),
     )
     .await?;
+    let history_scope = crate::ai_serving::conversation_history_scope(
+        input.auth_context.user_id.as_str(),
+        input.auth_context.api_key_id.as_str(),
+    )
+    .ok_or_else(|| {
+        GatewayError::Internal("conversation history requester identity is incomplete".to_string())
+    })?;
     let redaction = resolve_provider_chat_pii_redaction(
         state,
         parts,
@@ -604,7 +612,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
     .await?;
     let body_json = redaction.body_json.as_ref();
     let mut provider_request_body =
-        match crate::ai_serving::planner::standard::build_standard_request_body_with_model_directives_and_request_headers(
+        match crate::ai_serving::build_standard_request_body_with_model_directives_request_headers_and_history_scope(
             body_json,
             spec_metadata.api_format,
             &prepared_candidate.mapped_model,
@@ -618,6 +626,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
                 transport.endpoint.body_rules.as_ref()
             },
             Some(input.auth_context.api_key_id.as_str()),
+            Some(history_scope.as_str()),
             Some(effective_headers),
             false,
         ) {

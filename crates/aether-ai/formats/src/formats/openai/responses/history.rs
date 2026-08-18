@@ -17,6 +17,107 @@ const MAX_HISTORY_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const HISTORY_STORAGE_VERSION: u8 = 1;
 const HISTORY_STORAGE_KEY_PREFIX: &str = "ai:responses:history:v1";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConversationHistoryCapability {
+    Native,
+    Hydrate,
+    Translate,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConversationHistoryResolution<'a> {
+    pub capability: ConversationHistoryCapability,
+    pub previous_response_id: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConversationHistoryResolutionError {
+    InvalidPreviousResponseId,
+    Unsupported {
+        client_api_format: String,
+        provider_api_format: String,
+    },
+}
+
+impl std::fmt::Display for ConversationHistoryResolutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPreviousResponseId => formatter
+                .write_str("previous_response_id must be a non-empty string when it is supplied"),
+            Self::Unsupported {
+                client_api_format,
+                provider_api_format,
+            } => write!(
+                formatter,
+                "conversation history cannot continue from {client_api_format} to {provider_api_format}"
+            ),
+        }
+    }
+}
+
+pub struct ConversationHistoryResolver;
+
+impl ConversationHistoryResolver {
+    pub fn capability(
+        client_api_format: &str,
+        provider_api_format: &str,
+    ) -> ConversationHistoryCapability {
+        let client_api_format = crate::normalize_api_format_alias(client_api_format);
+        let provider_api_format = crate::normalize_api_format_alias(provider_api_format);
+        if client_api_format != "openai:responses" {
+            return ConversationHistoryCapability::Unsupported;
+        }
+        match provider_api_format.as_str() {
+            "openai:responses" => ConversationHistoryCapability::Native,
+            "openai:chat" => ConversationHistoryCapability::Hydrate,
+            "claude:messages" | "gemini:generate_content" => {
+                ConversationHistoryCapability::Translate
+            }
+            _ => ConversationHistoryCapability::Unsupported,
+        }
+    }
+
+    pub fn resolve<'a>(
+        request: &'a Value,
+        client_api_format: &str,
+        provider_api_format: &str,
+    ) -> Result<Option<ConversationHistoryResolution<'a>>, ConversationHistoryResolutionError> {
+        let Some(previous_response_id) = request.get("previous_response_id") else {
+            return Ok(None);
+        };
+        let previous_response_id = previous_response_id
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(ConversationHistoryResolutionError::InvalidPreviousResponseId)?;
+        let capability = Self::capability(client_api_format, provider_api_format);
+        if capability == ConversationHistoryCapability::Unsupported {
+            return Err(ConversationHistoryResolutionError::Unsupported {
+                client_api_format: crate::normalize_api_format_alias(client_api_format),
+                provider_api_format: crate::normalize_api_format_alias(provider_api_format),
+            });
+        }
+        Ok(Some(ConversationHistoryResolution {
+            capability,
+            previous_response_id,
+        }))
+    }
+}
+
+pub fn conversation_history_scope(user_id: &str, api_key_id: &str) -> Option<String> {
+    let user_id = user_id.trim();
+    let api_key_id = api_key_id.trim();
+    if user_id.is_empty() || api_key_id.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "tenant:{}:{user_id}:api-key:{}:{api_key_id}",
+        user_id.len(),
+        api_key_id.len()
+    ))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResponseHistoryRecord {
     pub storage_key: String,
@@ -274,33 +375,49 @@ fn request_input_items(request: &Value) -> Vec<Value> {
     }
 }
 
-fn history_conversion_enabled(report_context: &Value) -> bool {
-    report_context
-        .get("needs_conversion")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        && report_context
-            .get("client_api_format")
-            .and_then(Value::as_str)
-            .is_some_and(|format| format.eq_ignore_ascii_case("openai:responses"))
-        && report_context
-            .get("provider_api_format")
-            .and_then(Value::as_str)
-            .is_some_and(|format| format.eq_ignore_ascii_case("openai:chat"))
+fn history_recording_capability(report_context: &Value) -> Option<ConversationHistoryCapability> {
+    let client_api_format = report_context.get("client_api_format")?.as_str()?;
+    let provider_api_format = report_context.get("provider_api_format")?.as_str()?;
+    let capability =
+        ConversationHistoryResolver::capability(client_api_format, provider_api_format);
+    (capability != ConversationHistoryCapability::Unsupported).then_some(capability)
+}
+
+fn history_scope_from_report_context(report_context: &Value) -> Option<String> {
+    let user_id = report_context
+        .get("user_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let api_key_id = report_context
+        .get("api_key_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (user_id, api_key_id) {
+        (Some(user_id), Some(api_key_id)) => conversation_history_scope(user_id, api_key_id),
+        // Library-only callers historically scoped by API key. Gateway report
+        // contexts always carry both identities and therefore use the stronger
+        // tenant + API-key scope above.
+        (None, Some(api_key_id)) => Some(api_key_id.to_string()),
+        _ => None,
+    }
 }
 
 pub(crate) fn expand_previous_response_for_chat(
     request: &Value,
     history_scope: Option<&str>,
 ) -> Result<Value, String> {
-    let Some(previous_response_id) = request
-        .get("previous_response_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(raw_previous_response_id) = request.get("previous_response_id") else {
         return Ok(request.clone());
     };
+    let previous_response_id = raw_previous_response_id
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "previous_response_id must be a non-empty string when it is supplied".to_string()
+        })?;
     let mut store = response_history_store()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -324,9 +441,8 @@ pub fn record_converted_response_history(
     report_context: &Value,
     response: &Value,
 ) -> Option<ResponseHistoryRecord> {
-    if !history_conversion_enabled(report_context)
-        || response.get("status").and_then(Value::as_str) != Some("completed")
-    {
+    history_recording_capability(report_context)?;
+    if response.get("status").and_then(Value::as_str) != Some("completed") {
         return None;
     }
     let response_id = response
@@ -335,11 +451,7 @@ pub fn record_converted_response_history(
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
     let request = report_context.get("original_request_body")?;
-    let history_scope = report_context
-        .get("api_key_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|scope| !scope.is_empty());
+    let history_scope = history_scope_from_report_context(report_context);
     let mut transcript = if request.get("messages").and_then(Value::as_array).is_some() {
         Vec::new()
     } else {
@@ -352,7 +464,11 @@ pub fn record_converted_response_history(
                 response_history_store()
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .get(previous_response_id, history_scope, Instant::now())
+                    .get(
+                        previous_response_id,
+                        history_scope.as_deref(),
+                        Instant::now(),
+                    )
             })
             .unwrap_or_default()
     };
@@ -364,7 +480,7 @@ pub fn record_converted_response_history(
     let payload = serde_json::to_string(&PersistedResponseHistory {
         version: HISTORY_STORAGE_VERSION,
         response_id: response_id.to_string(),
-        scope_fingerprint: history_scope_fingerprint(history_scope),
+        scope_fingerprint: history_scope_fingerprint(history_scope.as_deref()),
         expires_at_unix_secs,
         transcript: transcript.clone(),
     })
@@ -377,13 +493,13 @@ pub fn record_converted_response_history(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(
             response_id.to_string(),
-            history_scope,
+            history_scope.as_deref(),
             transcript,
             Instant::now(),
             HISTORY_TTL,
         );
     Some(ResponseHistoryRecord {
-        storage_key: response_history_storage_key(response_id, history_scope),
+        storage_key: response_history_storage_key(response_id, history_scope.as_deref()),
         payload,
         ttl: HISTORY_TTL,
     })
@@ -396,9 +512,9 @@ mod tests {
     use crate::formats::{context::FormatContext, registry::convert_request};
 
     use super::{
-        expand_previous_response_for_chat, hydrate_response_history,
+        conversation_history_scope, expand_previous_response_for_chat, hydrate_response_history,
         record_converted_response_history, response_history_key, response_history_storage_key,
-        response_history_store,
+        response_history_store, ConversationHistoryCapability, ConversationHistoryResolver,
     };
 
     fn conversion_report_context(original_request_body: serde_json::Value) -> serde_json::Value {
@@ -408,6 +524,107 @@ mod tests {
             "provider_api_format": "openai:chat",
             "original_request_body": original_request_body,
         })
+    }
+
+    #[test]
+    fn resolver_declares_each_history_capability_and_rejects_lossy_pairs() {
+        assert_eq!(
+            ConversationHistoryResolver::capability("openai:responses", "openai:responses"),
+            ConversationHistoryCapability::Native
+        );
+        assert_eq!(
+            ConversationHistoryResolver::capability("openai:responses", "openai:chat"),
+            ConversationHistoryCapability::Hydrate
+        );
+        for provider in ["claude:messages", "gemini:generate_content"] {
+            assert_eq!(
+                ConversationHistoryResolver::capability("openai:responses", provider),
+                ConversationHistoryCapability::Translate
+            );
+        }
+        assert_eq!(
+            ConversationHistoryResolver::capability("openai:responses", "openai:search"),
+            ConversationHistoryCapability::Unsupported
+        );
+
+        let invalid = ConversationHistoryResolver::resolve(
+            &json!({"previous_response_id": {"unexpected": true}}),
+            "openai:responses",
+            "openai:chat",
+        )
+        .expect_err("non-string history IDs must not be silently dropped");
+        assert!(invalid.to_string().contains("non-empty string"));
+
+        let unsupported = ConversationHistoryResolver::resolve(
+            &json!({"previous_response_id": "resp_unsupported_pair"}),
+            "openai:responses",
+            "openai:search",
+        )
+        .expect_err("unsupported continuation pairs must fail closed");
+        assert!(unsupported
+            .to_string()
+            .contains("openai:responses to openai:search"));
+    }
+
+    #[test]
+    fn tenant_and_api_key_both_partition_history() {
+        let owner_scope = conversation_history_scope("tenant-a", "key-shared").unwrap();
+        let other_tenant_scope = conversation_history_scope("tenant-b", "key-shared").unwrap();
+        let other_key_scope = conversation_history_scope("tenant-a", "key-other").unwrap();
+        assert_ne!(owner_scope, other_tenant_scope);
+        assert_ne!(owner_scope, other_key_scope);
+
+        let report_context = json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses",
+            "user_id": "tenant-a",
+            "api_key_id": "key-shared",
+            "original_request_body": {"input": "private turn"}
+        });
+        let record = record_converted_response_history(
+            &report_context,
+            &json!({
+                "id": "resp_tenant_and_key_scope",
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant", "content": []}]
+            }),
+        )
+        .expect("native Responses history should be recorded");
+        assert_eq!(
+            record.storage_key,
+            response_history_storage_key("resp_tenant_and_key_scope", Some(owner_scope.as_str()))
+        );
+
+        let request = json!({
+            "previous_response_id": "resp_tenant_and_key_scope",
+            "input": "continue"
+        });
+        assert!(expand_previous_response_for_chat(&request, Some(owner_scope.as_str())).is_ok());
+        assert!(
+            expand_previous_response_for_chat(&request, Some(other_tenant_scope.as_str())).is_err()
+        );
+        assert!(
+            expand_previous_response_for_chat(&request, Some(other_key_scope.as_str())).is_err()
+        );
+    }
+
+    #[test]
+    fn translated_provider_responses_are_recorded_for_later_hydration() {
+        let report_context = json!({
+            "needs_conversion": true,
+            "client_api_format": "openai:responses",
+            "provider_api_format": "claude:messages",
+            "original_request_body": {"input": "translate this turn"}
+        });
+        assert!(record_converted_response_history(
+            &report_context,
+            &json!({
+                "id": "resp_translated_history",
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant", "content": []}]
+            })
+        )
+        .is_some());
     }
 
     #[test]

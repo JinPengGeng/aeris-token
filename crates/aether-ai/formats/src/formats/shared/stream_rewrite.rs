@@ -207,7 +207,7 @@ fn client_consumes_same_private_stream_envelope(
 enum AiSurfaceStreamRewriteState {
     EnvelopeUnwrap,
     ModelDirectiveDisplay,
-    OpenAiResponsesCompat,
+    OpenAiResponsesCompat(OpenAiResponsesCompatStreamState),
     OpenAiImage(Box<OpenAiImageStreamState>),
     OpenAiImageToOpenAiChat(Box<OpenAiImageChatStreamState>),
     ClaudeReadToolSanitize(Box<ClaudeReadToolStreamSanitizer>),
@@ -235,7 +235,9 @@ pub fn maybe_build_ai_surface_stream_rewriter<'a>(
             AiSurfaceStreamRewriteState::ModelDirectiveDisplay
         }
         FinalizeStreamRewriteMode::OpenAiResponsesCompat => {
-            AiSurfaceStreamRewriteState::OpenAiResponsesCompat
+            AiSurfaceStreamRewriteState::OpenAiResponsesCompat(
+                OpenAiResponsesCompatStreamState::default(),
+            )
         }
         FinalizeStreamRewriteMode::OpenAiImage => {
             AiSurfaceStreamRewriteState::OpenAiImage(Box::<OpenAiImageStreamState>::default())
@@ -292,7 +294,7 @@ impl AiSurfaceStreamRewriter<'_> {
             }
             AiSurfaceStreamRewriteState::EnvelopeUnwrap
             | AiSurfaceStreamRewriteState::ModelDirectiveDisplay
-            | AiSurfaceStreamRewriteState::OpenAiResponsesCompat
+            | AiSurfaceStreamRewriteState::OpenAiResponsesCompat(_)
             | AiSurfaceStreamRewriteState::Standard(_) => {
                 self.buffered.extend_from_slice(chunk);
                 let mut output = Vec::new();
@@ -328,7 +330,7 @@ impl AiSurfaceStreamRewriter<'_> {
             }
             AiSurfaceStreamRewriteState::EnvelopeUnwrap
             | AiSurfaceStreamRewriteState::ModelDirectiveDisplay
-            | AiSurfaceStreamRewriteState::OpenAiResponsesCompat
+            | AiSurfaceStreamRewriteState::OpenAiResponsesCompat(_)
             | AiSurfaceStreamRewriteState::Standard(_) => {
                 if self.buffered.is_empty() {
                     if let AiSurfaceStreamRewriteState::Standard(state) = &mut self.state {
@@ -348,6 +350,9 @@ impl AiSurfaceStreamRewriter<'_> {
 
     pub fn take_response_history_record(&mut self) -> Option<ResponseHistoryRecord> {
         match &mut self.state {
+            AiSurfaceStreamRewriteState::OpenAiResponsesCompat(state) => {
+                state.pending_history_record.take()
+            }
             AiSurfaceStreamRewriteState::Standard(state) => state.take_response_history_record(),
             AiSurfaceStreamRewriteState::KiroToClaudeCliThenStandard { standard, .. } => {
                 standard.take_response_history_record()
@@ -366,8 +371,8 @@ impl AiSurfaceStreamRewriter<'_> {
             AiSurfaceStreamRewriteState::ModelDirectiveDisplay => {
                 rewrite_model_directive_stream_line(self.report_context, line)
             }
-            AiSurfaceStreamRewriteState::OpenAiResponsesCompat => {
-                rewrite_openai_responses_compat_stream_line(self.report_context, line)
+            AiSurfaceStreamRewriteState::OpenAiResponsesCompat(state) => {
+                rewrite_openai_responses_compat_stream_line(state, self.report_context, line)
             }
             AiSurfaceStreamRewriteState::Standard(state) => {
                 transform_standard_line(state, self.report_context, line)
@@ -678,7 +683,13 @@ fn rewrite_model_directive_stream_line(
     Ok(output)
 }
 
+#[derive(Default)]
+struct OpenAiResponsesCompatStreamState {
+    pending_history_record: Option<ResponseHistoryRecord>,
+}
+
 fn rewrite_openai_responses_compat_stream_line(
+    state: &mut OpenAiResponsesCompatStreamState,
     report_context: &Value,
     line: Vec<u8>,
 ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
@@ -710,6 +721,19 @@ fn rewrite_openai_responses_compat_stream_line(
     if matches!(event_type, "response.completed" | "response.done") {
         if let Some(response) = value.get_mut("response").and_then(Value::as_object_mut) {
             changed |= ensure_modern_openai_responses_response_fields(response);
+            if state.pending_history_record.is_none() {
+                let mut completed_response = Value::Object(response.clone());
+                if let Some(object) = completed_response.as_object_mut() {
+                    object
+                        .entry("status".to_string())
+                        .or_insert_with(|| Value::String("completed".to_string()));
+                }
+                state.pending_history_record =
+                    crate::formats::openai::responses::history::record_converted_response_history(
+                        report_context,
+                        &completed_response,
+                    );
+            }
         }
     }
     if !changed {
@@ -1108,6 +1132,32 @@ data: {\"type\":\"response.reasoning_summary_text.delta\",\"response_id\":\"resp
         assert!(output.contains("\"metadata\":{\"source\":\"chat\"}"));
         assert!(output
             .contains("\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"turn_123\"}"));
+    }
+
+    #[test]
+    fn native_responses_stream_records_completed_history_for_scoped_continuations() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:responses",
+            "user_id": "stream-tenant",
+            "api_key_id": "stream-key",
+            "original_request_body": {"input": "keep this conversation"}
+        });
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
+            .expect("native Responses stream should be observed for history");
+        let output = rewriter
+            .push_chunk(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native_stream_history\",\"status\":\"completed\",\"output\":[]}}\n\n",
+            )
+            .expect("completion should remain relayable");
+        assert!(String::from_utf8(output)
+            .expect("SSE output should be UTF-8")
+            .contains("resp_native_stream_history"));
+        let record = rewriter
+            .take_response_history_record()
+            .expect("completed native stream should produce one history record");
+        assert!(record.payload.contains("resp_native_stream_history"));
+        assert!(rewriter.take_response_history_record().is_none());
     }
 
     #[test]

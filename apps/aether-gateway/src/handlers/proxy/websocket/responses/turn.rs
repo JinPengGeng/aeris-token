@@ -251,6 +251,7 @@ pub(super) struct ResponsesProviderAttempt {
     terminal_timeout: Duration,
     admission: Option<ResponsesWebSocketTurnAdmission>,
     terminal_error_body: Option<String>,
+    response_history_record: Option<crate::ai_serving::ResponseHistoryRecord>,
     /// 观察到的 provider 终态事实，与「为什么现在结算」这个信号分开保存。
     /// 客户端投递失败不会把它擦掉。
     provider_outcome: Option<AttemptProviderOutcome>,
@@ -443,6 +444,7 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
         terminal_timeout,
         admission: Some(admission),
         terminal_error_body: None,
+        response_history_record: None,
         provider_outcome: None,
         client_delivery: AttemptClientDelivery::Complete,
         upstream_request_sent: false,
@@ -656,6 +658,26 @@ impl ResponsesProviderAttempt {
         });
         let report_context = self.lifecycle.report_context().unwrap_or(&fallback_context);
         self.observer.observe_events(report_context, &events);
+        if self.response_history_record.is_none() {
+            self.response_history_record = events
+                .iter()
+                .find(|event| {
+                    matches!(
+                        event.get("type").and_then(Value::as_str),
+                        Some("response.completed" | "response.done")
+                    )
+                })
+                .and_then(|event| event.get("response"))
+                .and_then(|response| {
+                    let mut response = response.clone();
+                    if let Some(object) = response.as_object_mut() {
+                        object
+                            .entry("status".to_string())
+                            .or_insert_with(|| Value::String("completed".to_string()));
+                    }
+                    crate::ai_serving::record_converted_response_history(report_context, &response)
+                });
+        }
 
         let event_type = frame.event_type().unwrap_or_default();
         if matches!(event_type, "error" | "response.failed") {
@@ -744,6 +766,9 @@ impl ResponsesProviderAttempt {
         let summary = self.finish_summary(facts);
         let telemetry = self.telemetry();
         let terminal_error_body = self.terminal_error_body.take();
+        if let Some(record) = self.response_history_record.take() {
+            crate::ai_serving::persist_response_history_record(state.runtime_state(), record).await;
+        }
 
         // 终态载荷完整了才释放准入：usage/审计写入期间不再占着 gateway/供应商容量。
         if let Some(admission) = self.admission.take() {

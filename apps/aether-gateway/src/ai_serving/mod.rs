@@ -68,8 +68,8 @@ pub(crate) use self::planner::{
 };
 pub(crate) use self::pure::*;
 pub(crate) use self::response_history::{
-    hydrate_openai_response_history, persist_converted_response_history,
-    persist_response_history_record,
+    persist_converted_response_history, persist_response_history_record,
+    resolve_openai_response_history,
 };
 pub(crate) use self::transport::{
     append_transport_diagnostics_to_value, build_request_trace_proxy_value,
