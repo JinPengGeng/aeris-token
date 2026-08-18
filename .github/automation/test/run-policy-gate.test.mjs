@@ -200,3 +200,38 @@ test('publisher fences a moved head before completing the check', async () => {
   assert.equal(restores, 1);
   assert.equal(completions, 0);
 });
+
+test('publisher restores the same fenced check after the completed check observes a moved head', async () => {
+  let restores = 0;
+  let completions = 0;
+  const client = fakeClient({
+    listCheckRunsForRef: async () => {
+      const runs = [
+        { id: 1, name: 'Rust CI / check', head_sha: sha('a'), status: 'completed', conclusion: 'success', app: { id: 15368, slug: 'github-actions' } },
+        { id: 2, name: 'Frontend CI / check', head_sha: sha('a'), status: 'completed', conclusion: 'success', app: { id: 15368, slug: 'github-actions' } },
+      ];
+      return completions > 0 ? runs.map((check) => ({ ...check, id: check.id + 10 })) : runs;
+    },
+    completePolicyCheck: async () => { completions += 1; return { id: 77, html_url: 'https://github.com/JinPengGeng/aeris-token/runs/77' }; },
+    restorePolicyCheckInProgress: async (checkRunId, generation, checkName) => {
+      restores += 1;
+      assert.equal(checkRunId, 77);
+      assert.equal(generation.head_sha, sha('a'));
+      assert.equal(checkName, 'Automation Policy / gate');
+      return { id: 77 };
+    },
+  });
+  await assert.rejects(() => publishPolicyEvaluation({
+    client,
+    contracts: contracts(),
+    repository,
+    repositoryId: 123,
+    pullNumber: 37,
+    policySha: sha('c'),
+    policyApp: { id: 9001, slug: 'aeris-token-policy' },
+    runId: '321.1',
+    detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
+  }), /policy inputs changed during check completion/);
+  assert.equal(completions, 1);
+  assert.equal(restores, 1);
+});

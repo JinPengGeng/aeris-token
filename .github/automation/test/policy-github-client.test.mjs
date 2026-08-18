@@ -214,6 +214,33 @@ test('policy check recovery restores in-progress without trusting stale pull sta
   assert.equal(patched, true);
 });
 
+test('policy check recovery verifies the completed App-owned generation before patching it', async () => {
+  let patched = false;
+  const value = client(async (url, options) => {
+    if (url.endsWith('/check-runs/77') && options.method === 'PATCH') {
+      patched = true;
+      throw new Error('recovery must not patch an unbound check');
+    }
+    if (url.endsWith('/check-runs/77')) {
+      return response({
+        id: 77,
+        name: 'Automation Policy / gate',
+        head_sha: sha('a'),
+        external_id: 'aeris-policy:v1:123:37:wrong',
+        status: 'completed',
+        conclusion: 'neutral',
+        app: policyApp,
+      });
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+  await assert.rejects(
+    () => value.restorePolicyCheckInProgress(77, generation(), 'Automation Policy / gate'),
+    /expected recoverable App-owned generation/,
+  );
+  assert.equal(patched, false);
+});
+
 test('policy check begin reuses the exact generation and rejects stale or impersonated state', async () => {
   const external = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
   const pendingOutput = {

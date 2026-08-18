@@ -454,6 +454,14 @@ export class PolicyGitHubClient {
     validateDetailsUrl(detailsUrl);
     const id = externalId(generation);
     const output = renderPendingCheck(generation);
+    const existing = await this.#getCheckRun(checkRunId);
+    requireCondition(
+      existing.id === checkRunId && existing.name === checkName && existing.head_sha === generation.head_sha &&
+        existing.external_id === id && existing.app?.id === this.#policyApp.id && existing.app?.slug === this.#policyApp.slug &&
+        ((existing.status === 'in_progress' && existing.conclusion === null) ||
+          (existing.status === 'completed' && typeof existing.conclusion === 'string')),
+      'Policy check is not the expected recoverable App-owned generation',
+    );
     const response = normalizedCheck(await this.#request('PATCH', `/repos/${this.#repository}/check-runs/${checkRunId}`, {
       name: checkName,
       status: 'in_progress',
