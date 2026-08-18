@@ -44,8 +44,10 @@ jobs:
         run: |
           set -euo pipefail
           bash -n .github/workflows/scripts/checkpoint-merge.sh
+          bash -n .github/workflows/scripts/manage-sync-automerge.sh
           bash -n .github/workflows/scripts/prepare-checkpoint-sync.sh
           bash -n .github/workflows/scripts/sync-upstream.sh
+          bash .github/workflows/scripts/tests/test-manage-sync-automerge.sh
           AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
             bash .github/workflows/scripts/tests/test-checkpoint-merge.sh
           AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
@@ -92,6 +94,17 @@ jobs:
 
           ensure_check rust-ci.yml "Rust CI / check"
           ensure_check frontend-ci.yml "Frontend CI / check"
+
+      - name: Enable native auto-merge
+        if: steps.sync.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ steps.sync.outputs.pr_url }}
+          SYNCED_SHA: ${{ steps.sync.outputs.synced_sha }}
+        shell: bash
+        run: |
+          bash .github/workflows/scripts/manage-sync-automerge.sh \
+            arm "${GITHUB_REPOSITORY}" "${PR_URL}" "${SYNCED_SHA}"
 
       - name: Write summary
         if: always()

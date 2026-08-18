@@ -41,7 +41,7 @@
 
 `.github/workflows/sync-upstream.yml` 每天中国时间 05:00 检查 `fawney19/Aether` 的默认分支；发现上游新提交时，从受保护 `main@SHA` 的 `.github/upstream-sync-state.json` 读取上次已合并 checkpoint，只计算 checkpoint 之后的上游增量。工作流始终复用固定的 `automation/sync-upstream` 分支和唯一的开放同步 PR，不会因每日运行而重复创建 PR。维护者手工关闭该 PR 后，定时同步会持续暂停；只有手工运行工作流并设置 `resume=true` 才会尝试重新打开原 PR，无法重新打开时仅允许该次显式运行创建一个替代 PR。
 
-同步不会直接写入 `main`。`.github/upstream-sync-policy.yml` 中的 fork-owned 路径在三方合并前被过滤并保留 fork 版本；上游 workflow 变化按上游 workflow tree 去重创建告警 Issue，由维护者单独审查。其他冲突、上游历史重写、非法 state/policy 和无法识别的同步分支 tip 均 fail closed，不会推进 checkpoint 或覆盖远端分支。人工解决真实冲突时，应使用普通维护者 PR 同时提交解决结果和新的 `last_integrated_sha`；同步 PR 仍必须通过 `Rust CI / check` 和 `Frontend CI / check`。
+同步不会绕过 PR 直接写入 `main`。`.github/upstream-sync-policy.yml` 中的 fork-owned 路径在三方合并前被过滤并保留 fork 版本；上游 workflow 变化按上游 workflow tree 去重创建告警 Issue，由维护者单独审查。干净生成的 managed 同步 PR 会为精确 head SHA 启用 GitHub 原生 squash auto-merge，只有 `Rust CI / check` 和 `Frontend CI / check` 全部成功、分支基于最新 `main`、讨论已解决且不存在冲突时才会合并。每轮同步在重建固定分支前先撤销旧 auto-merge，避免过期 head 在失败路径中被合并。其他冲突、上游历史重写、非法 state/policy 和无法识别的同步分支 tip 均 fail closed，不会推进 checkpoint 或覆盖远端分支。人工解决真实冲突时，应使用普通维护者 PR 同时提交解决结果和新的 `last_integrated_sha`。
 
 ## 2. Issue 到 PR
 

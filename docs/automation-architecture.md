@@ -115,7 +115,7 @@ Agent handoff 只能选择 registry 中允许的目标，并受最大 handoff、
 
 ## 7. 上游同步
 
-当前同步 workflow 继续保持固定分支、单一开放 PR、人工关闭暂停、显式恢复、`force-with-lease` 和未知 tip 拒绝。
+当前同步 workflow 继续保持固定分支、单一开放 PR、人工关闭暂停、显式恢复、`force-with-lease` 和未知 tip 拒绝。干净生成的 managed 同步 PR 使用 GitHub 原生 squash auto-merge；分支保护负责等待精确 head 的必需 CI、最新 `main`、讨论解决和无冲突状态。
 
 同步 workflow 使用 checkpoint 模型，不再依赖 squash 后无法前进的 Git merge-base：
 
@@ -136,7 +136,7 @@ fork_owned > review_required > generated > upstream_owned > default
 
 准备合并树时，先将上游的 fork-owned 路径还原为 `U0` 版本，再执行 `base=U0, ours=M, theirs=filtered(U1)` 的三方合并；这样 fork 在 `M` 中的新增、修改和删除均被保留，fork-owned 冲突也不会阻断其他上游增量。当前执行器对 fork-owned 支持精确路径和目录末尾 `/**`；策略出现其他 glob 时拒绝运行，避免静默误分类。
 
-默认分类是 `review_required`。因此新路径不会在没有明确策略时自动获得低风险身份。上游 workflow drift 生成或更新审查 Issue，不直接进入自动合并。非 fork-owned 冲突时，自动化不会生成伪解决方案或覆盖未知同步分支；维护者应通过普通 PR 完成人工三方解决，并在同一 PR 中把 `last_integrated_sha` 更新为已实际纳入的上游 SHA。该 PR 合并后，下一轮从新 checkpoint 继续，不再重复旧冲突。
+默认分类是 `review_required`，用于标识同步后的审查风险，不会让未知路径被误认为 `upstream_owned`。managed 上游同步是通用 Agent Merger 之外的确定性例外：fork-owned 路径先被过滤，候选树必须通过 checkpoint、来源、固定分支和精确 head 验证，随后仅由分支保护决定原生 auto-merge。上游 workflow drift 仍生成或更新审查 Issue，且不会被同步候选覆盖。非 fork-owned 冲突时，自动化会先撤销旧 auto-merge，不生成伪解决方案或覆盖未知同步分支；维护者应通过普通 PR 完成人工三方解决，并在同一 PR 中把 `last_integrated_sha` 更新为已实际纳入的上游 SHA。该 PR 合并后，下一轮从新 checkpoint 继续，不再重复旧冲突。
 
 ## 8. 幂等、限流和审计边界
 
@@ -166,7 +166,7 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 3. `label`：维护者添加 `automerge-approved` 后允许 Merger 执行。
 4. `allowlist`：仅对经过历史验证的低风险范围自动合并。
 
-所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。`.github/**`、依赖文件、认证、安全、数据库、发布、同步和其他策略标记路径默认需要人工审查。模型的自报置信度不能改变门禁。
+所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。`.github/**`、依赖文件、认证、安全、数据库、发布和其他策略标记路径默认需要人工审查。managed 上游同步 PR 是独立的确定性例外：它不使用模型或通用 Merger，只在 checkpoint 合并无冲突、fork-owned 路径已过滤且严格分支保护全部满足时执行原生 squash auto-merge。模型的自报置信度不能改变门禁。
 
 ## 10. 威胁模型
 
@@ -202,10 +202,10 @@ Phase 6 需要的是符合一致性和运维要求的权威状态层，不等于
 下列设置不由策略文件自动生效，需要维护者在 GitHub Settings 中单独确认：
 
 - Actions 默认令牌保持只读。
-- 关闭 GitHub Actions 创建审批的能力。
+- 仅在同步工作流需要时允许 GitHub Actions 创建 PR；不得以该设置绕过审批或分支保护。
 - 限制允许的 Actions 来源，关键写权限 Action 固定完整 SHA。
 - `Rust CI / check` 和 `Frontend CI / check` 保持 strict required checks。
-- 自动合并在 Policy Gate 进入要求检查前不得由 Agent 使用。
+- 通用 Agent 自动合并在 Policy Gate 进入要求检查前不得启用；managed 上游同步仅使用上述确定性原生 auto-merge 例外。
 - 发布 Secrets 仅保存在受保护的 `release` Environment。
 
 任何远端设置变更都应记录在 Issue `#11`，并通过当前配置的现场读取结果验证。
