@@ -195,7 +195,7 @@ pub use crate::formats::{
                 CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_PROMPT, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
             },
             history::{
-                conversation_history_scope, hydrate_response_history,
+                conversation_history_scope, evict_response_history, hydrate_response_history,
                 record_converted_response_history, response_history_is_loaded,
                 response_history_storage_key, ConversationHistoryCapability,
                 ConversationHistoryResolution, ConversationHistoryResolutionError,

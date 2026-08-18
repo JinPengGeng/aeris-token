@@ -139,8 +139,124 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::json;
 
-    use super::resolve_openai_response_history;
+    use super::{persist_response_history_record, resolve_openai_response_history};
+    use crate::ai_serving::{
+        build_standard_request_body_with_model_directives_request_headers_and_history_scope,
+        conversation_history_scope, evict_response_history, record_converted_response_history,
+        response_history_is_loaded,
+    };
     use crate::GatewayError;
+
+    #[tokio::test]
+    async fn http_history_round_trip_restores_only_the_requesting_tenant() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let response_id = "resp_http_persisted_scope";
+
+        for (user_id, api_key_id, prompt, call_id) in [
+            (
+                "tenant-http-a",
+                "key-http",
+                "tenant-a-private",
+                "call-http-a",
+            ),
+            (
+                "tenant-http-b",
+                "key-http",
+                "tenant-b-private",
+                "call-http-b",
+            ),
+        ] {
+            let record = record_converted_response_history(
+                &json!({
+                    "client_api_format": "openai:responses",
+                    "provider_api_format": "openai:chat",
+                    "user_id": user_id,
+                    "api_key_id": api_key_id,
+                    "original_request_body": {
+                        "model": "source-model",
+                        "input": prompt
+                    }
+                }),
+                &json!({
+                    "id": response_id,
+                    "status": "completed",
+                    "output": [{
+                        "type": "function_call",
+                        "id": format!("fc-{call_id}"),
+                        "call_id": call_id,
+                        "name": "inspect_repository",
+                        "arguments": "{}"
+                    }]
+                }),
+            )
+            .expect("a fully scoped HTTP response should produce history");
+            persist_response_history_record(&runtime, record).await;
+        }
+
+        for (user_id, call_id, own_prompt, other_prompt) in [
+            (
+                "tenant-http-a",
+                "call-http-a",
+                "tenant-a-private",
+                "tenant-b-private",
+            ),
+            (
+                "tenant-http-b",
+                "call-http-b",
+                "tenant-b-private",
+                "tenant-a-private",
+            ),
+        ] {
+            let scope = conversation_history_scope(user_id, "key-http").unwrap();
+            evict_response_history(response_id, Some(scope.as_str()));
+            assert!(!response_history_is_loaded(
+                response_id,
+                Some(scope.as_str())
+            ));
+
+            let continuation = json!({
+                "model": "source-model",
+                "previous_response_id": response_id,
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": "inspection-complete"
+                }]
+            });
+            resolve_openai_response_history(
+                &runtime,
+                &continuation,
+                "openai:responses",
+                "openai:chat",
+                user_id,
+                "key-http",
+            )
+            .await
+            .expect("the HTTP resolver should hydrate the requester's persisted history");
+
+            let provider_body =
+                build_standard_request_body_with_model_directives_request_headers_and_history_scope(
+                    &continuation,
+                    "openai:responses",
+                    "mapped-model",
+                    "custom",
+                    "openai:chat",
+                    "/v1/responses",
+                    false,
+                    None,
+                    Some("key-http"),
+                    Some(scope.as_str()),
+                    None,
+                    false,
+                )
+                .expect("hydrated history should build the provider request");
+            let serialized = provider_body.to_string();
+            assert!(serialized.contains(own_prompt));
+            assert!(serialized.contains(call_id));
+            assert!(serialized.contains("inspection-complete"));
+            assert!(!serialized.contains(other_prompt));
+        }
+    }
 
     #[tokio::test]
     async fn native_http_and_websocket_continuations_skip_gateway_history() {

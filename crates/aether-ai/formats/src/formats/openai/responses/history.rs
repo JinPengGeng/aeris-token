@@ -312,6 +312,13 @@ pub fn response_history_is_loaded(response_id: &str, history_scope: Option<&str>
         .is_some()
 }
 
+pub fn evict_response_history(response_id: &str, history_scope: Option<&str>) {
+    response_history_store()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&response_history_key(response_id.trim(), history_scope));
+}
+
 pub fn hydrate_response_history(
     response_id: &str,
     history_scope: Option<&str>,

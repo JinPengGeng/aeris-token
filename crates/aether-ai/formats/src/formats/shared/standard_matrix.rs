@@ -90,6 +90,8 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers(
     request_headers: Option<&http::HeaderMap>,
     enable_model_directives: bool,
 ) -> Option<Value> {
+    // This compatibility API has no tenant identity, so it must not attempt
+    // conversation-history lookup with an API-key-only pseudo-scope.
     build_standard_request_body_with_model_directives_request_headers_and_history_scope(
         body_json,
         client_api_format,
@@ -100,7 +102,7 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers(
         upstream_is_stream,
         body_rules,
         user_api_key_id,
-        user_api_key_id,
+        None,
         request_headers,
         enable_model_directives,
     )
@@ -575,6 +577,19 @@ mod tests {
         let other_scope =
             conversation_history_scope("standard-history-user-b", "standard-history-key-a")
                 .unwrap();
+
+        assert!(build_standard_request_body(
+            &continuation,
+            "openai:responses",
+            "mapped-model",
+            "custom",
+            "openai:chat",
+            "/v1/responses",
+            false,
+            None,
+            Some("standard-history-key-a"),
+        )
+        .is_none());
 
         let owner =
             build_standard_request_body_with_model_directives_request_headers_and_history_scope(

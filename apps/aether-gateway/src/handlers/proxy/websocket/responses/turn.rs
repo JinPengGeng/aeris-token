@@ -659,24 +659,8 @@ impl ResponsesProviderAttempt {
         let report_context = self.lifecycle.report_context().unwrap_or(&fallback_context);
         self.observer.observe_events(report_context, &events);
         if self.response_history_record.is_none() {
-            self.response_history_record = events
-                .iter()
-                .find(|event| {
-                    matches!(
-                        event.get("type").and_then(Value::as_str),
-                        Some("response.completed" | "response.done")
-                    )
-                })
-                .and_then(|event| event.get("response"))
-                .and_then(|response| {
-                    let mut response = response.clone();
-                    if let Some(object) = response.as_object_mut() {
-                        object
-                            .entry("status".to_string())
-                            .or_insert_with(|| Value::String("completed".to_string()));
-                    }
-                    crate::ai_serving::record_converted_response_history(report_context, &response)
-                });
+            self.response_history_record =
+                response_history_record_from_completed_events(report_context, &events);
         }
 
         let event_type = frame.event_type().unwrap_or_default();
@@ -1006,6 +990,30 @@ fn resolve_responses_websocket_turn_timeouts(
     )
 }
 
+fn response_history_record_from_completed_events(
+    report_context: &Value,
+    events: &[&Value],
+) -> Option<crate::ai_serving::ResponseHistoryRecord> {
+    events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.get("type").and_then(Value::as_str),
+                Some("response.completed" | "response.done")
+            )
+        })
+        .and_then(|event| event.get("response"))
+        .and_then(|response| {
+            let mut response = response.clone();
+            if let Some(object) = response.as_object_mut() {
+                object
+                    .entry("status".to_string())
+                    .or_insert_with(|| Value::String("completed".to_string()));
+            }
+            crate::ai_serving::record_converted_response_history(report_context, &response)
+        })
+}
+
 fn websocket_event_as_sse_line(event: &Value) -> Vec<u8> {
     let payload = serde_json::to_string(event).unwrap_or_else(|_| {
         json!({
@@ -1032,6 +1040,7 @@ mod tests {
 
     use aether_contracts::ExecutionTimeouts;
     use aether_data_contracts::repository::candidates::RequestCandidateStatus;
+    use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeState};
     use serde_json::json;
 
     use super::super::observation::ResponsesStructuredTerminalObserver;
@@ -1043,9 +1052,15 @@ mod tests {
     use super::{
         attach_client_delivery_to_report_context, prepare_websocket_report_context,
         provider_terminal_outcome, release_then_record_responses_websocket_admission_failure,
-        resolve_responses_websocket_turn_timeouts, responses_websocket_admission_failure_update,
-        websocket_event_as_sse_line, ResponsesWebSocketTurnDeadline, ResponsesWebSocketTurnOutcome,
+        resolve_responses_websocket_turn_timeouts, response_history_record_from_completed_events,
+        responses_websocket_admission_failure_update, websocket_event_as_sse_line,
+        ResponsesWebSocketTurnDeadline, ResponsesWebSocketTurnOutcome,
         ResponsesWebSocketTurnTimeoutPhase,
+    };
+    use crate::ai_serving::{
+        build_standard_request_body_with_model_directives_request_headers_and_history_scope,
+        conversation_history_scope, evict_response_history, persist_response_history_record,
+        resolve_openai_response_history, response_history_is_loaded,
     };
     use crate::execution_runtime::attempt_lifecycle::{
         classify_attempt_settlement, AttemptBilling, AttemptCandidateError, AttemptCandidateStatus,
@@ -1227,6 +1242,101 @@ mod tests {
         assert_eq!(usage.input_tokens, 3);
         assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.dimensions.get("total_tokens"), Some(&json!(8)));
+    }
+
+    #[tokio::test]
+    async fn websocket_completed_frame_round_trips_scoped_history_through_runtime_state() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_ws_persisted_scope",
+                "output": [{
+                    "type": "function_call",
+                    "id": "fc-ws-persisted",
+                    "call_id": "call-ws-persisted",
+                    "name": "inspect_repository",
+                    "arguments": "{}"
+                }]
+            }
+        });
+        let raw = serde_json::to_string(&completed).expect("completed frame should serialize");
+        let frame = ParsedResponsesWebSocketFrame::parse(&raw)
+            .expect("completed frame should parse through the production decoder");
+        let events = frame.protocol_events();
+        let report_context = json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses",
+            "user_id": "tenant-ws",
+            "api_key_id": "key-ws",
+            "original_request_body": {
+                "type": "response.create",
+                "model": "source-model",
+                "input": "ws-private-turn"
+            }
+        });
+        let record = response_history_record_from_completed_events(&report_context, &events)
+            .expect("a completed WS frame with full identity should produce history");
+        persist_response_history_record(&runtime, record).await;
+
+        let partial_identity_context = json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses",
+            "user_id": "tenant-ws",
+            "original_request_body": {"input": "must-not-persist"}
+        });
+        assert!(
+            response_history_record_from_completed_events(&partial_identity_context, &events)
+                .is_none()
+        );
+
+        let scope = conversation_history_scope("tenant-ws", "key-ws").unwrap();
+        evict_response_history("resp_ws_persisted_scope", Some(scope.as_str()));
+        assert!(!response_history_is_loaded(
+            "resp_ws_persisted_scope",
+            Some(scope.as_str())
+        ));
+
+        let continuation = json!({
+            "type": "response.create",
+            "model": "source-model",
+            "previous_response_id": "resp_ws_persisted_scope",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call-ws-persisted",
+                "output": "ws-inspection-complete"
+            }]
+        });
+        resolve_openai_response_history(
+            &runtime,
+            &continuation,
+            "openai:responses",
+            "openai:chat",
+            "tenant-ws",
+            "key-ws",
+        )
+        .await
+        .expect("the next WS turn should hydrate its scoped persisted history");
+        let provider_body =
+            build_standard_request_body_with_model_directives_request_headers_and_history_scope(
+                &continuation,
+                "openai:responses",
+                "mapped-model",
+                "custom",
+                "openai:chat",
+                "/v1/responses",
+                false,
+                None,
+                Some("key-ws"),
+                Some(scope.as_str()),
+                None,
+                false,
+            )
+            .expect("the hydrated WS continuation should build the provider request");
+        let serialized = provider_body.to_string();
+        assert!(serialized.contains("ws-private-turn"));
+        assert!(serialized.contains("call-ws-persisted"));
+        assert!(serialized.contains("ws-inspection-complete"));
     }
 
     #[test]
