@@ -35,6 +35,8 @@ Phase 2.1 的 workflow 和运行器已合并并通过远端 CI，triage 已完�
 
 Phase 3 当前只提供默认关闭的 Writer 基础契约，不提供可触发的 Writer workflow，也不具备远端写入能力。基础层包含独立开关与 GitHub App 身份声明、Issue/命令授权和路径校验纯函数、Draft PR 生命周期判定、专用有界 artifact schema，以及不暴露 review/merge API 的受限 GitHub client。registry 与 policy 仍同时要求 `writer.enabled: false`；在独立 App、`writer` Environment、分支保护和真实 canary 全部完成前，任何人都不能仅通过设置变量启用 Writer。
 
+Phase 4 当前提供默认关闭的 Policy Gate 基础实现。`Policy Signal` workflow 不读取 Secret、不 checkout 代码、没有 token 权限，只把 PR 元数据和 review 状态变化转换为默认分支上的可信 `workflow_run` 信号。`Automation Policy Gate` 从当前受保护 `main` checkout 运行，只读 evaluate job 生成有界观测 artifact；每个 PR 的独立 publish job 进入 `policy` Environment、铸造仓库限定且再次缩权的 Policy App installation token，并发布 `Automation Policy / gate` Check Run。publish 先把精确 head/policy generation 置为 `in_progress`，再对 live PR、main、文件及 rename 源、必需 Check、compare 和 review thread 计算 canonical snapshot fingerprint；连续快照稳定后才完成 Check，写后状态漂移或异常会尝试恢复为 `in_progress`。Phase 4 只接受 `shadow` 和 `human`，显式拒绝 `label`、`allowlist`，且任何结果都不能授权自动合并。registry 与 policy 默认保持 `enabled: false`；App、Environment 和 canary 就绪前工作流由双变量开关跳过。
+
 ## 3. 信任和配置来源
 
 每次运行必须先取得默认分支的精确 SHA，并通过 GitHub API 从该 SHA 加载 registry 和 policy。以下来源不能影响本次授权：
@@ -88,6 +90,8 @@ Fallback 仅适用于连接失败、超时、429 和 5xx。认证失败、权限
 Writer 使用专用私有 GitHub App，安装范围仅限本仓库，声明权限固定为 `Metadata: read`、`Contents: write` 和 `Pull requests: write`。App ID 由 `AERIS_WRITER_APP_ID` Variable 提供，私钥仅存放在受保护的 `writer` Environment Secret `AERIS_WRITER_PRIVATE_KEY` 中；模型生成 job 和测试 job不得读取 App 凭据，确定性 publish job不得读取 AI Key 或执行候选代码。Writer 还必须同时通过全局 `AERIS_AGENTS_ENABLED`、专用 `AERIS_WRITER_ENABLED` 和受信 registry/policy 三重门禁。
 
 GitHub App 权限粒度不能把 `Contents: write` 限定到 `agent/**`，`Pull requests: write` 也不能在 IAM 层排除 review 或 merge。因此独立 App 是身份隔离，不是完整 capability boundary。剩余能力通过无 branch-protection bypass、受限 client、禁止 review/approve/merge/auto-merge/mark-ready/close/delete 操作、精确 head fencing 和人工审批缓解。若要求凭据本身不具备这些能力，则必须引入外部 capability broker，不能把 Actions-only 方案描述为已经满足。
+
+Policy 使用独立私有 GitHub App，安装范围仅限本仓库，权限固定为 `Metadata: read`、`Contents: read`、`Pull requests: read`、`Checks: write`，不授予 Actions、Statuses、Issues、Workflows、Contents write、Pull requests write 或 Administration。App ID/slug 分别由 `AERIS_POLICY_APP_ID`、`AERIS_POLICY_APP_SLUG` 提供，私钥只存放在 `policy` Environment Secret `AERIS_POLICY_PRIVATE_KEY`。只读 evaluate job不能读取私钥；publish job不能读取 AI Key、checkout PR head 或执行候选代码。Policy required checks 只接受精确 head 上由 GitHub Actions App `id=15368, slug=github-actions` 发布的 live Check Run，不接受同名 Commit Status 回退。
 
 ## 6. 事件和命令
 
@@ -174,6 +178,8 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 
 所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。`.github/**`、依赖文件、认证、安全、数据库、发布和其他策略标记路径默认需要人工审查。managed 上游同步 PR 是独立的确定性例外：它不使用模型或通用 Merger，只在 checkpoint 合并无冲突、fork-owned 路径已过滤且严格分支保护全部满足时执行原生 squash auto-merge。模型的自报置信度不能改变门禁。
 
+Phase 4 中 `shadow` 对所有完成的模拟判定发布 `neutral`，不会成为 required check；`human` 在硬门禁通过时发布 `success`，硬拒绝或状态尚未收敛时发布 `failure`，避免 GitHub 把 `neutral` 当作已满足的 required check；高风险路径仍明确标记为需要人工审查。两种模式都固定 `eligible_for_automatic_merge=false`。`label` 和 `allowlist` 只在 Phase 5 引入独立 Merger、精确 Check App 绑定和完整 canary 后才可实现。
+
 ## 10. 威胁模型
 
 首批实现必须覆盖：
@@ -195,7 +201,7 @@ Phase 2.1 的模型阶段不得获得 shell 或任意网络工具。未来 Write
 2. Phase 1：checkpoint 同步 PoC、测试和迁移（已实现；首次冲突路径已经 PR `#16` 人工三方解决并实证，checkpoint 已追平 `upstream/main`，后续回到定时 no-op/自动 PR 循环）。
 3. Phase 2.1：Actions-only 的只读 triage/planner/reviewer；模型分析与确定性写回分 job，通过有界无 Secret 的 JSON artifact 交接（已合并并逐个完成远端验证；Reviewer canary 证据记录于 Issue `#11`）。
 4. Phase 3：独立 Writer 身份和 Draft PR（当前仅有默认关闭的基础契约；workflow、App/Environment、受控生成器、publish 执行器和 canary 均未启用）。
-5. Phase 4：独立 Policy 身份及 shadow/human gate。
+5. Phase 4：独立 Policy 身份及 shadow/human gate（当前已具备默认关闭的运行器、受限 client、workflow 和契约测试；待 App/Environment、远端 canary 与分阶段启用）。
 6. Phase 5：独立 Merger 身份及极小 allowlist。
 7. Phase 6：仅在真实运行证明 Actions-only 无法满足要求后，才引入外部状态或工作流服务。触发条件包括多 worker/多实例协调、可靠跨运行恢复或复杂 DAG、精确额度与计费限流、需要事务化 outbox/effect receipt，或不可变且可查询的审计要求。
 
@@ -213,7 +219,7 @@ Phase 6 需要的是符合一致性和运维要求的权威状态层，不等于
 - `Rust CI / check` 和 `Frontend CI / check` 保持 strict required checks。
 - 通用 Agent 自动合并在 Policy Gate 进入要求检查前不得启用；managed 上游同步仅使用上述确定性原生 auto-merge 例外。
 - 发布 Secrets 仅保存在受保护的 `release` Environment。
-- Writer 启用前必须创建独立 `writer` Environment 和仓库级私有 GitHub App；Environment 初始要求 OWNER 审批并禁止管理员绕过，App 不得拥有 branch-protection bypass。
-- Writer canary 前必须解决人工审批与 managed 上游自动合并的共存方式；在当前 `main` 审批数为 0 且同步仍使用 Actions 身份时，不得开放 Writer 写入。
+- Writer、Policy、Merger、Sync 使用四个独立 Environment 和仅安装到本仓库的私有 GitHub App；这些 Agent Environment 不设置 required reviewer，使用受保护 `main` 分支限制、独立开关、最小 App 权限、精确 SHA fencing 和 ruleset 隔离实现无人值守。`release` Environment 继续保留人工审批且不与 Agent 共享 Secret。
+- Writer/Policy canary 前必须先以关闭状态合并基础实现，再逐个创建 App、写入对应 Environment、验证仓库限定 installation token 和 actor ruleset；任何 App、Secret、branch policy 或 live postcondition 异常都 fail closed。
 
 任何远端设置变更都应记录在 Issue `#11`，并通过当前配置的现场读取结果验证。

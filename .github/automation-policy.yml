@@ -120,6 +120,26 @@ writer:
 
 policy_gate:
   enabled: false
+  enabled_variable: AERIS_POLICY_ENABLED
+  identity: github_app
+  app_id_variable: AERIS_POLICY_APP_ID
+  app_slug_variable: AERIS_POLICY_APP_SLUG
+  private_key_secret: AERIS_POLICY_PRIVATE_KEY
+  environment: policy
+  credentials:
+    allowed_jobs: [publish]
+    github_token_write: false
+  permissions:
+    metadata: read
+    contents: read
+    pull_requests: read
+    checks: write
+    denied: [actions, statuses, issues, workflows, administration, deployments, environments, secrets, members, packages]
+  deterministic_client_mitigations:
+    allowed_operations: [read_policy_inputs, create_or_update_policy_check]
+    denied_operations: [contents_write, review, approve, merge, enable_auto_merge, mark_ready, close_pr, delete_branch]
+  release_secret_access: false
+  pull_request_target_checkout: false
   check_name: Automation Policy / gate
   mode: shadow
   allowed_modes: [shadow, human, label, allowlist]
@@ -130,9 +150,19 @@ policy_gate:
   required_checks:
     - Rust CI / check
     - Frontend CI / check
+  required_check_sources:
+    - context: Rust CI / check
+      app_id: 15368
+      app_slug: github-actions
+    - context: Frontend CI / check
+      app_id: 15368
+      app_slug: github-actions
   always_require_human_review:
     - .github/**
     - CODEOWNERS
+    - apps/**
+    - crates/**
+    - frontend/src/**
     - Cargo.toml
     - Cargo.lock
     - "**/Cargo.toml"
@@ -142,7 +172,11 @@ policy_gate:
     - Dockerfile*
     - docker-compose*.yml
     - deploy.sh
+    - release/**
+    - scripts/release/**
     - "**/auth/**"
+    - "**/database/**"
+    - "**/db/**"
     - "**/migrations/**"
     - "**/security/**"
   allowlist_paths: []

@@ -207,6 +207,103 @@ assert(
 );
 assert(automation.policy_gate.enabled === false, 'policy gate must default off');
 assert(automation.policy_gate.mode === 'shadow', 'policy gate must start in shadow mode');
+const expectedPolicyRegistryKeys = [
+  'enabled', 'enabled_variable', 'phase', 'mode', 'identity', 'app_id_variable',
+  'app_slug_variable', 'private_key_secret', 'environment', 'credentials', 'permissions',
+  'deterministic_client_mitigations', 'model_variable', 'triggers', 'tools', 'effects', 'handoff_to',
+];
+const expectedPolicyGateKeys = [
+  'enabled', 'enabled_variable', 'identity', 'app_id_variable', 'app_slug_variable',
+  'private_key_secret', 'environment', 'credentials', 'permissions',
+  'deterministic_client_mitigations', 'release_secret_access', 'pull_request_target_checkout',
+  'check_name', 'mode', 'allowed_modes', 'human_enable_label', 'require_exact_head_sha',
+  'require_base_up_to_date', 'require_conversation_resolution', 'required_checks',
+  'required_check_sources', 'always_require_human_review', 'allowlist_paths',
+];
+const expectedPolicyPermissions = {
+  metadata: 'read',
+  contents: 'read',
+  pull_requests: 'read',
+  checks: 'write',
+  denied: [
+    'actions', 'statuses', 'issues', 'workflows', 'administration', 'deployments', 'environments',
+    'secrets', 'members', 'packages',
+  ],
+};
+const expectedPolicyMitigations = {
+  allowed_operations: ['read_policy_inputs', 'create_or_update_policy_check'],
+  denied_operations: [
+    'contents_write', 'review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr',
+    'delete_branch',
+  ],
+};
+const expectedPolicySources = [
+  { context: 'Rust CI / check', app_id: 15368, app_slug: 'github-actions' },
+  { context: 'Frontend CI / check', app_id: 15368, app_slug: 'github-actions' },
+];
+const expectedPolicyHumanPaths = [
+  '.github/**', 'CODEOWNERS', 'apps/**', 'crates/**', 'frontend/src/**', 'Cargo.toml',
+  'Cargo.lock', '**/Cargo.toml', '**/Cargo.lock', 'frontend/package.json',
+  'frontend/package-lock.json', 'Dockerfile*', 'docker-compose*.yml', 'deploy.sh', 'release/**',
+  'scripts/release/**', '**/auth/**', '**/database/**', '**/db/**', '**/migrations/**',
+  '**/security/**',
+];
+const policyAgent = agents.agents.policy;
+assert(
+  sameMembers(Object.keys(policyAgent), expectedPolicyRegistryKeys) &&
+    sameMembers(Object.keys(automation.policy_gate), expectedPolicyGateKeys),
+  'policy registry or gate fields changed',
+);
+assert(
+  policyAgent.enabled === false &&
+    policyAgent.enabled === automation.policy_gate.enabled &&
+    policyAgent.enabled_variable === 'AERIS_POLICY_ENABLED' &&
+    policyAgent.phase === 4 &&
+    policyAgent.mode === 'deterministic' &&
+    policyAgent.model_variable === null &&
+    policyAgent.identity === 'github_app' &&
+    policyAgent.app_id_variable === 'AERIS_POLICY_APP_ID' &&
+    policyAgent.app_slug_variable === 'AERIS_POLICY_APP_SLUG' &&
+    policyAgent.private_key_secret === 'AERIS_POLICY_PRIVATE_KEY' &&
+    policyAgent.environment === 'policy',
+  'policy Agent identity or phase changed',
+);
+assert(
+  JSON.stringify(policyAgent.credentials) === JSON.stringify({ allowed_jobs: ['publish'], github_token_write: false }) &&
+    JSON.stringify(policyAgent.credentials) === JSON.stringify(automation.policy_gate.credentials) &&
+    JSON.stringify(policyAgent.permissions) === JSON.stringify(expectedPolicyPermissions) &&
+    JSON.stringify(automation.policy_gate.permissions) === JSON.stringify(expectedPolicyPermissions) &&
+    JSON.stringify(policyAgent.deterministic_client_mitigations) === JSON.stringify(expectedPolicyMitigations) &&
+    JSON.stringify(automation.policy_gate.deterministic_client_mitigations) === JSON.stringify(expectedPolicyMitigations),
+  'policy credentials, permissions, or deterministic client boundary changed',
+);
+assert(
+  JSON.stringify(policyAgent.triggers) === JSON.stringify([
+    'required_checks_completed', 'policy_signal_completed', 'default_branch_changed',
+    'scheduled_reconciliation', 'manual_dispatch',
+  ]) &&
+    JSON.stringify(policyAgent.tools) === JSON.stringify([
+      'repository_read', 'pull_request_metadata_read', 'checks_read', 'checks_write',
+    ]) &&
+    JSON.stringify(policyAgent.effects) === JSON.stringify(['publish_policy_check']) &&
+    JSON.stringify(policyAgent.handoff_to) === JSON.stringify(['merger']),
+  'policy Agent capabilities changed',
+);
+assert(
+  automation.policy_gate.release_secret_access === false &&
+    automation.policy_gate.pull_request_target_checkout === false &&
+    automation.policy_gate.check_name === 'Automation Policy / gate' &&
+    JSON.stringify(automation.policy_gate.allowed_modes) === JSON.stringify(['shadow', 'human', 'label', 'allowlist']) &&
+    automation.policy_gate.human_enable_label === 'automerge-approved' &&
+    automation.policy_gate.require_exact_head_sha === true &&
+    automation.policy_gate.require_base_up_to_date === true &&
+    automation.policy_gate.require_conversation_resolution === true &&
+    JSON.stringify(automation.policy_gate.required_checks) ===
+      JSON.stringify(['Rust CI / check', 'Frontend CI / check']) &&
+    JSON.stringify(automation.policy_gate.required_check_sources) === JSON.stringify(expectedPolicySources) &&
+    JSON.stringify(automation.policy_gate.always_require_human_review) === JSON.stringify(expectedPolicyHumanPaths),
+  'policy gate deterministic constraints changed',
+);
 assert(
   automation.policy_gate.allowlist_paths.length === 0,
   'automatic merge allowlist must start empty',

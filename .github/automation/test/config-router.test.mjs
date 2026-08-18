@@ -203,6 +203,92 @@ test('Writer Phase 3 foundation rejects drift, broad permissions, and unsafe lim
   assert.throws(() => validateContracts(contracts.agents, policyPullRequestTargetCheckout), ContractError);
 });
 
+test('Policy Phase 4 foundation is independently disabled and exposes only its deterministic Check surface', () => {
+  const agent = contracts.agents.agents.policy;
+  const gate = contracts.policy.policy_gate;
+  assert.equal(agent.enabled, false);
+  assert.equal(gate.enabled, false);
+  assert.equal(agent.enabled_variable, 'AERIS_POLICY_ENABLED');
+  assert.equal(agent.phase, 4);
+  assert.equal(agent.mode, 'deterministic');
+  assert.equal(agent.identity, 'github_app');
+  assert.equal(agent.app_id_variable, 'AERIS_POLICY_APP_ID');
+  assert.equal(agent.app_slug_variable, 'AERIS_POLICY_APP_SLUG');
+  assert.equal(agent.private_key_secret, 'AERIS_POLICY_PRIVATE_KEY');
+  assert.equal(agent.environment, 'policy');
+  assert.deepEqual(agent.credentials, { allowed_jobs: ['publish'], github_token_write: false });
+  assert.deepEqual(agent.permissions, {
+    metadata: 'read',
+    contents: 'read',
+    pull_requests: 'read',
+    checks: 'write',
+    denied: [
+      'actions', 'statuses', 'issues', 'workflows', 'administration', 'deployments', 'environments',
+      'secrets', 'members', 'packages',
+    ],
+  });
+  assert.deepEqual(agent.deterministic_client_mitigations, {
+    allowed_operations: ['read_policy_inputs', 'create_or_update_policy_check'],
+    denied_operations: [
+      'contents_write', 'review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr',
+      'delete_branch',
+    ],
+  });
+  assert.deepEqual(gate.required_check_sources, [
+    { context: 'Rust CI / check', app_id: 15368, app_slug: 'github-actions' },
+    { context: 'Frontend CI / check', app_id: 15368, app_slug: 'github-actions' },
+  ]);
+  assert.equal(gate.mode, 'shadow');
+  assert.deepEqual(gate.allowlist_paths, []);
+  assert.equal(gate.release_secret_access, false);
+  assert.equal(gate.pull_request_target_checkout, false);
+});
+
+test('Policy Phase 4 foundation rejects identity, permission, mode, check-source, and path drift', () => {
+  const registryMutations = [
+    (agent) => { agent.enabled = true; },
+    (agent) => { agent.identity = 'github_token'; },
+    (agent) => { agent.app_slug_variable = 'OTHER_SLUG'; },
+    (agent) => { agent.permissions.checks = 'read'; },
+    (agent) => { agent.permissions.statuses = 'read'; },
+    (agent) => { agent.permissions.denied.pop(); },
+    (agent) => { agent.deterministic_client_mitigations.allowed_operations.push('merge'); },
+    (agent) => { agent.triggers.pop(); },
+    (agent) => { agent.tools.push('exact_sha_merge'); },
+    (agent) => { agent.model_variable = 'AERIS_AI_MODEL'; },
+    (agent) => { agent.unrecognized_capability = true; },
+  ];
+  for (const mutate of registryMutations) {
+    const agents = structuredClone(contracts.agents);
+    mutate(agents.agents.policy);
+    assert.throws(() => validateContracts(agents, contracts.policy), ContractError);
+  }
+
+  const gateMutations = [
+    (gate) => { gate.enabled = true; },
+    (gate) => { gate.mode = 'label'; },
+    (gate) => { gate.allowlist_paths = ['docs/**']; },
+    (gate) => { gate.required_check_sources[0].app_id = 1; },
+    (gate) => { gate.required_checks.push(gate.check_name); },
+    (gate) => { gate.always_require_human_review.pop(); },
+    (gate) => { gate.release_secret_access = true; },
+    (gate) => { gate.pull_request_target_checkout = true; },
+    (gate) => { gate.permissions.checks = 'read'; },
+    (gate) => { gate.unrecognized_capability = true; },
+  ];
+  for (const mutate of gateMutations) {
+    const policy = structuredClone(contracts.policy);
+    mutate(policy.policy_gate);
+    assert.throws(() => validateContracts(contracts.agents, policy), ContractError);
+  }
+
+  const enabledAgents = structuredClone(contracts.agents);
+  const enabledPolicy = structuredClone(contracts.policy);
+  enabledAgents.agents.policy.enabled = true;
+  enabledPolicy.policy_gate.enabled = true;
+  assert.doesNotThrow(() => validateContracts(enabledAgents, enabledPolicy));
+});
+
 test('contract validation bounds the model output token budget', () => {
   for (const value of [undefined, null, '4000', 0, -1, 1.5, 16_385]) {
     const agents = structuredClone(contracts.agents);

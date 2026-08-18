@@ -165,11 +165,29 @@ agents:
 
   policy:
     enabled: false
+    enabled_variable: AERIS_POLICY_ENABLED
     phase: 4
     mode: deterministic
+    identity: github_app
+    app_id_variable: AERIS_POLICY_APP_ID
+    app_slug_variable: AERIS_POLICY_APP_SLUG
+    private_key_secret: AERIS_POLICY_PRIVATE_KEY
+    environment: policy
+    credentials:
+      allowed_jobs: [publish]
+      github_token_write: false
+    permissions:
+      metadata: read
+      contents: read
+      pull_requests: read
+      checks: write
+      denied: [actions, statuses, issues, workflows, administration, deployments, environments, secrets, members, packages]
+    deterministic_client_mitigations:
+      allowed_operations: [read_policy_inputs, create_or_update_policy_check]
+      denied_operations: [contents_write, review, approve, merge, enable_auto_merge, mark_ready, close_pr, delete_branch]
     model_variable: null
-    triggers: [pull_request_changed, required_checks_completed]
-    tools: [repository_read, pull_request_metadata_read, checks_read]
+    triggers: [required_checks_completed, policy_signal_completed, default_branch_changed, scheduled_reconciliation, manual_dispatch]
+    tools: [repository_read, pull_request_metadata_read, checks_read, checks_write]
     effects: [publish_policy_check]
     handoff_to: [merger]
 
