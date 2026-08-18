@@ -31,15 +31,20 @@ pub use candidate::{
 };
 pub use emergency_chain::{
     emergency_chain_candidate_order, evaluate_emergency_chain_gate,
-    EmergencyChainAttemptCompletion, EmergencyChainAttemptCompletionError,
-    EmergencyChainAttemptPermit, EmergencyChainCandidateMatch, EmergencyChainCandidateOrderError,
+    AuthenticatedEmergencyChainPrincipal, EmergencyChainAttemptCompletion,
+    EmergencyChainAttemptCompletionError, EmergencyChainAttemptPermit,
+    EmergencyChainCandidateMatch, EmergencyChainCandidateOrderError,
+    EmergencyChainDispatchCapability, EmergencyChainDispatchError, EmergencyChainDispatchedAttempt,
     EmergencyChainGateDecision, EmergencyChainGateError, EmergencyChainGateRequest,
     EmergencyChainGrant, EmergencyChainGrantBuildError, EmergencyChainGrantId, EmergencyChainHash,
-    EmergencyChainOperation, EmergencyChainPrincipal, EmergencyChainRequestFingerprint,
-    EmergencyChainRequestScope, EmergencyChainRevokeError, EmergencyChainRevokeOutcome,
+    EmergencyChainOperation, EmergencyChainPermitError, EmergencyChainPrincipal,
+    EmergencyChainRequestFingerprint, EmergencyChainRequestScope, EmergencyChainRevokeError,
+    EmergencyChainRevokeOutcome, EmergencyChainSafeSkipError, EmergencyChainSafeSkipProof,
     EmergencyChainSessionNonce, EmergencyChainSessionProgress, EmergencyChainTargetIdentity,
-    EmergencyChainUseRequest, IssueEmergencyChainGrant, ServerEmergencyChainInstant,
-    ServerNormalRoutingActivation, TrustedEmergencyChainContext,
+    EmergencyChainUseRequest, GatewayEmergencyChainAuthority, IssueEmergencyChainGrant,
+    LiveEmergencyChainRequestContext, ServerEmergencyChainGrantActivation,
+    ServerEmergencyChainInstant, ServerNormalRoutingActivation,
+    ServerSelectedEmergencyChainOperation, TrustedEmergencyChainContext,
     MAX_EMERGENCY_CHAIN_GRANT_TTL_SECS,
 };
 pub use health::{
