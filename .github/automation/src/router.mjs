@@ -39,35 +39,87 @@ export function parseWriterCommand(body, policy) {
   return canonicalWriterCommand(body);
 }
 
+function enabledValue(value, allowedValues) {
+  return typeof value === 'string' && allowedValues.includes(value.trim().toLowerCase());
+}
+
 /**
- * Resolve the complete Issue-comment authorization path for a Writer run.
- * Callers must provide the repository permission resolved for the comment
- * author, rather than inferring it from author_association.
+ * The caller supplies contracts loaded from a protected ref and the workflow
+ * environment. Webhook payload fields never participate in feature switches.
  */
-export function routeWriterInvocation({ eventName, event, actorPermission, switches, fixCycle, limits, changeSet = null, patchBytes, policy }) {
-  if (eventName !== 'issue_comment') return { action: 'skip', reason: 'unsupported_event' };
+export function writerSwitchesFromTrustedContracts({ trustedContracts, environment } = {}) {
+  const agents = trustedContracts?.agents;
+  const policy = trustedContracts?.policy;
+  const writer = agents?.agents?.writer;
+  const killSwitch = policy?.kill_switch;
+  if (!writer || !killSwitch || !environment || typeof environment !== 'object') {
+    return { globalEnabled: false, writerVariableEnabled: false, writerContractEnabled: false };
+  }
+  return {
+    globalEnabled: enabledValue(environment[killSwitch.repository_variable], killSwitch.enabled_values ?? []),
+    writerVariableEnabled: enabledValue(environment[writer.enabled_variable], ['1', 'true']),
+    writerContractEnabled: writer.enabled === true && policy.writer?.enabled === true,
+  };
+}
+
+function validCommentId(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+function matchingCommentAuthor(event, comment) {
+  const sender = event?.sender?.login;
+  const payloadAuthor = event?.comment?.user?.login;
+  const liveAuthor = comment?.user?.login;
+  return typeof sender === 'string' && sender === payloadAuthor && sender === liveAuthor;
+}
+
+/**
+ * Resolve the Writer authorization path from current GitHub state. This helper
+ * intentionally re-reads the comment, Issue, and collaborator permission;
+ * webhook payloads are only routing hints and never authorization evidence.
+ */
+export async function routeWriterInvocation({
+  eventName, event, github, trustedContracts, environment, fixCycle, limits, changeSet = null, patchBytes,
+} = {}) {
+  if (eventName !== 'issue_comment' || event?.action !== 'created') return { action: 'skip', reason: 'unsupported_event' };
   if (event.issue?.pull_request) return { action: 'skip', reason: 'pull_request_comment' };
-  const command = parseWriterCommand(event.comment?.body, policy);
-  if (!command) return { action: 'skip', reason: 'no_supported_command' };
-  const decision = evaluateWriterRequest({
-    command,
-    actorLogin: event.sender?.login,
-    actorPermission,
-    issue: event.issue && {
-      number: event.issue.number,
-      state: event.issue.state,
-      isPullRequest: Boolean(event.issue.pull_request),
-      labels: event.issue.labels,
-    },
-    switches,
-    fixCycle,
-    limits,
-    changeSet,
-    patchBytes,
-  });
-  return decision.allowed
-    ? { action: 'write', command, branch: decision.branch, reason: 'writer_authorized' }
-    : { action: 'skip', reason: decision.reason };
+  const policy = trustedContracts?.policy;
+  const commentId = event.comment?.id;
+  const issueNumber = event.issue?.number;
+  if (!github || typeof github.getIssueComment !== 'function' || typeof github.getIssue !== 'function' ||
+    typeof github.getCollaboratorPermission !== 'function' || !validCommentId(commentId) ||
+    !Number.isSafeInteger(issueNumber) || issueNumber <= 0) return { action: 'skip', reason: 'writer_live_validation_failed' };
+  try {
+    const comment = await github.getIssueComment(commentId);
+    if (!matchingCommentAuthor(event, comment)) return { action: 'skip', reason: 'comment_author_mismatch' };
+    const command = parseWriterCommand(comment.body, policy);
+    if (!command) return { action: 'skip', reason: 'no_supported_command' };
+    const [issue, actorPermission] = await Promise.all([
+      github.getIssue(issueNumber),
+      github.getCollaboratorPermission(comment.user.login),
+    ]);
+    const decision = evaluateWriterRequest({
+      command,
+      actorLogin: comment.user.login,
+      actorPermission,
+      issue: issue && {
+        number: issue.number,
+        state: issue.state,
+        isPullRequest: Boolean(issue.pull_request),
+        labels: issue.labels,
+      },
+      switches: writerSwitchesFromTrustedContracts({ trustedContracts, environment }),
+      fixCycle,
+      limits,
+      changeSet,
+      patchBytes,
+    });
+    return decision.allowed
+      ? { action: 'write', command, branch: decision.branch, reason: 'writer_authorized' }
+      : { action: 'skip', reason: decision.reason };
+  } catch {
+    return { action: 'skip', reason: 'writer_live_validation_failed' };
+  }
 }
 
 function commandDecision(command, association, policy, allowedRoles) {

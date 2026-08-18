@@ -67,6 +67,10 @@ export class GitHubClient {
     return this.request('GET', `/repos/${this.repository}/issues/${number}`);
   }
 
+  getIssueComment(commentId) {
+    return this.request('GET', `/repos/${this.repository}/issues/comments/${commentId}`);
+  }
+
   getPull(number) {
     return this.request('GET', `/repos/${this.repository}/pulls/${number}`);
   }

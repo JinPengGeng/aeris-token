@@ -292,7 +292,7 @@ test('command parser requires one exact command and ignores managed content', ()
   assert.equal(parseAgentCommand('<!-- aeris-agent-managed -->\n/agent plan', policy), null);
 });
 
-test('Writer parser and route use the canonical command plus live permission path', () => {
+test('Writer parser and route use canonical commands plus live GitHub authorization', async () => {
   for (const value of [
     '/agent implement', '/agent retry-write',
   ]) assert.equal(parseWriterCommand(value, policy), value);
@@ -303,22 +303,75 @@ test('Writer parser and route use the canonical command plus live permission pat
 
   const event = {
     sender: { login: 'maintainer' },
-    issue: { number: 41, state: 'open', labels: [{ name: 'agent-ready' }] },
-    comment: { body: '/agent implement' },
+    action: 'created',
+    issue: { number: 41, state: 'closed', labels: [] },
+    comment: { id: 91, body: '/agent retry-write', user: { login: 'maintainer' } },
   };
-  const switches = { globalEnabled: true, writerVariableEnabled: true, writerContractEnabled: true };
-  assert.deepEqual(routeWriterInvocation({
-    eventName: 'issue_comment', event, actorPermission: 'write', switches, fixCycle: 0, policy,
+  const trustedContracts = structuredClone(contracts);
+  trustedContracts.agents.agents.writer.enabled = true;
+  trustedContracts.policy.writer.enabled = true;
+  const environment = { AERIS_AGENTS_ENABLED: 'true', AERIS_WRITER_ENABLED: 'true' };
+  const liveComment = { id: 91, body: '/agent implement', user: { login: 'maintainer' } };
+  const liveIssue = { number: 41, state: 'open', labels: [{ name: 'agent-ready' }] };
+  const github = {
+    getIssueComment: async () => liveComment,
+    getIssue: async () => liveIssue,
+    getCollaboratorPermission: async () => 'write',
+  };
+  assert.deepEqual(await routeWriterInvocation({
+    eventName: 'issue_comment', event, github, trustedContracts, environment, fixCycle: 0,
   }), {
     action: 'write', command: '/agent implement', branch: 'agent/issue-41', reason: 'writer_authorized',
   });
-  assert.equal(routeWriterInvocation({
-    eventName: 'issue_comment', event, actorPermission: 'read', switches, fixCycle: 0, policy,
-  }).reason, 'insufficient_permission');
-  assert.equal(routeWriterInvocation({
-    eventName: 'issue_comment', event, actorPermission: 'write',
-    switches: { ...switches, writerVariableEnabled: false }, fixCycle: 0, policy,
-  }).reason, 'writer_disabled');
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event, github: { ...github, getCollaboratorPermission: async () => 'read' },
+    trustedContracts, environment, fixCycle: 0,
+  })).reason, 'insufficient_permission');
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event, github, trustedContracts,
+    environment: { ...environment, AERIS_WRITER_ENABLED: 'false' }, fixCycle: 0,
+  })).reason, 'writer_disabled');
+});
+
+test('Writer rejects non-created events and live-state drift', async () => {
+  const trustedContracts = structuredClone(contracts);
+  trustedContracts.agents.agents.writer.enabled = true;
+  trustedContracts.policy.writer.enabled = true;
+  const environment = { AERIS_AGENTS_ENABLED: 'true', AERIS_WRITER_ENABLED: '1' };
+  const event = {
+    sender: { login: 'maintainer' }, action: 'created',
+    issue: { number: 41, state: 'open', labels: [{ name: 'agent-ready' }] },
+    comment: { id: 91, body: '/agent implement', user: { login: 'maintainer' } },
+  };
+  const github = {
+    getIssueComment: async () => ({ id: 91, body: '/agent implement', user: { login: 'maintainer' } }),
+    getIssue: async () => ({ number: 41, state: 'open', labels: [{ name: 'agent-ready' }] }),
+    getCollaboratorPermission: async () => 'write',
+  };
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event: { ...event, action: 'edited' }, github, trustedContracts, environment, fixCycle: 0,
+  })).reason, 'unsupported_event');
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event: { ...event, action: 'deleted' }, github, trustedContracts, environment, fixCycle: 0,
+  })).reason, 'unsupported_event');
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event: { ...event, sender: { login: 'other-user' } }, github, trustedContracts, environment, fixCycle: 0,
+  })).reason, 'comment_author_mismatch');
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event, github: { ...github, getIssueComment: async () => ({ ...event.comment, user: { login: 'other-user' } }) }, trustedContracts, environment, fixCycle: 0,
+  })).reason, 'comment_author_mismatch');
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event, github: { ...github, getIssue: async () => ({ number: 41, state: 'closed', labels: [{ name: 'agent-ready' }] }) }, trustedContracts, environment, fixCycle: 0,
+  })).reason, 'issue_not_open');
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event, github: { ...github, getIssue: async () => ({ number: 41, state: 'open', labels: [] }) }, trustedContracts, environment, fixCycle: 0,
+  })).reason, 'missing_agent_ready_label');
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event, github: { ...github, getCollaboratorPermission: async () => null }, trustedContracts, environment, fixCycle: 0,
+  })).reason, 'insufficient_permission');
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event, github: { ...github, getIssueComment: async () => { throw new Error('deleted'); } }, trustedContracts, environment, fixCycle: 0,
+  })).reason, 'writer_live_validation_failed');
 });
 
 test('Issue routing gates external analysis with agent-analyze', () => {
