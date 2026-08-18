@@ -19,13 +19,17 @@ concurrency:
 jobs:
   sync:
     name: Sync upstream / create PR
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (vars.AERIS_AGENTS_ENABLED == 'true' || vars.AERIS_AGENTS_ENABLED == '1') &&
+      (vars.AERIS_SYNC_APP_ENABLED == 'true' || vars.AERIS_SYNC_APP_ENABLED == '1')
     runs-on: ubuntu-latest
+    environment: sync
     permissions:
       actions: write
       checks: read
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
+      pull-requests: read
       statuses: read
     env:
       GH_REPO: ${{ github.repository }}
@@ -33,11 +37,38 @@ jobs:
       SYNC_BRANCH: automation/sync-upstream
       RESUME: ${{ inputs.resume || 'false' }}
     steps:
+      - name: Validate bounded autonomy window
+        env:
+          AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${AERIS_AUTONOMY_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+          expires_epoch="$(date -u -d "${AERIS_AUTONOMY_EXPIRES_AT}" +%s)"
+          round_trip="$(date -u -d "@${expires_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
+          [[ "${round_trip}" == "${AERIS_AUTONOMY_EXPIRES_AT}" ]]
+          (( $(date -u +%s) < expires_epoch ))
+
+      - name: Mint bounded Sync App token
+        id: sync_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AERIS_SYNC_APP_ID }}
+          private-key: ${{ secrets.AERIS_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+          permission-checks: read
+          permission-statuses: read
+
       - name: Check out fork default branch
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ steps.sync_token.outputs.token }}
 
       - name: Validate checkpoint synchronization
         shell: bash
@@ -56,7 +87,7 @@ jobs:
       - name: Build and publish automation branch
         id: sync
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.sync_token.outputs.token }}
         shell: bash
         run: bash .github/workflows/scripts/sync-upstream.sh
 
@@ -98,7 +129,7 @@ jobs:
       - name: Enable native auto-merge
         if: steps.sync.outputs.has_changes == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.sync_token.outputs.token }}
           PR_URL: ${{ steps.sync.outputs.pr_url }}
           SYNCED_SHA: ${{ steps.sync.outputs.synced_sha }}
         shell: bash

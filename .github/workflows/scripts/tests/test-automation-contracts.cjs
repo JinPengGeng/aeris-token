@@ -147,6 +147,34 @@ assert(
 assert(sync.conflicts.overwrite_unknown_tip === false, 'unknown sync tips must not be overwritten');
 assert(sync.conflicts.create_or_update_alert === true, 'sync failures must create alerts');
 const syncSteps = syncWorkflow.jobs.sync.steps;
+assert(syncWorkflow.jobs.sync.environment === 'sync', 'sync must use the dedicated sync environment');
+assert(
+  syncWorkflow.jobs.sync.if.includes("vars.AERIS_SYNC_APP_ENABLED == 'true'") &&
+    syncWorkflow.jobs.sync.if.includes("vars.AERIS_AGENTS_ENABLED == 'true'"),
+  'sync must remain disabled unless the bounded Sync App switch is enabled',
+);
+assert(
+  syncWorkflow.jobs.sync.permissions.contents === 'read' &&
+    syncWorkflow.jobs.sync.permissions['pull-requests'] === 'read' &&
+    syncWorkflow.jobs.sync.permissions.actions === 'write' &&
+    syncWorkflow.jobs.sync.permissions.checks === 'read' &&
+    syncWorkflow.jobs.sync.permissions.statuses === 'read',
+  'sync GITHUB_TOKEN permissions must remain read-only for repository mutation',
+);
+const syncTokenStep = syncSteps.find((step) => step.name === 'Mint bounded Sync App token');
+assert(syncTokenStep && syncTokenStep.uses.includes('create-github-app-token@'), 'sync must mint its independent App token');
+assert(
+  syncTokenStep.with['permission-contents'] === 'write' &&
+    syncTokenStep.with['permission-pull-requests'] === 'write' &&
+    syncTokenStep.with['permission-issues'] === 'write' &&
+    syncTokenStep.with['permission-checks'] === 'read' &&
+    syncTokenStep.with['permission-statuses'] === 'read',
+  'Sync App token permissions exceed or miss the approved minimum',
+);
+const expiryStep = syncSteps.find((step) => step.name === 'Validate bounded autonomy window');
+assert(expiryStep && typeof expiryStep.run === 'string' && expiryStep.run.includes('AERIS_AUTONOMY_EXPIRES_AT'), 'sync must fail closed after the autonomy window');
+const checkoutStep = syncSteps.find((step) => step.name === 'Check out fork default branch');
+assert(checkoutStep?.with?.token === '${{ steps.sync_token.outputs.token }}', 'sync checkout must use the Sync App token');
 const autoMergeStep = syncSteps.find((step) => step.name === 'Enable native auto-merge');
 const disarmCallIndex = syncScript.search(/^disarm_tracked_pr$/m);
 const rebuildLoopIndex = syncScript.search(/^for attempt in 1 2 3; do$/m);
