@@ -96,7 +96,7 @@ const workflowFiles = fs
 const actionLock = yaml.load(
   fs.readFileSync(path.join(repoRoot, '.github', 'action-lock.yml'), 'utf8'),
 );
-const actionReferencePattern = /^([^@\s]+)@([0-9a-f]{40})$/;
+const actionReferencePattern = /^([A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*)@([0-9a-f]{40})$/;
 const dockerDigestPattern = /^docker:\/\/[^@\s]+@sha256:[0-9a-f]{64}$/;
 const sourceRefPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const workflowUseEntryPattern = /^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#\s*([^\s#]+))?\s*$/gm;
@@ -108,6 +108,15 @@ const workflowUseEntries = (workflowFile) => {
     ref: match[2] ?? null,
     workflowFile,
   }));
+};
+
+const assertRawWorkflowUseEntriesCoverParsedUses = (parsedUses, rawEntries, description) => {
+  const rawActions = rawEntries.map((entry) => entry.action).sort();
+  assert.deepEqual(
+    rawActions,
+    [...parsedUses].sort(),
+    `${description} has a uses entry whose source format is not covered by the action lock parser`,
+  );
 };
 
 const actionLockKey = ({ repository, ref }) => `${repository}\u0000${ref}`;
@@ -418,7 +427,11 @@ test('action lock is strict, sorted, and exactly covers external workflow action
       ['ref', 'repository', 'sha'],
       'action lock entries must have only repository, ref, and sha',
     );
-    assert.match(entry.repository, /^[^@\s]+\/[^^@\s]+$/, 'action lock repository is invalid');
+    assert.match(
+      entry.repository,
+      /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/,
+      'action lock repository must be an owner/repository pair',
+    );
     assert.match(entry.ref, sourceRefPattern, 'action lock source ref is invalid');
     assert.match(entry.sha, /^[0-9a-f]{40}$/, 'action lock SHA is invalid');
     const key = actionLockKey(entry);
@@ -433,7 +446,11 @@ test('action lock is strict, sorted, and exactly covers external workflow action
   const workflowRefs = new Map();
   assert.ok(workflowFiles.length > 0, 'repository must contain workflow files');
   for (const workflowFile of workflowFiles) {
-    for (const { action, ref } of workflowUseEntries(workflowFile)) {
+    const { document } = readWorkflow(workflowFile);
+    const parsedUses = collectUses(document.jobs);
+    const rawEntries = workflowUseEntries(workflowFile);
+    assertRawWorkflowUseEntriesCoverParsedUses(parsedUses, rawEntries, workflowFile);
+    for (const { action, ref } of rawEntries) {
       if (action.startsWith('./')) continue;
       if (action.startsWith('docker://')) {
         assertDockerDigest(action, `${workflowFile}`);
@@ -481,4 +498,22 @@ test('container workflow actions require immutable lowercase sha256 digests', ()
   ]) {
     assert.throws(() => assertDockerDigest(action, 'invalid container action'));
   }
+});
+
+test('action lock parser rejects YAML uses syntax it cannot map to a source ref', () => {
+  const source = [
+    'jobs:',
+    '  check:',
+    '    steps:',
+    '      - uses : actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5',
+  ].join('\n');
+  const parsedUses = collectUses(yaml.load(source).jobs);
+  assert.deepEqual(parsedUses, ['actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09']);
+  assert.throws(() =>
+    assertRawWorkflowUseEntriesCoverParsedUses(
+      parsedUses,
+      [...source.matchAll(workflowUseEntryPattern)].map((match) => ({ action: match[1] })),
+      'synthetic workflow',
+    ),
+  );
 });
