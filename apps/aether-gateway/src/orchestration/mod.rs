@@ -29,9 +29,9 @@ pub(crate) use self::attempt::{
 pub(crate) use self::classifier::{
     classify_anthropic_failure_disposition, classify_failure_disposition, classify_local_failover,
     classify_local_transport_error, failure_disposition_from_local_classification,
-    local_failover_error_message, FailureDisposition, FailureRetryAction, FailureScope,
-    FailureTokenAction, LocalFailoverClassification, LocalFailoverInput,
-    LocalTransportFailoverClassification,
+    local_failover_error_message, CallerFailureKind, FailureDisposition, FailureOrigin,
+    FailureRetryAction, FailureScope, FailureTokenAction, LocalFailoverClassification,
+    LocalFailoverInput, LocalTransportFailoverClassification, OperationReplayPolicy,
 };
 pub(crate) use self::codex_quota_breaker::{
     codex_account_id_from_headers, codex_quota_breaker_blocks_candidate,
@@ -57,7 +57,7 @@ pub(crate) use self::oauth_error::{
 pub(crate) use self::policy::{
     append_local_failover_policy_to_value, codex_cyber_flag_passthrough_enabled,
     cyber_continue_failover_enabled, local_failover_policy_from_report_context,
-    local_failover_policy_from_transport, resolve_local_failover_policy,
+    local_failover_policy_from_transport, operation_replay_policy, resolve_local_failover_policy,
     responses_websocket_adapter, LocalFailoverPolicy, LocalFailoverRegexRule,
     ResponsesWebSocketAdapter, CYBER_CONTINUE_FAILOVER_CONFIG_KEY, RESPONSES_WEBSOCKET_CONFIG_KEY,
 };
@@ -85,9 +85,18 @@ pub(crate) async fn resolve_local_failover_analysis_for_attempt(
     }
 
     let policy = resolve_local_failover_policy(state, plan, report_context).await;
-    let analysis =
-        analyze_local_failover(&policy, LocalFailoverInput::new(status_code, response_text));
-    apply_provider_failure_disposition(&plan.provider_api_format, status_code, analysis)
+    let replay_policy = operation_replay_policy(plan, report_context);
+    let failure_origin = FailureOrigin::UpstreamProvider;
+    let analysis = analyze_local_failover(
+        &policy,
+        LocalFailoverInput::upstream_response(status_code, response_text, replay_policy),
+    );
+    apply_provider_failure_disposition(
+        &plan.provider_api_format,
+        status_code,
+        failure_origin,
+        analysis,
+    )
 }
 
 pub(crate) async fn resolve_local_failover_decision_for_attempt(
@@ -114,7 +123,7 @@ pub(crate) async fn resolve_local_transport_failover_analysis_for_attempt(
     report_context: Option<&serde_json::Value>,
 ) -> LocalTransportFailoverAnalysis {
     let policy = resolve_local_failover_policy(state, plan, report_context).await;
-    analyze_local_transport_error(&policy)
+    analyze_local_transport_error(&policy, operation_replay_policy(plan, report_context))
 }
 
 pub(crate) fn build_local_error_flow_metadata(
@@ -128,6 +137,8 @@ pub(crate) fn build_local_error_flow_metadata(
             | LocalFailoverClassification::StopErrorPattern
             | LocalFailoverClassification::StopExecutionError
             | LocalFailoverClassification::StopCyberPolicy
+            | LocalFailoverClassification::StopFailureOrigin
+            | LocalFailoverClassification::StopReplayPolicy
     );
     let propagation = match analysis.decision {
         LocalFailoverDecision::RetryNextCandidate => "suppressed",

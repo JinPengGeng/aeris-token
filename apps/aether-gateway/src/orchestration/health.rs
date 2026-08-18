@@ -333,7 +333,9 @@ fn local_candidate_failure_should_project_health(
         }
         LocalFailoverClassification::StopErrorPattern
         | LocalFailoverClassification::StopExecutionError
-        | LocalFailoverClassification::StopCyberPolicy => false,
+        | LocalFailoverClassification::StopCyberPolicy
+        | LocalFailoverClassification::StopFailureOrigin
+        | LocalFailoverClassification::StopReplayPolicy => false,
     }
 }
 

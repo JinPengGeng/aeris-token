@@ -1,7 +1,7 @@
 use super::classifier::{
     classify_failure_disposition, classify_local_failover, classify_local_transport_error,
-    FailureRetryAction, LocalFailoverClassification, LocalFailoverInput,
-    LocalTransportFailoverClassification,
+    FailureOrigin, FailureRetryAction, LocalFailoverClassification, LocalFailoverInput,
+    LocalTransportFailoverClassification, OperationReplayPolicy,
 };
 use super::LocalFailoverPolicy;
 
@@ -56,8 +56,9 @@ pub(crate) fn analyze_local_failover(
 
 pub(crate) fn analyze_local_transport_error(
     policy: &LocalFailoverPolicy,
+    replay_policy: OperationReplayPolicy,
 ) -> LocalTransportFailoverAnalysis {
-    let classification = classify_local_transport_error(policy);
+    let classification = classify_local_transport_error(policy, replay_policy);
     let decision = match classification {
         LocalTransportFailoverClassification::StopTransportError => {
             LocalFailoverDecision::StopLocalFailover
@@ -75,6 +76,7 @@ pub(crate) fn analyze_local_transport_error(
 pub(crate) fn apply_provider_failure_disposition(
     provider_api_format: &str,
     status_code: u16,
+    failure_origin: FailureOrigin,
     analysis: LocalFailoverAnalysis,
 ) -> LocalFailoverAnalysis {
     if status_code < 400
@@ -86,8 +88,12 @@ pub(crate) fn apply_provider_failure_disposition(
         return analysis;
     }
 
-    let disposition =
-        classify_failure_disposition(provider_api_format, analysis.classification, status_code);
+    let disposition = classify_failure_disposition(
+        provider_api_format,
+        analysis.classification,
+        status_code,
+        failure_origin,
+    );
     let decision = match disposition.retry_action {
         FailureRetryAction::Stop | FailureRetryAction::SameCredential => {
             LocalFailoverDecision::StopLocalFailover
@@ -118,7 +124,9 @@ const fn decision_from_classification(
         LocalFailoverClassification::StopStatusCode
         | LocalFailoverClassification::StopErrorPattern
         | LocalFailoverClassification::StopExecutionError
-        | LocalFailoverClassification::StopCyberPolicy => LocalFailoverDecision::StopLocalFailover,
+        | LocalFailoverClassification::StopCyberPolicy
+        | LocalFailoverClassification::StopFailureOrigin
+        | LocalFailoverClassification::StopReplayPolicy => LocalFailoverDecision::StopLocalFailover,
         LocalFailoverClassification::RetrySuccessPattern
         | LocalFailoverClassification::RetryStatusCode
         | LocalFailoverClassification::RetryUpstreamFailure => {
@@ -134,7 +142,8 @@ mod tests {
         recover_local_failover_decision, LocalFailoverAnalysis, LocalFailoverDecision,
     };
     use crate::orchestration::{
-        LocalFailoverClassification, LocalFailoverInput, LocalFailoverPolicy,
+        FailureOrigin, LocalFailoverClassification, LocalFailoverInput, LocalFailoverPolicy,
+        OperationReplayPolicy,
     };
 
     #[test]
@@ -164,7 +173,11 @@ mod tests {
     #[test]
     fn transport_error_recovery_defaults_to_retry_and_can_stop() {
         assert_eq!(
-            analyze_local_transport_error(&LocalFailoverPolicy::default()).decision,
+            analyze_local_transport_error(
+                &LocalFailoverPolicy::default(),
+                OperationReplayPolicy::Conservative,
+            )
+            .decision,
             LocalFailoverDecision::RetryNextCandidate
         );
 
@@ -173,7 +186,8 @@ mod tests {
             ..LocalFailoverPolicy::default()
         };
         assert_eq!(
-            analyze_local_transport_error(&stop_policy).decision,
+            analyze_local_transport_error(&stop_policy, OperationReplayPolicy::Conservative)
+                .decision,
             LocalFailoverDecision::StopLocalFailover
         );
     }
@@ -188,7 +202,7 @@ mod tests {
                     Some("{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long\"}}")
                 )
             ),
-            LocalFailoverDecision::RetryNextCandidate
+            LocalFailoverDecision::StopLocalFailover
         );
     }
 
@@ -202,7 +216,7 @@ mod tests {
                     Some("{\"error\":{\"message\":\"invalid `signature` in `thinking` block\"}}")
                 )
             ),
-            LocalFailoverDecision::RetryNextCandidate
+            LocalFailoverDecision::StopLocalFailover
         );
     }
 
@@ -216,10 +230,10 @@ mod tests {
             ),
         );
 
-        assert_eq!(analysis.decision, LocalFailoverDecision::RetryNextCandidate);
+        assert_eq!(analysis.decision, LocalFailoverDecision::StopLocalFailover);
         assert_eq!(
             analysis.classification,
-            LocalFailoverClassification::RetryUpstreamFailure
+            LocalFailoverClassification::StopStatusCode
         );
     }
 
@@ -251,21 +265,31 @@ mod tests {
                 LocalFailoverInput::new(status_code, Some(r#"{"error":{"message":"failed"}}"#)),
             );
             assert_eq!(
-                apply_provider_failure_disposition("claude:messages", status_code, analysis,)
-                    .decision,
+                apply_provider_failure_disposition(
+                    "claude:messages",
+                    status_code,
+                    FailureOrigin::UpstreamProvider,
+                    analysis,
+                )
+                .decision,
                 LocalFailoverDecision::StopLocalFailover,
                 "Anthropic status {status_code} must not blindly rotate credentials"
             );
         }
 
-        for status_code in [401, 403, 404, 429, 529] {
+        for status_code in [408, 429, 529] {
             let analysis = analyze_local_failover(
                 &policy,
                 LocalFailoverInput::new(status_code, Some(r#"{"error":{"message":"failed"}}"#)),
             );
             assert_eq!(
-                apply_provider_failure_disposition("claude:messages", status_code, analysis,)
-                    .decision,
+                apply_provider_failure_disposition(
+                    "claude:messages",
+                    status_code,
+                    FailureOrigin::UpstreamProvider,
+                    analysis,
+                )
+                .decision,
                 LocalFailoverDecision::RetryNextCandidate,
                 "Anthropic status {status_code} should continue candidate failover"
             );
@@ -276,7 +300,13 @@ mod tests {
     fn provider_failure_disposition_preserves_non_failure_default() {
         let analysis = LocalFailoverAnalysis::use_default();
         assert_eq!(
-            apply_provider_failure_disposition("claude:messages", 200, analysis).decision,
+            apply_provider_failure_disposition(
+                "claude:messages",
+                200,
+                FailureOrigin::UpstreamProvider,
+                analysis,
+            )
+            .decision,
             LocalFailoverDecision::UseDefault
         );
     }

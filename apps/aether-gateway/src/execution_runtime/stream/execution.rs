@@ -1296,6 +1296,7 @@ async fn analyze_prefetched_stream_failure(
         plan.provider_api_format.as_str(),
         analysis.classification,
         failure.status_code,
+        crate::orchestration::FailureOrigin::UpstreamProvider,
     );
     AnalyzedPrefetchedStreamFailure {
         status_code: failure.status_code,
@@ -5820,6 +5821,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 &plan.provider_api_format,
                 failover_analysis.classification,
                 status_code,
+                crate::orchestration::FailureOrigin::UpstreamProvider,
             );
             if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
                 *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);

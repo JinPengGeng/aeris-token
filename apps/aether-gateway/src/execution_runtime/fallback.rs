@@ -611,7 +611,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_retry_next_candidate_treats_client_error_as_failover_by_default() {
+    async fn sync_retry_next_candidate_stops_ambiguous_upstream_credential_status() {
         let result = ExecutionResult {
             request_id: "req-1".to_string(),
             candidate_id: None,
@@ -630,7 +630,18 @@ mod tests {
         let plan = sample_plan();
 
         assert!(
-            should_retry_next_local_candidate_sync(
+            should_stop_local_candidate_failover_sync(
+                &state,
+                &plan,
+                "openai_chat_sync",
+                Some(&local_report_context),
+                &result,
+                Some("{\"error\":{\"message\":\"invalid auth token\"}}"),
+            )
+            .await
+        );
+        assert!(
+            !should_retry_next_local_candidate_sync(
                 &state,
                 &plan,
                 "openai_chat_sync",
@@ -835,7 +846,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_retry_next_candidate_treats_client_error_as_failover_by_default() {
+    async fn stream_retry_next_candidate_stops_ambiguous_upstream_credential_status() {
         let local_report_context = serde_json::json!({
             "candidate_index": 0,
             "retry_index": 0,
@@ -844,7 +855,18 @@ mod tests {
         let plan = sample_plan();
 
         assert!(
-            should_retry_next_local_candidate_stream(
+            should_stop_local_candidate_failover_stream(
+                &state,
+                &plan,
+                "openai_chat_stream",
+                Some(&local_report_context),
+                403,
+                Some("{\"error\":{\"message\":\"invalid auth token\"}}"),
+            )
+            .await
+        );
+        assert!(
+            !should_retry_next_local_candidate_stream(
                 &state,
                 &plan,
                 "openai_chat_stream",
@@ -951,7 +973,7 @@ mod tests {
                 success_failover_patterns: Vec::new(),
                 error_stop_patterns: Vec::new(),
                 stop_cyber_policy_errors: true,
-                retry_client_errors_by_default: true,
+                retry_client_errors_by_default: false,
             }
         );
     }
