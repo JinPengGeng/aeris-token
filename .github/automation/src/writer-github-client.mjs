@@ -1,8 +1,13 @@
-import { WRITER_OWNERSHIP_MARKER } from './writer-lifecycle.mjs';
+import {
+  hasCanonicalWriterOwnershipMarker,
+  WRITER_OWNERSHIP_MARKER,
+} from './writer-lifecycle.mjs';
 
 const API_ORIGIN = 'https://api.github.com';
 const MAX_RESPONSE_BYTES = 1_048_576;
+// The body limit applies after the canonical ownership marker is appended.
 const MAX_BODY_BYTES = 65_536;
+const MAX_METADATA_BYTES = 524_288;
 const MAX_TOKEN_LENGTH = 8_192;
 const MAX_PAGES = 3;
 const PAGE_SIZE = 100;
@@ -92,8 +97,9 @@ function validateText(value, name, { maximumBytes, required = false, singleLine 
 }
 
 function markedBody(value) {
-  if (value.includes(WRITER_OWNERSHIP_MARKER)) return value;
-  return `${value}${value.length === 0 || value.endsWith('\n') ? '' : '\n\n'}${WRITER_OWNERSHIP_MARKER}`;
+  if (value.includes(WRITER_OWNERSHIP_MARKER)) fail('Pull request body contains the reserved Writer ownership marker');
+  const body = value.length === 0 ? WRITER_OWNERSHIP_MARKER : `${value}\n\n${WRITER_OWNERSHIP_MARKER}`;
+  return validateText(body, 'Pull request body', { maximumBytes: MAX_BODY_BYTES });
 }
 
 function validateMetadata(metadata, { requireBoth = false } = {}) {
@@ -113,11 +119,11 @@ function validateMetadata(metadata, { requireBoth = false } = {}) {
     });
   }
   if (Object.hasOwn(metadata, 'body')) {
-    result.body = validateText(markedBody(validateText(metadata.body, 'Pull request body', {
+    result.body = markedBody(validateText(metadata.body, 'Pull request body', {
       maximumBytes: MAX_BODY_BYTES,
-    })), 'Pull request body', { maximumBytes: MAX_BODY_BYTES });
+    }));
   }
-  if (Buffer.byteLength(JSON.stringify(result), 'utf8') > MAX_BODY_BYTES) {
+  if (Buffer.byteLength(JSON.stringify(result), 'utf8') > MAX_METADATA_BYTES) {
     fail('Pull request metadata exceeds the configured limit');
   }
   return result;
@@ -240,7 +246,7 @@ export class WriterGitHubClient {
     if (pull.base?.ref !== 'main' || !this.#sameRepository(pull.base?.repo)) fail('Managed Draft PR base is invalid');
     if (pull.head?.ref !== expectedRef || !this.#sameRepository(pull.head?.repo)) fail('Managed Draft PR head is invalid');
     if (pull.head?.sha !== expectedHeadSha) fail('Managed Draft PR head SHA changed');
-    if (typeof pull.body !== 'string' || !pull.body.includes(WRITER_OWNERSHIP_MARKER)) fail('Managed Draft PR ownership marker is missing');
+    if (!hasCanonicalWriterOwnershipMarker(pull.body)) fail('Managed Draft PR ownership marker is missing or non-canonical');
     if (pull.author?.type !== 'App' || pull.author.id !== this.#writerApp.id) fail('Managed Draft PR Writer App ownership is invalid');
     if (metadata) {
       if (Object.hasOwn(metadata, 'title') && pull.title !== metadata.title) fail('Managed Draft PR title update was not persisted');
