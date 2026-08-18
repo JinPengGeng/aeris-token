@@ -13,7 +13,7 @@ use aether_routing_core::{
 };
 use aether_scheduler_core::{
     ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate, SchedulerPageId,
-    SchedulerRankingOutcome,
+    SchedulerRankingOutcome, SchedulerRequestSnapshot,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -1320,7 +1320,7 @@ async fn resolve_priority_candidate_page_with_cache(
         cursor.required_capabilities.as_ref(),
         cursor.routing_policy.as_ref(),
         cursor.request_auth_channel.as_deref(),
-        cursor.page_cursor.scheduling_snapshot().generation(),
+        cursor.page_cursor.scheduling_snapshot(),
         cursor.page_cursor.resolved_page_cache_preselection_mode(),
         cursor
             .page_cursor
@@ -1348,6 +1348,7 @@ async fn resolve_priority_candidate_page_with_cache(
     let routing_policy = cursor.routing_policy.as_ref();
     let request_auth_channel = cursor.request_auth_channel.as_deref();
     let resolution_mode = cursor.resolution_mode;
+    let scheduling_snapshot = cursor.page_cursor.scheduling_snapshot();
     let cached = cache
         .get_or_load_once_stale_while_revalidating(
             key,
@@ -1365,6 +1366,7 @@ async fn resolve_priority_candidate_page_with_cache(
                     routing_policy.cloned(),
                     request_auth_channel.map(ToOwned::to_owned),
                     resolution_mode,
+                    scheduling_snapshot,
                     page_id,
                 )
             },
@@ -1380,6 +1382,7 @@ async fn resolve_priority_candidate_page_with_cache(
                     routing_policy.cloned(),
                     request_auth_channel.map(ToOwned::to_owned),
                     resolution_mode,
+                    scheduling_snapshot,
                     page_id,
                 )
             },
@@ -1393,10 +1396,15 @@ async fn resolve_priority_candidate_page_with_cache(
         .unwrap_or(None);
 
     match cached {
-        Some(snapshot) if snapshot.page_id == page_id => (
-            snapshot.candidates.clone(),
-            snapshot.resolved_skipped.clone(),
-        ),
+        Some(snapshot)
+            if snapshot.page_id == page_id
+                && snapshot.scheduling_snapshot == cursor.page_cursor.scheduling_snapshot() =>
+        {
+            (
+                snapshot.candidates.clone(),
+                snapshot.resolved_skipped.clone(),
+            )
+        }
         Some(_) | None => {
             if page_candidates_for_fallback.is_empty() {
                 return (Vec::new(), Vec::new());
@@ -1430,6 +1438,7 @@ async fn resolve_candidate_page_snapshot(
     routing_policy: Option<ResolvedRoutingPolicy>,
     request_auth_channel: Option<String>,
     resolution_mode: LocalCandidateResolutionMode,
+    scheduling_snapshot: SchedulerRequestSnapshot,
     page_id: SchedulerPageId,
 ) -> Result<Option<Arc<CandidateResolvedPageSnapshot>>, GatewayError> {
     let state = PlannerAppState::new(&app);
@@ -1448,6 +1457,7 @@ async fn resolve_candidate_page_snapshot(
     )
     .await;
     Ok(Some(Arc::new(CandidateResolvedPageSnapshot {
+        scheduling_snapshot,
         page_id,
         candidates,
         resolved_skipped,

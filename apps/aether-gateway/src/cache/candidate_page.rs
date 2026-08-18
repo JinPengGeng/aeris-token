@@ -10,7 +10,7 @@ use aether_routing_core::ResolvedRoutingPolicy;
 use aether_runtime::{MetricKind, MetricSample};
 use aether_scheduler_core::{
     normalize_api_format, ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate,
-    SchedulerPageId,
+    SchedulerPageId, SchedulerRequestSnapshot,
 };
 use serde_json::Value;
 use sha2::Digest as _;
@@ -42,6 +42,7 @@ pub(crate) type CandidateRowPageCache =
 
 #[derive(Debug, Clone)]
 pub(crate) struct CandidateResolvedPageSnapshot {
+    pub(crate) scheduling_snapshot: SchedulerRequestSnapshot,
     pub(crate) page_id: SchedulerPageId,
     pub(crate) candidates: Vec<EligibleLocalExecutionCandidate>,
     pub(crate) resolved_skipped: Vec<SkippedLocalExecutionCandidate>,
@@ -117,6 +118,7 @@ enum CandidatePageAuthIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CandidateResolvedPageCacheKey {
     page_key: CandidatePageCacheKey,
+    scheduling_snapshot: SchedulerRequestSnapshot,
     page_id: SchedulerPageId,
     resolution_mode: &'static str,
 }
@@ -203,7 +205,7 @@ impl CandidateResolvedPageCacheKey {
         required_capabilities: Option<&Value>,
         routing_policy: Option<&ResolvedRoutingPolicy>,
         request_auth_channel: Option<&str>,
-        scheduler_affinity_epoch: u64,
+        scheduling_snapshot: SchedulerRequestSnapshot,
         preselection_mode: &'static str,
         use_api_format_alias_match: bool,
         client_session_affinity: Option<&ClientSessionAffinity>,
@@ -221,12 +223,13 @@ impl CandidateResolvedPageCacheKey {
                 required_capabilities,
                 routing_policy,
                 request_auth_channel,
-                scheduler_affinity_epoch,
+                scheduling_snapshot.generation(),
                 preselection_mode,
                 use_api_format_alias_match,
                 client_session_affinity,
                 model_directive_policy_hash,
             ),
+            scheduling_snapshot,
             page_id,
             resolution_mode: resolution_mode_name(resolution_mode),
         }
@@ -727,6 +730,7 @@ mod tests {
         assert_ne!(base, different_capabilities);
         assert_ne!(base, different_policy);
 
+        let resolved_snapshot = SchedulerRequestSnapshot::new(7, 11);
         let resolved_base = CandidateResolvedPageCacheKey::new(
             "gpt-4o",
             None,
@@ -736,13 +740,13 @@ mod tests {
             Some(&json!({"vision": true})),
             None,
             Some("bearer"),
-            7,
+            resolved_snapshot,
             "provider_endpoint_key_model",
             true,
             None,
             "policy-a",
             AiCandidateResolutionMode::Standard,
-            aether_scheduler_core::SchedulerRequestSnapshot::new(7, 11).page_id(0),
+            resolved_snapshot.page_id(0),
         );
         let resolved_same_policy = CandidateResolvedPageCacheKey::new(
             "gpt-4o",
@@ -753,13 +757,13 @@ mod tests {
             Some(&json!({"vision": true})),
             None,
             Some("bearer"),
-            7,
+            resolved_snapshot,
             "provider_endpoint_key_model",
             true,
             None,
             "policy-a",
             AiCandidateResolutionMode::Standard,
-            aether_scheduler_core::SchedulerRequestSnapshot::new(7, 11).page_id(0),
+            resolved_snapshot.page_id(0),
         );
         let resolved_different_policy = CandidateResolvedPageCacheKey::new(
             "gpt-4o",
@@ -770,13 +774,13 @@ mod tests {
             Some(&json!({"vision": true})),
             None,
             Some("bearer"),
-            7,
+            resolved_snapshot,
             "provider_endpoint_key_model",
             true,
             None,
             "policy-b",
             AiCandidateResolutionMode::Standard,
-            aether_scheduler_core::SchedulerRequestSnapshot::new(7, 11).page_id(0),
+            resolved_snapshot.page_id(0),
         );
         let resolved_different_page = CandidateResolvedPageCacheKey::new(
             "gpt-4o",
@@ -787,16 +791,40 @@ mod tests {
             Some(&json!({"vision": true})),
             None,
             Some("bearer"),
-            7,
+            resolved_snapshot,
             "provider_endpoint_key_model",
             true,
             None,
             "policy-a",
             AiCandidateResolutionMode::Standard,
-            aether_scheduler_core::SchedulerRequestSnapshot::new(7, 11).page_id(1),
+            resolved_snapshot.page_id(1),
+        );
+        let different_seed_snapshot = SchedulerRequestSnapshot::new(7, 12);
+        assert_eq!(
+            resolved_snapshot.page_id(0),
+            different_seed_snapshot.page_id(0),
+            "page IDs intentionally remain generation/ordinal scoped"
+        );
+        let resolved_different_seed = CandidateResolvedPageCacheKey::new(
+            "gpt-4o",
+            None,
+            "openai:chat",
+            true,
+            &auth_a,
+            Some(&json!({"vision": true})),
+            None,
+            Some("bearer"),
+            different_seed_snapshot,
+            "provider_endpoint_key_model",
+            true,
+            None,
+            "policy-a",
+            AiCandidateResolutionMode::Standard,
+            different_seed_snapshot.page_id(0),
         );
         assert_eq!(resolved_base, resolved_same_policy);
         assert_ne!(resolved_base, resolved_different_policy);
         assert_ne!(resolved_base, resolved_different_page);
+        assert_ne!(resolved_base, resolved_different_seed);
     }
 }
