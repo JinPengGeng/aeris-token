@@ -10,6 +10,7 @@ use aether_routing_core::ResolvedRoutingPolicy;
 use aether_runtime::{MetricKind, MetricSample};
 use aether_scheduler_core::{
     normalize_api_format, ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate,
+    SchedulerPageId,
 };
 use serde_json::Value;
 use sha2::Digest as _;
@@ -41,6 +42,7 @@ pub(crate) type CandidateRowPageCache =
 
 #[derive(Debug, Clone)]
 pub(crate) struct CandidateResolvedPageSnapshot {
+    pub(crate) page_id: SchedulerPageId,
     pub(crate) candidates: Vec<EligibleLocalExecutionCandidate>,
     pub(crate) resolved_skipped: Vec<SkippedLocalExecutionCandidate>,
 }
@@ -115,6 +117,7 @@ enum CandidatePageAuthIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CandidateResolvedPageCacheKey {
     page_key: CandidatePageCacheKey,
+    page_id: SchedulerPageId,
     resolution_mode: &'static str,
 }
 
@@ -206,6 +209,7 @@ impl CandidateResolvedPageCacheKey {
         client_session_affinity: Option<&ClientSessionAffinity>,
         model_directive_policy_hash: &str,
         resolution_mode: AiCandidateResolutionMode,
+        page_id: SchedulerPageId,
     ) -> Self {
         Self {
             page_key: CandidatePageCacheKey::new(
@@ -223,6 +227,7 @@ impl CandidateResolvedPageCacheKey {
                 client_session_affinity,
                 model_directive_policy_hash,
             ),
+            page_id,
             resolution_mode: resolution_mode_name(resolution_mode),
         }
     }
@@ -737,6 +742,7 @@ mod tests {
             None,
             "policy-a",
             AiCandidateResolutionMode::Standard,
+            aether_scheduler_core::SchedulerRequestSnapshot::new(7, 11).page_id(0),
         );
         let resolved_same_policy = CandidateResolvedPageCacheKey::new(
             "gpt-4o",
@@ -753,6 +759,7 @@ mod tests {
             None,
             "policy-a",
             AiCandidateResolutionMode::Standard,
+            aether_scheduler_core::SchedulerRequestSnapshot::new(7, 11).page_id(0),
         );
         let resolved_different_policy = CandidateResolvedPageCacheKey::new(
             "gpt-4o",
@@ -769,8 +776,27 @@ mod tests {
             None,
             "policy-b",
             AiCandidateResolutionMode::Standard,
+            aether_scheduler_core::SchedulerRequestSnapshot::new(7, 11).page_id(0),
+        );
+        let resolved_different_page = CandidateResolvedPageCacheKey::new(
+            "gpt-4o",
+            None,
+            "openai:chat",
+            true,
+            &auth_a,
+            Some(&json!({"vision": true})),
+            None,
+            Some("bearer"),
+            7,
+            "provider_endpoint_key_model",
+            true,
+            None,
+            "policy-a",
+            AiCandidateResolutionMode::Standard,
+            aether_scheduler_core::SchedulerRequestSnapshot::new(7, 11).page_id(1),
         );
         assert_eq!(resolved_base, resolved_same_policy);
         assert_ne!(resolved_base, resolved_different_policy);
+        assert_ne!(resolved_base, resolved_different_page);
     }
 }

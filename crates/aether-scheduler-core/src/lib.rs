@@ -6,6 +6,7 @@ mod model;
 mod provider;
 mod ranking;
 mod request_candidate;
+mod snapshot;
 
 pub use affinity::{
     build_scheduler_affinity_cache_key_for_api_key_id,
@@ -65,3 +66,4 @@ pub use request_candidate::{
     SchedulerExecutionRequestCandidateSeed, SchedulerRequestCandidateReportContext,
     SchedulerRequestCandidateStatusUpdate, SchedulerResolvedReportRequestCandidateSlot,
 };
+pub use snapshot::{SchedulerPageId, SchedulerRequestSnapshot};
