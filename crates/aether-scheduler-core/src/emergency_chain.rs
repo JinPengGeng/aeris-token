@@ -584,7 +584,6 @@ pub enum EmergencyChainGateError {
     PermitSerialExhausted,
 }
 
-#[derive(Debug)]
 /// ```compile_fail
 /// use aether_scheduler_core::EmergencyChainAttemptPermit;
 /// let _forged = EmergencyChainAttemptPermit {};
@@ -606,11 +605,16 @@ pub struct EmergencyChainAttemptPermit {
     authorized_at_unix_secs: i64,
 }
 
+impl std::fmt::Debug for EmergencyChainAttemptPermit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("EmergencyChainAttemptPermit(<opaque>)")
+    }
+}
+
 /// ```compile_fail
 /// use aether_scheduler_core::EmergencyChainSafeSkipProof;
 /// let _forged = EmergencyChainSafeSkipProof {};
 /// ```
-#[derive(Debug)]
 pub struct EmergencyChainSafeSkipProof {
     grant_id: EmergencyChainGrantId,
     chain_hash: EmergencyChainHash,
@@ -620,6 +624,12 @@ pub struct EmergencyChainSafeSkipProof {
     permit_serial: u64,
     ledger_entry_id: String,
     observed_at_unix_secs: i64,
+}
+
+impl std::fmt::Debug for EmergencyChainSafeSkipProof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("EmergencyChainSafeSkipProof(<opaque>)")
+    }
 }
 
 impl EmergencyChainSafeSkipProof {
