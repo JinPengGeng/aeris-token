@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   branchForIssue,
+  canonicalWriterCommand,
   evaluateWriterRequest,
   validateWriterChangeSet,
   writerLimitsFromContract,
@@ -31,6 +32,10 @@ function request(overrides = {}) {
 }
 
 test('admits exact writer commands and assigns the deterministic Issue branch', () => {
+  assert.equal(canonicalWriterCommand('/agent', 'implement'), '/agent implement');
+  assert.equal(canonicalWriterCommand('/agent', 'retry-write'), '/agent retry-write');
+  assert.equal(canonicalWriterCommand('/agent', 'implement now'), null);
+  assert.equal(canonicalWriterCommand('/other', 'implement'), null);
   assert.deepEqual(evaluateWriterRequest(request()), { allowed: true, reason: null, branch: 'agent/issue-41' });
   assert.equal(evaluateWriterRequest(request({ command: '/agent retry-write', fixCycle: 1 })).allowed, true);
   assert.equal(branchForIssue(41), 'agent/issue-41');

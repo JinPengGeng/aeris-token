@@ -1,6 +1,7 @@
 import { WRITER_FOUNDATION_LIMITS } from './writer-phase-contract.mjs';
 
-export const WRITER_COMMANDS = Object.freeze(['/agent implement', '/agent retry-write']);
+export const WRITER_COMMAND_NAMES = Object.freeze(['implement', 'retry-write']);
+export const WRITER_COMMANDS = Object.freeze(WRITER_COMMAND_NAMES.map((command) => `/agent ${command}`));
 export const WRITER_ACTOR_PERMISSIONS = Object.freeze(['admin', 'maintain', 'write']);
 export const MAXIMUM_WRITER_FILES = WRITER_FOUNDATION_LIMITS.maximum_files;
 export const MAXIMUM_WRITER_PATCH_BYTES = WRITER_FOUNDATION_LIMITS.maximum_patch_bytes;
@@ -40,6 +41,11 @@ function denied(reason, extra = {}) {
 
 function allowed(extra = {}) {
   return { allowed: true, reason: null, ...extra };
+}
+
+export function canonicalWriterCommand(prefix, command) {
+  if (prefix !== '/agent' || !WRITER_COMMAND_NAMES.includes(command)) return null;
+  return `${prefix} ${command}`;
 }
 
 function labelsContain(labels, label) {

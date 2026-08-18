@@ -23,6 +23,7 @@ import {
   inputFingerprint,
   sourceKey,
 } from '../src/input.mjs';
+import { canonicalWriterCommand, evaluateWriterRequest } from '../src/writer-guard.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..', '..');
@@ -39,6 +40,21 @@ test('trusted contracts load with only enabled agents declared', () => {
     canary_agents: ['planner'],
     approved_model_ids: ['gpt-5.6-sol'],
   });
+});
+
+test('writer policy command names canonicalize to the exact guarded commands', () => {
+  const commands = policy.authorization.code_write_requires.exact_commands.map(
+    (command) => canonicalWriterCommand(policy.commands.prefix, command),
+  );
+  assert.deepEqual(commands, ['/agent implement', '/agent retry-write']);
+  assert.equal(evaluateWriterRequest({
+    command: commands[0],
+    actorLogin: 'maintainer',
+    actorPermission: 'write',
+    issue: { number: 41, state: 'open', isPullRequest: false, labels: ['agent-ready'] },
+    switches: { globalEnabled: true, writerVariableEnabled: true, writerContractEnabled: true },
+    fixCycle: 0,
+  }).allowed, true);
 });
 
 test('structured output is planner-only and rejects unapproved model candidates', () => {
