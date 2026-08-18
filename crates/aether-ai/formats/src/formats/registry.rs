@@ -135,9 +135,13 @@ pub fn convert_request(
 ) -> Result<Value, FormatError> {
     let source = parse_format(source_format)?;
     let target = parse_format(target_format)?;
-    let expanded_body = if source == FormatId::OpenAiResponses && target == FormatId::OpenAiChat {
+    let expanded_body = if source == FormatId::OpenAiResponses
+        && matches!(
+            target,
+            FormatId::OpenAiChat | FormatId::ClaudeMessages | FormatId::GeminiGenerateContent
+        ) {
         Some(
-            openai_responses::history::expand_previous_response_for_chat(
+            openai_responses::history::expand_previous_response_for_conversion(
                 body,
                 ctx.history_scope.as_deref(),
             )

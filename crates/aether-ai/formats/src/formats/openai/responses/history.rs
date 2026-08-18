@@ -19,9 +19,13 @@ const HISTORY_STORAGE_KEY_PREFIX: &str = "ai:responses:history:v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConversationHistoryCapability {
+    /// Preserve the provider-owned continuation handle without local history.
     Native,
+    /// Expand stored Responses transcript into OpenAI Chat input.
     Hydrate,
+    /// Expand stored Responses transcript before emitting another wire format.
     Translate,
+    /// Reject the continuation because its semantics cannot be preserved.
     Unsupported,
 }
 
@@ -404,7 +408,7 @@ fn history_scope_from_report_context(report_context: &Value) -> Option<String> {
     }
 }
 
-pub(crate) fn expand_previous_response_for_chat(
+pub(crate) fn expand_previous_response_for_conversion(
     request: &Value,
     history_scope: Option<&str>,
 ) -> Result<Value, String> {
@@ -507,14 +511,15 @@ pub fn record_converted_response_history(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use crate::formats::{context::FormatContext, registry::convert_request};
 
     use super::{
-        conversation_history_scope, expand_previous_response_for_chat, hydrate_response_history,
-        record_converted_response_history, response_history_key, response_history_storage_key,
-        response_history_store, ConversationHistoryCapability, ConversationHistoryResolver,
+        conversation_history_scope, expand_previous_response_for_conversion,
+        hydrate_response_history, record_converted_response_history, response_history_key,
+        response_history_storage_key, response_history_store, ConversationHistoryCapability,
+        ConversationHistoryResolver,
     };
 
     fn conversion_report_context(original_request_body: serde_json::Value) -> serde_json::Value {
@@ -599,12 +604,17 @@ mod tests {
             "previous_response_id": "resp_tenant_and_key_scope",
             "input": "continue"
         });
-        assert!(expand_previous_response_for_chat(&request, Some(owner_scope.as_str())).is_ok());
         assert!(
-            expand_previous_response_for_chat(&request, Some(other_tenant_scope.as_str())).is_err()
+            expand_previous_response_for_conversion(&request, Some(owner_scope.as_str())).is_ok()
         );
+        assert!(expand_previous_response_for_conversion(
+            &request,
+            Some(other_tenant_scope.as_str())
+        )
+        .is_err());
         assert!(
-            expand_previous_response_for_chat(&request, Some(other_key_scope.as_str())).is_err()
+            expand_previous_response_for_conversion(&request, Some(other_key_scope.as_str()))
+                .is_err()
         );
     }
 
@@ -628,6 +638,115 @@ mod tests {
     }
 
     #[test]
+    fn native_continuation_preserves_the_provider_owned_response_id() {
+        let converted = convert_request(
+            "openai:responses",
+            "openai:responses",
+            &json!({
+                "model": "gpt-5",
+                "input": "continue",
+                "previous_response_id": "resp_owned_by_provider"
+            }),
+            &FormatContext::default(),
+        )
+        .expect("native continuation must not require gateway-local history");
+
+        assert_eq!(converted["previous_response_id"], "resp_owned_by_provider");
+    }
+
+    #[test]
+    fn translates_tool_history_to_claude_and_gemini_wire_formats() {
+        let history_scope = conversation_history_scope("tenant-translate", "key-translate")
+            .expect("test identities should produce a scope");
+        let report_context = json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "claude:messages",
+            "user_id": "tenant-translate",
+            "api_key_id": "key-translate",
+            "original_request_body": {
+                "model": "source-model",
+                "input": "find the deployment"
+            }
+        });
+        record_converted_response_history(
+            &report_context,
+            &json!({
+                "id": "resp_translate_tool_history",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "id": "fc_translate_tool_history",
+                    "call_id": "call_translate_tool_history",
+                    "name": "find_deployment",
+                    "arguments": "{\"environment\":\"prod\"}"
+                }]
+            }),
+        )
+        .expect("completed translated response should record history");
+        let continuation = json!({
+            "model": "source-model",
+            "previous_response_id": "resp_translate_tool_history",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_translate_tool_history",
+                "output": "deployment-42"
+            }]
+        });
+        let context = FormatContext::default().with_history_scope(history_scope);
+
+        let claude = convert_request(
+            "openai:responses",
+            "claude:messages",
+            &continuation,
+            &context,
+        )
+        .expect("stored Responses history should translate to Claude");
+        let claude_blocks = claude["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|message| message.get("content").and_then(Value::as_array))
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(claude_blocks.iter().any(|block| {
+            block.get("type").and_then(Value::as_str) == Some("tool_use")
+                && block.get("id").and_then(Value::as_str) == Some("call_translate_tool_history")
+        }));
+        assert!(claude_blocks.iter().any(|block| {
+            block.get("type").and_then(Value::as_str) == Some("tool_result")
+                && block.get("tool_use_id").and_then(Value::as_str)
+                    == Some("call_translate_tool_history")
+        }));
+
+        let gemini = convert_request(
+            "openai:responses",
+            "gemini:generate_content",
+            &continuation,
+            &context,
+        )
+        .expect("stored Responses history should translate to Gemini");
+        let gemini_parts = gemini["contents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|content| content.get("parts").and_then(Value::as_array))
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(gemini_parts.iter().any(|part| {
+            part.get("functionCall")
+                .and_then(|call| call.get("id"))
+                .and_then(Value::as_str)
+                == Some("call_translate_tool_history")
+        }));
+        assert!(gemini_parts.iter().any(|part| {
+            part.get("functionResponse")
+                .and_then(|response| response.get("id"))
+                .and_then(Value::as_str)
+                == Some("call_translate_tool_history")
+        }));
+    }
+
+    #[test]
     fn expands_previous_response_with_assistant_call_before_tool_output() {
         let report_context = conversion_report_context(json!({
             "model": "deepseek-v4-flash",
@@ -648,7 +767,7 @@ mod tests {
             }),
         );
 
-        let expanded = expand_previous_response_for_chat(
+        let expanded = expand_previous_response_for_conversion(
             &json!({
                 "model": "deepseek-v4-flash",
                 "previous_response_id": "resp_history_expand_test_1",
@@ -729,7 +848,7 @@ mod tests {
                 "output": "inspection-complete"
             }]
         });
-        assert!(expand_previous_response_for_chat(
+        assert!(expand_previous_response_for_conversion(
             &continuation,
             Some("distributed-history-key-a")
         )
@@ -741,9 +860,11 @@ mod tests {
             &record.payload,
         )
         .expect("another instance should hydrate the persisted transcript");
-        let expanded =
-            expand_previous_response_for_chat(&continuation, Some("distributed-history-key-a"))
-                .expect("hydrated history should support the continuation");
+        let expanded = expand_previous_response_for_conversion(
+            &continuation,
+            Some("distributed-history-key-a"),
+        )
+        .expect("hydrated history should support the continuation");
         assert_eq!(
             expanded["input"][1]["call_id"],
             "call_distributed_history_1"
@@ -793,7 +914,7 @@ mod tests {
             }),
         );
 
-        let expanded = expand_previous_response_for_chat(
+        let expanded = expand_previous_response_for_conversion(
             &json!({
                 "model": "deepseek-v4-flash",
                 "previous_response_id": "resp_history_redacted_test_1",

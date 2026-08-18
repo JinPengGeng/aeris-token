@@ -24,6 +24,11 @@ pub(crate) async fn resolve_openai_response_history(
     let Some(resolution) = resolution else {
         return Ok(());
     };
+    // Native IDs are provider-owned continuation handles. The local cache is
+    // only required when the gateway must reconstruct a cross-format request.
+    if resolution.capability == ConversationHistoryCapability::Native {
+        return Ok(());
+    }
     let history_scope = conversation_history_scope(user_id, api_key_id).ok_or_else(|| {
         GatewayError::Internal("conversation history requester identity is incomplete".to_string())
     })?;
@@ -125,5 +130,131 @@ pub(crate) async fn persist_converted_response_history(
     };
     if let Some(record) = record_converted_response_history(report_context, response) {
         persist_response_history_record(runtime_state, record).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeState};
+    use axum::http::StatusCode;
+    use serde_json::json;
+
+    use super::resolve_openai_response_history;
+    use crate::GatewayError;
+
+    #[tokio::test]
+    async fn native_http_and_websocket_continuations_skip_gateway_history() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        for request in [
+            json!({
+                "model": "gpt-5",
+                "input": "continue over HTTP",
+                "previous_response_id": "resp_owned_by_provider_http"
+            }),
+            json!({
+                "type": "response.create",
+                "model": "gpt-5",
+                "input": "continue over WebSocket",
+                "previous_response_id": "resp_owned_by_provider_ws"
+            }),
+        ] {
+            resolve_openai_response_history(
+                &runtime,
+                &request,
+                "openai:responses",
+                "openai:responses",
+                "",
+                "",
+            )
+            .await
+            .expect(
+                "native provider-owned response IDs must not require identity or local history",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn local_http_and_websocket_continuations_fail_closed_without_scoped_history() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        for (request, provider_api_format) in [
+            (
+                json!({
+                    "model": "chat-model",
+                    "input": "continue over HTTP",
+                    "previous_response_id": "resp_missing_http"
+                }),
+                "openai:chat",
+            ),
+            (
+                json!({
+                    "type": "response.create",
+                    "model": "claude-model",
+                    "input": "continue over WebSocket",
+                    "previous_response_id": "resp_missing_ws"
+                }),
+                "claude:messages",
+            ),
+        ] {
+            let error = resolve_openai_response_history(
+                &runtime,
+                &request,
+                "openai:responses",
+                provider_api_format,
+                "tenant-a",
+                "key-a",
+            )
+            .await
+            .expect_err("hydrate and translate paths require scoped gateway history");
+            match error {
+                GatewayError::Client { status, .. } => {
+                    assert_eq!(status, StatusCode::CONFLICT);
+                }
+                other => panic!("expected a client conflict, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_continuation_validation_remains_fail_closed() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let invalid = resolve_openai_response_history(
+            &runtime,
+            &json!({
+                "type": "response.create",
+                "previous_response_id": {"unexpected": true}
+            }),
+            "openai:responses",
+            "openai:responses",
+            "tenant-a",
+            "key-a",
+        )
+        .await
+        .expect_err("invalid native IDs must still be rejected");
+        match invalid {
+            GatewayError::Client { status, .. } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+            }
+            other => panic!("expected a bad request, got {other:?}"),
+        }
+
+        let unsupported = resolve_openai_response_history(
+            &runtime,
+            &json!({
+                "type": "response.create",
+                "previous_response_id": "resp_unsupported"
+            }),
+            "openai:responses",
+            "openai:search",
+            "tenant-a",
+            "key-a",
+        )
+        .await
+        .expect_err("unsupported continuation pairs must still be rejected");
+        match unsupported {
+            GatewayError::Client { status, .. } => {
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            }
+            other => panic!("expected an unprocessable entity, got {other:?}"),
+        }
     }
 }
