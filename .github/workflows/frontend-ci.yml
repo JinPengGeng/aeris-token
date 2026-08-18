@@ -13,7 +13,7 @@ on:
       - ".github/automation/**"
       - ".github/upstream-sync-policy.yml"
       - ".github/upstream-sync-state.json"
-      - ".github/workflows/scripts/tests/test-automation-contracts.cjs"
+      - ".github/workflows/scripts/**"
       - ".github/workflows/frontend-ci.yml"
   pull_request:
 
@@ -57,6 +57,12 @@ jobs:
       - run: npm test
         working-directory: .github/automation
       - run: node ../workflows/scripts/tests/test-automation-contracts.cjs
+        working-directory: .github/automation
+      - run: bash ../workflows/scripts/tests/test-github-autonomy.sh
+        working-directory: .github/automation
+      - run: bash ../workflows/scripts/tests/test-ensure-required-checks.sh
+        working-directory: .github/automation
+      - run: bash ../workflows/scripts/tests/test-sync-upstream-identity.sh
         working-directory: .github/automation
 
   type_check:

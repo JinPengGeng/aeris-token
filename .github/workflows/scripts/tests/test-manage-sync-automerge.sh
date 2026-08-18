@@ -6,6 +6,7 @@ HELPER="${SCRIPT_ROOT}/manage-sync-automerge.sh"
 RUN_BASE="${AERIS_TEST_TMP_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}"
 mkdir -p "${RUN_BASE}"
 RUN_ROOT="$(mktemp -d "${RUN_BASE%/}/aeris-automerge.XXXXXX")"
+export AERIS_AUTONOMY_EXPIRES_AT='2099-01-01T00:00:00Z'
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -37,6 +38,26 @@ new_fake_gh() {
     'if [[ "$1 $2 $3" == "pr view "* ]]; then printf "%s\n" "${FAKE_GH_AUTO_MERGE:-false}"; fi' \
     >"${bin}/gh"
   chmod +x "${bin}/gh"
+}
+
+new_expiring_clock() {
+  local bin="$1" clock_calls="$2"
+  : >"${clock_calls}"
+  cat >"${bin}/date" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  '-u -d 2033-05-18T03:33:20Z +%s') printf '2000000000\n' ;;
+  '-u -d @2000000000 +%Y-%m-%dT%H:%M:%SZ') printf '2033-05-18T03:33:20Z\n' ;;
+  '-u +%s')
+    count="$(wc -l <"${CLOCK_CALLS}")"
+    printf 'tick\n' >>"${CLOCK_CALLS}"
+    if [[ "${count}" -eq 0 ]]; then printf '1999999999\n'; else printf '2000000000\n'; fi
+    ;;
+  *) printf 'unexpected date invocation: %s\n' "$*" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "${bin}/date"
 }
 
 run_helper() {
@@ -151,6 +172,22 @@ test_disarm_propagates_disable_error() {
     "$(<"${log}")" 'disable failure arguments'
 }
 
+test_disarm_blocks_mutation_when_expiry_crosses_after_read() {
+  local bin="${RUN_ROOT}/disarm-expiry/bin" log="${RUN_ROOT}/disarm-expiry/gh.log"
+  local clock_calls="${RUN_ROOT}/disarm-expiry/clock.log" status
+  new_fake_gh "${bin}"
+  new_expiring_clock "${bin}" "${clock_calls}"
+  set +e
+  PATH="${bin}:${PATH}" FAKE_GH_LOG="${log}" FAKE_GH_AUTO_MERGE=true \
+    CLOCK_CALLS="${clock_calls}" AERIS_AUTONOMY_EXPIRES_AT='2033-05-18T03:33:20Z' \
+    "$HELPER" disarm owner/repo 9 >/dev/null 2>&1
+  status=$?
+  set -e
+  assert_status 78 "${status}" 'expiry after auto-merge read must fail closed'
+  assert_eq 'pr view 9 --repo owner/repo --json autoMergeRequest --jq .autoMergeRequest\ \!=\ null ' \
+    "$(<"${log}")" 'expired disarm must not reach the mutation'
+}
+
 test_arm_accepts_number_and_full_sha
 test_arm_accepts_matching_url
 test_invalid_input_never_calls_gh
@@ -160,5 +197,6 @@ test_disarm_is_noop_when_disabled
 test_disarm_fails_closed_on_unknown_response
 test_disarm_propagates_query_error
 test_disarm_propagates_disable_error
+test_disarm_blocks_mutation_when_expiry_crosses_after_read
 
 printf 'PASS manage sync automerge (%s)\n' "${RUN_ROOT}"
