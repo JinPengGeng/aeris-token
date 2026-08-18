@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { evaluateWriterLifecycle, WRITER_LIFECYCLE_ACTIONS, WRITER_OWNERSHIP_MARKER } from '../src/writer-lifecycle.mjs';
+import {
+  evaluateWriterLifecycle,
+  hasCanonicalWriterOwnershipMarker,
+  WRITER_LIFECYCLE_ACTIONS,
+  WRITER_OWNERSHIP_MARKER,
+} from '../src/writer-lifecycle.mjs';
 
 const sha = (character) => character.repeat(40);
 const repositoryId = 123;
@@ -15,7 +20,7 @@ function pull(overrides = {}) {
     state: 'open',
     merged: false,
     draft: true,
-    body: `Writer ownership ${WRITER_OWNERSHIP_MARKER}`,
+    body: `Writer ownership\n\n${WRITER_OWNERSHIP_MARKER}`,
     user: { id: 789, type: 'Bot', login: `${writerApp.slug}[bot]` },
     performed_via_github_app: { id: writerApp.id, slug: writerApp.slug },
     base: { ref: 'main', repo: { id: repositoryId } },
@@ -23,6 +28,30 @@ function pull(overrides = {}) {
     ...overrides,
   };
 }
+
+test('Writer ownership marker must be unique and in the canonical final position', () => {
+  assert.equal(hasCanonicalWriterOwnershipMarker(WRITER_OWNERSHIP_MARKER), true);
+  assert.equal(hasCanonicalWriterOwnershipMarker(`Details\n\n${WRITER_OWNERSHIP_MARKER}`), true);
+  for (const body of [
+    `Quoted ${WRITER_OWNERSHIP_MARKER}`,
+    `> ${WRITER_OWNERSHIP_MARKER}\n\nDetails`,
+    `${WRITER_OWNERSHIP_MARKER}\ntrailing content`,
+    `Details\n${WRITER_OWNERSHIP_MARKER}`,
+    `Details\n\n${WRITER_OWNERSHIP_MARKER}\n`,
+    `${WRITER_OWNERSHIP_MARKER}\n\n${WRITER_OWNERSHIP_MARKER}`,
+  ]) {
+    assert.equal(hasCanonicalWriterOwnershipMarker(body), false, body);
+    const result = evaluateWriterLifecycle({
+      command: '/agent retry-write',
+      issueNumber,
+      writerApp,
+      repositoryId,
+      branch,
+      pullRequests: [pull({ body })],
+    });
+    assert.deepEqual(result, { action: 'noop', reason: 'managed_pr_marker_missing' });
+  }
+});
 
 function snapshot(overrides = {}) {
   return {

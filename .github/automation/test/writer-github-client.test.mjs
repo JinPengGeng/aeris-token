@@ -181,6 +181,57 @@ test('Writer forces its ownership marker on create and preserves it on managed m
   assert.deepEqual(calls.map(({ init }) => init.method), ['GET', 'POST', 'GET', 'GET', 'PATCH', 'GET']);
 });
 
+test('Writer rejects caller-supplied ownership markers in any body position before API access', async () => {
+  let calls = 0;
+  const api = client(async () => {
+    calls += 1;
+    return response(null, 500);
+  });
+  for (const body of [
+    WRITER_OWNERSHIP_MARKER,
+    `Quoted ${WRITER_OWNERSHIP_MARKER} text`,
+    `> ${WRITER_OWNERSHIP_MARKER}`,
+    `Details\n\n${WRITER_OWNERSHIP_MARKER}`,
+    `${WRITER_OWNERSHIP_MARKER}\n\n${WRITER_OWNERSHIP_MARKER}`,
+  ]) {
+    await assert.rejects(
+      () => api.createDraftPull(7, { title: 'Fix issue 7', body }),
+      /reserved Writer ownership marker/,
+    );
+  }
+  assert.equal(calls, 0);
+});
+
+test('Writer body byte limit is applied to the canonical final body including its marker', async () => {
+  const separator = '\n\n';
+  const markerBytes = Buffer.byteLength(WRITER_OWNERSHIP_MARKER, 'utf8');
+  const maximumCallerBytes = 65_536 - Buffer.byteLength(separator, 'utf8') - markerBytes;
+  const acceptedBody = 'a'.repeat(maximumCallerBytes);
+  let acceptedRequest = null;
+  const accepted = client(async (url, init) => {
+    if (url.includes('/git/ref/heads/')) return response(rawRef(7, oldSha));
+    if (init.method === 'POST') {
+      acceptedRequest = JSON.parse(init.body);
+      return response(rawPull({ body: `${acceptedBody}${separator}${WRITER_OWNERSHIP_MARKER}` }));
+    }
+    return response(rawPull({ body: `${acceptedBody}${separator}${WRITER_OWNERSHIP_MARKER}` }));
+  });
+  await accepted.createDraftPull(7, { title: 'Fix issue 7', body: acceptedBody });
+  assert.equal(Buffer.byteLength(acceptedRequest.body, 'utf8'), 65_536);
+  assert.equal(acceptedRequest.body.endsWith(`${separator}${WRITER_OWNERSHIP_MARKER}`), true);
+
+  let rejectedCalls = 0;
+  const rejected = client(async () => {
+    rejectedCalls += 1;
+    return response(null, 500);
+  });
+  await assert.rejects(
+    () => rejected.createDraftPull(7, { title: 'Fix issue 7', body: 'a'.repeat(maximumCallerBytes + 1) }),
+    /Pull request body exceeds the configured limit/,
+  );
+  assert.equal(rejectedCalls, 0);
+});
+
 test('createDraftPull uses a persisted PR snapshot instead of trusting an attacker-controlled POST response', async () => {
   const calls = [];
   const api = client(async (url, init) => {

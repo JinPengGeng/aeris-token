@@ -55,8 +55,11 @@ function writerIdentityReason(pull, writerApp) {
   return null;
 }
 
-function markerPresent(body) {
-  return typeof body === 'string' && body.includes(WRITER_OWNERSHIP_MARKER);
+export function hasCanonicalWriterOwnershipMarker(body) {
+  if (typeof body !== 'string') return false;
+  const first = body.indexOf(WRITER_OWNERSHIP_MARKER);
+  if (first < 0 || first !== body.lastIndexOf(WRITER_OWNERSHIP_MARKER)) return false;
+  return body === WRITER_OWNERSHIP_MARKER || body.endsWith(`\n\n${WRITER_OWNERSHIP_MARKER}`);
 }
 
 function validateHistoryPull(pull, { repositoryId, branch, writerApp }) {
@@ -80,7 +83,7 @@ function validateHistoryPull(pull, { repositoryId, branch, writerApp }) {
   if (!validSha(pull.head?.sha)) return 'managed_pr_head_sha_invalid';
   const identityReason = writerIdentityReason(pull, writerApp);
   if (identityReason) return identityReason;
-  if (!markerPresent(pull.body)) return 'managed_pr_marker_missing';
+  if (!hasCanonicalWriterOwnershipMarker(pull.body)) return 'managed_pr_marker_missing';
   if (pull.state === 'open' && pull.draft !== true) return 'managed_pr_not_draft';
   return null;
 }
