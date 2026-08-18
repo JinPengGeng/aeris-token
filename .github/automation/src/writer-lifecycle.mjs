@@ -104,6 +104,8 @@ export function evaluateWriterLifecycle({
   repositoryId,
   writerApp,
   expectedHeadSha = null,
+  baseSha = null,
+  sourceSha = null,
   branch = null,
   pullRequests = [],
 } = {}) {
@@ -146,15 +148,19 @@ export function evaluateWriterLifecycle({
     if (branch.headSha !== pull.head.sha) return noop('managed_pr_branch_head_drift');
   }
 
+  if (!validSha(baseSha) || !validSha(sourceSha)) return noop('invalid_source_binding');
+
   if (command === '/agent implement') {
+    if (sourceSha !== baseSha) return noop('source_sha_base_sha_mismatch');
     if (branch.exists) return noop('branch_already_exists');
     if (pull) return noop('managed_pull_request_already_exists');
-    return { action: 'create', reason: 'create_draft_pull_request', branch: expectedBranch };
+    return { action: 'create', reason: 'create_draft_pull_request', branch: expectedBranch, sourceSha };
   }
 
   if (!pull) return noop('retry_requires_managed_draft_pull_request');
   if (!validSha(expectedHeadSha)) return noop('invalid_expected_head_sha');
+  if (sourceSha !== expectedHeadSha) return noop('source_sha_expected_head_mismatch');
   if (expectedHeadSha !== pull.head.sha) return noop('expected_head_sha_mismatch');
   if (branch.headSha !== expectedHeadSha) return noop('branch_head_sha_mismatch');
-  return { action: 'update', reason: 'update_managed_draft_pull_request', branch: expectedBranch, prNumber: pull.number };
+  return { action: 'update', reason: 'update_managed_draft_pull_request', branch: expectedBranch, prNumber: pull.number, sourceSha };
 }

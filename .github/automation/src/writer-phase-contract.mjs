@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 
-export const WRITER_ARTIFACT_SCHEMA_VERSION = 1;
+export const WRITER_ARTIFACT_SCHEMA_VERSION = 2;
 export const MAX_WRITER_ARTIFACT_BYTES = 1024 * 1024;
 export const WRITER_FOUNDATION_LIMITS = Object.freeze({
   maximum_files: 50,
@@ -18,6 +19,8 @@ const ACTOR = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 const COMMAND = /^\/agent (?:implement|retry-write)$/;
 const BRANCH = /^agent\/issue-[1-9][0-9]*$/;
 const COMMAND_LINE = /^[A-Za-z0-9][A-Za-z0-9 ._/@+=:,;|&(){}[\]-]{0,500}$/;
+const TEST_PLAN_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-v[1-9][0-9]*$/;
+const TEST_PLAN_ORDER = Object.freeze(['diff-check-v1', 'rust-changed-packages-v1', 'frontend-v1']);
 const SECRET_KEY = /(?:secret|token|password|passwd|authorization|credential|private[_-]?key|api[_-]?key|bearer|cookie|session)/i;
 const SENSITIVE_VALUE_PATTERNS = [
   /(?:\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+|\b(?:authorization|proxy-authorization|x-api-key|x-auth-token|x-github-token|private-token|cookie|set-cookie)\s*:\s*\S+|\bgh(?:p|o|u|s|r)_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----)/i,
@@ -48,7 +51,7 @@ function rejectSecretKeys(value, name = 'artifact') {
   if (Array.isArray(value)) value.forEach((item, index) => rejectSecretKeys(item, `${name}[${index}]`));
   if (!isObject(value)) return;
   for (const [key, child] of Object.entries(value)) {
-    requireCondition(!SECRET_KEY.test(key), `${name} contains a secret-like key`);
+    requireCondition(key === 'lease_token' || !SECRET_KEY.test(key), `${name} contains a secret-like key`);
     rejectSecretKeys(child, `${name}.${key}`);
   }
 }
@@ -90,7 +93,7 @@ function validateEnvelope(value, artifactType, keys) {
 }
 
 function validateIdentity(value, name = 'intent') {
-  exactKeys(value, ['repository_id', 'repository_name', 'issue_number', 'issue_updated_at', 'input_sha', 'comment_id', 'actor', 'command', 'base_sha', 'policy_sha', 'run_id', 'agent', 'branch', 'expected_remote_head'], name);
+  exactKeys(value, ['repository_id', 'repository_name', 'issue_number', 'issue_updated_at', 'input_sha', 'comment_id', 'actor', 'command', 'base_sha', 'source_sha', 'policy_sha', 'run_id', 'agent', 'branch', 'expected_remote_head', 'lease_token', 'cancel_epoch', 'lease_expires_at'], name);
   const identity = {
     repository_id: positiveInteger(value.repository_id, `${name} repository_id`),
     repository_name: string(value.repository_name, `${name} repository_name`, 201, REPOSITORY_NAME),
@@ -101,17 +104,30 @@ function validateIdentity(value, name = 'intent') {
     actor: string(value.actor, `${name} actor`, 39, ACTOR),
     command: string(value.command, `${name} command`, 130, COMMAND),
     base_sha: string(value.base_sha, `${name} base_sha`, 40, COMMIT_SHA),
+    source_sha: string(value.source_sha, `${name} source_sha`, 40, COMMIT_SHA),
     policy_sha: string(value.policy_sha, `${name} policy_sha`, 40, COMMIT_SHA),
     run_id: string(value.run_id, `${name} run_id`, 128, /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/),
     agent: string(value.agent, `${name} agent`, 6, /^writer$/),
     branch: string(value.branch, `${name} branch`, 80, BRANCH),
     expected_remote_head: nullableString(value.expected_remote_head, `${name} expected_remote_head`, 40, COMMIT_SHA),
+    lease_token: string(value.lease_token, `${name} lease_token`, 171, /^(?:[0-9a-f]{32,128}|[A-Za-z0-9_-]{43,171})$/),
+    cancel_epoch: nonNegativeInteger(value.cancel_epoch, `${name} cancel_epoch`),
+    lease_expires_at: string(value.lease_expires_at, `${name} lease_expires_at`, 30, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/),
   };
   requireCondition(Number.isFinite(Date.parse(identity.issue_updated_at)), `${name} issue_updated_at must be an ISO timestamp`);
   requireCondition(identity.branch === `agent/issue-${identity.issue_number}`, `${name} branch must bind the issue number`);
-  if (identity.command === '/agent implement') requireCondition(identity.expected_remote_head === null, `${name} implement must not bind a remote head`);
-  if (identity.command === '/agent retry-write') requireCondition(identity.expected_remote_head !== null, `${name} retry-write must bind a remote head`);
+  requireCondition(Number.isFinite(Date.parse(identity.lease_expires_at)), `${name} lease_expires_at must be an ISO timestamp`);
+  if (identity.command === '/agent implement') requireCondition(identity.expected_remote_head === null && identity.source_sha === identity.base_sha, `${name} implement must bind source_sha to base_sha and not bind a remote head`);
+  if (identity.command === '/agent retry-write') requireCondition(identity.expected_remote_head !== null && identity.source_sha === identity.expected_remote_head, `${name} retry-write must bind source_sha to expected_remote_head`);
   return identity;
+}
+
+export function writerFenceIsLive(identity, now = new Date()) {
+  try {
+    const validated = validateIdentity(identity);
+    const nowMs = now instanceof Date ? now.getTime() : Number.NaN;
+    return Number.isFinite(nowMs) && Date.parse(validated.lease_expires_at) > nowMs;
+  } catch { return false; }
 }
 
 export function validateWriteIntentArtifact(value) {
@@ -136,7 +152,15 @@ function validateChangedPaths(value, fileCount, maximumFiles) {
   });
   const identities = paths.map((candidate) => candidate.normalize('NFC').toLocaleLowerCase('en-US'));
   requireCondition(new Set(identities).size === paths.length, 'changed_paths must not have case or NFC conflicts');
-  return paths;
+  return paths.map((path) => ({ path, ...classifyPath(path) }));
+}
+
+function classifyPath(path) {
+  const parts = path.split('/');
+  if (/^(?:apps|crates)\/[^/]+\/(?:src|tests)\/.*\.rs$/.test(path)) return { family: 'rust', scope: `${parts[0]}/${parts[1]}`, testPlan: ['diff-check-v1', 'rust-changed-packages-v1'] };
+  if (/^frontend\/src\/.*\.(?:ts|tsx|vue|css)$/.test(path)) return { family: 'frontend', scope: 'frontend', testPlan: ['diff-check-v1', 'frontend-v1'] };
+  if (/^docs\/.*\.md$/.test(path) && path !== 'docs/automation-architecture.md') return { family: 'docs', scope: 'docs', testPlan: ['diff-check-v1'] };
+  fail(`changed path is not allowlisted: ${path}`);
 }
 
 function validateFileSizes(value, paths, maximumFileSize, totalFileBytes) {
@@ -147,7 +171,7 @@ function validateFileSizes(value, paths, maximumFileSize, totalFileBytes) {
     exactKeys(entry, ['path', 'bytes'], `file_sizes[${index}]`);
     const candidatePath = string(entry.path, `file_sizes[${index}] path`, 512);
     const normalized = candidatePath.normalize('NFC').toLocaleLowerCase('en-US');
-    requireCondition(paths.includes(candidatePath) && !seen.has(normalized), 'file_sizes must bind changed_paths exactly');
+    requireCondition(paths.some((item) => item.path === candidatePath) && !seen.has(normalized), 'file_sizes must bind changed_paths exactly');
     seen.add(normalized);
     const bytes = nonNegativeInteger(entry.bytes, `file_sizes[${index}] bytes`, maximumFileSize);
     total += bytes;
@@ -157,17 +181,38 @@ function validateFileSizes(value, paths, maximumFileSize, totalFileBytes) {
   return sizes;
 }
 
-function validateTests(value) {
-  exactKeys(value, ['state', 'commands', 'summary'], 'candidate tests');
+function validateTests(value, classifications, candidateState) {
+  exactKeys(value, ['state', 'plan_ids', 'summary'], 'candidate tests');
   requireCondition(['passed', 'failed', 'not_run'].includes(value.state), 'candidate tests state is invalid');
-  requireCondition(Array.isArray(value.commands) && value.commands.length <= 20, 'candidate tests commands are invalid');
-  const commands = value.commands.map((item, index) => string(item, `candidate tests commands[${index}]`, 501, COMMAND_LINE));
-  requireCondition(new Set(commands).size === commands.length, 'candidate tests commands must be unique');
-  return { state: value.state, commands, summary: string(value.summary, 'candidate tests summary', 2000) };
+  requireCondition(Array.isArray(value.plan_ids), 'candidate tests plan_ids are invalid');
+  const planIds = value.plan_ids.map((item, index) => string(item, `candidate tests plan_ids[${index}]`, 80, TEST_PLAN_ID));
+  requireCondition(new Set(planIds).size === planIds.length, 'candidate tests plan_ids must be unique');
+  const expected = [...new Set(classifications.flatMap((item) => item.testPlan))].sort((a, b) => TEST_PLAN_ORDER.indexOf(a) - TEST_PLAN_ORDER.indexOf(b));
+  requireCondition(planIds.length === expected.length && planIds.every((id, index) => id === expected[index]), 'candidate tests plan_ids must match changed paths');
+  if (candidateState === 'rejected' || classifications.length === 0) requireCondition(value.state === 'not_run' && planIds.length === 0, 'rejected or empty candidate tests must be not_run with no plans');
+  else requireCondition(value.state !== 'not_run' && planIds.length > 0, 'ready candidate tests must run trusted plans');
+  return { state: value.state, plan_ids: planIds, summary: string(value.summary, 'candidate tests summary', 2000) };
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (isObject(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
+function candidateEffect(candidate) {
+  return {
+    schema_version: candidate.schema_version, state: candidate.state, intent: candidate.intent, patch_sha: candidate.patch_sha,
+    changed_paths: candidate.changed_paths, file_sizes: candidate.file_sizes, file_count: candidate.file_count,
+    patch_bytes: candidate.patch_bytes, total_file_bytes: candidate.total_file_bytes, limits: candidate.limits,
+    fix_cycle: candidate.fix_cycle, tests: { state: candidate.tests.state, plan_ids: candidate.tests.plan_ids },
+  };
+}
+
+export function calculateWriterCandidateSha(candidate) { return createHash('sha256').update(canonicalJson(candidateEffect(candidate)), 'utf8').digest('hex'); }
+
 export function validateWriterCandidateArtifact(value) {
-  validateEnvelope(value, 'candidate', ['state', 'intent', 'patch_sha', 'changed_paths', 'file_sizes', 'file_count', 'patch_bytes', 'total_file_bytes', 'limits', 'fix_cycle', 'tests']);
+  validateEnvelope(value, 'candidate', ['state', 'intent', 'patch_sha', 'candidate_sha', 'changed_paths', 'file_sizes', 'file_count', 'patch_bytes', 'total_file_bytes', 'limits', 'fix_cycle', 'tests']);
   requireCondition(CANDIDATE_STATES.has(value.state), 'candidate state is invalid');
   const intent = validateIdentity(value.intent, 'candidate intent');
   const limits = value.limits;
@@ -181,31 +226,34 @@ export function validateWriterCandidateArtifact(value) {
   const fileCount = nonNegativeInteger(value.file_count, 'candidate file_count', maxFiles);
   const patchBytes = nonNegativeInteger(value.patch_bytes, 'candidate patch_bytes', maxPatchBytes);
   const totalFileBytes = nonNegativeInteger(value.total_file_bytes, 'candidate total_file_bytes', maxTotalFileBytes);
-  const changedPaths = validateChangedPaths(value.changed_paths, fileCount, maxFiles);
+  const classifiedPaths = validateChangedPaths(value.changed_paths, fileCount, maxFiles);
+  const changedPaths = classifiedPaths.map((item) => item.path);
   const candidate = {
     schema_version: WRITER_ARTIFACT_SCHEMA_VERSION,
     artifact_type: 'candidate',
     state: value.state,
     intent,
     patch_sha: nullableString(value.patch_sha, 'candidate patch_sha', 64, SHA256),
+    candidate_sha: string(value.candidate_sha, 'candidate candidate_sha', 64, SHA256),
     changed_paths: changedPaths,
-    file_sizes: validateFileSizes(value.file_sizes, changedPaths, maxFileSizeBytes, totalFileBytes),
+    file_sizes: validateFileSizes(value.file_sizes, classifiedPaths, maxFileSizeBytes, totalFileBytes),
     file_count: fileCount,
     patch_bytes: patchBytes,
     total_file_bytes: totalFileBytes,
     limits: { maximum_files: maxFiles, maximum_patch_bytes: maxPatchBytes, maximum_file_size_bytes: maxFileSizeBytes, maximum_total_file_bytes: maxTotalFileBytes, maximum_fix_cycles: maxFixCycles },
     fix_cycle: nonNegativeInteger(value.fix_cycle, 'candidate fix_cycle', maxFixCycles),
-    tests: validateTests(value.tests),
+    tests: validateTests(value.tests, classifiedPaths, value.state),
   };
   if (candidate.intent.command === '/agent implement') requireCondition(candidate.fix_cycle === 0, 'implement candidate fix_cycle must be zero');
   if (candidate.intent.command === '/agent retry-write') requireCondition(candidate.fix_cycle > 0, 'retry-write candidate fix_cycle must be positive');
   if (candidate.state === 'ready') requireCondition(candidate.patch_sha !== null && candidate.file_count > 0 && candidate.changed_paths.length > 0 && candidate.patch_bytes > 0, 'ready candidate requires a non-empty patch');
   if (candidate.state === 'rejected') requireCondition(candidate.patch_sha === null && candidate.file_count === 0 && candidate.patch_bytes === 0 && candidate.total_file_bytes === 0 && candidate.changed_paths.length === 0 && candidate.file_sizes.length === 0, 'rejected candidate must not carry a patch');
+  requireCondition(candidate.candidate_sha === calculateWriterCandidateSha(candidate), 'candidate candidate_sha does not match canonical effect');
   return candidate;
 }
 
 export function validateWriterReceiptArtifact(value) {
-  validateEnvelope(value, 'receipt', ['state', 'reason', 'candidate', 'commit_sha', 'ref', 'pr_number', 'pr_url', 'draft']);
+  validateEnvelope(value, 'receipt', ['state', 'reason', 'candidate', 'candidate_sha', 'commit_sha', 'ref', 'pr_number', 'pr_url', 'draft']);
   requireCondition(RECEIPT_STATES.has(value.state), 'receipt state is invalid');
   const candidate = validateWriterCandidateArtifact(value.candidate);
   const receipt = {
@@ -214,12 +262,14 @@ export function validateWriterReceiptArtifact(value) {
     state: value.state,
     reason: string(value.reason, 'receipt reason', 160, /^[A-Za-z][A-Za-z0-9_-]*$/),
     candidate,
+    candidate_sha: string(value.candidate_sha, 'receipt candidate_sha', 64, SHA256),
     commit_sha: nullableString(value.commit_sha, 'receipt commit_sha', 40, COMMIT_SHA),
     ref: nullableString(value.ref, 'receipt ref', 80, BRANCH),
     pr_number: value.pr_number === null ? null : positiveInteger(value.pr_number, 'receipt pr_number'),
     pr_url: nullableString(value.pr_url, 'receipt pr_url', 2048),
     draft: value.draft,
   };
+  requireCondition(receipt.candidate_sha === candidate.candidate_sha, 'receipt candidate_sha must bind candidate');
   requireCondition(typeof receipt.draft === 'boolean' || receipt.draft === null, 'receipt draft must be boolean or null');
   if (receipt.pr_url !== null) {
     let url;
@@ -232,6 +282,7 @@ export function validateWriterReceiptArtifact(value) {
   const published = receipt.state === 'draft_created' || receipt.state === 'draft_updated';
   if (published) {
     requireCondition(candidate.state === 'ready', 'draft receipt requires ready candidate');
+    requireCondition(candidate.tests.state === 'passed', 'draft receipt requires passed candidate tests');
     if (receipt.state === 'draft_created') requireCondition(candidate.intent.command === '/agent implement', 'draft_created receipt requires implement command');
     if (receipt.state === 'draft_updated') requireCondition(candidate.intent.command === '/agent retry-write', 'draft_updated receipt requires retry-write command');
     requireCondition(receipt.commit_sha !== null && receipt.ref === candidate.intent.branch && receipt.pr_number !== null && receipt.pr_url !== null && receipt.draft === true, 'draft receipt is incomplete or does not bind candidate branch');

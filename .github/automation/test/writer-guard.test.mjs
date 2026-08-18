@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   branchForIssue,
+  classifyWriterPath,
   canonicalWriterCommand,
   evaluateWriterRequest,
   validateWriterChangeSet,
@@ -39,6 +40,13 @@ test('accepts only the canonical writer command representation', () => {
     '/agent  implement', '/agent\timplement', '/agent implement ', '/agent implement now',
     '/agent Implement', '/agent RETRY-WRITE', '/other implement', 'merge', null, 1,
   ]) assert.equal(canonicalWriterCommand(raw), null, JSON.stringify(raw));
+});
+
+test('classifies only the positive writer path allowlist', () => {
+  assert.deepEqual(classifyWriterPath('apps/gateway/src/lib.rs'), { allowed: true, family: 'rust', scope: 'apps/gateway', testPlan: ['diff-check-v1', 'rust-changed-packages-v1'] });
+  assert.deepEqual(classifyWriterPath('frontend/src/App.vue'), { allowed: true, family: 'frontend', scope: 'frontend', testPlan: ['diff-check-v1', 'frontend-v1'] });
+  assert.deepEqual(classifyWriterPath('docs/runbook.md'), { allowed: true, family: 'docs', scope: 'docs', testPlan: ['diff-check-v1'] });
+  for (const path of ['docs/automation-architecture.md', 'apps/gateway/Cargo.toml', 'frontend/src/App.Vue']) assert.equal(classifyWriterPath(path).reason, 'path_not_allowlisted');
 });
 
 test('admits exact writer commands and assigns the deterministic Issue branch', () => {
@@ -79,13 +87,13 @@ test('fails closed for command, authorization, switches, and Issue admission', (
 
 test('accepts a bounded regular change set and includes its branch', () => {
   const result = evaluateWriterRequest(request({
-    changeSet: [{ path: 'src/app.mjs', mode: '100644', bytes: 8 }],
+    changeSet: [{ path: 'apps/a/src/app.rs', mode: '100644', bytes: 8 }],
     patchBytes: 8,
     limits,
   }));
   assert.deepEqual(result, { allowed: true, reason: null, branch: 'agent/issue-41', fileCount: 1, patchBytes: 8, totalBytes: 8 });
   assert.equal(evaluateWriterRequest(request({
-    changeSet: [{ path: 'src/app.mjs', mode: '100644', bytes: 8 }],
+    changeSet: [{ path: 'apps/a/src/app.rs', mode: '100644', bytes: 8 }],
     patchBytes: 13,
     limits,
   })).reason, 'maximum_patch_bytes_exceeded');
@@ -124,7 +132,7 @@ test('rejects every unsafe path class including both rename endpoints', () => {
     }
   }
   for (const path of ['com10.txt', 'lpt0', 'console.txt', 'conin.txt', 'conout.txt', 'clock.txt']) {
-    assert.equal(validateWriterChangeSet([{ path, mode: '100644', bytes: 1 }], limits, 1).allowed, true, path);
+    assert.equal(validateWriterChangeSet([{ path, mode: '100644', bytes: 1 }], limits, 1).reason, 'path_not_allowlisted', path);
   }
   for (const field of ['oldPath', 'toPath', 'status']) {
     assert.equal(validateWriterChangeSet([{
@@ -135,13 +143,13 @@ test('rejects every unsafe path class including both rename endpoints', () => {
 
 test('rejects Unicode and case-fold path collisions, links, malformed files, and size violations', () => {
   const cases = [
-    [[{ path: 'A.txt', mode: '100644', bytes: 1 }, { path: 'a.txt', mode: '100644', bytes: 1 }], 'path_collision'],
+    [[{ path: 'apps/a/src/A.rs', mode: '100644', bytes: 1 }, { path: 'apps/a/src/a.rs', mode: '100644', bytes: 1 }], 'path_collision'],
     [[{ path: 'link', mode: '120000', bytes: 1 }], 'non_regular_mode'],
     [[{ path: 'submodule', mode: 0o160000, bytes: 1 }], 'non_regular_mode'],
     [[{ path: 'unknown-mode', bytes: 1 }], 'non_regular_mode'],
     [[{ path: 'x', mode: '100644', bytes: -1 }], 'invalid_file_bytes'],
     [[{ path: 'x', mode: '100644', bytes: 11 }], 'maximum_file_bytes_exceeded'],
-    [[{ path: 'x', mode: '100644', bytes: 8 }, { path: 'y', mode: '100644', bytes: 8 }], 'maximum_total_bytes_exceeded'],
+    [[{ path: 'apps/a/src/x.rs', mode: '100644', bytes: 8 }, { path: 'apps/a/src/y.rs', mode: '100644', bytes: 8 }], 'maximum_total_bytes_exceeded'],
     [[{ path: 'a', mode: '100644', bytes: 1 }, { path: 'b', mode: '100644', bytes: 1 }, { path: 'c', mode: '100644', bytes: 1 }], 'maximum_files_exceeded'],
     [[], 'empty_change_set'],
   ];
@@ -159,7 +167,7 @@ test('rejects Unicode and case-fold path collisions, links, malformed files, and
     ...limits,
     unexpected: 1,
   }, 1).reason, 'invalid_limits');
-  assert.equal(validateWriterChangeSet([{ path: 'x', mode: 0o100755, bytes: 1 }], limits, 1).allowed, true);
+  assert.equal(validateWriterChangeSet([{ path: 'apps/a/src/x.rs', mode: 0o100755, bytes: 1 }], limits, 1).allowed, true);
   assert.deepEqual(writerLimitsFromContract({
     maximum_files: 50,
     maximum_file_size_bytes: 524_288,

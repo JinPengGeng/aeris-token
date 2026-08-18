@@ -56,6 +56,7 @@ test('Writer ownership marker must be unique and in the canonical final position
 function snapshot(overrides = {}) {
   return {
     command: '/agent implement', issueNumber, repositoryId, writerApp,
+    baseSha: sha('a'), sourceSha: sha('a'),
     branch: { ...branch }, pullRequests: [],
     ...overrides,
   };
@@ -64,7 +65,7 @@ function snapshot(overrides = {}) {
 test('implement creates only on a virgin Issue branch with zero exact-head history', () => {
   const virginBranch = { ref: branch.ref, exists: false, headSha: null };
   const result = evaluateWriterLifecycle(snapshot({ branch: virginBranch }));
-  assert.deepEqual(result, { action: 'create', reason: 'create_draft_pull_request', branch: branch.ref });
+  assert.deepEqual(result, { action: 'create', reason: 'create_draft_pull_request', branch: branch.ref, sourceSha: sha('a') });
 
   assert.equal(evaluateWriterLifecycle(snapshot()).reason, 'branch_already_exists');
   assert.equal(evaluateWriterLifecycle(snapshot({ branch: virginBranch, pullRequests: [pull()] })).reason, 'orphaned_managed_branch');
@@ -72,8 +73,8 @@ test('implement creates only on a virgin Issue branch with zero exact-head histo
 
 test('retry-write updates exactly one owned Draft PR at its expected head', () => {
   const result = evaluateWriterLifecycle(snapshot({ command: '/agent retry-write', expectedHeadSha: sha('a'), pullRequests: [pull()] }));
-  assert.deepEqual(result, { action: 'update', reason: 'update_managed_draft_pull_request', branch: branch.ref, prNumber: 99 });
-  assert.equal(evaluateWriterLifecycle(snapshot({ command: '/agent retry-write', expectedHeadSha: sha('b'), pullRequests: [pull()] })).reason, 'expected_head_sha_mismatch');
+  assert.deepEqual(result, { action: 'update', reason: 'update_managed_draft_pull_request', branch: branch.ref, prNumber: 99, sourceSha: sha('a') });
+  assert.equal(evaluateWriterLifecycle(snapshot({ command: '/agent retry-write', expectedHeadSha: sha('b'), sourceSha: sha('b'), pullRequests: [pull()] })).reason, 'expected_head_sha_mismatch');
   assert.equal(evaluateWriterLifecycle(snapshot({ command: '/agent retry-write', expectedHeadSha: null, pullRequests: [pull()] })).reason, 'invalid_expected_head_sha');
   assert.equal(evaluateWriterLifecycle(snapshot({ command: '/agent retry-write', expectedHeadSha: sha('a') })).reason, 'retry_requires_managed_draft_pull_request');
 });

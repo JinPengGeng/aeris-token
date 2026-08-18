@@ -132,8 +132,19 @@ function pathFailure(candidate) {
   return null;
 }
 
+export function classifyWriterPath(candidate) {
+  const failure = pathFailure(candidate);
+  if (failure) return { allowed: false, reason: failure };
+  const parts = candidate.split('/');
+  if (/^(?:apps|crates)\/[^/]+\/(?:src|tests)\/.*\.rs$/.test(candidate)) return { allowed: true, family: 'rust', scope: `${parts[0]}/${parts[1]}`, testPlan: ['diff-check-v1', 'rust-changed-packages-v1'] };
+  if (/^frontend\/src\/.*\.(?:ts|tsx|vue|css)$/.test(candidate)) return { allowed: true, family: 'frontend', scope: 'frontend', testPlan: ['diff-check-v1', 'frontend-v1'] };
+  if (/^docs\/.*\.md$/.test(candidate) && candidate !== 'docs/automation-architecture.md') return { allowed: true, family: 'docs', scope: 'docs', testPlan: ['diff-check-v1'] };
+  return { allowed: false, reason: 'path_not_allowlisted' };
+}
+
 function changePaths(change) {
   if (!change || typeof change !== 'object' || Array.isArray(change)) return null;
+  if (Object.hasOwn(change, 'previousPath') && Object.hasOwn(change, 'fromPath')) return null;
   const paths = [];
   if (Object.hasOwn(change, 'path')) paths.push(change.path);
   if (Object.hasOwn(change, 'previousPath')) paths.push(change.previousPath);
@@ -174,12 +185,21 @@ export function validateWriterChangeSet(changes, limits = DEFAULT_WRITER_LIMITS,
     if (!Number.isSafeInteger(totalBytes) || totalBytes > normalized.maximumTotalBytes) {
       return denied('maximum_total_bytes_exceeded');
     }
+    const changePathsToClassify = [];
     for (const candidate of paths) {
       const reason = pathFailure(candidate);
       if (reason) return denied(reason, { path: candidate });
       const canonical = candidate.normalize('NFC').toLowerCase();
       if (canonicalPaths.has(canonical)) return denied('path_collision', { path: candidate });
       canonicalPaths.add(canonical);
+      changePathsToClassify.push(candidate);
+    }
+    let changeClassification = null;
+    for (const candidate of changePathsToClassify) {
+      const classified = classifyWriterPath(candidate);
+      if (!classified.allowed) return denied(classified.reason, { path: candidate });
+      if (changeClassification && (classified.family !== changeClassification.family || classified.scope !== changeClassification.scope)) return denied('rename_scope_mismatch');
+      changeClassification = classified;
     }
   }
   return allowed({ fileCount: changes.length, patchBytes, totalBytes });
