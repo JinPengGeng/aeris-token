@@ -32,9 +32,12 @@ The scheduler core defines a separate `EmergencyChainGrant` capability:
   later revocations are idempotent.
 - Progress is owned by the grant domain object, not supplied as caller-authored
   `attempted_targets`. Authorizing a target reserves one non-cloneable permit
-  and locks the grant. Only consuming that exact permit as a terminal outcome,
-  retryable failure, or authoritative safe skip can update the cursor. Terminal
-  outcomes consume the one-request grant; retrying the last slot exhausts it.
+  and locks the grant. The permit has no target getter. It must be consumed by a
+  send-boundary revalidation to produce a non-cloneable dispatch capability,
+  whose `FnOnce` dispatch consumes it. Only the resulting dispatched-attempt
+  receipt can record success/failure. A safe skip instead consumes the permit
+  with an opaque ledger proof. Terminal outcomes consume the one-request grant;
+  retrying the last slot exhausts it.
 - A request that asks for emergency routing fails closed for a missing/mismatched
   grant, principal or operation overreach, request ID/fingerprint/nonce drift,
   future/expired/revoked grant, chain hash drift, outstanding permit, consumed or
@@ -47,12 +50,21 @@ The scheduler core defines a separate `EmergencyChainGrant` capability:
 
 ## Trusted input boundary
 
-`NormalRouting` requires `ServerNormalRoutingActivation`, which may only be
-created by server route selection. Emergency principal and operation come from
-authenticated server context and server route selection. The request scope and
-chain hash come from server grant state. Gate and completion instants come from
-the server clock. These types intentionally have no serde deserialization
-contract.
+All trusted values are minted through `GatewayEmergencyChainAuthority`. This is
+a sealed capability with no safe public constructor, `Default`, `Clone`, or
+serde contract; ordinary dependency crates cannot forge it. This preparatory
+slice deliberately exposes no bootstrap path, so the capability remains
+unusable until a gateway-owned authority bootstrap is reviewed and added.
+
+`NormalRouting` requires `ServerNormalRoutingActivation`. Emergency principal
+and operation come from
+`AuthenticatedEmergencyChainPrincipal` and
+`ServerSelectedEmergencyChainOperation`. Grant ID and chain hash come from
+`ServerEmergencyChainGrantActivation`, built from server grant state. In
+contrast, `LiveEmergencyChainRequestContext` is independently derived from the
+currently authenticated request and is compared with the stored grant scope;
+it must never be copied from the grant to make the comparison tautological.
+Gate and completion instants come from the server clock.
 
 No adapter may populate these values from headers, JSON bodies, query strings,
 cookies, client timestamps, or any other client-controlled field. Client input
@@ -66,12 +78,21 @@ instant for one gate evaluation. Every predicate is evaluated against that same
 value. Validity is the half-open range `[issued_at, expires_at)`, and a
 revocation is effective when `revoked_at <= gate_at`.
 
-The in-memory permit is not a durable authorization lease. Future integration
-must strong-read grant/session state and atomically reserve its permit with CAS
-at the send boundary. Completion, including `AuthoritativeSafeSkip`, must be
-derived from the authoritative attempt/materialization ledger and persisted by
-CAS. A client assertion or a locally compressed candidate list is never proof
-that an earlier slot was attempted or safely skipped.
+The initial gate only reserves an in-memory permit. `linearize_dispatch` takes a
+fresh trusted live-request context, rechecks grant identity, request scope,
+principal, operation, hash, expiry and revocation, consumes the permit, and
+marks the session dispatching. `dispatch_once` then consumes the resulting
+capability and exposes the target only to one `FnOnce` send closure.
+
+This still is not a distributed authorization lease. Future integration must
+strong-read grant/session state and persist the `Ready -> Outstanding ->
+Dispatching -> Ready/Consumed/Exhausted` transition with versioned CAS. A stale
+instance or CAS loser must not receive or use a dispatch capability. Dispatch
+completion must use the authoritative attempt ledger. Safe skip must use
+`EmergencyChainSafeSkipProof`, minted only by the gateway authority after an
+authoritative materialization-ledger record is committed, and its transition
+must use the same CAS discipline. A client assertion or locally compressed
+candidate list is never proof of attempt or safe skip.
 
 ## Deferred integration
 
