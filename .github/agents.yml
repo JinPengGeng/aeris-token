@@ -52,6 +52,9 @@ model_policy:
   retryable_http_statuses: [408, 429, 500, 502, 503, 504]
   retryable_failures: [connect_error, timeout]
   non_retryable_http_statuses: [400, 401, 403, 404, 405, 409, 413, 422]
+  structured_output:
+    canary_agents: [planner]
+    approved_model_ids: [gpt-5.6-sol]
 
 agents:
   triage:

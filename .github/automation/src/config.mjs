@@ -86,6 +86,24 @@ export function validateContracts(agents, policy) {
     'agent registry does not contain exactly the approved roles',
   );
 
+  const structuredOutput = agents.model_policy?.structured_output;
+  requireCondition(
+    Array.isArray(structuredOutput?.canary_agents) &&
+      structuredOutput.canary_agents.length === 1 &&
+      structuredOutput.canary_agents[0] === 'planner',
+    'structured output canary must remain limited to planner',
+  );
+  requireCondition(
+    Array.isArray(structuredOutput?.approved_model_ids) &&
+      structuredOutput.approved_model_ids.length > 0 &&
+      structuredOutput.approved_model_ids.every(
+        (id) => typeof id === 'string' && id === id.trim() && id.length > 0 && id.length <= 200,
+      ) &&
+      new Set(structuredOutput.approved_model_ids).size ===
+        structuredOutput.approved_model_ids.length,
+    'structured output approved models must be unique bounded IDs',
+  );
+
   const allowedModelVariables = new Set(agents.model_policy?.allowed_model_variables ?? []);
   for (const [name, agent] of Object.entries(agents.agents)) {
     validateAgent(name, agent, allowedModelVariables, knownAgents);
@@ -165,4 +183,17 @@ export function resolveModelCandidates(agentName, agent, environment) {
     throw new ContractError(`no model is configured for ${agentName}`);
   }
   return candidates;
+}
+
+export function shouldUseStructuredOutput(agentName, candidates, agents) {
+  const policy = agents.model_policy.structured_output;
+  if (!policy.canary_agents.includes(agentName)) return false;
+  const approvedModelIds = new Set(policy.approved_model_ids);
+  if (!candidates.every((candidate) => approvedModelIds.has(candidate.id))) {
+    throw Object.assign(
+      new ContractError(`structured output model is not approved for ${agentName}`),
+      { code: 'structured_output_model_not_approved' },
+    );
+  }
+  return true;
 }
