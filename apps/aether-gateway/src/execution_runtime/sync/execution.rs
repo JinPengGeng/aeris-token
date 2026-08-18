@@ -2757,7 +2757,7 @@ async fn execute_execution_runtime_sync_impl(
             &plan.provider_api_format,
             local_failover_analysis.classification,
             result.status_code,
-            crate::orchestration::FailureOrigin::UpstreamProvider,
+            local_failover_analysis.failure_origin,
         );
         if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
             *retry_scope =

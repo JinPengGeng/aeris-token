@@ -26,6 +26,7 @@ impl LocalFailoverDecision {
 pub(crate) struct LocalFailoverAnalysis {
     pub(crate) classification: LocalFailoverClassification,
     pub(crate) decision: LocalFailoverDecision,
+    pub(crate) failure_origin: FailureOrigin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,7 @@ impl LocalFailoverAnalysis {
         Self {
             classification: LocalFailoverClassification::UseDefault,
             decision: LocalFailoverDecision::UseDefault,
+            failure_origin: FailureOrigin::Unknown,
         }
     }
 }
@@ -51,6 +53,7 @@ pub(crate) fn analyze_local_failover(
     LocalFailoverAnalysis {
         classification,
         decision: decision_from_classification(classification),
+        failure_origin: input.failure_origin,
     }
 }
 
@@ -76,7 +79,6 @@ pub(crate) fn analyze_local_transport_error(
 pub(crate) fn apply_provider_failure_disposition(
     provider_api_format: &str,
     status_code: u16,
-    failure_origin: FailureOrigin,
     analysis: LocalFailoverAnalysis,
 ) -> LocalFailoverAnalysis {
     if status_code < 400
@@ -92,7 +94,7 @@ pub(crate) fn apply_provider_failure_disposition(
         provider_api_format,
         analysis.classification,
         status_code,
-        failure_origin,
+        analysis.failure_origin,
     );
     let decision = match disposition.retry_action {
         FailureRetryAction::Stop | FailureRetryAction::SameCredential => {
@@ -106,6 +108,7 @@ pub(crate) fn apply_provider_failure_disposition(
     LocalFailoverAnalysis {
         classification: analysis.classification,
         decision,
+        failure_origin: analysis.failure_origin,
     }
 }
 
@@ -142,8 +145,7 @@ mod tests {
         recover_local_failover_decision, LocalFailoverAnalysis, LocalFailoverDecision,
     };
     use crate::orchestration::{
-        FailureOrigin, LocalFailoverClassification, LocalFailoverInput, LocalFailoverPolicy,
-        OperationReplayPolicy,
+        LocalFailoverClassification, LocalFailoverInput, LocalFailoverPolicy, OperationReplayPolicy,
     };
 
     #[test]
@@ -265,13 +267,8 @@ mod tests {
                 LocalFailoverInput::new(status_code, Some(r#"{"error":{"message":"failed"}}"#)),
             );
             assert_eq!(
-                apply_provider_failure_disposition(
-                    "claude:messages",
-                    status_code,
-                    FailureOrigin::UpstreamProvider,
-                    analysis,
-                )
-                .decision,
+                apply_provider_failure_disposition("claude:messages", status_code, analysis,)
+                    .decision,
                 LocalFailoverDecision::StopLocalFailover,
                 "Anthropic status {status_code} must not blindly rotate credentials"
             );
@@ -283,13 +280,8 @@ mod tests {
                 LocalFailoverInput::new(status_code, Some(r#"{"error":{"message":"failed"}}"#)),
             );
             assert_eq!(
-                apply_provider_failure_disposition(
-                    "claude:messages",
-                    status_code,
-                    FailureOrigin::UpstreamProvider,
-                    analysis,
-                )
-                .decision,
+                apply_provider_failure_disposition("claude:messages", status_code, analysis,)
+                    .decision,
                 LocalFailoverDecision::RetryNextCandidate,
                 "Anthropic status {status_code} should continue candidate failover"
             );
@@ -300,13 +292,7 @@ mod tests {
     fn provider_failure_disposition_preserves_non_failure_default() {
         let analysis = LocalFailoverAnalysis::use_default();
         assert_eq!(
-            apply_provider_failure_disposition(
-                "claude:messages",
-                200,
-                FailureOrigin::UpstreamProvider,
-                analysis,
-            )
-            .decision,
+            apply_provider_failure_disposition("claude:messages", 200, analysis,).decision,
             LocalFailoverDecision::UseDefault
         );
     }

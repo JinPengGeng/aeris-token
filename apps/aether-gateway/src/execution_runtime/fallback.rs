@@ -2,7 +2,7 @@ use aether_contracts::{ExecutionPlan, ExecutionResult};
 use serde_json::Value;
 
 use crate::orchestration::{
-    resolve_local_failover_analysis_for_attempt, LocalFailoverAnalysis,
+    resolve_local_failover_analysis_for_attempt, FailureOrigin, LocalFailoverAnalysis,
     LocalFailoverClassification, LocalFailoverDecision,
 };
 use crate::AppState;
@@ -68,6 +68,7 @@ pub(crate) async fn analyze_local_candidate_failover_sync(
             return LocalFailoverAnalysis {
                 classification: LocalFailoverClassification::StopExecutionError,
                 decision: LocalFailoverDecision::StopLocalFailover,
+                failure_origin: FailureOrigin::Internal,
             };
         }
     }

@@ -36,7 +36,7 @@ impl<'a> LocalFailoverInput<'a> {
         Self::trusted(
             status_code,
             response_text,
-            FailureOrigin::UpstreamProvider,
+            failure_origin_from_upstream_response(status_code, response_text),
             replay_policy,
         )
     }
@@ -83,8 +83,39 @@ pub(crate) enum OperationReplayPolicy {
 }
 
 impl OperationReplayPolicy {
-    const fn allows_candidate_switch(self) -> bool {
+    pub(crate) const fn allows_candidate_switch(self) -> bool {
         matches!(self, Self::Conservative)
+    }
+}
+
+/// Provider responses are trusted at this boundary. A 401 is an explicit
+/// credential rejection; a 403 needs an authentication taxonomy because it
+/// can also describe a non-retryable permission policy.
+pub(crate) fn failure_origin_from_upstream_response(
+    status_code: u16,
+    response_text: Option<&str>,
+) -> FailureOrigin {
+    if status_code == 401 {
+        return FailureOrigin::UpstreamCredential;
+    }
+    if status_code != 403 {
+        return FailureOrigin::UpstreamProvider;
+    }
+    let is_authentication_error = serde_json::from_str::<Value>(response_text.unwrap_or_default())
+        .ok()
+        .and_then(|body| {
+            body.get("error")
+                .and_then(|error| error.get("type"))
+                .or_else(|| body.get("type"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .map(|kind| kind.eq_ignore_ascii_case("authentication_error"))
+        })
+        .unwrap_or(false);
+    if is_authentication_error {
+        FailureOrigin::UpstreamCredential
+    } else {
+        FailureOrigin::UpstreamProvider
     }
 }
 
@@ -348,6 +379,9 @@ pub(crate) fn classify_local_failover(
     }
 
     if input.failure_origin == FailureOrigin::UpstreamCredential {
+        if !input.replay_policy.allows_candidate_switch() {
+            return LocalFailoverClassification::StopReplayPolicy;
+        }
         return if matches!(input.status_code, 401 | 403) {
             LocalFailoverClassification::RetryUpstreamFailure
         } else {
@@ -1108,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    fn only_explicit_upstream_credential_rejection_rotates_credentials() {
+    fn credential_rejection_rotates_only_when_replay_is_safe() {
         for status_code in [401, 403] {
             let credential_classification = classify_local_failover(
                 &LocalFailoverPolicy::default(),
@@ -1116,7 +1150,7 @@ mod tests {
                     status_code,
                     Some(r#"{"error":{"message":"credential rejected"}}"#),
                     FailureOrigin::UpstreamCredential,
-                    OperationReplayPolicy::NoReplayAfterDispatch,
+                    OperationReplayPolicy::Conservative,
                 ),
             );
             assert_eq!(
@@ -1136,6 +1170,20 @@ mod tests {
             assert_eq!(
                 classify_local_failover(
                     &LocalFailoverPolicy::default(),
+                    LocalFailoverInput::trusted(
+                        status_code,
+                        Some(r#"{"error":{"message":"credential rejected"}}"#),
+                        FailureOrigin::UpstreamCredential,
+                        OperationReplayPolicy::NoReplayAfterDispatch,
+                    ),
+                ),
+                LocalFailoverClassification::StopReplayPolicy,
+                "credential rejection must not replay a dispatched non-idempotent request"
+            );
+
+            assert_eq!(
+                classify_local_failover(
+                    &LocalFailoverPolicy::default(),
                     LocalFailoverInput::upstream_response(
                         status_code,
                         Some(r#"{"error":{"message":"credential rejected"}}"#),
@@ -1145,6 +1193,28 @@ mod tests {
                 LocalFailoverClassification::StopStatusCode
             );
         }
+    }
+
+    #[test]
+    fn trusted_provider_auth_boundary_classifies_only_explicit_credentials() {
+        assert_eq!(
+            failure_origin_from_upstream_response(401, Some("not JSON")),
+            FailureOrigin::UpstreamCredential
+        );
+        assert_eq!(
+            failure_origin_from_upstream_response(
+                403,
+                Some(r#"{"type":"error","error":{"type":"authentication_error"}}"#),
+            ),
+            FailureOrigin::UpstreamCredential
+        );
+        assert_eq!(
+            failure_origin_from_upstream_response(
+                403,
+                Some(r#"{"type":"error","error":{"type":"permission_error"}}"#),
+            ),
+            FailureOrigin::UpstreamProvider
+        );
     }
 
     #[test]
