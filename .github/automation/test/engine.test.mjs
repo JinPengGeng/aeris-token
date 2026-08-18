@@ -251,7 +251,7 @@ test('Issue triage publishes one managed comment and replay is a no-op', async (
   assert.equal(ai.calls(), 1);
 });
 
-test('analysis passes the validated output token budget to the AI client', async () => {
+test('analysis passes the output budget without enabling structured output for triage', async () => {
   const github = new FakeGitHub();
   const currentContracts = enabledContracts('triage');
   let request;
@@ -261,6 +261,75 @@ test('analysis passes the validated output token budget to the AI client', async
     contracts: currentContracts, policySha, github, aiClientFactory: ai.factory,
   });
   assert.equal(request.maxTokens, currentContracts.agents.runtime.limits.maximum_output_tokens);
+  assert.equal(request.responseFormat, undefined);
+});
+
+test('planner canary sends its strict response format to the AI client', async () => {
+  const github = new FakeGitHub();
+  let request;
+  const planEvent = {
+    sender: { login: 'maintainer' },
+    issue: { number: 1 },
+    comment: { id: 34, body: '/agent plan', author_association: 'MEMBER' },
+  };
+  await runAutomation({
+    kind: 'issue',
+    eventName: 'issue_comment',
+    event: planEvent,
+    environment: environment({ AERIS_AI_MODEL: 'gpt-5.6-sol' }),
+    repoRoot,
+    contracts: enabledContracts('planner'),
+    policySha,
+    github,
+    aiClientFactory: () => ({
+      async complete(value) {
+        request = value;
+        return {
+          content: JSON.stringify({
+            schema_version: 1,
+            agent: 'planner',
+            summary: 'Implement the bounded change.',
+            acceptance_criteria: ['The response is schema-valid.'],
+            implementation_steps: ['Send the strict planner schema.'],
+            validation_plan: ['Run the automation tests.'],
+            risks: ['The provider capability requires a live canary.'],
+            next_agent: null,
+          }),
+          model: { alias: 'default', id: 'gpt-5.6-sol' },
+          durationMs: 12,
+          usage: { total_tokens: 20 },
+        };
+      },
+    }),
+  });
+  assert.equal(request.responseFormat.type, 'json_schema');
+  assert.equal(request.responseFormat.json_schema.name, 'aeris_planner_output');
+  assert.equal(request.responseFormat.json_schema.strict, true);
+  assert.equal(request.responseFormat.json_schema.schema.additionalProperties, false);
+});
+
+test('unapproved planner models fail before reservation or model construction', async () => {
+  const github = new FakeGitHub();
+  const planEvent = {
+    sender: { login: 'maintainer' },
+    issue: { number: 1 },
+    comment: { id: 35, body: '/agent plan', author_association: 'MEMBER' },
+  };
+  await assert.rejects(
+    () =>
+      runPreflightPhase({
+        kind: 'issue',
+        eventName: 'issue_comment',
+        event: planEvent,
+        environment: environment({ AERIS_AI_MODEL: 'unverified-model' }),
+        repoRoot,
+        contracts: enabledContracts('planner'),
+        policySha,
+        github,
+      }),
+    (error) => error.code === 'structured_output_model_not_approved',
+  );
+  assert.equal(github.comments.length, 0);
 });
 
 test('generation change during model call prevents writeback', async () => {
@@ -866,17 +935,29 @@ test('model and schema failures replace the reservation with failed metadata', a
     [() => { throw Object.assign(new Error('truncated'), { code: 'output_truncated' }); }, 'output_truncated'],
   ]) {
     const github = new FakeGitHub();
+    const modelEvents = [];
     await assert.rejects(
       runAutomation({
         kind: 'issue', eventName: 'issues', event: issueEvent, environment: environment(), repoRoot,
         contracts: enabledContracts('triage'), policySha, github,
         aiClientFactory: () => ({ async complete() { return completion(); } }),
+        auditEvent: (event) => modelEvents.push(event),
       }),
       (error) => error.code === expectedCode,
     );
     assert.equal(managedMetadata(github).result, 'failed');
     assert.equal(managedMetadata(github).reason_codes.at(-1), expectedCode);
     assert.equal(managedMetadata(github).lease_expires_at, null);
+    assert.equal(modelEvents.length, 1);
+    assert.equal(modelEvents[0].code, expectedCode);
+    if (expectedCode === 'invalid_model_output') {
+      assert.equal(modelEvents[0].diagnostic, 'json_syntax');
+      assert.equal(modelEvents[0].completion_received, true);
+      assert.equal(modelEvents[0].content_bytes, 10);
+      assert.equal(modelEvents[0].model_alias, 'default');
+      assert.equal(modelEvents[0].model_id, 'test-model');
+      assert.equal(JSON.stringify(modelEvents[0]).includes('{not json}'), false);
+    }
   }
 });
 

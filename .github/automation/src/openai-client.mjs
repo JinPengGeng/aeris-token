@@ -282,7 +282,7 @@ export class OpenAICompatibleClient {
     return new Set(ids);
   }
 
-  async complete({ candidates, messages, maxTokens = 1800 }) {
+  async complete({ candidates, messages, maxTokens = 1800, responseFormat = undefined }) {
     const availableModels = await this.listModelIds();
     for (const candidate of candidates) {
       if (!availableModels.has(candidate.id)) {
@@ -307,6 +307,7 @@ export class OpenAICompatibleClient {
             max_tokens: maxTokens,
             stream: true,
             stream_options: { include_usage: true },
+            ...(responseFormat === undefined ? {} : { response_format: responseFormat }),
           }),
           headers: { accept: 'text/event-stream' },
         });

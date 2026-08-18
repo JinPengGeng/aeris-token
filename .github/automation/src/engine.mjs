@@ -1,7 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
-import { loadContracts, resolveModelCandidates } from './config.mjs';
+import {
+  loadContracts,
+  resolveModelCandidates,
+  shouldUseStructuredOutput,
+} from './config.mjs';
 import { GitHubClient } from './github-client.mjs';
 import { buildIssueInput, buildPullInput, inputFingerprint, sourceKey } from './input.mjs';
 import {
@@ -12,8 +16,8 @@ import {
   renderAnalysisComment,
   renderStatusComment,
 } from './managed-comment.mjs';
-import { OpenAICompatibleClient } from './openai-client.mjs';
-import { buildMessages } from './prompts.mjs';
+import { byteLength, OpenAICompatibleClient } from './openai-client.mjs';
+import { buildMessages, responseFormatForAgent } from './prompts.mjs';
 import { evaluateRequiredChecks } from './required-checks.mjs';
 import { routeIssueInvocation, routePullInvocation } from './router.mjs';
 import { parseModelJson, validateAgentOutput } from './schemas.mjs';
@@ -24,6 +28,13 @@ const LEDGER_LIMIT = 32;
 
 function audit(event) {
   console.log(JSON.stringify(event));
+}
+
+function safeModelDiagnostic(error) {
+  if (error?.code !== 'invalid_model_output') return null;
+  return typeof error.diagnostic === 'string' && /^[a-z0-9_]{1,80}$/.test(error.diagnostic)
+    ? error.diagnostic
+    : 'unspecified';
 }
 
 function policyShaAt(repoRoot) {
@@ -208,7 +219,8 @@ async function fetchInput(kind, number, client, agents) {
 
 function validateAiConfiguration(selectedAgent, agent, agents, environment, { requireSecretValue }) {
   if (!agent?.enabled) throw new Error(`agent is not enabled: ${selectedAgent}`);
-  resolveModelCandidates(selectedAgent, agent, environment);
+  const candidates = resolveModelCandidates(selectedAgent, agent, environment);
+  shouldUseStructuredOutput(selectedAgent, candidates, agents);
   const baseUrl = new URL(environment.AERIS_AI_BASE_URL);
   if (baseUrl.protocol !== 'https:' || baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash) {
     throw new Error('AI base URL is invalid');
@@ -219,6 +231,7 @@ function validateAiConfiguration(selectedAgent, agent, agents, environment, { re
     throw new Error('AI API key is not configured');
   }
   if (!agents.runtime.api.connect_timeout_seconds) throw new Error('AI connect timeout is invalid');
+  return candidates;
 }
 
 function containsSensitiveModelOutput(value, apiKey) {
@@ -517,6 +530,7 @@ export async function runAnalysisPhase({
   github = null,
   aiClientFactory = (options) => new OpenAICompatibleClient(options),
   clock = () => new Date(),
+  auditEvent = audit,
 }) {
   if (artifact.state === 'terminal') {
     return { schema_version: SCHEMA_VERSION, artifact_type: 'analysis', state: 'terminal', reservation: artifact, output: null, model: null, failure: null };
@@ -558,6 +572,7 @@ export async function runAnalysisPhase({
       failure: { code: leaseFailureCode(currentMetadata, clock()) },
     };
   }
+  let completion = null;
   try {
     if (!enabledByKillSwitch(loaded.policy, environment)) throw new Error('agent kill switch is off');
     let modelInput = artifact.preflight.input;
@@ -566,8 +581,10 @@ export async function runAnalysisPhase({
       if (fetched.inputSha !== context.input_sha) throw new Error('input fingerprint changed before analysis');
       modelInput = fetched.input;
     }
-    validateAiConfiguration(context.agent, agent, agents, environment, { requireSecretValue: true });
-    const candidates = resolveModelCandidates(context.agent, agent, environment);
+    const candidates = validateAiConfiguration(context.agent, agent, agents, environment, {
+      requireSecretValue: true,
+    });
+    const useStructuredOutput = shouldUseStructuredOutput(context.agent, candidates, agents);
     const finalManaged = findManagedComment(await client.listIssueComments(context.number));
     const finalMetadata = decodeMetadata(finalManaged?.body);
     const finalFenceMatches =
@@ -594,10 +611,11 @@ export async function runAnalysisPhase({
       timeoutMs: agents.runtime.api.request_timeout_seconds * 1000,
       maximumResponseBytes: agents.runtime.api.maximum_response_bytes,
     });
-    const completion = await ai.complete({
+    completion = await ai.complete({
       candidates,
       messages: buildMessages(context.agent, modelInput),
       maxTokens: agents.runtime.limits.maximum_output_tokens,
+      responseFormat: useStructuredOutput ? responseFormatForAgent(context.agent) : undefined,
     });
     const repositoryLabels = context.kind === 'issue' ? modelInput.available_labels : [];
     const output = validateAgentOutput(context.agent, parseModelJson(completion.content), repositoryLabels);
@@ -606,7 +624,15 @@ export async function runAnalysisPhase({
         code: 'sensitive_model_output',
       });
     }
-    audit({ event: 'aeris_agent_model_call', agent: context.agent, model_alias: completion.model.alias, model_id: completion.model.id, duration_ms: completion.durationMs, usage: usageSummary(completion.usage) });
+    auditEvent({
+      event: 'aeris_agent_model_call',
+      state: 'completed',
+      agent: context.agent,
+      model_alias: completion.model.alias,
+      model_id: completion.model.id,
+      duration_ms: completion.durationMs,
+      usage: usageSummary(completion.usage),
+    });
     return {
       schema_version: SCHEMA_VERSION,
       artifact_type: 'analysis',
@@ -617,7 +643,21 @@ export async function runAnalysisPhase({
       failure: null,
     };
   } catch (error) {
-    audit({ event: 'aeris_agent_model_call', state: 'failed', agent: context.agent, code: error.code ?? 'model_call_failed', status: error.status ?? null });
+    auditEvent({
+      event: 'aeris_agent_model_call',
+      state: 'failed',
+      agent: context.agent,
+      code: error.code ?? 'model_call_failed',
+      diagnostic: safeModelDiagnostic(error),
+      status: error.status ?? null,
+      completion_received: completion !== null,
+      content_bytes:
+        typeof completion?.content === 'string' ? byteLength(completion.content) : null,
+      model_alias: completion?.model?.alias ?? null,
+      model_id: completion?.model?.id ?? null,
+      duration_ms: completion?.durationMs ?? null,
+      usage: usageSummary(completion?.usage),
+    });
     return {
       schema_version: SCHEMA_VERSION,
       artifact_type: 'analysis',

@@ -293,12 +293,21 @@ test('streamed SSE completion aggregates deltas, usage, and DONE', async () => {
     [jsonResponse({ data: [{ id: 'fast-model' }] }), sseResponse()],
     calls,
   );
-  const result = await api.complete({ candidates: [{ alias: 'role', id: 'fast-model' }], messages: [] });
+  const responseFormat = {
+    type: 'json_schema',
+    json_schema: { name: 'test_output', strict: true, schema: { type: 'object' } },
+  };
+  const result = await api.complete({
+    candidates: [{ alias: 'role', id: 'fast-model' }],
+    messages: [],
+    responseFormat,
+  });
   assert.equal(result.content, '{"ok":true}');
   assert.deepEqual(result.usage, { total_tokens: 7 });
   const body = JSON.parse(calls[1].init.body);
   assert.equal(body.stream, true);
   assert.deepEqual(body.stream_options, { include_usage: true });
+  assert.deepEqual(body.response_format, responseFormat);
 });
 
 test('stream that ends without DONE or finish_reason is invalid', async () => {

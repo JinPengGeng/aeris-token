@@ -7,6 +7,7 @@ import {
   ContractError,
   loadContracts,
   resolveModelCandidates,
+  shouldUseStructuredOutput,
   validateContracts,
 } from '../src/config.mjs';
 import {
@@ -34,6 +35,44 @@ test('trusted contracts load with only enabled agents declared', () => {
     .filter(([, agent]) => agent.enabled)
     .map(([name]) => name);
   assert.deepEqual(enabled, ['triage', 'planner']);
+  assert.deepEqual(contracts.agents.model_policy.structured_output, {
+    canary_agents: ['planner'],
+    approved_model_ids: ['gpt-5.6-sol'],
+  });
+});
+
+test('structured output is planner-only and rejects unapproved model candidates', () => {
+  assert.equal(
+    shouldUseStructuredOutput(
+      'triage',
+      [{ alias: 'default', id: 'any-model', variable: 'AERIS_AI_MODEL' }],
+      contracts.agents,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldUseStructuredOutput(
+      'planner',
+      [{ alias: 'default', id: 'gpt-5.6-sol', variable: 'AERIS_AI_MODEL' }],
+      contracts.agents,
+    ),
+    true,
+  );
+  assert.throws(
+    () =>
+      shouldUseStructuredOutput(
+        'planner',
+        [{ alias: 'default', id: 'unverified-model', variable: 'AERIS_AI_MODEL' }],
+        contracts.agents,
+      ),
+    (error) =>
+      error instanceof ContractError &&
+      error.code === 'structured_output_model_not_approved',
+  );
+
+  const agents = structuredClone(contracts.agents);
+  agents.model_policy.structured_output.canary_agents.push('triage');
+  assert.throws(() => validateContracts(agents, contracts.policy), ContractError);
 });
 
 test('contract validation rejects broad fallback statuses', () => {

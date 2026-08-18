@@ -1,45 +1,81 @@
 const CONTROL_LABELS = new Set(['agent-analyze', 'agent-ready', 'automerge-approved']);
 
-function requireCondition(condition, message) {
-  if (!condition) throw Object.assign(new Error(message), { code: 'invalid_model_output' });
+function diagnosticName(name) {
+  return name
+    .replace(/\[\d+\]/g, '_item')
+    .replace(/[^a-z0-9]+/gi, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+}
+
+function requireCondition(condition, message, diagnostic = 'schema_contract') {
+  if (!condition) {
+    throw Object.assign(new Error(message), {
+      code: 'invalid_model_output',
+      diagnostic,
+    });
+  }
 }
 
 function exactKeys(value, keys, name) {
-  requireCondition(value && typeof value === 'object' && !Array.isArray(value), `${name} must be object`);
+  const diagnostic = `${diagnosticName(name)}_keys`;
+  requireCondition(
+    value && typeof value === 'object' && !Array.isArray(value),
+    `${name} must be object`,
+    diagnostic,
+  );
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
-  requireCondition(JSON.stringify(actual) === JSON.stringify(expected), `${name} has unexpected keys`);
+  requireCondition(
+    JSON.stringify(actual) === JSON.stringify(expected),
+    `${name} has unexpected keys`,
+    diagnostic,
+  );
 }
 
 function cleanString(value, name, maximumLength = 1200) {
-  requireCondition(typeof value === 'string', `${name} must be string`);
+  const diagnostic = diagnosticName(name);
+  requireCondition(typeof value === 'string', `${name} must be string`, `${diagnostic}_type`);
   const cleaned = value
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
     .trim();
-  requireCondition(cleaned.length > 0 && cleaned.length <= maximumLength, `${name} length is invalid`);
+  requireCondition(
+    cleaned.length > 0 && cleaned.length <= maximumLength,
+    `${name} length is invalid`,
+    `${diagnostic}_bounds`,
+  );
   return cleaned;
 }
 
 function stringArray(value, name, maximumItems = 12, maximumLength = 500) {
-  requireCondition(Array.isArray(value) && value.length <= maximumItems, `${name} must be bounded array`);
+  requireCondition(
+    Array.isArray(value) && value.length <= maximumItems,
+    `${name} must be bounded array`,
+    `${diagnosticName(name)}_bounds`,
+  );
   return value.map((entry, index) => cleanString(entry, `${name}[${index}]`, maximumLength));
 }
 
 function common(value, agent, keys) {
   exactKeys(value, ['schema_version', 'agent', ...keys], `${agent} output`);
-  requireCondition(value.schema_version === 1, 'output schema_version must be 1');
-  requireCondition(value.agent === agent, `output agent must be ${agent}`);
+  requireCondition(value.schema_version === 1, 'output schema_version must be 1', 'schema_version');
+  requireCondition(value.agent === agent, `output agent must be ${agent}`, 'schema_agent');
 }
 
 export function parseModelJson(content) {
   const trimmed = content.trim();
-  requireCondition(trimmed.startsWith('{') && trimmed.endsWith('}'), 'model output must be one JSON object');
+  requireCondition(
+    trimmed.startsWith('{') && trimmed.endsWith('}'),
+    'model output must be one JSON object',
+    'json_envelope',
+  );
   try {
     return JSON.parse(trimmed);
   } catch {
     throw Object.assign(new Error('model output is not valid JSON'), {
       code: 'invalid_model_output',
+      diagnostic: 'json_syntax',
     });
   }
 }
@@ -54,16 +90,32 @@ export function validateAgentOutput(agent, value, repositoryLabels = []) {
       'recommended_action',
       'next_agent',
     ]);
-    requireCondition(['low', 'medium', 'high'].includes(value.risk), 'triage risk is invalid');
+    requireCondition(
+      ['low', 'medium', 'high'].includes(value.risk),
+      'triage risk is invalid',
+      'triage_risk_enum',
+    );
     const knownLabels = new Set(repositoryLabels);
-    requireCondition(Array.isArray(value.proposed_labels) && value.proposed_labels.length <= 8, 'labels invalid');
+    requireCondition(
+      Array.isArray(value.proposed_labels) && value.proposed_labels.length <= 8,
+      'labels invalid',
+      'proposed_labels_bounds',
+    );
     const proposedLabels = value.proposed_labels.map((label) => {
       const cleaned = cleanString(label, 'proposed label', 80);
-      requireCondition(knownLabels.has(cleaned), `unknown proposed label: ${cleaned}`);
-      requireCondition(!CONTROL_LABELS.has(cleaned), `control label cannot be proposed: ${cleaned}`);
+      requireCondition(knownLabels.has(cleaned), `unknown proposed label: ${cleaned}`, 'proposed_label_unknown');
+      requireCondition(
+        !CONTROL_LABELS.has(cleaned),
+        `control label cannot be proposed: ${cleaned}`,
+        'proposed_label_control',
+      );
       return cleaned;
     });
-    requireCondition(value.next_agent === null || value.next_agent === 'planner', 'triage next_agent invalid');
+    requireCondition(
+      value.next_agent === null || value.next_agent === 'planner',
+      'triage next_agent invalid',
+      'triage_next_agent_enum',
+    );
     return {
       ...value,
       summary: cleanString(value.summary, 'summary'),
@@ -82,7 +134,11 @@ export function validateAgentOutput(agent, value, repositoryLabels = []) {
       'risks',
       'next_agent',
     ]);
-    requireCondition(value.next_agent === null || value.next_agent === 'reviewer', 'planner next_agent invalid');
+    requireCondition(
+      value.next_agent === null || value.next_agent === 'reviewer',
+      'planner next_agent invalid',
+      'planner_next_agent_enum',
+    );
     return {
       ...value,
       summary: cleanString(value.summary, 'summary'),
@@ -104,16 +160,34 @@ export function validateAgentOutput(agent, value, repositoryLabels = []) {
     requireCondition(
       ['ready_for_human_review', 'changes_requested', 'needs_human_decision'].includes(value.verdict),
       'review verdict invalid',
+      'reviewer_verdict_enum',
     );
-    requireCondition(value.next_agent === null || value.next_agent === 'security', 'reviewer next_agent invalid');
-    requireCondition(Array.isArray(value.findings) && value.findings.length <= 20, 'findings invalid');
+    requireCondition(
+      value.next_agent === null || value.next_agent === 'security',
+      'reviewer next_agent invalid',
+      'reviewer_next_agent_enum',
+    );
+    requireCondition(
+      Array.isArray(value.findings) && value.findings.length <= 20,
+      'findings invalid',
+      'findings_bounds',
+    );
     const findings = value.findings.map((finding, index) => {
       exactKeys(finding, ['severity', 'title', 'details', 'path', 'line'], `finding ${index}`);
-      requireCondition(['critical', 'high', 'medium', 'low'].includes(finding.severity), 'severity invalid');
-      requireCondition(finding.path === null || typeof finding.path === 'string', 'finding path invalid');
+      requireCondition(
+        ['critical', 'high', 'medium', 'low'].includes(finding.severity),
+        'severity invalid',
+        'finding_severity_enum',
+      );
+      requireCondition(
+        finding.path === null || typeof finding.path === 'string',
+        'finding path invalid',
+        'finding_path_type',
+      );
       requireCondition(
         finding.line === null || (Number.isInteger(finding.line) && finding.line > 0),
         'finding line invalid',
+        'finding_line_type',
       );
       return {
         ...finding,
