@@ -85,10 +85,29 @@ function requireCompleteFinishReason(finishReason, responseKind) {
   }
 }
 
+function modelRefusalState(refusal) {
+  if (refusal === undefined || refusal === null || refusal === '') return 'none';
+  return typeof refusal === 'string' ? 'present' : 'invalid';
+}
+
+function requireNoModelRefusal(refusalState, responseKind) {
+  if (refusalState === 'invalid') {
+    throw new AiRequestError(`AI ${responseKind} returned an invalid refusal value`, {
+      code: 'invalid_chat_response',
+    });
+  }
+  if (refusalState !== 'present') return;
+  throw new AiRequestError(`AI ${responseKind} was refused by the model`, {
+    code: 'model_refusal',
+    retryable: false,
+  });
+}
+
 function aggregateSseCompletion(text) {
   let content = '';
   let usage = null;
   let finishReason = null;
+  let refusalState = 'none';
   let sawDone = false;
   for (const payload of parseSseEvents(text)) {
     if (payload === '[DONE]') {
@@ -106,10 +125,18 @@ function aggregateSseCompletion(text) {
     } catch {
       throw new AiRequestError('AI stream returned invalid JSON', { code: 'invalid_service_json' });
     }
-    const delta = event.choices?.[0]?.delta?.content;
+    const choice = event.choices?.[0];
+    const delta = choice?.delta?.content;
     if (typeof delta === 'string') content += delta;
+    const nextRefusalState = modelRefusalState(choice?.delta?.refusal);
+    if (
+      nextRefusalState === 'invalid' ||
+      (nextRefusalState === 'present' && refusalState === 'none')
+    ) {
+      refusalState = nextRefusalState;
+    }
     if (event.usage && typeof event.usage === 'object') usage = event.usage;
-    const nextFinishReason = event.choices?.[0]?.finish_reason;
+    const nextFinishReason = choice?.finish_reason;
     if (nextFinishReason) {
       if (finishReason && finishReason !== nextFinishReason) {
         if (finishReason === 'length' || nextFinishReason === 'length') {
@@ -130,6 +157,7 @@ function aggregateSseCompletion(text) {
     });
   }
   requireCompleteFinishReason(finishReason ?? 'stop', 'stream');
+  requireNoModelRefusal(refusalState, 'stream');
   return { content, usage };
 }
 
@@ -336,7 +364,9 @@ export class OpenAICompatibleClient {
           const payload = parseJson(text, 'invalid_service_json');
           const choice = payload.choices?.[0];
           requireCompleteFinishReason(choice?.finish_reason, 'response');
-          const content = choice?.message?.content;
+          const message = choice?.message;
+          requireNoModelRefusal(modelRefusalState(message?.refusal), 'response');
+          const content = message?.content;
           if (typeof content !== 'string') {
             throw new AiRequestError('AI response does not contain message content', {
               code: 'invalid_chat_response',

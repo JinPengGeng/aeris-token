@@ -34,11 +34,14 @@ const candidates = [
   { alias: 'fallback', id: 'strong-model' },
 ];
 
-const completionResponse = (content = '{"ok":true}', options = {}) =>
-  jsonResponse({
-    choices: [{ finish_reason: options.finishReason ?? 'stop', message: { content } }],
+const completionResponse = (content = '{"ok":true}', options = {}) => {
+  const message = { content };
+  if (Object.hasOwn(options, 'refusal')) message.refusal = options.refusal;
+  return jsonResponse({
+    choices: [{ finish_reason: options.finishReason ?? 'stop', message }],
     ...(options.usage ? { usage: options.usage } : {}),
   });
+};
 
 test('429 switches to the approved fallback model', async () => {
   const calls = [];
@@ -310,6 +313,119 @@ test('streamed SSE completion aggregates deltas, usage, and DONE', async () => {
   assert.deepEqual(body.response_format, responseFormat);
 });
 
+test('streamed refusal fails without exposing refusal text or using fallback', async () => {
+  const refusalText = 'private refusal details';
+  const refusalChunks = ['private refusal ', 'details'];
+  const body = [
+    `data: ${JSON.stringify({ choices: [{ delta: { content: '{"ok":true}' } }] })}`,
+    '',
+    ...refusalChunks.flatMap((refusal) => [
+      `data: ${JSON.stringify({ choices: [{ delta: { refusal } }] })}`,
+      '',
+    ]),
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}`,
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n');
+  const calls = [];
+  const api = client(
+    [
+      jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
+      new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+      completionResponse(),
+    ],
+    calls,
+  );
+  let captured;
+  await assert.rejects(
+    () => api.complete({ candidates, messages: [] }),
+    (error) => {
+      captured = error;
+      return error instanceof AiRequestError && error.code === 'model_refusal' && !error.retryable;
+    },
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(captured.message.includes(refusalText), false);
+});
+
+test('streamed truncation takes precedence over refusal', async () => {
+  for (const refusal of ['do not expose', {}]) {
+    const body = [
+      `data: ${JSON.stringify({ choices: [{ delta: { refusal } }] })}`,
+      '',
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}`,
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+    const calls = [];
+    const api = client(
+      [
+        jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
+        new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+        completionResponse(),
+      ],
+      calls,
+    );
+    await assert.rejects(
+      () => api.complete({ candidates, messages: [] }),
+      (error) => error instanceof AiRequestError && error.code === 'output_truncated',
+    );
+    assert.equal(calls.length, 2);
+  }
+});
+
+test('stream accepts empty or null refusal and rejects invalid refusal types', async () => {
+  for (const refusal of [null, '']) {
+    const validBody = [
+      `data: ${JSON.stringify({ choices: [{ delta: { content: '{"ok":true}', refusal } }] })}`,
+      '',
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}`,
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+    const validApi = client(
+      [
+        jsonResponse({ data: [{ id: 'fast-model' }] }),
+        new Response(validBody, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+      ],
+      [],
+    );
+    const result = await validApi.complete({
+      candidates: [{ alias: 'role', id: 'fast-model' }],
+      messages: [],
+    });
+    assert.equal(result.content, '{"ok":true}');
+  }
+
+  for (const refusal of [{}, [], 1]) {
+    const invalidBody = [
+      `data: ${JSON.stringify({ choices: [{ delta: { refusal } }] })}`,
+      '',
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}`,
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+    const calls = [];
+    const api = client(
+      [
+        jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
+        new Response(invalidBody, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+        completionResponse(),
+      ],
+      calls,
+    );
+    await assert.rejects(
+      () => api.complete({ candidates, messages: [] }),
+      (error) => error instanceof AiRequestError && error.code === 'invalid_chat_response',
+    );
+    assert.equal(calls.length, 2);
+  }
+});
+
 test('stream that ends without DONE or finish_reason is invalid', async () => {
   const sseResponse = () =>
     new Response('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n', {
@@ -422,6 +538,84 @@ test('non-stream JSON response still works when the gateway ignores stream', asy
   const result = await api.complete({ candidates: [{ alias: 'role', id: 'fast-model' }], messages: [] });
   assert.equal(result.content, '{"ok":true}');
   assert.equal(JSON.parse(calls[1].init.body).stream, true);
+});
+
+test('non-stream refusal fails before content handling and without fallback', async () => {
+  const refusalText = 'private refusal details';
+  for (const content of [null, '{"ok":true}']) {
+    const calls = [];
+    const api = client(
+      [
+        jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
+        completionResponse(content, { refusal: refusalText }),
+        completionResponse(),
+      ],
+      calls,
+    );
+    let captured;
+    await assert.rejects(
+      () => api.complete({ candidates, messages: [] }),
+      (error) => {
+        captured = error;
+        return error instanceof AiRequestError && error.code === 'model_refusal' && !error.retryable;
+      },
+    );
+    assert.equal(calls.length, 2);
+    assert.equal(captured.message.includes(refusalText), false);
+  }
+});
+
+test('non-stream truncation takes precedence over refusal', async () => {
+  for (const refusal of ['do not expose', {}]) {
+    const calls = [];
+    const api = client(
+      [
+        jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
+        completionResponse(null, { finishReason: 'length', refusal }),
+        completionResponse(),
+      ],
+      calls,
+    );
+    await assert.rejects(
+      () => api.complete({ candidates, messages: [] }),
+      (error) => error instanceof AiRequestError && error.code === 'output_truncated',
+    );
+    assert.equal(calls.length, 2);
+  }
+});
+
+test('non-stream accepts empty or null refusal and rejects invalid refusal types', async () => {
+  for (const refusal of [null, '']) {
+    const validApi = client(
+      [
+        jsonResponse({ data: [{ id: 'fast-model' }] }),
+        completionResponse('{"ok":true}', { refusal }),
+      ],
+      [],
+    );
+    const result = await validApi.complete({
+      candidates: [{ alias: 'role', id: 'fast-model' }],
+      messages: [],
+    });
+    assert.equal(result.content, '{"ok":true}');
+  }
+
+  for (const refusal of [{}, [], 1]) {
+    const calls = [];
+    const api = client(
+      [
+        jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
+        completionResponse('{"ok":true}', { refusal }),
+        completionResponse(),
+      ],
+      calls,
+    );
+    await assert.rejects(
+      () => api.complete({ candidates, messages: [] }),
+      (error) => error instanceof AiRequestError && error.code === 'invalid_chat_response',
+    );
+    assert.equal(calls.length, 2);
+  }
 });
 
 test('non-stream response truncated at the token limit fails without fallback', async () => {

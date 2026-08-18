@@ -961,6 +961,56 @@ test('model and schema failures replace the reservation with failed metadata', a
   }
 });
 
+test('model refusal is published as a code-only failure without leaking refusal text', async () => {
+  const refusalText = 'private model refusal details';
+  const github = new FakeGitHub();
+  const modelEvents = [];
+  const common = {
+    kind: 'issue',
+    eventName: 'issues',
+    event: issueEvent,
+    environment: environment(),
+    repoRoot,
+    contracts: enabledContracts('triage'),
+    policySha,
+    github,
+  };
+  const preflight = await runPreflightPhase(common);
+  const reservation = await runReservationPhase({ ...common, artifact: preflight });
+  const analysis = await runAnalysisPhase({
+    ...common,
+    artifact: reservation,
+    aiClientFactory: () => ({
+      async complete() {
+        throw Object.assign(new Error(refusalText), {
+          code: 'model_refusal',
+          retryable: false,
+        });
+      },
+    }),
+    auditEvent: (event) => modelEvents.push(event),
+  });
+
+  assert.equal(analysis.state, 'failed');
+  assert.equal(analysis.output, null);
+  assert.equal(analysis.model, null);
+  assert.deepEqual(analysis.failure, { code: 'model_refusal' });
+  assert.equal(JSON.stringify(analysis).includes(refusalText), false);
+  assert.equal(modelEvents.length, 1);
+  assert.equal(modelEvents[0].code, 'model_refusal');
+  assert.equal(modelEvents[0].completion_received, false);
+  assert.equal(JSON.stringify(modelEvents[0]).includes(refusalText), false);
+
+  const publication = await runPublishPhase({ ...common, artifact: analysis });
+  assert.equal(publication.state, 'published');
+  assert.equal(publication.result.reason, 'model_refusal');
+  assert.equal(managedMetadata(github).result, 'failed');
+  assert.equal(managedMetadata(github).reason_codes.at(-1), 'model_refusal');
+  assert.equal(managedMetadata(github).lease_expires_at, null);
+  assert.equal(github.comments[0].body.includes(refusalText), false);
+  assert.equal(JSON.stringify(publication).includes(refusalText), false);
+});
+
 test('sensitive model output is rejected before it reaches an artifact or comment', async () => {
   const secret = 'test-secret-value-1234567890';
   for (const leakedSummary of [
