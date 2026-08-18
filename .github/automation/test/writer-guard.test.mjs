@@ -135,6 +135,14 @@ test('rejects Unicode and case-fold path collisions, links, malformed files, and
   assert.equal(validateWriterChangeSet([{ path: 'x', mode: '100644', bytes: 1 }], limits, 13).reason, 'maximum_patch_bytes_exceeded');
   assert.equal(validateWriterChangeSet([{ path: 'x', mode: '100644', bytes: 1 }], {}).reason, 'invalid_limits');
   assert.equal(validateWriterChangeSet([{ path: 'x', mode: '100644', bytes: 1 }], { ...limits, maximumFiles: 51 }, 1).reason, 'invalid_limits');
+  assert.equal(validateWriterChangeSet([{ path: 'x', mode: '100644', bytes: 1 }], {
+    ...limits,
+    maximum_patch_bytes: 1,
+  }, 1).reason, 'invalid_limits');
+  assert.equal(validateWriterChangeSet([{ path: 'x', mode: '100644', bytes: 1 }], {
+    ...limits,
+    unexpected: 1,
+  }, 1).reason, 'invalid_limits');
   assert.equal(validateWriterChangeSet([{ path: 'x', mode: 0o100755, bytes: 1 }], limits, 1).allowed, true);
   assert.deepEqual(writerLimitsFromContract({
     maximum_files: 50,
@@ -147,6 +155,10 @@ test('rejects Unicode and case-fold path collisions, links, malformed files, and
     maximumTotalBytes: 2_097_152, maximumFixCycles: 2,
   });
   assert.equal(writerLimitsFromContract({ maximum_files: 1, maximum_file_size_bytes: 1 }), null);
+  assert.equal(writerLimitsFromContract({
+    maximum_files: 1, maximum_file_size_bytes: 1, maximum_total_file_bytes: 1,
+    maximum_patch_bytes: 1, maximum_fix_cycles: 1, maximumPatchBytes: 1,
+  }), null);
   assert.equal(writerLimitsFromContract({
     maximum_files: 51,
     maximum_file_size_bytes: 15,
