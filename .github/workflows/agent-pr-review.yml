@@ -103,7 +103,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
+      issues: write
+      pull-requests: read
     concurrency:
       group: agent-pr-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pull_request_number || github.run_id }}
       cancel-in-progress: false
@@ -232,7 +233,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
+      issues: write
+      pull-requests: read
       checks: read
       statuses: read
     concurrency:
