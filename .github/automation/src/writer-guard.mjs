@@ -20,6 +20,19 @@ const WINDOWS_ILLEGAL_CHARACTER = /[<>"|?*]/;
 const WINDOWS_RESERVED_DEVICE = /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|conin\$|conout\$|clock\$)$/i;
 const ACTOR_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 const CHANGE_KEYS = new Set(['path', 'previousPath', 'fromPath', 'mode', 'bytes']);
+const CONTRACT_LIMIT_KEYS = new Set([
+  'maximum_files', 'maximum_patch_bytes', 'maximum_file_size_bytes',
+  'maximum_total_file_bytes', 'maximum_fix_cycles',
+]);
+const RUNTIME_LIMIT_KEYS = new Set([
+  'maximumFiles', 'maximumPatchBytes', 'maximumFileBytes',
+  'maximumTotalBytes', 'maximumFixCycles',
+]);
+
+function hasExactKeys(value, expected) {
+  const keys = Object.keys(value);
+  return keys.length === expected.size && keys.every((key) => expected.has(key));
+}
 
 function denied(reason, extra = {}) {
   return { allowed: false, reason, ...extra };
@@ -35,13 +48,7 @@ function labelsContain(labels, label) {
 
 export function writerLimitsFromContract(limits) {
   if (!limits || typeof limits !== 'object' || Array.isArray(limits)) return null;
-  if (
-    !Object.hasOwn(limits, 'maximum_files') ||
-    !Object.hasOwn(limits, 'maximum_file_size_bytes') ||
-    !Object.hasOwn(limits, 'maximum_total_file_bytes') ||
-    !Object.hasOwn(limits, 'maximum_patch_bytes') ||
-    !Object.hasOwn(limits, 'maximum_fix_cycles')
-  ) return null;
+  if (!hasExactKeys(limits, CONTRACT_LIMIT_KEYS)) return null;
   if (
     !Number.isSafeInteger(limits.maximum_patch_bytes) || limits.maximum_patch_bytes <= 0 ||
     limits.maximum_patch_bytes > MAXIMUM_WRITER_PATCH_BYTES
@@ -64,13 +71,11 @@ export function writerLimitsFromContract(limits) {
 }
 
 function normalizedLimits(limits) {
-  const normalized =
-    Object.hasOwn(limits ?? {}, 'maximum_files') ||
-    Object.hasOwn(limits ?? {}, 'maximum_file_size_bytes') ||
-    Object.hasOwn(limits ?? {}, 'maximum_total_file_bytes') ||
-    Object.hasOwn(limits ?? {}, 'maximum_fix_cycles')
+  if (!limits || typeof limits !== 'object' || Array.isArray(limits)) return null;
+  const hasContractKey = Object.keys(limits).some((key) => CONTRACT_LIMIT_KEYS.has(key));
+  const normalized = hasContractKey
     ? writerLimitsFromContract(limits)
-    : limits;
+    : hasExactKeys(limits, RUNTIME_LIMIT_KEYS) ? limits : null;
   if (!normalized || ['maximumFiles', 'maximumPatchBytes', 'maximumFileBytes', 'maximumTotalBytes', 'maximumFixCycles'].some(
     (key) => !Number.isSafeInteger(normalized[key]) || normalized[key] <= 0,
   )) return null;
