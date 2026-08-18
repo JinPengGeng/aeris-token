@@ -11459,7 +11459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_anthropic_auth_error_moves_to_the_next_credential() {
+    async fn native_anthropic_auth_error_stops_without_credential_rotation() {
         let upstream_error = concat!(
             "event: error\n",
             "data: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid credential\"}}\n\n",
@@ -11470,18 +11470,14 @@ mod tests {
         )
         .await;
 
-        let AiAttemptExecutionOutcome::Retry {
-            scope,
-            fallback_response: Some(fallback_response),
-        } = outcome
-        else {
-            panic!("precommit authentication error should retry another credential")
+        let AiAttemptExecutionOutcome::Responded(response) = outcome else {
+            panic!("embedded authentication error should stop without failover")
         };
-        assert_eq!(scope, AiAttemptRetryScope::Credential);
-        let fallback_body = to_bytes(fallback_response.into_body(), usize::MAX)
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("fallback response body should read");
-        assert_eq!(fallback_body.as_ref(), upstream_error.as_bytes());
+            .expect("upstream response body should read");
+        assert_eq!(response_body.as_ref(), upstream_error.as_bytes());
     }
 
     #[tokio::test]
