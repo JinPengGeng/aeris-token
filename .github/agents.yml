@@ -43,7 +43,8 @@ runtime:
     maximum_input_characters: 262144
     maximum_patch_characters_per_file: 65536
     # Large, complete PR patches can require longer inference than issue
-    # analysis. Keep this bounded below the 15-minute reservation lease.
+    # analysis. The engine separately caps the whole fallback sequence to the
+    # remaining reservation lease with publication headroom.
     request_timeout_seconds: 300
 
 model_policy:

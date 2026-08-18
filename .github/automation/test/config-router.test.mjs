@@ -127,6 +127,17 @@ test('contract validation requires bounded exact reviewer limits', () => {
   agents.runtime.reviewer_limits = validLimits;
   assert.doesNotThrow(() => validateContracts(agents, contracts.policy));
 
+  for (const boundary of [120, 600]) {
+    const boundaryAgents = structuredClone(contracts.agents);
+    boundaryAgents.runtime.reviewer_limits.request_timeout_seconds = boundary;
+    assert.doesNotThrow(() => validateContracts(boundaryAgents, contracts.policy));
+  }
+
+  const equalTimeoutAgents = structuredClone(contracts.agents);
+  equalTimeoutAgents.runtime.api.request_timeout_seconds = 300;
+  equalTimeoutAgents.runtime.reviewer_limits.request_timeout_seconds = 300;
+  assert.doesNotThrow(() => validateContracts(equalTimeoutAgents, contracts.policy));
+
   agents.runtime.api.request_timeout_seconds = 301;
   assert.throws(() => validateContracts(agents, contracts.policy), ContractError);
 });

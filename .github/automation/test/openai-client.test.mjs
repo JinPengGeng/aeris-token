@@ -111,12 +111,82 @@ test('connect timeout can switch to fallback while the total timeout remains ava
       completionResponse(),
     ],
     calls,
-    { connectTimeoutMs: 10, timeoutMs: 200 },
+    { connectTimeoutMs: 10, timeoutMs: 200, deadlineAtMs: Date.now() + 400 },
   );
 
   const result = await api.complete({ candidates, messages: [] });
   assert.equal(result.model.alias, 'fallback');
   assert.equal(calls.length, 3);
+});
+
+test('shared total timeout includes model discovery', async () => {
+  const calls = [];
+  const stalledModels = (_url, init) =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve(jsonResponse({ data: [] })), 500);
+      init.signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          reject(new DOMException('aborted', 'AbortError'));
+        },
+        { once: true },
+      );
+    });
+  const api = client([stalledModels], calls, { timeoutMs: 200, deadlineAtMs: Date.now() + 20 });
+
+  await assert.rejects(
+    () => api.complete({ candidates, messages: [] }),
+    (error) => error instanceof AiRequestError && error.code === 'timeout' && !error.retryable,
+  );
+  assert.equal(calls.length, 1);
+});
+
+test('shared total timeout prevents another fallback request after the deadline', async () => {
+  const calls = [];
+  const stalledCompletion = (_url, init) =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve(completionResponse()), 500);
+      init.signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          reject(new DOMException('aborted', 'AbortError'));
+        },
+        { once: true },
+      );
+    });
+  const api = client(
+    [
+      jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
+      stalledCompletion,
+      completionResponse(),
+    ],
+    calls,
+    { timeoutMs: 200, deadlineAtMs: Date.now() + 20 },
+  );
+
+  await assert.rejects(
+    () => api.complete({ candidates, messages: [] }),
+    (error) => error instanceof AiRequestError && error.code === 'timeout' && !error.retryable,
+  );
+  assert.equal(calls.length, 2);
+});
+
+test('absolute deadline is not extended when completion starts later', async () => {
+  const calls = [];
+  const api = client(
+    [jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] })],
+    calls,
+    { timeoutMs: 200, deadlineAtMs: Date.now() + 5 },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 15));
+
+  await assert.rejects(
+    () => api.complete({ candidates, messages: [] }),
+    (error) => error instanceof AiRequestError && error.code === 'timeout' && !error.retryable,
+  );
+  assert.equal(calls.length, 0);
 });
 
 test('connect timer stops after headers while the response body is still streaming', async () => {
