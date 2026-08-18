@@ -11931,7 +11931,7 @@ mod tests {
         assert_eq!(blocked_snapshot.terminal_submission_in_flight, 0);
         assert!(blocked_snapshot.lifecycle_submission_pending >= 2);
 
-        store.release_policy.notify_waiters();
+        store.release_policy.notify_one();
         timeout(Duration::from_secs(2), async {
             loop {
                 let snapshot = runtime.metrics_snapshot();
