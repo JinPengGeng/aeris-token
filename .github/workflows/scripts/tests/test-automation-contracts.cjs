@@ -92,7 +92,7 @@ assert(
       JSON.stringify(['maintainer_command_implement', 'maintainer_command_retry_write']) &&
     JSON.stringify(agents.agents.writer.required_actor_permissions) ===
       JSON.stringify(['admin', 'maintain', 'write']) &&
-    JSON.stringify(agents.agents.writer.required_commands) === JSON.stringify(['implement', 'retry-write']),
+    JSON.stringify(agents.agents.writer.required_commands) === JSON.stringify(['/agent implement', '/agent retry-write']),
   'writer boundary must remain Draft PR only on agent/ branches with live actor permissions',
 );
 assert(
@@ -123,7 +123,7 @@ assert(automation.writer.enabled === false, 'writer policy must default off');
 assert(
   JSON.stringify(automation.authorization.code_write_requires) === JSON.stringify({
     actor_permission: ['admin', 'maintain', 'write'],
-    exact_commands: ['implement', 'retry-write'],
+    exact_commands: ['/agent implement', '/agent retry-write'],
     issue_labels: ['agent-ready'],
   }),
   'code-write authorization must require live actor permissions and exact commands',

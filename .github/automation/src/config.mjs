@@ -3,7 +3,7 @@ import path from 'node:path';
 import yaml from 'js-yaml';
 
 import { WRITER_FOUNDATION_LIMITS } from './writer-phase-contract.mjs';
-import { canonicalWriterCommand, WRITER_COMMAND_NAMES, WRITER_COMMANDS } from './writer-guard.mjs';
+import { canonicalWriterCommand, WRITER_COMMANDS } from './writer-guard.mjs';
 
 export class ContractError extends Error {
   constructor(message) {
@@ -47,7 +47,7 @@ const WRITER_DENIED_OPERATIONS = [
   'review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch',
 ];
 const WRITER_REQUIRED_ACTOR_PERMISSIONS = ['admin', 'maintain', 'write'];
-const WRITER_REQUIRED_COMMANDS = WRITER_COMMAND_NAMES;
+const WRITER_REQUIRED_COMMANDS = WRITER_COMMANDS;
 const WRITER_REGISTRY_KEYS = [
   'enabled', 'enabled_variable', 'phase', 'mode', 'identity', 'app_id_variable',
   'private_key_secret', 'environment', 'credentials', 'permissions', 'capability_residuals',
@@ -341,7 +341,7 @@ export function validateContracts(agents, policy) {
   requireCondition(policy.commands?.prefix === '/agent', 'command prefix must remain /agent');
   requireCondition(
     sameStringArray(
-      WRITER_REQUIRED_COMMANDS.map((command) => canonicalWriterCommand(policy.commands.prefix, command)),
+      WRITER_REQUIRED_COMMANDS.map((command) => canonicalWriterCommand(command)),
       WRITER_COMMANDS,
     ),
     'writer command names do not map to the guarded command format',

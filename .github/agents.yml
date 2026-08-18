@@ -134,7 +134,7 @@ agents:
     triggers: [maintainer_command_implement, maintainer_command_retry_write]
     required_issue_labels: [agent-ready]
     required_actor_permissions: [admin, maintain, write]
-    required_commands: [implement, retry-write]
+    required_commands: [/agent implement, /agent retry-write]
     allowed_branch_prefixes: [agent/]
     tools: [repository_read, isolated_shell, branch_write, draft_pull_request]
     effects: [create_or_update_draft_pull_request]

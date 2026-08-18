@@ -36,7 +36,7 @@ authorization:
   external_pull_request_analysis_requires_label: agent-analyze
   code_write_requires:
     actor_permission: [admin, maintain, write]
-    exact_commands: [implement, retry-write]
+    exact_commands: [/agent implement, /agent retry-write]
     issue_labels: [agent-ready]
   merge_requires:
     author_association: [OWNER, MEMBER]

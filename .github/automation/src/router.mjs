@@ -1,3 +1,5 @@
+import { canonicalWriterCommand, evaluateWriterRequest } from './writer-guard.mjs';
+
 const ROLE_BY_COMMAND = Object.freeze({
   triage: 'triage',
   plan: 'planner',
@@ -24,6 +26,48 @@ export function parseAgentCommand(body, policy) {
   const escapedPrefix = policy.commands.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const match = new RegExp(`^${escapedPrefix}\\s+(triage|plan|review|status|cancel)$`, 'i').exec(trimmed);
   return match?.[1].toLowerCase() ?? null;
+}
+
+/**
+ * Writer commands deliberately do not share the permissive read-only command
+ * parser. A comment body is the authorization input, so whitespace, aliases,
+ * extra arguments, and case changes must fail closed.
+ */
+export function parseWriterCommand(body, policy) {
+  if (typeof body !== 'string' || policy?.commands?.prefix !== '/agent') return null;
+  if (policy.commands.ignore_markers?.some((marker) => body.includes(marker))) return null;
+  return canonicalWriterCommand(body);
+}
+
+/**
+ * Resolve the complete Issue-comment authorization path for a Writer run.
+ * Callers must provide the repository permission resolved for the comment
+ * author, rather than inferring it from author_association.
+ */
+export function routeWriterInvocation({ eventName, event, actorPermission, switches, fixCycle, limits, changeSet = null, patchBytes, policy }) {
+  if (eventName !== 'issue_comment') return { action: 'skip', reason: 'unsupported_event' };
+  if (event.issue?.pull_request) return { action: 'skip', reason: 'pull_request_comment' };
+  const command = parseWriterCommand(event.comment?.body, policy);
+  if (!command) return { action: 'skip', reason: 'no_supported_command' };
+  const decision = evaluateWriterRequest({
+    command,
+    actorLogin: event.sender?.login,
+    actorPermission,
+    issue: event.issue && {
+      number: event.issue.number,
+      state: event.issue.state,
+      isPullRequest: Boolean(event.issue.pull_request),
+      labels: event.issue.labels,
+    },
+    switches,
+    fixCycle,
+    limits,
+    changeSet,
+    patchBytes,
+  });
+  return decision.allowed
+    ? { action: 'write', command, branch: decision.branch, reason: 'writer_authorized' }
+    : { action: 'skip', reason: decision.reason };
 }
 
 function commandDecision(command, association, policy, allowedRoles) {

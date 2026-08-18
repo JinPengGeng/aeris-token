@@ -12,8 +12,10 @@ import {
 } from '../src/config.mjs';
 import {
   parseAgentCommand,
+  parseWriterCommand,
   routeIssueInvocation,
   routePullInvocation,
+  routeWriterInvocation,
 } from '../src/router.mjs';
 import {
   buildIssueInput,
@@ -43,9 +45,7 @@ test('trusted contracts load with only enabled agents declared', () => {
 });
 
 test('writer policy command names canonicalize to the exact guarded commands', () => {
-  const commands = policy.authorization.code_write_requires.exact_commands.map(
-    (command) => canonicalWriterCommand(policy.commands.prefix, command),
-  );
+  const commands = policy.authorization.code_write_requires.exact_commands.map(canonicalWriterCommand);
   assert.deepEqual(commands, ['/agent implement', '/agent retry-write']);
   assert.equal(evaluateWriterRequest({
     command: commands[0],
@@ -113,10 +113,10 @@ test('Writer Phase 3 foundation stays independently disabled and least-privilege
   assert.equal(writer.private_key_secret, 'AERIS_WRITER_PRIVATE_KEY');
   assert.equal(writer.environment, 'writer');
   assert.deepEqual(writer.required_actor_permissions, ['admin', 'maintain', 'write']);
-  assert.deepEqual(writer.required_commands, ['implement', 'retry-write']);
+  assert.deepEqual(writer.required_commands, ['/agent implement', '/agent retry-write']);
   assert.deepEqual(contracts.policy.authorization.code_write_requires, {
     actor_permission: ['admin', 'maintain', 'write'],
-    exact_commands: ['implement', 'retry-write'],
+    exact_commands: ['/agent implement', '/agent retry-write'],
     issue_labels: ['agent-ready'],
   });
   assert.deepEqual(writer.credentials, { allowed_jobs: ['publish'], github_token_write: false });
@@ -290,6 +290,35 @@ test('command parser requires one exact command and ignores managed content', ()
   assert.equal(parseAgentCommand('/agent plan', policy), 'plan');
   assert.equal(parseAgentCommand('/agent plan\nplease do more', policy), null);
   assert.equal(parseAgentCommand('<!-- aeris-agent-managed -->\n/agent plan', policy), null);
+});
+
+test('Writer parser and route use the canonical command plus live permission path', () => {
+  for (const value of [
+    '/agent implement', '/agent retry-write',
+  ]) assert.equal(parseWriterCommand(value, policy), value);
+  for (const value of [
+    'implement', 'retry-write', '/agent Implement', '/agent implement ',
+    ' /agent implement', '/agent implement now', '/agent retry-write\nplease',
+  ]) assert.equal(parseWriterCommand(value, policy), null, value);
+
+  const event = {
+    sender: { login: 'maintainer' },
+    issue: { number: 41, state: 'open', labels: [{ name: 'agent-ready' }] },
+    comment: { body: '/agent implement' },
+  };
+  const switches = { globalEnabled: true, writerVariableEnabled: true, writerContractEnabled: true };
+  assert.deepEqual(routeWriterInvocation({
+    eventName: 'issue_comment', event, actorPermission: 'write', switches, fixCycle: 0, policy,
+  }), {
+    action: 'write', command: '/agent implement', branch: 'agent/issue-41', reason: 'writer_authorized',
+  });
+  assert.equal(routeWriterInvocation({
+    eventName: 'issue_comment', event, actorPermission: 'read', switches, fixCycle: 0, policy,
+  }).reason, 'insufficient_permission');
+  assert.equal(routeWriterInvocation({
+    eventName: 'issue_comment', event, actorPermission: 'write',
+    switches: { ...switches, writerVariableEnabled: false }, fixCycle: 0, policy,
+  }).reason, 'writer_disabled');
 });
 
 test('Issue routing gates external analysis with agent-analyze', () => {

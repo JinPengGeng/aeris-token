@@ -43,15 +43,12 @@ function allowed(extra = {}) {
   return { allowed: true, reason: null, ...extra };
 }
 
-export function normalizeWriterCommand(rawCommand, prefix = '/agent') {
-  if (prefix !== '/agent' || typeof rawCommand !== 'string') return null;
-  if (WRITER_COMMAND_NAMES.includes(rawCommand)) return `${prefix} ${rawCommand}`;
-  if (WRITER_COMMANDS.includes(rawCommand)) return rawCommand;
-  return null;
-}
-
-export function canonicalWriterCommand(prefix, command) {
-  return normalizeWriterCommand(command, prefix);
+/**
+ * Writer commands are authorization tokens, not user-friendly aliases. Keep a
+ * single, exact representation across policy, comment parsing, and admission.
+ */
+export function canonicalWriterCommand(command) {
+  return typeof command === 'string' && WRITER_COMMANDS.includes(command) ? command : null;
 }
 
 function labelsContain(labels, label) {
@@ -208,7 +205,7 @@ export function evaluateWriterRequest({
   fixCycle,
   limits = DEFAULT_WRITER_LIMITS,
 } = {}) {
-  const normalizedCommand = normalizeWriterCommand(command);
+  const normalizedCommand = canonicalWriterCommand(command);
   if (!normalizedCommand) return denied('unsupported_command');
   if (typeof actorLogin !== 'string') return denied('invalid_actor');
   if (/\[bot\]/i.test(actorLogin)) return denied('bot_actor_not_allowed');
