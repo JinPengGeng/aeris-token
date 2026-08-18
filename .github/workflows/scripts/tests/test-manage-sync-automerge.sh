@@ -6,6 +6,7 @@ HELPER="${SCRIPT_ROOT}/manage-sync-automerge.sh"
 RUN_BASE="${AERIS_TEST_TMP_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}"
 mkdir -p "${RUN_BASE}"
 RUN_ROOT="$(mktemp -d "${RUN_BASE%/}/aeris-automerge.XXXXXX")"
+export AERIS_AUTONOMY_EXPIRES_AT='2099-01-01T00:00:00Z'
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2

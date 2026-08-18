@@ -24,7 +24,10 @@ const agents = loadYaml('.github/agents.yml');
 const automation = loadYaml('.github/automation-policy.yml');
 const sync = loadYaml('.github/upstream-sync-policy.yml');
 const syncWorkflow = loadYaml('.github/workflows/sync-upstream.yml');
+const frontendWorkflow = loadYaml('.github/workflows/frontend-ci.yml');
 const syncScript = read('.github/workflows/scripts/sync-upstream.sh');
+const autoMergeScript = read('.github/workflows/scripts/manage-sync-automerge.sh');
+const autonomyScript = read('.github/workflows/scripts/github-autonomy.sh');
 const state = JSON.parse(read('.github/upstream-sync-state.json'));
 
 for (const contract of [agents, automation, sync]) {
@@ -150,7 +153,9 @@ const syncSteps = syncWorkflow.jobs.sync.steps;
 assert(syncWorkflow.jobs.sync.environment === 'sync', 'sync must use the dedicated sync environment');
 assert(
   syncWorkflow.jobs.sync.if.includes("vars.AERIS_SYNC_APP_ENABLED == 'true'") &&
-    syncWorkflow.jobs.sync.if.includes("vars.AERIS_AGENTS_ENABLED == 'true'"),
+    syncWorkflow.jobs.sync.if.includes("vars.AERIS_SYNC_APP_ENABLED == '1'") &&
+    syncWorkflow.jobs.sync.if.includes("vars.AERIS_AGENTS_ENABLED == 'true'") &&
+    syncWorkflow.jobs.sync.if.includes("vars.AERIS_AGENTS_ENABLED == '1'"),
   'sync must remain disabled unless the bounded Sync App switch is enabled',
 );
 assert(
@@ -171,10 +176,33 @@ assert(
     syncTokenStep.with['permission-statuses'] === 'read',
   'Sync App token permissions exceed or miss the approved minimum',
 );
-const expiryStep = syncSteps.find((step) => step.name === 'Validate bounded autonomy window');
-assert(expiryStep && typeof expiryStep.run === 'string' && expiryStep.run.includes('AERIS_AUTONOMY_EXPIRES_AT'), 'sync must fail closed after the autonomy window');
+assert(
+  syncWorkflow.jobs.sync.env.AERIS_AUTONOMY_EXPIRES_AT ===
+    '${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}',
+  'every sync phase must receive the bounded autonomy expiry',
+);
+const tokenStepIndex = syncSteps.indexOf(syncTokenStep);
+const preMintExpiryStep = syncSteps[tokenStepIndex - 1];
+assert(
+  preMintExpiryStep?.name === 'Validate autonomy before token mint' &&
+    typeof preMintExpiryStep.run === 'string' &&
+    preMintExpiryStep.run.includes('AERIS_AUTONOMY_EXPIRES_AT'),
+  'sync must fail closed immediately before minting the App token',
+);
 const checkoutStep = syncSteps.find((step) => step.name === 'Check out fork default branch');
 assert(checkoutStep?.with?.token === '${{ steps.sync_token.outputs.token }}', 'sync checkout must use the Sync App token');
+const checkoutStepIndex = syncSteps.indexOf(checkoutStep);
+assert(
+  syncSteps[checkoutStepIndex - 1]?.name === 'Validate autonomy before checkout',
+  'sync must revalidate expiry immediately before checkout uses the App token',
+);
+const publishStep = syncSteps.find(
+  (step) => step.name === 'Build and publish automation branch',
+);
+assert(
+  publishStep?.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}',
+  'sync publication must use the bounded Sync App token',
+);
 const autoMergeStep = syncSteps.find((step) => step.name === 'Enable native auto-merge');
 const disarmCallIndex = syncScript.search(/^disarm_tracked_pr$/m);
 const rebuildLoopIndex = syncScript.search(/^for attempt in 1 2 3; do$/m);
@@ -185,7 +213,8 @@ assert(
 );
 assert(
   autoMergeStep.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
-    autoMergeStep.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}',
+    autoMergeStep.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}' &&
+    autoMergeStep.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}',
   'native auto-merge must bind the published PR URL and exact head SHA',
 );
 assert(
@@ -197,6 +226,45 @@ assert(
 assert(
   disarmCallIndex >= 0 && rebuildLoopIndex >= 0 && disarmCallIndex < rebuildLoopIndex,
   'sync must disarm a stale auto-merge before rebuilding its fixed branch',
+);
+assert(
+  /aeris_require_active_autonomy_window[\s\S]*now_epoch >= expires_epoch/.test(
+    autonomyScript,
+  ) &&
+    autonomyScript.includes('aeris_require_active_autonomy_window || return'),
+  'GitHub wrappers must revalidate the exact UTC expiry before every invocation',
+);
+assert(
+  !/(^|\n)\s*gh\s/.test(syncScript) &&
+    !/(^|\n)\s*gh\s/.test(autoMergeScript) &&
+    syncScript.includes('source "${SCRIPT_DIR}/github-autonomy.sh"') &&
+    autoMergeScript.includes('source "${SCRIPT_DIR}/github-autonomy.sh"'),
+  'sync and auto-merge must not bypass the expiry-guarded GitHub wrapper',
+);
+assert(
+  !/(^|\n)\s*git\s+(fetch|push|ls-remote)\b/.test(syncScript),
+  'authenticated Git network operations must not bypass expiry revalidation',
+);
+const checkDispatchStep = syncSteps.find(
+  (step) => step.name === 'Ensure required checks are dispatched',
+);
+assert(
+  checkDispatchStep?.run.includes('source .github/workflows/scripts/github-autonomy.sh') &&
+    !/(^|\n)\s*gh\s/.test(checkDispatchStep.run),
+  'check discovery and dispatch must revalidate expiry before every GitHub token use',
+);
+const validationStep = syncSteps.find(
+  (step) => step.name === 'Validate checkpoint synchronization',
+);
+assert(
+  validationStep?.run.includes('test-github-autonomy.sh'),
+  'workflow validation must exercise expiry crossing between planning and mutation',
+);
+assert(
+  frontendWorkflow.jobs.automation.steps.some(
+    (step) => step.run === 'bash ../workflows/scripts/tests/test-github-autonomy.sh',
+  ),
+  'required CI must execute the fake-clock autonomy integration test',
 );
 assert(
   automation.authorization.external_pull_request_analysis_requires_label === 'agent-analyze',

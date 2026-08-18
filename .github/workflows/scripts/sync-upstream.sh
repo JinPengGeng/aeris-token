@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Every authenticated GitHub operation rechecks the time-bounded authorization.
+source "${SCRIPT_DIR}/github-autonomy.sh"
+
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 
@@ -38,7 +42,7 @@ output() {
 }
 
 list_sync_prs() {
-  gh api --paginate --slurp \
+  aeris_gh api --paginate --slurp \
     --method GET \
     "repos/${GITHUB_REPOSITORY}/pulls" \
     -f state=all \
@@ -83,7 +87,7 @@ refresh_prs() {
 }
 
 pr_bot_comments() {
-  gh api --paginate \
+  aeris_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/$1/comments?per_page=100" \
     --jq ".[] | select(.user.login == \"${BOT_LOGIN}\") | .body"
 }
@@ -93,7 +97,7 @@ issue_comment_once() {
   marker="<!-- upstream-sync-${key} -->"
   comments="$(pr_bot_comments "${number}")"
   if [[ "${comments}" != *"${marker}"* ]]; then
-    gh api --method POST \
+    aeris_gh api --method POST \
       "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" \
       -f body="${marker}
 ${message}" >/dev/null
@@ -110,22 +114,22 @@ set_pending_tip() {
   local number="$1" sha="$2" comment_id body
   body="<!-- upstream-sync-pending-tip:${sha} -->
 Prepared automation branch tip ${sha}."
-  comment_id="$(gh api --paginate \
+  comment_id="$(aeris_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/${number}/comments?per_page=100" \
     --jq ".[] | select(.user.login == \"${BOT_LOGIN}\" and (.body | startswith(\"<!-- upstream-sync-pending-tip:\"))) | .id" |
     tail -n1)"
   if [[ -n "${comment_id}" ]]; then
-    gh api \
+    aeris_gh api \
       --method PATCH \
       "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
       -f body="${body}" >/dev/null
   else
-    gh pr comment --repo "${GITHUB_REPOSITORY}" "${number}" --body "${body}" >/dev/null
+    aeris_gh pr comment --repo "${GITHUB_REPOSITORY}" "${number}" --body "${body}" >/dev/null
   fi
 }
 
 latest_close_actor() {
-  gh api --paginate \
+  aeris_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/$1/events?per_page=100" \
     --jq '.[] | select(.event == "closed") | .actor.login' | tail -n1
 }
@@ -220,9 +224,9 @@ is_legacy_tip() {
 }
 
 fetch_remote_tip() {
-  remote_sha="$(git ls-remote --heads origin "refs/heads/${SYNC_BRANCH}" | awk '{print $1}')"
+  remote_sha="$(aeris_git_network ls-remote --heads origin "refs/heads/${SYNC_BRANCH}" | awk '{print $1}')"
   if [[ -n "${remote_sha}" ]]; then
-    git fetch --no-tags origin \
+    aeris_git_network fetch --no-tags origin \
       "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
   fi
 }
@@ -271,7 +275,7 @@ pause_or_resume() {
     return 20
   fi
   for attempt in 1 2; do
-    if gh pr reopen --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null 2>&1; then
+    if aeris_gh pr reopen --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null 2>&1; then
       refresh_prs
       [[ -n "${open_pr}" && "$(jq -r '.number' <<<"${open_pr}")" == "${number}" ]] || return 1
       tracked_pr="${open_pr}"
@@ -356,7 +360,7 @@ report_workflow_drift() {
   [[ -n "${changed}" ]] || return 0
 
   title="[sync-upstream] Review upstream workflow tree ${current_tree:0:12}"
-  existing="$(gh issue list \
+  existing="$(aeris_gh issue list \
     --repo "${GITHUB_REPOSITORY}" \
     --state all \
     --limit 100 \
@@ -364,7 +368,7 @@ report_workflow_drift() {
     --json title \
     --jq ".[] | select(.title == \"${title}\") | .title" | head -n1)"
   if [[ -z "${existing}" ]]; then
-    gh issue create \
+    aeris_gh issue create \
       --repo "${GITHUB_REPOSITORY}" \
       --title "${title}" \
       --body "<!-- upstream-sync-workflow-tree:${current_tree} -->
@@ -379,7 +383,7 @@ report_sync_alert() {
   local kind="$1" key="$2" message="$3" title existing number marker
   title="[sync-upstream] ${kind}: ${key}"
   marker="<!-- upstream-sync-alert:${kind}:${key} -->"
-  existing="$(gh issue list \
+  existing="$(aeris_gh issue list \
     --repo "${GITHUB_REPOSITORY}" \
     --state open \
     --limit 100 \
@@ -387,7 +391,7 @@ report_sync_alert() {
     --json number,title,body \
     --jq ".[] | select(.title == \"${title}\" and ((.body // \"\") | contains(\"${marker}\"))) | .number" | head -n1)"
   if [[ -z "${existing}" ]]; then
-    gh issue create \
+    aeris_gh issue create \
       --repo "${GITHUB_REPOSITORY}" \
       --title "${title}" \
       --body "${marker}
@@ -411,7 +415,7 @@ close_obsolete_pr() {
     }
     assert_remote_owned "${base_sha}"
     pr_comment_once "${number}" auto-closed 'Closed automatically because the base branch already contains the applicable upstream content.'
-    gh pr close --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null
+    aeris_gh pr close --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null
   fi
   output state noop
   output has_changes false
@@ -421,7 +425,7 @@ close_obsolete_pr() {
 wait_for_pr_head() {
   local pr="$1" expected_sha="$2" attempt view_data
   for attempt in 1 2 3 4 5 6; do
-    if view_data="$(gh pr view --repo "${GITHUB_REPOSITORY}" "${pr}" --json state,headRefOid)" &&
+    if view_data="$(aeris_gh pr view --repo "${GITHUB_REPOSITORY}" "${pr}" --json state,headRefOid)" &&
        [[ "$(jq -r '.state' <<<"${view_data}")" == OPEN &&
           "$(jq -r '.headRefOid' <<<"${view_data}")" == "${expected_sha}" ]]; then
       printf '%s\n' "${view_data}"
@@ -457,7 +461,7 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
     view_data="$(wait_for_pr_head "${number}" "${published_sha}")" || return 1
   else
     create_error="$(mktemp)"
-    if create_output="$(gh pr create \
+    if create_output="$(aeris_gh pr create \
       --repo "${GITHUB_REPOSITORY}" \
       --base "${BASE_BRANCH}" \
       --head "${SYNC_BRANCH}" \
@@ -477,7 +481,7 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
     view_data="$(wait_for_pr_head "${pr_url}" "${published_sha}")" || return 1
   fi
 
-  gh pr edit \
+  aeris_gh pr edit \
     --repo "${GITHUB_REPOSITORY}" \
     "${pr_url}" \
     --title 'chore: sync upstream' \
@@ -488,12 +492,12 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
   output pr_url "${pr_url}"
 }
 
-parent="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.full_name // empty')"
+parent="$(aeris_gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.full_name // empty')"
 [[ -n "${parent}" ]] || {
   echo "${GITHUB_REPOSITORY} is not a fork." >&2
   exit 1
 }
-upstream_branch="$(gh api "repos/${parent}" --jq '.default_branch')"
+upstream_branch="$(aeris_gh api "repos/${parent}" --jq '.default_branch')"
 output parent "${parent}"
 output upstream_branch "${upstream_branch}"
 
@@ -512,8 +516,8 @@ fi
 disarm_tracked_pr
 
 for attempt in 1 2 3; do
-  git fetch --no-tags origin "${BASE_BRANCH}"
-  git fetch --no-tags upstream "${upstream_branch}"
+  aeris_git_network fetch --no-tags origin "${BASE_BRANCH}"
+  aeris_git_network fetch --no-tags upstream "${upstream_branch}"
   base_sha="$(git rev-parse "origin/${BASE_BRANCH}")"
   upstream_sha="$(git rev-parse "upstream/${upstream_branch}")"
   output upstream_sha "${upstream_sha}"
@@ -597,8 +601,8 @@ for attempt in 1 2 3; do
     -m "Sync-Upstream-Base: ${base_sha}"
   local_sha="$(git rev-parse HEAD)"
 
-  git fetch --no-tags origin "${BASE_BRANCH}"
-  git fetch --no-tags upstream "${upstream_branch}"
+  aeris_git_network fetch --no-tags origin "${BASE_BRANCH}"
+  aeris_git_network fetch --no-tags upstream "${upstream_branch}"
   if [[ "${base_sha}" != "$(git rev-parse "origin/${BASE_BRANCH}")" ||
         "${upstream_sha}" != "$(git rev-parse "upstream/${upstream_branch}")" ]]; then
     continue
@@ -617,11 +621,11 @@ for attempt in 1 2 3; do
       set_pending_tip "$(jq -r '.number' <<<"${reference_pr}")" "${local_sha}"
     fi
     if [[ -n "${remote_sha}" ]]; then
-      git push \
+      aeris_git_network push \
         --force-with-lease="refs/heads/${SYNC_BRANCH}:${remote_sha}" \
         origin "${local_sha}:refs/heads/${SYNC_BRANCH}"
     else
-      git push \
+      aeris_git_network push \
         --force-with-lease="refs/heads/${SYNC_BRANCH}:" \
         origin "${local_sha}:refs/heads/${SYNC_BRANCH}"
     fi

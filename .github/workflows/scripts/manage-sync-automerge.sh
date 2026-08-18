@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/github-autonomy.sh"
+
 usage() {
   printf '%s\n' 'usage: manage-sync-automerge.sh <arm|disarm> <owner/repo> <pr-number|pr-url> [head-sha]'
   exit 64
@@ -50,16 +53,16 @@ case "${ACTION}" in
     HEAD_SHA="$4"
     [[ "${HEAD_SHA}" =~ ^[0-9A-Fa-f]{40}$ ]] ||
       fail 'head SHA must be a full 40-character hexadecimal commit SHA'
-    gh pr merge "${PR_NUMBER}" --repo "${REPOSITORY}" --auto --squash \
+    aeris_gh pr merge "${PR_NUMBER}" --repo "${REPOSITORY}" --auto --squash \
       --match-head-commit "${HEAD_SHA}"
     ;;
   disarm)
     [[ $# -eq 3 ]] || usage
-    auto_merge_enabled="$(gh pr view "${PR_NUMBER}" --repo "${REPOSITORY}" \
+    auto_merge_enabled="$(aeris_gh pr view "${PR_NUMBER}" --repo "${REPOSITORY}" \
       --json autoMergeRequest --jq '.autoMergeRequest != null')"
     case "${auto_merge_enabled}" in
       true)
-        gh pr merge "${PR_NUMBER}" --repo "${REPOSITORY}" --disable-auto
+        aeris_gh pr merge "${PR_NUMBER}" --repo "${REPOSITORY}" --disable-auto
         ;;
       false) ;;
       *) fail 'unable to determine whether automatic merge is enabled' ;;

@@ -39,12 +39,13 @@ EOF
   chmod +x "${fake_bin}/gh"
 
   harness="${RUN_ROOT}/alert-harness.sh"
-  sed '/^parent="$(gh api "repos\/\${GITHUB_REPOSITORY}"/,$d' "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
+  cp "${SCRIPT_ROOT}/github-autonomy.sh" "${RUN_ROOT}/github-autonomy.sh"
+  sed '/^parent="$(aeris_gh api "repos\/\${GITHUB_REPOSITORY}"/,$d' "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
   printf '%s\n' 'report_sync_alert conflict deadbeef "conflict detected"' >>"${harness}"
 
-  PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_COMMENT_CREATED="${RUN_ROOT}/comment-created" GITHUB_OUTPUT="${RUN_ROOT}/output" GITHUB_REPOSITORY=example/repo \
+  PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_COMMENT_CREATED="${RUN_ROOT}/comment-created" GITHUB_OUTPUT="${RUN_ROOT}/output" GITHUB_REPOSITORY=example/repo AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z \
     BOT_LOGIN=github-actions[bot] bash "${harness}"
-  PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_COMMENT_CREATED="${RUN_ROOT}/comment-created" GITHUB_OUTPUT="${RUN_ROOT}/output" GITHUB_REPOSITORY=example/repo \
+  PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_COMMENT_CREATED="${RUN_ROOT}/comment-created" GITHUB_OUTPUT="${RUN_ROOT}/output" GITHUB_REPOSITORY=example/repo AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z \
     BOT_LOGIN=github-actions[bot] bash "${harness}"
 
   assert_eq 1 "$(grep -c -- '--method POST repos/example/repo/issues/42/comments' "${calls}")" \

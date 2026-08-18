@@ -36,10 +36,9 @@ jobs:
       BASE_BRANCH: main
       SYNC_BRANCH: automation/sync-upstream
       RESUME: ${{ inputs.resume || 'false' }}
+      AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
     steps:
-      - name: Validate bounded autonomy window
-        env:
-          AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
+      - name: Validate autonomy before token mint
         shell: bash
         run: |
           set -euo pipefail
@@ -63,6 +62,16 @@ jobs:
           permission-checks: read
           permission-statuses: read
 
+      - name: Validate autonomy before checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${AERIS_AUTONOMY_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+          expires_epoch="$(date -u -d "${AERIS_AUTONOMY_EXPIRES_AT}" +%s)"
+          round_trip="$(date -u -d "@${expires_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
+          [[ "${round_trip}" == "${AERIS_AUTONOMY_EXPIRES_AT}" ]]
+          (( $(date -u +%s) < expires_epoch ))
+
       - name: Check out fork default branch
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -76,8 +85,10 @@ jobs:
           set -euo pipefail
           bash -n .github/workflows/scripts/checkpoint-merge.sh
           bash -n .github/workflows/scripts/manage-sync-automerge.sh
+          bash -n .github/workflows/scripts/github-autonomy.sh
           bash -n .github/workflows/scripts/prepare-checkpoint-sync.sh
           bash -n .github/workflows/scripts/sync-upstream.sh
+          bash .github/workflows/scripts/tests/test-github-autonomy.sh
           bash .github/workflows/scripts/tests/test-manage-sync-automerge.sh
           AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
             bash .github/workflows/scripts/tests/test-checkpoint-merge.sh
@@ -99,15 +110,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source .github/workflows/scripts/github-autonomy.sh
 
           ensure_check() {
             local workflow="$1" context="$2" attempt check_active status_active run_active
             for attempt in 1 2 3 4 5 6; do
-              check_active="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SYNCED_SHA}/check-runs?per_page=100" \
+              check_active="$(aeris_gh api "repos/${GITHUB_REPOSITORY}/commits/${SYNCED_SHA}/check-runs?per_page=100" \
                 --jq "[.check_runs[] | select(.name == \"${context}\")] | sort_by(.started_at // .completed_at // .created_at) | last // {} | if .status == null then false elif (.status != \"completed\" or .conclusion == \"success\") then true else false end")"
-              status_active="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SYNCED_SHA}/status" \
+              status_active="$(aeris_gh api "repos/${GITHUB_REPOSITORY}/commits/${SYNCED_SHA}/status" \
                 --jq "[.statuses[] | select(.context == \"${context}\")] | sort_by(.created_at) | last // {} | if .state == \"success\" or .state == \"pending\" then true else false end")"
-              run_active="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?head_sha=${SYNCED_SHA}&per_page=100" \
+              run_active="$(aeris_gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?head_sha=${SYNCED_SHA}&per_page=100" \
                 --jq '[.workflow_runs[] | select(.status != "completed" or .conclusion == "success")] | length > 0')"
               if [[ "${check_active}" == true || "${status_active}" == true || "${run_active}" == true ]]; then
                 echo "${context}: an active or successful result already exists"
@@ -119,7 +131,7 @@ jobs:
 
             # The PR event normally wins during the polling window. Dispatch is
             # the fallback for token-created PRs that do not emit that event.
-            gh workflow run --repo "${GITHUB_REPOSITORY}" "${workflow}" --ref "${SYNC_BRANCH}"
+            aeris_gh workflow run --repo "${GITHUB_REPOSITORY}" "${workflow}" --ref "${SYNC_BRANCH}"
             echo "${context}: fallback workflow_dispatch created"
           }
 
