@@ -87,8 +87,31 @@ for (const name of ['tester', 'policy', 'merger']) {
 }
 assert(
   agents.agents.writer.mode === 'draft_pull_request' &&
-    agents.agents.writer.denied_paths.includes('.github/**'),
-  'writer boundary must remain Draft PR only and deny .github',
+    JSON.stringify(agents.agents.writer.allowed_branch_prefixes) === JSON.stringify(['agent/']) &&
+    JSON.stringify(agents.agents.writer.triggers) ===
+      JSON.stringify(['maintainer_command_implement', 'maintainer_command_retry_write']) &&
+    JSON.stringify(agents.agents.writer.required_actor_permissions) ===
+      JSON.stringify(['admin', 'maintain', 'write']) &&
+    JSON.stringify(agents.agents.writer.required_commands) === JSON.stringify(['implement', 'retry-write']),
+  'writer boundary must remain Draft PR only on agent/ branches with live actor permissions',
+);
+assert(
+  sameMembers(Object.keys(agents.agents.writer), [
+    'enabled', 'enabled_variable', 'phase', 'mode', 'identity', 'app_id_variable',
+    'private_key_secret', 'environment', 'credentials', 'permissions', 'capability_residuals',
+    'deterministic_client_mitigations', 'limits', 'model_variable', 'fallback_model_variable',
+    'triggers', 'required_issue_labels', 'required_actor_permissions', 'required_commands',
+    'allowed_branch_prefixes', 'tools', 'effects', 'denied_paths', 'handoff_to',
+  ]) &&
+    agents.agents.writer.phase === 3 &&
+    agents.agents.writer.model_variable === 'AERIS_AI_MODEL_WRITER' &&
+    agents.agents.writer.fallback_model_variable === 'AERIS_AI_MODEL_FALLBACK' &&
+    JSON.stringify(agents.agents.writer.required_issue_labels) === JSON.stringify(['agent-ready']) &&
+    JSON.stringify(agents.agents.writer.tools) ===
+      JSON.stringify(['repository_read', 'isolated_shell', 'branch_write', 'draft_pull_request']) &&
+    JSON.stringify(agents.agents.writer.effects) === JSON.stringify(['create_or_update_draft_pull_request']) &&
+    JSON.stringify(agents.agents.writer.handoff_to) === JSON.stringify(['reviewer', 'tester', 'security']),
+  'writer registry capabilities changed',
 );
 assert(
   !agents.agents.reviewer.handoff_to.includes('writer'),
@@ -98,9 +121,93 @@ assert(
 assert(automation.kill_switch.default_enabled === false, 'kill switch must default off');
 assert(automation.writer.enabled === false, 'writer policy must default off');
 assert(
+  JSON.stringify(automation.authorization.code_write_requires) === JSON.stringify({
+    actor_permission: ['admin', 'maintain', 'write'],
+    exact_commands: ['implement', 'retry-write'],
+    issue_labels: ['agent-ready'],
+  }),
+  'code-write authorization must require live actor permissions and exact commands',
+);
+assert(
+  agents.agents.writer.enabled_variable === 'AERIS_WRITER_ENABLED' &&
+    automation.writer.enabled_variable === 'AERIS_WRITER_ENABLED' &&
+    agents.agents.writer.identity === 'github_app' &&
+    automation.writer.identity === 'github_app' &&
+    agents.agents.writer.app_id_variable === 'AERIS_WRITER_APP_ID' &&
+    automation.writer.app_id_variable === 'AERIS_WRITER_APP_ID' &&
+    agents.agents.writer.private_key_secret === 'AERIS_WRITER_PRIVATE_KEY' &&
+    automation.writer.private_key_secret === 'AERIS_WRITER_PRIVATE_KEY' &&
+    agents.agents.writer.environment === 'writer' &&
+    automation.writer.environment === 'writer',
+  'writer must use its independent disabled GitHub App identity and environment',
+);
+assert(
   automation.writer.draft_pull_requests_only === true &&
-    automation.writer.forbidden_paths.includes('.github/**'),
-  'writer policy boundary changed',
+    automation.writer.maximum_open_pull_requests_per_issue === 1 &&
+    JSON.stringify(agents.agents.writer.credentials) === JSON.stringify({
+      allowed_jobs: ['publish'],
+      github_token_write: false,
+    }) &&
+    JSON.stringify(automation.writer.credentials) === JSON.stringify(agents.agents.writer.credentials),
+  'writer credentials must remain publish-only without GITHUB_TOKEN write access',
+);
+assert(
+  sameMembers(Object.keys(automation.writer), [
+    'enabled', 'enabled_variable', 'branch_prefix', 'draft_pull_requests_only',
+    'maximum_open_pull_requests_per_issue', 'identity', 'app_id_variable', 'private_key_secret',
+    'environment', 'credentials', 'permissions', 'capability_residuals',
+    'deterministic_client_mitigations', 'limits', 'forbidden_paths', 'release_secret_access',
+    'pull_request_target_checkout',
+  ]) &&
+    automation.writer.branch_prefix === 'agent/' &&
+    automation.writer.release_secret_access === false &&
+    automation.writer.pull_request_target_checkout === false,
+  'writer policy capabilities changed',
+);
+const expectedWriterPermissions = {
+  metadata: 'read',
+  contents: 'write',
+  pull_requests: 'write',
+  denied: [
+    'checks', 'actions', 'workflows', 'administration', 'deployments', 'environments', 'secrets',
+    'members', 'packages', 'issues',
+  ],
+};
+const expectedWriterCapabilityResiduals = {
+  pull_requests_write_can_review_or_merge: true,
+  contents_write_not_branch_scoped: true,
+  app_has_branch_protection_bypass: false,
+};
+const expectedWriterDeterministicClientMitigations = {
+  allowed_operations: ['create_or_update_agent_ref', 'create_or_update_draft_pull_request'],
+  denied_operations: ['review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch'],
+};
+const expectedWriterLimits = {
+  maximum_files: 50,
+  maximum_patch_bytes: 65536,
+  maximum_file_size_bytes: 524288,
+  maximum_total_file_bytes: 2097152,
+  maximum_fix_cycles: 2,
+};
+const expectedWriterForbiddenPaths = [
+  '.github/**', '**/CODEOWNERS', '.gitmodules', '**/.git', '**/.git/**',
+];
+assert(
+    JSON.stringify(agents.agents.writer.permissions) === JSON.stringify(expectedWriterPermissions) &&
+    JSON.stringify(automation.writer.permissions) === JSON.stringify(expectedWriterPermissions) &&
+    JSON.stringify(agents.agents.writer.capability_residuals) ===
+      JSON.stringify(expectedWriterCapabilityResiduals) &&
+    JSON.stringify(automation.writer.capability_residuals) ===
+      JSON.stringify(expectedWriterCapabilityResiduals) &&
+    JSON.stringify(agents.agents.writer.deterministic_client_mitigations) ===
+      JSON.stringify(expectedWriterDeterministicClientMitigations) &&
+    JSON.stringify(automation.writer.deterministic_client_mitigations) ===
+      JSON.stringify(expectedWriterDeterministicClientMitigations) &&
+    JSON.stringify(agents.agents.writer.limits) === JSON.stringify(expectedWriterLimits) &&
+    JSON.stringify(automation.writer.limits) === JSON.stringify(expectedWriterLimits) &&
+    JSON.stringify(agents.agents.writer.denied_paths) === JSON.stringify(expectedWriterForbiddenPaths) &&
+    JSON.stringify(automation.writer.forbidden_paths) === JSON.stringify(expectedWriterForbiddenPaths),
+  'writer permissions, limits, or forbidden paths changed',
 );
 assert(automation.policy_gate.enabled === false, 'policy gate must default off');
 assert(automation.policy_gate.mode === 'shadow', 'policy gate must start in shadow mode');

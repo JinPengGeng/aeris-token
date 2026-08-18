@@ -87,6 +87,122 @@ test('contract validation rejects divergent object concurrency limits', () => {
   assert.throws(() => validateContracts(agents, contracts.policy), ContractError);
 });
 
+test('Writer Phase 3 foundation stays independently disabled and least-privileged', () => {
+  const writer = contracts.agents.agents.writer;
+  assert.equal(writer.enabled, false);
+  assert.equal(contracts.policy.writer.enabled, false);
+  assert.equal(writer.enabled_variable, 'AERIS_WRITER_ENABLED');
+  assert.equal(writer.identity, 'github_app');
+  assert.equal(writer.app_id_variable, 'AERIS_WRITER_APP_ID');
+  assert.equal(writer.private_key_secret, 'AERIS_WRITER_PRIVATE_KEY');
+  assert.equal(writer.environment, 'writer');
+  assert.deepEqual(writer.required_actor_permissions, ['admin', 'maintain', 'write']);
+  assert.deepEqual(writer.required_commands, ['implement', 'retry-write']);
+  assert.deepEqual(contracts.policy.authorization.code_write_requires, {
+    actor_permission: ['admin', 'maintain', 'write'],
+    exact_commands: ['implement', 'retry-write'],
+    issue_labels: ['agent-ready'],
+  });
+  assert.deepEqual(writer.credentials, { allowed_jobs: ['publish'], github_token_write: false });
+  assert.deepEqual(writer.permissions, {
+    metadata: 'read',
+    contents: 'write',
+    pull_requests: 'write',
+    denied: [
+      'checks', 'actions', 'workflows', 'administration', 'deployments', 'environments', 'secrets',
+      'members', 'packages', 'issues',
+    ],
+  });
+  assert.deepEqual(writer.capability_residuals, {
+    pull_requests_write_can_review_or_merge: true,
+    contents_write_not_branch_scoped: true,
+    app_has_branch_protection_bypass: false,
+  });
+  assert.deepEqual(writer.deterministic_client_mitigations, {
+    allowed_operations: ['create_or_update_agent_ref', 'create_or_update_draft_pull_request'],
+    denied_operations: ['review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch'],
+  });
+  assert.deepEqual(writer.limits, {
+    maximum_files: 50,
+    maximum_patch_bytes: 65536,
+    maximum_file_size_bytes: 524288,
+    maximum_total_file_bytes: 2097152,
+    maximum_fix_cycles: 2,
+  });
+  assert.equal(contracts.policy.writer.maximum_open_pull_requests_per_issue, 1);
+  assert.deepEqual(writer.denied_paths, [
+    '.github/**', '**/CODEOWNERS', '.gitmodules', '**/.git', '**/.git/**',
+  ]);
+  assert.deepEqual(contracts.policy.writer.forbidden_paths, writer.denied_paths);
+});
+
+test('Writer Phase 3 foundation rejects drift, broad permissions, and unsafe limits', () => {
+  const mutations = [
+    (agents) => { agents.agents.writer.enabled = true; },
+    (agents) => { agents.agents.writer.identity = 'github_token'; },
+    (agents) => { agents.agents.writer.credentials.github_token_write = true; },
+    (agents) => { agents.agents.writer.permissions.denied.pop(); },
+    (agents) => { agents.agents.writer.permissions.issues = 'write'; },
+    (agents) => { agents.agents.writer.capability_residuals.app_has_branch_protection_bypass = true; },
+    (agents) => { agents.agents.writer.deterministic_client_mitigations.denied_operations.pop(); },
+    (agents) => { agents.agents.writer.required_actor_permissions.pop(); },
+    (agents) => { agents.agents.writer.limits.maximum_files = 100; },
+    (agents) => { agents.agents.writer.limits.maximum_patch_bytes = 65_535; },
+    (agents) => { agents.agents.writer.limits.maximum_file_size_bytes = 1_048_576; },
+    (agents) => { agents.agents.writer.limits.maximum_total_file_bytes = 2_097_151; },
+    (agents) => { agents.agents.writer.limits.maximum_fix_cycles = 1; },
+    (agents) => { agents.agents.writer.denied_paths.pop(); },
+    (agents) => { agents.agents.writer.tools = ['exact_sha_merge']; },
+    (agents) => { agents.agents.writer.unrecognized_capability = true; },
+  ];
+  for (const mutate of mutations) {
+    const agents = structuredClone(contracts.agents);
+    mutate(agents);
+    assert.throws(() => validateContracts(agents, contracts.policy), ContractError);
+  }
+
+  const policy = structuredClone(contracts.policy);
+  policy.writer.app_id_variable = 'AERIS_OTHER_APP_ID';
+  assert.throws(() => validateContracts(contracts.agents, policy), ContractError);
+
+  const reorderedPermissionKeys = structuredClone(contracts.agents);
+  reorderedPermissionKeys.agents.writer.permissions = {
+    denied: reorderedPermissionKeys.agents.writer.permissions.denied,
+    pull_requests: 'write',
+    contents: 'write',
+    metadata: 'read',
+  };
+  assert.doesNotThrow(() => validateContracts(reorderedPermissionKeys, contracts.policy));
+
+  const policyCapabilities = structuredClone(contracts.policy);
+  policyCapabilities.writer.deterministic_client_mitigations.allowed_operations.push('merge');
+  assert.throws(() => validateContracts(contracts.agents, policyCapabilities), ContractError);
+
+  const policyAuthorization = structuredClone(contracts.policy);
+  policyAuthorization.authorization.code_write_requires.actor_permission = ['admin'];
+  assert.throws(() => validateContracts(contracts.agents, policyAuthorization), ContractError);
+
+  const policyLabels = structuredClone(contracts.policy);
+  policyLabels.authorization.code_write_requires.issue_labels = ['other-label'];
+  assert.throws(() => validateContracts(contracts.agents, policyLabels), ContractError);
+
+  const policyOpenPullRequests = structuredClone(contracts.policy);
+  policyOpenPullRequests.writer.maximum_open_pull_requests_per_issue = 2;
+  assert.throws(() => validateContracts(contracts.agents, policyOpenPullRequests), ContractError);
+
+  const policyUnknownWriterField = structuredClone(contracts.policy);
+  policyUnknownWriterField.writer.unrecognized_capability = true;
+  assert.throws(() => validateContracts(contracts.agents, policyUnknownWriterField), ContractError);
+
+  const policyReleaseSecretAccess = structuredClone(contracts.policy);
+  policyReleaseSecretAccess.writer.release_secret_access = true;
+  assert.throws(() => validateContracts(contracts.agents, policyReleaseSecretAccess), ContractError);
+
+  const policyPullRequestTargetCheckout = structuredClone(contracts.policy);
+  policyPullRequestTargetCheckout.writer.pull_request_target_checkout = true;
+  assert.throws(() => validateContracts(contracts.agents, policyPullRequestTargetCheckout), ContractError);
+});
+
 test('contract validation bounds the model output token budget', () => {
   for (const value of [undefined, null, '4000', 0, -1, 1.5, 16_385]) {
     const agents = structuredClone(contracts.agents);
