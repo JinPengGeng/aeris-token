@@ -11476,8 +11476,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let response_body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("upstream response body should read");
-        assert_eq!(response_body.as_ref(), upstream_error.as_bytes());
+            .expect("structured error response body should read");
+        let response_body: Value = serde_json::from_slice(&response_body)
+            .expect("embedded Anthropic error should be converted to a structured JSON response");
+        assert_eq!(response_body["type"], "error");
+        assert_eq!(response_body["error"]["type"], "authentication_error");
+        assert_eq!(response_body["error"]["message"], "invalid credential");
     }
 
     #[tokio::test]
