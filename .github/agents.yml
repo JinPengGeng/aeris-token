@@ -37,6 +37,11 @@ runtime:
     maximum_fix_cycles: 2
     maximum_concurrent_runs_per_object: 1
     maximum_output_tokens: 4000
+  reviewer_limits:
+    # Reviewer input may include every changed-file record. This deliberately
+    # does not widen the shared Issue/Triage input limit above.
+    maximum_input_characters: 262144
+    maximum_patch_characters_per_file: 65536
 
 model_policy:
   # Values are GitHub Actions variable names. Their resolved model IDs form the
