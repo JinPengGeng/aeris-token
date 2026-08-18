@@ -631,9 +631,10 @@ mod tests {
     use super::{
         classify_anthropic_failure_disposition, classify_local_failover,
         classify_local_transport_error, failure_disposition_from_local_classification,
-        CallerFailureKind, FailureDisposition, FailureOrigin, FailureRetryAction, FailureScope,
-        FailureTokenAction, LocalFailoverClassification, LocalFailoverInput,
-        LocalTransportFailoverClassification, OperationReplayPolicy,
+        failure_origin_from_upstream_response, CallerFailureKind, FailureDisposition,
+        FailureOrigin, FailureRetryAction, FailureScope, FailureTokenAction,
+        LocalFailoverClassification, LocalFailoverInput, LocalTransportFailoverClassification,
+        OperationReplayPolicy,
     };
     use crate::orchestration::{LocalFailoverPolicy, LocalFailoverRegexRule};
 
