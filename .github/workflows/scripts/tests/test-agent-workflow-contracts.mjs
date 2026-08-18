@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import test from 'node:test';
@@ -98,17 +99,29 @@ const actionLock = yaml.load(
 );
 const actionReferencePattern = /^([A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*)@([0-9a-f]{40})$/;
 const dockerDigestPattern = /^docker:\/\/[^@\s]+@sha256:[0-9a-f]{64}$/;
+const imageDigestPattern = /^([a-z0-9]+(?:[._\/-][a-z0-9]+)*)@(sha256:[0-9a-f]{64})$/;
 const sourceRefPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const workflowUseEntryPattern = /^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#\s*([^\s#]+))?\s*$/gm;
+const workflowImageEntryPattern = /^\s*image:\s*([^\s#]+)(?:\s+#\s*([^\s#]+))?\s*$/gm;
+
+const sourceUseEntries = (source, sourcePath) =>
+  [...source.matchAll(workflowUseEntryPattern)].map((match) => ({
+    action: match[1],
+    ref: match[2] ?? null,
+    sourcePath,
+  }));
 
 const workflowUseEntries = (workflowFile) => {
   const source = fs.readFileSync(path.join(repoRoot, workflowFile), 'utf8');
-  return [...source.matchAll(workflowUseEntryPattern)].map((match) => ({
-    action: match[1],
-    ref: match[2] ?? null,
-    workflowFile,
-  }));
+  return sourceUseEntries(source, workflowFile);
 };
+
+const sourceImageEntries = (source, sourcePath) =>
+  [...source.matchAll(workflowImageEntryPattern)].map((match) => ({
+    image: match[1],
+    ref: match[2] ?? null,
+    sourcePath,
+  }));
 
 const assertRawWorkflowUseEntriesCoverParsedUses = (parsedUses, rawEntries, description) => {
   const rawActions = rawEntries.map((entry) => entry.action).sort();
@@ -120,12 +133,285 @@ const assertRawWorkflowUseEntriesCoverParsedUses = (parsedUses, rawEntries, desc
 };
 
 const actionLockKey = ({ repository, ref }) => `${repository}\u0000${ref}`;
+const imageLockKey = ({ image, ref }) => `${image}\u0000${ref}`;
 
 const assertDockerDigest = (action, description) => {
   assert.match(
     action,
     dockerDigestPattern,
     `${description} container action must use a lowercase sha256 digest`,
+  );
+};
+
+const assertImageDigest = (image, description) => {
+  const match = image.match(imageDigestPattern);
+  assert.ok(match, `${description} runtime image must use a lowercase sha256 digest: ${image}`);
+  return { image: match[1], digest: match[2] };
+};
+
+const collectRuntimeImages = (document, description) => {
+  const images = [];
+  for (const [jobName, job] of Object.entries(document.jobs ?? {})) {
+    assert.ok(
+      job && typeof job === 'object' && !Array.isArray(job),
+      `${description} job ${jobName} must be a map`,
+    );
+    if (job.container !== undefined) {
+      assert.ok(
+        job.container && typeof job.container === 'object' && !Array.isArray(job.container),
+        `${description} job ${jobName} container shorthand is unsupported by the image lock`,
+      );
+      assert.equal(
+        typeof job.container.image,
+        'string',
+        `${description} job ${jobName} container.image must be a string`,
+      );
+      images.push(job.container.image);
+    }
+    if (job.services !== undefined) {
+      assert.ok(
+        job.services && typeof job.services === 'object' && !Array.isArray(job.services),
+        `${description} job ${jobName} services must be a map`,
+      );
+      for (const [serviceName, service] of Object.entries(job.services)) {
+        assert.ok(
+          service && typeof service === 'object' && !Array.isArray(service),
+          `${description} service ${jobName}.${serviceName} must be a map`,
+        );
+        assert.equal(
+          typeof service.image,
+          'string',
+          `${description} service ${jobName}.${serviceName}.image must be a string`,
+        );
+        images.push(service.image);
+      }
+    }
+    for (const [stepIndex, step] of (job.steps ?? []).entries()) {
+      if (typeof step?.uses !== 'string' || !step.uses.startsWith('docker/setup-qemu-action@')) {
+        continue;
+      }
+      assert.ok(
+        step.with && typeof step.with === 'object' && !Array.isArray(step.with),
+        `${description} job ${jobName} setup-qemu step ${stepIndex} must define with.image`,
+      );
+      assert.equal(
+        typeof step.with.image,
+        'string',
+        `${description} job ${jobName} setup-qemu step ${stepIndex} with.image must be a string`,
+      );
+      images.push(step.with.image);
+    }
+  }
+  return images;
+};
+
+const workflowImageEntries = (workflowFile, document) => {
+  const source = fs.readFileSync(path.join(repoRoot, workflowFile), 'utf8');
+  const parsedImages = collectRuntimeImages(document, workflowFile);
+  const rawEntries = sourceImageEntries(source, workflowFile);
+  assert.deepEqual(
+    rawEntries.map((entry) => entry.image).sort(),
+    [...parsedImages].sort(),
+    `${workflowFile} has an image whose source format is not covered by the image lock parser`,
+  );
+  return rawEntries;
+};
+
+const isInsidePath = (rootPath, candidatePath) => {
+  const relative = path.relative(rootPath, candidatePath);
+  return (
+    relative !== '' &&
+    !path.isAbsolute(relative) &&
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`)
+  );
+};
+
+const resolveLocalActionDescriptor = (rootPath, action, description) => {
+  assert.ok(action.startsWith('./'), `${description} local action must start with ./`);
+  const realRoot = fs.realpathSync(rootPath);
+  const candidate = path.resolve(realRoot, action.slice(2));
+  assert.ok(isInsidePath(realRoot, candidate), `${description} local action escapes the repository: ${action}`);
+  assert.ok(fs.existsSync(candidate), `${description} local action path is missing: ${action}`);
+  assert.ok(
+    fs.statSync(candidate).isDirectory(),
+    `${description} local action path must be a directory: ${action}`,
+  );
+
+  const realDirectory = fs.realpathSync(candidate);
+  assert.ok(
+    isInsidePath(realRoot, realDirectory),
+    `${description} local action resolves outside the repository: ${action}`,
+  );
+  const descriptors = ['action.yml', 'action.yaml']
+    .map((name) => path.join(realDirectory, name))
+    .filter((descriptor) => fs.existsSync(descriptor));
+  assert.equal(
+    descriptors.length,
+    1,
+    `${description} local action must have exactly one action.yml or action.yaml descriptor: ${action}`,
+  );
+  assert.ok(
+    fs.statSync(descriptors[0]).isFile(),
+    `${description} local action descriptor must be a file: ${action}`,
+  );
+  const realDescriptor = fs.realpathSync(descriptors[0]);
+  assert.ok(
+    isInsidePath(realRoot, realDescriptor),
+    `${description} local action descriptor resolves outside the repository: ${action}`,
+  );
+  return realDescriptor;
+};
+
+const createUseAuditor = ({ rootPath, recordExternal }) => {
+  const scannedDescriptors = new Set();
+  const activeDescriptors = new Set();
+  const dockerReferences = new Set();
+
+  const auditEntry = (entry, description = entry.sourcePath) => {
+    const { action } = entry;
+    if (action.startsWith('./')) {
+      const descriptorPath = resolveLocalActionDescriptor(rootPath, action, description);
+      assert.equal(
+        activeDescriptors.has(descriptorPath),
+        false,
+        `${description} local action cycle includes ${action}`,
+      );
+      if (scannedDescriptors.has(descriptorPath)) return;
+
+      activeDescriptors.add(descriptorPath);
+      try {
+        const source = fs.readFileSync(descriptorPath, 'utf8');
+        const document = yaml.load(source);
+        assert.ok(
+          document && typeof document === 'object' && !Array.isArray(document),
+          `${descriptorPath} action descriptor must be a map`,
+        );
+        assert.ok(
+          document.runs && typeof document.runs === 'object' && !Array.isArray(document.runs),
+          `${descriptorPath} action descriptor must define runs`,
+        );
+        assert.equal(
+          document.runs.using,
+          'composite',
+          `${descriptorPath} only composite local actions are supported by the recursive audit`,
+        );
+        assert.ok(
+          Array.isArray(document.runs.steps),
+          `${descriptorPath} composite action must define runs.steps`,
+        );
+
+        const parsedUses = [];
+        for (const [index, step] of document.runs.steps.entries()) {
+          assert.ok(
+            step && typeof step === 'object' && !Array.isArray(step),
+            `${descriptorPath} runs.steps[${index}] must be a map`,
+          );
+          const hasUses = Object.hasOwn(step, 'uses');
+          const hasRun = Object.hasOwn(step, 'run');
+          assert.notEqual(
+            hasUses,
+            hasRun,
+            `${descriptorPath} runs.steps[${index}] must define exactly one of uses or run`,
+          );
+          if (hasUses) {
+            assert.equal(
+              typeof step.uses,
+              'string',
+              `${descriptorPath} runs.steps[${index}].uses must be a string`,
+            );
+            parsedUses.push(step.uses);
+          } else {
+            assert.equal(
+              typeof step.run,
+              'string',
+              `${descriptorPath} runs.steps[${index}].run must be a string`,
+            );
+            assert.equal(
+              typeof step.shell,
+              'string',
+              `${descriptorPath} runs.steps[${index}] run step must define shell`,
+            );
+          }
+        }
+
+        const rawEntries = sourceUseEntries(source, descriptorPath);
+        assertRawWorkflowUseEntriesCoverParsedUses(parsedUses, rawEntries, descriptorPath);
+        for (const nestedEntry of rawEntries) auditEntry(nestedEntry, descriptorPath);
+        scannedDescriptors.add(descriptorPath);
+      } finally {
+        activeDescriptors.delete(descriptorPath);
+      }
+      return;
+    }
+
+    if (action.startsWith('docker://')) {
+      assertDockerDigest(action, description);
+      dockerReferences.add(action);
+      return;
+    }
+
+    recordExternal(entry, description);
+  };
+
+  return { auditEntry, dockerReferences, scannedDescriptors };
+};
+
+const withFixtureRepo = (files, callback) => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-action-audit-'));
+  try {
+    for (const [relativePath, source] of Object.entries(files)) {
+      const target = path.join(fixtureRoot, relativePath);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, source, 'utf8');
+    }
+    return callback(fixtureRoot);
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+};
+
+const createFixtureUseAuditor = (rootPath) => {
+  const externalReferences = [];
+  const auditor = createUseAuditor({
+    rootPath,
+    recordExternal: ({ action, ref }, description) => {
+      const match = action.match(actionReferencePattern);
+      assert.ok(match, `${description} indirect action is unsupported or mutable: ${action}`);
+      assert.match(ref ?? '', sourceRefPattern, `${description} indirect action must retain a source ref`);
+      externalReferences.push({ repository: match[1], sha: match[2], ref });
+    },
+  });
+  return { ...auditor, externalReferences };
+};
+
+const imageEntriesFromWorkflowSource = (source, description) => {
+  const document = yaml.load(source);
+  const parsedImages = collectRuntimeImages(document, description);
+  const rawEntries = sourceImageEntries(source, description);
+  assert.deepEqual(
+    rawEntries.map((entry) => entry.image).sort(),
+    [...parsedImages].sort(),
+    `${description} has an image whose source format is not covered by the image lock parser`,
+  );
+  return rawEntries;
+};
+
+const assertFixtureImageLockCoverage = (lockImages, imageEntries, description) => {
+  const lock = new Map(lockImages.map((entry) => [imageLockKey(entry), entry.digest]));
+  assert.equal(lock.size, lockImages.length, `${description} fixture image lock contains duplicates`);
+  const observed = new Map();
+  for (const entry of imageEntries) {
+    assert.match(entry.ref ?? '', sourceRefPattern, `${description} image must retain a source ref`);
+    const { image, digest } = assertImageDigest(entry.image, description);
+    const key = imageLockKey({ image, ref: entry.ref });
+    assert.equal(lock.get(key), digest, `${description} image is missing from the fixture lock`);
+    observed.set(key, digest);
+  }
+  assert.deepEqual(
+    [...lock.keys()].sort(),
+    [...observed.keys()].sort(),
+    `${description} fixture image lock contains a stale entry`,
   );
 };
 
@@ -413,10 +699,11 @@ for (const spec of workflowSpecs) {
   }
 }
 
-test('action lock is strict, sorted, and exactly covers external workflow actions', () => {
-  assert.deepEqual(Object.keys(actionLock).sort(), ['actions', 'version']);
+test('action and image locks are strict, sorted, and exactly cover workflow supply-chain references', () => {
+  assert.deepEqual(Object.keys(actionLock).sort(), ['actions', 'images', 'version']);
   assert.equal(actionLock.version, 1, 'action lock must use version 1');
   assert.ok(Array.isArray(actionLock.actions), 'action lock actions must be an array');
+  assert.ok(Array.isArray(actionLock.images), 'action lock images must be an array');
 
   const lockKeys = new Set();
   const lockEntries = new Map();
@@ -442,37 +729,84 @@ test('action lock is strict, sorted, and exactly covers external workflow action
     previousKey = key;
   }
 
+  const imageLockKeys = new Set();
+  const imageLockEntries = new Map();
+  previousKey = '';
+  for (const entry of actionLock.images) {
+    assert.deepEqual(
+      Object.keys(entry).sort(),
+      ['digest', 'image', 'ref'],
+      'image lock entries must have only image, ref, and digest',
+    );
+    assert.match(
+      entry.image,
+      /^[a-z0-9]+(?:[._\/-][a-z0-9]+)*$/,
+      'image lock image name is invalid',
+    );
+    assert.match(entry.ref, sourceRefPattern, 'image lock source ref is invalid');
+    assert.match(entry.digest, /^sha256:[0-9a-f]{64}$/, 'image lock digest is invalid');
+    const key = imageLockKey(entry);
+    assert.ok(key > previousKey, 'image lock entries must be strictly sorted by image and ref');
+    assert.equal(imageLockKeys.has(key), false, `image lock duplicates ${entry.image}@${entry.ref}`);
+    imageLockKeys.add(key);
+    imageLockEntries.set(key, entry.digest);
+    previousKey = key;
+  }
+
   const workflowKeys = new Set();
   const workflowRefs = new Map();
-  assert.ok(workflowFiles.length > 0, 'repository must contain workflow files');
-  for (const workflowFile of workflowFiles) {
-    const { document } = readWorkflow(workflowFile);
-    const parsedUses = collectUses(document.jobs);
-    const rawEntries = workflowUseEntries(workflowFile);
-    assertRawWorkflowUseEntriesCoverParsedUses(parsedUses, rawEntries, workflowFile);
-    for (const { action, ref } of rawEntries) {
-      if (action.startsWith('./')) continue;
-      if (action.startsWith('docker://')) {
-        assertDockerDigest(action, `${workflowFile}`);
-        continue;
-      }
-
+  const workflowImageKeys = new Set();
+  const workflowImageRefs = new Map();
+  const useAuditor = createUseAuditor({
+    rootPath: repoRoot,
+    recordExternal: ({ action, ref }, description) => {
       const match = action.match(actionReferencePattern);
-      assert.ok(match, `${workflowFile} action is not pinned to a full commit SHA: ${action}`);
-      assert.match(ref ?? '', sourceRefPattern, `${workflowFile} action must retain a source ref comment`);
+      assert.ok(match, `${description} action is unsupported or not pinned to a full commit SHA: ${action}`);
+      assert.match(ref ?? '', sourceRefPattern, `${description} action must retain a source ref comment`);
       const [, repository, sha] = match;
       const key = actionLockKey({ repository, ref });
       const priorSha = workflowRefs.get(key);
       assert.ok(
         priorSha === undefined || priorSha === sha,
-        `${workflowFile} maps ${repository}@${ref} to more than one SHA`,
+        `${description} maps ${repository}@${ref} to more than one SHA`,
       );
       workflowRefs.set(key, sha);
       workflowKeys.add(key);
       assert.equal(
         lockEntries.get(key),
         sha,
-        `${workflowFile} action ${repository}@${ref} must exactly match action-lock.yml`,
+        `${description} action ${repository}@${ref} must exactly match action-lock.yml`,
+      );
+    },
+  });
+
+  assert.ok(workflowFiles.length > 0, 'repository must contain workflow files');
+  for (const workflowFile of workflowFiles) {
+    const { document } = readWorkflow(workflowFile);
+    const parsedUses = collectUses(document.jobs);
+    const rawEntries = workflowUseEntries(workflowFile);
+    assertRawWorkflowUseEntriesCoverParsedUses(parsedUses, rawEntries, workflowFile);
+    for (const entry of rawEntries) useAuditor.auditEntry(entry, workflowFile);
+
+    for (const entry of workflowImageEntries(workflowFile, document)) {
+      assert.match(
+        entry.ref ?? '',
+        sourceRefPattern,
+        `${workflowFile} image must retain a source ref comment`,
+      );
+      const { image, digest } = assertImageDigest(entry.image, workflowFile);
+      const key = imageLockKey({ image, ref: entry.ref });
+      const priorDigest = workflowImageRefs.get(key);
+      assert.ok(
+        priorDigest === undefined || priorDigest === digest,
+        `${workflowFile} maps ${image}@${entry.ref} to more than one digest`,
+      );
+      workflowImageRefs.set(key, digest);
+      workflowImageKeys.add(key);
+      assert.equal(
+        imageLockEntries.get(key),
+        digest,
+        `${workflowFile} image ${image}@${entry.ref} must exactly match action-lock.yml`,
       );
     }
   }
@@ -481,6 +815,12 @@ test('action lock is strict, sorted, and exactly covers external workflow action
     [...workflowKeys].sort(),
     'action lock must not contain unused entries and must cover every external workflow action',
   );
+  assert.deepEqual(
+    [...imageLockKeys].sort(),
+    [...workflowImageKeys].sort(),
+    'image lock must not contain unused entries and must cover every workflow runtime image',
+  );
+  assert.ok(useAuditor.dockerReferences instanceof Set, 'docker action references must be explicitly audited');
 });
 
 test('container workflow actions require immutable lowercase sha256 digests', () => {
@@ -515,5 +855,232 @@ test('action lock parser rejects YAML uses syntax it cannot map to a source ref'
       [...source.matchAll(workflowUseEntryPattern)].map((match) => ({ action: match[1] })),
       'synthetic workflow',
     ),
+  );
+});
+
+test('local composite actions are recursively audited and expose indirect external actions', () => {
+  const pinnedSha = 'a'.repeat(40);
+  withFixtureRepo(
+    {
+      '.github/actions/outer/action.yml': [
+        'name: outer',
+        'description: outer fixture',
+        'runs:',
+        '  using: composite',
+        '  steps:',
+        '    - uses: ./.github/actions/inner',
+      ].join('\n'),
+      '.github/actions/inner/action.yaml': [
+        'name: inner',
+        'description: inner fixture',
+        'runs:',
+        '  using: composite',
+        '  steps:',
+        `    - uses: example/safe-action@${pinnedSha} # v1`,
+        '    - run: echo safe',
+        '      shell: bash',
+      ].join('\n'),
+    },
+    (fixtureRoot) => {
+      const auditor = createFixtureUseAuditor(fixtureRoot);
+      auditor.auditEntry({ action: './.github/actions/outer', sourcePath: 'fixture workflow' });
+      assert.deepEqual(auditor.externalReferences, [
+        { repository: 'example/safe-action', sha: pinnedSha, ref: 'v1' },
+      ]);
+      assert.equal(auditor.scannedDescriptors.size, 2);
+    },
+  );
+});
+
+test('recursive local action audit rejects mutable indirect and remote reusable workflow references', () => {
+  withFixtureRepo(
+    {
+      '.github/actions/mutable/action.yml': [
+        'name: mutable',
+        'description: mutable fixture',
+        'runs:',
+        '  using: composite',
+        '  steps:',
+        '    - uses: example/unsafe-action@v1 # v1',
+      ].join('\n'),
+    },
+    (fixtureRoot) => {
+      const auditor = createFixtureUseAuditor(fixtureRoot);
+      assert.throws(
+        () => auditor.auditEntry({ action: './.github/actions/mutable', sourcePath: 'fixture workflow' }),
+        /unsupported or mutable/,
+      );
+      assert.throws(
+        () =>
+          auditor.auditEntry({
+            action: `example/repository/.github/workflows/reuse.yml@${'b'.repeat(40)}`,
+            ref: 'v1',
+            sourcePath: 'fixture workflow',
+          }),
+        /unsupported or mutable/,
+      );
+    },
+  );
+});
+
+test('recursive local action audit rejects cycles, missing or ambiguous descriptors, traversal, and unsupported runs', () => {
+  const composite = (uses) =>
+    [
+      'name: fixture',
+      'description: fixture',
+      'runs:',
+      '  using: composite',
+      '  steps:',
+      `    - uses: ${uses}`,
+    ].join('\n');
+
+  withFixtureRepo(
+    {
+      '.github/actions/a/action.yml': composite('./.github/actions/b'),
+      '.github/actions/b/action.yml': composite('./.github/actions/a'),
+      '.github/actions/ambiguous/action.yml': composite('./.github/actions/a'),
+      '.github/actions/ambiguous/action.yaml': composite('./.github/actions/a'),
+      '.github/actions/unsupported/action.yml': [
+        'name: unsupported',
+        'description: unsupported fixture',
+        'runs:',
+        '  using: node20',
+        '  main: index.js',
+      ].join('\n'),
+    },
+    (fixtureRoot) => {
+      assert.throws(
+        () =>
+          createFixtureUseAuditor(fixtureRoot).auditEntry({
+            action: './.github/actions/a',
+            sourcePath: 'fixture workflow',
+          }),
+        /cycle/,
+      );
+      assert.throws(
+        () =>
+          createFixtureUseAuditor(fixtureRoot).auditEntry({
+            action: './.github/actions/missing',
+            sourcePath: 'fixture workflow',
+          }),
+        /missing/,
+      );
+      assert.throws(
+        () =>
+          createFixtureUseAuditor(fixtureRoot).auditEntry({
+            action: './.github/actions/ambiguous',
+            sourcePath: 'fixture workflow',
+          }),
+        /exactly one/,
+      );
+      assert.throws(
+        () =>
+          createFixtureUseAuditor(fixtureRoot).auditEntry({
+            action: './../outside',
+            sourcePath: 'fixture workflow',
+          }),
+        /escapes the repository/,
+      );
+      assert.throws(
+        () =>
+          createFixtureUseAuditor(fixtureRoot).auditEntry({
+            action: './.github/actions/unsupported',
+            sourcePath: 'fixture workflow',
+          }),
+        /only composite/,
+      );
+    },
+  );
+});
+
+test('docker action audit records digests and rejects mutable tags', () => {
+  withFixtureRepo({}, (fixtureRoot) => {
+    const auditor = createFixtureUseAuditor(fixtureRoot);
+    const immutable = `docker://example.invalid/tool@sha256:${'c'.repeat(64)}`;
+    auditor.auditEntry({ action: immutable, sourcePath: 'fixture workflow' });
+    assert.deepEqual([...auditor.dockerReferences], [immutable]);
+    assert.throws(
+      () => auditor.auditEntry({ action: 'docker://example.invalid/tool:latest', sourcePath: 'fixture workflow' }),
+      /lowercase sha256 digest/,
+    );
+  });
+});
+
+test('runtime service, container, and setup-qemu images require exact immutable lock entries', () => {
+  const postgresDigest = `sha256:${'d'.repeat(64)}`;
+  const mysqlDigest = `sha256:${'e'.repeat(64)}`;
+  const qemuDigest = `sha256:${'f'.repeat(64)}`;
+  const source = [
+    'jobs:',
+    '  service_job:',
+    '    runs-on: ubuntu-latest',
+    '    services:',
+    '      db:',
+    `        image: postgres@${postgresDigest} # 16`,
+    '    steps:',
+    '      - run: true',
+    '  container_job:',
+    '    runs-on: ubuntu-latest',
+    '    container:',
+    `      image: mysql@${mysqlDigest} # 8.0`,
+    '    steps:',
+    `      - uses: docker/setup-qemu-action@${'a'.repeat(40)}`,
+    '        with:',
+    `          image: docker.io/tonistiigi/binfmt@${qemuDigest} # latest`,
+  ].join('\n');
+  const entries = imageEntriesFromWorkflowSource(source, 'image fixture');
+  const lockImages = [
+    { image: 'docker.io/tonistiigi/binfmt', ref: 'latest', digest: qemuDigest },
+    { image: 'mysql', ref: '8.0', digest: mysqlDigest },
+    { image: 'postgres', ref: '16', digest: postgresDigest },
+  ];
+  assert.doesNotThrow(() => assertFixtureImageLockCoverage(lockImages, entries, 'image fixture'));
+  assert.throws(
+    () => assertFixtureImageLockCoverage(lockImages.slice(1), entries, 'missing lock fixture'),
+    /missing from the fixture lock/,
+  );
+  assert.throws(
+    () =>
+      assertFixtureImageLockCoverage(
+        [...lockImages, { image: 'redis', ref: '7', digest: `sha256:${'1'.repeat(64)}` }],
+        entries,
+        'stale lock fixture',
+      ),
+    /stale entry/,
+  );
+});
+
+test('runtime image audit rejects mutable tags and hidden setup-qemu defaults', () => {
+  for (const source of [
+    [
+      'jobs:',
+      '  test:',
+      '    runs-on: ubuntu-latest',
+      '    services:',
+      '      db:',
+      '        image: postgres:16 # 16',
+    ].join('\n'),
+    [
+      'jobs:',
+      '  test:',
+      '    runs-on: ubuntu-latest',
+      '    container:',
+      '      image: mysql:8.0 # 8.0',
+    ].join('\n'),
+  ]) {
+    const entries = imageEntriesFromWorkflowSource(source, 'mutable image fixture');
+    assert.throws(() => assertImageDigest(entries[0].image, 'mutable image fixture'), /sha256 digest/);
+  }
+
+  const hiddenQemuDefault = [
+    'jobs:',
+    '  test:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    `      - uses: docker/setup-qemu-action@${'a'.repeat(40)}`,
+  ].join('\n');
+  assert.throws(
+    () => imageEntriesFromWorkflowSource(hiddenQemuDefault, 'setup-qemu fixture'),
+    /must define with.image/,
   );
 });
