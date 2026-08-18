@@ -202,9 +202,7 @@ pub enum EmergencyChainGrantBuildError {
 enum EmergencyChainSessionState {
     Ready { next_position: usize },
     Outstanding { position: usize, permit_serial: u64 },
-    Dispatching { position: usize, permit_serial: u64 },
     Exhausted,
-    Consumed,
 }
 
 #[derive(Debug)]
@@ -338,30 +336,6 @@ impl EmergencyChainGrant {
         }
     }
 
-    pub fn linearize_dispatch(
-        &mut self,
-        permit: EmergencyChainAttemptPermit,
-        context: &TrustedEmergencyChainContext,
-    ) -> Result<EmergencyChainDispatchCapability, EmergencyChainDispatchError> {
-        validate_trusted_context(self, context).map_err(EmergencyChainDispatchError::Gate)?;
-        let (position, permit_serial) = self
-            .outstanding_permit_identity(&permit)
-            .map_err(EmergencyChainDispatchError::Permit)?;
-        if context.gate_at.unix_secs < permit.authorized_at_unix_secs {
-            return Err(EmergencyChainDispatchError::Permit(
-                EmergencyChainPermitError::DispatchBeforeAuthorization,
-            ));
-        }
-        self.session_state = EmergencyChainSessionState::Dispatching {
-            position,
-            permit_serial,
-        };
-        Ok(EmergencyChainDispatchCapability {
-            permit,
-            linearized_at_unix_secs: context.gate_at.unix_secs,
-        })
-    }
-
     pub fn apply_authoritative_safe_skip(
         &mut self,
         permit: EmergencyChainAttemptPermit,
@@ -372,49 +346,13 @@ impl EmergencyChainGrant {
         let (position, _) = self
             .outstanding_permit_identity(&permit)
             .map_err(EmergencyChainSafeSkipError::Permit)?;
-        if !proof.matches(&permit) || proof.observed_at_unix_secs > context.gate_at.unix_secs {
+        if !proof.matches(&permit)
+            || proof.observed_at_unix_secs < permit.authorized_at_unix_secs
+            || proof.observed_at_unix_secs > context.gate_at.unix_secs
+        {
             return Err(EmergencyChainSafeSkipError::ProofMismatch);
         }
         Ok(self.advance_after_retryable(position))
-    }
-
-    pub fn complete_dispatched_attempt(
-        &mut self,
-        dispatched: EmergencyChainDispatchedAttempt,
-        completion: EmergencyChainAttemptCompletion,
-        completed_at: ServerEmergencyChainInstant,
-    ) -> Result<EmergencyChainSessionProgress, EmergencyChainAttemptCompletionError> {
-        let EmergencyChainSessionState::Dispatching {
-            position,
-            permit_serial,
-        } = self.session_state
-        else {
-            return Err(EmergencyChainAttemptCompletionError::NoDispatchInFlight);
-        };
-        let permit = dispatched.permit;
-        if permit.grant_id != self.id
-            || permit.chain_hash != self.chain_hash
-            || permit.request_scope != self.request_scope
-            || permit.chain_position != position
-            || permit.permit_serial != permit_serial
-            || self.targets.get(position) != Some(&permit.target)
-        {
-            return Err(EmergencyChainAttemptCompletionError::PermitMismatch);
-        }
-        if completed_at.unix_secs < dispatched.linearized_at_unix_secs {
-            return Err(EmergencyChainAttemptCompletionError::CompletionBeforeAuthorization);
-        }
-
-        match completion {
-            EmergencyChainAttemptCompletion::RetryableFailure => {
-                Ok(self.advance_after_retryable(position))
-            }
-            EmergencyChainAttemptCompletion::TerminalSuccess
-            | EmergencyChainAttemptCompletion::TerminalFailure => {
-                self.session_state = EmergencyChainSessionState::Consumed;
-                Ok(EmergencyChainSessionProgress::Consumed)
-            }
-        }
     }
 
     fn outstanding_permit_identity(
@@ -473,6 +411,18 @@ pub enum EmergencyChainRevokeError {
 /// ```
 #[derive(Debug)]
 pub struct GatewayEmergencyChainAuthority {
+    _sealed: (),
+}
+
+/// Separate sealed capability owned by the authoritative attempt/materialization
+/// ledger. The gateway dispatch authority cannot mint skip proofs.
+///
+/// ```compile_fail
+/// use aether_scheduler_core::EmergencyChainLedgerAuthority;
+/// let _forged = EmergencyChainLedgerAuthority { _sealed: () };
+/// ```
+#[derive(Debug)]
+pub struct EmergencyChainLedgerAuthority {
     _sealed: (),
 }
 
@@ -575,9 +525,11 @@ impl GatewayEmergencyChainAuthority {
             gate_at,
         }
     }
+}
 
-    /// Constructs a proof only after the gateway-owned authoritative ledger
-    /// has recorded that this exact reserved slot is safely unmaterializable.
+impl EmergencyChainLedgerAuthority {
+    /// Constructs a proof only after the authoritative ledger has recorded
+    /// that this exact reserved slot is safely unmaterializable.
     pub fn authoritative_safe_skip_proof(
         &self,
         permit: &EmergencyChainAttemptPermit,
@@ -629,7 +581,6 @@ pub enum EmergencyChainGateError {
     TargetOutOfOrder,
     AttemptAlreadyOutstanding,
     ChainExhausted,
-    GrantConsumed,
     PermitSerialExhausted,
 }
 
@@ -637,6 +588,13 @@ pub enum EmergencyChainGateError {
 /// ```compile_fail
 /// use aether_scheduler_core::EmergencyChainAttemptPermit;
 /// let _forged = EmergencyChainAttemptPermit {};
+/// ```
+///
+/// ```compile_fail
+/// use aether_scheduler_core::EmergencyChainAttemptPermit;
+/// fn bypass_domain(permit: EmergencyChainAttemptPermit) {
+///     permit.dispatch_once(|_| Ok::<(), ()>(()));
+/// }
 /// ```
 pub struct EmergencyChainAttemptPermit {
     grant_id: EmergencyChainGrantId,
@@ -646,13 +604,6 @@ pub struct EmergencyChainAttemptPermit {
     target: EmergencyChainTargetIdentity,
     permit_serial: u64,
     authorized_at_unix_secs: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmergencyChainAttemptCompletion {
-    RetryableFailure,
-    TerminalSuccess,
-    TerminalFailure,
 }
 
 /// ```compile_fail
@@ -683,54 +634,10 @@ impl EmergencyChainSafeSkipProof {
     }
 }
 
-/// ```compile_fail
-/// use aether_scheduler_core::EmergencyChainDispatchCapability;
-/// fn send_twice(capability: EmergencyChainDispatchCapability) {
-///     let _ = capability.dispatch_once(|_| Ok::<(), ()>(()));
-///     let _ = capability.dispatch_once(|_| Ok::<(), ()>(()));
-/// }
-/// ```
-#[derive(Debug)]
-pub struct EmergencyChainDispatchCapability {
-    permit: EmergencyChainAttemptPermit,
-    linearized_at_unix_secs: i64,
-}
-
-impl EmergencyChainDispatchCapability {
-    /// Consumes the capability and invokes exactly one send closure. The target
-    /// is visible only for the lifetime of that one `FnOnce` call.
-    pub fn dispatch_once<T, E>(
-        self,
-        dispatch: impl FnOnce(&EmergencyChainTargetIdentity) -> Result<T, E>,
-    ) -> (EmergencyChainDispatchedAttempt, Result<T, E>) {
-        let result = dispatch(&self.permit.target);
-        (
-            EmergencyChainDispatchedAttempt {
-                permit: self.permit,
-                linearized_at_unix_secs: self.linearized_at_unix_secs,
-            },
-            result,
-        )
-    }
-}
-
-#[derive(Debug)]
-pub struct EmergencyChainDispatchedAttempt {
-    permit: EmergencyChainAttemptPermit,
-    linearized_at_unix_secs: i64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmergencyChainPermitError {
     NoOutstandingPermit,
     PermitMismatch,
-    DispatchBeforeAuthorization,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmergencyChainDispatchError {
-    Gate(EmergencyChainGateError),
-    Permit(EmergencyChainPermitError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -744,14 +651,6 @@ pub enum EmergencyChainSafeSkipError {
 pub enum EmergencyChainSessionProgress {
     ReadyForNextTarget { next_position: usize },
     Exhausted,
-    Consumed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmergencyChainAttemptCompletionError {
-    NoDispatchInFlight,
-    PermitMismatch,
-    CompletionBeforeAuthorization,
 }
 
 fn validate_trusted_context(
@@ -812,14 +711,12 @@ pub fn evaluate_emergency_chain_gate(
 
     let next_position = match grant.session_state {
         EmergencyChainSessionState::Ready { next_position } => next_position,
-        EmergencyChainSessionState::Outstanding { .. }
-        | EmergencyChainSessionState::Dispatching { .. } => {
+        EmergencyChainSessionState::Outstanding { .. } => {
             return Err(EmergencyChainGateError::AttemptAlreadyOutstanding)
         }
         EmergencyChainSessionState::Exhausted => {
             return Err(EmergencyChainGateError::ChainExhausted)
         }
-        EmergencyChainSessionState::Consumed => return Err(EmergencyChainGateError::GrantConsumed),
     };
     let expected_target = &grant.targets[next_position];
     if !grant.targets.contains(request.requested_target) {
@@ -954,6 +851,10 @@ mod tests {
         GatewayEmergencyChainAuthority { _sealed: () }
     }
 
+    fn ledger_authority() -> EmergencyChainLedgerAuthority {
+        EmergencyChainLedgerAuthority { _sealed: () }
+    }
+
     fn instant(unix_secs: i64) -> ServerEmergencyChainInstant {
         authority().server_clock_instant(unix_secs)
     }
@@ -1064,18 +965,6 @@ mod tests {
             panic!("expected emergency permit")
         };
         *permit
-    }
-
-    fn dispatch_permit(
-        grant: &mut EmergencyChainGrant,
-        permit: EmergencyChainAttemptPermit,
-        at_unix_secs: i64,
-    ) -> EmergencyChainDispatchedAttempt {
-        let context = context(grant, at_unix_secs);
-        let capability = grant.linearize_dispatch(permit, &context).unwrap();
-        let (dispatched, result) = capability.dispatch_once(|_| Ok::<(), ()>(()));
-        result.unwrap();
-        dispatched
     }
 
     fn candidate(identity: &EmergencyChainTargetIdentity) -> SchedulerRankableCandidate {
@@ -1428,14 +1317,13 @@ mod tests {
             authorize(&mut grant, &target_a, ISSUED_AT).unwrap_err(),
             EmergencyChainGateError::AttemptAlreadyOutstanding
         );
-        let dispatched_a = dispatch_permit(&mut grant, permit_a, ISSUED_AT + 1);
+        let proof_a = ledger_authority()
+            .authoritative_safe_skip_proof(&permit_a, "ledger-entry-a", instant(ISSUED_AT + 1))
+            .unwrap();
+        let context_a = context(&grant, ISSUED_AT + 1);
         assert_eq!(
             grant
-                .complete_dispatched_attempt(
-                    dispatched_a,
-                    EmergencyChainAttemptCompletion::RetryableFailure,
-                    instant(ISSUED_AT + 1),
-                )
+                .apply_authoritative_safe_skip(permit_a, proof_a, &context_a)
                 .unwrap(),
             EmergencyChainSessionProgress::ReadyForNextTarget { next_position: 1 }
         );
@@ -1445,116 +1333,57 @@ mod tests {
         );
         let permit_b = permit(authorize(&mut grant, &target_b, ISSUED_AT + 1).unwrap());
         assert_eq!(permit_b.chain_position, 1);
-        let dispatched_b = dispatch_permit(&mut grant, permit_b, ISSUED_AT + 2);
-        grant
-            .complete_dispatched_attempt(
-                dispatched_b,
-                EmergencyChainAttemptCompletion::TerminalSuccess,
+        assert_eq!(
+            authorize(&mut grant, &target_b, ISSUED_AT + 2).unwrap_err(),
+            EmergencyChainGateError::AttemptAlreadyOutstanding
+        );
+    }
+
+    #[test]
+    fn reserved_permit_has_no_domain_send_or_completion_path() {
+        let target_a = target("a");
+        let mut grant = issue_grant(vec![target_a.clone()]);
+        let reserved = permit(authorize(&mut grant, &target_a, ISSUED_AT).unwrap());
+        assert_eq!(reserved.chain_position, 0);
+        assert_eq!(
+            authorize(&mut grant, &target_a, ISSUED_AT + 1).unwrap_err(),
+            EmergencyChainGateError::AttemptAlreadyOutstanding
+        );
+    }
+
+    #[test]
+    fn safe_skip_requires_authorization_then_ledger_observation_then_gate_order() {
+        let target_a = target("a");
+        let mut grant = issue_grant(vec![target_a.clone(), target("b")]);
+        let future_permit = permit(authorize(&mut grant, &target_a, ISSUED_AT).unwrap());
+        let ledger_authority = ledger_authority();
+        let proof = ledger_authority
+            .authoritative_safe_skip_proof(
+                &future_permit,
+                "ledger-entry-future",
                 instant(ISSUED_AT + 2),
             )
             .unwrap();
+        let future_context = context(&grant, ISSUED_AT + 1);
         assert_eq!(
-            authorize(&mut grant, &target_b, ISSUED_AT + 2).unwrap_err(),
-            EmergencyChainGateError::GrantConsumed
-        );
-    }
-
-    #[test]
-    fn dispatch_boundary_revalidates_live_scope_revocation_and_server_time() {
-        let target_a = target("a");
-
-        let mut scope_drift = issue_grant(vec![target_a.clone()]);
-        let scope_permit = permit(authorize(&mut scope_drift, &target_a, ISSUED_AT).unwrap());
-        let drifted_context = context_with(
-            &scope_drift,
-            scope_drift.chain_hash().clone(),
-            scope_drift.principal().clone(),
-            operation("responses.create"),
-            request_scope("request-DIFFERENT", 'a', "nonce-000001"),
-            ISSUED_AT + 1,
-        );
-        assert!(matches!(
-            scope_drift.linearize_dispatch(scope_permit, &drifted_context),
-            Err(EmergencyChainDispatchError::Gate(
-                EmergencyChainGateError::RequestScopeDenied
-            ))
-        ));
-        assert_eq!(
-            authorize(&mut scope_drift, &target_a, ISSUED_AT + 1).unwrap_err(),
-            EmergencyChainGateError::AttemptAlreadyOutstanding
+            grant.apply_authoritative_safe_skip(future_permit, proof, &future_context),
+            Err(EmergencyChainSafeSkipError::ProofMismatch)
         );
 
-        let mut revoked = issue_grant(vec![target_a.clone()]);
-        let revoked_permit = permit(authorize(&mut revoked, &target_a, ISSUED_AT).unwrap());
-        revoked.revoke(ISSUED_AT + 1).unwrap();
-        let revoked_context = context(&revoked, ISSUED_AT + 1);
-        assert!(matches!(
-            revoked.linearize_dispatch(revoked_permit, &revoked_context),
-            Err(EmergencyChainDispatchError::Gate(
-                EmergencyChainGateError::Revoked
-            ))
-        ));
-
-        let mut expired = issue_grant(vec![target_a.clone()]);
-        let expired_permit = permit(authorize(&mut expired, &target_a, ISSUED_AT).unwrap());
-        let expired_context = context(&expired, expired.expires_at_unix_secs());
-        assert!(matches!(
-            expired.linearize_dispatch(expired_permit, &expired_context),
-            Err(EmergencyChainDispatchError::Gate(
-                EmergencyChainGateError::Expired
-            ))
-        ));
-    }
-
-    #[test]
-    fn dispatch_capability_invokes_one_send_and_only_receipt_can_complete() {
-        let target_a = target("a");
-        let mut grant = issue_grant(vec![target_a.clone()]);
-        let permit = permit(authorize(&mut grant, &target_a, ISSUED_AT).unwrap());
-        let context = context(&grant, ISSUED_AT + 1);
-        let capability = grant.linearize_dispatch(permit, &context).unwrap();
-        let mut send_count = 0;
-        let (dispatched, result) = capability.dispatch_once(|selected| {
-            send_count += 1;
-            assert_eq!(selected, &target_a);
-            Ok::<_, ()>("sent")
-        });
-        assert_eq!(result, Ok("sent"));
-        assert_eq!(send_count, 1);
-        assert_eq!(
-            grant
-                .complete_dispatched_attempt(
-                    dispatched,
-                    EmergencyChainAttemptCompletion::TerminalSuccess,
-                    instant(ISSUED_AT + 2),
-                )
-                .unwrap(),
-            EmergencyChainSessionProgress::Consumed
-        );
-    }
-
-    #[test]
-    fn safe_skip_rejects_ledger_proof_observed_after_gate_linearization() {
-        let target_a = target("a");
-        let mut grant = issue_grant(vec![target_a.clone(), target("b")]);
-        let permit = permit(authorize(&mut grant, &target_a, ISSUED_AT).unwrap());
-        let authority = authority();
-        let proof = authority
-            .authoritative_safe_skip_proof(
-                &permit,
-                "ledger-entry-future",
-                authority.server_clock_instant(ISSUED_AT + 2),
-            )
+        let mut before_authorization = issue_grant(vec![target_a.clone(), target("b")]);
+        let permit = permit(authorize(&mut before_authorization, &target_a, ISSUED_AT).unwrap());
+        let proof = ledger_authority
+            .authoritative_safe_skip_proof(&permit, "ledger-entry-before", instant(ISSUED_AT - 1))
             .unwrap();
-        let context = context(&grant, ISSUED_AT + 1);
+        let context = context(&before_authorization, ISSUED_AT + 1);
         assert_eq!(
-            grant.apply_authoritative_safe_skip(permit, proof, &context),
+            before_authorization.apply_authoritative_safe_skip(permit, proof, &context),
             Err(EmergencyChainSafeSkipError::ProofMismatch)
         );
     }
 
     #[test]
-    fn retrying_last_target_exhausts_chain_and_cannot_fallback() {
+    fn authoritative_skip_of_last_target_exhausts_chain_and_cannot_fallback() {
         let target_a = target("a");
         let target_outside = target("outside");
         let mut grant = issue_grant(vec![target_a.clone()]);
@@ -1563,14 +1392,13 @@ mod tests {
             EmergencyChainGateError::TargetOutsideChain
         );
         let permit_a = permit(authorize(&mut grant, &target_a, ISSUED_AT).unwrap());
-        let dispatched_a = dispatch_permit(&mut grant, permit_a, ISSUED_AT + 1);
+        let proof_a = ledger_authority()
+            .authoritative_safe_skip_proof(&permit_a, "ledger-entry-last", instant(ISSUED_AT + 1))
+            .unwrap();
+        let context_a = context(&grant, ISSUED_AT + 1);
         assert_eq!(
             grant
-                .complete_dispatched_attempt(
-                    dispatched_a,
-                    EmergencyChainAttemptCompletion::RetryableFailure,
-                    instant(ISSUED_AT + 1),
-                )
+                .apply_authoritative_safe_skip(permit_a, proof_a, &context_a)
                 .unwrap(),
             EmergencyChainSessionProgress::Exhausted
         );
@@ -1599,12 +1427,12 @@ mod tests {
         );
 
         let missing_a_permit = permit(authorize(&mut grant, &target_a, ISSUED_AT).unwrap());
-        let authority = authority();
-        let proof = authority
+        let ledger_authority = ledger_authority();
+        let proof = ledger_authority
             .authoritative_safe_skip_proof(
                 &missing_a_permit,
                 "ledger-entry-000001",
-                authority.server_clock_instant(ISSUED_AT + 1),
+                instant(ISSUED_AT + 1),
             )
             .unwrap();
         let context = context(&grant, ISSUED_AT + 1);
