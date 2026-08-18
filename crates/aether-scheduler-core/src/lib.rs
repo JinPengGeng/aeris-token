@@ -1,6 +1,7 @@
 mod affinity;
 mod auth;
 mod candidate;
+mod emergency_chain;
 mod health;
 mod model;
 mod provider;
@@ -27,6 +28,14 @@ pub use candidate::{
     requested_capability_priority_for_candidate, CandidateRuntimeSelectabilityInput,
     EnumerateMinimalCandidateSelectionInput, SchedulerMinimalCandidateSelectionCandidate,
     SchedulerPriorityMode,
+};
+pub use emergency_chain::{
+    emergency_chain_candidate_order, evaluate_emergency_chain_gate, EmergencyChainCandidateMatch,
+    EmergencyChainCandidateOrderError, EmergencyChainGateDecision, EmergencyChainGateError,
+    EmergencyChainGateRequest, EmergencyChainGrant, EmergencyChainGrantBuildError,
+    EmergencyChainGrantId, EmergencyChainHash, EmergencyChainOperation, EmergencyChainPrincipal,
+    EmergencyChainRevokeError, EmergencyChainRevokeOutcome, EmergencyChainTargetIdentity,
+    EmergencyChainUseRequest, IssueEmergencyChainGrant, MAX_EMERGENCY_CHAIN_GRANT_TTL_SECS,
 };
 pub use health::{
     aggregate_provider_key_health_score, any_provider_key_circuit_open_at,
