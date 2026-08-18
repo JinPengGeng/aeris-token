@@ -93,6 +93,33 @@ const workflowFiles = fs
   .filter((entry) => entry.isFile() && /\.ya?ml$/i.test(entry.name))
   .map((entry) => path.join('.github', 'workflows', entry.name));
 
+const actionLock = yaml.load(
+  fs.readFileSync(path.join(repoRoot, '.github', 'action-lock.yml'), 'utf8'),
+);
+const actionReferencePattern = /^([^@\s]+)@([0-9a-f]{40})$/;
+const dockerDigestPattern = /^docker:\/\/[^@\s]+@sha256:[0-9a-f]{64}$/;
+const sourceRefPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+const workflowUseEntryPattern = /^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#\s*([^\s#]+))?\s*$/gm;
+
+const workflowUseEntries = (workflowFile) => {
+  const source = fs.readFileSync(path.join(repoRoot, workflowFile), 'utf8');
+  return [...source.matchAll(workflowUseEntryPattern)].map((match) => ({
+    action: match[1],
+    ref: match[2] ?? null,
+    workflowFile,
+  }));
+};
+
+const actionLockKey = ({ repository, ref }) => `${repository}\u0000${ref}`;
+
+const assertDockerDigest = (action, description) => {
+  assert.match(
+    action,
+    dockerDigestPattern,
+    `${description} container action must use a lowercase sha256 digest`,
+  );
+};
+
 const collectCheckoutSteps = (document) =>
   Object.values(document.jobs ?? {}).flatMap((job) =>
     (job.steps ?? []).filter(
@@ -377,17 +404,81 @@ for (const spec of workflowSpecs) {
   }
 }
 
-test('all workflow actions are pinned to immutable commit SHAs', () => {
+test('action lock is strict, sorted, and exactly covers external workflow actions', () => {
+  assert.deepEqual(Object.keys(actionLock).sort(), ['actions', 'version']);
+  assert.equal(actionLock.version, 1, 'action lock must use version 1');
+  assert.ok(Array.isArray(actionLock.actions), 'action lock actions must be an array');
+
+  const lockKeys = new Set();
+  const lockEntries = new Map();
+  let previousKey = '';
+  for (const entry of actionLock.actions) {
+    assert.deepEqual(
+      Object.keys(entry).sort(),
+      ['ref', 'repository', 'sha'],
+      'action lock entries must have only repository, ref, and sha',
+    );
+    assert.match(entry.repository, /^[^@\s]+\/[^^@\s]+$/, 'action lock repository is invalid');
+    assert.match(entry.ref, sourceRefPattern, 'action lock source ref is invalid');
+    assert.match(entry.sha, /^[0-9a-f]{40}$/, 'action lock SHA is invalid');
+    const key = actionLockKey(entry);
+    assert.ok(key > previousKey, 'action lock entries must be strictly sorted by repository and ref');
+    assert.equal(lockKeys.has(key), false, `action lock duplicates ${entry.repository}@${entry.ref}`);
+    lockKeys.add(key);
+    lockEntries.set(key, entry.sha);
+    previousKey = key;
+  }
+
+  const workflowKeys = new Set();
+  const workflowRefs = new Map();
   assert.ok(workflowFiles.length > 0, 'repository must contain workflow files');
   for (const workflowFile of workflowFiles) {
-    const { document } = readWorkflow(workflowFile);
-    for (const action of collectUses(document.jobs)) {
-      if (action.startsWith('./') || action.startsWith('docker://')) continue;
-      assert.match(
-        action,
-        /^[^@\s]+@[0-9a-f]{40}$/,
-        `${workflowFile} action is not pinned to a full commit SHA: ${action}`,
+    for (const { action, ref } of workflowUseEntries(workflowFile)) {
+      if (action.startsWith('./')) continue;
+      if (action.startsWith('docker://')) {
+        assertDockerDigest(action, `${workflowFile}`);
+        continue;
+      }
+
+      const match = action.match(actionReferencePattern);
+      assert.ok(match, `${workflowFile} action is not pinned to a full commit SHA: ${action}`);
+      assert.match(ref ?? '', sourceRefPattern, `${workflowFile} action must retain a source ref comment`);
+      const [, repository, sha] = match;
+      const key = actionLockKey({ repository, ref });
+      const priorSha = workflowRefs.get(key);
+      assert.ok(
+        priorSha === undefined || priorSha === sha,
+        `${workflowFile} maps ${repository}@${ref} to more than one SHA`,
+      );
+      workflowRefs.set(key, sha);
+      workflowKeys.add(key);
+      assert.equal(
+        lockEntries.get(key),
+        sha,
+        `${workflowFile} action ${repository}@${ref} must exactly match action-lock.yml`,
       );
     }
+  }
+  assert.deepEqual(
+    [...lockKeys].sort(),
+    [...workflowKeys].sort(),
+    'action lock must not contain unused entries and must cover every external workflow action',
+  );
+});
+
+test('container workflow actions require immutable lowercase sha256 digests', () => {
+  assert.doesNotThrow(() =>
+    assertDockerDigest(
+      `docker://example.invalid/tool@sha256:${'a'.repeat(64)}`,
+      'valid container action',
+    ),
+  );
+  for (const action of [
+    'docker://example.invalid/tool:latest',
+    'docker://example.invalid/tool',
+    `docker://example.invalid/tool@sha256:${'A'.repeat(64)}`,
+    `docker://example.invalid/tool@sha256:${'a'.repeat(63)}`,
+  ]) {
+    assert.throws(() => assertDockerDigest(action, 'invalid container action'));
   }
 });
