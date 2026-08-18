@@ -63,6 +63,23 @@ review_required:
 YAML
 }
 
+write_policy_with_fork_owned() {
+  local fork_owned="$1"
+  mkdir -p .github
+  cat >.github/upstream-sync-policy.yml <<YAML
+version: 1
+upstream:
+  repository: example/Upstream
+  branch: main
+sync:
+  state_file: .github/upstream-sync-state.json
+matching:
+  enforced_fork_owned_subset: exact_or_directory_recursive
+fork_owned:
+  - ${fork_owned}
+YAML
+}
+
 prepare() {
   AERIS_TMP_ROOT="${RUN_ROOT}/tmp" "${HELPER}" \
     "$1" "$2" example/Upstream main
@@ -156,6 +173,60 @@ test_fork_owned_filter_and_state_advance() {
   assert_eq "${checkpoint}" "$(git show "${main}:.github/upstream-sync-state.json" |
     node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>process.stdout.write(JSON.parse(d).last_integrated_sha))")" \
     'fork base checkpoint must not advance'
+}
+
+test_exact_path_and_recursive_directory_filter() {
+  local case_name repo root checkpoint upstream_tip main output tree expected_filtered
+  local expected_foo expected_nested
+  for case_name in exact recursive; do
+    repo="${RUN_ROOT}/${case_name}-path-filter"
+    new_repo "${repo}"
+    cd "${repo}"
+
+    mkdir -p docs/nested
+    printf 'foo v0\n' >docs/foo.md
+    printf 'nested v0\n' >docs/nested/bar.md
+    git add .
+    git commit -qm 'base'
+    root="$(git rev-parse HEAD)"
+
+    git switch -qc upstream
+    git commit --allow-empty -qm 'checkpoint'
+    checkpoint="$(git rev-parse HEAD)"
+    printf 'foo v1\n' >docs/foo.md
+    printf 'nested v1\n' >docs/nested/bar.md
+    git add docs
+    git commit -qm 'upstream docs changes'
+    upstream_tip="$(git rev-parse HEAD)"
+
+    git switch -qc main "${root}"
+    write_state "${checkpoint}"
+    if [[ "${case_name}" == exact ]]; then
+      write_policy_with_fork_owned 'docs/foo.md'
+      expected_filtered=1
+      expected_foo='foo v0'
+      expected_nested='nested v1'
+    else
+      write_policy_with_fork_owned 'docs/**'
+      expected_filtered=2
+      expected_foo='foo v0'
+      expected_nested='nested v0'
+    fi
+    git add .github
+    git commit -qm "${case_name} fork-owned policy"
+    main="$(git rev-parse HEAD)"
+
+    output="$(prepare "${main}" "${upstream_tip}")"
+    assert_eq clean "$(sed -n 's/^state=//p' <<<"${output}")" \
+      "${case_name} path filter state"
+    assert_eq "${expected_filtered}" "$(sed -n 's/^filtered_paths=//p' <<<"${output}")" \
+      "${case_name} path filter count"
+    tree="$(tree_from_output "${output}")"
+    assert_eq "${expected_foo}" "$(git show "${tree}:docs/foo.md")" \
+      "${case_name} foo preservation"
+    assert_eq "${expected_nested}" "$(git show "${tree}:docs/nested/bar.md")" \
+      "${case_name} nested preservation"
+  done
 }
 
 test_non_fork_conflict() {
@@ -297,6 +368,7 @@ test_policy_identity_mismatch() {
 
 test_squash_checkpoint_noop
 test_fork_owned_filter_and_state_advance
+test_exact_path_and_recursive_directory_filter
 test_non_fork_conflict
 test_invalid_state_and_history_rewrite
 test_unsupported_policy_pattern

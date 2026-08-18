@@ -23,6 +23,8 @@ const sameMembers = (actual, expected) =>
 const agents = loadYaml('.github/agents.yml');
 const automation = loadYaml('.github/automation-policy.yml');
 const sync = loadYaml('.github/upstream-sync-policy.yml');
+const syncWorkflow = loadYaml('.github/workflows/sync-upstream.yml');
+const syncScript = read('.github/workflows/scripts/sync-upstream.sh');
 const state = JSON.parse(read('.github/upstream-sync-state.json'));
 
 for (const contract of [agents, automation, sync]) {
@@ -142,6 +144,30 @@ assert(
 );
 assert(sync.conflicts.overwrite_unknown_tip === false, 'unknown sync tips must not be overwritten');
 assert(sync.conflicts.create_or_update_alert === true, 'sync failures must create alerts');
+const syncSteps = syncWorkflow.jobs.sync.steps;
+const autoMergeStep = syncSteps.find((step) => step.name === 'Enable native auto-merge');
+const disarmCallIndex = syncScript.search(/^disarm_tracked_pr$/m);
+const rebuildLoopIndex = syncScript.search(/^for attempt in 1 2 3; do$/m);
+assert(autoMergeStep, 'sync workflow must expose the native auto-merge step');
+assert(
+  autoMergeStep.if === "steps.sync.outputs.has_changes == 'true'",
+  'native auto-merge must require a published synchronization change',
+);
+assert(
+  autoMergeStep.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
+    autoMergeStep.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}',
+  'native auto-merge must bind the published PR URL and exact head SHA',
+);
+assert(
+  typeof autoMergeStep.run === 'string' &&
+    autoMergeStep.run.includes('manage-sync-automerge.sh') &&
+    autoMergeStep.run.includes(' arm '),
+  'native auto-merge must use the managed helper arm action',
+);
+assert(
+  disarmCallIndex >= 0 && rebuildLoopIndex >= 0 && disarmCallIndex < rebuildLoopIndex,
+  'sync must disarm a stale auto-merge before rebuilding its fixed branch',
+);
 assert(
   automation.authorization.external_pull_request_analysis_requires_label === 'agent-analyze',
   'external PR analysis must require agent-analyze',
@@ -153,6 +179,7 @@ assert(/^[0-9a-f]{40}$/.test(state.last_integrated_sha), 'checkpoint must be a f
 
 const directlyExecutedScripts = [
   '.github/workflows/scripts/checkpoint-merge.sh',
+  '.github/workflows/scripts/manage-sync-automerge.sh',
   '.github/workflows/scripts/prepare-checkpoint-sync.sh',
 ];
 const trackedModes = execFileSync('git', ['ls-files', '--stage', '--', ...directlyExecutedScripts], {

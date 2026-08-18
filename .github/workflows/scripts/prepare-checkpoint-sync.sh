@@ -180,7 +180,7 @@ for index in "${!fork_patterns[@]}"; do
     pattern="${pattern:1:${#pattern}-2}"
   fi
   valid_repo_path "${pattern}" || fail_error "invalid fork_owned pattern: ${pattern}"
-  if [[ "${pattern}" == */** ]]; then
+  if [[ "${pattern}" == *'/**' ]]; then
     prefix="${pattern%/**}"
     contains_glob "${prefix}" &&
       fail_error "unsupported fork_owned pattern: ${pattern}"
@@ -195,7 +195,7 @@ printf 'checkpoint=%s\n' "${checkpoint}"
 path_is_fork_owned() {
   local path="$1" pattern prefix
   for pattern in "${fork_patterns[@]}"; do
-    if [[ "${pattern}" == */** ]]; then
+    if [[ "${pattern}" == *'/**' ]]; then
       prefix="${pattern%/**}"
       [[ "${path}" == "${prefix}/"* ]] && return 0
     elif [[ "${path}" == "${pattern}" ]]; then

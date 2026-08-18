@@ -12,6 +12,7 @@ STATE_FILE="${STATE_FILE:-.github/upstream-sync-state.json}"
 SYNC_POLICY_FILE="${SYNC_POLICY_FILE:-.github/upstream-sync-policy.yml}"
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREPARE_HELPER="${PREPARE_HELPER:-${SCRIPT_ROOT}/prepare-checkpoint-sync.sh}"
+AUTOMERGE_HELPER="${AUTOMERGE_HELPER:-${SCRIPT_ROOT}/manage-sync-automerge.sh}"
 
 MANAGED_MARKER='<!-- upstream-sync-managed -->'
 AUTO_CLOSED_MARKER='<!-- upstream-sync-auto-closed -->'
@@ -339,6 +340,14 @@ require_gate() {
   exit "${rc}"
 }
 
+disarm_tracked_pr() {
+  [[ -n "${tracked_pr}" ]] || return 0
+  bash "${AUTOMERGE_HELPER}" \
+    disarm \
+    "${GITHUB_REPOSITORY}" \
+    "$(jq -r '.url' <<<"${tracked_pr}")"
+}
+
 report_workflow_drift() {
   local current_tree changed title existing
   [[ -n "${checkpoint_sha}" && "${checkpoint_sha}" != "${upstream_sha}" ]] || return 0
@@ -439,7 +448,7 @@ publish_pr() {
 Automated synchronization from ${parent}:${upstream_branch} at ${upstream_sha}.
 Checkpoint advanced from ${checkpoint_sha} to ${upstream_sha}.
 
-This pull request requires protected branch checks and a maintainer decision.
+This pull request is configured for native auto-merge after protected branch checks pass.
 Configured fork-owned paths are preserved; upstream workflow changes are reviewed separately."
 
   if [[ -n "${tracked_pr}" ]]; then
@@ -500,6 +509,7 @@ else
   ((rc == 20)) && exit 0
   exit "${rc}"
 fi
+disarm_tracked_pr
 
 for attempt in 1 2 3; do
   git fetch --no-tags origin "${BASE_BRANCH}"
