@@ -378,11 +378,14 @@ fn normalize_standard_request_to_openai_chat_request_cow<'a>(
 
 #[cfg(test)]
 mod tests {
-    use crate::formats::openai::responses::history::record_converted_response_history;
+    use crate::formats::openai::responses::history::{
+        conversation_history_scope, record_converted_response_history,
+    };
 
     use super::{
         build_standard_request_body, build_standard_request_body_from_canonical,
         build_standard_request_body_with_model_directives,
+        build_standard_request_body_with_model_directives_request_headers_and_history_scope,
         normalize_standard_request_to_openai_chat_request,
     };
     use serde_json::{json, Value};
@@ -532,12 +535,13 @@ mod tests {
     }
 
     #[test]
-    fn standard_request_body_scopes_previous_response_history_by_api_key() {
+    fn standard_request_body_scopes_previous_response_history_by_tenant_and_api_key() {
         record_converted_response_history(
             &json!({
                 "needs_conversion": true,
                 "client_api_format": "openai:responses",
                 "provider_api_format": "openai:chat",
+                "user_id": "standard-history-user-a",
                 "api_key_id": "standard-history-key-a",
                 "original_request_body": {
                     "model": "source-model",
@@ -565,19 +569,29 @@ mod tests {
                 "output": "inspection-complete"
             }]
         });
+        let owner_scope =
+            conversation_history_scope("standard-history-user-a", "standard-history-key-a")
+                .unwrap();
+        let other_scope =
+            conversation_history_scope("standard-history-user-b", "standard-history-key-a")
+                .unwrap();
 
-        let owner = build_standard_request_body(
-            &continuation,
-            "openai:responses",
-            "mapped-model",
-            "custom",
-            "openai:chat",
-            "/v1/responses",
-            false,
-            None,
-            Some("standard-history-key-a"),
-        )
-        .expect("the owning API key should restore response history");
+        let owner =
+            build_standard_request_body_with_model_directives_request_headers_and_history_scope(
+                &continuation,
+                "openai:responses",
+                "mapped-model",
+                "custom",
+                "openai:chat",
+                "/v1/responses",
+                false,
+                None,
+                Some("standard-history-key-a"),
+                Some(owner_scope.as_str()),
+                None,
+                false,
+            )
+            .expect("the owning tenant and API key should restore response history");
         assert_eq!(
             owner["messages"][1]["tool_calls"][0]["id"],
             "call_standard_history_scope_1"
@@ -587,18 +601,23 @@ mod tests {
             "call_standard_history_scope_1"
         );
 
-        assert!(build_standard_request_body(
-            &continuation,
-            "openai:responses",
-            "mapped-model",
-            "custom",
-            "openai:chat",
-            "/v1/responses",
-            false,
-            None,
-            Some("standard-history-key-b"),
-        )
-        .is_none());
+        assert!(
+            build_standard_request_body_with_model_directives_request_headers_and_history_scope(
+                &continuation,
+                "openai:responses",
+                "mapped-model",
+                "custom",
+                "openai:chat",
+                "/v1/responses",
+                false,
+                None,
+                Some("standard-history-key-a"),
+                Some(other_scope.as_str()),
+                None,
+                false,
+            )
+            .is_none()
+        );
     }
 
     #[test]

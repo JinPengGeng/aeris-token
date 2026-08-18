@@ -387,7 +387,12 @@ fn history_recording_capability(report_context: &Value) -> Option<ConversationHi
     (capability != ConversationHistoryCapability::Unsupported).then_some(capability)
 }
 
-fn history_scope_from_report_context(report_context: &Value) -> Option<String> {
+enum ResponseHistoryScope {
+    Unscoped,
+    Scoped(String),
+}
+
+fn history_scope_from_report_context(report_context: &Value) -> Option<ResponseHistoryScope> {
     let user_id = report_context
         .get("user_id")
         .and_then(Value::as_str)
@@ -399,11 +404,13 @@ fn history_scope_from_report_context(report_context: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty());
     match (user_id, api_key_id) {
-        (Some(user_id), Some(api_key_id)) => conversation_history_scope(user_id, api_key_id),
-        // Library-only callers historically scoped by API key. Gateway report
-        // contexts always carry both identities and therefore use the stronger
-        // tenant + API-key scope above.
-        (None, Some(api_key_id)) => Some(api_key_id.to_string()),
+        (Some(user_id), Some(api_key_id)) => {
+            conversation_history_scope(user_id, api_key_id).map(ResponseHistoryScope::Scoped)
+        }
+        // Identity-free library conversions remain unscoped. A partial
+        // identity is rejected because the gateway can never resolve it with
+        // its tenant + API-key lookup scope.
+        (None, None) => Some(ResponseHistoryScope::Unscoped),
         _ => None,
     }
 }
@@ -455,7 +462,10 @@ pub fn record_converted_response_history(
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
     let request = report_context.get("original_request_body")?;
-    let history_scope = history_scope_from_report_context(report_context);
+    let history_scope = match history_scope_from_report_context(report_context)? {
+        ResponseHistoryScope::Unscoped => None,
+        ResponseHistoryScope::Scoped(scope) => Some(scope),
+    };
     let mut transcript = if request.get("messages").and_then(Value::as_array).is_some() {
         Vec::new()
     } else {
@@ -616,6 +626,50 @@ mod tests {
             expand_previous_response_for_conversion(&request, Some(other_key_scope.as_str()))
                 .is_err()
         );
+
+        let other_tenant_record = record_converted_response_history(
+            &json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses",
+                "user_id": "tenant-b",
+                "api_key_id": "key-shared",
+                "original_request_body": {"input": "other tenant turn"}
+            }),
+            &json!({
+                "id": "resp_tenant_and_key_scope",
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant", "content": []}]
+            }),
+        )
+        .expect("the same provider response ID may exist in another tenant scope");
+        assert_ne!(record.storage_key, other_tenant_record.storage_key);
+
+        let owner = expand_previous_response_for_conversion(&request, Some(owner_scope.as_str()))
+            .expect("owner history should remain available");
+        let other_tenant =
+            expand_previous_response_for_conversion(&request, Some(other_tenant_scope.as_str()))
+                .expect("other tenant should resolve only its own scoped record");
+        assert_eq!(owner["input"][0]["content"], "private turn");
+        assert_eq!(other_tenant["input"][0]["content"], "other tenant turn");
+    }
+
+    #[test]
+    fn partial_gateway_identity_does_not_create_an_orphaned_history_record() {
+        let record = record_converted_response_history(
+            &json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:chat",
+                "api_key_id": "key-without-tenant",
+                "original_request_body": {"input": "must not be persisted"}
+            }),
+            &json!({
+                "id": "resp_partial_gateway_identity",
+                "status": "completed",
+                "output": []
+            }),
+        );
+
+        assert!(record.is_none());
     }
 
     #[test]
@@ -801,12 +855,16 @@ mod tests {
             "needs_conversion": true,
             "client_api_format": "openai:responses",
             "provider_api_format": "openai:chat",
+            "user_id": "distributed-history-user-a",
             "api_key_id": "distributed-history-key-a",
             "original_request_body": {
                 "model": "deepseek-v4-flash",
                 "input": [{"role": "user", "content": "inspect the repository"}]
             }
         });
+        let history_scope =
+            conversation_history_scope("distributed-history-user-a", "distributed-history-key-a")
+                .unwrap();
         let record = record_converted_response_history(
             &report_context,
             &json!({
@@ -826,7 +884,7 @@ mod tests {
             record.storage_key,
             response_history_storage_key(
                 "resp_distributed_history_1",
-                Some("distributed-history-key-a")
+                Some(history_scope.as_str())
             )
         );
         assert!(!record.storage_key.contains("distributed-history-key-a"));
@@ -837,7 +895,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&response_history_key(
                 "resp_distributed_history_1",
-                Some("distributed-history-key-a"),
+                Some(history_scope.as_str()),
             ));
         let continuation = json!({
             "model": "deepseek-v4-flash",
@@ -850,21 +908,19 @@ mod tests {
         });
         assert!(expand_previous_response_for_conversion(
             &continuation,
-            Some("distributed-history-key-a")
+            Some(history_scope.as_str())
         )
         .is_err());
 
         hydrate_response_history(
             "resp_distributed_history_1",
-            Some("distributed-history-key-a"),
+            Some(history_scope.as_str()),
             &record.payload,
         )
         .expect("another instance should hydrate the persisted transcript");
-        let expanded = expand_previous_response_for_conversion(
-            &continuation,
-            Some("distributed-history-key-a"),
-        )
-        .expect("hydrated history should support the continuation");
+        let expanded =
+            expand_previous_response_for_conversion(&continuation, Some(history_scope.as_str()))
+                .expect("hydrated history should support the continuation");
         assert_eq!(
             expanded["input"][1]["call_id"],
             "call_distributed_history_1"
@@ -943,11 +999,12 @@ mod tests {
     }
 
     #[test]
-    fn isolates_response_history_by_api_key_scope() {
+    fn isolates_response_history_by_tenant_and_api_key_scope() {
         let report_context = json!({
             "needs_conversion": true,
             "client_api_format": "openai:responses",
             "provider_api_format": "openai:chat",
+            "user_id": "user-history-scope-a",
             "api_key_id": "key-history-scope-a",
             "original_request_body": {
                 "model": "deepseek-v4-flash",
@@ -967,12 +1024,16 @@ mod tests {
             "previous_response_id": "resp_history_scope_test_1",
             "input": "continue"
         });
+        let owner_scope =
+            conversation_history_scope("user-history-scope-a", "key-history-scope-a").unwrap();
+        let other_scope =
+            conversation_history_scope("user-history-scope-b", "key-history-scope-a").unwrap();
 
         let owner_result = convert_request(
             "openai:responses",
             "openai:chat",
             &continuation,
-            &FormatContext::default().with_history_scope("key-history-scope-a"),
+            &FormatContext::default().with_history_scope(owner_scope),
         );
         assert!(owner_result.is_ok());
 
@@ -980,9 +1041,9 @@ mod tests {
             "openai:responses",
             "openai:chat",
             &continuation,
-            &FormatContext::default().with_history_scope("key-history-scope-b"),
+            &FormatContext::default().with_history_scope(other_scope),
         )
-        .expect_err("another API key must not recover scoped history");
+        .expect_err("another tenant must not recover scoped history");
         assert!(matches!(
             other_user_error,
             crate::formats::context::FormatError::UnsupportedField { ref field, .. }
