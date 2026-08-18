@@ -6,11 +6,13 @@ export const MAXIMUM_WRITER_FILES = WRITER_FOUNDATION_LIMITS.maximum_files;
 export const MAXIMUM_WRITER_PATCH_BYTES = WRITER_FOUNDATION_LIMITS.maximum_patch_bytes;
 export const MAXIMUM_WRITER_FILE_BYTES = WRITER_FOUNDATION_LIMITS.maximum_file_size_bytes;
 export const MAXIMUM_WRITER_TOTAL_BYTES = WRITER_FOUNDATION_LIMITS.maximum_total_file_bytes;
+export const MAXIMUM_WRITER_FIX_CYCLES = WRITER_FOUNDATION_LIMITS.maximum_fix_cycles;
 export const DEFAULT_WRITER_LIMITS = Object.freeze({
   maximumFiles: MAXIMUM_WRITER_FILES,
   maximumPatchBytes: MAXIMUM_WRITER_PATCH_BYTES,
   maximumFileBytes: MAXIMUM_WRITER_FILE_BYTES,
   maximumTotalBytes: MAXIMUM_WRITER_TOTAL_BYTES,
+  maximumFixCycles: MAXIMUM_WRITER_FIX_CYCLES,
 });
 
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
@@ -37,7 +39,8 @@ export function writerLimitsFromContract(limits) {
     !Object.hasOwn(limits, 'maximum_files') ||
     !Object.hasOwn(limits, 'maximum_file_size_bytes') ||
     !Object.hasOwn(limits, 'maximum_total_file_bytes') ||
-    !Object.hasOwn(limits, 'maximum_patch_bytes')
+    !Object.hasOwn(limits, 'maximum_patch_bytes') ||
+    !Object.hasOwn(limits, 'maximum_fix_cycles')
   ) return null;
   if (
     !Number.isSafeInteger(limits.maximum_patch_bytes) || limits.maximum_patch_bytes <= 0 ||
@@ -48,11 +51,13 @@ export function writerLimitsFromContract(limits) {
     maximumPatchBytes: limits.maximum_patch_bytes,
     maximumFileBytes: limits.maximum_file_size_bytes,
     maximumTotalBytes: limits.maximum_total_file_bytes,
+    maximumFixCycles: limits.maximum_fix_cycles,
   };
   if (
     !Number.isSafeInteger(normalized.maximumFiles) || normalized.maximumFiles <= 0 || normalized.maximumFiles > MAXIMUM_WRITER_FILES ||
     !Number.isSafeInteger(normalized.maximumFileBytes) || normalized.maximumFileBytes <= 0 || normalized.maximumFileBytes > MAXIMUM_WRITER_FILE_BYTES ||
     !Number.isSafeInteger(normalized.maximumTotalBytes) || normalized.maximumTotalBytes <= 0 || normalized.maximumTotalBytes > MAXIMUM_WRITER_TOTAL_BYTES ||
+    !Number.isSafeInteger(normalized.maximumFixCycles) || normalized.maximumFixCycles <= 0 || normalized.maximumFixCycles > MAXIMUM_WRITER_FIX_CYCLES ||
     normalized.maximumFileBytes > normalized.maximumTotalBytes
   ) return null;
   return normalized;
@@ -62,10 +67,11 @@ function normalizedLimits(limits) {
   const normalized =
     Object.hasOwn(limits ?? {}, 'maximum_files') ||
     Object.hasOwn(limits ?? {}, 'maximum_file_size_bytes') ||
-    Object.hasOwn(limits ?? {}, 'maximum_total_file_bytes')
+    Object.hasOwn(limits ?? {}, 'maximum_total_file_bytes') ||
+    Object.hasOwn(limits ?? {}, 'maximum_fix_cycles')
     ? writerLimitsFromContract(limits)
     : limits;
-  if (!normalized || ['maximumFiles', 'maximumPatchBytes', 'maximumFileBytes', 'maximumTotalBytes'].some(
+  if (!normalized || ['maximumFiles', 'maximumPatchBytes', 'maximumFileBytes', 'maximumTotalBytes', 'maximumFixCycles'].some(
     (key) => !Number.isSafeInteger(normalized[key]) || normalized[key] <= 0,
   )) return null;
   if (
@@ -73,6 +79,7 @@ function normalizedLimits(limits) {
     normalized.maximumPatchBytes > MAXIMUM_WRITER_PATCH_BYTES ||
     normalized.maximumFileBytes > MAXIMUM_WRITER_FILE_BYTES ||
     normalized.maximumTotalBytes > MAXIMUM_WRITER_TOTAL_BYTES ||
+    normalized.maximumFixCycles > MAXIMUM_WRITER_FIX_CYCLES ||
     normalized.maximumFileBytes > normalized.maximumTotalBytes
   ) return null;
   return normalized;
@@ -181,6 +188,7 @@ export function evaluateWriterRequest({
   switches,
   changeSet = null,
   patchBytes,
+  fixCycle,
   limits = DEFAULT_WRITER_LIMITS,
 } = {}) {
   if (!WRITER_COMMANDS.includes(command)) return denied('unsupported_command');
@@ -196,7 +204,13 @@ export function evaluateWriterRequest({
   if (!Number.isSafeInteger(issue.number) || issue.number <= 0) return denied('invalid_issue_number');
   if (!labelsContain(issue.labels, 'agent-ready')) return denied('missing_agent_ready_label');
   const branch = branchForIssue(issue.number);
+  const normalized = normalizedLimits(limits);
+  if (!normalized) return denied('invalid_limits');
+  if (!Number.isSafeInteger(fixCycle) || fixCycle < 0) return denied('invalid_fix_cycle');
+  if (command === '/agent implement' && fixCycle !== 0) return denied('invalid_fix_cycle');
+  if (command === '/agent retry-write' && fixCycle === 0) return denied('invalid_fix_cycle');
+  if (fixCycle > normalized.maximumFixCycles) return denied('maximum_fix_cycles_exceeded');
   if (changeSet === null) return allowed({ branch });
-  const changes = validateWriterChangeSet(changeSet, limits, patchBytes);
+  const changes = validateWriterChangeSet(changeSet, normalized, patchBytes);
   return changes.allowed ? allowed({ branch, ...changes }) : changes;
 }

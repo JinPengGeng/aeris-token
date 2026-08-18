@@ -10,7 +10,13 @@ import {
 
 const switches = { globalEnabled: true, writerVariableEnabled: true, writerContractEnabled: true };
 const issue = { number: 41, state: 'open', isPullRequest: false, labels: ['bug', 'agent-ready'] };
-const limits = { maximumFiles: 2, maximumPatchBytes: 12, maximumFileBytes: 10, maximumTotalBytes: 15 };
+const limits = {
+  maximumFiles: 2,
+  maximumPatchBytes: 12,
+  maximumFileBytes: 10,
+  maximumTotalBytes: 15,
+  maximumFixCycles: 2,
+};
 
 function request(overrides = {}) {
   return {
@@ -19,13 +25,14 @@ function request(overrides = {}) {
     actorPermission: 'write',
     issue,
     switches,
+    fixCycle: 0,
     ...overrides,
   };
 }
 
 test('admits exact writer commands and assigns the deterministic Issue branch', () => {
   assert.deepEqual(evaluateWriterRequest(request()), { allowed: true, reason: null, branch: 'agent/issue-41' });
-  assert.equal(evaluateWriterRequest(request({ command: '/agent retry-write' })).allowed, true);
+  assert.equal(evaluateWriterRequest(request({ command: '/agent retry-write', fixCycle: 1 })).allowed, true);
   assert.equal(branchForIssue(41), 'agent/issue-41');
   assert.equal(branchForIssue(0), null);
 });
@@ -44,6 +51,9 @@ test('fails closed for command, authorization, switches, and Issue admission', (
     [{ issue: { ...issue, isPullRequest: true } }, 'pull_request_not_allowed'],
     [{ issue: { ...issue, labels: [] } }, 'missing_agent_ready_label'],
     [{ issue: { ...issue, number: -1 } }, 'invalid_issue_number'],
+    [{ fixCycle: 1 }, 'invalid_fix_cycle'],
+    [{ command: '/agent retry-write', fixCycle: 0 }, 'invalid_fix_cycle'],
+    [{ command: '/agent retry-write', fixCycle: 3 }, 'maximum_fix_cycles_exceeded'],
   ];
   for (const [overrides, reason] of cases) {
     assert.equal(evaluateWriterRequest(request(overrides)).reason, reason);
@@ -131,8 +141,10 @@ test('rejects Unicode and case-fold path collisions, links, malformed files, and
     maximum_file_size_bytes: 524_288,
     maximum_total_file_bytes: 2_097_152,
     maximum_patch_bytes: 65_536,
+    maximum_fix_cycles: 2,
   }), {
-    maximumFiles: 50, maximumPatchBytes: 65_536, maximumFileBytes: 524_288, maximumTotalBytes: 2_097_152,
+    maximumFiles: 50, maximumPatchBytes: 65_536, maximumFileBytes: 524_288,
+    maximumTotalBytes: 2_097_152, maximumFixCycles: 2,
   });
   assert.equal(writerLimitsFromContract({ maximum_files: 1, maximum_file_size_bytes: 1 }), null);
   assert.equal(writerLimitsFromContract({
@@ -140,15 +152,22 @@ test('rejects Unicode and case-fold path collisions, links, malformed files, and
     maximum_file_size_bytes: 15,
     maximum_total_file_bytes: 15,
     maximum_patch_bytes: 1,
+    maximum_fix_cycles: 2,
   }), null);
   assert.equal(validateWriterChangeSet([{ path: 'x', mode: '100644', bytes: 1 }], {
     maximum_files: 51,
     maximum_file_size_bytes: 15,
     maximum_total_file_bytes: 15,
     maximum_patch_bytes: 1,
+    maximum_fix_cycles: 2,
   }).reason, 'invalid_limits');
   assert.equal(writerLimitsFromContract({
-    maximum_files: 1, maximum_file_size_bytes: 1, maximum_total_file_bytes: 1, maximum_patch_bytes: 65_537,
+    maximum_files: 1, maximum_file_size_bytes: 1, maximum_total_file_bytes: 1,
+    maximum_patch_bytes: 65_537, maximum_fix_cycles: 2,
+  }), null);
+  assert.equal(writerLimitsFromContract({
+    maximum_files: 1, maximum_file_size_bytes: 1, maximum_total_file_bytes: 1,
+    maximum_patch_bytes: 1, maximum_fix_cycles: 3,
   }), null);
   assert.equal(validateWriterChangeSet([{ path: 'x', mode: '100644', bytes: 1 }], { max_files: 2, max_bytes: 15 }, 1).reason, 'invalid_limits');
 });
