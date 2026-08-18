@@ -98,15 +98,23 @@ test('contract validation bounds the model output token budget', () => {
   assert.doesNotThrow(() => validateContracts(agents, contracts.policy));
 });
 
-test('contract validation requires bounded exact reviewer input limits', () => {
+test('contract validation requires bounded exact reviewer limits', () => {
+  const validLimits = {
+    maximum_input_characters: 262_144,
+    maximum_patch_characters_per_file: 65_536,
+    request_timeout_seconds: 300,
+  };
   const invalidValues = [
-    { maximum_input_characters: 23_999, maximum_patch_characters_per_file: 1 },
-    { maximum_input_characters: 262_145, maximum_patch_characters_per_file: 1 },
-    { maximum_input_characters: 24_000, maximum_patch_characters_per_file: 0 },
-    { maximum_input_characters: 24_000, maximum_patch_characters_per_file: 65_537 },
-    { maximum_input_characters: 24_000, maximum_patch_characters_per_file: 24_001 },
-    { maximum_input_characters: '262144', maximum_patch_characters_per_file: 65_536 },
-    { maximum_input_characters: 262_144, maximum_patch_characters_per_file: 65_536, extra: 1 },
+    { ...validLimits, maximum_input_characters: 23_999 },
+    { ...validLimits, maximum_input_characters: 262_145 },
+    { ...validLimits, maximum_patch_characters_per_file: 0 },
+    { ...validLimits, maximum_patch_characters_per_file: 65_537 },
+    { ...validLimits, maximum_input_characters: 24_000, maximum_patch_characters_per_file: 24_001 },
+    { ...validLimits, maximum_input_characters: '262144' },
+    { ...validLimits, request_timeout_seconds: 119 },
+    { ...validLimits, request_timeout_seconds: 601 },
+    { ...validLimits, request_timeout_seconds: '300' },
+    { ...validLimits, extra: 1 },
     { maximum_input_characters: 262_144 },
   ];
   for (const limits of invalidValues) {
@@ -116,11 +124,22 @@ test('contract validation requires bounded exact reviewer input limits', () => {
   }
 
   const agents = structuredClone(contracts.agents);
-  agents.runtime.reviewer_limits = {
-    maximum_input_characters: 262_144,
-    maximum_patch_characters_per_file: 65_536,
-  };
+  agents.runtime.reviewer_limits = validLimits;
   assert.doesNotThrow(() => validateContracts(agents, contracts.policy));
+
+  for (const boundary of [120, 600]) {
+    const boundaryAgents = structuredClone(contracts.agents);
+    boundaryAgents.runtime.reviewer_limits.request_timeout_seconds = boundary;
+    assert.doesNotThrow(() => validateContracts(boundaryAgents, contracts.policy));
+  }
+
+  const equalTimeoutAgents = structuredClone(contracts.agents);
+  equalTimeoutAgents.runtime.api.request_timeout_seconds = 300;
+  equalTimeoutAgents.runtime.reviewer_limits.request_timeout_seconds = 300;
+  assert.doesNotThrow(() => validateContracts(equalTimeoutAgents, contracts.policy));
+
+  agents.runtime.api.request_timeout_seconds = 301;
+  assert.throws(() => validateContracts(agents, contracts.policy), ContractError);
 });
 
 test('model candidates follow role, default, fallback order and deduplicate IDs', () => {

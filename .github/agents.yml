@@ -42,6 +42,10 @@ runtime:
     # does not widen the shared Issue/Triage input limit above.
     maximum_input_characters: 262144
     maximum_patch_characters_per_file: 65536
+    # Large, complete PR patches can require longer inference than issue
+    # analysis. The engine separately caps the whole fallback sequence to the
+    # remaining reservation lease with publication headroom.
+    request_timeout_seconds: 300
 
 model_policy:
   # Values are GitHub Actions variable names. Their resolved model IDs form the

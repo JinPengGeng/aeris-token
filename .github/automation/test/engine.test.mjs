@@ -266,7 +266,9 @@ test('analysis passes the output budget without enabling structured output for t
 
 test('planner canary sends its strict response format to the AI client', async () => {
   const github = new FakeGitHub();
+  const now = new Date('2026-08-11T01:00:00Z');
   let request;
+  let clientOptions;
   const planEvent = {
     sender: { login: 'maintainer' },
     issue: { number: 1 },
@@ -281,27 +283,33 @@ test('planner canary sends its strict response format to the AI client', async (
     contracts: enabledContracts('planner'),
     policySha,
     github,
-    aiClientFactory: () => ({
-      async complete(value) {
-        request = value;
-        return {
-          content: JSON.stringify({
-            schema_version: 1,
-            agent: 'planner',
-            summary: 'Implement the bounded change.',
-            acceptance_criteria: ['The response is schema-valid.'],
-            implementation_steps: ['Send the strict planner schema.'],
-            validation_plan: ['Run the automation tests.'],
-            risks: ['The provider capability requires a live canary.'],
-            next_agent: null,
-          }),
-          model: { alias: 'default', id: 'gpt-5.6-sol' },
-          durationMs: 12,
-          usage: { total_tokens: 20 },
-        };
-      },
-    }),
+    clock: () => now,
+    aiClientFactory: (options) => {
+      clientOptions = options;
+      return {
+        async complete(value) {
+          request = value;
+          return {
+            content: JSON.stringify({
+              schema_version: 1,
+              agent: 'planner',
+              summary: 'Implement the bounded change.',
+              acceptance_criteria: ['The response is schema-valid.'],
+              implementation_steps: ['Send the strict planner schema.'],
+              validation_plan: ['Run the automation tests.'],
+              risks: ['The provider capability requires a live canary.'],
+              next_agent: null,
+            }),
+            model: { alias: 'default', id: 'gpt-5.6-sol' },
+            durationMs: 12,
+            usage: { total_tokens: 20 },
+          };
+        },
+      };
+    },
   });
+  assert.equal(clientOptions.timeoutMs, 120_000);
+  assert.equal(clientOptions.deadlineAtMs, Date.parse('2026-08-11T01:10:00Z'));
   assert.equal(request.responseFormat.type, 'json_schema');
   assert.equal(request.responseFormat.json_schema.name, 'aeris_planner_output');
   assert.equal(request.responseFormat.json_schema.strict, true);
@@ -522,7 +530,9 @@ test('cancel remains available after the kill switch is turned off', async () =>
 
 test('workflow_run reviewer reads patches and publishes advisory output', async () => {
   const github = new FakeGitHub();
+  const now = new Date('2026-08-11T01:00:00Z');
   let calls = 0;
+  let clientOptions;
   const result = await runAutomation({
     kind: 'pull',
     eventName: 'workflow_run',
@@ -540,29 +550,36 @@ test('workflow_run reviewer reads patches and publishes advisory output', async 
     contracts: enabledContracts('reviewer'),
     policySha,
     github,
-    aiClientFactory: () => ({
-      async complete({ messages }) {
-        calls += 1;
-        assert.equal(messages[1].content.includes('src/request.ts'), true);
-        return {
-          content: JSON.stringify({
-            schema_version: 1,
-            agent: 'reviewer',
-            summary: 'No blocking issue found.',
-            verdict: 'ready_for_human_review',
-            findings: [],
-            test_recommendations: ['Run the request regression test.'],
-            next_agent: null,
-          }),
-          model: { alias: 'default', id: 'test-model' },
-          durationMs: 10,
-          usage: null,
-        };
-      },
-    }),
+    clock: () => now,
+    aiClientFactory: (options) => {
+      clientOptions = options;
+      return {
+        async complete({ messages }) {
+          calls += 1;
+          assert.equal(messages[1].content.includes('src/request.ts'), true);
+          return {
+            content: JSON.stringify({
+              schema_version: 1,
+              agent: 'reviewer',
+              summary: 'No blocking issue found.',
+              verdict: 'ready_for_human_review',
+              findings: [],
+              test_recommendations: ['Run the request regression test.'],
+              next_agent: null,
+            }),
+            model: { alias: 'default', id: 'test-model' },
+            durationMs: 10,
+            usage: null,
+          };
+        },
+      };
+    },
   });
   assert.equal(result.state, 'published');
   assert.equal(calls, 1);
+  assert.equal(clientOptions.connectTimeoutMs, 120_000);
+  assert.equal(clientOptions.timeoutMs, 300_000);
+  assert.equal(clientOptions.deadlineAtMs, Date.parse('2026-08-11T01:10:00Z'));
   assert.equal(github.comments[0].body.includes('ready_for_human_review'), true);
 });
 
@@ -759,6 +776,51 @@ test('required-check regression before analysis defers without consuming the del
   });
   assert.equal(retried.state, 'published');
   assert.equal(calls, 1);
+});
+
+test('analysis rechecks cancellation after required checks before constructing the AI client', async () => {
+  const github = new FakeGitHub();
+  const event = {
+    action: 'completed',
+    sender: { login: 'github-actions[bot]' },
+    workflow_run: {
+      conclusion: 'success',
+      head_sha: github.pull.head.sha,
+      pull_requests: [{ number: 7 }],
+    },
+  };
+  const common = {
+    kind: 'pull', eventName: 'workflow_run', event, environment: environment(), repoRoot,
+    contracts: enabledContracts('reviewer'), policySha, github,
+  };
+  const preflight = await runPreflightPhase(common);
+  const reservation = await runReservationPhase({ ...common, artifact: preflight });
+  const listCommitStatuses = github.listCommitStatuses.bind(github);
+  github.listCommitStatuses = async (...args) => {
+    const statuses = await listCommitStatuses(...args);
+    const metadata = managedMetadata(github);
+    runningComment(github, {
+      ...metadata,
+      result: 'cancelled',
+      lease_token: null,
+      lease_expires_at: null,
+      cancel_epoch: metadata.cancel_epoch + 1,
+    });
+    return statuses;
+  };
+
+  let constructed = false;
+  const analysis = await runAnalysisPhase({
+    ...common,
+    artifact: reservation,
+    aiClientFactory: () => {
+      constructed = true;
+      throw new Error('must not construct');
+    },
+  });
+  assert.equal(analysis.state, 'failed');
+  assert.deepEqual(analysis.failure, { code: 'cancelled_before_analysis' });
+  assert.equal(constructed, false);
 });
 
 test('analysis check deferrals release only their own reservation from the hourly limit', async () => {
@@ -1107,6 +1169,7 @@ test('the hourly limit includes a reservation exactly at the one-hour boundary',
 
 test('the four phases exchange fingerprint-only artifacts and wire the connect timeout', async () => {
   const github = new FakeGitHub();
+  const now = new Date('2026-08-11T01:00:00Z');
   const contracts = enabledContracts('triage');
   const common = {
     environment: environment({ AERIS_AI_API_KEY_PRESENT: 'true' }),
@@ -1114,6 +1177,7 @@ test('the four phases exchange fingerprint-only artifacts and wire the connect t
     contracts,
     policySha,
     github,
+    clock: () => now,
   };
   const preflight = await runPreflightPhase({
     ...common,
@@ -1137,6 +1201,8 @@ test('the four phases exchange fingerprint-only artifacts and wire the connect t
   });
   assert.equal(analysis.state, 'completed');
   assert.equal(clientOptions.connectTimeoutMs, 120_000);
+  assert.equal(clientOptions.timeoutMs, 120_000);
+  assert.equal(clientOptions.deadlineAtMs, Date.parse('2026-08-11T01:10:00Z'));
   assert.equal(analysis.reservation.preflight.input, null);
   const publication = await runPublishPhase({ ...common, artifact: analysis });
   assert.equal(publication.state, 'published');
@@ -1192,6 +1258,61 @@ test('analysis does not construct the AI client for an expired reservation', asy
   });
   assert.equal(analysis.state, 'failed');
   assert.equal(analysis.failure.code, 'lease_expired');
+  assert.equal(constructed, false);
+});
+
+test('analysis derives an absolute deadline from the remaining lease with publish headroom', async () => {
+  const github = new FakeGitHub();
+  const contracts = enabledContracts('triage');
+  const reservationTime = new Date('2026-08-11T01:00:00Z');
+  const common = {
+    environment: environment(), repoRoot, contracts, policySha, github,
+  };
+  const preflight = await runPreflightPhase({
+    ...common, kind: 'issue', eventName: 'issues', event: issueEvent,
+  });
+  const reservation = await runReservationPhase({
+    ...common, artifact: preflight, clock: () => reservationTime,
+  });
+  let clientOptions;
+  const analysis = await runAnalysisPhase({
+    ...common,
+    artifact: reservation,
+    clock: () => new Date('2026-08-11T01:11:59Z'),
+    aiClientFactory: (options) => {
+      clientOptions = options;
+      return triageCompletion().factory();
+    },
+  });
+  assert.equal(analysis.state, 'completed');
+  assert.equal(clientOptions.deadlineAtMs, Date.parse('2026-08-11T01:12:00Z'));
+});
+
+test('analysis fails before model construction when only publish headroom remains', async () => {
+  const github = new FakeGitHub();
+  const contracts = enabledContracts('triage');
+  const reservationTime = new Date('2026-08-11T01:00:00Z');
+  const common = {
+    environment: environment(), repoRoot, contracts, policySha, github,
+  };
+  const preflight = await runPreflightPhase({
+    ...common, kind: 'issue', eventName: 'issues', event: issueEvent,
+  });
+  const reservation = await runReservationPhase({
+    ...common, artifact: preflight, clock: () => reservationTime,
+  });
+  let constructed = false;
+  const analysis = await runAnalysisPhase({
+    ...common,
+    artifact: reservation,
+    clock: () => new Date('2026-08-11T01:12:00Z'),
+    aiClientFactory: () => {
+      constructed = true;
+      throw new Error('must not construct');
+    },
+  });
+  assert.equal(analysis.state, 'failed');
+  assert.equal(analysis.failure.code, 'lease_expiring');
   assert.equal(constructed, false);
 });
 

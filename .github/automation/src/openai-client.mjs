@@ -184,6 +184,10 @@ function canUseFallback(error, retryableStatuses) {
   return error.code === 'http_error' && retryableStatuses.has(error.status);
 }
 
+function totalTimeoutError() {
+  return new AiRequestError('AI completion deadline exceeded', { code: 'timeout' });
+}
+
 export class OpenAICompatibleClient {
   constructor({
     baseUrl,
@@ -192,6 +196,7 @@ export class OpenAICompatibleClient {
     retryableStatuses,
     timeoutMs = 120_000,
     connectTimeoutMs = timeoutMs,
+    deadlineAtMs = null,
     maximumResponseBytes = 1_048_576,
     fetchImpl = globalThis.fetch,
   }) {
@@ -211,12 +216,18 @@ export class OpenAICompatibleClient {
     this.retryableStatuses = new Set(retryableStatuses);
     this.timeoutMs = timeoutMs;
     this.connectTimeoutMs = connectTimeoutMs;
+    if (deadlineAtMs !== null && (!Number.isFinite(deadlineAtMs) || deadlineAtMs <= 0)) {
+      throw new AiRequestError('AI deadline must be a positive epoch timestamp', {
+        code: 'invalid_timeout',
+      });
+    }
+    this.deadlineAtMs = deadlineAtMs;
     this.maximumResponseBytes = maximumResponseBytes;
     this.fetchImpl = fetchImpl;
   }
 
-  async request(path, init) {
-    const { response, readBody, dispose } = await this.openRequest(path, init);
+  async request(path, init, timeoutMs = this.timeoutMs) {
+    const { response, readBody, dispose } = await this.openRequest(path, init, timeoutMs);
     try {
       if (!response.ok) {
         const errorText = await readBody();
@@ -236,12 +247,12 @@ export class OpenAICompatibleClient {
     }
   }
 
-  async openRequest(path, init) {
+  async openRequest(path, init, timeoutMs = this.timeoutMs) {
     const controller = new AbortController();
-    const requestTimeout = createTimeout(controller, this.timeoutMs, 'AI request timed out');
+    const requestTimeout = createTimeout(controller, timeoutMs, 'AI request timed out');
     const connectTimeout = createTimeout(
       controller,
-      this.connectTimeoutMs,
+      Math.min(this.connectTimeoutMs, timeoutMs),
       'AI response headers timed out',
     );
     let response;
@@ -296,8 +307,8 @@ export class OpenAICompatibleClient {
     });
   }
 
-  async listModelIds() {
-    const payload = await this.request('/models', { method: 'GET', headers: {} });
+  async listModelIds({ timeoutMs = this.timeoutMs } = {}) {
+    const payload = await this.request('/models', { method: 'GET', headers: {} }, timeoutMs);
     if (!Array.isArray(payload.data)) {
       throw new AiRequestError('AI model list has an invalid shape', { code: 'invalid_model_list' });
     }
@@ -310,8 +321,29 @@ export class OpenAICompatibleClient {
     return new Set(ids);
   }
 
+  remainingRequestTimeoutMs(deadline) {
+    if (deadline === null) return this.timeoutMs;
+    const remaining = Math.ceil(deadline - Date.now());
+    if (remaining <= 0) throw totalTimeoutError();
+    return Math.min(this.timeoutMs, remaining);
+  }
+
+  ensureWithinTotalDeadline(deadline) {
+    if (deadline !== null && Date.now() >= deadline) throw totalTimeoutError();
+  }
+
   async complete({ candidates, messages, maxTokens = 1800, responseFormat = undefined }) {
-    const availableModels = await this.listModelIds();
+    const deadline = this.deadlineAtMs;
+    let availableModels;
+    const modelDiscoveryTimeoutMs = this.remainingRequestTimeoutMs(deadline);
+    try {
+      availableModels = await this.listModelIds({
+        timeoutMs: modelDiscoveryTimeoutMs,
+      });
+    } catch (error) {
+      if (deadline !== null && Date.now() >= deadline) throw totalTimeoutError();
+      throw error;
+    }
     for (const candidate of candidates) {
       if (!availableModels.has(candidate.id)) {
         throw new AiRequestError(`configured model is not present in /models: ${candidate.alias}`, {
@@ -326,19 +358,25 @@ export class OpenAICompatibleClient {
       const startedAt = Date.now();
       let opened = null;
       try {
-        opened = await this.openRequest(this.endpoint, {
-          method: 'POST',
-          body: JSON.stringify({
-            model: candidate.id,
-            messages,
-            temperature: 0.1,
-            max_tokens: maxTokens,
-            stream: true,
-            stream_options: { include_usage: true },
-            ...(responseFormat === undefined ? {} : { response_format: responseFormat }),
-          }),
-          headers: { accept: 'text/event-stream' },
+        const body = JSON.stringify({
+          model: candidate.id,
+          messages,
+          temperature: 0.1,
+          max_tokens: maxTokens,
+          stream: true,
+          stream_options: { include_usage: true },
+          ...(responseFormat === undefined ? {} : { response_format: responseFormat }),
         });
+        const requestTimeoutMs = this.remainingRequestTimeoutMs(deadline);
+        opened = await this.openRequest(
+          this.endpoint,
+          {
+            method: 'POST',
+            body,
+            headers: { accept: 'text/event-stream' },
+          },
+          requestTimeoutMs,
+        );
         const { response, readBody, dispose } = opened;
         try {
           if (!response.ok) {
@@ -354,6 +392,7 @@ export class OpenAICompatibleClient {
           const text = await readBody();
           if (contentType.includes('text/event-stream')) {
             const aggregated = aggregateSseCompletion(text);
+            this.ensureWithinTotalDeadline(deadline);
             return {
               content: aggregated.content,
               model: candidate,
@@ -372,6 +411,7 @@ export class OpenAICompatibleClient {
               code: 'invalid_chat_response',
             });
           }
+          this.ensureWithinTotalDeadline(deadline);
           return {
             content,
             model: candidate,
@@ -383,6 +423,7 @@ export class OpenAICompatibleClient {
         }
       } catch (error) {
         lastError = this.normalizeTransportError(error, null);
+        if (deadline !== null && Date.now() >= deadline) throw totalTimeoutError();
         if (!canUseFallback(lastError, this.retryableStatuses) || index === candidates.length - 1) {
           throw lastError;
         }

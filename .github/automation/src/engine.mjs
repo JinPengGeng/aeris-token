@@ -24,6 +24,8 @@ import { parseModelJson, validateAgentOutput } from './schemas.mjs';
 
 const SCHEMA_VERSION = 1;
 const LEASE_MS = 15 * 60 * 1000;
+const ANALYSIS_LEASE_HEADROOM_MS = 3 * 60 * 1000;
+const MAXIMUM_ANALYSIS_TIMEOUT_MS = 10 * 60 * 1000;
 const LEDGER_LIMIT = 32;
 
 function audit(event) {
@@ -204,6 +206,28 @@ function leaseFailureCode(metadata, now) {
     return 'lease_expired';
   }
   return 'lease_fence_changed';
+}
+
+function ownsLease(metadata, reservation, context, now) {
+  return (
+    metadata?.result === 'running' &&
+    Number.isFinite(Date.parse(metadata?.lease_expires_at)) &&
+    Date.parse(metadata.lease_expires_at) > now.getTime() &&
+    metadata?.lease_token === reservation.lease_token &&
+    metadata?.cancel_epoch === reservation.cancel_epoch &&
+    metadataMatches(metadata, identityFromContext(context))
+  );
+}
+
+function analysisDeadlineAtMs(leaseExpiresAt, now) {
+  const nowMs = now.getTime();
+  const leaseDeadlineAtMs = Date.parse(leaseExpiresAt) - ANALYSIS_LEASE_HEADROOM_MS;
+  if (!Number.isFinite(leaseDeadlineAtMs) || leaseDeadlineAtMs <= nowMs) {
+    throw Object.assign(new Error('reservation lease has insufficient analysis time remaining'), {
+      code: 'lease_expiring',
+    });
+  }
+  return Math.min(leaseDeadlineAtMs, nowMs + MAXIMUM_ANALYSIS_TIMEOUT_MS);
 }
 
 async function fetchInput(kind, number, client, agents) {
@@ -559,13 +583,8 @@ export async function runAnalysisPhase({
   const currentManaged = findManagedComment(await client.listIssueComments(context.number));
   const currentMetadata = decodeMetadata(currentManaged?.body);
   const reservation = artifact.reservation;
-  const stillOwnsLease =
-    currentMetadata?.result === 'running' &&
-    Number.isFinite(Date.parse(currentMetadata?.lease_expires_at)) &&
-    Date.parse(currentMetadata.lease_expires_at) > clock().getTime() &&
-    currentMetadata?.lease_token === reservation.lease_token &&
-    currentMetadata?.cancel_epoch === reservation.cancel_epoch &&
-    metadataMatches(currentMetadata, identityFromContext(context));
+  const initialFenceTime = clock();
+  const stillOwnsLease = ownsLease(currentMetadata, reservation, context, initialFenceTime);
   if (!stillOwnsLease) {
     return {
       schema_version: SCHEMA_VERSION,
@@ -574,7 +593,7 @@ export async function runAnalysisPhase({
       reservation: artifact,
       output: null,
       model: null,
-      failure: { code: leaseFailureCode(currentMetadata, clock()) },
+      failure: { code: leaseFailureCode(currentMetadata, initialFenceTime) },
     };
   }
   let completion = null;
@@ -592,28 +611,35 @@ export async function runAnalysisPhase({
     const useStructuredOutput = shouldUseStructuredOutput(context.agent, candidates, agents);
     const finalManaged = findManagedComment(await client.listIssueComments(context.number));
     const finalMetadata = decodeMetadata(finalManaged?.body);
-    const finalFenceMatches =
-      finalMetadata?.result === 'running' &&
-      Number.isFinite(Date.parse(finalMetadata?.lease_expires_at)) &&
-      Date.parse(finalMetadata.lease_expires_at) > clock().getTime() &&
-      finalMetadata?.lease_token === reservation.lease_token &&
-      finalMetadata?.cancel_epoch === reservation.cancel_epoch &&
-      metadataMatches(finalMetadata, identityFromContext(context));
+    const finalFenceTime = clock();
+    const finalFenceMatches = ownsLease(finalMetadata, reservation, context, finalFenceTime);
     if (!finalFenceMatches) throw Object.assign(new Error('lease fence changed before model call'), {
-      code: leaseFailureCode(finalMetadata, clock()),
+      code: leaseFailureCode(finalMetadata, finalFenceTime),
     });
     if (!(await requiredChecksReady(context, client, policy))) {
       throw Object.assign(new Error('required checks changed before analysis'), {
         code: 'required_checks_not_successful',
       });
     }
+    const modelCallManaged = findManagedComment(await client.listIssueComments(context.number));
+    const modelCallMetadata = decodeMetadata(modelCallManaged?.body);
+    const modelCallTime = clock();
+    if (!ownsLease(modelCallMetadata, reservation, context, modelCallTime)) {
+      throw Object.assign(new Error('lease fence changed during model preconditions'), {
+        code: leaseFailureCode(modelCallMetadata, modelCallTime),
+      });
+    }
+    const deadlineAtMs = analysisDeadlineAtMs(modelCallMetadata.lease_expires_at, modelCallTime);
     const ai = aiClientFactory({
       baseUrl: environment.AERIS_AI_BASE_URL,
       apiKey: environment.AERIS_AI_API_KEY,
       endpoint: agents.runtime.api.endpoint,
       retryableStatuses: agents.model_policy.retryable_http_statuses,
       connectTimeoutMs: agents.runtime.api.connect_timeout_seconds * 1000,
-      timeoutMs: agents.runtime.api.request_timeout_seconds * 1000,
+      timeoutMs: (context.agent === 'reviewer'
+        ? agents.runtime.reviewer_limits.request_timeout_seconds
+        : agents.runtime.api.request_timeout_seconds) * 1000,
+      deadlineAtMs,
       maximumResponseBytes: agents.runtime.api.maximum_response_bytes,
     });
     completion = await ai.complete({
