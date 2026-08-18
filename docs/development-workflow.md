@@ -53,7 +53,7 @@
 
 Agent 的模型路由、权限隔离、事件幂等、上游同步 checkpoint 和自动合并门禁见 [GitHub 自动化与 Agent 架构](automation-architecture.md)。该架构默认关闭新 Agent；只有对应阶段的 workflow、测试和仓库设置全部完成后才可启用。
 
-当前只读 `triage`、`planner`、`reviewer` workflow 已有本地实现，但在合并并完成远端验证前仍保持双重关闭：仓库变量 `AERIS_AGENTS_ENABLED` 不启用，registry 中各 Agent 的 `enabled` 也保持 `false`。启用只读阶段不等于授权 `writer`、Policy Gate 或 Merger。
+当前仓库已打开全局只读 Agent 开关，registry 显式启用 `triage`、`planner` 和 `reviewer`；其他 Agent 仍保持关闭。`reviewer` 合并后必须先在独立的 owner-authored canary PR 上验证托管评论写回，并确认其不修改代码、Checks、审批或合并状态。启用只读阶段不等于授权 `writer`、Policy Gate 或 Merger。
 
 Scheduler、重试、路由、池、额度或故障转移变更必须说明状态转换、确定性选择规则、依赖失败行为和回滚，并覆盖失败与恢复测试。
 

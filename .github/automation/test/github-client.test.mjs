@@ -48,6 +48,24 @@ test('listIssueComments fails closed when the lookup reaches its page limit', as
   assert.equal(calls, 10);
 });
 
+test('managed comment writes use only the Issue Comments API', async () => {
+  const calls = [];
+  const api = client(async (url, init) => {
+    calls.push({ url, init });
+    return response({ id: 11, body: JSON.parse(init.body).body });
+  });
+
+  await api.createIssueComment(7, 'created');
+  await api.updateIssueComment(11, 'updated');
+
+  assert.equal(calls[0].init.method, 'POST');
+  assert.match(calls[0].url, /\/repos\/example\/repo\/issues\/7\/comments$/);
+  assert.deepEqual(JSON.parse(calls[0].init.body), { body: 'created' });
+  assert.equal(calls[1].init.method, 'PATCH');
+  assert.match(calls[1].url, /\/repos\/example\/repo\/issues\/comments\/11$/);
+  assert.deepEqual(JSON.parse(calls[1].init.body), { body: 'updated' });
+});
+
 test('findManagedComment rejects multiple bot-owned managed comments', () => {
   const managed = (id) => ({
     id,

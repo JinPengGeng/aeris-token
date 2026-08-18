@@ -80,7 +80,7 @@ agents:
     handoff_to: [reviewer]
 
   reviewer:
-    enabled: false
+    enabled: true
     phase: "2.1"
     mode: read_only
     model_variable: AERIS_AI_MODEL_REVIEWER
