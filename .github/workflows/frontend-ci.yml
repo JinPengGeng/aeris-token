@@ -60,6 +60,8 @@ jobs:
         working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-github-autonomy.sh
         working-directory: .github/automation
+      - run: bash ../workflows/scripts/tests/test-sync-upstream-identity.sh
+        working-directory: .github/automation
 
   type_check:
     name: Type Check

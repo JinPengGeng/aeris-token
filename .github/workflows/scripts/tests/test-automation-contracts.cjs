@@ -169,6 +169,10 @@ assert(
 const syncTokenStep = syncSteps.find((step) => step.name === 'Mint bounded Sync App token');
 assert(syncTokenStep && syncTokenStep.uses.includes('create-github-app-token@'), 'sync must mint its independent App token');
 assert(
+  syncTokenStep['timeout-minutes'] === 2,
+  'App token mint must remain within the reserved autonomy margin',
+);
+assert(
   syncTokenStep.with['permission-contents'] === 'write' &&
     syncTokenStep.with['permission-pull-requests'] === 'write' &&
     syncTokenStep.with['permission-issues'] === 'write' &&
@@ -181,20 +185,42 @@ assert(
     '${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}',
   'every sync phase must receive the bounded autonomy expiry',
 );
+assert(
+  syncWorkflow.jobs.sync.env.AERIS_SYNC_APP_SLUG === '${{ vars.AERIS_SYNC_APP_SLUG }}',
+  'sync must receive its explicit GitHub App slug for actor identity migration',
+);
+assert(
+  syncWorkflow.jobs.sync.env.AERIS_AUTONOMY_MIN_REMAINING_SECONDS === 600,
+  'unguarded token actions must reserve a conservative ten-minute autonomy margin',
+);
 const tokenStepIndex = syncSteps.indexOf(syncTokenStep);
 const preMintExpiryStep = syncSteps[tokenStepIndex - 1];
 assert(
   preMintExpiryStep?.name === 'Validate autonomy before token mint' &&
     typeof preMintExpiryStep.run === 'string' &&
-    preMintExpiryStep.run.includes('AERIS_AUTONOMY_EXPIRES_AT'),
+    preMintExpiryStep.run.includes('AERIS_AUTONOMY_EXPIRES_AT') &&
+    preMintExpiryStep.run.includes('AERIS_SYNC_APP_SLUG') &&
+    preMintExpiryStep.run.includes(
+      'now_epoch + AERIS_AUTONOMY_MIN_REMAINING_SECONDS',
+    ),
   'sync must fail closed immediately before minting the App token',
 );
 const checkoutStep = syncSteps.find((step) => step.name === 'Check out fork default branch');
 assert(checkoutStep?.with?.token === '${{ steps.sync_token.outputs.token }}', 'sync checkout must use the Sync App token');
+assert(
+  checkoutStep['timeout-minutes'] === 5,
+  'authenticated checkout must remain within the reserved autonomy margin',
+);
 const checkoutStepIndex = syncSteps.indexOf(checkoutStep);
 assert(
   syncSteps[checkoutStepIndex - 1]?.name === 'Validate autonomy before checkout',
   'sync must revalidate expiry immediately before checkout uses the App token',
+);
+assert(
+  syncSteps[checkoutStepIndex - 1].run.includes(
+    'now_epoch + AERIS_AUTONOMY_MIN_REMAINING_SECONDS',
+  ),
+  'checkout must reserve the conservative autonomy margin before using the App token',
 );
 const publishStep = syncSteps.find(
   (step) => step.name === 'Build and publish automation branch',
@@ -228,7 +254,7 @@ assert(
   'sync must disarm a stale auto-merge before rebuilding its fixed branch',
 );
 assert(
-  /aeris_require_active_autonomy_window[\s\S]*now_epoch >= expires_epoch/.test(
+  /aeris_require_active_autonomy_window[\s\S]*now_epoch \+ minimum_remaining_seconds >= expires_epoch/.test(
     autonomyScript,
   ) &&
     autonomyScript.includes('aeris_require_active_autonomy_window || return'),
@@ -240,6 +266,15 @@ assert(
     syncScript.includes('source "${SCRIPT_DIR}/github-autonomy.sh"') &&
     autoMergeScript.includes('source "${SCRIPT_DIR}/github-autonomy.sh"'),
   'sync and auto-merge must not bypass the expiry-guarded GitHub wrapper',
+);
+assert(
+  syncScript.includes('SYNC_APP_BOT_LOGIN="${AERIS_SYNC_APP_SLUG}[bot]"') &&
+    syncScript.includes("LEGACY_BOT_LOGIN='github-actions[bot]'") &&
+    syncScript.includes(
+      '.user.login == \\"${SYNC_APP_BOT_LOGIN}\\" or .user.login == \\"${LEGACY_BOT_LOGIN}\\"',
+    ) &&
+    syncScript.includes('is_sync_automation_login'),
+  'comment and PR identity checks must accept the Sync App bot and migrate legacy Actions state',
 );
 assert(
   !/(^|\n)\s*git\s+(fetch|push|ls-remote)\b/.test(syncScript),
@@ -261,10 +296,20 @@ assert(
   'workflow validation must exercise expiry crossing between planning and mutation',
 );
 assert(
+  validationStep?.run.includes('test-sync-upstream-identity.sh'),
+  'workflow validation must exercise Sync App comment identity migration',
+);
+assert(
   frontendWorkflow.jobs.automation.steps.some(
     (step) => step.run === 'bash ../workflows/scripts/tests/test-github-autonomy.sh',
   ),
   'required CI must execute the fake-clock autonomy integration test',
+);
+assert(
+  frontendWorkflow.jobs.automation.steps.some(
+    (step) => step.run === 'bash ../workflows/scripts/tests/test-sync-upstream-identity.sh',
+  ),
+  'required CI must execute the Sync App comment identity integration test',
 );
 assert(
   automation.authorization.external_pull_request_analysis_requires_label === 'agent-analyze',

@@ -8,6 +8,11 @@ source "${SCRIPT_DIR}/github-autonomy.sh"
 
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
+: "${AERIS_SYNC_APP_SLUG:?AERIS_SYNC_APP_SLUG is required}"
+[[ "${AERIS_SYNC_APP_SLUG}" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]] || {
+  echo 'AERIS_SYNC_APP_SLUG must be a lowercase GitHub App slug.' >&2
+  exit 78
+}
 
 BASE_BRANCH="${BASE_BRANCH:-main}"
 SYNC_BRANCH="${SYNC_BRANCH:-automation/sync-upstream}"
@@ -20,7 +25,8 @@ AUTOMERGE_HELPER="${AUTOMERGE_HELPER:-${SCRIPT_ROOT}/manage-sync-automerge.sh}"
 
 MANAGED_MARKER='<!-- upstream-sync-managed -->'
 AUTO_CLOSED_MARKER='<!-- upstream-sync-auto-closed -->'
-BOT_LOGIN='github-actions[bot]'
+SYNC_APP_BOT_LOGIN="${AERIS_SYNC_APP_SLUG}[bot]"
+LEGACY_BOT_LOGIN='github-actions[bot]'
 BOT_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
 
 repo_owner="${GITHUB_REPOSITORY%%/*}"
@@ -89,7 +95,11 @@ refresh_prs() {
 pr_bot_comments() {
   aeris_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/$1/comments?per_page=100" \
-    --jq ".[] | select(.user.login == \"${BOT_LOGIN}\") | .body"
+    --jq ".[] | select(.user.login == \"${SYNC_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") | .body"
+}
+
+is_sync_automation_login() {
+  [[ "$1" == "${SYNC_APP_BOT_LOGIN}" || "$1" == "${LEGACY_BOT_LOGIN}" || "$1" == app/github-actions ]]
 }
 
 issue_comment_once() {
@@ -116,7 +126,7 @@ set_pending_tip() {
 Prepared automation branch tip ${sha}."
   comment_id="$(aeris_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/${number}/comments?per_page=100" \
-    --jq ".[] | select(.user.login == \"${BOT_LOGIN}\" and (.body | startswith(\"<!-- upstream-sync-pending-tip:\"))) | .id" |
+    --jq ".[] | select((.user.login == \"${SYNC_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") and (.body | startswith(\"<!-- upstream-sync-pending-tip:\"))) | .id" |
     tail -n1)"
   if [[ -n "${comment_id}" ]]; then
     aeris_gh api \
@@ -136,7 +146,7 @@ latest_close_actor() {
 
 pr_was_auto_closed() {
   local number="$1"
-  [[ "$(latest_close_actor "${number}" || true)" == "${BOT_LOGIN}" ]] || return 1
+  is_sync_automation_login "$(latest_close_actor "${number}" || true)" || return 1
   [[ "$(pr_bot_comments "${number}" || true)" == *"${AUTO_CLOSED_MARKER}"* ]]
 }
 
@@ -163,7 +173,7 @@ pr_is_managed() {
   local body author
   body="$(jq -r '.body // ""' <<<"$1")"
   author="$(jq -r '.author // ""' <<<"$1")"
-  [[ "${author}" == "${BOT_LOGIN}" || "${author}" == app/github-actions ]] || return 1
+  is_sync_automation_login "${author}" || return 1
   [[ "${body}" == *"${MANAGED_MARKER}"* ||
      "${body}" == *'Automated synchronization from '* ]]
 }

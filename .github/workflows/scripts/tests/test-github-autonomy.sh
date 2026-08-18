@@ -27,6 +27,10 @@ test_strict_expiry_values() {
   expect_rejected '1970-01-01T00:00:00Z'
   AERIS_AUTONOMY_EXPIRES_AT='2099-01-01T00:00:00Z' \
     bash "${SCRIPT_ROOT}/github-autonomy.sh"
+  if AERIS_AUTONOMY_EXPIRES_AT='2099-01-01T00:00:00Z' \
+    bash -c "source '${SCRIPT_ROOT}/github-autonomy.sh'; aeris_require_active_autonomy_window 2300000000" >/dev/null 2>&1; then
+    fail 'minimum remaining window was not enforced'
+  fi
 }
 
 test_expiry_between_plan_and_mutation() {

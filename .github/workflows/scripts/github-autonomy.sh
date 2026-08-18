@@ -6,8 +6,13 @@ aeris_autonomy_fail() {
 }
 
 aeris_require_active_autonomy_window() {
+  local minimum_remaining_seconds="${1:-0}"
   local expires_at="${AERIS_AUTONOMY_EXPIRES_AT:-}" expires_epoch round_trip now_epoch
 
+  if [[ ! "${minimum_remaining_seconds}" =~ ^[0-9]+$ ]]; then
+    aeris_autonomy_fail 'minimum remaining autonomy seconds must be a non-negative integer'
+    return
+  fi
   if [[ ! "${expires_at}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
     aeris_autonomy_fail 'AERIS_AUTONOMY_EXPIRES_AT must be an exact UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)'
     return
@@ -32,7 +37,7 @@ aeris_require_active_autonomy_window() {
     aeris_autonomy_fail 'current UTC time is invalid'
     return
   fi
-  if (( now_epoch >= expires_epoch )); then
+  if (( now_epoch + minimum_remaining_seconds >= expires_epoch )); then
     aeris_autonomy_fail "authorization expired at ${expires_at}"
     return
   fi
