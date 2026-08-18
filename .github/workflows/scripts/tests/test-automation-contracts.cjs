@@ -28,6 +28,7 @@ const frontendWorkflow = loadYaml('.github/workflows/frontend-ci.yml');
 const syncScript = read('.github/workflows/scripts/sync-upstream.sh');
 const autoMergeScript = read('.github/workflows/scripts/manage-sync-automerge.sh');
 const autonomyScript = read('.github/workflows/scripts/github-autonomy.sh');
+const checkDispatchScript = read('.github/workflows/scripts/ensure-required-checks.sh');
 const state = JSON.parse(read('.github/upstream-sync-state.json'));
 
 for (const contract of [agents, automation, sync]) {
@@ -284,8 +285,15 @@ const checkDispatchStep = syncSteps.find(
   (step) => step.name === 'Ensure required checks are dispatched',
 );
 assert(
-  checkDispatchStep?.run.includes('source .github/workflows/scripts/github-autonomy.sh') &&
-    !/(^|\n)\s*gh\s/.test(checkDispatchStep.run),
+  syncWorkflow.jobs.sync.permissions.actions === 'write' &&
+    checkDispatchStep?.env.GH_TOKEN === '${{ github.token }}',
+  'fallback dispatch must explicitly use a workflow job token with actions:write',
+);
+assert(
+  checkDispatchStep?.run === 'bash .github/workflows/scripts/ensure-required-checks.sh' &&
+    checkDispatchScript.includes('source "${SCRIPT_DIR}/github-autonomy.sh"') &&
+    checkDispatchScript.includes('aeris_gh workflow run') &&
+    !/(^|\n)\s*gh\s/.test(checkDispatchScript),
   'check discovery and dispatch must revalidate expiry before every GitHub token use',
 );
 const validationStep = syncSteps.find(
@@ -296,6 +304,10 @@ assert(
   'workflow validation must exercise expiry crossing between planning and mutation',
 );
 assert(
+  validationStep?.run.includes('test-ensure-required-checks.sh'),
+  'workflow validation must exercise fallback dispatch with the explicit job token',
+);
+assert(
   validationStep?.run.includes('test-sync-upstream-identity.sh'),
   'workflow validation must exercise Sync App comment identity migration',
 );
@@ -304,6 +316,12 @@ assert(
     (step) => step.run === 'bash ../workflows/scripts/tests/test-github-autonomy.sh',
   ),
   'required CI must execute the fake-clock autonomy integration test',
+);
+assert(
+  frontendWorkflow.jobs.automation.steps.some(
+    (step) => step.run === 'bash ../workflows/scripts/tests/test-ensure-required-checks.sh',
+  ),
+  'required CI must execute the workflow job-token dispatch integration test',
 );
 assert(
   frontendWorkflow.jobs.automation.steps.some(
