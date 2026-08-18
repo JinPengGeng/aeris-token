@@ -1,3 +1,4 @@
+pub mod attempt_budget;
 pub mod attempt_loop;
 pub mod attempt_plan;
 pub mod candidate_materialization;
@@ -51,6 +52,11 @@ pub use aether_pool_core::{
     PoolMemberScoreRules, PoolMemberScoreWeights, POOL_SCORE_VERSION,
     PROBE_FAILURE_COOLDOWN_THRESHOLD, PROBE_FAILURE_PENALTY, PROBE_FRESHNESS_TTL_SECONDS,
     REQUEST_FAILURE_PENALTY, UNSCHEDULABLE_SCORE_CAP,
+};
+pub use attempt_budget::{
+    AttemptBudget, AttemptBudgetDimension, AttemptBudgetError, AttemptBudgetExhausted,
+    AttemptBudgetLimits, AttemptBudgetReservation, AttemptBudgetUsage, AttemptRetryIntent,
+    AttemptTarget, AttemptTransitionViolation,
 };
 pub use attempt_loop::{
     run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopOutcome, AiAttemptLoopPort,
