@@ -88,6 +88,11 @@ const collectUses = (value, results = []) => {
   return results;
 };
 
+const workflowFiles = fs
+  .readdirSync(path.join(repoRoot, '.github', 'workflows'), { withFileTypes: true })
+  .filter((entry) => entry.isFile() && /\.ya?ml$/i.test(entry.name))
+  .map((entry) => path.join('.github', 'workflows', entry.name));
+
 const collectCheckoutSteps = (document) =>
   Object.values(document.jobs ?? {}).flatMap((job) =>
     (job.steps ?? []).filter(
@@ -371,3 +376,18 @@ for (const spec of workflowSpecs) {
     });
   }
 }
+
+test('all workflow actions are pinned to immutable commit SHAs', () => {
+  assert.ok(workflowFiles.length > 0, 'repository must contain workflow files');
+  for (const workflowFile of workflowFiles) {
+    const { document } = readWorkflow(workflowFile);
+    for (const action of collectUses(document.jobs)) {
+      if (action.startsWith('./') || action.startsWith('docker://')) continue;
+      assert.match(
+        action,
+        /^[^@\s]+@[0-9a-f]{40}$/,
+        `${workflowFile} action is not pinned to a full commit SHA: ${action}`,
+      );
+    }
+  }
+});
