@@ -613,7 +613,9 @@ export async function runAnalysisPhase({
       endpoint: agents.runtime.api.endpoint,
       retryableStatuses: agents.model_policy.retryable_http_statuses,
       connectTimeoutMs: agents.runtime.api.connect_timeout_seconds * 1000,
-      timeoutMs: agents.runtime.api.request_timeout_seconds * 1000,
+      timeoutMs: (context.agent === 'reviewer'
+        ? agents.runtime.reviewer_limits.request_timeout_seconds
+        : agents.runtime.api.request_timeout_seconds) * 1000,
       maximumResponseBytes: agents.runtime.api.maximum_response_bytes,
     });
     completion = await ai.complete({

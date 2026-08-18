@@ -523,6 +523,7 @@ test('cancel remains available after the kill switch is turned off', async () =>
 test('workflow_run reviewer reads patches and publishes advisory output', async () => {
   const github = new FakeGitHub();
   let calls = 0;
+  let clientOptions;
   const result = await runAutomation({
     kind: 'pull',
     eventName: 'workflow_run',
@@ -540,29 +541,34 @@ test('workflow_run reviewer reads patches and publishes advisory output', async 
     contracts: enabledContracts('reviewer'),
     policySha,
     github,
-    aiClientFactory: () => ({
-      async complete({ messages }) {
-        calls += 1;
-        assert.equal(messages[1].content.includes('src/request.ts'), true);
-        return {
-          content: JSON.stringify({
-            schema_version: 1,
-            agent: 'reviewer',
-            summary: 'No blocking issue found.',
-            verdict: 'ready_for_human_review',
-            findings: [],
-            test_recommendations: ['Run the request regression test.'],
-            next_agent: null,
-          }),
-          model: { alias: 'default', id: 'test-model' },
-          durationMs: 10,
-          usage: null,
-        };
-      },
-    }),
+    aiClientFactory: (options) => {
+      clientOptions = options;
+      return {
+        async complete({ messages }) {
+          calls += 1;
+          assert.equal(messages[1].content.includes('src/request.ts'), true);
+          return {
+            content: JSON.stringify({
+              schema_version: 1,
+              agent: 'reviewer',
+              summary: 'No blocking issue found.',
+              verdict: 'ready_for_human_review',
+              findings: [],
+              test_recommendations: ['Run the request regression test.'],
+              next_agent: null,
+            }),
+            model: { alias: 'default', id: 'test-model' },
+            durationMs: 10,
+            usage: null,
+          };
+        },
+      };
+    },
   });
   assert.equal(result.state, 'published');
   assert.equal(calls, 1);
+  assert.equal(clientOptions.connectTimeoutMs, 120_000);
+  assert.equal(clientOptions.timeoutMs, 300_000);
   assert.equal(github.comments[0].body.includes('ready_for_human_review'), true);
 });
 
@@ -1137,6 +1143,7 @@ test('the four phases exchange fingerprint-only artifacts and wire the connect t
   });
   assert.equal(analysis.state, 'completed');
   assert.equal(clientOptions.connectTimeoutMs, 120_000);
+  assert.equal(clientOptions.timeoutMs, 120_000);
   assert.equal(analysis.reservation.preflight.input, null);
   const publication = await runPublishPhase({ ...common, artifact: analysis });
   assert.equal(publication.state, 'published');

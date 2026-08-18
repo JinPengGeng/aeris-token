@@ -13,11 +13,14 @@ const MAXIMUM_MODEL_OUTPUT_TOKENS = 16_384;
 const REVIEWER_LIMIT_KEYS = new Set([
   'maximum_input_characters',
   'maximum_patch_characters_per_file',
+  'request_timeout_seconds',
 ]);
 const MINIMUM_REVIEWER_INPUT_CHARACTERS = 24_000;
 const MAXIMUM_REVIEWER_INPUT_CHARACTERS = 262_144;
 const MINIMUM_REVIEWER_PATCH_CHARACTERS = 1;
 const MAXIMUM_REVIEWER_PATCH_CHARACTERS = 65_536;
+const MINIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS = 120;
+const MAXIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS = 600;
 
 function requireCondition(condition, message) {
   if (!condition) throw new ContractError(message);
@@ -72,6 +75,12 @@ function validateReviewerLimits(limits) {
       limits.maximum_patch_characters_per_file <= limits.maximum_input_characters,
     `reviewer maximum_patch_characters_per_file must be an integer between ${MINIMUM_REVIEWER_PATCH_CHARACTERS} and ${MAXIMUM_REVIEWER_PATCH_CHARACTERS} and not exceed maximum_input_characters`,
   );
+  requireCondition(
+    Number.isInteger(limits.request_timeout_seconds) &&
+      limits.request_timeout_seconds >= MINIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS &&
+      limits.request_timeout_seconds <= MAXIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS,
+    `reviewer request_timeout_seconds must be an integer between ${MINIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS} and ${MAXIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS}`,
+  );
 }
 
 export function validateContracts(agents, policy) {
@@ -103,6 +112,10 @@ export function validateContracts(agents, policy) {
     `maximum_output_tokens must be an integer between 1 and ${MAXIMUM_MODEL_OUTPUT_TOKENS}`,
   );
   validateReviewerLimits(agents.runtime?.reviewer_limits);
+  requireCondition(
+    agents.runtime.reviewer_limits.request_timeout_seconds >= agents.runtime.api.request_timeout_seconds,
+    'reviewer request timeout must not be shorter than the shared request timeout',
+  );
 
   const expectedAgents = new Set([
     'triage',
