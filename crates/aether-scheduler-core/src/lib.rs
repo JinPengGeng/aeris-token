@@ -67,8 +67,8 @@ pub use request_candidate::{
     SchedulerRequestCandidateStatusUpdate, SchedulerResolvedReportRequestCandidateSlot,
 };
 pub use send_admission::{
-    issue_admitted_send, AdmittedSend, SendAdmissionBinding, SendAdmissionBudgetEffect,
-    SendAdmissionDecision, SendAdmissionEvidenceError, SendAdmissionReservation,
-    SendAdmissionRetryScope, SendAdmissionSkip, SendAdmissionSkipReason, SendAdmissionStop,
-    SendAdmissionStopReason, SendAuthorityRevision,
+    SendAdmissionBinding, SendAdmissionBudgetEffect, SendAdmissionDecision, SendAdmissionEvidence,
+    SendAdmissionEvidenceError, SendAdmissionReservationEvidence, SendAdmissionRetryScope,
+    SendAdmissionSkip, SendAdmissionSkipReason, SendAdmissionStop, SendAdmissionStopReason,
+    SendAuthorityRevision,
 };
