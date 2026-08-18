@@ -10,6 +10,14 @@ export class ContractError extends Error {
 }
 
 const MAXIMUM_MODEL_OUTPUT_TOKENS = 16_384;
+const REVIEWER_LIMIT_KEYS = new Set([
+  'maximum_input_characters',
+  'maximum_patch_characters_per_file',
+]);
+const MINIMUM_REVIEWER_INPUT_CHARACTERS = 24_000;
+const MAXIMUM_REVIEWER_INPUT_CHARACTERS = 262_144;
+const MINIMUM_REVIEWER_PATCH_CHARACTERS = 1;
+const MAXIMUM_REVIEWER_PATCH_CHARACTERS = 65_536;
 
 function requireCondition(condition, message) {
   if (!condition) throw new ContractError(message);
@@ -41,6 +49,31 @@ function validateAgent(name, agent, allowedModelVariables, knownAgents) {
   }
 }
 
+function validateReviewerLimits(limits) {
+  requireCondition(
+    limits && typeof limits === 'object' && !Array.isArray(limits),
+    'reviewer limits must be an object',
+  );
+  const keys = Object.keys(limits);
+  requireCondition(
+    keys.length === REVIEWER_LIMIT_KEYS.size && keys.every((key) => REVIEWER_LIMIT_KEYS.has(key)),
+    'reviewer limits must contain exactly the approved keys',
+  );
+  requireCondition(
+    Number.isInteger(limits.maximum_input_characters) &&
+      limits.maximum_input_characters >= MINIMUM_REVIEWER_INPUT_CHARACTERS &&
+      limits.maximum_input_characters <= MAXIMUM_REVIEWER_INPUT_CHARACTERS,
+    `reviewer maximum_input_characters must be an integer between ${MINIMUM_REVIEWER_INPUT_CHARACTERS} and ${MAXIMUM_REVIEWER_INPUT_CHARACTERS}`,
+  );
+  requireCondition(
+    Number.isInteger(limits.maximum_patch_characters_per_file) &&
+      limits.maximum_patch_characters_per_file >= MINIMUM_REVIEWER_PATCH_CHARACTERS &&
+      limits.maximum_patch_characters_per_file <= MAXIMUM_REVIEWER_PATCH_CHARACTERS &&
+      limits.maximum_patch_characters_per_file <= limits.maximum_input_characters,
+    `reviewer maximum_patch_characters_per_file must be an integer between ${MINIMUM_REVIEWER_PATCH_CHARACTERS} and ${MAXIMUM_REVIEWER_PATCH_CHARACTERS} and not exceed maximum_input_characters`,
+  );
+}
+
 export function validateContracts(agents, policy) {
   requireCondition(agents?.version === 1, 'agent registry version must be 1');
   requireCondition(policy?.version === 1, 'automation policy version must be 1');
@@ -69,6 +102,7 @@ export function validateContracts(agents, policy) {
       agents.runtime.limits.maximum_output_tokens <= MAXIMUM_MODEL_OUTPUT_TOKENS,
     `maximum_output_tokens must be an integer between 1 and ${MAXIMUM_MODEL_OUTPUT_TOKENS}`,
   );
+  validateReviewerLimits(agents.runtime?.reviewer_limits);
 
   const expectedAgents = new Set([
     'triage',

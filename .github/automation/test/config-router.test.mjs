@@ -98,6 +98,31 @@ test('contract validation bounds the model output token budget', () => {
   assert.doesNotThrow(() => validateContracts(agents, contracts.policy));
 });
 
+test('contract validation requires bounded exact reviewer input limits', () => {
+  const invalidValues = [
+    { maximum_input_characters: 23_999, maximum_patch_characters_per_file: 1 },
+    { maximum_input_characters: 262_145, maximum_patch_characters_per_file: 1 },
+    { maximum_input_characters: 24_000, maximum_patch_characters_per_file: 0 },
+    { maximum_input_characters: 24_000, maximum_patch_characters_per_file: 65_537 },
+    { maximum_input_characters: 24_000, maximum_patch_characters_per_file: 24_001 },
+    { maximum_input_characters: '262144', maximum_patch_characters_per_file: 65_536 },
+    { maximum_input_characters: 262_144, maximum_patch_characters_per_file: 65_536, extra: 1 },
+    { maximum_input_characters: 262_144 },
+  ];
+  for (const limits of invalidValues) {
+    const agents = structuredClone(contracts.agents);
+    agents.runtime.reviewer_limits = limits;
+    assert.throws(() => validateContracts(agents, contracts.policy), ContractError);
+  }
+
+  const agents = structuredClone(contracts.agents);
+  agents.runtime.reviewer_limits = {
+    maximum_input_characters: 262_144,
+    maximum_patch_characters_per_file: 65_536,
+  };
+  assert.doesNotThrow(() => validateContracts(agents, contracts.policy));
+});
+
 test('model candidates follow role, default, fallback order and deduplicate IDs', () => {
   const candidates = resolveModelCandidates('triage', contracts.agents.agents.triage, {
     AERIS_AI_MODEL_TRIAGE: 'fast-model',
@@ -372,6 +397,84 @@ test('PR fingerprint covers title, body, labels, refs, SHAs, files, and patches'
     const candidate = structuredClone(input);
     mutate(candidate);
     assert.notEqual(inputFingerprint(candidate), fingerprint);
+  }
+});
+
+test('Reviewer pull input retains every file record while bounding patches to its dedicated budget', () => {
+  const input = buildPullInput(
+    {
+      number: 7,
+      html_url: 'https://github.test/example/repo/pull/7',
+      title: 'Review a large pull request',
+      body: '',
+      author_association: 'MEMBER',
+      labels: [],
+      changed_files: 3,
+      base: { ref: 'main', sha: 'b'.repeat(40) },
+      head: { ref: 'review/full-diff', sha: 'c'.repeat(40) },
+    },
+    {
+      files: [
+        { filename: 'src/first.ts', status: 'modified', additions: 1, deletions: 1, changes: 2, patch: 'a'.repeat(100) },
+        { filename: 'src/second.ts', status: 'modified', additions: 2, deletions: 2, changes: 4, patch: 'b'.repeat(100) },
+        { filename: 'src/third.ts', status: 'added', additions: 3, deletions: 0, changes: 3, patch: 'c'.repeat(100) },
+      ],
+      truncated: false,
+    },
+    { maximumCharacters: 1_000, maximumPatchCharactersPerFile: 64 },
+  );
+
+  assert.deepEqual(input.files.map((file) => file.path), [
+    'src/first.ts', 'src/second.ts', 'src/third.ts',
+  ]);
+  assert.equal(input.files.length, 3);
+  assert.ok(input.files.every((file) => file.patch === null || file.patch.length <= 64));
+  assert.ok(input.files.some((file) => file.patch_truncated));
+  assert.equal(input.truncated, true);
+  assert.ok(JSON.stringify(input).length <= 1_000);
+});
+
+test('Reviewer pull input fails closed when all file metadata cannot fit the total budget', () => {
+  const files = Array.from({ length: 4 }, (_, index) => ({
+    filename: `src/${index}.ts`, status: 'modified', additions: index, deletions: 0, changes: index,
+    patch: 'x'.repeat(128),
+  }));
+  assert.throws(
+    () => buildPullInput(
+      {
+        number: 7, html_url: 'https://github.test/example/repo/pull/7', title: 'Review', body: '',
+        author_association: 'MEMBER', labels: [], changed_files: files.length,
+        base: { ref: 'main', sha: 'b'.repeat(40) }, head: { ref: 'fix', sha: 'c'.repeat(40) },
+      },
+      { files, truncated: false },
+      { maximumCharacters: 1, maximumPatchCharactersPerFile: 64 },
+    ),
+    /metadata exceeds the maximum input size/,
+  );
+});
+
+test('Reviewer pull input fails closed on incomplete file pagination or count mismatch', () => {
+  const pull = {
+    number: 7, html_url: 'https://github.test/example/repo/pull/7', title: 'Review', body: '',
+    author_association: 'MEMBER', labels: [], changed_files: 1,
+    base: { ref: 'main', sha: 'b'.repeat(40) }, head: { ref: 'fix', sha: 'c'.repeat(40) },
+  };
+  const file = {
+    filename: 'src/index.ts', status: 'modified', additions: 1, deletions: 0, changes: 1, patch: '+value',
+  };
+
+  for (const pullFiles of [
+    { files: [file], truncated: true },
+    { files: [], truncated: false },
+  ]) {
+    assert.throws(
+      () => buildPullInput(
+        pull,
+        pullFiles,
+        { maximumCharacters: 1_000, maximumPatchCharactersPerFile: 64 },
+      ),
+      /file list is incomplete/,
+    );
   }
 });
 

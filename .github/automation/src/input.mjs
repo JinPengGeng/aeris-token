@@ -41,7 +41,25 @@ export function buildIssueInput(issue, { maximumCharacters, repositoryLabels }) 
   };
 }
 
-export function buildPullInput(pull, pullFiles, { maximumCharacters }) {
+function fittingPrefix(value, maximumLength, fits) {
+  if (value.length <= maximumLength && fits(value)) return value;
+  let low = 0;
+  let high = Math.min(value.length, maximumLength);
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (fits(value.slice(0, middle))) low = middle;
+    else high = middle - 1;
+  }
+  return value.slice(0, low);
+}
+
+export function buildPullInput(pull, pullFiles, {
+  maximumCharacters,
+  maximumPatchCharactersPerFile = 5000,
+}) {
+  if (pullFiles.truncated || pullFiles.files.length !== pull.changed_files) {
+    throw new Error('Reviewer pull file list is incomplete');
+  }
   const title = truncate(pull.title, 512);
   const body = truncate(pull.body, 5000);
   const input = {
@@ -60,23 +78,36 @@ export function buildPullInput(pull, pullFiles, { maximumCharacters }) {
   };
 
   for (const file of pullFiles.files) {
-    const patch = truncate(file.patch, 5000);
-    const candidate = {
+    input.files.push({
       path: file.filename,
       status: file.status,
       additions: file.additions,
       deletions: file.deletions,
       changes: file.changes,
-      patch: patch.value || null,
-      patch_truncated: patch.truncated,
-    };
-    input.files.push(candidate);
-    if (JSON.stringify(input).length > maximumCharacters) {
-      input.files.pop();
-      input.truncated = true;
-      break;
-    }
-    if (patch.truncated) input.truncated = true;
+      patch: null,
+      patch_truncated: false,
+    });
+  }
+
+  if (JSON.stringify(input).length > maximumCharacters) {
+    throw new Error('Reviewer pull metadata exceeds the maximum input size');
+  }
+
+  for (const [index, file] of input.files.entries()) {
+    const sourcePatch = pullFiles.files[index].patch;
+    if (typeof sourcePatch !== 'string' || sourcePatch.length === 0) continue;
+    const cappedPatch = truncate(sourcePatch, maximumPatchCharactersPerFile);
+    const patch = fittingPrefix(
+      cappedPatch.value,
+      maximumPatchCharactersPerFile,
+      (value) => {
+        file.patch = value || null;
+        return JSON.stringify(input).length <= maximumCharacters;
+      },
+    );
+    file.patch = patch || null;
+    file.patch_truncated = patch.length !== sourcePatch.length;
+    if (file.patch_truncated) input.truncated = true;
   }
   return input;
 }

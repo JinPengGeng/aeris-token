@@ -209,11 +209,16 @@ function leaseFailureCode(metadata, now) {
 async function fetchInput(kind, number, client, agents) {
   const object = kind === 'issue' ? await client.getIssue(number) : await client.getPull(number);
   const repositoryLabels = kind === 'issue' ? await client.listRepositoryLabels() : [];
-  const maximumCharacters = agents.runtime.limits.maximum_input_characters;
+  const maximumCharacters = kind === 'pull'
+    ? agents.runtime.reviewer_limits.maximum_input_characters
+    : agents.runtime.limits.maximum_input_characters;
   const input =
     kind === 'issue'
       ? buildIssueInput(object, { maximumCharacters, repositoryLabels })
-      : buildPullInput(object, await client.listPullFiles(number), { maximumCharacters });
+      : buildPullInput(object, await client.listPullFiles(number), {
+        maximumCharacters,
+        maximumPatchCharactersPerFile: agents.runtime.reviewer_limits.maximum_patch_characters_per_file,
+      });
   return { object, repositoryLabels, input, inputSha: inputFingerprint(input) };
 }
 
