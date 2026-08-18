@@ -909,7 +909,7 @@ mod tests {
                 "openai_chat_stream",
                 Some(&local_report_context),
                 403,
-                Some("{\"error\":{\"message\":\"invalid auth token\"}}"),
+                Some("{\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid auth token\"}}"),
             )
             .await
         );
@@ -920,7 +920,7 @@ mod tests {
                 "openai_chat_stream",
                 Some(&local_report_context),
                 403,
-                Some("{\"error\":{\"message\":\"invalid auth token\"}}"),
+                Some("{\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid auth token\"}}"),
             )
             .await
         );
