@@ -5,6 +5,7 @@ import {
   branchForIssue,
   canonicalWriterCommand,
   evaluateWriterRequest,
+  normalizeWriterCommand,
   validateWriterChangeSet,
   writerLimitsFromContract,
 } from '../src/writer-guard.mjs';
@@ -31,12 +32,26 @@ function request(overrides = {}) {
   };
 }
 
+test('normalizes only exact bare and prefixed writer commands', () => {
+  assert.equal(normalizeWriterCommand('implement'), '/agent implement');
+  assert.equal(normalizeWriterCommand('retry-write'), '/agent retry-write');
+  assert.equal(normalizeWriterCommand('/agent implement'), '/agent implement');
+  assert.equal(normalizeWriterCommand('/agent retry-write'), '/agent retry-write');
+  for (const raw of [
+    '', ' ', ' implement', 'implement ', 'implement now', 'retry-write --force',
+    '/agent  implement', '/agent\timplement', '/agent implement ', '/agent implement now',
+    '/other implement', 'merge', null, 1,
+  ]) assert.equal(normalizeWriterCommand(raw), null, JSON.stringify(raw));
+});
+
 test('admits exact writer commands and assigns the deterministic Issue branch', () => {
   assert.equal(canonicalWriterCommand('/agent', 'implement'), '/agent implement');
   assert.equal(canonicalWriterCommand('/agent', 'retry-write'), '/agent retry-write');
   assert.equal(canonicalWriterCommand('/agent', 'implement now'), null);
   assert.equal(canonicalWriterCommand('/other', 'implement'), null);
   assert.deepEqual(evaluateWriterRequest(request()), { allowed: true, reason: null, branch: 'agent/issue-41' });
+  assert.equal(evaluateWriterRequest(request({ command: 'implement' })).allowed, true);
+  assert.equal(evaluateWriterRequest(request({ command: 'retry-write', fixCycle: 1 })).allowed, true);
   assert.equal(evaluateWriterRequest(request({ command: '/agent retry-write', fixCycle: 1 })).allowed, true);
   assert.equal(branchForIssue(41), 'agent/issue-41');
   assert.equal(branchForIssue(0), null);
@@ -45,6 +60,9 @@ test('admits exact writer commands and assigns the deterministic Issue branch', 
 test('fails closed for command, authorization, switches, and Issue admission', () => {
   const cases = [
     [{ command: '/agent implement now' }, 'unsupported_command'],
+    [{ command: 'implement now' }, 'unsupported_command'],
+    [{ command: '/agent  implement' }, 'unsupported_command'],
+    [{ command: ' retry-write' }, 'unsupported_command'],
     [{ actorLogin: 'github-actions[bot]' }, 'bot_actor_not_allowed'],
     [{ actorLogin: '' }, 'invalid_actor'],
     [{ actorLogin: 'not a login' }, 'invalid_actor'],

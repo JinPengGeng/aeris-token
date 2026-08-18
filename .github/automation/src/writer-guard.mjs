@@ -43,9 +43,15 @@ function allowed(extra = {}) {
   return { allowed: true, reason: null, ...extra };
 }
 
+export function normalizeWriterCommand(rawCommand, prefix = '/agent') {
+  if (prefix !== '/agent' || typeof rawCommand !== 'string') return null;
+  if (WRITER_COMMAND_NAMES.includes(rawCommand)) return `${prefix} ${rawCommand}`;
+  if (WRITER_COMMANDS.includes(rawCommand)) return rawCommand;
+  return null;
+}
+
 export function canonicalWriterCommand(prefix, command) {
-  if (prefix !== '/agent' || !WRITER_COMMAND_NAMES.includes(command)) return null;
-  return `${prefix} ${command}`;
+  return normalizeWriterCommand(command, prefix);
 }
 
 function labelsContain(labels, label) {
@@ -202,7 +208,8 @@ export function evaluateWriterRequest({
   fixCycle,
   limits = DEFAULT_WRITER_LIMITS,
 } = {}) {
-  if (!WRITER_COMMANDS.includes(command)) return denied('unsupported_command');
+  const normalizedCommand = normalizeWriterCommand(command);
+  if (!normalizedCommand) return denied('unsupported_command');
   if (typeof actorLogin !== 'string') return denied('invalid_actor');
   if (/\[bot\]/i.test(actorLogin)) return denied('bot_actor_not_allowed');
   if (!ACTOR_LOGIN.test(actorLogin) || CONTROL_CHARACTER.test(actorLogin)) return denied('invalid_actor');
@@ -218,8 +225,8 @@ export function evaluateWriterRequest({
   const normalized = normalizedLimits(limits);
   if (!normalized) return denied('invalid_limits');
   if (!Number.isSafeInteger(fixCycle) || fixCycle < 0) return denied('invalid_fix_cycle');
-  if (command === '/agent implement' && fixCycle !== 0) return denied('invalid_fix_cycle');
-  if (command === '/agent retry-write' && fixCycle === 0) return denied('invalid_fix_cycle');
+  if (normalizedCommand === '/agent implement' && fixCycle !== 0) return denied('invalid_fix_cycle');
+  if (normalizedCommand === '/agent retry-write' && fixCycle === 0) return denied('invalid_fix_cycle');
   if (fixCycle > normalized.maximumFixCycles) return denied('maximum_fix_cycles_exceeded');
   if (changeSet === null) return allowed({ branch });
   const changes = validateWriterChangeSet(changeSet, normalized, patchBytes);
