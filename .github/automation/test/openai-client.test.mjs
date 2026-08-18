@@ -34,13 +34,19 @@ const candidates = [
   { alias: 'fallback', id: 'strong-model' },
 ];
 
+const completionResponse = (content = '{"ok":true}', options = {}) =>
+  jsonResponse({
+    choices: [{ finish_reason: options.finishReason ?? 'stop', message: { content } }],
+    ...(options.usage ? { usage: options.usage } : {}),
+  });
+
 test('429 switches to the approved fallback model', async () => {
   const calls = [];
   const api = client(
     [
       jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
       jsonResponse({ error: { message: 'limited' } }, 429),
-      jsonResponse({ choices: [{ message: { content: '{"ok":true}' } }], usage: { total_tokens: 4 } }),
+      completionResponse('{"ok":true}', { usage: { total_tokens: 4 } }),
     ],
     calls,
   );
@@ -73,7 +79,7 @@ test('connection failure can switch to fallback', async () => {
     [
       jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
       new TypeError('offline'),
-      jsonResponse({ choices: [{ message: { content: '{"ok":true}' } }] }),
+      completionResponse(),
     ],
     calls,
   );
@@ -99,7 +105,7 @@ test('connect timeout can switch to fallback while the total timeout remains ava
     [
       jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
       stalledHeaders,
-      jsonResponse({ choices: [{ message: { content: '{"ok":true}' } }] }),
+      completionResponse(),
     ],
     calls,
     { connectTimeoutMs: 10, timeoutMs: 200 },
@@ -157,7 +163,7 @@ test('response body timeout can switch to fallback', async () => {
     [
       jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
       stalledResponse,
-      jsonResponse({ choices: [{ message: { content: '{"ok":true}' } }] }),
+      completionResponse(),
     ],
     calls,
     { timeoutMs: 10 },
@@ -183,7 +189,7 @@ test('response body connection failure can switch to fallback', async () => {
     [
       jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
       brokenResponse,
-      jsonResponse({ choices: [{ message: { content: '{"ok":true}' } }] }),
+      completionResponse(),
     ],
     calls,
   );
@@ -199,7 +205,7 @@ test('abort errors can switch to fallback even when a fetch mock does not observ
     [
       jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
       new DOMException('upstream timeout', 'AbortError'),
-      jsonResponse({ choices: [{ message: { content: '{"ok":true}' } }] }),
+      completionResponse(),
     ],
     calls,
   );
@@ -218,7 +224,7 @@ test('arbitrary retryable errors cannot switch to fallback', async () => {
         code: 'invalid_chat_response',
         retryable: true,
       }),
-      jsonResponse({ choices: [{ message: { content: '{"ok":true}' } }] }),
+      completionResponse(),
     ],
     calls,
   );
@@ -311,16 +317,147 @@ test('stream that ends without DONE or finish_reason is invalid', async () => {
   );
 });
 
+test('stream truncated at the token limit fails without fallback', async () => {
+  const truncatedBody = [
+    `data: ${JSON.stringify({ choices: [{ delta: { content: '{"partial":' } }] })}`,
+    '',
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}`,
+    '',
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}`,
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n');
+  const sseResponse = () =>
+    new Response(truncatedBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  const calls = [];
+  const api = client(
+    [jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }), sseResponse()],
+    calls,
+  );
+  await assert.rejects(
+    () => api.complete({ candidates, messages: [] }),
+    (error) => error instanceof AiRequestError && error.code === 'output_truncated' && !error.retryable,
+  );
+  assert.equal(calls.length, 2);
+});
+
+test('stream reports truncation when length follows an earlier stop reason', async () => {
+  const body = [
+    `data: ${JSON.stringify({ choices: [{ delta: { content: '{"partial":' } }] })}`,
+    '',
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}`,
+    '',
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}`,
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n');
+  const api = client(
+    [
+      jsonResponse({ data: [{ id: 'fast-model' }] }),
+      new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    ],
+    [],
+  );
+  await assert.rejects(
+    () => api.complete({ candidates: [{ alias: 'role', id: 'fast-model' }], messages: [] }),
+    (error) => error instanceof AiRequestError && error.code === 'output_truncated',
+  );
+});
+
+test('stream rejects unsupported finish reasons and data after DONE', async () => {
+  const bodies = [
+    [
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'content_filter' }] })}`,
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n'),
+    [
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}`,
+      '',
+      'data: [DONE]',
+      '',
+      `data: ${JSON.stringify({ choices: [{ delta: { content: 'late' } }] })}`,
+      '',
+    ].join('\n'),
+  ];
+  for (const body of bodies) {
+    const api = client(
+      [
+        jsonResponse({ data: [{ id: 'fast-model' }] }),
+        new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+      ],
+      [],
+    );
+    await assert.rejects(
+      () => api.complete({ candidates: [{ alias: 'role', id: 'fast-model' }], messages: [] }),
+      (error) => error instanceof AiRequestError && error.code === 'invalid_chat_response',
+    );
+  }
+});
+
 test('non-stream JSON response still works when the gateway ignores stream', async () => {
   const calls = [];
   const api = client(
     [
       jsonResponse({ data: [{ id: 'fast-model' }] }),
-      jsonResponse({ choices: [{ message: { content: '{"ok":true}' } }], usage: { total_tokens: 3 } }),
+      completionResponse('{"ok":true}', { usage: { total_tokens: 3 } }),
     ],
     calls,
   );
   const result = await api.complete({ candidates: [{ alias: 'role', id: 'fast-model' }], messages: [] });
   assert.equal(result.content, '{"ok":true}');
   assert.equal(JSON.parse(calls[1].init.body).stream, true);
+});
+
+test('non-stream response truncated at the token limit fails without fallback', async () => {
+  for (const content of ['{"partial":', null]) {
+    const calls = [];
+    const api = client(
+      [
+        jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] }),
+        completionResponse(content, { finishReason: 'length' }),
+      ],
+      calls,
+    );
+    await assert.rejects(
+      () => api.complete({ candidates, messages: [] }),
+      (error) => error instanceof AiRequestError && error.code === 'output_truncated' && !error.retryable,
+    );
+    assert.equal(calls.length, 2);
+  }
+});
+
+test('non-stream response without a finish reason fails closed', async () => {
+  const api = client(
+    [
+      jsonResponse({ data: [{ id: 'fast-model' }] }),
+      jsonResponse({ choices: [{ message: { content: '{"ok":true}' } }] }),
+    ],
+    [],
+  );
+  await assert.rejects(
+    () => api.complete({ candidates: [{ alias: 'role', id: 'fast-model' }], messages: [] }),
+    (error) => error instanceof AiRequestError && error.code === 'invalid_chat_response',
+  );
+});
+
+test('unsupported finish reasons fail closed even when content is valid JSON', async () => {
+  const calls = [];
+  const api = client(
+    [
+      jsonResponse({ data: [{ id: 'fast-model' }] }),
+      completionResponse('{"ok":true}', { finishReason: 'content_filter' }),
+    ],
+    calls,
+  );
+  await assert.rejects(
+    () => api.complete({ candidates: [{ alias: 'role', id: 'fast-model' }], messages: [] }),
+    (error) => error instanceof AiRequestError && error.code === 'invalid_chat_response',
+  );
 });

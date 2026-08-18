@@ -71,14 +71,34 @@ function parseSseEvents(text) {
   return events;
 }
 
+function requireCompleteFinishReason(finishReason, responseKind) {
+  if (finishReason === 'length') {
+    throw new AiRequestError(`AI ${responseKind} stopped at the token limit before completing`, {
+      code: 'output_truncated',
+      retryable: false,
+    });
+  }
+  if (finishReason !== 'stop') {
+    throw new AiRequestError(`AI ${responseKind} ended with an unsupported finish reason`, {
+      code: 'invalid_chat_response',
+    });
+  }
+}
+
 function aggregateSseCompletion(text) {
   let content = '';
   let usage = null;
-  let sawCompletion = false;
+  let finishReason = null;
+  let sawDone = false;
   for (const payload of parseSseEvents(text)) {
     if (payload === '[DONE]') {
-      sawCompletion = true;
+      sawDone = true;
       continue;
+    }
+    if (sawDone) {
+      throw new AiRequestError('AI stream returned data after the completion marker', {
+        code: 'invalid_chat_response',
+      });
     }
     let event;
     try {
@@ -89,15 +109,27 @@ function aggregateSseCompletion(text) {
     const delta = event.choices?.[0]?.delta?.content;
     if (typeof delta === 'string') content += delta;
     if (event.usage && typeof event.usage === 'object') usage = event.usage;
-    if (Array.isArray(event.choices) && event.choices.length > 0 && event.choices[0].finish_reason) {
-      sawCompletion = true;
+    const nextFinishReason = event.choices?.[0]?.finish_reason;
+    if (nextFinishReason) {
+      if (finishReason && finishReason !== nextFinishReason) {
+        if (finishReason === 'length' || nextFinishReason === 'length') {
+          finishReason = 'length';
+        } else {
+          throw new AiRequestError('AI stream returned conflicting finish reasons', {
+            code: 'invalid_chat_response',
+          });
+        }
+      } else {
+        finishReason = nextFinishReason;
+      }
     }
   }
-  if (!sawCompletion) {
+  if (!finishReason && !sawDone) {
     throw new AiRequestError('AI stream ended without completion', {
       code: 'invalid_chat_response',
     });
   }
+  requireCompleteFinishReason(finishReason ?? 'stop', 'stream');
   return { content, usage };
 }
 
@@ -301,7 +333,9 @@ export class OpenAICompatibleClient {
             };
           }
           const payload = parseJson(text, 'invalid_service_json');
-          const content = payload.choices?.[0]?.message?.content;
+          const choice = payload.choices?.[0];
+          requireCompleteFinishReason(choice?.finish_reason, 'response');
+          const content = choice?.message?.content;
           if (typeof content !== 'string') {
             throw new AiRequestError('AI response does not contain message content', {
               code: 'invalid_chat_response',

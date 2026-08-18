@@ -9,6 +9,8 @@ export class ContractError extends Error {
   }
 }
 
+const MAXIMUM_MODEL_OUTPUT_TOKENS = 16_384;
+
 function requireCondition(condition, message) {
   if (!condition) throw new ContractError(message);
 }
@@ -60,6 +62,12 @@ export function validateContracts(agents, policy) {
     policy.limits?.maximum_concurrent_runs_per_object ===
       agents.runtime?.limits?.maximum_concurrent_runs_per_object,
     'registry and policy object concurrency limits differ',
+  );
+  requireCondition(
+    Number.isInteger(agents.runtime?.limits?.maximum_output_tokens) &&
+      agents.runtime.limits.maximum_output_tokens > 0 &&
+      agents.runtime.limits.maximum_output_tokens <= MAXIMUM_MODEL_OUTPUT_TOKENS,
+    `maximum_output_tokens must be an integer between 1 and ${MAXIMUM_MODEL_OUTPUT_TOKENS}`,
   );
 
   const expectedAgents = new Set([

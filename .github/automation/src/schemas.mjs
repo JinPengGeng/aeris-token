@@ -1,7 +1,7 @@
 const CONTROL_LABELS = new Set(['agent-analyze', 'agent-ready', 'automerge-approved']);
 
 function requireCondition(condition, message) {
-  if (!condition) throw new Error(message);
+  if (!condition) throw Object.assign(new Error(message), { code: 'invalid_model_output' });
 }
 
 function exactKeys(value, keys, name) {
@@ -38,7 +38,9 @@ export function parseModelJson(content) {
   try {
     return JSON.parse(trimmed);
   } catch {
-    throw new Error('model output is not valid JSON');
+    throw Object.assign(new Error('model output is not valid JSON'), {
+      code: 'invalid_model_output',
+    });
   }
 }
 
