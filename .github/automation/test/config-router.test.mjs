@@ -48,6 +48,17 @@ test('contract validation rejects divergent object concurrency limits', () => {
   assert.throws(() => validateContracts(agents, contracts.policy), ContractError);
 });
 
+test('contract validation bounds the model output token budget', () => {
+  for (const value of [undefined, null, '4000', 0, -1, 1.5, 16_385]) {
+    const agents = structuredClone(contracts.agents);
+    agents.runtime.limits.maximum_output_tokens = value;
+    assert.throws(() => validateContracts(agents, contracts.policy), ContractError);
+  }
+  const agents = structuredClone(contracts.agents);
+  agents.runtime.limits.maximum_output_tokens = 16_384;
+  assert.doesNotThrow(() => validateContracts(agents, contracts.policy));
+});
+
 test('model candidates follow role, default, fallback order and deduplicate IDs', () => {
   const candidates = resolveModelCandidates('triage', contracts.agents.agents.triage, {
     AERIS_AI_MODEL_TRIAGE: 'fast-model',

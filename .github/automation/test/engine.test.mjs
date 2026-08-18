@@ -159,9 +159,9 @@ function triageCompletion(onComplete = null) {
   let calls = 0;
   return {
     factory: () => ({
-      async complete() {
+      async complete(request) {
         calls += 1;
-        onComplete?.();
+        onComplete?.(request);
         return {
           content: JSON.stringify({
             schema_version: 1,
@@ -249,6 +249,18 @@ test('Issue triage publishes one managed comment and replay is a no-op', async (
   assert.equal(replay.state, 'noop');
   assert.equal(github.comments.length, 1);
   assert.equal(ai.calls(), 1);
+});
+
+test('analysis passes the validated output token budget to the AI client', async () => {
+  const github = new FakeGitHub();
+  const currentContracts = enabledContracts('triage');
+  let request;
+  const ai = triageCompletion((value) => { request = value; });
+  await runAutomation({
+    kind: 'issue', eventName: 'issues', event: issueEvent, environment: environment(), repoRoot,
+    contracts: currentContracts, policySha, github, aiClientFactory: ai.factory,
+  });
+  assert.equal(request.maxTokens, currentContracts.agents.runtime.limits.maximum_output_tokens);
 });
 
 test('generation change during model call prevents writeback', async () => {
@@ -848,9 +860,10 @@ test('an expired running lease is recovered with a new reservation and completed
 });
 
 test('model and schema failures replace the reservation with failed metadata', async () => {
-  for (const completion of [
-    () => { throw Object.assign(new Error('connection lost'), { code: 'connect_error' }); },
-    () => ({ content: '{not json}', model: { alias: 'default', id: 'test-model' }, durationMs: 1, usage: null }),
+  for (const [completion, expectedCode] of [
+    [() => { throw Object.assign(new Error('connection lost'), { code: 'connect_error' }); }, 'connect_error'],
+    [() => ({ content: '{not json}', model: { alias: 'default', id: 'test-model' }, durationMs: 1, usage: null }), 'invalid_model_output'],
+    [() => { throw Object.assign(new Error('truncated'), { code: 'output_truncated' }); }, 'output_truncated'],
   ]) {
     const github = new FakeGitHub();
     await assert.rejects(
@@ -859,8 +872,10 @@ test('model and schema failures replace the reservation with failed metadata', a
         contracts: enabledContracts('triage'), policySha, github,
         aiClientFactory: () => ({ async complete() { return completion(); } }),
       }),
+      (error) => error.code === expectedCode,
     );
     assert.equal(managedMetadata(github).result, 'failed');
+    assert.equal(managedMetadata(github).reason_codes.at(-1), expectedCode);
     assert.equal(managedMetadata(github).lease_expires_at, null);
   }
 });
