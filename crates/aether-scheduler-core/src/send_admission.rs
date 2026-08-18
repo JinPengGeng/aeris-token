@@ -59,14 +59,17 @@ impl SendAuthorityRevision {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct SendAdmissionReservation {
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Observed metadata from a reservation decision.
+///
+/// This is not the live reservation lease or a capability accepted by transport.
+pub struct SendAdmissionReservationEvidence {
     reservation_id: String,
     fencing_token: u64,
     expires_at_unix_ms: u64,
 }
 
-impl SendAdmissionReservation {
+impl SendAdmissionReservationEvidence {
     pub fn new(
         reservation_id: impl Into<String>,
         fencing_token: u64,
@@ -108,25 +111,26 @@ pub enum SendAdmissionEvidenceError {
     ReservationExpiresBeforeAdmission,
 }
 
-/// Proof that one physical upstream dispatch passed send-time admission.
+/// Non-authoritative evidence captured when send-time admission returned `Admit`.
 ///
-/// This type intentionally does not implement `Clone`. Transport entrypoints should
-/// take it by value so the same grant cannot accidentally authorize multiple sends.
-#[derive(Debug, PartialEq, Eq)]
-#[must_use = "an admitted send must be consumed by exactly one physical dispatch"]
-pub struct AdmittedSend {
+/// This value is diagnostic contract data. It is not a transport capability, does
+/// not authorize a physical send, and does not prove that a send occurred. The
+/// gateway-owned dispatch port must define and consume the real one-shot capability.
+/// This evidence is deliberately cloneable because cloning it conveys no authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendAdmissionEvidence {
     binding: SendAdmissionBinding,
     authority_revision: SendAuthorityRevision,
-    reservation: SendAdmissionReservation,
+    reservation: SendAdmissionReservationEvidence,
     admitted_at_unix_ms: u64,
     valid_until_unix_ms: u64,
 }
 
-impl AdmittedSend {
-    pub(crate) fn new(
+impl SendAdmissionEvidence {
+    pub fn new(
         binding: SendAdmissionBinding,
         authority_revision: SendAuthorityRevision,
-        reservation: SendAdmissionReservation,
+        reservation: SendAdmissionReservationEvidence,
         admitted_at_unix_ms: u64,
         valid_until_unix_ms: u64,
     ) -> Result<Self, SendAdmissionEvidenceError> {
@@ -144,50 +148,6 @@ impl AdmittedSend {
             valid_until_unix_ms,
         })
     }
-
-    pub fn binding(&self) -> &SendAdmissionBinding {
-        &self.binding
-    }
-
-    pub const fn authority_revision(&self) -> SendAuthorityRevision {
-        self.authority_revision
-    }
-
-    pub fn reservation(&self) -> &SendAdmissionReservation {
-        &self.reservation
-    }
-
-    pub const fn admitted_at_unix_ms(&self) -> u64 {
-        self.admitted_at_unix_ms
-    }
-
-    pub const fn valid_until_unix_ms(&self) -> u64 {
-        self.valid_until_unix_ms
-    }
-
-    pub const fn is_valid_at(&self, now_unix_ms: u64) -> bool {
-        now_unix_ms >= self.admitted_at_unix_ms && now_unix_ms < self.valid_until_unix_ms
-    }
-}
-
-/// Issues the linear transport token from already-verified authority and reservation evidence.
-///
-/// Runtime integration should centralize calls to this factory in the send-admission adapter;
-/// ordinary transport code should only receive the returned token by value.
-pub fn issue_admitted_send(
-    binding: SendAdmissionBinding,
-    authority_revision: SendAuthorityRevision,
-    reservation: SendAdmissionReservation,
-    admitted_at_unix_ms: u64,
-    valid_until_unix_ms: u64,
-) -> Result<AdmittedSend, SendAdmissionEvidenceError> {
-    AdmittedSend::new(
-        binding,
-        authority_revision,
-        reservation,
-        admitted_at_unix_ms,
-        valid_until_unix_ms,
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,12 +281,16 @@ impl SendAdmissionStop {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendAdmissionBudgetEffect {
     AdmissionDisposition,
-    PhysicalDispatch,
+    /// The Admit disposition requires the request budget to reserve a dispatch.
+    /// It does not assert that a physical dispatch already happened.
+    DispatchReservation,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SendAdmissionDecision {
-    Admit(AdmittedSend),
+    /// Dynamic checks passed at observation time. The enclosed evidence is not
+    /// authorization to send and must not be accepted by a transport API.
+    Admit(SendAdmissionEvidence),
     Skip(SendAdmissionSkip),
     Stop(SendAdmissionStop),
 }
@@ -334,7 +298,7 @@ pub enum SendAdmissionDecision {
 impl SendAdmissionDecision {
     pub const fn budget_effect(&self) -> SendAdmissionBudgetEffect {
         match self {
-            Self::Admit(_) => SendAdmissionBudgetEffect::PhysicalDispatch,
+            Self::Admit(_) => SendAdmissionBudgetEffect::DispatchReservation,
             Self::Skip(_) | Self::Stop(_) => SendAdmissionBudgetEffect::AdmissionDisposition,
         }
     }
@@ -348,30 +312,32 @@ impl SendAdmissionDecision {
 mod tests {
     use super::*;
 
-    fn admitted_send() -> AdmittedSend {
-        issue_admitted_send(
+    fn admission_evidence() -> SendAdmissionEvidence {
+        SendAdmissionEvidence::new(
             SendAdmissionBinding::new("provider", "endpoint", "key", "openai:responses")
                 .expect("binding"),
             SendAuthorityRevision::new(17),
-            SendAdmissionReservation::new("reservation", 42, 2_000).expect("reservation"),
+            SendAdmissionReservationEvidence::new("reservation", 42, 2_000)
+                .expect("reservation evidence"),
             1_000,
             1_500,
         )
-        .expect("admitted send")
+        .expect("admission evidence")
     }
 
     #[test]
-    fn admitted_send_retains_authority_and_fencing_evidence() {
-        let admitted = admitted_send();
-        assert_eq!(admitted.binding().provider_id(), "provider");
-        assert_eq!(admitted.binding().endpoint_id(), "endpoint");
-        assert_eq!(admitted.binding().key_id(), "key");
-        assert_eq!(admitted.binding().api_format(), "openai:responses");
-        assert_eq!(admitted.authority_revision().get(), 17);
-        assert_eq!(admitted.reservation().fencing_token(), 42);
-        assert!(admitted.is_valid_at(1_000));
-        assert!(admitted.is_valid_at(1_499));
-        assert!(!admitted.is_valid_at(1_500));
+    fn admission_evidence_retains_authority_and_fencing_facts() {
+        let evidence = admission_evidence();
+        assert_eq!(evidence.binding.provider_id(), "provider");
+        assert_eq!(evidence.binding.endpoint_id(), "endpoint");
+        assert_eq!(evidence.binding.key_id(), "key");
+        assert_eq!(evidence.binding.api_format(), "openai:responses");
+        assert_eq!(evidence.authority_revision.get(), 17);
+        assert_eq!(evidence.reservation.fencing_token(), 42);
+    }
+
+    fn evidence_window_contains(evidence: &SendAdmissionEvidence, now_unix_ms: u64) -> bool {
+        now_unix_ms >= evidence.admitted_at_unix_ms && now_unix_ms < evidence.valid_until_unix_ms
     }
 
     #[test]
@@ -381,15 +347,28 @@ mod tests {
             Err(SendAdmissionEvidenceError::IncompleteBinding)
         );
         assert_eq!(
-            SendAdmissionReservation::new("reservation", 0, 2_000),
+            SendAdmissionReservationEvidence::new("reservation", 0, 2_000),
             Err(SendAdmissionEvidenceError::FencingTokenMissing)
         );
         assert_eq!(
-            issue_admitted_send(
+            SendAdmissionEvidence::new(
                 SendAdmissionBinding::new("provider", "endpoint", "key", "format")
                     .expect("binding"),
                 SendAuthorityRevision::new(1),
-                SendAdmissionReservation::new("reservation", 1, 1_100).expect("reservation"),
+                SendAdmissionReservationEvidence::new("reservation", 1, 1_000)
+                    .expect("reservation evidence"),
+                1_000,
+                1_000,
+            ),
+            Err(SendAdmissionEvidenceError::InvalidValidityWindow)
+        );
+        assert_eq!(
+            SendAdmissionEvidence::new(
+                SendAdmissionBinding::new("provider", "endpoint", "key", "format")
+                    .expect("binding"),
+                SendAuthorityRevision::new(1),
+                SendAdmissionReservationEvidence::new("reservation", 1, 1_100)
+                    .expect("reservation evidence"),
                 1_000,
                 1_200,
             ),
@@ -398,45 +377,119 @@ mod tests {
     }
 
     #[test]
-    fn skip_reasons_have_fixed_retry_scopes() {
-        for reason in [
-            SendAdmissionSkipReason::ProviderInactive,
-            SendAdmissionSkipReason::ProviderQuotaExhausted,
-            SendAdmissionSkipReason::ProviderConcurrencyExhausted,
-        ] {
-            assert_eq!(reason.retry_scope(), SendAdmissionRetryScope::Provider);
-        }
-        for reason in [
-            SendAdmissionSkipReason::EndpointInactive,
-            SendAdmissionSkipReason::EndpointUnhealthy,
-        ] {
-            assert_eq!(reason.retry_scope(), SendAdmissionRetryScope::Endpoint);
-        }
-        for reason in [
-            SendAdmissionSkipReason::CredentialInactive,
-            SendAdmissionSkipReason::CredentialExpired,
-            SendAdmissionSkipReason::CredentialCircuitOpen,
-            SendAdmissionSkipReason::CredentialUnhealthy,
-            SendAdmissionSkipReason::CredentialRpmExhausted,
-            SendAdmissionSkipReason::CredentialConcurrencyExhausted,
-            SendAdmissionSkipReason::AccountQuotaExhausted,
-            SendAdmissionSkipReason::OAuthInvalid,
-        ] {
-            assert_eq!(reason.retry_scope(), SendAdmissionRetryScope::Credential);
-        }
-        for reason in [
-            SendAdmissionSkipReason::ModelUnavailable,
-            SendAdmissionSkipReason::BindingMissing,
-        ] {
-            assert_eq!(reason.retry_scope(), SendAdmissionRetryScope::Candidate);
+    fn reservation_expiry_equal_to_evidence_end_is_accepted() {
+        let evidence = SendAdmissionEvidence::new(
+            SendAdmissionBinding::new("provider", "endpoint", "key", "format").expect("binding"),
+            SendAuthorityRevision::new(1),
+            SendAdmissionReservationEvidence::new("reservation", 1, 1_500)
+                .expect("reservation evidence"),
+            1_000,
+            1_500,
+        )
+        .expect("equal expiry should be accepted");
+        assert_eq!(evidence.reservation.expires_at_unix_ms(), 1_500);
+    }
+
+    #[test]
+    fn evidence_window_uses_inclusive_start_and_exclusive_end() {
+        let evidence = admission_evidence();
+        assert!(!evidence_window_contains(&evidence, 999));
+        assert!(evidence_window_contains(&evidence, 1_000));
+        assert!(evidence_window_contains(&evidence, 1_499));
+        assert!(!evidence_window_contains(&evidence, 1_500));
+        assert!(!evidence_window_contains(&evidence, 1_501));
+    }
+
+    #[test]
+    fn every_skip_reason_has_stable_scope_and_code() {
+        let cases = [
+            (
+                SendAdmissionSkipReason::ProviderInactive,
+                SendAdmissionRetryScope::Provider,
+                "provider_inactive",
+            ),
+            (
+                SendAdmissionSkipReason::ProviderQuotaExhausted,
+                SendAdmissionRetryScope::Provider,
+                "provider_quota_exhausted",
+            ),
+            (
+                SendAdmissionSkipReason::ProviderConcurrencyExhausted,
+                SendAdmissionRetryScope::Provider,
+                "provider_concurrency_exhausted",
+            ),
+            (
+                SendAdmissionSkipReason::EndpointInactive,
+                SendAdmissionRetryScope::Endpoint,
+                "endpoint_inactive",
+            ),
+            (
+                SendAdmissionSkipReason::EndpointUnhealthy,
+                SendAdmissionRetryScope::Endpoint,
+                "endpoint_unhealthy",
+            ),
+            (
+                SendAdmissionSkipReason::CredentialInactive,
+                SendAdmissionRetryScope::Credential,
+                "credential_inactive",
+            ),
+            (
+                SendAdmissionSkipReason::CredentialExpired,
+                SendAdmissionRetryScope::Credential,
+                "credential_expired",
+            ),
+            (
+                SendAdmissionSkipReason::CredentialCircuitOpen,
+                SendAdmissionRetryScope::Credential,
+                "credential_circuit_open",
+            ),
+            (
+                SendAdmissionSkipReason::CredentialUnhealthy,
+                SendAdmissionRetryScope::Credential,
+                "credential_unhealthy",
+            ),
+            (
+                SendAdmissionSkipReason::CredentialRpmExhausted,
+                SendAdmissionRetryScope::Credential,
+                "credential_rpm_exhausted",
+            ),
+            (
+                SendAdmissionSkipReason::CredentialConcurrencyExhausted,
+                SendAdmissionRetryScope::Credential,
+                "credential_concurrency_exhausted",
+            ),
+            (
+                SendAdmissionSkipReason::AccountQuotaExhausted,
+                SendAdmissionRetryScope::Credential,
+                "account_quota_exhausted",
+            ),
+            (
+                SendAdmissionSkipReason::OAuthInvalid,
+                SendAdmissionRetryScope::Credential,
+                "oauth_invalid",
+            ),
+            (
+                SendAdmissionSkipReason::ModelUnavailable,
+                SendAdmissionRetryScope::Candidate,
+                "model_unavailable",
+            ),
+            (
+                SendAdmissionSkipReason::BindingMissing,
+                SendAdmissionRetryScope::Candidate,
+                "binding_missing",
+            ),
+        ];
+        for (reason, scope, code) in cases {
+            assert_eq!(reason.retry_scope(), scope);
+            assert_eq!(reason.as_str(), code);
         }
     }
 
     #[test]
     fn every_decision_declares_its_budget_effect() {
         assert_eq!(
-            SendAdmissionDecision::Admit(admitted_send()).budget_effect(),
-            SendAdmissionBudgetEffect::PhysicalDispatch
+            SendAdmissionDecision::Admit(admission_evidence()).budget_effect(),
+            SendAdmissionBudgetEffect::DispatchReservation
         );
         assert_eq!(
             SendAdmissionDecision::Skip(SendAdmissionSkip::new(
@@ -456,14 +509,34 @@ mod tests {
     }
 
     #[test]
-    fn reason_codes_are_stable_for_metrics_and_audit() {
-        assert_eq!(
-            SendAdmissionSkipReason::CredentialRpmExhausted.as_str(),
-            "credential_rpm_exhausted"
-        );
-        assert_eq!(
-            SendAdmissionStopReason::UnsupportedDistributedMemoryState.as_str(),
-            "unsupported_distributed_memory_state"
-        );
+    fn every_stop_reason_has_a_stable_code() {
+        let cases = [
+            (
+                SendAdmissionStopReason::AuthorityReadFailed,
+                "authority_read_failed",
+            ),
+            (
+                SendAdmissionStopReason::AuthorityInconsistent,
+                "authority_inconsistent",
+            ),
+            (
+                SendAdmissionStopReason::ReservationBackendUnavailable,
+                "reservation_backend_unavailable",
+            ),
+            (SendAdmissionStopReason::BudgetExhausted, "budget_exhausted"),
+            (
+                SendAdmissionStopReason::DeadlineExceeded,
+                "deadline_exceeded",
+            ),
+            (SendAdmissionStopReason::LeaseLost, "lease_lost"),
+            (SendAdmissionStopReason::Cancelled, "cancelled"),
+            (
+                SendAdmissionStopReason::UnsupportedDistributedMemoryState,
+                "unsupported_distributed_memory_state",
+            ),
+        ];
+        for (reason, code) in cases {
+            assert_eq!(reason.as_str(), code);
+        }
     }
 }
