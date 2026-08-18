@@ -1,4 +1,5 @@
 import { canonicalWriterCommand, evaluateWriterRequest } from './writer-guard.mjs';
+import { validateContracts } from './config.mjs';
 
 const ROLE_BY_COMMAND = Object.freeze({
   triage: 'triage',
@@ -53,6 +54,11 @@ export function writerSwitchesFromTrustedContracts({ trustedContracts, environme
   const writer = agents?.agents?.writer;
   const killSwitch = policy?.kill_switch;
   if (!writer || !killSwitch || !environment || typeof environment !== 'object') {
+    return { globalEnabled: false, writerVariableEnabled: false, writerContractEnabled: false };
+  }
+  try {
+    validateContracts(agents, policy);
+  } catch {
     return { globalEnabled: false, writerVariableEnabled: false, writerContractEnabled: false };
   }
   return {
