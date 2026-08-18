@@ -114,11 +114,11 @@ use crate::orchestration::{
     apply_local_execution_effect, build_local_error_flow_metadata, classify_failure_disposition,
     cyber_continue_failover_enabled, spawn_local_oauth_success_effect,
     trace_upstream_response_body, with_error_flow_report_context,
-    with_upstream_response_report_context, FailureDisposition, FailureTokenAction,
-    LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
-    LocalExecutionEffect, LocalExecutionEffectContext, LocalFailoverAnalysis,
-    LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
-    LocalOAuthSuccessEffect, LocalPoolErrorEffect,
+    with_upstream_response_report_context, FailureDisposition, LocalAdaptiveRateLimitEffect,
+    LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
+    LocalExecutionEffectContext, LocalFailoverAnalysis, LocalHealthFailureEffect,
+    LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect,
+    LocalPoolErrorEffect,
 };
 use crate::provider_pool_demand::{
     acquire_provider_pool_in_flight_guard, ProviderPoolInFlightGuard,
@@ -1233,15 +1233,14 @@ async fn execute_in_process_stream_with_oauth_retry(
         .as_ref()
         .map(|failure| failure.status_code)
         .unwrap_or(execution.status_code);
-    let retry_requested =
-        analyzed_prefetched_failure
-            .as_ref()
-            .map_or(execution.status_code >= 400, |failure| {
-                matches!(
-                    failure.disposition.token_action,
-                    FailureTokenAction::ForceRefresh
-                )
-            });
+    // OAuth refresh has its own strict proof gate. An embedded Anthropic error
+    // is an upstream 200 transport response, so its disposition must not
+    // suppress that gate before it can inspect the parsed error taxonomy.
+    let retry_requested = analyzed_prefetched_failure
+        .as_ref()
+        .map_or(execution.status_code >= 400, |failure| {
+            failure.status_code >= 400
+        });
     if retry_requested
         && uses_oauth_credential
         && refresh_oauth_plan_auth_for_retry(
