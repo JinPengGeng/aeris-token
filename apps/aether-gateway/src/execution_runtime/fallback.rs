@@ -612,7 +612,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_retry_next_candidate_stops_ambiguous_upstream_credential_status() {
+    async fn sync_retry_next_candidate_rotates_trusted_upstream_credential_rejection() {
         let result = ExecutionResult {
             request_id: "req-1".to_string(),
             candidate_id: None,
@@ -629,6 +629,53 @@ mod tests {
         });
         let state = build_state_with_provider_config(None);
         let plan = sample_plan();
+
+        assert!(
+            should_retry_next_local_candidate_sync(
+                &state,
+                &plan,
+                "openai_chat_sync",
+                Some(&local_report_context),
+                &result,
+                Some("{\"error\":{\"message\":\"invalid auth token\"}}"),
+            )
+            .await
+        );
+        assert!(
+            !should_stop_local_candidate_failover_sync(
+                &state,
+                &plan,
+                "openai_chat_sync",
+                Some(&local_report_context),
+                &result,
+                Some("{\"error\":{\"message\":\"invalid auth token\"}}"),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_credential_rejection_stops_when_request_may_have_side_effects() {
+        let result = ExecutionResult {
+            request_id: "req-1".to_string(),
+            candidate_id: None,
+            status_code: 401,
+            headers: Default::default(),
+            response_observation: None,
+            body: None,
+            telemetry: None,
+            error: None,
+        };
+        let local_report_context = serde_json::json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        let state = build_state_with_provider_config(None);
+        let mut plan = sample_plan();
+        plan.body = aether_contracts::RequestBody::from_json(serde_json::json!({
+            "model": "gpt-5",
+            "tools": [{"type": "function", "function": {"name": "mutate_state"}}]
+        }));
 
         assert!(
             should_stop_local_candidate_failover_sync(
@@ -847,7 +894,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_retry_next_candidate_stops_ambiguous_upstream_credential_status() {
+    async fn stream_retry_next_candidate_rotates_trusted_upstream_credential_rejection() {
         let local_report_context = serde_json::json!({
             "candidate_index": 0,
             "retry_index": 0,
@@ -856,7 +903,7 @@ mod tests {
         let plan = sample_plan();
 
         assert!(
-            should_stop_local_candidate_failover_stream(
+            should_retry_next_local_candidate_stream(
                 &state,
                 &plan,
                 "openai_chat_stream",
@@ -867,7 +914,7 @@ mod tests {
             .await
         );
         assert!(
-            !should_retry_next_local_candidate_stream(
+            !should_stop_local_candidate_failover_stream(
                 &state,
                 &plan,
                 "openai_chat_stream",
