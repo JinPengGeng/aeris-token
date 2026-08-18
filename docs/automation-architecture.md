@@ -212,8 +212,8 @@ Phase 6 需要的是符合一致性和运维要求的权威状态层，不等于
 - 限制允许的 Actions 来源，关键写权限 Action 固定完整 SHA。
 - `Rust CI / check` 和 `Frontend CI / check` 保持 strict required checks。
 - 通用 Agent 自动合并在 Policy Gate 进入要求检查前不得启用；managed 上游同步仅使用上述确定性原生 auto-merge 例外。
-- 发布 Secrets 仅保存在受保护的 `release` Environment。
-- Writer 启用前必须创建独立 `writer` Environment 和仓库级私有 GitHub App；Environment 初始要求 OWNER 审批并禁止管理员绕过，App 不得拥有 branch-protection bypass。
-- Writer canary 前必须解决人工审批与 managed 上游自动合并的共存方式；在当前 `main` 审批数为 0 且同步仍使用 Actions 身份时，不得开放 Writer 写入。
+- `writer`、`policy`、`merger` 和 `sync` Agent Environment 仅允许 `main`，不要求人工 reviewer，且管理员不能绕过 Environment 保护。
+- 发布 Secrets 仅保存在受保护的 `release` Environment；该 Environment 继续要求 `JinPengGeng` 人工审批，且管理员不能绕过。
+- Writer 启用前必须已有独立 `writer` Environment 和仓库级私有 GitHub App；App 不得拥有 branch-protection bypass。Writer workflow、受控生成器、发布前二次现场复核和真实 canary 仍是独立 activation blocker。
 
 任何远端设置变更都应记录在 Issue `#11`，并通过当前配置的现场读取结果验证。
