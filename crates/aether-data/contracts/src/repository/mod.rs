@@ -8,6 +8,7 @@ pub mod candidate_selection;
 pub mod candidates;
 pub mod gemini_file_mappings;
 pub mod global_models;
+pub mod half_open_probes;
 pub mod management_tokens;
 pub mod oauth_providers;
 pub mod pool_scores;
