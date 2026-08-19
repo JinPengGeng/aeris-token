@@ -1,0 +1,27 @@
+name: Policy Signal
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, labeled, unlabeled, closed]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+
+permissions: {}
+
+jobs:
+  signal:
+    name: Publish metadata signal
+    if: ${{ github.event.pull_request.number > 0 }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record signal target
+        env:
+          AERIS_PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          case "$AERIS_PULL_REQUEST_NUMBER" in
+            ''|*[!0-9]*|0) exit 1 ;;
+          esac
+          printf 'Policy signal received for PR #%s\n' "$AERIS_PULL_REQUEST_NUMBER"

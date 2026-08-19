@@ -21,6 +21,50 @@ const MINIMUM_REVIEWER_PATCH_CHARACTERS = 1;
 const MAXIMUM_REVIEWER_PATCH_CHARACTERS = 65_536;
 const MINIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS = 120;
 const MAXIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS = 600;
+const POLICY_PERMISSION_GRANTS = {
+  metadata: 'read',
+  contents: 'read',
+  pull_requests: 'read',
+  checks: 'write',
+};
+const POLICY_DENIED_PERMISSIONS = [
+  'actions', 'statuses', 'issues', 'workflows', 'administration', 'deployments', 'environments',
+  'secrets', 'members', 'packages',
+];
+const POLICY_ALLOWED_OPERATIONS = ['read_policy_inputs', 'create_or_update_policy_check'];
+const POLICY_DENIED_OPERATIONS = [
+  'contents_write', 'review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr',
+  'delete_branch',
+];
+const POLICY_TRIGGERS = [
+  'required_checks_completed', 'policy_signal_completed', 'default_branch_changed',
+  'scheduled_reconciliation', 'manual_dispatch',
+];
+const POLICY_HUMAN_REVIEW_PATHS = [
+  '.github/**', 'CODEOWNERS', 'apps/**', 'crates/**', 'frontend/src/**', 'Cargo.toml',
+  'Cargo.lock', '**/Cargo.toml', '**/Cargo.lock', 'frontend/package.json',
+  'frontend/package-lock.json', 'Dockerfile*', 'docker-compose*.yml', 'deploy.sh', 'release/**',
+  'scripts/release/**', '**/auth/**', '**/database/**', '**/db/**', '**/migrations/**',
+  '**/security/**',
+];
+const POLICY_REQUIRED_CHECKS = ['Rust CI / check', 'Frontend CI / check'];
+const POLICY_REQUIRED_CHECK_SOURCES = [
+  { context: 'Rust CI / check', app_id: 15368, app_slug: 'github-actions' },
+  { context: 'Frontend CI / check', app_id: 15368, app_slug: 'github-actions' },
+];
+const POLICY_REGISTRY_KEYS = [
+  'enabled', 'enabled_variable', 'phase', 'mode', 'identity', 'app_id_variable',
+  'app_slug_variable', 'private_key_secret', 'environment', 'credentials', 'permissions',
+  'deterministic_client_mitigations', 'model_variable', 'triggers', 'tools', 'effects', 'handoff_to',
+];
+const POLICY_GATE_KEYS = [
+  'enabled', 'enabled_variable', 'identity', 'app_id_variable', 'app_slug_variable',
+  'private_key_secret', 'environment', 'credentials', 'permissions',
+  'deterministic_client_mitigations', 'release_secret_access', 'pull_request_target_checkout',
+  'check_name', 'mode', 'allowed_modes', 'human_enable_label', 'require_exact_head_sha',
+  'require_base_up_to_date', 'require_conversation_resolution', 'required_checks',
+  'required_check_sources', 'always_require_human_review', 'allowlist_paths',
+];
 
 function requireCondition(condition, message) {
   if (!condition) throw new ContractError(message);
@@ -81,6 +125,53 @@ function validateReviewerLimits(limits) {
       limits.request_timeout_seconds <= MAXIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS,
     `reviewer request_timeout_seconds must be an integer between ${MINIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS} and ${MAXIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS}`,
   );
+}
+
+function sameStringArray(actual, expected) {
+  return Array.isArray(actual) && actual.length === expected.length &&
+    actual.every((value, index) => value === expected[index]);
+}
+
+function sameStringSet(actual, expected) {
+  return Array.isArray(actual) && actual.length === expected.length &&
+    actual.every((value) => typeof value === 'string') &&
+    new Set(actual).size === actual.length && actual.every((value) => expected.includes(value));
+}
+
+function sameRecord(actual, expected) {
+  return actual && typeof actual === 'object' && !Array.isArray(actual) &&
+    sameStringSet(Object.keys(actual), Object.keys(expected)) &&
+    Object.entries(expected).every(([key, value]) => actual[key] === value);
+}
+
+function validatePolicyFoundation(policyAgent, gate) {
+  requireCondition(policyAgent && typeof policyAgent === 'object', 'policy Agent foundation is missing');
+  requireCondition(gate && typeof gate === 'object', 'policy gate foundation is missing');
+  requireCondition(sameStringSet(Object.keys(policyAgent), POLICY_REGISTRY_KEYS), 'policy Agent registry contains unapproved fields');
+  requireCondition(sameStringSet(Object.keys(gate), POLICY_GATE_KEYS), 'policy gate contains unapproved fields');
+  requireCondition(policyAgent.enabled === true && gate.enabled === true, 'policy Agent and gate must be enabled in human mode');
+  requireCondition(policyAgent.phase === 4 && policyAgent.mode === 'deterministic' && policyAgent.model_variable === null, 'policy Agent must remain deterministic Phase 4');
+  for (const field of ['enabled_variable', 'identity', 'app_id_variable', 'app_slug_variable', 'private_key_secret', 'environment']) {
+    requireCondition(policyAgent[field] === gate[field], `policy Agent registry and gate ${field} differ`);
+  }
+  requireCondition(
+    policyAgent.enabled_variable === 'AERIS_POLICY_ENABLED' && policyAgent.identity === 'github_app' &&
+      policyAgent.app_id_variable === 'AERIS_POLICY_APP_ID' && policyAgent.app_slug_variable === 'AERIS_POLICY_APP_SLUG' &&
+      policyAgent.private_key_secret === 'AERIS_POLICY_PRIVATE_KEY' && policyAgent.environment === 'policy',
+    'policy Agent identity configuration changed',
+  );
+  for (const source of [policyAgent, gate]) {
+    requireCondition(sameStringArray(source.credentials?.allowed_jobs, ['publish']) && source.credentials.github_token_write === false, 'policy credentials must be limited to publish without GITHUB_TOKEN write access');
+    requireCondition(Object.entries(POLICY_PERMISSION_GRANTS).every(([name, level]) => source.permissions?.[name] === level) && sameStringSet(Object.keys(source.permissions ?? {}), [...Object.keys(POLICY_PERMISSION_GRANTS), 'denied']) && sameStringArray(source.permissions.denied, POLICY_DENIED_PERMISSIONS), 'policy App permissions exceed the approved minimum');
+    requireCondition(sameStringArray(source.deterministic_client_mitigations?.allowed_operations, POLICY_ALLOWED_OPERATIONS) && sameStringArray(source.deterministic_client_mitigations?.denied_operations, POLICY_DENIED_OPERATIONS), 'policy deterministic client operations exceed the approved boundary');
+  }
+  requireCondition(sameStringArray(policyAgent.triggers, POLICY_TRIGGERS) && sameStringArray(policyAgent.tools, ['repository_read', 'pull_request_metadata_read', 'checks_read', 'checks_write']) && sameStringArray(policyAgent.effects, ['publish_policy_check']) && sameStringArray(policyAgent.handoff_to, ['merger']), 'policy Agent capabilities exceed the approved Phase 4 boundary');
+  requireCondition(gate.release_secret_access === false && gate.pull_request_target_checkout === false, 'policy gate cannot access release secrets or checkout pull request code');
+  requireCondition(gate.check_name === 'Automation Policy / gate' && gate.mode === 'human' && sameStringArray(gate.allowed_modes, ['shadow', 'human', 'label', 'allowlist']) && gate.require_exact_head_sha === true && gate.require_base_up_to_date === true && gate.require_conversation_resolution === true, 'policy gate core constraints changed');
+  requireCondition(sameStringArray(gate.required_checks, POLICY_REQUIRED_CHECKS) && JSON.stringify(gate.required_check_sources) === JSON.stringify(POLICY_REQUIRED_CHECK_SOURCES), 'policy gate required check identities changed');
+  requireCondition(!gate.required_checks.includes(gate.check_name), 'policy gate cannot require its own check');
+  requireCondition(sameStringArray(gate.always_require_human_review, POLICY_HUMAN_REVIEW_PATHS), 'policy gate human-review paths changed');
+  requireCondition(Array.isArray(gate.allowlist_paths) && gate.allowlist_paths.length === 0, 'human-mode automatic merge allowlist must remain empty');
 }
 
 export function validateContracts(agents, policy) {
@@ -193,7 +284,7 @@ export function validateContracts(agents, policy) {
   requireCondition(policy.prompt_security?.triage_shell_access === false, 'triage shell must remain off');
   requireCondition(policy.prompt_security?.triage_network_access === false, 'model network tools must remain off');
   requireCondition(policy.writer?.enabled === false, 'writer must remain disabled during Phase 2');
-  requireCondition(policy.policy_gate?.enabled === false, 'policy gate must remain disabled during Phase 2');
+  validatePolicyFoundation(agents.agents.policy, policy.policy_gate);
   requireCondition(
     Array.isArray(policy.policy_gate?.required_checks) &&
       policy.policy_gate.required_checks.length > 0 &&

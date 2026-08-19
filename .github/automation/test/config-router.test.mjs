@@ -34,7 +34,7 @@ test('trusted contracts load with only enabled agents declared', () => {
   const enabled = Object.entries(contracts.agents.agents)
     .filter(([, agent]) => agent.enabled)
     .map(([name]) => name);
-  assert.deepEqual(enabled, ['triage', 'planner', 'reviewer']);
+  assert.deepEqual(enabled, ['triage', 'planner', 'reviewer', 'policy']);
   assert.deepEqual(contracts.agents.model_policy.structured_output, {
     canary_agents: ['planner'],
     approved_model_ids: ['gpt-5.6-sol'],

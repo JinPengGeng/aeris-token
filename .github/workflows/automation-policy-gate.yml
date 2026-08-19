@@ -1,0 +1,367 @@
+name: Automation Policy Gate
+
+on:
+  workflow_run:
+    workflows: [Rust CI, Frontend CI, Policy Signal]
+    types: [completed]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Pull request number to evaluate; omit to reconcile all open PRs
+        required: false
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    name: Discover policy targets
+    if: >-
+      (vars.AERIS_AGENTS_ENABLED == 'true' || vars.AERIS_AGENTS_ENABLED == '1') &&
+      (vars.AERIS_POLICY_ENABLED == 'true' || vars.AERIS_POLICY_ENABLED == '1')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - name: Resolve bounded target set
+        id: targets
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v8
+        with:
+          script: |
+            const eventName = context.eventName;
+            let numbers = [];
+            if (eventName === 'workflow_run') {
+              const run = context.payload.workflow_run;
+              const repository = context.payload.repository;
+              if (!run || run.repository?.id !== repository?.id || run.repository?.full_name !== repository?.full_name) {
+                throw new Error('workflow_run repository identity is invalid');
+              }
+              if (!Number.isSafeInteger(run.id) || run.id < 1 || run.status !== 'completed') {
+                throw new Error('workflow_run identity is invalid');
+              }
+              const pulls = context.payload.workflow_run?.pull_requests;
+              if (!Array.isArray(pulls)) throw new Error('workflow_run pull request set is invalid');
+              if (pulls.length > 100) throw new Error('workflow_run pull request set exceeds 100 pull requests');
+              numbers = pulls.map((pull, index) => {
+                const number = pull?.number;
+                if (!Number.isSafeInteger(number) || number < 1) {
+                  throw new Error(`workflow_run pull request ${index} is invalid`);
+                }
+                return number;
+              });
+            } else if (eventName === 'workflow_dispatch' && context.payload.inputs?.pull_request_number) {
+              const number = Number(context.payload.inputs.pull_request_number);
+              if (!Number.isSafeInteger(number) || number < 1) throw new Error('invalid pull request number');
+              numbers = [number];
+            } else {
+              const response = await github.request('GET /repos/{owner}/{repo}/pulls', {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                base: context.payload.repository.default_branch,
+                per_page: 100,
+                page: 1,
+              });
+              if (String(response.headers.link ?? '').includes('rel="next"')) {
+                throw new Error('more than 100 open pull requests; refusing truncated reconciliation');
+              }
+              numbers = response.data.map((pull) => pull.number);
+            }
+            numbers = [...new Set(numbers)].sort((left, right) => left - right);
+            if (numbers.length > 100) throw new Error('policy target set exceeds 100 pull requests');
+            core.setOutput('targets', JSON.stringify(numbers.map((pull_request_number) => ({ pull_request_number }))));
+
+  observe:
+    # This job is intentionally non-authoritative. Its artifact is diagnostics
+    # only; publish independently revalidates every live input with the App token.
+    name: Observe PR #${{ matrix.pull_request_number }} policy inputs
+    needs: [discover]
+    if: always() && needs.discover.result == 'success'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.targets) }}
+    concurrency:
+      group: policy-observe-${{ github.event.repository.id }}-${{ matrix.pull_request_number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bind trusted policy checkout
+        id: policy_sha
+        env:
+          AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$AERIS_DEFAULT_BRANCH" = "main"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/automation/package-lock.json
+
+      - name: Install trusted automation runtime
+        working-directory: .github/automation
+        run: npm ci --ignore-scripts
+
+      - name: Record non-authoritative live policy observation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
+          AERIS_POLICY_ENABLED: ${{ vars.AERIS_POLICY_ENABLED }}
+          AERIS_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_PULL_REQUEST_NUMBER: ${{ matrix.pull_request_number }}
+          AERIS_EXPECTED_HEAD_SHA: ""
+          AERIS_EXPECTED_POLICY_SHA: ${{ steps.policy_sha.outputs.sha }}
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/aeris-policy/observation.json
+        run: node .github/automation/src/run-policy-gate.mjs evaluate
+
+      - name: Upload diagnostic policy observation
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: policy-observation-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.pull_request_number }}
+          path: ${{ runner.temp }}/aeris-policy/observation.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish PR #${{ matrix.pull_request_number }} policy check
+    needs: [discover]
+    if: needs.discover.result == 'success'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.targets) }}
+    concurrency:
+      group: policy-gate-${{ github.event.repository.id }}-${{ matrix.pull_request_number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: policy
+    permissions:
+      contents: read
+    steps:
+      - name: Mint bounded Policy App token
+        id: policy_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AERIS_POLICY_APP_ID }}
+          private-key: ${{ secrets.AERIS_POLICY_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: read
+          permission-pull-requests: read
+          permission-checks: write
+
+      - name: Fence prior Policy success for the live exact head
+        id: early_fence
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v8
+        env:
+          AERIS_POLICY_APP_ID: ${{ vars.AERIS_POLICY_APP_ID }}
+          AERIS_POLICY_APP_SLUG: ${{ vars.AERIS_POLICY_APP_SLUG }}
+          AERIS_PULL_REQUEST_NUMBER: ${{ matrix.pull_request_number }}
+          AERIS_REPOSITORY_ID: ${{ github.event.repository.id }}
+        with:
+          github-token: ${{ steps.policy_token.outputs.token }}
+          script: |
+            const appId = Number(process.env.AERIS_POLICY_APP_ID);
+            const appSlug = process.env.AERIS_POLICY_APP_SLUG;
+            const pullNumber = Number(process.env.AERIS_PULL_REQUEST_NUMBER);
+            const repositoryId = Number(process.env.AERIS_REPOSITORY_ID);
+            const sha = /^[0-9a-f]{40}$/;
+            if (!Number.isSafeInteger(appId) || appId < 1 || !/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/.test(appSlug ?? '')) {
+              throw new Error('Policy App identity is invalid');
+            }
+            if (!Number.isSafeInteger(pullNumber) || pullNumber < 1 || !Number.isSafeInteger(repositoryId) || repositoryId < 1) {
+              throw new Error('Policy fence target is invalid');
+            }
+            const repository = await github.request('GET /repos/{owner}/{repo}', context.repo);
+            if (repository.data.id !== repositoryId || repository.data.full_name !== context.payload.repository.full_name || repository.data.default_branch !== 'main') {
+              throw new Error('Policy fence repository identity is invalid');
+            }
+            const branch = await github.request('GET /repos/{owner}/{repo}/git/ref/{ref}', {
+              ...context.repo,
+              ref: 'heads/main',
+            });
+            const policySha = branch.data?.object?.sha;
+            if (branch.data?.ref !== 'refs/heads/main' || !sha.test(policySha ?? '')) {
+              throw new Error('Policy fence trusted branch is invalid');
+            }
+            const pull = await github.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+              ...context.repo,
+              pull_number: pullNumber,
+            });
+            const headSha = pull.data?.head?.sha;
+            const baseSha = pull.data?.base?.sha;
+            if (pull.data?.number !== pullNumber || pull.data?.state !== 'open' || !sha.test(headSha ?? '') || !sha.test(baseSha ?? '') ||
+                pull.data?.head?.repo?.full_name !== repository.data.full_name || pull.data?.base?.repo?.full_name !== repository.data.full_name ||
+                pull.data?.base?.ref !== 'main') {
+              throw new Error('Policy fence pull request identity is invalid');
+            }
+            const managed = [];
+            for (let page = 1; page <= 10; page += 1) {
+              const response = await github.request('GET /repos/{owner}/{repo}/commits/{ref}/check-runs', {
+                ...context.repo,
+                ref: headSha,
+                filter: 'all',
+                per_page: 100,
+                page,
+              });
+              if (!Array.isArray(response.data?.check_runs)) throw new Error('Policy fence check list is invalid');
+              managed.push(...response.data.check_runs.filter((check) =>
+                check?.name === 'Automation Policy / gate' && check?.head_sha === headSha &&
+                check?.app?.id === appId && check?.app?.slug === appSlug));
+              if (response.data.check_runs.length < 100) break;
+              if (page === 10) throw new Error('Policy fence check list exceeds the bounded page limit');
+            }
+            const externalId = `aeris-policy:v1:${repositoryId}:${pullNumber}:${headSha}:${policySha}`;
+            const output = {
+              title: 'Policy evaluation in progress',
+              summary: `Policy inputs are being revalidated.\nHead SHA: ${headSha}\nPolicy SHA: ${policySha}`,
+            };
+            const detailsUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            if (!managed.every((check) => Number.isSafeInteger(check.id) && check.id > 0) ||
+                new Set(managed.map((check) => check.id)).size !== managed.length) {
+              throw new Error('Policy fence managed check identities are invalid');
+            }
+            const ordered = managed.sort((left, right) => right.id - left.id);
+            const dominant = ordered[0] ?? null;
+            let fenced;
+            if (dominant) {
+              fenced = await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                ...context.repo,
+                check_run_id: dominant.id,
+                name: 'Automation Policy / gate',
+                status: 'in_progress',
+                external_id: externalId,
+                output,
+                details_url: detailsUrl,
+              });
+            } else {
+              fenced = await github.request('POST /repos/{owner}/{repo}/check-runs', {
+                ...context.repo,
+                name: 'Automation Policy / gate',
+                head_sha: headSha,
+                status: 'in_progress',
+                external_id: externalId,
+                output,
+                details_url: detailsUrl,
+              });
+            }
+            const fencedId = fenced.data?.id;
+            if (!Number.isSafeInteger(fencedId) || fencedId < 1 || (dominant && fencedId !== dominant.id) ||
+                (!dominant && ordered.length > 0 && fencedId <= ordered[0].id)) {
+              throw new Error('Policy fence did not establish the dominant check identity');
+            }
+            const persisted = await github.request('GET /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+              ...context.repo,
+              check_run_id: fencedId,
+            });
+            if (persisted.data?.id !== fencedId || persisted.data?.name !== 'Automation Policy / gate' || persisted.data?.head_sha !== headSha ||
+                persisted.data?.external_id !== externalId || persisted.data?.status !== 'in_progress' || persisted.data?.conclusion !== null ||
+                persisted.data?.app?.id !== appId || persisted.data?.app?.slug !== appSlug) {
+              throw new Error('Policy fence persistence verification failed');
+            }
+            for (const check of ordered.filter((candidate) => candidate.id !== fencedId)) {
+              await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                ...context.repo,
+                check_run_id: check.id,
+                name: 'Automation Policy / gate',
+                status: 'in_progress',
+                output,
+                details_url: detailsUrl,
+              });
+              const cleaned = await github.request('GET /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                ...context.repo,
+                check_run_id: check.id,
+              });
+              if (cleaned.data?.id !== check.id || cleaned.data?.name !== 'Automation Policy / gate' ||
+                  cleaned.data?.head_sha !== headSha || cleaned.data?.status !== 'in_progress' || cleaned.data?.conclusion !== null ||
+                  cleaned.data?.app?.id !== appId || cleaned.data?.app?.slug !== appSlug) {
+                throw new Error(`Policy fence cleanup verification failed for check ${check.id}`);
+              }
+            }
+            core.setOutput('head_sha', headSha);
+            core.setOutput('policy_sha', policySha);
+            core.setOutput('check_run_id', String(fencedId));
+
+      - name: Check out trusted default branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bind trusted policy checkout
+        id: policy_sha
+        env:
+          AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AERIS_FENCED_POLICY_SHA: ${{ steps.early_fence.outputs.policy_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$AERIS_DEFAULT_BRANCH" = "main"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+          test "$(git rev-parse HEAD)" = "$AERIS_FENCED_POLICY_SHA"
+          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/automation/package-lock.json
+
+      - name: Install trusted automation runtime
+        working-directory: .github/automation
+        run: npm ci --ignore-scripts
+
+      - name: Publish exact-head policy check
+        env:
+          AERIS_POLICY_TOKEN: ${{ steps.policy_token.outputs.token }}
+          AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
+          AERIS_POLICY_ENABLED: ${{ vars.AERIS_POLICY_ENABLED }}
+          AERIS_POLICY_APP_ID: ${{ vars.AERIS_POLICY_APP_ID }}
+          AERIS_POLICY_APP_SLUG: ${{ vars.AERIS_POLICY_APP_SLUG }}
+          AERIS_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_PULL_REQUEST_NUMBER: ${{ matrix.pull_request_number }}
+          AERIS_EXPECTED_HEAD_SHA: ${{ steps.early_fence.outputs.head_sha }}
+          AERIS_EXPECTED_POLICY_SHA: ${{ steps.policy_sha.outputs.sha }}
+          AERIS_EXPECTED_FENCE_CHECK_ID: ${{ steps.early_fence.outputs.check_run_id }}
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/aeris-policy/receipt.json
+        run: node .github/automation/src/run-policy-gate.mjs publish
+
+      - name: Upload policy receipt
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: policy-receipt-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.pull_request_number }}
+          path: ${{ runner.temp }}/aeris-policy/receipt.json
+          if-no-files-found: error
+          retention-days: 7

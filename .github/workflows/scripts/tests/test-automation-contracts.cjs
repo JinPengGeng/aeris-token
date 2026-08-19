@@ -52,11 +52,11 @@ assert(
 assert(agents.runtime.default_enabled === false, 'agent runtime must default off');
 assert(
   Object.entries(agents.agents).every(([name, agent]) =>
-    name === 'triage' || name === 'planner' || name === 'reviewer'
+    name === 'triage' || name === 'planner' || name === 'reviewer' || name === 'policy'
       ? agent.enabled === true
       : agent.enabled === false,
   ),
-  'only the triage, planner, and reviewer agents may be enabled; every other agent must default off',
+  'only the triage, planner, reviewer, and Policy agents may be enabled; every other agent must default off',
 );
 assert(
   agents.model_policy.retryable_http_statuses.every(
@@ -97,13 +97,19 @@ assert(
 
 assert(automation.kill_switch.default_enabled === false, 'kill switch must default off');
 assert(automation.writer.enabled === false, 'writer policy must default off');
+assert(automation.policy_gate.enabled === true, 'Policy gate must be enabled');
+assert(automation.policy_gate.mode === 'human', 'Policy gate must remain in human mode');
+assert(agents.agents.policy.enabled === true, 'Policy registry entry must be enabled');
+assert(
+  automation.policy_gate.allowlist_paths.length === 0 &&
+    automation.policy_gate.required_check_sources.every((source) => source.app_id === 15368),
+  'Policy gate must remain non-automatic and bind required CI to the GitHub Actions App',
+);
 assert(
   automation.writer.draft_pull_requests_only === true &&
     automation.writer.forbidden_paths.includes('.github/**'),
   'writer policy boundary changed',
 );
-assert(automation.policy_gate.enabled === false, 'policy gate must default off');
-assert(automation.policy_gate.mode === 'shadow', 'policy gate must start in shadow mode');
 assert(
   automation.policy_gate.allowlist_paths.length === 0,
   'automatic merge allowlist must start empty',
