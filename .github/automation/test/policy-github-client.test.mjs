@@ -150,23 +150,22 @@ test('policy check begins in-progress, App-owned, and exact-head fenced', async 
     summary: `Policy inputs are being revalidated.\nHead SHA: ${sha('a')}\nPolicy SHA: ${sha('c')}`,
   };
   let pullReads = 0;
+  const state = new Map();
   const value = client(async (url, options) => {
     requests.push({ url, options });
     if (url.endsWith('/pulls/37')) {
       pullReads += 1;
       return response(pull());
     }
-    if (url.includes(`/commits/${sha('a')}/check-runs`)) return response({ check_runs: [] });
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) return response({ check_runs: [...state.values()] });
     if (url.endsWith('/check-runs') && options.method === 'POST') {
       const body = JSON.parse(options.body);
       assert.equal(body.external_id, external);
       assert.equal(body.status, 'in_progress');
       assert.equal(Object.hasOwn(body, 'conclusion'), false);
-      return response({ id: 77, ...body, app: policyApp });
-    }
-    if (url.endsWith('/check-runs/77')) {
-      return response({ id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
-        status: 'in_progress', conclusion: null, app: policyApp, output });
+      const created = { id: 77, ...body, conclusion: null, app: policyApp };
+      state.set(77, created);
+      return response(created);
     }
     throw new Error(`unexpected request ${url}`);
   });
@@ -185,22 +184,21 @@ test('policy check begin creates a new check instead of reopening completed hist
   };
   const mutations = [];
   let pullReads = 0;
+  const state = new Map([[77, { id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
+    status: 'completed', conclusion: 'success', app: policyApp }]]);
   const value = client(async (url, options) => {
     if (url.endsWith('/pulls/37')) {
       pullReads += 1;
       return response(pull());
     }
     if (url.includes(`/commits/${sha('a')}/check-runs`)) {
-      return response({ check_runs: [{ id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
-        status: 'completed', conclusion: 'success', app: policyApp }] });
+      return response({ check_runs: [...state.values()] });
     }
     if (url.endsWith('/check-runs') && options.method === 'POST') {
       mutations.push(options.method);
-      return response({ id: 88, app: policyApp, ...JSON.parse(options.body) });
-    }
-    if (url.endsWith('/check-runs/88')) {
-      return response({ id: 88, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
-        status: 'in_progress', conclusion: null, app: policyApp, output: pendingOutput });
+      const created = { id: 88, app: policyApp, ...JSON.parse(options.body), conclusion: null };
+      state.set(88, created);
+      return response(created);
     }
     if (options.method === 'PATCH') throw new Error('completed check must not be reopened');
     throw new Error(`unexpected request ${url}`);
@@ -251,30 +249,60 @@ test('policy check completion requires the exact in-progress App-owned generatio
   assert.equal(patched, true);
 });
 
-test('policy check recovery restores in-progress without trusting stale pull state', async () => {
+test('policy check recovery creates a higher successor without trusting stale pull state', async () => {
   const external = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
   const pendingOutput = {
     title: 'Policy evaluation in progress',
     summary: `Policy inputs are being revalidated.\nHead SHA: ${sha('a')}\nPolicy SHA: ${sha('c')}`,
   };
-  let patched = false;
+  const state = new Map([[77, { id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
+    status: 'in_progress', conclusion: null, app: policyApp, output: pendingOutput }]]);
+  const methods = [];
   const value = client(async (url, options) => {
     assert.equal(url.includes('/pulls/'), false);
-    if (url.endsWith('/check-runs/77') && options.method === 'PATCH') {
-      patched = true;
-      const body = JSON.parse(options.body);
-      assert.equal(body.status, 'in_progress');
-      return response({ id: 77, head_sha: sha('a'), app: policyApp, ...body });
+    if (url.endsWith('/check-runs/77')) return response(state.get(77));
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) return response({ check_runs: [...state.values()] });
+    if (url.endsWith('/check-runs') && options.method === 'POST') {
+      methods.push('POST');
+      const created = { id: 88, app: policyApp, ...JSON.parse(options.body), conclusion: null };
+      state.set(88, created);
+      return response(created);
     }
-    if (url.endsWith('/check-runs/77')) {
-      return response({ id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
-        status: 'in_progress', conclusion: null, app: policyApp, output: pendingOutput });
-    }
+    if (options.method === 'PATCH') throw new Error('recovery must not PATCH');
     throw new Error(`unexpected request ${url}`);
   });
   const result = await value.restorePolicyCheckInProgress(77, generation(), 'Automation Policy / gate');
-  assert.equal(result.status, 'in_progress');
-  assert.equal(patched, true);
+  assert.equal(result.id, 88);
+  assert.deepEqual(methods, ['POST']);
+});
+
+test('policy check recovery creates a successor when the source completes before fresh-list publication', async () => {
+  const external = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
+  const pendingOutput = {
+    title: 'Policy evaluation in progress',
+    summary: `Policy inputs are being revalidated.\nHead SHA: ${sha('a')}\nPolicy SHA: ${sha('c')}`,
+  };
+  const state = new Map([[77, { id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
+    status: 'in_progress', conclusion: null, app: policyApp, output: pendingOutput }]]);
+  let listReads = 0;
+  const value = client(async (url, options) => {
+    if (url.endsWith('/check-runs/77')) return response(state.get(77));
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) {
+      listReads += 1;
+      if (listReads === 1) state.set(77, { ...state.get(77), status: 'completed', conclusion: 'success' });
+      return response({ check_runs: [...state.values()] });
+    }
+    if (url.endsWith('/check-runs') && options.method === 'POST') {
+      const created = { id: 88, app: policyApp, ...JSON.parse(options.body), conclusion: null };
+      state.set(88, created);
+      return response(created);
+    }
+    if (options.method === 'PATCH') throw new Error('completed check must not be reopened');
+    throw new Error(`unexpected request ${url}`);
+  });
+  const result = await value.restorePolicyCheckInProgress(77, generation(), 'Automation Policy / gate');
+  assert.equal(result.id, 88);
+  assert.equal(state.get(77).status, 'completed');
 });
 
 test('policy check recovery verifies the completed App-owned generation before replacing it', async () => {
@@ -311,28 +339,159 @@ test('policy check recovery replaces a completed generation without reopening it
     summary: `Policy inputs are being revalidated.\nHead SHA: ${sha('a')}\nPolicy SHA: ${sha('c')}`,
   };
   const methods = [];
+  const state = new Map([[77, { id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
+    status: 'completed', conclusion: 'success', app: policyApp }]]);
   const value = client(async (url, options) => {
-    if (url.endsWith('/check-runs/77')) {
-      assert.equal(options.method, 'GET');
-      return response({ id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
-        status: 'completed', conclusion: 'success', app: policyApp });
-    }
+    if (url.endsWith('/check-runs/77')) return response(state.get(77));
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) return response({ check_runs: [...state.values()] });
     if (url.endsWith('/check-runs') && options.method === 'POST') {
       methods.push(options.method);
       const body = JSON.parse(options.body);
       assert.equal(body.status, 'in_progress');
       assert.equal(body.head_sha, sha('a'));
-      return response({ id: 88, app: policyApp, ...body });
-    }
-    if (url.endsWith('/check-runs/88')) {
-      return response({ id: 88, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
-        status: 'in_progress', conclusion: null, app: policyApp, output: pendingOutput });
+      const created = { id: 88, app: policyApp, ...body, conclusion: null };
+      state.set(88, created);
+      return response(created);
     }
     throw new Error(`unexpected request ${url}`);
   });
   const result = await value.restorePolicyCheckInProgress(77, generation(), 'Automation Policy / gate');
   assert.equal(result.id, 88);
   assert.deepEqual(methods, ['POST']);
+});
+
+test('policy check successor adopts an applied POST whose response is lost', async () => {
+  const external = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
+  const state = new Map();
+  let posts = 0;
+  const value = client(async (url, options) => {
+    if (url.endsWith('/pulls/37')) return response(pull());
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) return response({ check_runs: [...state.values()] });
+    if (url.endsWith('/check-runs') && options.method === 'POST') {
+      posts += 1;
+      const created = { id: 88, app: policyApp, ...JSON.parse(options.body), conclusion: null };
+      state.set(created.id, created);
+      throw new Error('connection reset after POST was applied');
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+
+  const result = await value.beginPolicyCheck(generation(), 'Automation Policy / gate');
+  assert.equal(result.id, 88);
+  assert.equal(posts, 1);
+});
+
+test('policy check successor retries an ambiguous POST that was not applied', async () => {
+  const state = new Map();
+  let posts = 0;
+  const value = client(async (url, options) => {
+    if (url.endsWith('/pulls/37')) return response(pull());
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) return response({ check_runs: [...state.values()] });
+    if (url.endsWith('/check-runs') && options.method === 'POST') {
+      posts += 1;
+      if (posts === 1) throw new Error('connection reset before POST was applied');
+      const created = { id: 88, app: policyApp, ...JSON.parse(options.body), conclusion: null };
+      state.set(created.id, created);
+      return response(created);
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+
+  const result = await value.beginPolicyCheck(generation(), 'Automation Policy / gate');
+  assert.equal(result.id, 88);
+  assert.equal(posts, 2);
+});
+
+test('policy check successor retries when the first created check completes before adoption', async () => {
+  const state = new Map();
+  let posts = 0;
+  const value = client(async (url, options) => {
+    if (url.endsWith('/pulls/37')) return response(pull());
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) return response({ check_runs: [...state.values()] });
+    if (url.endsWith('/check-runs') && options.method === 'POST') {
+      posts += 1;
+      const body = JSON.parse(options.body);
+      const created = posts === 1
+        ? { id: 88, app: policyApp, ...body, status: 'completed', conclusion: 'neutral' }
+        : { id: 99, app: policyApp, ...body, conclusion: null };
+      state.set(created.id, created);
+      return response(created);
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+
+  const result = await value.beginPolicyCheck(generation(), 'Automation Policy / gate');
+  assert.equal(result.id, 99);
+  assert.equal(posts, 2);
+  assert.equal(state.get(88).status, 'completed');
+});
+
+test('policy check begin rejects a higher-ID fresh-list identity conflict before POST', async () => {
+  const external = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
+  const pendingOutput = {
+    title: 'Policy evaluation in progress',
+    summary: `Policy inputs are being revalidated.\nHead SHA: ${sha('a')}\nPolicy SHA: ${sha('c')}`,
+  };
+  let lists = 0;
+  let mutated = false;
+  const value = client(async (url, options) => {
+    if (url.endsWith('/pulls/37')) return response(pull());
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) {
+      lists += 1;
+      const checks = [{ id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
+        status: 'in_progress', conclusion: null, app: policyApp, output: pendingOutput }];
+      if (lists > 1) checks.push({ ...checks[0], id: 88, app: { id: 2, slug: 'other-app' } });
+      return response({ check_runs: checks });
+    }
+    if (options.method === 'POST' || options.method === 'PATCH') mutated = true;
+    throw new Error(`unexpected request ${url}`);
+  });
+
+  await assert.rejects(
+    () => value.beginPolicyCheck(generation(), 'Automation Policy / gate', null, 77),
+    /unexpected name, head, or App/,
+  );
+  assert.equal(mutated, false);
+});
+
+test('policy check completion timeout is followed by a higher pending successor', async () => {
+  const external = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
+  const pendingOutput = {
+    title: 'Policy evaluation in progress',
+    summary: `Policy inputs are being revalidated.\nHead SHA: ${sha('a')}\nPolicy SHA: ${sha('c')}`,
+  };
+  const state = new Map([[77, { id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
+    status: 'in_progress', conclusion: null, app: policyApp, output: pendingOutput }]]);
+  const value = client(async (url, options) => {
+    if (url.endsWith('/pulls/37')) return response(pull());
+    if (url.endsWith('/check-runs/77') && options.method === 'PATCH') {
+      state.set(77, { ...state.get(77), status: 'completed', conclusion: 'neutral' });
+      return new Promise(() => {});
+    }
+    if (url.endsWith('/check-runs/77')) return response(state.get(77));
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) return response({ check_runs: [...state.values()] });
+    if (url.endsWith('/check-runs') && options.method === 'POST') {
+      const created = { id: 88, app: policyApp, ...JSON.parse(options.body), conclusion: null };
+      state.set(created.id, created);
+      return response(created);
+    }
+    throw new Error(`unexpected request ${url}`);
+  }, policyApp, { requestTimeoutMs: 100 });
+
+  await assert.rejects(
+    () => value.completePolicyCheck(77, artifact(), 'Automation Policy / gate'),
+    /timed out/,
+  );
+  const successor = await value.restorePolicyCheckInProgress(
+    77,
+    generation(),
+    'Automation Policy / gate',
+    null,
+    true,
+  );
+  assert.equal(successor.id, 88);
+  assert.equal(state.get(77).status, 'completed');
+  assert.equal(state.get(88).status, 'in_progress');
 });
 
 test('policy check begin reuses the exact generation and rejects stale or impersonated state', async () => {
@@ -346,12 +505,14 @@ test('policy check begin reuses the exact generation and rejects stale or impers
     if (url.endsWith('/pulls/37')) return response(pull());
     if (url.includes(`/commits/${sha('a')}/check-runs`)) {
       return response({ check_runs: [{ id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
-        status: 'in_progress', conclusion: null, app: policyApp }] });
+        status: 'in_progress', conclusion: null, app: policyApp, output: pendingOutput }] });
     }
     if (url.endsWith('/check-runs/77') && options.method === 'PATCH') {
       patched = true;
       const body = JSON.parse(options.body);
       assert.equal(Object.hasOwn(body, 'head_sha'), false);
+      assert.equal(Object.hasOwn(body, 'status'), false);
+      assert.equal(Object.hasOwn(body, 'external_id'), false);
       return response({ id: 77, head_sha: sha('a'), app: policyApp, ...body });
     }
     if (url.endsWith('/check-runs/77')) {
@@ -361,13 +522,13 @@ test('policy check begin reuses the exact generation and rejects stale or impers
     throw new Error(`unexpected request ${url}`);
   });
   await reused.beginPolicyCheck(generation(), 'Automation Policy / gate', null, 77);
-  assert.equal(patched, true);
+  assert.equal(patched, false);
   await assert.rejects(
     () => reused.beginPolicyCheck(generation(), 'Automation Policy / gate', null, 76),
     /Expected early Policy fence is missing/,
   );
 
-  let duplicatePatched = false;
+  let duplicateMutated = false;
   const duplicateCurrent = client(async (url, options) => {
     if (url.endsWith('/pulls/37')) return response(pull());
     if (url.includes(`/commits/${sha('a')}/check-runs`)) {
@@ -379,16 +540,19 @@ test('policy check begin reuses the exact generation and rejects stale or impers
         status: 'in_progress',
         conclusion: null,
         app: policyApp,
+        output: pendingOutput,
       })) });
     }
-    if (options.method === 'PATCH') duplicatePatched = true;
+    if (url.endsWith('/check-runs') && options.method === 'POST') {
+      duplicateMutated = true;
+      return response({ id: 99, app: policyApp, ...JSON.parse(options.body) });
+    }
+    if (options.method === 'PATCH') duplicateMutated = true;
     throw new Error(`unexpected request ${url}`);
   });
-  await assert.rejects(
-    () => duplicateCurrent.beginPolicyCheck(generation(), 'Automation Policy / gate', null, 88),
-    /Multiple in-progress managed policy checks exist for the head/,
-  );
-  assert.equal(duplicatePatched, false);
+  const duplicateResult = await duplicateCurrent.beginPolicyCheck(generation(), 'Automation Policy / gate', null, 88);
+  assert.equal(duplicateResult.id, 88);
+  assert.equal(duplicateMutated, false);
 
   const stale = client(async (url) => {
     if (url.endsWith('/pulls/37')) return response(pull(sha('d')));
@@ -398,20 +562,36 @@ test('policy check begin reuses the exact generation and rejects stale or impers
 
   const impersonated = client(async (url) => {
     if (url.endsWith('/pulls/37')) return response(pull());
-    if (url.includes('/check-runs')) return response({ check_runs: [{ id: 8, name: 'Automation Policy / gate', external_id: external, app: { id: 2, slug: 'other' } }] });
+    if (url.includes('/check-runs')) return response({ check_runs: [{ id: 8, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external, app: { id: 2, slug: 'other' } }] });
     throw new Error(`unexpected request ${url}`);
   });
-  await assert.rejects(() => impersonated.beginPolicyCheck(generation(), 'Automation Policy / gate'), /non-Policy App/);
+  await assert.rejects(() => impersonated.beginPolicyCheck(generation(), 'Automation Policy / gate'), /unexpected name, head, or App/);
+
+  let conflictingNameMutated = false;
+  const conflictingName = client(async (url, options) => {
+    if (url.endsWith('/pulls/37')) return response(pull());
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) return response({ check_runs: [{
+      id: 8, name: 'Different check', head_sha: sha('a'), external_id: external,
+      status: 'in_progress', conclusion: null, app: policyApp,
+    }] });
+    if (options.method === 'POST' || options.method === 'PATCH') conflictingNameMutated = true;
+    throw new Error(`unexpected request ${url}`);
+  });
+  await assert.rejects(
+    () => conflictingName.beginPolicyCheck(generation(), 'Automation Policy / gate'),
+    /unexpected name, head, or App/,
+  );
+  assert.equal(conflictingNameMutated, false);
 
   const wrongPersisted = client(async (url, options) => {
     if (url.endsWith('/pulls/37')) return response(pull());
-    if (url.includes(`/commits/${sha('a')}/check-runs`)) return response({ check_runs: [] });
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) return response({ check_runs: [{ id: 9,
+      name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
+      status: 'in_progress', conclusion: null, app: { id: 2, slug: 'other' }, output: pendingOutput }] });
     if (url.endsWith('/check-runs') && options.method === 'POST') return response({ id: 9 });
-    if (url.endsWith('/check-runs/9')) return response({ id: 9, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
-      status: 'in_progress', conclusion: null, app: { id: 2, slug: 'other' }, output: pendingOutput });
     throw new Error(`unexpected request ${url}`);
   });
-  await assert.rejects(() => wrongPersisted.beginPolicyCheck(generation(), 'Automation Policy / gate'), /not owned/);
+  await assert.rejects(() => wrongPersisted.beginPolicyCheck(generation(), 'Automation Policy / gate'), /unexpected name, head, or App/);
 });
 
 test('client exposes no generic request or merge surface', () => {

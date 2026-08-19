@@ -138,8 +138,10 @@ test('publisher rejects duplicate current-generation checks before any mutation'
   const client = fakeClient({
     listCheckRunsForRef: async () => [
       ...(await base.listCheckRunsForRef()),
-      { id: 77, external_id: currentExternalId, status: 'in_progress', conclusion: null },
-      { id: 88, external_id: currentExternalId, status: 'in_progress', conclusion: null },
+      { id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: currentExternalId,
+        status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' } },
+      { id: 88, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: currentExternalId,
+        status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' } },
     ],
     beginPolicyCheck: async () => { mutationMethods.push('POST/PATCH'); throw new Error('must not begin'); },
     completePolicyCheck: async () => { mutationMethods.push('PATCH'); throw new Error('must not complete'); },
@@ -168,8 +170,10 @@ test('publisher accepts completed history for the current generation', async () 
   const client = fakeClient({
     listCheckRunsForRef: async () => [
       ...(await base.listCheckRunsForRef()),
-      { id: 70, external_id: currentExternalId, status: 'completed', conclusion: 'success' },
-      { id: 71, external_id: currentExternalId, status: 'completed', conclusion: 'neutral' },
+      { id: 70, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: currentExternalId,
+        status: 'completed', conclusion: 'success', app: { id: 9001, slug: 'aeris-token-policy' } },
+      { id: 71, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: currentExternalId,
+        status: 'completed', conclusion: 'neutral', app: { id: 9001, slug: 'aeris-token-policy' } },
     ],
     beginPolicyCheck: async () => {
       begins += 1;
@@ -191,6 +195,35 @@ test('publisher accepts completed history for the current generation', async () 
   });
   assert.equal(receipt.state, 'published');
   assert.equal(begins, 1);
+});
+
+test('publisher rejects an external-id identity conflict before any mutation', async () => {
+  const mutations = [];
+  const currentExternalId = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
+  const base = fakeClient();
+  const client = fakeClient({
+    listCheckRunsForRef: async () => [
+      ...(await base.listCheckRunsForRef()),
+      { id: 99, name: 'Impersonated Policy check', head_sha: sha('a'), external_id: currentExternalId,
+        status: 'in_progress', conclusion: null, app: { id: 2, slug: 'other-app' } },
+    ],
+    beginPolicyCheck: async () => { mutations.push('begin'); },
+    completePolicyCheck: async () => { mutations.push('complete'); },
+    restorePolicyCheckInProgress: async () => { mutations.push('restore'); },
+  });
+  await assert.rejects(() => publishPolicyEvaluation({
+    client,
+    contracts: contracts(),
+    repository,
+    repositoryId: 123,
+    pullNumber: 37,
+    policySha: sha('c'),
+    expectedHeadSha: sha('a'),
+    policyApp: { id: 9001, slug: 'aeris-token-policy' },
+    runId: '321.1',
+    detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
+  }), /unexpected name, head, or App identity/);
+  assert.deepEqual(mutations, []);
 });
 
 test('publisher rejects an unexpected live head before any mutation', async () => {
@@ -243,9 +276,14 @@ test('publisher restores an in-progress fence when completion postconditions fai
   let begins = 0;
   let restores = 0;
   let completions = 0;
+  const recoveryCompletionAttempts = [];
   const client = fakeClient({
     beginPolicyCheck: async () => { begins += 1; return { id: 77 }; },
-    restorePolicyCheckInProgress: async () => { restores += 1; return { id: 77 }; },
+    restorePolicyCheckInProgress: async (...args) => {
+      restores += 1;
+      recoveryCompletionAttempts.push(args[4]);
+      return { id: 77 };
+    },
     completePolicyCheck: async () => { completions += 1; throw new Error('persisted check reread failed'); },
   });
   await assert.rejects(() => publishPolicyEvaluation({
@@ -263,6 +301,37 @@ test('publisher restores an in-progress fence when completion postconditions fai
   assert.equal(begins, 1);
   assert.equal(restores, 1);
   assert.equal(completions, 1);
+  assert.deepEqual(recoveryCompletionAttempts, [true]);
+});
+
+test('publisher establishes recovery after a completion request timeout', async () => {
+  const recoveryCompletionAttempts = [];
+  let completions = 0;
+  const client = fakeClient({
+    completePolicyCheck: async () => {
+      completions += 1;
+      throw new Error('GitHub API request timed out');
+    },
+    restorePolicyCheckInProgress: async (...args) => {
+      recoveryCompletionAttempts.push(args[4]);
+      return { id: 88 };
+    },
+  });
+
+  await assert.rejects(() => publishPolicyEvaluation({
+    client,
+    contracts: contracts(),
+    repository,
+    repositoryId: 123,
+    pullNumber: 37,
+    policySha: sha('c'),
+    expectedHeadSha: sha('a'),
+    policyApp: { id: 9001, slug: 'aeris-token-policy' },
+    runId: '321.1',
+    detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
+  }), /timed out/);
+  assert.equal(completions, 1);
+  assert.deepEqual(recoveryCompletionAttempts, [true]);
 });
 
 test('publisher leaves the check in progress when policy inputs do not stabilize', async () => {
@@ -270,6 +339,7 @@ test('publisher leaves the check in progress when policy inputs do not stabilize
   let restores = 0;
   let completions = 0;
   let checkReads = 0;
+  const recoveryCompletionAttempts = [];
   const base = fakeClient();
   const client = fakeClient({
     listCheckRunsForRef: async () => {
@@ -277,7 +347,11 @@ test('publisher leaves the check in progress when policy inputs do not stabilize
       return (await base.listCheckRunsForRef()).map((check) => ({ ...check, id: check.id + checkReads * 10 }));
     },
     beginPolicyCheck: async () => { begins += 1; return { id: 77 }; },
-    restorePolicyCheckInProgress: async () => { restores += 1; return { id: 77 }; },
+    restorePolicyCheckInProgress: async (...args) => {
+      restores += 1;
+      recoveryCompletionAttempts.push(args[4]);
+      return { id: 77 };
+    },
     completePolicyCheck: async () => { completions += 1; return { id: 77 }; },
   });
   await assert.rejects(() => publishPolicyEvaluation({
@@ -295,6 +369,7 @@ test('publisher leaves the check in progress when policy inputs do not stabilize
   assert.equal(begins, 1);
   assert.equal(restores, 1);
   assert.equal(completions, 0);
+  assert.deepEqual(recoveryCompletionAttempts, [false]);
 });
 
 test('publisher fences a moved head before completing the check', async () => {
@@ -303,6 +378,7 @@ test('publisher fences a moved head before completing the check', async () => {
   let begins = 0;
   let restores = 0;
   let completions = 0;
+  const recoveryCompletionAttempts = [];
   const moved = fakeClient({
     getPull: async () => {
       reads += 1;
@@ -313,7 +389,11 @@ test('publisher fences a moved head before completing the check', async () => {
       };
     },
     beginPolicyCheck: async () => { begins += 1; return { id: 77 }; },
-    restorePolicyCheckInProgress: async () => { restores += 1; return { id: 77 }; },
+    restorePolicyCheckInProgress: async (...args) => {
+      restores += 1;
+      recoveryCompletionAttempts.push(args[4]);
+      return { id: 77 };
+    },
     completePolicyCheck: async () => { completions += 1; return { id: 77 }; },
   });
   await assert.rejects(() => publishPolicyEvaluation({
@@ -331,6 +411,7 @@ test('publisher fences a moved head before completing the check', async () => {
   assert.equal(begins, 1);
   assert.equal(restores, 1);
   assert.equal(completions, 0);
+  assert.deepEqual(recoveryCompletionAttempts, [false]);
 });
 
 test('publisher restores the same fenced check after the completed check observes a moved head', async () => {

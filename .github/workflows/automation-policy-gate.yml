@@ -249,105 +249,86 @@ jobs:
               throw new Error('Policy fence pull request identity is invalid');
             }
             const externalId = `aeris-policy:v1:${repositoryId}:${pullNumber}:${headSha}:${policySha}`;
-            const allChecks = [];
-            for (let page = 1; page <= 10; page += 1) {
-              const response = await boundedRequest('GET /repos/{owner}/{repo}/commits/{ref}/check-runs', {
-                ...context.repo,
-                ref: headSha,
-                filter: 'all',
-                per_page: 100,
-                page,
-              });
-              if (!Array.isArray(response.data?.check_runs)) throw new Error('Policy fence check list is invalid');
-              allChecks.push(...response.data.check_runs);
-              if (response.data.check_runs.length < 100) break;
-              if (page === 10) throw new Error('Policy fence check list exceeds the bounded page limit');
-            }
             const isManaged = (check) => check?.name === 'Automation Policy / gate' && check?.head_sha === headSha &&
               check?.app?.id === appId && check?.app?.slug === appSlug;
-            const exactGeneration = allChecks.filter((check) => check?.external_id === externalId);
-            if (exactGeneration.some((check) => !isManaged(check))) {
-              throw new Error('Policy fence current generation has an unexpected owner or identity');
-            }
-            const managed = allChecks.filter(isManaged);
             const output = {
               title: 'Policy evaluation in progress',
               summary: `Policy inputs are being revalidated.\nHead SHA: ${headSha}\nPolicy SHA: ${policySha}`,
             };
             const detailsUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            if (!managed.every((check) => Number.isSafeInteger(check.id) && check.id > 0) ||
-                new Set(managed.map((check) => check.id)).size !== managed.length) {
-              throw new Error('Policy fence managed check identities are invalid');
-            }
-            const ordered = managed.sort((left, right) => right.id - left.id);
             const inProgress = (check) => check?.status === 'in_progress' && check?.conclusion == null;
-            const dominant = inProgress(ordered[0]) ? ordered[0] : null;
-            const fencePriorIdentity = async (check) => {
-              await boundedRequest('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
-                ...context.repo,
-                check_run_id: check.id,
-                name: 'Automation Policy / gate',
-                status: 'completed',
-                conclusion: 'cancelled',
-                output: {
-                  title: 'Policy evaluation superseded',
-                  summary: `A newer Policy evaluation replaced this pending check.\nHead SHA: ${headSha}\nPolicy SHA: ${policySha}`,
-                },
-                details_url: detailsUrl,
-              });
-              const cleaned = await boundedRequest('GET /repos/{owner}/{repo}/check-runs/{check_run_id}', {
-                ...context.repo,
-                check_run_id: check.id,
-              });
-              if (cleaned.data?.id !== check.id || cleaned.data?.name !== 'Automation Policy / gate' ||
-                  cleaned.data?.head_sha !== headSha || cleaned.data?.external_id !== check.external_id ||
-                  cleaned.data?.status !== 'completed' || cleaned.data?.conclusion !== 'cancelled' ||
-                  cleaned.data?.app?.id !== appId || cleaned.data?.app?.slug !== appSlug) {
-                throw new Error(`Policy fence cleanup verification failed for check ${check.id}`);
+            const listChecks = async () => {
+              const checks = [];
+              for (let page = 1; page <= 10; page += 1) {
+                const response = await boundedRequest('GET /repos/{owner}/{repo}/commits/{ref}/check-runs', {
+                  ...context.repo,
+                  ref: headSha,
+                  filter: 'all',
+                  per_page: 100,
+                  page,
+                });
+                if (!Array.isArray(response.data?.check_runs)) throw new Error('Policy fence check list is invalid');
+                checks.push(...response.data.check_runs);
+                if (response.data.check_runs.length < 100) return checks;
               }
+              throw new Error('Policy fence check list exceeds the bounded page limit');
             };
-            let fenced;
-            if (dominant) {
-              fenced = await boundedRequest('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
-                ...context.repo,
-                check_run_id: dominant.id,
-                name: 'Automation Policy / gate',
-                status: 'in_progress',
-                external_id: externalId,
-                output,
-                details_url: detailsUrl,
-              });
-            } else {
-              fenced = await boundedRequest('POST /repos/{owner}/{repo}/check-runs', {
-                ...context.repo,
-                name: 'Automation Policy / gate',
-                head_sha: headSha,
-                status: 'in_progress',
-                external_id: externalId,
-                output,
-                details_url: detailsUrl,
-              });
+            const classify = (checks) => {
+              const exact = checks.filter((check) => check?.external_id === externalId);
+              if (exact.some((check) => !isManaged(check))) {
+                throw new Error('Policy fence current generation has an unexpected owner or identity');
+              }
+              const managed = checks.filter(isManaged).sort((left, right) => right.id - left.id);
+              if (!managed.every((check) => Number.isSafeInteger(check.id) && check.id > 0) ||
+                  new Set(managed.map((check) => check.id)).size !== managed.length) {
+                throw new Error('Policy fence managed check identities are invalid');
+              }
+              return { exact: exact.sort((left, right) => right.id - left.id), managed, watermark: managed[0]?.id ?? 0 };
+            };
+            let state = classify(await listChecks());
+            const failures = [];
+            let fenced = null;
+            for (let attempt = 1; attempt <= 3 && fenced === null; attempt += 1) {
+              const watermark = state.watermark;
+              let postError = null;
+              try {
+                await boundedRequest('POST /repos/{owner}/{repo}/check-runs', {
+                  ...context.repo,
+                  name: 'Automation Policy / gate',
+                  head_sha: headSha,
+                  status: 'in_progress',
+                  external_id: externalId,
+                  output,
+                  details_url: detailsUrl,
+                });
+              } catch (error) {
+                postError = error;
+                failures.push(error);
+              }
+              state = classify(await listChecks());
+              const candidate = state.exact.find((check) => check.id > watermark && inProgress(check));
+              if (candidate && state.managed[0]?.id === candidate.id &&
+                  candidate.output?.title === output.title && candidate.output?.summary === output.summary) {
+                fenced = candidate;
+                break;
+              }
+              const racedCompletion = state.exact.some((check) => check.id > watermark && check.status === 'completed');
+              if (!postError && !racedCompletion) failures.push(new Error('Policy fence successor was not visible as dominant pending'));
             }
-            const fencedId = fenced.data?.id;
-            if (!Number.isSafeInteger(fencedId) || fencedId < 1 || (dominant && fencedId !== dominant.id) ||
-                (!dominant && ordered.length > 0 && fencedId <= ordered[0].id)) {
-              throw new Error('Policy fence did not establish the dominant check identity');
-            }
-            const persisted = await boundedRequest('GET /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+            if (fenced === null) throw new AggregateError(failures, 'Policy fence could not establish a dominant successor check');
+            const livePull = await boundedRequest('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
               ...context.repo,
-              check_run_id: fencedId,
+              pull_number: pullNumber,
             });
-            if (persisted.data?.id !== fencedId || persisted.data?.name !== 'Automation Policy / gate' || persisted.data?.head_sha !== headSha ||
-                persisted.data?.external_id !== externalId || persisted.data?.status !== 'in_progress' || persisted.data?.conclusion !== null ||
-                persisted.data?.app?.id !== appId || persisted.data?.app?.slug !== appSlug) {
-              throw new Error('Policy fence persistence verification failed');
-            }
-            for (const check of ordered.filter((candidate) => candidate.id !== fencedId && inProgress(candidate))) {
-              await fencePriorIdentity(check);
+            if (livePull.data?.number !== pullNumber || livePull.data?.state !== 'open' ||
+                livePull.data?.head?.sha !== headSha || livePull.data?.base?.sha !== baseSha ||
+                livePull.data?.head?.repo?.full_name !== repository.data.full_name ||
+                livePull.data?.base?.repo?.full_name !== repository.data.full_name || livePull.data?.base?.ref !== 'main') {
+              throw new Error('Policy fence pull request changed during successor publication');
             }
             core.setOutput('head_sha', headSha);
             core.setOutput('policy_sha', policySha);
-            core.setOutput('check_run_id', String(fencedId));
+            core.setOutput('check_run_id', String(fenced.id));
 
       - name: Check out trusted default branch
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

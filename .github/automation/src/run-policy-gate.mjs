@@ -253,17 +253,27 @@ export async function publishPolicyEvaluation({
     headSha: generation.head_sha,
     policySha,
   });
+  const checkName = contracts.policy.policy_gate.check_name;
   const currentGenerationChecks = (await client.listCheckRunsForRef(generation.head_sha))
-    .filter((checkRun) => checkRun?.external_id === currentExternalId &&
-      checkRun?.status === 'in_progress' && checkRun?.conclusion == null);
+    .filter((checkRun) => checkRun?.external_id === currentExternalId);
+  const identityConflicts = currentGenerationChecks.filter((checkRun) => (
+    checkRun?.name !== checkName || checkRun?.head_sha !== generation.head_sha ||
+    checkRun?.app?.id !== policyApp.id || checkRun?.app?.slug !== policyApp.slug
+  ));
   requireCondition(
-    currentGenerationChecks.length <= 1,
+    identityConflicts.length === 0,
+    'current policy generation external ID has an unexpected name, head, or App identity',
+  );
+  const currentGenerationPending = currentGenerationChecks.filter((checkRun) =>
+    checkRun?.status === 'in_progress' && checkRun?.conclusion == null);
+  requireCondition(
+    currentGenerationPending.length <= 1,
     'multiple in-progress policy checks exist for the current generation',
   );
-  const checkName = contracts.policy.policy_gate.check_name;
   if (expectedFenceCheckRunId !== null) positiveInteger(expectedFenceCheckRunId, 'expected Policy fence check run ID');
   let check = await client.beginPolicyCheck(generation, checkName, detailsUrl, expectedFenceCheckRunId);
   let current;
+  let completionAttempted = false;
   try {
     let previous = await collectPolicyEvaluation({
       client,
@@ -302,6 +312,7 @@ export async function publishPolicyEvaluation({
       });
       requireCondition(previous.snapshot_sha === current.snapshot_sha, 'policy inputs did not reach a stable snapshot');
     }
+    completionAttempted = true;
     check = await client.completePolicyCheck(check.id, current, checkName, detailsUrl);
     requireCondition(typeof check.html_url === 'string' && check.html_url.startsWith('https://github.com/'), 'published check URL is invalid');
     const verified = await collectPolicyEvaluation({
@@ -318,7 +329,7 @@ export async function publishPolicyEvaluation({
     requireCondition(verified.snapshot_sha === current.snapshot_sha, 'policy inputs changed during check completion');
   } catch (error) {
     try {
-      await client.restorePolicyCheckInProgress(check.id, generation, checkName, detailsUrl);
+      await client.restorePolicyCheckInProgress(check.id, generation, checkName, detailsUrl, completionAttempted);
     } catch (recoveryError) {
       throw new AggregateError([error, recoveryError], 'policy check failed and could not be restored to in-progress');
     }

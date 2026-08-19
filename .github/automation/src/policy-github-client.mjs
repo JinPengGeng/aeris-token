@@ -424,6 +424,79 @@ export class PolicyGitHubClient {
     return check;
   }
 
+  #classifyPolicyChecks(checks, generation, checkName) {
+    const id = externalId(generation);
+    const generationChecks = checks.filter((check) => check.external_id === id);
+    const identityConflicts = generationChecks.filter((check) => (
+      check.name !== checkName || check.head_sha !== generation.head_sha ||
+      check.app?.id !== this.#policyApp.id || check.app?.slug !== this.#policyApp.slug
+    ));
+    requireCondition(
+      identityConflicts.length === 0,
+      'A check with an unexpected name, head, or App reused the managed external ID',
+    );
+    const managed = checks.filter((check) => check.name === checkName && check.head_sha === generation.head_sha && (
+      check.app?.id === this.#policyApp.id && check.app?.slug === this.#policyApp.slug
+    )).sort((left, right) => right.id - left.id);
+    requireCondition(
+      managed.every((check) => Number.isSafeInteger(check.id) && check.id > 0) &&
+        new Set(managed.map((check) => check.id)).size === managed.length,
+      'Managed policy check identities are invalid',
+    );
+    return {
+      external_id: id,
+      exact: generationChecks.sort((left, right) => right.id - left.id),
+      managed,
+      watermark: managed[0]?.id ?? 0,
+    };
+  }
+
+  async #establishSuccessorPending(generation, checkName, output, detailsUrl, initialChecks = null) {
+    let checks = initialChecks ?? await this.listCheckRunsForRef(generation.head_sha);
+    let state = this.#classifyPolicyChecks(checks, generation, checkName);
+    const failures = [];
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const watermark = state.watermark;
+      let postError = null;
+      try {
+        await this.#request('POST', `/repos/${this.#repository}/check-runs`, {
+          name: checkName,
+          head_sha: generation.head_sha,
+          status: 'in_progress',
+          external_id: state.external_id,
+          output,
+          ...(detailsUrl === null ? {} : { details_url: detailsUrl }),
+        });
+      } catch (error) {
+        postError = error;
+        failures.push(error);
+      }
+
+      checks = await this.listCheckRunsForRef(generation.head_sha);
+      state = this.#classifyPolicyChecks(checks, generation, checkName);
+      const candidate = state.exact.find((check) => (
+        check.id > watermark && check.status === 'in_progress' && check.conclusion === null
+      ));
+      if (candidate && state.managed[0]?.id === candidate.id) {
+        return this.#verifyPersistedCheck(candidate, {
+          id: candidate.id,
+          name: checkName,
+          head_sha: generation.head_sha,
+          external_id: state.external_id,
+          status: 'in_progress',
+          conclusion: null,
+          output,
+        });
+      }
+
+      const racedCompletion = state.exact.some((check) => check.id > watermark && check.status === 'completed');
+      if (!postError && !racedCompletion) {
+        failures.push(new PolicyGitHubApiError('Created policy successor was not visible as the dominant pending check'));
+      }
+    }
+    throw new AggregateError(failures, 'Could not establish a dominant successor policy check');
+  }
+
   async beginPolicyCheck(rawGeneration, checkName, detailsUrl = null, expectedCheckRunId = null) {
     if (!this.#policyApp) fail('Policy App identity is required to publish checks');
     const generation = validateGeneration(rawGeneration);
@@ -440,64 +513,31 @@ export class PolicyGitHubClient {
       'Policy generation is stale before check publication',
     );
 
-    const id = externalId(generation);
     const output = renderPendingCheck(generation);
     const allChecks = await this.listCheckRunsForRef(generation.head_sha);
-    const impersonators = allChecks.filter((check) => check.name === checkName && check.external_id === id && (
-      check.app?.id !== this.#policyApp.id || check.app?.slug !== this.#policyApp.slug
-    ));
-    requireCondition(impersonators.length === 0, 'A non-Policy App check reused the managed external ID');
-    const existing = allChecks.filter((check) => check.name === checkName && check.external_id === id && (
-      check.app?.id === this.#policyApp.id && check.app?.slug === this.#policyApp.slug
-    )).sort((left, right) => right.id - left.id);
-    const managed = allChecks.filter((check) => check.name === checkName && check.head_sha === generation.head_sha && (
-      check.app?.id === this.#policyApp.id && check.app?.slug === this.#policyApp.slug
-    )).sort((left, right) => right.id - left.id);
-    const active = existing.filter((check) => check.status === 'in_progress' && check.conclusion === null);
-    const managedActive = managed.filter((check) => check.status === 'in_progress' && check.conclusion === null);
-    let target = null;
+    let state = this.#classifyPolicyChecks(allChecks, generation, checkName);
     if (expectedCheckRunId !== null) {
-      requireCondition(managedActive.length <= 1, 'Multiple in-progress managed policy checks exist for the head');
-      target = existing.find((check) => check.id === expectedCheckRunId) ?? null;
-      requireCondition(target !== null, 'Expected early Policy fence is missing');
       requireCondition(
-        target.status === 'in_progress' && target.conclusion === null,
-        'Expected early Policy fence is not in progress',
+        state.exact.some((check) => check.id === expectedCheckRunId),
+        'Expected early Policy fence is missing',
       );
-      requireCondition(managed[0]?.id === expectedCheckRunId, 'Expected early Policy fence is not the dominant managed check');
-    } else {
-      requireCondition(active.length <= 1, 'Multiple in-progress managed policy checks exist for the same generation');
-      target = active[0] ?? null;
     }
-
-    const body = {
-      name: checkName,
-      head_sha: generation.head_sha,
-      status: 'in_progress',
-      external_id: id,
-      output,
-      ...(detailsUrl === null ? {} : { details_url: detailsUrl }),
-    };
-    let response;
-    if (target !== null) {
-      const { head_sha: ignored, ...update } = body;
-      void ignored;
-      response = await this.#request('PATCH', `/repos/${this.#repository}/check-runs/${target.id}`, update);
-    } else {
-      response = await this.#request('POST', `/repos/${this.#repository}/check-runs`, body);
-    }
-    const created = normalizedCheck(response);
-    positiveInteger(created.id, 'Published check run ID');
-    const expected = {
-      id: created.id,
-      name: checkName,
-      head_sha: generation.head_sha,
-      external_id: id,
-      status: 'in_progress',
-      conclusion: null,
-      output,
-    };
-    const persisted = this.#verifyPersistedCheck(await this.#getCheckRun(created.id), expected);
+    const freshChecks = await this.listCheckRunsForRef(generation.head_sha);
+    state = this.#classifyPolicyChecks(freshChecks, generation, checkName);
+    const reusable = state.exact.find((check) => (
+      check.status === 'in_progress' && check.conclusion === null && check.id === state.managed[0]?.id
+    ));
+    const persisted = reusable
+      ? this.#verifyPersistedCheck(reusable, {
+        id: reusable.id,
+        name: checkName,
+        head_sha: generation.head_sha,
+        external_id: state.external_id,
+        status: 'in_progress',
+        conclusion: null,
+        output,
+      })
+      : await this.#establishSuccessorPending(generation, checkName, output, detailsUrl, freshChecks);
     const liveAfter = await this.getPull(generation.pull_number);
     requireCondition(
       liveAfter.state === 'open' && liveAfter.head.sha === generation.head_sha && liveAfter.base.sha === generation.base_sha,
@@ -506,7 +546,7 @@ export class PolicyGitHubClient {
     return persisted;
   }
 
-  async restorePolicyCheckInProgress(checkRunId, rawGeneration, checkName, detailsUrl = null) {
+  async restorePolicyCheckInProgress(checkRunId, rawGeneration, checkName, detailsUrl = null, completionAttempted = false) {
     if (!this.#policyApp) fail('Policy App identity is required to publish checks');
     positiveInteger(checkRunId, 'Policy check run ID');
     const generation = validateGeneration(rawGeneration);
@@ -516,6 +556,7 @@ export class PolicyGitHubClient {
     );
     string(checkName, 'Policy check name', 160);
     validateDetailsUrl(detailsUrl);
+    requireCondition(typeof completionAttempted === 'boolean', 'Completion attempted flag is invalid');
     const id = externalId(generation);
     const output = renderPendingCheck(generation);
     const existing = await this.#getCheckRun(checkRunId);
@@ -526,38 +567,11 @@ export class PolicyGitHubClient {
           (existing.status === 'completed' && typeof existing.conclusion === 'string')),
       'Policy check is not the expected recoverable App-owned generation',
     );
-    const body = {
-      name: checkName,
-      status: 'in_progress',
-      external_id: id,
-      output,
-      ...(detailsUrl === null ? {} : { details_url: detailsUrl }),
-    };
-    let response;
-    if (existing.status === 'in_progress') {
-      response = normalizedCheck(await this.#request(
-        'PATCH',
-        `/repos/${this.#repository}/check-runs/${checkRunId}`,
-        body,
-      ));
-      requireCondition(response.id === checkRunId, 'Restored policy check response ID changed');
-    } else {
-      response = normalizedCheck(await this.#request('POST', `/repos/${this.#repository}/check-runs`, {
-        ...body,
-        head_sha: generation.head_sha,
-      }));
-      positiveInteger(response.id, 'Replacement policy check run ID');
-      requireCondition(response.id > checkRunId, 'Replacement policy check is not newer than the completed check run');
-    }
-    return this.#verifyPersistedCheck(await this.#getCheckRun(response.id), {
-      id: response.id,
-      name: checkName,
-      head_sha: generation.head_sha,
-      external_id: id,
-      status: 'in_progress',
-      conclusion: null,
-      output,
-    });
+    const checks = await this.listCheckRunsForRef(generation.head_sha);
+    const state = this.#classifyPolicyChecks(checks, generation, checkName);
+    requireCondition(state.exact.some((check) => check.id === checkRunId), 'Recoverable policy check is missing from the fresh check list');
+    void completionAttempted;
+    return this.#establishSuccessorPending(generation, checkName, output, detailsUrl, checks);
   }
 
   async completePolicyCheck(checkRunId, rawArtifact, checkName, detailsUrl = null) {

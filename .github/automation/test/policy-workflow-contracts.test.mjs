@@ -193,9 +193,11 @@ test('publish fences any reusable Policy success before checkout, npm, or runtim
   assert.equal(steps[1].id, 'early_fence');
   assert.equal(steps[1].uses, 'actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b');
   assert.match(steps[1].with.script, /status: 'in_progress'/);
-  assert.match(steps[1].with.script, /PATCH \/repos\/\{owner\}\/\{repo\}\/check-runs\/\{check_run_id\}/);
   assert.match(steps[1].with.script, /POST \/repos\/\{owner\}\/\{repo\}\/check-runs/);
-  assert.match(steps[1].with.script, /persisted\.data\?\.status !== 'in_progress'/);
+  assert.doesNotMatch(steps[1].with.script, /PATCH \/repos\/\{owner\}\/\{repo\}\/check-runs/);
+  assert.match(steps[1].with.script, /const watermark = state\.watermark/);
+  assert.match(steps[1].with.script, /check\.id > watermark/);
+  assert.match(steps[1].with.script, /state\.managed\[0\]\?\.id === candidate\.id/);
   assert.match(steps[1].with.script, /const requestTimeoutMs = 15_000/);
   assert.match(steps[1].with.script, /Promise\.race/);
   assert.match(steps[1].with.script, /signal: controller\.signal/);
@@ -235,10 +237,10 @@ test('early fence supersedes a completed same-App success with a new check run',
       number: 37, state: 'open', head: { sha: head, repo: { full_name: 'JinPengGeng/aeris-token' } },
       base: { sha: base, ref: 'main', repo: { full_name: 'JinPengGeng/aeris-token' } },
     } };
-    if (route === 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs') return { data: { check_runs: [{
+    if (route === 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs') return { data: { check_runs: [persisted, {
       id: 7, name: 'Automation Policy / gate', head_sha: head, external_id: 'aeris-policy:v1:123:37:old',
       status: 'completed', conclusion: 'success', app: { id: 9001, slug: 'aeris-token-policy' },
-    }] } };
+    }].filter(Boolean) } };
     if (route === 'POST /repos/{owner}/{repo}/check-runs') {
       persisted = { id: 8, conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' }, ...parameters };
       return { data: persisted };
@@ -253,15 +255,17 @@ test('early fence supersedes a completed same-App success with a new check run',
   assert.deepEqual(outputs, { head_sha: head, policy_sha: policy, check_run_id: '8' });
 });
 
-test('cleanup failure leaves the highest-ID current fence dominant over an older success', async () => {
+test('early fence establishes a successor before leaving older pending identities immutable', async () => {
   const head = 'a'.repeat(40);
   const base = 'b'.repeat(40);
   const policy = 'c'.repeat(40);
+  const external = `aeris-policy:v1:123:37:${head}:${policy}`;
   const state = new Map([
-    [9, { id: 9, name: 'Automation Policy / gate', head_sha: head, external_id: 'aeris-policy:v1:123:37:old-9', status: 'completed', conclusion: 'success', app: { id: 9001, slug: 'aeris-token-policy' } }],
+    [9, { id: 9, name: 'Automation Policy / gate', head_sha: head, external_id: 'aeris-policy:v1:123:37:old-9', status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' } }],
     [7, { id: 7, name: 'Automation Policy / gate', head_sha: head, external_id: 'aeris-policy:v1:123:37:old-7', status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' } }],
   ]);
-  await assert.rejects(() => runEarlyFence(async (route, parameters) => {
+  const mutations = [];
+  const request = async (route, parameters) => {
     if (route === 'GET /repos/{owner}/{repo}') return { data: { id: 123, full_name: 'JinPengGeng/aeris-token', default_branch: 'main' } };
     if (route === 'GET /repos/{owner}/{repo}/git/ref/{ref}') return { data: { ref: 'refs/heads/main', object: { sha: policy } } };
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: {
@@ -270,26 +274,167 @@ test('cleanup failure leaves the highest-ID current fence dominant over an older
     } };
     if (route === 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs') return { data: { check_runs: [...state.values()] } };
     if (route === 'POST /repos/{owner}/{repo}/check-runs') {
+      mutations.push({ route, parameters: structuredClone(parameters) });
       const next = { id: 10, conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' }, ...parameters };
       state.set(10, next);
       return { data: next };
     }
-    if (route === 'PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}') {
-      if (parameters.check_run_id === 7) throw new Error('simulated cleanup failure');
-      const prior = state.get(parameters.check_run_id);
-      const next = { ...prior, ...parameters, conclusion: null };
-      state.set(parameters.check_run_id, next);
+    if (route.startsWith('PATCH ')) throw new Error('completed immutability forbids cleanup PATCH');
+    throw new Error(`unexpected request ${route}`);
+  };
+  const outputs = await runEarlyFence(request);
+  assert.deepEqual(outputs, { head_sha: head, policy_sha: policy, check_run_id: '10' });
+  assert.equal(state.get(9).status, 'in_progress');
+  assert.equal(state.get(9).external_id, 'aeris-policy:v1:123:37:old-9');
+  assert.equal(state.get(7).status, 'in_progress');
+  assert.equal(state.get(7).external_id, 'aeris-policy:v1:123:37:old-7');
+  assert.equal(state.get(10).status, 'in_progress');
+  assert.equal(state.get(10).external_id, external);
+  assert.equal(mutations.filter(({ route }) => route.startsWith('POST ')).length, 1);
+});
+
+test('early fence creates a higher dominant successor above duplicate current-generation pending history', async () => {
+  const head = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const policy = 'c'.repeat(40);
+  const external = `aeris-policy:v1:123:37:${head}:${policy}`;
+  const state = new Map([9, 7].map((id) => [id, {
+    id, name: 'Automation Policy / gate', head_sha: head, external_id: external,
+    status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' },
+  }]));
+  const mutations = [];
+  const outputs = await runEarlyFence(async (route, parameters) => {
+    if (route === 'GET /repos/{owner}/{repo}') return { data: { id: 123, full_name: 'JinPengGeng/aeris-token', default_branch: 'main' } };
+    if (route === 'GET /repos/{owner}/{repo}/git/ref/{ref}') return { data: { ref: 'refs/heads/main', object: { sha: policy } } };
+    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: {
+      number: 37, state: 'open', head: { sha: head, repo: { full_name: 'JinPengGeng/aeris-token' } },
+      base: { sha: base, ref: 'main', repo: { full_name: 'JinPengGeng/aeris-token' } },
+    } };
+    if (route === 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs') return { data: { check_runs: [...state.values()] } };
+    if (route === 'POST /repos/{owner}/{repo}/check-runs') {
+      mutations.push(structuredClone(parameters));
+      const next = { id: 10, conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' }, ...parameters };
+      state.set(10, next);
       return { data: next };
     }
-    if (route === 'GET /repos/{owner}/{repo}/check-runs/{check_run_id}') return { data: state.get(parameters.check_run_id) };
     throw new Error(`unexpected request ${route}`);
-  }), /simulated cleanup failure/);
-  assert.equal(state.get(9).status, 'completed');
-  assert.equal(state.get(9).conclusion, 'success');
-  assert.equal(state.get(7).status, 'in_progress');
+  });
+  assert.deepEqual(outputs, { head_sha: head, policy_sha: policy, check_run_id: '10' });
   assert.equal(state.get(10).status, 'in_progress');
-  assert.equal(state.get(10).external_id, `aeris-policy:v1:123:37:${head}:${policy}`);
-  assert.ok(state.get(10).id > state.get(9).id);
+  assert.equal(state.get(9).status, 'in_progress');
+  assert.equal(state.get(7).status, 'in_progress');
+  assert.equal(mutations.length, 1);
+});
+
+test('early fence creates another successor when the first successor completes before fresh-list adoption', async () => {
+  const head = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const policy = 'c'.repeat(40);
+  const external = `aeris-policy:v1:123:37:${head}:${policy}`;
+  const state = new Map([[9, {
+    id: 9, name: 'Automation Policy / gate', head_sha: head, external_id: external,
+    status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' },
+  }]]);
+  let posts = 0;
+  const outputs = await runEarlyFence(async (route, parameters) => {
+    if (route === 'GET /repos/{owner}/{repo}') return { data: { id: 123, full_name: 'JinPengGeng/aeris-token', default_branch: 'main' } };
+    if (route === 'GET /repos/{owner}/{repo}/git/ref/{ref}') return { data: { ref: 'refs/heads/main', object: { sha: policy } } };
+    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: {
+      number: 37, state: 'open', head: { sha: head, repo: { full_name: 'JinPengGeng/aeris-token' } },
+      base: { sha: base, ref: 'main', repo: { full_name: 'JinPengGeng/aeris-token' } },
+    } };
+    if (route === 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs') return { data: { check_runs: [...state.values()] } };
+    if (route === 'POST /repos/{owner}/{repo}/check-runs') {
+      posts += 1;
+      const id = 9 + posts;
+      const next = { id, conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' }, ...parameters };
+      if (posts === 1) {
+        next.status = 'completed';
+        next.conclusion = 'success';
+      }
+      state.set(id, next);
+      return { data: next };
+    }
+    if (route.startsWith('PATCH ')) throw new Error('completed check must not be reopened');
+    throw new Error(`unexpected request ${route}`);
+  });
+  assert.deepEqual(outputs, { head_sha: head, policy_sha: policy, check_run_id: '11' });
+  assert.equal(posts, 2);
+  assert.equal(state.get(10).status, 'completed');
+  assert.equal(state.get(11).status, 'in_progress');
+});
+
+test('early fence adopts an applied POST whose response is lost', async () => {
+  const head = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const policy = 'c'.repeat(40);
+  const external = `aeris-policy:v1:123:37:${head}:${policy}`;
+  const state = new Map([[9, {
+    id: 9, name: 'Automation Policy / gate', head_sha: head, external_id: 'aeris-policy:v1:123:37:old',
+    status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' },
+  }]]);
+  let posts = 0;
+  const mutations = [];
+  const request = async (route, parameters) => {
+    if (route === 'GET /repos/{owner}/{repo}') return { data: { id: 123, full_name: 'JinPengGeng/aeris-token', default_branch: 'main' } };
+    if (route === 'GET /repos/{owner}/{repo}/git/ref/{ref}') return { data: { ref: 'refs/heads/main', object: { sha: policy } } };
+    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: {
+      number: 37, state: 'open', head: { sha: head, repo: { full_name: 'JinPengGeng/aeris-token' } },
+      base: { sha: base, ref: 'main', repo: { full_name: 'JinPengGeng/aeris-token' } },
+    } };
+    if (route === 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs') return { data: { check_runs: [...state.values()] } };
+    if (route === 'POST /repos/{owner}/{repo}/check-runs') {
+      posts += 1;
+      const next = { id: 10, conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' }, ...parameters };
+      state.set(10, next);
+      throw new Error('simulated lost POST response');
+    }
+    if (route.startsWith('PATCH ')) throw new Error('completed immutability forbids PATCH');
+    throw new Error(`unexpected request ${route}`);
+  };
+  const outputs = await runEarlyFence(request);
+  assert.deepEqual(outputs, { head_sha: head, policy_sha: policy, check_run_id: '10' });
+  assert.equal(posts, 1);
+  assert.equal(state.get(9).status, 'in_progress');
+  assert.equal(state.get(9).external_id, 'aeris-policy:v1:123:37:old');
+  assert.equal(state.get(10).external_id, external);
+  assert.deepEqual(mutations, []);
+});
+
+test('early fence retries an ambiguous POST that was not applied', async () => {
+  const head = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const policy = 'c'.repeat(40);
+  const external = `aeris-policy:v1:123:37:${head}:${policy}`;
+  const state = new Map([
+    [10, { id: 10, name: 'Automation Policy / gate', head_sha: head, external_id: external, status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' } }],
+    [9, { id: 9, name: 'Automation Policy / gate', head_sha: head, external_id: 'aeris-policy:v1:123:37:old', status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' } }],
+  ]);
+  let posts = 0;
+  const request = async (route, parameters) => {
+    if (route === 'GET /repos/{owner}/{repo}') return { data: { id: 123, full_name: 'JinPengGeng/aeris-token', default_branch: 'main' } };
+    if (route === 'GET /repos/{owner}/{repo}/git/ref/{ref}') return { data: { ref: 'refs/heads/main', object: { sha: policy } } };
+    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: {
+      number: 37, state: 'open', head: { sha: head, repo: { full_name: 'JinPengGeng/aeris-token' } },
+      base: { sha: base, ref: 'main', repo: { full_name: 'JinPengGeng/aeris-token' } },
+    } };
+    if (route === 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs') return { data: { check_runs: [...state.values()] } };
+    if (route === 'POST /repos/{owner}/{repo}/check-runs') {
+      posts += 1;
+      if (posts === 1) throw new Error('simulated lost POST response before apply');
+      const next = { id: 11, conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' }, ...parameters };
+      state.set(11, next);
+      return { data: next };
+    }
+    if (route.startsWith('PATCH ')) throw new Error('completed immutability forbids PATCH');
+    throw new Error(`unexpected request ${route}`);
+  };
+  const outputs = await runEarlyFence(request);
+  assert.deepEqual(outputs, { head_sha: head, policy_sha: policy, check_run_id: '11' });
+  assert.equal(posts, 2);
+  assert.equal(state.get(10).status, 'in_progress');
+  assert.equal(state.get(9).status, 'in_progress');
+  assert.equal(state.get(9).external_id, 'aeris-policy:v1:123:37:old');
 });
 
 test('early fence tolerates completed exact-generation history across pages and creates a replacement', async () => {
@@ -319,8 +464,9 @@ test('early fence tolerates completed exact-generation history across pages and 
     if (route === 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs') {
       if (parameters.page === 1) {
         return { data: { check_runs: [
+          ...(state.has(1099) ? [state.get(1099)] : []),
           state.get(88),
-          ...Array.from({ length: 99 }, (_, index) => ({
+          ...Array.from({ length: state.has(1099) ? 98 : 99 }, (_, index) => ({
             id: 1000 + index,
             name: `Unmanaged check ${index}`,
             head_sha: head,
@@ -341,7 +487,7 @@ test('early fence tolerates completed exact-generation history across pages and 
   });
   assert.deepEqual(
     calls.filter(({ route }) => route === 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs').map(({ parameters }) => parameters.page),
-    [1, 2],
+    [1, 2, 1, 2],
   );
   assert.deepEqual(outputs, { head_sha: head, policy_sha: policy, check_run_id: '1099' });
   assert.deepEqual(calls.filter(({ route }) => route.startsWith('PATCH ')), []);
@@ -413,6 +559,34 @@ test('early fence replaces a completed current generation without rewriting comp
   assert.equal(state.get(77).external_id, external);
   assert.equal(state.get(77).status, 'completed');
   assert.equal(state.get(99).status, 'in_progress');
+});
+
+test('early fence publishes a successor before failing closed on post-publication head drift', async () => {
+  const head = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const policy = 'c'.repeat(40);
+  const state = new Map();
+  let pullReads = 0;
+  await assert.rejects(() => runEarlyFence(async (route, parameters) => {
+    if (route === 'GET /repos/{owner}/{repo}') return { data: { id: 123, full_name: 'JinPengGeng/aeris-token', default_branch: 'main' } };
+    if (route === 'GET /repos/{owner}/{repo}/git/ref/{ref}') return { data: { ref: 'refs/heads/main', object: { sha: policy } } };
+    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') {
+      pullReads += 1;
+      return { data: {
+        number: 37, state: 'open', head: { sha: pullReads === 1 ? head : 'd'.repeat(40), repo: { full_name: 'JinPengGeng/aeris-token' } },
+        base: { sha: base, ref: 'main', repo: { full_name: 'JinPengGeng/aeris-token' } },
+      } };
+    }
+    if (route === 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs') return { data: { check_runs: [...state.values()] } };
+    if (route === 'POST /repos/{owner}/{repo}/check-runs') {
+      const next = { id: 1, conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' }, ...parameters };
+      state.set(1, next);
+      return { data: next };
+    }
+    throw new Error(`unexpected request ${route}`);
+  }), /pull request changed during successor publication/);
+  assert.equal(state.get(1).status, 'in_progress');
+  assert.equal(pullReads, 2);
 });
 
 test('Policy Gate jobs have bounded hard workflow deadlines', () => {
