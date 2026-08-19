@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   hasCanonicalWriterOwnershipMarker,
   WRITER_OWNERSHIP_MARKER,
@@ -5,17 +7,28 @@ import {
 
 const API_ORIGIN = 'https://api.github.com';
 const MAX_RESPONSE_BYTES = 1_048_576;
-// The body limit applies after the canonical ownership marker is appended.
+// The body limit applies after internal create-attempt and ownership markers are appended.
 const MAX_BODY_BYTES = 65_536;
 const MAX_METADATA_BYTES = 524_288;
 const MAX_TOKEN_LENGTH = 8_192;
+const WRITER_CREATE_ATTEMPT_PREFIX = '<!-- aeris-writer-create-attempt:';
+const WRITER_INSTALLATION_PERMISSIONS = Object.freeze({
+  contents: 'write',
+  pull_requests: 'write',
+});
 const MAX_PAGES = 3;
 const PAGE_SIZE = 100;
+const DEFAULT_TOTAL_TIMEOUT_MS = 30_000;
+const DEFAULT_HEADERS_TIMEOUT_MS = 10_000;
+const DEFAULT_BODY_TIMEOUT_MS = 15_000;
+const MAX_INSTALLATION_TOKEN_LIFETIME_MS = 70 * 60 * 1_000;
 
 const OWNER_PATTERN = /^[A-Za-z\d](?:[A-Za-z\d-]{0,37}[A-Za-z\d])?$/;
 const REPOSITORY_NAME_PATTERN = /^[A-Za-z\d_.-]+$/;
 const USERNAME_PATTERN = /^[A-Za-z\d](?:[A-Za-z\d-]{0,37}[A-Za-z\d])?$/;
 const APP_SLUG_PATTERN = /^[a-z\d](?:[a-z\d-]{0,98}[a-z\d])?$/;
+const APP_JWT_PATTERN = /^[A-Za-z\d_-]+\.[A-Za-z\d_-]+\.[A-Za-z\d_-]+$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const GITHUB_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 
@@ -96,13 +109,43 @@ function validateText(value, name, { maximumBytes, required = false, singleLine 
   return value;
 }
 
-function markedBody(value) {
+function validateAppJwt(value) {
+  validateText(value, 'Writer App JWT', { maximumBytes: MAX_TOKEN_LENGTH, required: true, singleLine: true });
+  if (!APP_JWT_PATTERN.test(value)) fail('Writer App JWT is invalid');
+  return value;
+}
+
+function validateCreateAttemptId(value) {
+  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) fail('Writer create attempt ID is invalid');
+  return value;
+}
+
+function validateInstallationPermissions(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('Writer installation permissions are invalid');
+  const keys = Object.keys(value);
+  if (
+    keys.some((key) => key !== 'contents' && key !== 'pull_requests' && key !== 'metadata') ||
+    value.contents !== 'write' || value.pull_requests !== 'write' ||
+    (Object.hasOwn(value, 'metadata') && value.metadata !== 'read')
+  ) fail('Writer installation permissions exceed the configured boundary');
+  return value;
+}
+
+function createAttemptMarker(value) {
+  return `${WRITER_CREATE_ATTEMPT_PREFIX}${validateCreateAttemptId(value)} -->`;
+}
+
+function markedBody(value, createAttemptId = null) {
   if (value.includes(WRITER_OWNERSHIP_MARKER)) fail('Pull request body contains the reserved Writer ownership marker');
-  const body = value.length === 0 ? WRITER_OWNERSHIP_MARKER : `${value}\n\n${WRITER_OWNERSHIP_MARKER}`;
+  if (value.includes(WRITER_CREATE_ATTEMPT_PREFIX)) fail('Pull request body contains the reserved Writer create-attempt marker');
+  const suffix = createAttemptId === null
+    ? WRITER_OWNERSHIP_MARKER
+    : `${createAttemptMarker(createAttemptId)}\n\n${WRITER_OWNERSHIP_MARKER}`;
+  const body = value.length === 0 ? suffix : `${value}\n\n${suffix}`;
   return validateText(body, 'Pull request body', { maximumBytes: MAX_BODY_BYTES });
 }
 
-function validateMetadata(metadata, { requireBoth = false } = {}) {
+function validateMetadata(metadata, { requireBoth = false, createAttemptId = null } = {}) {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) fail('Pull request metadata must be an object');
   const keys = Object.keys(metadata);
   if (keys.some((key) => key !== 'title' && key !== 'body')) fail('Pull request metadata contains unsupported fields');
@@ -121,7 +164,7 @@ function validateMetadata(metadata, { requireBoth = false } = {}) {
   if (Object.hasOwn(metadata, 'body')) {
     result.body = markedBody(validateText(metadata.body, 'Pull request body', {
       maximumBytes: MAX_BODY_BYTES,
-    }));
+    }), createAttemptId);
   }
   if (Buffer.byteLength(JSON.stringify(result), 'utf8') > MAX_METADATA_BYTES) {
     fail('Pull request metadata exceeds the configured limit');
@@ -129,67 +172,244 @@ function validateMetadata(metadata, { requireBoth = false } = {}) {
   return result;
 }
 
-async function boundedText(response) {
-  const text = await response.text();
-  if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) {
-    throw new WriterGitHubApiError('GitHub API response exceeds the configured limit');
+function boundedTimeout(value, name, fallback) {
+  const candidate = value ?? fallback;
+  if (!Number.isSafeInteger(candidate) || candidate < 1 || candidate > 120_000) {
+    fail(`${name} must be a positive bounded timeout`);
   }
-  return text;
+  return candidate;
+}
+
+function deadline(promise, milliseconds, message, controller = null) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller?.abort();
+      reject(new WriterGitHubApiError(message));
+    }, milliseconds);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function isAmbiguousMutationError(error) {
+  if (!(error instanceof WriterGitHubApiError)) return true;
+  const { status } = error;
+  if (!Number.isInteger(status)) return true;
+  return status === 408 || (status >= 200 && status <= 299) || (status >= 500 && status <= 599);
+}
+
+const isAmbiguousCreateError = isAmbiguousMutationError;
+
+async function boundedText(response, bodyTimeoutMs, controller) {
+  if (response.body === null) return '';
+  const reader = response.body.getReader();
+  const chunks = [];
+  let bytes = 0;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      void reader.cancel().catch(() => {});
+      reject(new WriterGitHubApiError('GitHub API response body timed out', response.status));
+    }, bodyTimeoutMs);
+  });
+  const readAll = (async () => {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw new WriterGitHubApiError('GitHub API response body is invalid', response.status);
+      bytes += value.byteLength;
+      if (bytes > MAX_RESPONSE_BYTES) {
+        controller.abort();
+        void reader.cancel().catch(() => {});
+        throw new WriterGitHubApiError('GitHub API response exceeds the configured limit', response.status);
+      }
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks, bytes).toString('utf8');
+  })();
+  try {
+    return await Promise.race([readAll, timeout]);
+  } finally {
+    clearTimeout(timer);
+    try {
+      reader.releaseLock();
+    } catch {
+      // A hostile stream may leave a read pending even after cancellation.
+    }
+  }
 }
 
 export class WriterGitHubClient {
-  #token;
+  #appJwt;
+  #token = null;
   #repository;
   #repositoryId;
   #owner;
   #writerApp;
   #fetchImpl;
+  #totalTimeoutMs;
+  #headersTimeoutMs;
+  #bodyTimeoutMs;
+  #randomUUIDImpl;
+  #identityVerified = false;
 
   constructor(options = {}) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) fail('Writer GitHub client options are invalid');
-    const allowed = new Set(['token', 'repository', 'repositoryId', 'writerApp', 'fetchImpl']);
+    const allowed = new Set([
+      'appJwt', 'repository', 'repositoryId', 'writerApp', 'fetchImpl',
+      'totalTimeoutMs', 'headersTimeoutMs', 'bodyTimeoutMs', 'randomUUIDImpl',
+    ]);
     if (Object.keys(options).some((key) => !allowed.has(key))) fail('Writer GitHub client options contain unsupported fields');
     const {
-      token,
+      appJwt,
       repository,
       repositoryId,
       writerApp,
       fetchImpl = globalThis.fetch,
+      totalTimeoutMs,
+      headersTimeoutMs,
+      bodyTimeoutMs,
+      randomUUIDImpl = randomUUID,
     } = options;
-    validateText(token, 'GitHub token', { maximumBytes: MAX_TOKEN_LENGTH, required: true, singleLine: true });
+    validateAppJwt(appJwt);
     validateRepository(repository);
     positiveId(repositoryId, 'GitHub repository ID');
     const normalizedWriterApp = validateWriterApp(writerApp);
     if (typeof fetchImpl !== 'function') fail('GitHub fetch implementation is invalid');
+    if (typeof randomUUIDImpl !== 'function') fail('Writer UUID implementation is invalid');
 
-    this.#token = token;
+    this.#appJwt = appJwt;
     this.#repository = repository;
     this.#repositoryId = repositoryId;
     this.#owner = repository.split('/')[0];
     this.#writerApp = normalizedWriterApp;
     this.#fetchImpl = fetchImpl;
+    this.#randomUUIDImpl = randomUUIDImpl;
+    this.#totalTimeoutMs = boundedTimeout(totalTimeoutMs, 'Total timeout', DEFAULT_TOTAL_TIMEOUT_MS);
+    this.#headersTimeoutMs = boundedTimeout(headersTimeoutMs, 'Headers timeout', DEFAULT_HEADERS_TIMEOUT_MS);
+    this.#bodyTimeoutMs = boundedTimeout(bodyTimeoutMs, 'Body timeout', DEFAULT_BODY_TIMEOUT_MS);
+    if (this.#headersTimeoutMs >= this.#totalTimeoutMs || this.#bodyTimeoutMs >= this.#totalTimeoutMs) {
+      fail('Headers and body timeouts must be shorter than the total timeout');
+    }
   }
 
-  async #request(method, path, body = undefined) {
-    const response = await this.#fetchImpl(`${API_ORIGIN}${path}`, {
-      method,
-      redirect: 'error',
-      headers: {
-        accept: 'application/vnd.github+json',
-        authorization: `Bearer ${this.#token}`,
-        'content-type': 'application/json',
-        'x-github-api-version': '2022-11-28',
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const text = response.status === 204 ? '' : await boundedText(response);
-    if (!response.ok) throw new WriterGitHubApiError(`GitHub API returned HTTP ${response.status}`, response.status);
-    if (!text) return null;
-    try {
-      return JSON.parse(text);
-    } catch {
-      throw new WriterGitHubApiError('GitHub API returned invalid JSON', response.status);
+  async #requestWithCredential(credential, method, path, body = undefined, expectedStatus = null) {
+    const controller = new AbortController();
+    const operation = (async () => {
+      const response = await deadline(
+        Promise.resolve(this.#fetchImpl(`${API_ORIGIN}${path}`, {
+          method,
+          redirect: 'error',
+          signal: controller.signal,
+          headers: {
+            accept: 'application/vnd.github+json',
+            authorization: `Bearer ${credential}`,
+            'content-type': 'application/json',
+            'x-github-api-version': '2022-11-28',
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        })),
+        this.#headersTimeoutMs,
+        'GitHub API response headers timed out',
+        controller,
+      );
+      const text = response.status === 204 ? '' : await boundedText(response, this.#bodyTimeoutMs, controller);
+      if (!response.ok) throw new WriterGitHubApiError(`GitHub API returned HTTP ${response.status}`, response.status);
+      if (expectedStatus !== null && response.status !== expectedStatus) {
+        throw new WriterGitHubApiError(
+          `GitHub API returned HTTP ${response.status}; expected ${expectedStatus}`,
+          response.status,
+        );
+      }
+      if (!text) return null;
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new WriterGitHubApiError('GitHub API returned invalid JSON', response.status);
+      }
+    })();
+    return deadline(operation, this.#totalTimeoutMs, 'GitHub API request timed out', controller);
+  }
+
+  #request(method, path, body = undefined, expectedStatus = null) {
+    if (this.#token === null) fail('Writer installation token has not been minted and verified');
+    return this.#requestWithCredential(this.#token, method, path, body, expectedStatus);
+  }
+
+  #requestAsApp(method, path, body = undefined, expectedStatus = null) {
+    return this.#requestWithCredential(this.#appJwt, method, path, body, expectedStatus);
+  }
+
+  async verifyInstallationIdentity() {
+    this.#identityVerified = false;
+    this.#token = null;
+    const app = await this.#requestAsApp('GET', '/app');
+    if (app?.id !== this.#writerApp.id || app?.slug !== this.#writerApp.slug) {
+      fail('Writer App JWT identity does not match configuration');
     }
+    const installation = await this.#requestAsApp('GET', `/repos/${this.#repository}/installation`);
+    const installationId = positiveId(installation?.id, 'Writer installation ID');
+    if (
+      installation?.app_id !== this.#writerApp.id || installation?.app_slug !== this.#writerApp.slug ||
+      installation?.repository_selection !== 'selected' ||
+      typeof installation?.account?.login !== 'string' ||
+      installation.account.login.toLowerCase() !== this.#owner.toLowerCase()
+    ) fail('Writer App installation does not match the configured repository owner and App');
+    validateInstallationPermissions(installation.permissions);
+
+    const access = await this.#requestAsApp(
+      'POST',
+      `/app/installations/${installationId}/access_tokens`,
+      { permissions: WRITER_INSTALLATION_PERMISSIONS },
+      201,
+    );
+    const token = validateText(access?.token, 'Writer installation token', {
+      maximumBytes: MAX_TOKEN_LENGTH,
+      required: true,
+      singleLine: true,
+    });
+    if (token === this.#appJwt) fail('Writer App JWT and installation token must be distinct');
+    const tokenExpiresAt = Date.parse(access?.expires_at);
+    const now = Date.now();
+    if (
+      !validGitHubTimestamp(access?.expires_at) || tokenExpiresAt <= now ||
+      tokenExpiresAt - now > MAX_INSTALLATION_TOKEN_LIFETIME_MS
+    ) {
+      fail('Writer installation token expiry is invalid');
+    }
+    if (access?.repository_selection !== 'selected') fail('Writer installation token repository selection is invalid');
+    validateInstallationPermissions(access.permissions);
+
+    const repositories = await this.#requestWithCredential(
+      token,
+      'GET',
+      '/installation/repositories?per_page=2&page=1',
+    );
+    if (
+      repositories?.repository_selection !== 'selected' ||
+      repositories?.total_count !== 1 ||
+      !Array.isArray(repositories.repositories) ||
+      repositories.repositories.length !== 1 ||
+      !this.#sameRepository(repositories.repositories[0])
+    ) fail('Writer installation token must authorize exactly the configured repository');
+    this.#token = token;
+    this.#identityVerified = true;
+    return { appId: app.id, appSlug: app.slug, installationId, repositoryId: this.#repositoryId };
+  }
+
+  #requireVerifiedIdentity() {
+    if (!this.#identityVerified) fail('Writer installation token identity is not verified');
+  }
+
+  #createAttemptId() {
+    let value;
+    try {
+      value = this.#randomUUIDImpl();
+    } catch {
+      fail('Writer could not generate a create attempt ID');
+    }
+    return validateCreateAttemptId(value);
   }
 
   async #list(path) {
@@ -300,24 +520,123 @@ export class WriterGitHubClient {
 
   async createDraftPull(issueNumber, metadata) {
     const verifiedIssueNumber = positiveNumber(issueNumber, 'Issue number');
-    const normalized = validateMetadata(metadata, { requireBoth: true });
+    const normalized = validateMetadata(metadata, {
+      requireBoth: true,
+      createAttemptId: this.#createAttemptId(),
+    });
+    this.#requireVerifiedIdentity();
     const currentRef = await this.#readAgentRef(verifiedIssueNumber);
     const expectedHeadSha = validateSha(currentRef?.object?.sha, 'Writer ref SHA');
     this.#verifyRef(currentRef, verifiedIssueNumber, expectedHeadSha);
-    const created = await this.#request('POST', `/repos/${this.#repository}/pulls`, {
-      ...normalized,
-      base: 'main',
-      head: agentRef(verifiedIssueNumber),
-      draft: true,
-    });
-    const pullNumber = positiveNumber(created?.number, 'Created Draft PR number');
-    const persisted = await this.#request('GET', `/repos/${this.#repository}/pulls/${pullNumber}`);
-    return this.#verifyManagedPull(persisted, {
-      issueNumber: verifiedIssueNumber,
-      pullNumber,
-      expectedHeadSha,
-      metadata: normalized,
-    });
+    this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, expectedHeadSha);
+    let pullNumber;
+    try {
+      const created = await this.#request('POST', `/repos/${this.#repository}/pulls`, {
+        ...normalized,
+        base: 'main',
+        head: agentRef(verifiedIssueNumber),
+        draft: true,
+      }, 201);
+      pullNumber = positiveNumber(created?.number, 'Created Draft PR number');
+    } catch (error) {
+      if (!isAmbiguousCreateError(error)) throw error;
+      await this.#compensateAmbiguousCreatedPull({
+        issueNumber: verifiedIssueNumber,
+        expectedHeadSha,
+        metadata: normalized,
+      });
+      throw error;
+    }
+    const path = `/repos/${this.#repository}/pulls/${pullNumber}`;
+    try {
+      const persisted = await this.#request('GET', path);
+      const verified = this.#verifyManagedPull(persisted, {
+        issueNumber: verifiedIssueNumber,
+        pullNumber,
+        expectedHeadSha,
+        metadata: normalized,
+      });
+      this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, expectedHeadSha);
+      return verified;
+    } catch (error) {
+      await this.#compensateAmbiguousCreatedPull({
+        issueNumber: verifiedIssueNumber,
+        pullNumber,
+        expectedHeadSha,
+        metadata: normalized,
+      });
+      throw error;
+    }
+  }
+
+  #isAttributableCreatedPull(pull, issueNumber, expectedHeadSha, metadata, state) {
+    const expectedRef = agentRef(issueNumber);
+    return pull && typeof pull === 'object' && !Array.isArray(pull) &&
+      Number.isSafeInteger(pull.number) && pull.number > 0 && pull.number <= 2_147_483_647 &&
+      pull.state === state && pull.merged === false && pull.draft === true &&
+      pull.base?.ref === 'main' && this.#sameRepository(pull.base?.repo) &&
+      pull.head?.ref === expectedRef && this.#sameRepository(pull.head?.repo) &&
+      typeof pull.head?.sha === 'string' && SHA_PATTERN.test(pull.head.sha) &&
+      pull.head.sha === expectedHeadSha &&
+      pull.title === metadata.title && pull.body === metadata.body &&
+      hasCanonicalWriterOwnershipMarker(pull.body) &&
+      pull.author?.type === 'App' && pull.author.id === this.#writerApp.id;
+  }
+
+  async #compensateAmbiguousCreatedPull({ issueNumber, pullNumber: _pullNumber = null, expectedHeadSha, metadata }) {
+    validateSha(expectedHeadSha, 'Expected create-attempt head SHA');
+    const markerStart = metadata.body.indexOf(WRITER_CREATE_ATTEMPT_PREFIX);
+    const markerEnd = metadata.body.indexOf(' -->', markerStart);
+    if (markerStart < 0 || markerEnd < 0) fail('Writer compensation metadata is missing its create-attempt marker');
+    const attemptMarker = metadata.body.slice(markerStart, markerEnd + ' -->'.length);
+
+    // A POST response can be malformed, stale, or duplicated. Always enumerate the
+    // bounded head history so this attempt marker is globally unique before closing.
+    const head = `${this.#owner}:${agentRef(issueNumber)}`;
+    let pulls;
+    try {
+      pulls = (await this.#list(
+        `/repos/${this.#repository}/pulls?state=all&base=main&head=${encodeURIComponent(head)}`,
+      )).map((pull) => this.#normalizePull(pull));
+    } catch {
+      fail('Writer could not enumerate a uniquely attributable Draft PR for compensation; platform residue may remain');
+    }
+    const candidates = pulls.filter((pull) => typeof pull?.body === 'string' && pull.body.includes(attemptMarker));
+    if (candidates.length !== 1) {
+      fail('Writer could not uniquely attribute the created Draft PR for compensation; platform residue may remain');
+    }
+    const candidate = candidates[0];
+    if (this.#isAttributableCreatedPull(candidate, issueNumber, expectedHeadSha, metadata, 'closed')) return;
+    if (!this.#isAttributableCreatedPull(candidate, issueNumber, expectedHeadSha, metadata, 'open')) {
+      fail('Writer refused to close an unverified created Draft PR; platform residue may remain');
+    }
+
+    let fenced;
+    try {
+      fenced = this.#normalizePull(await this.#request('GET', `/repos/${this.#repository}/pulls/${candidate.number}`));
+    } catch {
+      fail('Writer could not re-read the attributable Draft PR before cleanup; platform residue may remain');
+    }
+    if (!this.#isAttributableCreatedPull(fenced, issueNumber, expectedHeadSha, metadata, 'open')) {
+      fail('Writer refused to close a Draft PR that changed before cleanup; platform residue may remain');
+    }
+
+    let patchError = null;
+    try {
+      await this.#request('PATCH', `/repos/${this.#repository}/pulls/${candidate.number}`, { state: 'closed' }, 200);
+    } catch (error) {
+      patchError = error;
+    }
+    let closed;
+    try {
+      closed = this.#normalizePull(await this.#request('GET', `/repos/${this.#repository}/pulls/${candidate.number}`));
+    } catch {
+      fail('Writer could not confirm cleanup of the attributable Draft PR; platform residue may remain');
+    }
+    if (!this.#isAttributableCreatedPull(closed, issueNumber, expectedHeadSha, metadata, 'closed')) {
+      const suffix = patchError ? ' after an ambiguous close response' : '';
+      fail(`Writer failed to confirm cleanup of the attributable Draft PR${suffix}; platform residue may remain`);
+    }
   }
 
   async updateManagedDraftPull(issueNumber, pullNumber, expectedHeadSha, metadata) {
@@ -325,6 +644,7 @@ export class WriterGitHubClient {
     const verifiedIssueNumber = positiveNumber(issueNumber, 'Issue number');
     const verifiedPullNumber = positiveNumber(pullNumber, 'Pull request number');
     const verifiedHeadSha = validateSha(expectedHeadSha, 'Expected head SHA');
+    this.#requireVerifiedIdentity();
     const path = `/repos/${this.#repository}/pulls/${verifiedPullNumber}`;
     const before = await this.#request('GET', path);
     this.#verifyManagedPull(before, {
@@ -332,31 +652,70 @@ export class WriterGitHubClient {
       pullNumber: verifiedPullNumber,
       expectedHeadSha: verifiedHeadSha,
     });
-    await this.#request('PATCH', path, normalized);
-    const after = await this.#request('GET', path);
-    return this.#verifyManagedPull(after, {
+    const fenced = await this.#request('GET', path);
+    this.#verifyManagedPull(fenced, {
       issueNumber: verifiedIssueNumber,
       pullNumber: verifiedPullNumber,
       expectedHeadSha: verifiedHeadSha,
-      metadata: normalized,
     });
+    let mutationError = null;
+    try {
+      await this.#request('PATCH', path, normalized);
+    } catch (error) {
+      if (!isAmbiguousMutationError(error)) throw error;
+      mutationError = error;
+    }
+    try {
+      const after = await this.#request('GET', path);
+      return this.#verifyManagedPull(after, {
+        issueNumber: verifiedIssueNumber,
+        pullNumber: verifiedPullNumber,
+        expectedHeadSha: verifiedHeadSha,
+        metadata: normalized,
+      });
+    } catch (error) {
+      if (mutationError) {
+        throw new AggregateError(
+          [mutationError, error],
+          'Writer could not reconcile an ambiguous Draft PR metadata update; platform state may have changed',
+        );
+      }
+      throw error;
+    }
   }
 
   async createAgentRef(issueNumber, sha) {
     const verifiedIssueNumber = positiveNumber(issueNumber, 'Issue number');
     const verifiedSha = validateSha(sha, 'Ref SHA');
+    this.#requireVerifiedIdentity();
     try {
       await this.#readAgentRef(verifiedIssueNumber);
       fail('Writer ref already exists');
     } catch (error) {
       if (!(error instanceof WriterGitHubApiError) || error.status !== 404) throw error;
     }
-    const created = await this.#request('POST', `/repos/${this.#repository}/git/refs`, {
-      ref: `refs/heads/${agentRef(verifiedIssueNumber)}`,
-      sha: verifiedSha,
-    });
-    this.#verifyRef(created, verifiedIssueNumber, verifiedSha);
-    return this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, verifiedSha);
+    let mutationError = null;
+    try {
+      const created = await this.#request('POST', `/repos/${this.#repository}/git/refs`, {
+        ref: `refs/heads/${agentRef(verifiedIssueNumber)}`,
+        sha: verifiedSha,
+      });
+      this.#verifyRef(created, verifiedIssueNumber, verifiedSha);
+    } catch (error) {
+      if (!isAmbiguousMutationError(error)) throw error;
+      mutationError = error;
+    }
+    try {
+      return this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, verifiedSha);
+    } catch (error) {
+      if (mutationError) {
+        throw new AggregateError(
+          [mutationError, error],
+          'Writer could not reconcile an ambiguous agent ref creation; platform state may have changed',
+        );
+      }
+      throw error;
+    }
   }
 
   async advanceAgentRef(issueNumber, expectedOldSha, newSha) {
@@ -364,13 +723,31 @@ export class WriterGitHubClient {
     const verifiedOldSha = validateSha(expectedOldSha, 'Expected old ref SHA');
     const verifiedNewSha = validateSha(newSha, 'New ref SHA');
     if (verifiedOldSha === verifiedNewSha) fail('New ref SHA must differ from the expected old SHA');
+    this.#requireVerifiedIdentity();
     this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, verifiedOldSha);
-    const updated = await this.#request(
-      'PATCH',
-      `/repos/${this.#repository}/git/refs/heads/${encodeURIComponent(agentRef(verifiedIssueNumber))}`,
-      { sha: verifiedNewSha, force: false },
-    );
-    this.#verifyRef(updated, verifiedIssueNumber, verifiedNewSha);
-    return this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, verifiedNewSha);
+    this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, verifiedOldSha);
+    let mutationError = null;
+    try {
+      const updated = await this.#request(
+        'PATCH',
+        `/repos/${this.#repository}/git/refs/heads/${encodeURIComponent(agentRef(verifiedIssueNumber))}`,
+        { sha: verifiedNewSha, force: false },
+      );
+      this.#verifyRef(updated, verifiedIssueNumber, verifiedNewSha);
+    } catch (error) {
+      if (!isAmbiguousMutationError(error)) throw error;
+      mutationError = error;
+    }
+    try {
+      return this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, verifiedNewSha);
+    } catch (error) {
+      if (mutationError) {
+        throw new AggregateError(
+          [mutationError, error],
+          'Writer could not reconcile an ambiguous agent ref advance; platform state may have changed',
+        );
+      }
+      throw error;
+    }
   }
 }

@@ -28,9 +28,16 @@ const GLOBAL_ENABLED_VARIABLE = 'AERIS_AGENTS_ENABLED';
 const GLOBAL_ENABLED_VALUES = Object.freeze(['1', 'true']);
 const WRITER_ENABLED_VARIABLE = 'AERIS_WRITER_ENABLED';
 const WRITER_APP_ID_VARIABLE = 'AERIS_WRITER_APP_ID';
+const WRITER_APP_SLUG_VARIABLE = 'AERIS_WRITER_APP_SLUG';
 const WRITER_PRIVATE_KEY_SECRET = 'AERIS_WRITER_PRIVATE_KEY';
 const WRITER_ENVIRONMENT = 'writer';
 const WRITER_BRANCH_PREFIX = 'agent/';
+const WRITER_TIMEOUTS = Object.freeze({
+  github_api_total_seconds: 30,
+  github_response_headers_seconds: 10,
+  github_response_body_seconds: 15,
+  publish_job_minutes: 15,
+});
 
 const WRITER_PERMISSION_GRANTS = {
   metadata: 'read',
@@ -49,7 +56,13 @@ const WRITER_CAPABILITY_RESIDUALS = {
   contents_write_not_branch_scoped: true,
   app_has_branch_protection_bypass: false,
 };
-const WRITER_ALLOWED_OPERATIONS = ['create_or_update_agent_ref', 'create_or_update_draft_pull_request'];
+const WRITER_IDENTITY_VERIFICATION = 'app_jwt_mints_installation_token_then_verify';
+const WRITER_AMBIGUOUS_CREATE_RECOVERY = 'unique_attempt_marker_then_verified_close';
+const WRITER_ALLOWED_OPERATIONS = [
+  'create_or_update_agent_ref',
+  'create_or_update_draft_pull_request',
+  'compensate_close_just_created_verified_draft_pull',
+];
 const WRITER_DENIED_OPERATIONS = [
   'review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch',
 ];
@@ -57,15 +70,15 @@ const WRITER_REQUIRED_ACTOR_PERMISSIONS = ['admin', 'maintain', 'write'];
 const WRITER_REQUIRED_COMMANDS = WRITER_COMMANDS;
 const WRITER_REGISTRY_KEYS = [
   'enabled', 'enabled_variable', 'phase', 'mode', 'identity', 'app_id_variable',
-  'private_key_secret', 'environment', 'credentials', 'permissions', 'capability_residuals',
+  'app_slug_variable', 'private_key_secret', 'environment', 'timeouts', 'credentials', 'permissions', 'capability_residuals',
   'deterministic_client_mitigations', 'limits', 'model_variable', 'fallback_model_variable',
   'triggers', 'required_issue_labels', 'required_actor_permissions', 'required_commands',
   'allowed_branch_prefixes', 'tools', 'effects', 'denied_paths', 'handoff_to',
 ];
 const WRITER_POLICY_KEYS = [
   'enabled', 'enabled_variable', 'branch_prefix', 'draft_pull_requests_only',
-  'maximum_open_pull_requests_per_issue', 'identity', 'app_id_variable', 'private_key_secret',
-  'environment', 'credentials', 'permissions', 'capability_residuals',
+  'maximum_open_pull_requests_per_issue', 'identity', 'app_id_variable', 'app_slug_variable',
+  'private_key_secret', 'environment', 'timeouts', 'credentials', 'permissions', 'capability_residuals',
   'deterministic_client_mitigations', 'limits', 'forbidden_paths', 'release_secret_access',
   'pull_request_target_checkout',
 ];
@@ -175,10 +188,18 @@ function validateWriterFoundation(writer, counterpart) {
     'writer App ID must use AERIS_WRITER_APP_ID',
   );
   requireCondition(
+    writer.app_slug_variable === WRITER_APP_SLUG_VARIABLE,
+    'writer App slug must use AERIS_WRITER_APP_SLUG',
+  );
+  requireCondition(
     writer.private_key_secret === WRITER_PRIVATE_KEY_SECRET,
     'writer private key must use AERIS_WRITER_PRIVATE_KEY',
   );
   requireCondition(writer.environment === WRITER_ENVIRONMENT, 'writer must use the writer environment');
+  requireCondition(
+    sameRecord(writer.timeouts, WRITER_TIMEOUTS),
+    'writer API and publish job timeouts changed',
+  );
   requireCondition(
     sameStringArray(writer.credentials?.allowed_jobs, ['publish']) &&
       writer.credentials.github_token_write === false,
@@ -197,7 +218,12 @@ function validateWriterFoundation(writer, counterpart) {
     'writer GitHub App capability residuals changed',
   );
   requireCondition(
-    sameStringArray(writer.deterministic_client_mitigations?.allowed_operations, WRITER_ALLOWED_OPERATIONS) &&
+    sameStringSet(Object.keys(writer.deterministic_client_mitigations ?? {}), [
+      'identity_verification', 'ambiguous_create_recovery', 'allowed_operations', 'denied_operations',
+    ]) &&
+      writer.deterministic_client_mitigations.identity_verification === WRITER_IDENTITY_VERIFICATION &&
+      writer.deterministic_client_mitigations.ambiguous_create_recovery === WRITER_AMBIGUOUS_CREATE_RECOVERY &&
+      sameStringArray(writer.deterministic_client_mitigations.allowed_operations, WRITER_ALLOWED_OPERATIONS) &&
       sameStringArray(writer.deterministic_client_mitigations?.denied_operations, WRITER_DENIED_OPERATIONS),
     'writer deterministic client operations exceed the approved boundary',
   );
@@ -236,8 +262,9 @@ function validateWriterFoundation(writer, counterpart) {
       'writer policy capabilities exceed the approved Phase 3 boundary',
     );
     for (const field of [
-      'enabled', 'enabled_variable', 'identity', 'app_id_variable', 'private_key_secret', 'environment',
-      'credentials', 'permissions', 'capability_residuals', 'deterministic_client_mitigations', 'limits',
+      'enabled', 'enabled_variable', 'identity', 'app_id_variable', 'app_slug_variable',
+      'private_key_secret', 'environment', 'timeouts', 'credentials', 'permissions',
+      'capability_residuals', 'deterministic_client_mitigations', 'limits',
     ]) {
       requireCondition(
         sameWriterField(field, writer[field], counterpart[field]),

@@ -86,8 +86,14 @@ writer:
   maximum_open_pull_requests_per_issue: 1
   identity: github_app
   app_id_variable: AERIS_WRITER_APP_ID
+  app_slug_variable: AERIS_WRITER_APP_SLUG
   private_key_secret: AERIS_WRITER_PRIVATE_KEY
   environment: writer
+  timeouts:
+    github_api_total_seconds: 30
+    github_response_headers_seconds: 10
+    github_response_body_seconds: 15
+    publish_job_minutes: 15
   credentials:
     allowed_jobs: [publish]
     github_token_write: false
@@ -101,7 +107,9 @@ writer:
     contents_write_not_branch_scoped: true
     app_has_branch_protection_bypass: false
   deterministic_client_mitigations:
-    allowed_operations: [create_or_update_agent_ref, create_or_update_draft_pull_request]
+    identity_verification: app_jwt_mints_installation_token_then_verify
+    ambiguous_create_recovery: unique_attempt_marker_then_verified_close
+    allowed_operations: [create_or_update_agent_ref, create_or_update_draft_pull_request, compensate_close_just_created_verified_draft_pull]
     denied_operations: [review, approve, merge, enable_auto_merge, mark_ready, close_pr, delete_branch]
   limits:
     maximum_files: 50

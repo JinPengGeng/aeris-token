@@ -98,7 +98,7 @@ assert(
 assert(
   sameMembers(Object.keys(agents.agents.writer), [
     'enabled', 'enabled_variable', 'phase', 'mode', 'identity', 'app_id_variable',
-    'private_key_secret', 'environment', 'credentials', 'permissions', 'capability_residuals',
+    'app_slug_variable', 'private_key_secret', 'environment', 'timeouts', 'credentials', 'permissions', 'capability_residuals',
     'deterministic_client_mitigations', 'limits', 'model_variable', 'fallback_model_variable',
     'triggers', 'required_issue_labels', 'required_actor_permissions', 'required_commands',
     'allowed_branch_prefixes', 'tools', 'effects', 'denied_paths', 'handoff_to',
@@ -135,6 +135,8 @@ assert(
     automation.writer.identity === 'github_app' &&
     agents.agents.writer.app_id_variable === 'AERIS_WRITER_APP_ID' &&
     automation.writer.app_id_variable === 'AERIS_WRITER_APP_ID' &&
+    agents.agents.writer.app_slug_variable === 'AERIS_WRITER_APP_SLUG' &&
+    automation.writer.app_slug_variable === 'AERIS_WRITER_APP_SLUG' &&
     agents.agents.writer.private_key_secret === 'AERIS_WRITER_PRIVATE_KEY' &&
     automation.writer.private_key_secret === 'AERIS_WRITER_PRIVATE_KEY' &&
     agents.agents.writer.environment === 'writer' &&
@@ -154,8 +156,8 @@ assert(
 assert(
   sameMembers(Object.keys(automation.writer), [
     'enabled', 'enabled_variable', 'branch_prefix', 'draft_pull_requests_only',
-    'maximum_open_pull_requests_per_issue', 'identity', 'app_id_variable', 'private_key_secret',
-    'environment', 'credentials', 'permissions', 'capability_residuals',
+    'maximum_open_pull_requests_per_issue', 'identity', 'app_id_variable', 'app_slug_variable', 'private_key_secret',
+    'environment', 'timeouts', 'credentials', 'permissions', 'capability_residuals',
     'deterministic_client_mitigations', 'limits', 'forbidden_paths', 'release_secret_access',
     'pull_request_target_checkout',
   ]) &&
@@ -163,6 +165,17 @@ assert(
     automation.writer.release_secret_access === false &&
     automation.writer.pull_request_target_checkout === false,
   'writer policy capabilities changed',
+);
+const expectedWriterTimeouts = {
+  github_api_total_seconds: 30,
+  github_response_headers_seconds: 10,
+  github_response_body_seconds: 15,
+  publish_job_minutes: 15,
+};
+assert(
+  JSON.stringify(agents.agents.writer.timeouts) === JSON.stringify(expectedWriterTimeouts) &&
+    JSON.stringify(automation.writer.timeouts) === JSON.stringify(expectedWriterTimeouts),
+  'writer API and publish job timeout contract changed',
 );
 const expectedWriterPermissions = {
   metadata: 'read',
@@ -179,7 +192,13 @@ const expectedWriterCapabilityResiduals = {
   app_has_branch_protection_bypass: false,
 };
 const expectedWriterDeterministicClientMitigations = {
-  allowed_operations: ['create_or_update_agent_ref', 'create_or_update_draft_pull_request'],
+  identity_verification: 'app_jwt_mints_installation_token_then_verify',
+  ambiguous_create_recovery: 'unique_attempt_marker_then_verified_close',
+  allowed_operations: [
+    'create_or_update_agent_ref',
+    'create_or_update_draft_pull_request',
+    'compensate_close_just_created_verified_draft_pull',
+  ],
   denied_operations: ['review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch'],
 };
 const expectedWriterLimits = {

@@ -111,8 +111,15 @@ test('Writer Phase 3 foundation stays independently disabled and least-privilege
   assert.equal(writer.enabled_variable, 'AERIS_WRITER_ENABLED');
   assert.equal(writer.identity, 'github_app');
   assert.equal(writer.app_id_variable, 'AERIS_WRITER_APP_ID');
+  assert.equal(writer.app_slug_variable, 'AERIS_WRITER_APP_SLUG');
   assert.equal(writer.private_key_secret, 'AERIS_WRITER_PRIVATE_KEY');
   assert.equal(writer.environment, 'writer');
+  assert.deepEqual(writer.timeouts, {
+    github_api_total_seconds: 30,
+    github_response_headers_seconds: 10,
+    github_response_body_seconds: 15,
+    publish_job_minutes: 15,
+  });
   assert.deepEqual(writer.required_actor_permissions, ['admin', 'maintain', 'write']);
   assert.deepEqual(writer.required_commands, ['/agent implement', '/agent retry-write']);
   assert.deepEqual(contracts.policy.authorization.code_write_requires, {
@@ -136,7 +143,13 @@ test('Writer Phase 3 foundation stays independently disabled and least-privilege
     app_has_branch_protection_bypass: false,
   });
   assert.deepEqual(writer.deterministic_client_mitigations, {
-    allowed_operations: ['create_or_update_agent_ref', 'create_or_update_draft_pull_request'],
+    identity_verification: 'app_jwt_mints_installation_token_then_verify',
+    ambiguous_create_recovery: 'unique_attempt_marker_then_verified_close',
+    allowed_operations: [
+      'create_or_update_agent_ref',
+      'create_or_update_draft_pull_request',
+      'compensate_close_just_created_verified_draft_pull',
+    ],
     denied_operations: ['review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch'],
   });
   assert.deepEqual(writer.limits, {
@@ -157,9 +170,15 @@ test('Writer Phase 3 foundation rejects drift, broad permissions, and unsafe lim
   const mutations = [
     (agents) => { agents.agents.writer.enabled = true; },
     (agents) => { agents.agents.writer.identity = 'github_token'; },
+    (agents) => { agents.agents.writer.app_slug_variable = 'AERIS_OTHER_APP_SLUG'; },
+    (agents) => { agents.agents.writer.timeouts.github_response_body_seconds = 16; },
+    (agents) => { agents.agents.writer.timeouts.publish_job_minutes = 16; },
     (agents) => { agents.agents.writer.credentials.github_token_write = true; },
     (agents) => { agents.agents.writer.permissions.denied.pop(); },
     (agents) => { agents.agents.writer.permissions.issues = 'write'; },
+    (agents) => { agents.agents.writer.deterministic_client_mitigations.identity_verification = 'installation_token_only'; },
+    (agents) => { agents.agents.writer.deterministic_client_mitigations.ambiguous_create_recovery = 'retry_post'; },
+    (agents) => { agents.agents.writer.deterministic_client_mitigations.unapproved = true; },
     (agents) => { agents.agents.writer.capability_residuals.app_has_branch_protection_bypass = true; },
     (agents) => { agents.agents.writer.deterministic_client_mitigations.denied_operations.pop(); },
     (agents) => { agents.agents.writer.required_actor_permissions.pop(); },
