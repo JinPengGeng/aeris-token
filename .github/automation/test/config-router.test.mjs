@@ -432,6 +432,27 @@ test('Writer rejects non-created events and live-state drift', async () => {
   assert.equal((await routeWriterInvocation({
     eventName: 'issue_comment', event, github: { ...github, getIssueComment: async () => ({ ...event.comment, user: { login: 'other-user' } }) }, trustedContracts, environment, fixCycle: 0,
   })).reason, 'comment_author_mismatch');
+  let permissionCalls = 0;
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event,
+    github: {
+      ...github,
+      getIssueComment: async () => ({ ...event.comment, id: 92 }),
+      getCollaboratorPermission: async () => { permissionCalls += 1; return 'write'; },
+    },
+    trustedContracts, environment, fixCycle: 0,
+  })).reason, 'writer_live_validation_failed');
+  assert.equal(permissionCalls, 0);
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event,
+    github: {
+      ...github,
+      getIssue: async () => ({ number: 42, state: 'open', labels: [{ name: 'agent-ready' }] }),
+      getCollaboratorPermission: async () => { permissionCalls += 1; return 'write'; },
+    },
+    trustedContracts, environment, fixCycle: 0,
+  })).reason, 'writer_live_validation_failed');
+  assert.equal(permissionCalls, 0);
   assert.equal((await routeWriterInvocation({
     eventName: 'issue_comment', event, github: { ...github, getIssue: async () => ({ number: 41, state: 'closed', labels: [{ name: 'agent-ready' }] }) }, trustedContracts, environment, fixCycle: 0,
   })).reason, 'writer_disabled');
@@ -444,6 +465,41 @@ test('Writer rejects non-created events and live-state drift', async () => {
   assert.equal((await routeWriterInvocation({
     eventName: 'issue_comment', event, github: { ...github, getIssueComment: async () => { throw new Error('deleted'); } }, trustedContracts, environment, fixCycle: 0,
   })).reason, 'writer_live_validation_failed');
+});
+
+test('Writer switches accept only exact literal enable values', async () => {
+  for (const value of ['1', 'true']) {
+    assert.deepEqual(writerSwitchesFromTrustedContracts({
+      trustedContracts: contracts,
+      environment: { AERIS_AGENTS_ENABLED: value, AERIS_WRITER_ENABLED: value },
+    }), {
+      globalEnabled: true, writerVariableEnabled: true, writerContractEnabled: false,
+    });
+  }
+  for (const value of [' 1', '1 ', ' TRUE ', 'True', 'TRUE', ' true']) {
+    assert.deepEqual(writerSwitchesFromTrustedContracts({
+      trustedContracts: contracts,
+      environment: { AERIS_AGENTS_ENABLED: value, AERIS_WRITER_ENABLED: value },
+    }), {
+      globalEnabled: false, writerVariableEnabled: false, writerContractEnabled: false,
+    }, value);
+    const route = await routeWriterInvocation({
+      eventName: 'issue_comment',
+      event: {
+        sender: { login: 'maintainer' }, action: 'created', issue: { number: 41 },
+        comment: { id: 91, user: { login: 'maintainer' } },
+      },
+      github: {
+        getIssueComment: async () => ({ id: 91, body: '/agent implement', user: { login: 'maintainer' } }),
+        getIssue: async () => ({ number: 41, state: 'open', labels: [{ name: 'agent-ready' }] }),
+        getCollaboratorPermission: async () => 'write',
+      },
+      trustedContracts: contracts,
+      environment: { AERIS_AGENTS_ENABLED: value, AERIS_WRITER_ENABLED: value },
+      fixCycle: 0,
+    });
+    assert.notEqual(route.action, 'write', value);
+  }
 });
 
 test('Writer switches fail closed for forged or malformed contracts', async () => {

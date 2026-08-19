@@ -41,7 +41,7 @@ export function parseWriterCommand(body, policy) {
 }
 
 function enabledValue(value, allowedValues) {
-  return typeof value === 'string' && allowedValues.includes(value.trim().toLowerCase());
+  return typeof value === 'string' && allowedValues.includes(value);
 }
 
 /**
@@ -97,13 +97,17 @@ export async function routeWriterInvocation({
     !Number.isSafeInteger(issueNumber) || issueNumber <= 0) return { action: 'skip', reason: 'writer_live_validation_failed' };
   try {
     const comment = await github.getIssueComment(commentId);
+    if (!validCommentId(comment?.id) || comment.id !== commentId) {
+      return { action: 'skip', reason: 'writer_live_validation_failed' };
+    }
     if (!matchingCommentAuthor(event, comment)) return { action: 'skip', reason: 'comment_author_mismatch' };
     const command = parseWriterCommand(comment.body, policy);
     if (!command) return { action: 'skip', reason: 'no_supported_command' };
-    const [issue, actorPermission] = await Promise.all([
-      github.getIssue(issueNumber),
-      github.getCollaboratorPermission(comment.user.login),
-    ]);
+    const issue = await github.getIssue(issueNumber);
+    if (!Number.isSafeInteger(issue?.number) || issue.number !== issueNumber) {
+      return { action: 'skip', reason: 'writer_live_validation_failed' };
+    }
+    const actorPermission = await github.getCollaboratorPermission(comment.user.login);
     const decision = evaluateWriterRequest({
       command,
       actorLogin: comment.user.login,
