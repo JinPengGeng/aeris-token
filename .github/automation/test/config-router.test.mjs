@@ -33,7 +33,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..', '..');
 const contracts = loadContracts(repoRoot);
 const policy = contracts.policy;
-const writerIssueUrl = 'https://api.github.com/repos/example/repository/issues/41';
+const writerRepository = Object.freeze({ id: 1_316_750_512, full_name: 'JinPengGeng/aeris-token' });
+const writerIssueUrl = `https://api.github.com/repos/${writerRepository.full_name}/issues/41`;
 
 function writerComment(overrides = {}) {
   return {
@@ -151,6 +152,10 @@ test('Writer Phase 3 foundation stays independently disabled and least-privilege
     issue_labels: ['agent-ready'],
   });
   assert.deepEqual(writer.credentials, { allowed_jobs: ['publish'], github_token_write: false });
+  assert.equal(writer.repository_id, writerRepository.id);
+  assert.equal(writer.repository_name, writerRepository.full_name);
+  assert.equal(contracts.policy.writer.repository_id, writerRepository.id);
+  assert.equal(contracts.policy.writer.repository_name, writerRepository.full_name);
   assert.deepEqual(writer.permissions, {
     metadata: 'read',
     contents: 'write',
@@ -191,6 +196,8 @@ test('Writer Phase 3 foundation stays independently disabled and least-privilege
 test('Writer Phase 3 foundation rejects drift, broad permissions, and unsafe limits', () => {
   const mutations = [
     (agents) => { agents.agents.writer.enabled = true; },
+    (agents) => { agents.agents.writer.repository_id += 1; },
+    (agents) => { agents.agents.writer.repository_name = 'attacker/repository'; },
     (agents) => { agents.agents.writer.identity = 'github_token'; },
     (agents) => { agents.agents.writer.app_slug_variable = 'AERIS_OTHER_APP_SLUG'; },
     (agents) => { agents.agents.writer.timeouts.github_response_body_seconds = 16; },
@@ -253,6 +260,10 @@ test('Writer Phase 3 foundation rejects drift, broad permissions, and unsafe lim
   policyUnknownWriterField.writer.unrecognized_capability = true;
   assert.throws(() => validateContracts(contracts.agents, policyUnknownWriterField), ContractError);
 
+  const policyRepositoryId = structuredClone(contracts.policy);
+  policyRepositoryId.writer.repository_id += 1;
+  assert.throws(() => validateContracts(contracts.agents, policyRepositoryId), ContractError);
+
   const policyCredentialField = structuredClone(contracts.policy);
   policyCredentialField.writer.credentials.installation_token = 'AERIS_WRITER_TOKEN';
   assert.throws(() => validateContracts(contracts.agents, policyCredentialField), ContractError);
@@ -308,6 +319,14 @@ test('protected global and Writer contracts reject coordinated cross-file drift'
     (value) => {
       value.agents.agents.writer.enabled_variable = 'ATTACKER_WRITER_ENABLED';
       value.policy.writer.enabled_variable = 'ATTACKER_WRITER_ENABLED';
+    },
+    (value) => {
+      value.agents.agents.writer.repository_id = 42;
+      value.policy.writer.repository_id = 42;
+    },
+    (value) => {
+      value.agents.agents.writer.repository_name = 'attacker/repository';
+      value.policy.writer.repository_name = 'attacker/repository';
     },
     (value) => {
       value.agents.agents.writer.app_id_variable = 'ATTACKER_WRITER_APP_ID';
@@ -445,6 +464,7 @@ test('Writer parser and route keep the valid disabled contract disabled', async 
   const liveComment = writerComment();
   const liveIssue = writerIssue();
   const github = {
+    getRepository: async () => writerRepository,
     getIssueComment: async () => liveComment,
     getIssue: async () => liveIssue,
     getCollaboratorPermission: async () => 'write',
@@ -476,6 +496,7 @@ test('Writer rejects non-created events and live-state drift', async () => {
     comment: { id: 91, body: '/agent implement', user: { login: 'maintainer' } },
   };
   const github = {
+    getRepository: async () => writerRepository,
     getIssueComment: async () => writerComment(),
     getIssue: async () => writerIssue(),
     getCollaboratorPermission: async () => 'write',
@@ -525,11 +546,19 @@ test('Writer rejects non-created events and live-state drift', async () => {
   assert.equal((await routeWriterInvocation({
     eventName: 'issue_comment', event, github: { ...github, getIssueComment: async () => { throw new Error('deleted'); } }, trustedContracts, environment, fixCycle: 0,
   })).reason, 'writer_live_validation_failed');
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event,
+    github: { ...github, getRepository: async () => ({ ...writerRepository, id: writerRepository.id + 1 }) },
+    trustedContracts, environment, fixCycle: 0,
+  })).reason, 'writer_repository_mismatch');
 
   for (const mismatch of [
-    writerComment({ issue_url: 'https://api.github.com/repos/example/repository/issues/42' }),
+    writerComment({ issue_url: `https://api.github.com/repos/${writerRepository.full_name}/issues/42` }),
     writerComment({ issue_url: 'https://api.github.com/repos/attacker/repository/issues/41' }),
-    writerComment({ issue_url: 'https://api.github.com/repos/example/repository/issues/41?redirect=1' }),
+    writerComment({ issue_url: `${writerIssueUrl}?redirect=1` }),
+    writerComment({ issue_url: 'https://api.github.com/repos/jinpenggeng/aeris-token/issues/41' }),
+    writerComment({ issue_url: 'https://api.github.com/repos/JinPengGeng/aeris-token.evil/issues/41' }),
+    writerComment({ issue_url: 'https://api.github.com/repos/JinPengGeng/aeris%2Dtoken/issues/41' }),
     writerComment({ issue_url: null }),
   ]) {
     assert.equal((await routeWriterInvocation({
@@ -538,11 +567,24 @@ test('Writer rejects non-created events and live-state drift', async () => {
       trustedContracts, environment, fixCycle: 0,
     })).reason, 'comment_issue_mismatch');
   }
+
+  const coordinatedCrossRepository = 'https://api.github.com/repos/attacker/repository/issues/41';
+  assert.equal((await routeWriterInvocation({
+    eventName: 'issue_comment', event,
+    github: {
+      ...github,
+      getIssueComment: async () => writerComment({ issue_url: coordinatedCrossRepository }),
+      getIssue: async () => writerIssue({ url: coordinatedCrossRepository }),
+    },
+    trustedContracts, environment, fixCycle: 0,
+  })).reason, 'comment_issue_mismatch');
 });
 
 test('Writer publish boundary re-reads and binds comment, Issue, actor permission, and command', async () => {
   const environment = { AERIS_AGENTS_ENABLED: 'true', AERIS_WRITER_ENABLED: 'true' };
   const intent = {
+    repository_id: writerRepository.id,
+    repository_name: writerRepository.full_name,
     issue_number: 41,
     issue_updated_at: '2026-08-18T09:00:00Z',
     comment_id: 91,
@@ -551,6 +593,7 @@ test('Writer publish boundary re-reads and binds comment, Issue, actor permissio
   };
   let permissionCalls = 0;
   const github = {
+    getRepository: async () => writerRepository,
     getIssueComment: async () => writerComment(),
     getIssue: async () => writerIssue(),
     getCollaboratorPermission: async () => { permissionCalls += 1; return 'write'; },
@@ -563,6 +606,10 @@ test('Writer publish boundary re-reads and binds comment, Issue, actor permissio
 
   const adversarial = [
     [{ ...intent, comment_id: 0 }, github, 'writer_publish_binding_invalid'],
+    [{ ...intent, repository_id: writerRepository.id + 1 }, github, 'writer_publish_binding_invalid'],
+    [{ ...intent, repository_name: 'attacker/repository' }, github, 'writer_publish_binding_invalid'],
+    [intent, { ...github, getRepository: async () => ({ ...writerRepository, id: writerRepository.id + 1 }) }, 'writer_publish_repository_changed'],
+    [intent, { ...github, getRepository: async () => ({ ...writerRepository, full_name: 'jinpenggeng/aeris-token' }) }, 'writer_publish_repository_changed'],
     [intent, { ...github, getIssueComment: async () => writerComment({ issue_url: 'https://api.github.com/repos/attacker/repository/issues/41' }) }, 'writer_publish_binding_invalid'],
     [intent, { ...github, getIssueComment: async () => writerComment({ user: { login: 'other-user' } }) }, 'writer_publish_actor_changed'],
     [intent, { ...github, getIssueComment: async () => writerComment({ body: '/agent retry-write' }) }, 'writer_publish_command_changed'],
@@ -580,6 +627,19 @@ test('Writer publish boundary re-reads and binds comment, Issue, actor permissio
       fixCycle: 0,
     })).reason, reason);
   }
+
+  const coordinatedCrossRepository = 'https://api.github.com/repos/attacker/repository/issues/41';
+  assert.equal((await revalidateWriterPublishBoundary({
+    intent,
+    github: {
+      ...github,
+      getIssueComment: async () => writerComment({ issue_url: coordinatedCrossRepository }),
+      getIssue: async () => writerIssue({ url: coordinatedCrossRepository }),
+    },
+    trustedContracts: contracts,
+    environment,
+    fixCycle: 0,
+  })).reason, 'writer_publish_binding_invalid');
 });
 
 test('Writer switches accept only exact literal enable values', async () => {
@@ -605,6 +665,7 @@ test('Writer switches accept only exact literal enable values', async () => {
         comment: { id: 91, user: { login: 'maintainer' } },
       },
       github: {
+        getRepository: async () => writerRepository,
         getIssueComment: async () => writerComment(),
         getIssue: async () => writerIssue(),
         getCollaboratorPermission: async () => 'write',
@@ -649,6 +710,7 @@ test('Writer switches fail closed for forged or malformed contracts', async () =
     issue: { number: 41 }, comment: { id: 91, user: { login: 'maintainer' } },
   };
   const github = {
+    getRepository: async () => writerRepository,
     getIssueComment: async () => writerComment(),
     getIssue: async () => writerIssue(),
     getCollaboratorPermission: async () => 'write',

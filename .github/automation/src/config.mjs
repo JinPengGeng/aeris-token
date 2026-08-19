@@ -32,6 +32,8 @@ const WRITER_APP_SLUG_VARIABLE = 'AERIS_WRITER_APP_SLUG';
 const WRITER_PRIVATE_KEY_SECRET = 'AERIS_WRITER_PRIVATE_KEY';
 const WRITER_ENVIRONMENT = 'writer';
 const WRITER_BRANCH_PREFIX = 'agent/';
+const WRITER_REPOSITORY_ID = 1_316_750_512;
+const WRITER_REPOSITORY_NAME = 'JinPengGeng/aeris-token';
 const WRITER_TIMEOUTS = Object.freeze({
   github_api_total_seconds: 30,
   github_response_headers_seconds: 10,
@@ -68,7 +70,7 @@ const WRITER_DENIED_OPERATIONS = [
 const WRITER_REQUIRED_ACTOR_PERMISSIONS = ['admin', 'maintain', 'write'];
 const WRITER_REQUIRED_COMMANDS = WRITER_COMMANDS;
 const WRITER_REGISTRY_KEYS = [
-  'enabled', 'enabled_variable', 'phase', 'mode', 'identity', 'app_id_variable',
+  'enabled', 'enabled_variable', 'phase', 'mode', 'repository_id', 'repository_name', 'identity', 'app_id_variable',
   'app_slug_variable', 'private_key_secret', 'environment', 'timeouts', 'credentials', 'permissions', 'capability_residuals',
   'deterministic_client_mitigations', 'limits', 'model_variable', 'fallback_model_variable',
   'triggers', 'required_issue_labels', 'required_actor_permissions', 'required_commands',
@@ -76,7 +78,7 @@ const WRITER_REGISTRY_KEYS = [
 ];
 const WRITER_POLICY_KEYS = [
   'enabled', 'enabled_variable', 'branch_prefix', 'draft_pull_requests_only',
-  'maximum_open_pull_requests_per_issue', 'identity', 'app_id_variable', 'app_slug_variable',
+  'maximum_open_pull_requests_per_issue', 'repository_id', 'repository_name', 'identity', 'app_id_variable', 'app_slug_variable',
   'private_key_secret', 'environment', 'timeouts', 'credentials', 'permissions', 'capability_residuals',
   'deterministic_client_mitigations', 'limits', 'forbidden_paths', 'release_secret_access',
   'pull_request_target_checkout',
@@ -178,6 +180,10 @@ function validateWriterFoundation(writer, counterpart) {
   requireCondition(writer.phase === 3, 'writer phase must remain 3');
   requireCondition(writer.mode === 'draft_pull_request', 'writer must remain Draft PR only');
   requireCondition(
+    writer.repository_id === WRITER_REPOSITORY_ID && writer.repository_name === WRITER_REPOSITORY_NAME,
+    'writer repository identity must match the approved repository ID and full name',
+  );
+  requireCondition(
     writer.enabled_variable === WRITER_ENABLED_VARIABLE,
     'writer must use the independent AERIS_WRITER_ENABLED switch',
   );
@@ -262,7 +268,7 @@ function validateWriterFoundation(writer, counterpart) {
       'writer policy capabilities exceed the approved Phase 3 boundary',
     );
     for (const field of [
-      'enabled', 'enabled_variable', 'identity', 'app_id_variable', 'app_slug_variable',
+      'enabled', 'enabled_variable', 'repository_id', 'repository_name', 'identity', 'app_id_variable', 'app_slug_variable',
       'private_key_secret', 'environment', 'timeouts', 'credentials', 'permissions',
       'capability_residuals', 'deterministic_client_mitigations', 'limits',
     ]) {

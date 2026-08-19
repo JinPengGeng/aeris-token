@@ -104,6 +104,8 @@ agents:
     enabled_variable: AERIS_WRITER_ENABLED
     phase: 3
     mode: draft_pull_request
+    repository_id: 1316750512
+    repository_name: JinPengGeng/aeris-token
     identity: github_app
     app_id_variable: AERIS_WRITER_APP_ID
     app_slug_variable: AERIS_WRITER_APP_SLUG

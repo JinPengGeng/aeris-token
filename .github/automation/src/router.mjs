@@ -72,7 +72,17 @@ function validCommentId(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
 
-function canonicalIssueUrl(value, issueNumber) {
+function trustedWriterRepository(trustedContracts) {
+  try {
+    validateContracts(trustedContracts?.agents, trustedContracts?.policy);
+  } catch {
+    return null;
+  }
+  const writer = trustedContracts.agents.agents.writer;
+  return { id: writer.repository_id, fullName: writer.repository_name };
+}
+
+function canonicalIssueUrl(value, issueNumber, repositoryName) {
   if (typeof value !== 'string') return null;
   try {
     const url = new URL(value);
@@ -82,15 +92,21 @@ function canonicalIssueUrl(value, issueNumber) {
       parts.length !== 6 || parts[1] !== 'repos' || !parts[2] || !parts[3] ||
       parts[4] !== 'issues' || parts[5] !== String(issueNumber)
     ) return null;
-    return url.href;
+    const expected = `https://api.github.com/repos/${repositoryName}/issues/${issueNumber}`;
+    return url.href === expected ? url.href : null;
   } catch {
     return null;
   }
 }
 
-function commentBelongsToIssue(comment, issue, issueNumber) {
-  const issueUrl = canonicalIssueUrl(issue?.url, issueNumber);
-  return issueUrl !== null && canonicalIssueUrl(comment?.issue_url, issueNumber) === issueUrl;
+function repositoryMatches(repository, expected) {
+  return repository?.id === expected?.id && repository?.full_name === expected?.fullName;
+}
+
+function commentBelongsToIssue(comment, issue, issueNumber, expectedRepository) {
+  const issueUrl = canonicalIssueUrl(issue?.url, issueNumber, expectedRepository.fullName);
+  return issueUrl !== null &&
+    canonicalIssueUrl(comment?.issue_url, issueNumber, expectedRepository.fullName) === issueUrl;
 }
 
 function matchingCommentAuthor(event, comment) {
@@ -111,12 +127,19 @@ export async function routeWriterInvocation({
   if (eventName !== 'issue_comment' || event?.action !== 'created') return { action: 'skip', reason: 'unsupported_event' };
   if (event.issue?.pull_request) return { action: 'skip', reason: 'pull_request_comment' };
   const policy = trustedContracts?.policy;
+  const expectedRepository = trustedWriterRepository(trustedContracts);
   const commentId = event.comment?.id;
   const issueNumber = event.issue?.number;
-  if (!github || typeof github.getIssueComment !== 'function' || typeof github.getIssue !== 'function' ||
+  if (!expectedRepository) return { action: 'skip', reason: 'writer_disabled' };
+  if (!github || typeof github.getRepository !== 'function' ||
+    typeof github.getIssueComment !== 'function' || typeof github.getIssue !== 'function' ||
     typeof github.getCollaboratorPermission !== 'function' || !validCommentId(commentId) ||
     !Number.isSafeInteger(issueNumber) || issueNumber <= 0) return { action: 'skip', reason: 'writer_live_validation_failed' };
   try {
+    const repository = await github.getRepository();
+    if (!repositoryMatches(repository, expectedRepository)) {
+      return { action: 'skip', reason: 'writer_repository_mismatch' };
+    }
     const comment = await github.getIssueComment(commentId);
     if (!validCommentId(comment?.id) || comment.id !== commentId) {
       return { action: 'skip', reason: 'writer_live_validation_failed' };
@@ -128,7 +151,7 @@ export async function routeWriterInvocation({
     if (!Number.isSafeInteger(issue?.number) || issue.number !== issueNumber) {
       return { action: 'skip', reason: 'writer_live_validation_failed' };
     }
-    if (!commentBelongsToIssue(comment, issue, issueNumber)) {
+    if (!commentBelongsToIssue(comment, issue, issueNumber, expectedRepository)) {
       return { action: 'skip', reason: 'comment_issue_mismatch' };
     }
     const actorPermission = await github.getCollaboratorPermission(comment.user.login);
@@ -169,20 +192,27 @@ export async function revalidateWriterPublishBoundary({
   const commentId = intent?.comment_id;
   const actor = intent?.actor;
   const expectedCommand = canonicalWriterCommand(intent?.command);
+  const expectedRepository = trustedWriterRepository(trustedContracts);
   if (
-    !github || typeof github.getIssueComment !== 'function' || typeof github.getIssue !== 'function' ||
+    !expectedRepository || intent?.repository_id !== expectedRepository.id ||
+    intent?.repository_name !== expectedRepository.fullName || !github ||
+    typeof github.getRepository !== 'function' || typeof github.getIssueComment !== 'function' || typeof github.getIssue !== 'function' ||
     typeof github.getCollaboratorPermission !== 'function' || !Number.isSafeInteger(issueNumber) || issueNumber <= 0 ||
     !validCommentId(commentId) || typeof actor !== 'string' || actor.length === 0 || expectedCommand === null ||
     typeof intent?.issue_updated_at !== 'string' || intent.issue_updated_at.length === 0
   ) return { action: 'skip', reason: 'writer_publish_binding_invalid' };
 
   try {
+    const repository = await github.getRepository();
+    if (!repositoryMatches(repository, expectedRepository)) {
+      return { action: 'skip', reason: 'writer_publish_repository_changed' };
+    }
     const comment = await github.getIssueComment(commentId);
     const issue = await github.getIssue(issueNumber);
     if (
       !validCommentId(comment?.id) || comment.id !== commentId ||
       !Number.isSafeInteger(issue?.number) || issue.number !== issueNumber ||
-      !commentBelongsToIssue(comment, issue, issueNumber)
+      !commentBelongsToIssue(comment, issue, issueNumber, expectedRepository)
     ) return { action: 'skip', reason: 'writer_publish_binding_invalid' };
     if (comment?.user?.login !== actor) return { action: 'skip', reason: 'writer_publish_actor_changed' };
     const command = parseWriterCommand(comment.body, trustedContracts?.policy);

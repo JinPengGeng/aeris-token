@@ -502,6 +502,10 @@ export class WriterGitHubClient {
     return this.#request('GET', `/repos/${this.#repository}/git/ref/heads/${encodeURIComponent(ref)}`);
   }
 
+  getRepository() {
+    return this.#request('GET', `/repos/${this.#repository}`);
+  }
+
   getIssue(number) {
     return this.#request('GET', `/repos/${this.#repository}/issues/${positiveNumber(number, 'Issue number')}`);
   }

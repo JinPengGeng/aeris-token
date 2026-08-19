@@ -164,6 +164,7 @@ test('Writer reads are pinned to GitHub.com, reject redirects, retain tombstones
     return response({ id: 7 });
   });
 
+  assert.deepEqual(await api.getRepository(), { id: 7 });
   assert.deepEqual(await api.getIssue(7), { id: 7 });
   assert.deepEqual(await api.getIssueComment(91), { id: 7 });
   assert.equal(await api.getCollaboratorPermission('writer-user'), 'write');
@@ -172,6 +173,7 @@ test('Writer reads are pinned to GitHub.com, reject redirects, retain tombstones
   assert.equal((await api.listPullsForHead('agent/issue-7'))[0].state, 'closed');
 
   assert.deepEqual(calls.map(({ url, init }) => [url, init.method, init.redirect]), [
+    ['https://api.github.com/repos/example/repository', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/issues/7', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/issues/comments/91', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/collaborators/writer-user/permission', 'GET', 'error'],

@@ -84,6 +84,8 @@ writer:
   branch_prefix: agent/
   draft_pull_requests_only: true
   maximum_open_pull_requests_per_issue: 1
+  repository_id: 1316750512
+  repository_name: JinPengGeng/aeris-token
   identity: github_app
   app_id_variable: AERIS_WRITER_APP_ID
   app_slug_variable: AERIS_WRITER_APP_SLUG
