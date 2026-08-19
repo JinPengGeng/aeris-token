@@ -790,7 +790,8 @@ pub enum EmergencyChainCandidateOrderError {
 
 /// Returns only candidates named by the grant, in immutable chain order.
 /// Every grant slot is returned. A missing target has `candidate_index: None`;
-/// callers must not compress it away. Duplicate identities fail closed.
+/// callers must not compress it away. Multiple candidates matching the same
+/// grant target fail closed; candidates outside the grant are ignored.
 pub fn emergency_chain_candidate_order(
     grant: &EmergencyChainGrant,
     candidates: &[SchedulerRankableCandidate],
@@ -1641,7 +1642,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_candidate_identity_fails_closed() {
+    fn duplicate_grant_target_candidate_identity_fails_closed() {
         let target_a = target("a");
         let grant = issue_grant(vec![target_a.clone()]);
         assert_eq!(
@@ -1654,6 +1655,30 @@ mod tests {
                 ],
             ),
             Err(EmergencyChainCandidateOrderError::AmbiguousTarget)
+        );
+    }
+
+    #[test]
+    fn duplicate_non_grant_candidate_identity_is_ignored() {
+        let target_a = target("a");
+        let outside = target("outside");
+        let grant = issue_grant(vec![target_a.clone()]);
+        let ordered = emergency_chain_candidate_order(
+            &grant,
+            &[
+                candidate(&outside),
+                candidate(&outside),
+                candidate(&target_a),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            ordered,
+            vec![EmergencyChainCandidateMatch {
+                chain_position: 0,
+                candidate_index: Some(2),
+            }]
         );
     }
 }

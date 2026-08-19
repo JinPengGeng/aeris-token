@@ -44,8 +44,9 @@ The scheduler core defines a separate `EmergencyChainGrant` capability:
 - Candidate matching returns one slot for every original chain position. A
   missing materialization is `candidate_index: None`; it is never compressed
   away. An available later slot remains unauthorized until the missing earlier
-  slot receives an authoritative safe-skip permit completion. Duplicate
-  candidate identities are ambiguous and fail closed.
+  slot receives an authoritative safe-skip permit completion. Multiple
+  candidates matching the same grant target are ambiguous and fail closed;
+  candidates outside the grant are ignored.
 
 ## Trusted input boundary
 
