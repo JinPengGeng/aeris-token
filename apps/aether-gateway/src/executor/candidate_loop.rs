@@ -19,6 +19,9 @@ use tracing::{debug, warn, Instrument};
 use crate::ai_serving::LocalExecutionAttemptSource;
 use crate::clock::current_unix_ms;
 use crate::control::GatewayControlDecision;
+use crate::execution_runtime::attempt_replay::{
+    AttemptDispatchLifecycleError, AttemptReplayHandle,
+};
 use crate::execution_runtime::{
     acquire_upstream_execution_gate, build_transport_error_stop_response,
     execute_execution_runtime_stream_with_retry_scope,
@@ -59,6 +62,55 @@ fn attach_redaction_execution_candidate(response: &mut Response<Body>, candidate
         response
             .extensions_mut()
             .insert(RedactionExecutionCandidateId::new(candidate_id));
+    }
+}
+
+fn replay_error(error: AttemptDispatchLifecycleError) -> GatewayError {
+    GatewayError::Internal(format!(
+        "attempt replay lifecycle rejected dispatch: {error}"
+    ))
+}
+
+fn new_replay_handle() -> Result<AttemptReplayHandle, GatewayError> {
+    AttemptReplayHandle::new().map_err(replay_error)
+}
+
+fn begin_replay_dispatch(
+    replay: &AttemptReplayHandle,
+    plan_kind: &str,
+    plan: &aether_contracts::ExecutionPlan,
+) -> Result<(), GatewayError> {
+    replay
+        .apply_request_policy(plan_kind, plan.body.json_body.as_ref())
+        .and_then(|()| replay.mark_sent())
+        .map_err(replay_error)
+}
+
+fn finish_replay_execution(
+    replay: &AttemptReplayHandle,
+    execution: AiAttemptExecutionOutcome<Response<Body>>,
+) -> Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError> {
+    match execution {
+        AiAttemptExecutionOutcome::Responded(response) => Ok(AiAttemptExecutionOutcome::Responded(
+            replay.guard_response(response),
+        )),
+        AiAttemptExecutionOutcome::Retry {
+            scope,
+            fallback_response,
+        } => match replay.authorize_classified_scheduler_retry() {
+            Ok(()) => Ok(AiAttemptExecutionOutcome::Retry {
+                scope,
+                fallback_response,
+            }),
+            Err(error) => {
+                let _ = replay.finish_ambiguous();
+                if let Some(response) = fallback_response {
+                    Ok(AiAttemptExecutionOutcome::Responded(response))
+                } else {
+                    Err(replay_error(error))
+                }
+            }
+        },
     }
 }
 
@@ -129,6 +181,7 @@ where
             decision,
             plan_kind,
             transfer_tracker,
+            replay: new_replay_handle()?,
         };
         match run_ai_attempt_loop(&port, plan_and_reports).await? {
             AiAttemptLoopOutcome::Responded(response) => {
@@ -203,6 +256,7 @@ where
             decision,
             plan_kind,
             transfer_tracker,
+            replay: new_replay_handle()?,
         };
         run_dynamic_attempt_loop(
             &port,
@@ -226,6 +280,7 @@ struct SyncAttemptLoopPort<'a> {
     decision: &'a GatewayControlDecision,
     plan_kind: &'a str,
     transfer_tracker: &'a ProviderTransferTracker,
+    replay: AttemptReplayHandle,
 }
 
 #[async_trait]
@@ -283,8 +338,9 @@ where
         }
         prewarm_direct_reqwest_candidate_client(plan);
         let _permit = acquire_upstream_execution_gate(self.state, self.trace_id).await?;
+        begin_replay_dispatch(&self.replay, self.plan_kind, plan)?;
         let upstream_execution_gate_held_started_at = std::time::Instant::now();
-        let mut execution = execute_execution_runtime_sync_with_retry_scope(
+        let execution = execute_execution_runtime_sync_with_retry_scope(
             self.state,
             self.parts.uri.path(),
             plan.clone(),
@@ -294,7 +350,14 @@ where
             attempt.report_kind(),
             report_context,
         )
-        .await?;
+        .await;
+        let mut execution = match execution {
+            Ok(execution) => finish_replay_execution(&self.replay, execution)?,
+            Err(error) => {
+                let _ = self.replay.finish_ambiguous();
+                return Err(error);
+            }
+        };
         observe_gateway_stage_ms(
             "upstream_execution_gate_held",
             upstream_execution_gate_held_started_at
@@ -408,6 +471,7 @@ where
             decision,
             plan_kind,
             transfer_tracker,
+            replay: new_replay_handle()?,
         };
         match run_ai_attempt_loop(&port, plan_and_reports).await? {
             AiAttemptLoopOutcome::Responded(response) => {
@@ -478,6 +542,7 @@ where
             decision,
             plan_kind,
             transfer_tracker,
+            replay: new_replay_handle()?,
         };
         run_dynamic_attempt_loop(
             &port,
@@ -926,6 +991,7 @@ struct StreamAttemptLoopPort<'a> {
     decision: &'a GatewayControlDecision,
     plan_kind: &'a str,
     transfer_tracker: &'a ProviderTransferTracker,
+    replay: AttemptReplayHandle,
 }
 
 #[async_trait]
@@ -1028,6 +1094,7 @@ where
             LocalFailoverDecision::StopLocalFailover
         );
         let watchdog_started_at = std::time::Instant::now();
+        begin_replay_dispatch(&self.replay, self.plan_kind, plan)?;
         let execution = execute_stream_candidate_with_watchdog(
             self.state,
             self.trace_id,
@@ -1048,9 +1115,17 @@ where
                 .await
             },
         )
-        .await?;
+        .await;
+        let execution = match execution {
+            Ok(execution) => execution,
+            Err(error) => {
+                let _ = self.replay.finish_ambiguous();
+                return Err(error);
+            }
+        };
         let mut execution = match execution {
             StreamCandidateWatchdogOutcome::TransportTimeout => {
+                let _ = self.replay.finish_ambiguous();
                 AiAttemptExecutionOutcome::Responded(
                     build_transport_error_stop_response(
                         self.state,
@@ -1068,6 +1143,7 @@ where
             }
             StreamCandidateWatchdogOutcome::Executed(execution) => execution,
         };
+        execution = finish_replay_execution(&self.replay, execution)?;
         match &mut execution {
             AiAttemptExecutionOutcome::Responded(response)
             | AiAttemptExecutionOutcome::Retry {

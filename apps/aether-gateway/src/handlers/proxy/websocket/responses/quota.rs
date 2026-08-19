@@ -92,17 +92,16 @@ pub(super) fn record_exhausted_bound_key(
 
 /// 为同一个 logical turn 规划并绑定下一个 attempt。
 ///
-/// `_previous_settled` 不被使用，它只是把「上一个 attempt 已经结算完毕」这个
-/// 前置条件写进签名：规划要读 health / adaptive / pool 状态，而这些是上一个
-/// attempt 结算时才投射的；它的 pool key lease 也要先释放，否则替代 key 的挑选
-/// 会看到一把仍被占用的 key。
+/// `previous_settled` 同时证明旧 attempt 已结算、物理 socket 已静止，并携带
+/// generation-bound replay capability。规划要读 health / adaptive / pool 状态，
+/// 而这些是上一个 attempt 结算时才投射的；它的 pool key lease 也要先释放。
 pub(super) async fn retry_active_turn_after_quota_exhaustion(
     bound: &mut BoundResponsesConnection,
     state: &AppState,
     context: &WebSocketRequestContext,
-    _previous_settled: PreviousAttemptSettled,
+    previous_settled: PreviousAttemptSettled,
 ) -> bool {
-    let Some(active) = bound.turn_state.logical_mut() else {
+    let Some(active) = bound.turn_state.logical() else {
         return false;
     };
     if let Some(reason) = active.quota_retry_block_reason() {
@@ -120,6 +119,28 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
         );
         return false;
     }
+    let replay = match previous_settled.authorize_quota_replay() {
+        Ok(replay) => replay,
+        Err(reason) => {
+            warn!(
+                event_name = "responses_websocket_quota_retry_lifecycle_denied",
+                log_type = "ops",
+                transport = WEBSOCKET_LOG_TRANSPORT,
+                websocket = true,
+                trace_id = %context.trace_id,
+                reason,
+                "gateway refused a Responses WebSocket replay without lifecycle authorization"
+            );
+            return false;
+        }
+    };
+    // Permit consumption leaves the next generation Prepared. Every failure
+    // before the replacement socket accepts response.create must close the
+    // barrier so this logical request cannot be replayed again.
+    let replay_prepared_guard = ReplayPreparedGuard::new(replay.clone());
+    let Some(active) = bound.turn_state.logical_mut() else {
+        return false;
+    };
     active.retry_attempted = true;
     active.turn_attempt = active.turn_attempt.saturating_add(1);
     let client_event = active.client_event.clone();
@@ -270,6 +291,7 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
             return false;
         }
     };
+    turn.replace_replay_handle(replay);
     let mut replacement = match bind_responses_upstream(
         &decision,
         normalization,
@@ -301,6 +323,7 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
     };
 
     turn.mark_upstream_request_sent();
+    replay_prepared_guard.disarm();
     turn.set_provider_response_headers(replacement.upstream_response_headers.clone());
     let replacement_upstream = replacement
         .upstream
@@ -339,6 +362,30 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
         "gateway transparently rebound a Responses WebSocket turn after quota exhaustion"
     );
     true
+}
+
+struct ReplayPreparedGuard {
+    replay: Option<crate::execution_runtime::attempt_replay::AttemptReplayHandle>,
+}
+
+impl ReplayPreparedGuard {
+    fn new(replay: crate::execution_runtime::attempt_replay::AttemptReplayHandle) -> Self {
+        Self {
+            replay: Some(replay),
+        }
+    }
+
+    fn disarm(mut self) {
+        self.replay.take();
+    }
+}
+
+impl Drop for ReplayPreparedGuard {
+    fn drop(&mut self) {
+        if let Some(replay) = self.replay.take() {
+            let _ = replay.finish_ambiguous();
+        }
+    }
 }
 
 pub(super) fn is_usage_limit_error_event(event: &Value) -> bool {

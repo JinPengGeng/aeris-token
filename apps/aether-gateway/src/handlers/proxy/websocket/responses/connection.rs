@@ -351,6 +351,19 @@ pub(super) async fn relay_bound_connection(
                 };
                 let mut quota_relay_action = classify_quota_relay(quota_facts);
                 if matches!(quota_relay_action, QuotaRelayAction::AttemptTransparentRetry) {
+                    let lifecycle_allows_retry = bound
+                        .turn_state
+                        .attempt()
+                        .is_some_and(|attempt| attempt.ensure_replay_uncommitted().is_ok());
+                    if !lifecycle_allows_retry {
+                        quota_relay_action = classify_quota_relay(QuotaRelayFacts {
+                            retry_current_turn: false,
+                            transparent_retry_failed: true,
+                            ..quota_facts
+                        });
+                    }
+                }
+                if matches!(quota_relay_action, QuotaRelayAction::AttemptTransparentRetry) {
                     // detach_attempt 保留 logical turn：重试是同一轮请求的下一个 attempt。
                     let retry_turn = bound.turn_state.detach_attempt();
                     // 先结算旧 attempt 并等它落地，再规划下一个 attempt。两个理由：
@@ -450,6 +463,7 @@ pub(super) async fn relay_bound_connection(
                         };
                         match send_client_message(client_socket, client_frame).await {
                             Ok(()) => {
+                                bound.turn_state.mark_client_committed();
                                 if let (Some(turn), Some(frame)) = (
                                     bound.turn_state.attempt_mut(),
                                     parsed_upstream_frame.as_ref(),
@@ -482,6 +496,7 @@ pub(super) async fn relay_bound_connection(
                             .await
                             {
                                 Ok(()) => {
+                                    bound.turn_state.mark_client_committed();
                                     if let Some(turn) = bound.turn_state.attempt_mut() {
                                         turn.capture_client_frame(event);
                                     }
@@ -502,10 +517,15 @@ pub(super) async fn relay_bound_connection(
                         .await
                         {
                             relay_send_error = Some(error);
+                        } else {
+                            bound.turn_state.mark_client_committed();
                         }
                     }
                 }
                 if relay_serialization_failed {
+                    bound.turn_state.close_replay_barrier(
+                        crate::execution_runtime::attempt_replay::ReplayBarrierReason::AmbiguousDispatchOutcome,
+                    );
                     warn!(
                         event_name = "responses_websocket_provider_event_serialization_failed",
                         log_type = "ops",

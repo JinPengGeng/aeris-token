@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 
 pub(crate) mod admission;
 pub(crate) mod attempt_lifecycle;
+pub(crate) mod attempt_replay;
 mod chatgpt_web_image;
 mod constants;
 mod fallback;

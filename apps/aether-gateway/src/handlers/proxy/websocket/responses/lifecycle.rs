@@ -14,6 +14,7 @@ use super::state::BoundResponsesConnection;
 use super::turn::{
     begin_unowned_responses_websocket_turn, ResponsesProviderAttempt, ResponsesWebSocketTurnOutcome,
 };
+use crate::execution_runtime::attempt_replay::AttemptReplayHandle;
 use crate::handlers::proxy::websocket::session::{
     CLOSE_INTERNAL_ERROR, CLOSE_POLICY_VIOLATION, CLOSE_TRY_AGAIN, WEBSOCKET_LOG_TRANSPORT,
 };
@@ -213,12 +214,22 @@ pub(super) async fn queue_turn_finalization(
 /// ([`super::quota::retry_active_turn_after_quota_exhaustion`]) 要求这个参数，
 /// 于是「先结算、再规划」成为签名的一部分，而不是一句注释——顺序写反连编译都
 /// 过不了。
-pub(super) struct PreviousAttemptSettled(());
+pub(super) struct PreviousAttemptSettled {
+    replay: Option<AttemptReplayHandle>,
+}
 
 impl PreviousAttemptSettled {
     /// 没有 attempt 要结算（连接此刻不在 `Responding`）。
     pub(super) const fn nothing_to_settle() -> Self {
-        Self(())
+        Self { replay: None }
+    }
+
+    pub(super) fn authorize_quota_replay(self) -> Result<AttemptReplayHandle, &'static str> {
+        let replay = self.replay.ok_or("missing_previous_attempt")?;
+        replay
+            .authorize_websocket_quota_retry()
+            .map_err(|_| "quota_replay_not_authorized")?;
+        Ok(replay)
     }
 }
 
@@ -234,9 +245,17 @@ pub(super) async fn settle_turn_finalization(
     turn: ActiveProviderAttempt,
     outcome: ResponsesWebSocketTurnOutcome,
 ) -> PreviousAttemptSettled {
-    queue_turn_finalization(bound, state, turn, outcome).await;
+    let replay = turn.replay_handle();
+    await_pending_adapter_observation(bound).await;
     await_pending_turn_finalization(bound).await;
-    PreviousAttemptSettled(())
+    let state = state.clone();
+    bound.pending_turn_finalization = Some(tokio::spawn(async move {
+        turn.disarm().finalize_for_replay(&state, outcome).await;
+    }));
+    await_pending_turn_finalization(bound).await;
+    PreviousAttemptSettled {
+        replay: Some(replay),
+    }
 }
 
 pub(super) fn spawn_bounded_adapter_observation(
