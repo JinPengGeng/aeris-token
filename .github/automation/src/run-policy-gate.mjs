@@ -60,6 +60,10 @@ function normalizedExpectedHead(value) {
   return value;
 }
 
+function policyExternalId({ repositoryId, pullNumber, headSha, policySha }) {
+  return ['aeris-policy', 'v1', repositoryId, pullNumber, headSha, policySha].join(':');
+}
+
 function snapshotSha({ repositoryState, mainSha, pull, files, checkRuns, comparison, reviewThreads, policy }) {
   const requiredContexts = new Set(policy.policy_gate.required_checks);
   const snapshot = {
@@ -214,6 +218,7 @@ export async function publishPolicyEvaluation({
   repositoryId,
   pullNumber,
   policySha,
+  expectedHeadSha,
   policyApp,
   runId,
   detailsUrl,
@@ -222,6 +227,8 @@ export async function publishPolicyEvaluation({
   clock = () => new Date(),
 }) {
   requireCondition(policyApp && typeof policyApp === 'object', 'Policy App identity is required');
+  const expectedHead = normalizedExpectedHead(expectedHeadSha);
+  requireCondition(expectedHead !== null, 'expected PR head SHA is required');
   const generationState = await collectPolicyGeneration({
     client,
     contracts,
@@ -229,6 +236,7 @@ export async function publishPolicyEvaluation({
     repositoryId,
     pullNumber,
     policySha,
+    expectedHeadSha: expectedHead,
     expectedPolicySha,
   });
   const generation = {
@@ -239,6 +247,18 @@ export async function publishPolicyEvaluation({
     base_sha: generationState.pull.base.sha,
     policy_sha: policySha,
   };
+  const currentExternalId = policyExternalId({
+    repositoryId,
+    pullNumber,
+    headSha: generation.head_sha,
+    policySha,
+  });
+  const currentGenerationChecks = (await client.listCheckRunsForRef(generation.head_sha))
+    .filter((checkRun) => checkRun?.external_id === currentExternalId);
+  requireCondition(
+    currentGenerationChecks.length <= 1,
+    'multiple policy checks exist for the current generation',
+  );
   const checkName = contracts.policy.policy_gate.check_name;
   if (expectedFenceCheckRunId !== null) positiveInteger(expectedFenceCheckRunId, 'expected Policy fence check run ID');
   let check = await client.beginPolicyCheck(generation, checkName, detailsUrl, expectedFenceCheckRunId);
@@ -342,6 +362,7 @@ export async function runPolicyGateCli({
   const repository = environment.GITHUB_REPOSITORY;
   const repositoryId = positiveInteger(environment.AERIS_REPOSITORY_ID, 'repository ID');
   const sha = policyShaAt(repoRoot);
+  const expectedHeadSha = normalizedExpectedHead(environment.AERIS_EXPECTED_HEAD_SHA);
   const expectedPolicySha = normalizedExpectedHead(environment.AERIS_EXPECTED_POLICY_SHA);
   requireCondition(expectedPolicySha !== null && expectedPolicySha === sha, 'trusted checkout is not bound to the expected policy SHA');
   requireCondition(typeof environment.AERIS_OUTPUT_PATH === 'string' && environment.AERIS_OUTPUT_PATH.length > 0, 'AERIS_OUTPUT_PATH is required');
@@ -355,7 +376,7 @@ export async function runPolicyGateCli({
       repositoryId,
       pullNumber: positiveInteger(environment.AERIS_PULL_REQUEST_NUMBER, 'pull request number'),
       policySha: sha,
-      expectedHeadSha: normalizedExpectedHead(environment.AERIS_EXPECTED_HEAD_SHA),
+      expectedHeadSha,
       expectedPolicySha,
       clock,
     });
@@ -380,6 +401,7 @@ export async function runPolicyGateCli({
     repositoryId,
     pullNumber: positiveInteger(environment.AERIS_PULL_REQUEST_NUMBER, 'pull request number'),
     policySha: sha,
+    expectedHeadSha,
     policyApp,
     runId,
     detailsUrl,

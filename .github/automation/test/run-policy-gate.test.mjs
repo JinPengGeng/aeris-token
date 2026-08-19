@@ -118,6 +118,7 @@ test('publisher re-collects the live generation and emits a bounded receipt', as
     repositoryId: 123,
     pullNumber: 37,
     policySha: sha('c'),
+    expectedHeadSha: sha('a'),
     policyApp: { id: 9001, slug: 'aeris-token-policy' },
     runId: '321.1',
     detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
@@ -128,6 +129,82 @@ test('publisher re-collects the live generation and emits a bounded receipt', as
   assert.equal(receipt.check_run_id, 77);
   assert.equal(receipt.conclusion, 'neutral');
   assert.equal(receivedFenceId, 77);
+});
+
+test('publisher rejects duplicate current-generation checks before any mutation', async () => {
+  const mutationMethods = [];
+  const currentExternalId = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
+  const base = fakeClient();
+  const client = fakeClient({
+    listCheckRunsForRef: async () => [
+      ...(await base.listCheckRunsForRef()),
+      { id: 77, external_id: currentExternalId },
+      { id: 88, external_id: currentExternalId },
+    ],
+    beginPolicyCheck: async () => { mutationMethods.push('POST/PATCH'); throw new Error('must not begin'); },
+    completePolicyCheck: async () => { mutationMethods.push('PATCH'); throw new Error('must not complete'); },
+    restorePolicyCheckInProgress: async () => { mutationMethods.push('PATCH'); throw new Error('must not restore'); },
+  });
+
+  await assert.rejects(() => publishPolicyEvaluation({
+    client,
+    contracts: contracts(),
+    repository,
+    repositoryId: 123,
+    pullNumber: 37,
+    policySha: sha('c'),
+    expectedHeadSha: sha('a'),
+    policyApp: { id: 9001, slug: 'aeris-token-policy' },
+    runId: '321.1',
+    detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
+  }), /multiple policy checks exist for the current generation/);
+  assert.deepEqual(mutationMethods, []);
+});
+
+test('publisher rejects an unexpected live head before any mutation', async () => {
+  const mutationMethods = [];
+  const client = fakeClient({
+    beginPolicyCheck: async () => { mutationMethods.push('POST/PATCH'); throw new Error('must not begin'); },
+    completePolicyCheck: async () => { mutationMethods.push('PATCH'); throw new Error('must not complete'); },
+    restorePolicyCheckInProgress: async () => { mutationMethods.push('PATCH'); throw new Error('must not restore'); },
+  });
+
+  await assert.rejects(() => publishPolicyEvaluation({
+    client,
+    contracts: contracts(),
+    repository,
+    repositoryId: 123,
+    pullNumber: 37,
+    policySha: sha('c'),
+    expectedHeadSha: sha('d'),
+    policyApp: { id: 9001, slug: 'aeris-token-policy' },
+    runId: '321.1',
+    detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
+  }), /pull head SHA changed/);
+  assert.deepEqual(mutationMethods, []);
+});
+
+test('publisher requires an expected head before reading or mutating live state', async () => {
+  let calls = 0;
+  const client = new Proxy({}, {
+    get() {
+      calls += 1;
+      throw new Error('client must not be accessed');
+    },
+  });
+
+  await assert.rejects(() => publishPolicyEvaluation({
+    client,
+    contracts: contracts(),
+    repository,
+    repositoryId: 123,
+    pullNumber: 37,
+    policySha: sha('c'),
+    policyApp: { id: 9001, slug: 'aeris-token-policy' },
+    runId: '321.1',
+    detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
+  }), /expected PR head SHA is required/);
+  assert.equal(calls, 0);
 });
 
 test('publisher restores an in-progress fence when completion postconditions fail', async () => {
@@ -146,6 +223,7 @@ test('publisher restores an in-progress fence when completion postconditions fai
     repositoryId: 123,
     pullNumber: 37,
     policySha: sha('c'),
+    expectedHeadSha: sha('a'),
     policyApp: { id: 9001, slug: 'aeris-token-policy' },
     runId: '321.1',
     detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
@@ -177,6 +255,7 @@ test('publisher leaves the check in progress when policy inputs do not stabilize
     repositoryId: 123,
     pullNumber: 37,
     policySha: sha('c'),
+    expectedHeadSha: sha('a'),
     policyApp: { id: 9001, slug: 'aeris-token-policy' },
     runId: '321.1',
     detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
@@ -212,6 +291,7 @@ test('publisher fences a moved head before completing the check', async () => {
     repositoryId: 123,
     pullNumber: 37,
     policySha: sha('c'),
+    expectedHeadSha: sha('a'),
     policyApp: { id: 9001, slug: 'aeris-token-policy' },
     runId: '321.1',
     detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
@@ -248,6 +328,7 @@ test('publisher restores the same fenced check after the completed check observe
     repositoryId: 123,
     pullNumber: 37,
     policySha: sha('c'),
+    expectedHeadSha: sha('a'),
     policyApp: { id: 9001, slug: 'aeris-token-policy' },
     runId: '321.1',
     detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
@@ -281,6 +362,7 @@ test('publisher restores success when a review thread becomes unresolved after c
     repositoryId: 123,
     pullNumber: 37,
     policySha: sha('c'),
+    expectedHeadSha: sha('a'),
     policyApp: { id: 9001, slug: 'aeris-token-policy' },
     runId: '321.1',
     detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
@@ -316,6 +398,7 @@ test('post-success hard abort plus recovery failure is reported as an explicit p
       repositoryId: 123,
       pullNumber: 37,
       policySha: sha('c'),
+      expectedHeadSha: sha('a'),
       policyApp: { id: 9001, slug: 'aeris-token-policy' },
       runId: '321.1',
       detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
