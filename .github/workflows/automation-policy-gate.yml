@@ -225,7 +225,8 @@ jobs:
                 pull.data?.base?.ref !== 'main') {
               throw new Error('Policy fence pull request identity is invalid');
             }
-            const managed = [];
+            const externalId = `aeris-policy:v1:${repositoryId}:${pullNumber}:${headSha}:${policySha}`;
+            const allChecks = [];
             for (let page = 1; page <= 10; page += 1) {
               const response = await github.request('GET /repos/{owner}/{repo}/commits/{ref}/check-runs', {
                 ...context.repo,
@@ -235,13 +236,20 @@ jobs:
                 page,
               });
               if (!Array.isArray(response.data?.check_runs)) throw new Error('Policy fence check list is invalid');
-              managed.push(...response.data.check_runs.filter((check) =>
-                check?.name === 'Automation Policy / gate' && check?.head_sha === headSha &&
-                check?.app?.id === appId && check?.app?.slug === appSlug));
+              allChecks.push(...response.data.check_runs);
               if (response.data.check_runs.length < 100) break;
               if (page === 10) throw new Error('Policy fence check list exceeds the bounded page limit');
             }
-            const externalId = `aeris-policy:v1:${repositoryId}:${pullNumber}:${headSha}:${policySha}`;
+            const isManaged = (check) => check?.name === 'Automation Policy / gate' && check?.head_sha === headSha &&
+              check?.app?.id === appId && check?.app?.slug === appSlug;
+            const exactGeneration = allChecks.filter((check) => check?.external_id === externalId);
+            if (exactGeneration.length > 1) {
+              throw new Error('Policy fence current generation is duplicated');
+            }
+            if (exactGeneration.length === 1 && !isManaged(exactGeneration[0])) {
+              throw new Error('Policy fence current generation has an unexpected owner or identity');
+            }
+            const managed = allChecks.filter(isManaged);
             const output = {
               title: 'Policy evaluation in progress',
               summary: `Policy inputs are being revalidated.\nHead SHA: ${headSha}\nPolicy SHA: ${policySha}`,
@@ -252,7 +260,28 @@ jobs:
               throw new Error('Policy fence managed check identities are invalid');
             }
             const ordered = managed.sort((left, right) => right.id - left.id);
-            const dominant = ordered[0] ?? null;
+            const currentGeneration = ordered.filter((check) => check.external_id === externalId);
+            const dominant = currentGeneration[0] ?? ordered[0] ?? null;
+            const fencePriorIdentity = async (check) => {
+              await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                ...context.repo,
+                check_run_id: check.id,
+                name: 'Automation Policy / gate',
+                status: 'in_progress',
+                output,
+                details_url: detailsUrl,
+              });
+              const cleaned = await github.request('GET /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                ...context.repo,
+                check_run_id: check.id,
+              });
+              if (cleaned.data?.id !== check.id || cleaned.data?.name !== 'Automation Policy / gate' ||
+                  cleaned.data?.head_sha !== headSha || cleaned.data?.external_id !== check.external_id ||
+                  cleaned.data?.status !== 'in_progress' || cleaned.data?.conclusion !== null ||
+                  cleaned.data?.app?.id !== appId || cleaned.data?.app?.slug !== appSlug) {
+                throw new Error(`Policy fence cleanup verification failed for check ${check.id}`);
+              }
+            };
             let fenced;
             if (dominant) {
               fenced = await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
@@ -290,23 +319,7 @@ jobs:
               throw new Error('Policy fence persistence verification failed');
             }
             for (const check of ordered.filter((candidate) => candidate.id !== fencedId)) {
-              await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
-                ...context.repo,
-                check_run_id: check.id,
-                name: 'Automation Policy / gate',
-                status: 'in_progress',
-                output,
-                details_url: detailsUrl,
-              });
-              const cleaned = await github.request('GET /repos/{owner}/{repo}/check-runs/{check_run_id}', {
-                ...context.repo,
-                check_run_id: check.id,
-              });
-              if (cleaned.data?.id !== check.id || cleaned.data?.name !== 'Automation Policy / gate' ||
-                  cleaned.data?.head_sha !== headSha || cleaned.data?.status !== 'in_progress' || cleaned.data?.conclusion !== null ||
-                  cleaned.data?.app?.id !== appId || cleaned.data?.app?.slug !== appSlug) {
-                throw new Error(`Policy fence cleanup verification failed for check ${check.id}`);
-              }
+              await fencePriorIdentity(check);
             }
             core.setOutput('head_sha', headSha);
             core.setOutput('policy_sha', policySha);
