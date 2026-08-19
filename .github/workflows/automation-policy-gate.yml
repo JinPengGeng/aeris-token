@@ -34,7 +34,7 @@ jobs:
     steps:
       - name: Resolve bounded target set
         id: targets
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v8
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const eventName = context.eventName;
@@ -182,7 +182,7 @@ jobs:
 
       - name: Fence prior Policy success for the live exact head
         id: early_fence
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v8
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           AERIS_POLICY_APP_ID: ${{ vars.AERIS_POLICY_APP_ID }}
           AERIS_POLICY_APP_SLUG: ${{ vars.AERIS_POLICY_APP_SLUG }}
