@@ -193,11 +193,10 @@ const expectedWriterCapabilityResiduals = {
 };
 const expectedWriterDeterministicClientMitigations = {
   identity_verification: 'app_jwt_mints_installation_token_then_verify',
-  ambiguous_create_recovery: 'unique_attempt_marker_then_verified_close',
+  ambiguous_create_recovery: 'unique_attempt_marker_then_read_only_reconcile_or_fail_closed_residue',
   allowed_operations: [
     'create_or_update_agent_ref',
     'create_or_update_draft_pull_request',
-    'compensate_close_just_created_verified_draft_pull',
   ],
   denied_operations: ['review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch'],
 };

@@ -167,11 +167,10 @@ test('Writer Phase 3 foundation stays independently disabled and least-privilege
   });
   assert.deepEqual(writer.deterministic_client_mitigations, {
     identity_verification: 'app_jwt_mints_installation_token_then_verify',
-    ambiguous_create_recovery: 'unique_attempt_marker_then_verified_close',
+    ambiguous_create_recovery: 'unique_attempt_marker_then_read_only_reconcile_or_fail_closed_residue',
     allowed_operations: [
       'create_or_update_agent_ref',
       'create_or_update_draft_pull_request',
-      'compensate_close_just_created_verified_draft_pull',
     ],
     denied_operations: ['review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch'],
   });
@@ -265,6 +264,39 @@ test('Writer Phase 3 foundation rejects drift, broad permissions, and unsafe lim
   const policyPullRequestTargetCheckout = structuredClone(contracts.policy);
   policyPullRequestTargetCheckout.writer.pull_request_target_checkout = true;
   assert.throws(() => validateContracts(contracts.agents, policyPullRequestTargetCheckout), ContractError);
+});
+
+test('Writer contracts reject retired close compensation even under coordinated drift', () => {
+  const retiredRecovery = structuredClone(contracts);
+  retiredRecovery.agents.agents.writer.deterministic_client_mitigations.ambiguous_create_recovery =
+    'unique_attempt_marker_then_verified_close';
+  retiredRecovery.policy.writer.deterministic_client_mitigations.ambiguous_create_recovery =
+    'unique_attempt_marker_then_verified_close';
+  assert.throws(
+    () => validateContracts(retiredRecovery.agents, retiredRecovery.policy),
+    ContractError,
+  );
+
+  const retiredOperation = structuredClone(contracts);
+  for (const writer of [retiredOperation.agents.agents.writer, retiredOperation.policy.writer]) {
+    writer.deterministic_client_mitigations.allowed_operations.push(
+      'compensate_close_just_created_verified_draft_pull',
+    );
+  }
+  assert.throws(
+    () => validateContracts(retiredOperation.agents, retiredOperation.policy),
+    ContractError,
+  );
+
+  const weakenedCloseDenial = structuredClone(contracts);
+  for (const writer of [weakenedCloseDenial.agents.agents.writer, weakenedCloseDenial.policy.writer]) {
+    writer.deterministic_client_mitigations.denied_operations =
+      writer.deterministic_client_mitigations.denied_operations.filter((operation) => operation !== 'close_pr');
+  }
+  assert.throws(
+    () => validateContracts(weakenedCloseDenial.agents, weakenedCloseDenial.policy),
+    ContractError,
+  );
 });
 
 test('protected global and Writer contracts reject coordinated cross-file drift', () => {
