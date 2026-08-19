@@ -24,6 +24,13 @@ const MINIMUM_REVIEWER_PATCH_CHARACTERS = 1;
 const MAXIMUM_REVIEWER_PATCH_CHARACTERS = 65_536;
 const MINIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS = 120;
 const MAXIMUM_REVIEWER_REQUEST_TIMEOUT_SECONDS = 600;
+const GLOBAL_ENABLED_VARIABLE = 'AERIS_AGENTS_ENABLED';
+const GLOBAL_ENABLED_VALUES = Object.freeze(['1', 'true']);
+const WRITER_ENABLED_VARIABLE = 'AERIS_WRITER_ENABLED';
+const WRITER_APP_ID_VARIABLE = 'AERIS_WRITER_APP_ID';
+const WRITER_PRIVATE_KEY_SECRET = 'AERIS_WRITER_PRIVATE_KEY';
+const WRITER_ENVIRONMENT = 'writer';
+const WRITER_BRANCH_PREFIX = 'agent/';
 
 const WRITER_PERMISSION_GRANTS = {
   metadata: 'read',
@@ -159,19 +166,19 @@ function validateWriterFoundation(writer, counterpart) {
   requireCondition(writer.phase === 3, 'writer phase must remain 3');
   requireCondition(writer.mode === 'draft_pull_request', 'writer must remain Draft PR only');
   requireCondition(
-    writer.enabled_variable === 'AERIS_WRITER_ENABLED',
+    writer.enabled_variable === WRITER_ENABLED_VARIABLE,
     'writer must use the independent AERIS_WRITER_ENABLED switch',
   );
   requireCondition(writer.identity === 'github_app', 'writer must use a GitHub App identity');
   requireCondition(
-    writer.app_id_variable === 'AERIS_WRITER_APP_ID',
+    writer.app_id_variable === WRITER_APP_ID_VARIABLE,
     'writer App ID must use AERIS_WRITER_APP_ID',
   );
   requireCondition(
-    writer.private_key_secret === 'AERIS_WRITER_PRIVATE_KEY',
+    writer.private_key_secret === WRITER_PRIVATE_KEY_SECRET,
     'writer private key must use AERIS_WRITER_PRIVATE_KEY',
   );
-  requireCondition(writer.environment === 'writer', 'writer must use the writer environment');
+  requireCondition(writer.environment === WRITER_ENVIRONMENT, 'writer must use the writer environment');
   requireCondition(
     sameStringArray(writer.credentials?.allowed_jobs, ['publish']) &&
       writer.credentials.github_token_write === false,
@@ -209,7 +216,7 @@ function validateWriterFoundation(writer, counterpart) {
       sameStringArray(writer.required_issue_labels, ['agent-ready']) &&
       sameStringArray(writer.required_actor_permissions, WRITER_REQUIRED_ACTOR_PERMISSIONS) &&
       sameStringArray(writer.required_commands, WRITER_REQUIRED_COMMANDS) &&
-      sameStringArray(writer.allowed_branch_prefixes, ['agent/']) &&
+      sameStringArray(writer.allowed_branch_prefixes, [WRITER_BRANCH_PREFIX]) &&
       sameStringArray(writer.tools, ['repository_read', 'isolated_shell', 'branch_write', 'draft_pull_request']) &&
       sameStringArray(writer.effects, ['create_or_update_draft_pull_request']) &&
       sameStringArray(writer.handoff_to, ['reviewer', 'tester', 'security']),
@@ -221,7 +228,7 @@ function validateWriterFoundation(writer, counterpart) {
       'writer policy contains unapproved fields',
     );
     requireCondition(
-      counterpart.branch_prefix === 'agent/' &&
+      counterpart.branch_prefix === WRITER_BRANCH_PREFIX &&
         counterpart.draft_pull_requests_only === true &&
         counterpart.maximum_open_pull_requests_per_issue === 1 &&
         counterpart.release_secret_access === false &&
@@ -258,8 +265,13 @@ export function validateContracts(agents, policy) {
   requireCondition(agents.runtime?.default_enabled === false, 'agent runtime must default off');
   requireCondition(policy.kill_switch?.default_enabled === false, 'kill switch must default off');
   requireCondition(
-    policy.kill_switch?.repository_variable === agents.runtime?.enabled_variable,
-    'registry and policy kill switch variables differ',
+    agents.runtime?.enabled_variable === GLOBAL_ENABLED_VARIABLE &&
+      policy.kill_switch?.repository_variable === GLOBAL_ENABLED_VARIABLE,
+    'registry and policy must use the fixed AERIS_AGENTS_ENABLED kill switch',
+  );
+  requireCondition(
+    sameStringArray(policy.kill_switch?.enabled_values, GLOBAL_ENABLED_VALUES),
+    'kill switch enabled values must be exactly 1 and true',
   );
   requireCondition(
     policy.limits?.maximum_concurrent_runs_per_object ===
@@ -363,7 +375,8 @@ export function validateContracts(agents, policy) {
   const writer = agents.agents?.writer;
   requireCondition(writer?.mode === 'draft_pull_request', 'writer must remain Draft PR only');
   requireCondition(
-    sameStringArray(writer?.allowed_branch_prefixes, ['agent/']) && policy.writer?.branch_prefix === 'agent/',
+    sameStringArray(writer?.allowed_branch_prefixes, [WRITER_BRANCH_PREFIX]) &&
+      policy.writer?.branch_prefix === WRITER_BRANCH_PREFIX,
     'writer branch prefix must remain agent/',
   );
   requireCondition(policy.writer?.draft_pull_requests_only === true, 'writer must create Draft PRs only');

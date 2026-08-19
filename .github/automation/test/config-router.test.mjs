@@ -220,6 +220,59 @@ test('Writer Phase 3 foundation rejects drift, broad permissions, and unsafe lim
   assert.throws(() => validateContracts(contracts.agents, policyPullRequestTargetCheckout), ContractError);
 });
 
+test('protected global and Writer contracts reject coordinated cross-file drift', () => {
+  const mutations = [
+    (value) => {
+      value.agents.runtime.enabled_variable = 'ATTACKER_AGENTS_ENABLED';
+      value.policy.kill_switch.repository_variable = 'ATTACKER_AGENTS_ENABLED';
+    },
+    (value) => {
+      value.agents.agents.writer.enabled_variable = 'ATTACKER_WRITER_ENABLED';
+      value.policy.writer.enabled_variable = 'ATTACKER_WRITER_ENABLED';
+    },
+    (value) => {
+      value.agents.agents.writer.app_id_variable = 'ATTACKER_WRITER_APP_ID';
+      value.policy.writer.app_id_variable = 'ATTACKER_WRITER_APP_ID';
+    },
+    (value) => {
+      value.agents.agents.writer.private_key_secret = 'ATTACKER_WRITER_PRIVATE_KEY';
+      value.policy.writer.private_key_secret = 'ATTACKER_WRITER_PRIVATE_KEY';
+    },
+    (value) => {
+      value.agents.agents.writer.environment = 'attacker-writer';
+      value.policy.writer.environment = 'attacker-writer';
+    },
+    (value) => {
+      value.agents.agents.writer.allowed_branch_prefixes = ['attacker/'];
+      value.policy.writer.branch_prefix = 'attacker/';
+    },
+    (value) => {
+      value.agents.agents.writer.denied_paths = ['attacker/**'];
+      value.policy.writer.forbidden_paths = ['attacker/**'];
+    },
+  ];
+  for (const mutate of mutations) {
+    const forged = structuredClone(contracts);
+    mutate(forged);
+    assert.throws(() => validateContracts(forged.agents, forged.policy), ContractError);
+  }
+
+  for (const enabledValues of [
+    ['true', '1'],
+    ['1', 'TRUE'],
+    ['1', 'true', 'yes'],
+    ['1'],
+    [],
+    ['1', true],
+    '1,true',
+    null,
+  ]) {
+    const forged = structuredClone(contracts);
+    forged.policy.kill_switch.enabled_values = enabledValues;
+    assert.throws(() => validateContracts(forged.agents, forged.policy), ContractError);
+  }
+});
+
 test('contract validation bounds the model output token budget', () => {
   for (const value of [undefined, null, '4000', 0, -1, 1.5, 16_385]) {
     const agents = structuredClone(contracts.agents);
@@ -375,11 +428,21 @@ test('Writer rejects non-created events and live-state drift', async () => {
 });
 
 test('Writer switches fail closed for forged or malformed contracts', async () => {
-  const environment = { AERIS_AGENTS_ENABLED: 'true', AERIS_WRITER_ENABLED: 'true' };
+  const environment = {
+    AERIS_AGENTS_ENABLED: 'true',
+    AERIS_WRITER_ENABLED: 'true',
+    ATTACKER_AGENTS_ENABLED: 'true',
+  };
   const invalidContracts = [
     (value) => { value.agents.agents.writer.enabled = true; },
     (value) => { value.agents.agents.writer.enabled_variable = 'ATTACKER_WRITER_ENABLED'; },
     (value) => { value.policy.kill_switch.repository_variable = 'ATTACKER_AGENTS_ENABLED'; },
+    (value) => {
+      value.agents.runtime.enabled_variable = 'ATTACKER_AGENTS_ENABLED';
+      value.policy.kill_switch.repository_variable = 'ATTACKER_AGENTS_ENABLED';
+    },
+    (value) => { value.policy.kill_switch.enabled_values = ['enable-me']; },
+    (value) => { value.policy.kill_switch.enabled_values = ['1', 'true', 'yes']; },
     (value) => { value.agents.agents.writer.permissions.issues = 'write'; },
     (value) => { value.policy.writer.unapproved_field = true; },
   ];
