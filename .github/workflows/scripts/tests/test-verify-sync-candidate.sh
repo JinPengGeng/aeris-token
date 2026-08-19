@@ -289,7 +289,7 @@ write_pr "${MERGED_BASE}" "${VALID}"
 expect_rejected 'replay after checkpoint advancement' "${VALID}"
 
 git switch -q --orphan rewritten-upstream
-git rm -qrf .
+git rm -qrf --ignore-unmatch .
 printf 'rewritten\n' >app.txt
 git add app.txt
 git commit -qm 'rewritten upstream'
