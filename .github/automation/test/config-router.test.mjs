@@ -134,6 +134,8 @@ test('Writer Phase 3 foundation stays independently disabled and least-privilege
   assert.equal(contracts.policy.writer.enabled, false);
   assert.equal(writer.enabled_variable, 'AERIS_WRITER_ENABLED');
   assert.equal(writer.identity, 'github_app');
+  assert.equal(writer.repository_id, writerRepository.id);
+  assert.equal(writer.repository_name, writerRepository.full_name);
   assert.equal(writer.app_id_variable, 'AERIS_WRITER_APP_ID');
   assert.equal(writer.app_slug_variable, 'AERIS_WRITER_APP_SLUG');
   assert.equal(writer.private_key_secret, 'AERIS_WRITER_PRIVATE_KEY');
@@ -586,7 +588,9 @@ test('Writer publish boundary re-reads and binds comment, Issue, actor permissio
     repository_id: writerRepository.id,
     repository_name: writerRepository.full_name,
     issue_number: 41,
+    issue_url: writerIssueUrl,
     issue_updated_at: '2026-08-18T09:00:00Z',
+    issue_labels: ['agent-ready'],
     comment_id: 91,
     actor: 'maintainer',
     command: '/agent implement',
@@ -614,8 +618,10 @@ test('Writer publish boundary re-reads and binds comment, Issue, actor permissio
     [intent, { ...github, getIssueComment: async () => writerComment({ user: { login: 'other-user' } }) }, 'writer_publish_actor_changed'],
     [intent, { ...github, getIssueComment: async () => writerComment({ body: '/agent retry-write' }) }, 'writer_publish_command_changed'],
     [intent, { ...github, getIssue: async () => writerIssue({ updated_at: '2026-08-18T09:00:01Z' }) }, 'writer_publish_issue_changed'],
+    [intent, { ...github, getIssue: async () => writerIssue({ url: 'https://api.github.com/repos/example/repository/issues/42' }) }, 'writer_publish_binding_invalid'],
+    [intent, { ...github, getIssue: async () => writerIssue({ labels: [{ name: 'agent-ready' }, { name: 'bug' }] }) }, 'writer_publish_labels_changed'],
     [intent, { ...github, getIssue: async () => writerIssue({ state: 'closed' }) }, 'issue_not_open'],
-    [intent, { ...github, getIssue: async () => writerIssue({ labels: [] }) }, 'missing_agent_ready_label'],
+    [intent, { ...github, getIssue: async () => writerIssue({ labels: [] }) }, 'writer_publish_labels_changed'],
     [intent, { ...github, getCollaboratorPermission: async () => 'read' }, 'insufficient_permission'],
   ];
   for (const [candidateIntent, candidateGitHub, reason] of adversarial) {

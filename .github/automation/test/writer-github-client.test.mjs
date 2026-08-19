@@ -159,6 +159,7 @@ test('Writer reads are pinned to GitHub.com, reject redirects, retain tombstones
   const api = await verifiedClient(async (url, init) => {
     calls.push({ url, init });
     if (url.includes('/permission')) return response({ permission: 'write' });
+    if (url.includes('/timeline')) return response([]);
     if (url.includes('/pulls?')) return response([rawPull({ state: 'closed', merged_at: null })]);
     if (url.includes('/pulls/')) return response(rawPull());
     return response({ id: 7 });
@@ -180,6 +181,7 @@ test('Writer reads are pinned to GitHub.com, reject redirects, retain tombstones
     ['https://api.github.com/repos/example/repository/pulls/42', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/git/ref/heads/agent%2Fissue-7', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/pulls?state=all&head=example%3Aagent%2Fissue-7&per_page=100&page=1', 'GET', 'error'],
+    ['https://api.github.com/repos/example/repository/issues/42/timeline?per_page=100&page=1', 'GET', 'error'],
   ]);
   assert.equal(calls.every(({ init }) => init.headers.authorization === `Bearer ${installationToken}`), true);
 
@@ -199,7 +201,7 @@ test('state=all list fixtures normalize merged_at for lifecycle tombstones', asy
     }),
     rawPull({ number: 44, state: 'open', merged: undefined, merged_at: null }),
   ];
-  const api = await verifiedClient(async () => response(fixtures));
+  const api = await verifiedClient(async (url) => response(url.includes('/timeline') ? [] : fixtures));
   const pulls = await api.listPullsForHead('agent/issue-7');
   assert.deepEqual(pulls.map(({ merged }) => merged), [true, false, false]);
   assert.equal(evaluateWriterLifecycle({
@@ -227,7 +229,7 @@ test('merged_at normalization fails closed for invalid or open-merged list fixtu
     rawPull({ state: 'closed', merged: undefined, merged_at: '2026-02-31T01:02:03Z' }),
     rawPull({ state: 'closed', merged: undefined }),
   ];
-  const api = await verifiedClient(async () => response(fixtures));
+  const api = await verifiedClient(async (url) => response(url.includes('/timeline') ? [] : fixtures));
   const pulls = await api.listPullsForHead('agent/issue-7');
   assert.deepEqual(pulls.map(({ merged }) => merged), [null, null, null, null]);
 });
@@ -1194,6 +1196,70 @@ test('advanceAgentRef reconciles ambiguous successful response bodies by exact r
       assert.equal(state.bodyCanceled, true, fixture.name);
     }
   }
+});
+
+test('open-after-reopen remains tombstoned from the authoritative pull timeline', async () => {
+  const api = await verifiedClient(async (url) => {
+    if (url.includes('/timeline')) return response([
+      { id: 501, event: 'closed', created_at: '2026-08-19T01:00:00Z' },
+      { id: 502, event: 'reopened', created_at: '2026-08-19T01:01:00Z' },
+    ]);
+    return response([rawPull({ state: 'open', merged: false, draft: true })]);
+  });
+  const pulls = await api.listPullsForHead('agent/issue-7');
+  assert.deepEqual(pulls[0].writer_lifecycle, { epoch: 0, tombstoned: true });
+  assert.equal(evaluateWriterLifecycle({
+    command: '/agent retry-write',
+    issueNumber: 7,
+    repositoryId,
+    writerApp,
+    expectedHeadSha: oldSha,
+    baseSha: oldSha,
+    sourceSha: oldSha,
+    branch: { ref: 'agent/issue-7', exists: true, headSha: oldSha },
+    pullRequests: pulls,
+  }).reason, 'issue_tombstoned');
+});
+
+test('timeline permission failures, malformed events, and pagination exhaustion fail closed', async () => {
+  const denied = await verifiedClient(async (url) => url.includes('/timeline')
+    ? response({ message: 'forbidden' }, 403)
+    : response([rawPull()]));
+  await assert.rejects(() => denied.listPullsForHead('agent/issue-7'), /HTTP 403/);
+
+  const malformed = await verifiedClient(async (url) => response(url.includes('/timeline') ? [{ event: 'closed' }] : [rawPull()]));
+  await assert.rejects(() => malformed.listPullsForHead('agent/issue-7'), /timeline is invalid/);
+
+  const exhausted = await verifiedClient(async (url) => response(url.includes('/timeline')
+    ? Array.from({ length: 100 }, (_, index) => ({ id: index + 1, event: 'commented' }))
+    : [rawPull()]));
+  await assert.rejects(() => exhausted.listPullsForHead('agent/issue-7'), /page limit/);
+});
+
+test('Writer invokes the live mutation callback after internal fencing and before REST writes', async () => {
+  const calls = [];
+  const api = await verifiedClient(async (url, init) => {
+    calls.push({ url, method: init.method });
+    if (url.includes('/git/ref/heads/')) return response({ message: 'missing' }, 404);
+    return response({ message: 'unexpected' }, 500);
+  });
+  await assert.rejects(
+    () => api.createAgentRef(7, oldSha, async () => ({ action: 'skip', reason: 'issue_changed' })),
+    /mutation boundary rejected: issue_changed/,
+  );
+  assert.deepEqual(calls.map((call) => call.method), ['GET']);
+
+  const pullCalls = [];
+  const pullApi = await verifiedClient(async (url, init) => {
+    pullCalls.push(init.method);
+    if (url.includes('/git/ref/heads/')) return response(rawRef(7, oldSha));
+    return response({ message: 'unexpected' }, 500);
+  });
+  await assert.rejects(
+    () => pullApi.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' }, async () => ({ action: 'skip', reason: 'label_changed' })),
+    /mutation boundary rejected: label_changed/,
+  );
+  assert.deepEqual(pullCalls, ['GET', 'GET']);
 });
 
 test('Writer invalid input and ref bounds fail before issuing a network call', async () => {

@@ -5,6 +5,7 @@ import {
   evaluateWriterLifecycle,
   hasCanonicalWriterOwnershipMarker,
   WRITER_LIFECYCLE_ACTIONS,
+  WRITER_LIFECYCLE_EPOCH,
   WRITER_OWNERSHIP_MARKER,
 } from '../src/writer-lifecycle.mjs';
 
@@ -23,6 +24,7 @@ function pull(overrides = {}) {
     body: `Writer ownership\n\n${WRITER_OWNERSHIP_MARKER}`,
     user: { id: 789, type: 'Bot', login: `${writerApp.slug}[bot]` },
     performed_via_github_app: { id: writerApp.id, slug: writerApp.slug },
+    writer_lifecycle: { epoch: WRITER_LIFECYCLE_EPOCH, tombstoned: false },
     base: { ref: 'main', repo: { id: repositoryId } },
     head: { ref: branch.ref, repo: { id: repositoryId }, sha: branch.headSha },
     ...overrides,
@@ -101,6 +103,27 @@ test('merged managed history tombstones an Issue after its branch is deleted', (
     head: { ref: branch.ref, repo: null, sha: sha('a') },
   });
   assert.equal(evaluateWriterLifecycle(snapshot({ branch: deletedBranch, pullRequests: [merged] })).reason, 'issue_tombstoned');
+});
+
+test('a reopened managed Draft PR remains irreversibly tombstoned by its lifecycle attestation', () => {
+  const reopened = pull({
+    state: 'open',
+    merged: false,
+    draft: true,
+    writer_lifecycle: { epoch: WRITER_LIFECYCLE_EPOCH, tombstoned: true },
+  });
+  assert.equal(evaluateWriterLifecycle(snapshot({
+    command: '/agent retry-write',
+    expectedHeadSha: sha('a'),
+    pullRequests: [reopened],
+  })).reason, 'issue_tombstoned');
+});
+
+test('missing, malformed, or future lifecycle attestations fail closed', () => {
+  for (const writerLifecycle of [undefined, null, {}, { epoch: 1, tombstoned: false }, { epoch: 0, tombstoned: 'false' }]) {
+    assert.equal(evaluateWriterLifecycle(snapshot({ pullRequests: [pull({ writer_lifecycle: writerLifecycle })] })).reason,
+      'managed_pr_lifecycle_attestation_invalid');
+  }
 });
 
 test('raw GitHub REST Writer identity requires Bot user and validates optional App evidence', () => {

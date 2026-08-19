@@ -48,6 +48,45 @@ test('listIssueComments fails closed when the lookup reaches its page limit', as
   assert.equal(calls, 10);
 });
 
+test('listPullTimeline returns the complete bounded timeline across pages', async () => {
+  const calls = [];
+  const pageOne = Array.from({ length: 100 }, (_, index) => ({ id: index + 1, event: 'commented' }));
+  const api = client(async (url) => {
+    calls.push(url);
+    return response(url.endsWith('page=1') ? pageOne : [{ id: 101, event: 'reopened' }]);
+  });
+
+  const timeline = await api.listPullTimeline(7);
+  assert.equal(timeline.events.length, 101);
+  assert.equal(timeline.truncated, false);
+  assert.equal(calls.length, 2);
+  assert.match(calls[0], /issues\/7\/timeline\?per_page=100&page=1$/);
+  assert.match(calls[1], /issues\/7\/timeline\?per_page=100&page=2$/);
+});
+
+test('listPullTimeline reports truncation at its three-page safety cap', async () => {
+  let calls = 0;
+  const fullPage = Array.from({ length: 100 }, (_, index) => ({ id: index + 1, event: 'commented' }));
+  const api = client(async () => {
+    calls += 1;
+    return response(fullPage);
+  });
+
+  const timeline = await api.listPullTimeline(7);
+  assert.equal(timeline.events.length, 300);
+  assert.equal(timeline.truncated, true);
+  assert.equal(calls, 3);
+});
+
+test('listPullTimeline propagates timeline permission failures', async () => {
+  const api = client(async () => response({ message: 'forbidden' }, 403));
+
+  await assert.rejects(
+    () => api.listPullTimeline(7),
+    (error) => error instanceof GitHubApiError && error.status === 403,
+  );
+});
+
 test('managed comment writes use only the Issue Comments API', async () => {
   const calls = [];
   const api = client(async (url, init) => {

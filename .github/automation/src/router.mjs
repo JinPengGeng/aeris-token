@@ -11,6 +11,12 @@ function labelNames(item) {
   return new Set((item?.labels ?? []).map((label) => (typeof label === 'string' ? label : label.name)));
 }
 
+function canonicalLabels(item) {
+  const labels = [...labelNames(item)];
+  if (labels.some((label) => typeof label !== 'string' || label.length === 0)) return null;
+  return labels.sort((left, right) => left.localeCompare(right, 'en'));
+}
+
 function isIgnoredActor(login, policy) {
   if (!login) return false;
   return policy.commands.ignore_actors.includes(login) || login.endsWith('[bot]');
@@ -199,6 +205,8 @@ export async function revalidateWriterPublishBoundary({
     typeof github.getRepository !== 'function' || typeof github.getIssueComment !== 'function' || typeof github.getIssue !== 'function' ||
     typeof github.getCollaboratorPermission !== 'function' || !Number.isSafeInteger(issueNumber) || issueNumber <= 0 ||
     !validCommentId(commentId) || typeof actor !== 'string' || actor.length === 0 || expectedCommand === null ||
+    typeof intent?.issue_url !== 'string' || intent.issue_url.length === 0 ||
+    !Array.isArray(intent?.issue_labels) ||
     typeof intent?.issue_updated_at !== 'string' || intent.issue_updated_at.length === 0
   ) return { action: 'skip', reason: 'writer_publish_binding_invalid' };
 
@@ -218,6 +226,14 @@ export async function revalidateWriterPublishBoundary({
     const command = parseWriterCommand(comment.body, trustedContracts?.policy);
     if (command !== expectedCommand) return { action: 'skip', reason: 'writer_publish_command_changed' };
     if (issue.updated_at !== intent.issue_updated_at) return { action: 'skip', reason: 'writer_publish_issue_changed' };
+    if (canonicalIssueUrl(issue.url, issueNumber, expectedRepository.fullName) !== intent.issue_url) {
+      return { action: 'skip', reason: 'writer_publish_issue_url_changed' };
+    }
+    const labels = canonicalLabels(issue);
+    if (labels === null || labels.length !== intent.issue_labels.length ||
+      labels.some((label, index) => label !== intent.issue_labels[index])) {
+      return { action: 'skip', reason: 'writer_publish_labels_changed' };
+    }
 
     const actorPermission = await github.getCollaboratorPermission(actor);
     const request = {

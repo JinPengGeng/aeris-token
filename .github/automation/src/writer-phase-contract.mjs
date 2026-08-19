@@ -28,7 +28,7 @@ const SENSITIVE_VALUE_PATTERNS = [
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
 ];
 const CANDIDATE_STATES = new Set(['ready', 'rejected']);
-const RECEIPT_STATES = new Set(['draft_created', 'draft_updated', 'no_changes', 'rejected', 'stale', 'failed', 'cancelled']);
+const RECEIPT_STATES = new Set(['draft_created', 'draft_updated', 'no_changes', 'rejected', 'stale', 'failed', 'cancelled', 'residue']);
 const WINDOWS_RESERVED_DEVICE = /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|conin\$|conout\$|clock\$)$/i;
 const WINDOWS_INVALID_PATH_CHARACTER = /[<>"|?*]/;
 
@@ -93,12 +93,20 @@ function validateEnvelope(value, artifactType, keys) {
 }
 
 function validateIdentity(value, name = 'intent') {
-  exactKeys(value, ['repository_id', 'repository_name', 'issue_number', 'issue_updated_at', 'input_sha', 'comment_id', 'actor', 'command', 'base_sha', 'source_sha', 'policy_sha', 'run_id', 'agent', 'branch', 'expected_remote_head', 'lease_token', 'cancel_epoch', 'lease_expires_at'], name);
+  exactKeys(value, ['repository_id', 'repository_name', 'issue_number', 'issue_url', 'issue_updated_at', 'issue_labels', 'input_sha', 'comment_id', 'actor', 'command', 'base_sha', 'source_sha', 'policy_sha', 'config_sha', 'run_id', 'agent', 'branch', 'expected_remote_head', 'lease_token', 'cancel_epoch', 'lease_expires_at'], name);
+  const repositoryName = string(value.repository_name, `${name} repository_name`, 201, REPOSITORY_NAME);
+  const issueNumber = positiveInteger(value.issue_number, `${name} issue_number`, 10 ** 9);
+  requireCondition(Array.isArray(value.issue_labels), `${name} issue_labels must be an array`);
+  const issueLabels = value.issue_labels.map((label, index) => string(label, `${name} issue_labels[${index}]`, 100));
+  requireCondition(issueLabels.length <= 100 && new Set(issueLabels).size === issueLabels.length, `${name} issue_labels must be unique and bounded`);
+  requireCondition(issueLabels.every((label, index) => index === 0 || issueLabels[index - 1].localeCompare(label, 'en') < 0), `${name} issue_labels must use canonical sort order`);
   const identity = {
     repository_id: positiveInteger(value.repository_id, `${name} repository_id`),
-    repository_name: string(value.repository_name, `${name} repository_name`, 201, REPOSITORY_NAME),
-    issue_number: positiveInteger(value.issue_number, `${name} issue_number`, 10 ** 9),
+    repository_name: repositoryName,
+    issue_number: issueNumber,
+    issue_url: string(value.issue_url, `${name} issue_url`, 2048),
     issue_updated_at: string(value.issue_updated_at, `${name} issue_updated_at`, 30, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/),
+    issue_labels: issueLabels,
     input_sha: string(value.input_sha, `${name} input_sha`, 64, SHA256),
     comment_id: positiveInteger(value.comment_id, `${name} comment_id`),
     actor: string(value.actor, `${name} actor`, 39, ACTOR),
@@ -106,6 +114,7 @@ function validateIdentity(value, name = 'intent') {
     base_sha: string(value.base_sha, `${name} base_sha`, 40, COMMIT_SHA),
     source_sha: string(value.source_sha, `${name} source_sha`, 40, COMMIT_SHA),
     policy_sha: string(value.policy_sha, `${name} policy_sha`, 40, COMMIT_SHA),
+    config_sha: string(value.config_sha, `${name} config_sha`, 40, COMMIT_SHA),
     run_id: string(value.run_id, `${name} run_id`, 128, /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/),
     agent: string(value.agent, `${name} agent`, 6, /^writer$/),
     branch: string(value.branch, `${name} branch`, 80, BRANCH),
@@ -115,6 +124,14 @@ function validateIdentity(value, name = 'intent') {
     lease_expires_at: string(value.lease_expires_at, `${name} lease_expires_at`, 30, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/),
   };
   requireCondition(Number.isFinite(Date.parse(identity.issue_updated_at)), `${name} issue_updated_at must be an ISO timestamp`);
+  let issueUrl;
+  try { issueUrl = new URL(identity.issue_url); } catch { fail(`${name} issue_url format is invalid`); }
+  requireCondition(
+    issueUrl.origin === 'https://api.github.com' && issueUrl.username === '' && issueUrl.password === '' &&
+      issueUrl.search === '' && issueUrl.hash === '' &&
+      issueUrl.pathname === `/repos/${identity.repository_name}/issues/${identity.issue_number}`,
+    `${name} issue_url must bind repository and Issue number`,
+  );
   requireCondition(identity.branch === `agent/issue-${identity.issue_number}`, `${name} branch must bind the issue number`);
   requireCondition(Number.isFinite(Date.parse(identity.lease_expires_at)), `${name} lease_expires_at must be an ISO timestamp`);
   if (identity.command === '/agent implement') requireCondition(identity.expected_remote_head === null && identity.source_sha === identity.base_sha, `${name} implement must bind source_sha to base_sha and not bind a remote head`);
@@ -127,6 +144,15 @@ export function writerFenceIsLive(identity, now = new Date()) {
     const validated = validateIdentity(identity);
     const nowMs = now instanceof Date ? now.getTime() : Number.NaN;
     return Number.isFinite(nowMs) && Date.parse(validated.lease_expires_at) > nowMs;
+  } catch { return false; }
+}
+
+export function writerFenceHasMargin(identity, now = new Date(), minimumMarginMs = 180_000) {
+  try {
+    const validated = validateIdentity(identity);
+    const nowMs = now instanceof Date ? now.getTime() : Number.NaN;
+    return Number.isSafeInteger(minimumMarginMs) && minimumMarginMs >= 0 && Number.isFinite(nowMs) &&
+      Date.parse(validated.lease_expires_at) - nowMs >= minimumMarginMs;
   } catch { return false; }
 }
 
@@ -287,9 +313,13 @@ export function validateWriterReceiptArtifact(value) {
     if (receipt.state === 'draft_updated') requireCondition(candidate.intent.command === '/agent retry-write', 'draft_updated receipt requires retry-write command');
     requireCondition(receipt.commit_sha !== null && receipt.ref === candidate.intent.branch && receipt.pr_number !== null && receipt.pr_url !== null && receipt.draft === true, 'draft receipt is incomplete or does not bind candidate branch');
     requireCondition(receipt.pr_url.endsWith(`/pull/${receipt.pr_number}`), 'receipt pr_url must bind pr_number');
-  } else {
+  } else if (receipt.state !== 'residue') {
     requireCondition(receipt.commit_sha === null && receipt.ref === null && receipt.pr_number === null && receipt.pr_url === null && receipt.draft === null, 'terminal receipt must not claim a remote write');
     if (receipt.state === 'no_changes' || receipt.state === 'rejected') requireCondition(candidate.state === 'rejected', `${receipt.state} receipt requires rejected candidate`);
+  } else {
+    requireCondition(receipt.pr_url === null, 'residue receipt must not claim a verified pull request URL');
+    requireCondition(receipt.draft === null, 'residue receipt must not claim verified Draft state');
+    requireCondition(receipt.ref === null || receipt.ref === candidate.intent.branch, 'residue receipt ref must bind candidate branch');
   }
   return receipt;
 }

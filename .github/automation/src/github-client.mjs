@@ -67,6 +67,10 @@ export class GitHubClient {
     return this.request('GET', `/repos/${this.repository}/issues/${number}`);
   }
 
+  getRepository() {
+    return this.request('GET', `/repos/${this.repository}`);
+  }
+
   getIssueComment(commentId) {
     return this.request('GET', `/repos/${this.repository}/issues/comments/${commentId}`);
   }
@@ -79,6 +83,11 @@ export class GitHubClient {
     const result = await this.list(`/repos/${this.repository}/issues/${number}/comments`, 10);
     if (result.truncated) throw new GitHubApiError('Issue has too many comments for safe managed-comment lookup');
     return result.items;
+  }
+
+  async listPullTimeline(number) {
+    const result = await this.list(`/repos/${this.repository}/issues/${number}/timeline`, 3);
+    return { events: result.items, truncated: result.truncated };
   }
 
   async listRepositoryLabels() {

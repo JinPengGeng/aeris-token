@@ -4,15 +4,16 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { MAX_WRITER_ARTIFACT_BYTES, calculateWriterCandidateSha, readWriterArtifact, validateWriterArtifact, validateWriteIntentArtifact, validateWriterCandidateArtifact, validateWriterReceiptArtifact, writeWriterArtifactAtomic, writerFenceIsLive } from '../src/writer-phase-contract.mjs';
+import { MAX_WRITER_ARTIFACT_BYTES, calculateWriterCandidateSha, readWriterArtifact, validateWriterArtifact, validateWriteIntentArtifact, validateWriterCandidateArtifact, validateWriterReceiptArtifact, writeWriterArtifactAtomic, writerFenceHasMargin, writerFenceIsLive } from '../src/writer-phase-contract.mjs';
 
 const sha = (character, length = 40) => character.repeat(length);
 function intent(overrides = {}) {
   return {
     schema_version: 2, artifact_type: 'write_intent', intent: {
       repository_id: 123456, repository_name: 'aeris/token', issue_number: 12,
+      issue_url: 'https://api.github.com/repos/aeris/token/issues/12', issue_labels: ['agent-ready', 'bug'],
       issue_updated_at: '2026-08-18T09:00:00.000Z', input_sha: sha('b', 64), comment_id: 91, actor: 'maintainer',
-      command: '/agent implement', base_sha: sha('c'), source_sha: sha('c'), policy_sha: sha('d'), run_id: '12345',
+      command: '/agent implement', base_sha: sha('c'), source_sha: sha('c'), policy_sha: sha('d'), config_sha: sha('a'), run_id: '12345',
       agent: 'writer', branch: 'agent/issue-12', expected_remote_head: null, lease_token: sha('e', 64), cancel_epoch: 0, lease_expires_at: '2026-08-18T10:00:00.000Z',
     }, ...overrides,
   };
@@ -65,11 +66,19 @@ test('intent fixes writer branch to its issue and validates command and hashes',
   assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, input_sha: 'bad' } })), /input_sha format/);
   assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, command: '/agent implement', expected_remote_head: sha('a') } })), /not bind a remote head/);
   assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, command: '/agent retry-write' } })), /retry-write must bind source_sha/);
+  assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, issue_url: 'https://api.github.com/repos/aeris/token/issues/13' } })), /bind repository and Issue/);
+  assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, issue_labels: ['bug', 'agent-ready'] } })), /canonical sort order/);
   assert.equal(validateWriteIntentArtifact(intent({ intent: { ...intent().intent, command: '/agent retry-write', source_sha: sha('a'), expected_remote_head: sha('a') } })).intent.command, '/agent retry-write');
   assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, issue_updated_at: 'not-a-timestamp' } })), /issue_updated_at format/);
   assert.equal(writerFenceIsLive(intent().intent, new Date('2026-08-18T09:30:00.000Z')), true);
   assert.equal(writerFenceIsLive(intent().intent, new Date('2026-08-18T10:00:00.000Z')), false);
   assert.equal(writerFenceIsLive({ ...intent().intent, lease_token: 'bad' }, new Date('2026-08-18T09:30:00.000Z')), false);
+});
+
+test('Writer autonomy fence requires a publication safety margin', () => {
+  const identity = intent().intent;
+  assert.equal(writerFenceHasMargin(identity, new Date('2026-08-18T09:56:59.000Z'), 180_000), true);
+  assert.equal(writerFenceHasMargin(identity, new Date('2026-08-18T09:57:01.000Z'), 180_000), false);
 });
 
 test('candidate enforces actual path count, quota, patch state, and bounded tests', () => {
@@ -116,6 +125,7 @@ test('receipt enforces command-bound published states and terminal candidate mat
   assert.throws(() => validateWriterReceiptArtifact(receipt({ state: 'rejected', reason: 'rejected', commit_sha: null, ref: null, pr_number: null, pr_url: null, draft: null })), /rejected receipt requires rejected candidate/);
   const terminal = receipt({ state: 'stale', reason: 'remote_head_changed', commit_sha: null, ref: null, pr_number: null, pr_url: null, draft: null });
   assert.equal(validateWriterReceiptArtifact(terminal).state, 'stale');
+  assert.equal(validateWriterReceiptArtifact(receipt({ state: 'residue', reason: 'ambiguous_platform_residue', commit_sha: null, ref: 'agent/issue-12', pr_number: 45, pr_url: null, draft: null })).state, 'residue');
   assert.throws(() => validateWriterReceiptArtifact(receipt({ state: 'failed' })), /terminal receipt must not claim/);
 });
 

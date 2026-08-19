@@ -176,7 +176,7 @@ function validateWriterFoundation(writer, counterpart) {
     sameStringSet(Object.keys(writer), WRITER_REGISTRY_KEYS),
     'writer registry contains unapproved fields',
   );
-  requireCondition(writer.enabled === false, 'writer must remain disabled during Phase 3 foundation');
+  requireCondition(typeof writer.enabled === 'boolean', 'writer enabled switch must be boolean');
   requireCondition(writer.phase === 3, 'writer phase must remain 3');
   requireCondition(writer.mode === 'draft_pull_request', 'writer must remain Draft PR only');
   requireCondition(

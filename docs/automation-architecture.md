@@ -33,7 +33,7 @@ Phase 2.1 采用 Actions-only，不部署常驻 Coordinator 或外部数据库�
 
 Phase 2.1 的 workflow 和运行器已合并并通过远端 CI，triage 已完成端到端实证（真实模型分析发布 managed comment，修复链见 PR `#19`/`#20`/`#22`/`#23`）。当前显式启用的 Agent 是 `triage`、`planner` 和 `reviewer`（kill switch 与 registry 双开）；`reviewer` 合并后通过独立的 owner-authored canary PR 完成受控验证。`issue-triage.yml` 继续确定性添加 `status:triage`。这三个 Agent 的唯一 GitHub 写入投影是 managed comment；Reviewer 的 `analyze` job 保持 `pull-requests: read`，无 Secret 的确定性 `reserve`/`publish` job 使用 `pull-requests: write` 写入 PR 普通评论。其受信运行器只调用 Issue Comments 的 POST/PATCH，不包含 review、approve 或 merge API，也不发布 Check Run。由于同步 workflow 需要仓库级 Actions 创建 PR 开关，此 token 权限在能力层面仍覆盖 approval；canary PR `#34` 的 run `32109708799` 已证明仅改用 `issues: write` 会在 PR 评论写回时返回 HTTP 403。后续若要消除该能力残余，必须改用权限独立的 GitHub App，而不是再次缩减 `GITHUB_TOKEN`。Writer、Policy 和 Merger 继续关闭。Phase 2.1 不修改业务标签、代码、审批或合并状态。
 
-Phase 3 当前只提供默认关闭的 Writer 基础契约，不提供可触发的 Writer workflow，也不具备远端写入能力。基础层包含独立开关与 GitHub App 身份声明、仅接受精确完整 Writer 命令的解析器、从现场 GitHub API 重读评论作者权限与 Issue 状态/标签的授权路径、路径校验纯函数、Draft PR 生命周期判定、专用有界 artifact schema，以及不暴露 review/merge API 的受限 GitHub client。registry 与 policy 固定相同的 repository ID 和大小写精确的 full name；route 与供未来 publish job 调用的边界复核 helper 都会重新读取 repository 元数据，要求 stable ID/full name 与受信合同一致，并要求评论 `issue_url` 和现场 Issue `url` 都精确指向该合同仓库及 Issue 编号。publish 复核还要求已校验 intent 的 `repository_id`/`repository_name` 与同一身份一致，然后再次读取评论、Issue、标签、作者权限和开关。模糊 PR 创建只允许按唯一 nonce 做只读对账；GitHub 缺少原子 head 前置条件时保留 fail-closed residue，不执行 close compensation。registry 与 policy 仍同时要求 `writer.enabled: false`；在独立 App、`writer` Environment、分支保护和真实 canary 全部完成前，任何人都不能仅通过设置变量启用 Writer。Writer workflow 尚不存在，publish 执行器也尚未把该 helper 接到每个真实 mutation 边界，因此这仍是启用前 blocker，不能把当前基础契约表述为写入闭环。
+Phase 3 已实现默认关闭的 Writer activation 代码和 `writer.yml` 四阶段 workflow。registry 与 policy 固定相同的 repository ID 和大小写精确的 full name；`preflight` 从受保护 main 读取契约并现场重读 repository 元数据、命令、`issue_url`、Issue generation/标签和 actor permission。`analyze` 仅生成有界 unified diff；`build` 在无写凭据环境中应用 patch、执行 allowlist/diff-check/对应测试并生成确定性 commit；`publish` 才进入 `writer` Environment、生成短期 App JWT 并 mint 仅限本仓库的 installation token。每个 ref/PR mutation 在底层 client 内部 fence 完成后再次调用 `revalidateWriterPublishBoundary`，并绑定 repository ID/full name、policy/config SHA、candidate SHA、main/base SHA、Issue ref 和完整 App-owned Draft PR lifecycle。该 lifecycle 必须来自完整 authoritative PR timeline；任何历史 close 都在受信 epoch 0 中永久 tombstone 对应 Issue，close 后 reopen 也不可复用，timeline 不可读、畸形或截断均 fail closed。模糊结果只生成 `residue` receipt，不 close PR、不删除分支。registry 与 policy 仍保持 `writer.enabled: false`，仓库变量也不得提前开启；当前仅允许无 App token、零 mutation 的 disabled canary。独立 App、Environment 和真实 App canary 的现场配置仍是唯一 activation blocker。
 
 ## 3. 信任和配置来源
 
@@ -161,7 +161,7 @@ agent
 
 managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-and-swap。即使 reservation 写后重读自己的 token，两个并发运行仍可能先后各自观察到自己写入的值并都进入模型调用。Actions `concurrency`、写回前 fingerprint 复核、Bot marker 和运行身份元数据只能减少重复并使重试趋于同一投影；并发、手工编辑、评论删除或 API 超时仍可能产生重复模型调用、重复或覆盖写入以及无法判断的状态。因此 Phase 2.1 不承诺 at-most-once 或 strict exactly-once，也不能把 managed comment 当作锁、租约、CAS 或权威运行状态。重放 ledger 在内存中最多保留最近 32 条；写入 managed comment 时会先裁剪旧原因码，再按最终编码后的评论预算丢弃最旧 ledger 记录，因此这同样只是有界、best-effort 的近期重放抑制。
 
-Writer 的 Draft PR 元数据更新和 agent ref 推进同样没有 REST 级别的 compare-and-swap：每次 mutation 前会连续完整重读并验证既有 PR/ref fencing，写后立即读回并要求精确的预期 head SHA；任何漂移都会停止后续 mutation 并 fail closed。POST 建 PR 的不确定结果则始终有界枚举同一 head 的所有 open/closed PR，要求本次 attempt marker 全局唯一，并在返回前再次读取、验证 App 所有者、draft/open、base、head SHA、完整 marker/body 和分支 head。这个只读对账流程缩窄竞态窗口并使未确认结果可见，但不会关闭 PR、删除分支或把 REST PATCH 描述为原子操作；最后一次读和写之间仍可能发生并发变更，读回不符时会报告残留而不继续写入。
+Writer 的 Draft PR 元数据更新和 agent ref 推进同样没有 REST 级别的 compare-and-swap：每个底层 mutation callback 完成命令、Issue、权限等网络读取后，会把 exact main/ref/完整 App-owned Draft PR ownership/lifecycle 快照作为最后一次写前 fence；写后立即复读 main、ref、PR 和签名 receipt marker。v2 receipt marker 绑定 issue、触发 comment、受信 lifecycle epoch、跨运行 fix cycle、candidate SHA 与 commit SHA，并由 Writer App 私钥生成域隔离 RSA-SHA256 签名；v1 receipt 或非当前 epoch receipt 均不可信。`retry-write` 的 cycle 只能从当前 exact head 上唯一且完整验证的 Draft PR receipt 推导，不能由调用方或 workflow 环境变量自报，并严格止于 2。签名 receipt 不是 lifecycle 权威来源：完整 PR timeline 中只要出现历史 `closed` 事件，Issue 就在 epoch 0 中永久 tombstone；即使 GitHub 当前返回 open/reopened 且旧 receipt 仍有效，也不得再次写入。timeline 权限/API 失败、畸形事件或三页截断都必须 fail closed。`agent/**` 规则集还必须阻止维护者重置、force-push 或删除 Writer ref，避免把旧签名 receipt 与旧 head 一起回放。POST 建 PR 的不确定结果则始终有界枚举同一 head 的所有 open/closed PR，要求本次 attempt marker 全局唯一，并在返回前再次读取、验证 App 所有者、draft/open、base/head SHA、完整 marker/body 和分支 head。这个只读对账流程缩窄竞态窗口并使未确认结果可见，但不会关闭 PR、删除分支或把 REST PATCH 描述为原子操作；最后一次读和写之间仍可能发生并发变更，读回不符时会报告残留而不继续写入。
 
 每对象每小时运行数和并发数同样是 Actions-only 的 best-effort 防滥用护栏，不是精确配额或计费限流。小时窗口按 `[now - 60 minutes, now]` 计算，恰好位于下界的预约仍计入。Bot 自己发布的评论不得再次触发 Agent；发布器在重试前必须重新读取当前状态并尽量收敛。当前只读阶段不创建 PR、写业务标签或执行合并，所以这些高风险 effect 的强幂等问题留在相应阶段启用前解决。
 
@@ -196,7 +196,7 @@ Phase 2.1 的模型阶段不得获得 shell 或任意网络工具。未来 Write
 1. Phase 0：策略契约、威胁模型、kill switch 和仓库设置审计（已实现，默认关闭）。
 2. Phase 1：checkpoint 同步 PoC、测试和迁移（已实现；首次冲突路径已经 PR `#16` 人工三方解决并实证，checkpoint 已追平 `upstream/main`，后续回到定时 no-op/自动 PR 循环）。
 3. Phase 2.1：Actions-only 的只读 triage/planner/reviewer；模型分析与确定性写回分 job，通过有界无 Secret 的 JSON artifact 交接（已合并并逐个完成远端验证；Reviewer canary 证据记录于 Issue `#11`）。
-4. Phase 3：独立 Writer 身份和 Draft PR（当前仅有默认关闭的基础契约；workflow、App/Environment、受控生成器、publish 执行器和 canary 均未启用）。
+4. Phase 3：独立 Writer 身份和 Draft PR（activation workflow、受控生成器、build/publish 执行器和 disabled canary harness 已实现；开关保持关闭，等待 App/Environment provisioning 与真实 App canary）。
 5. Phase 4：独立 Policy 身份及 shadow/human gate。
 6. Phase 5：独立 Merger 身份及极小 allowlist。
 7. Phase 6：仅在真实运行证明 Actions-only 无法满足要求后，才引入外部状态或工作流服务。触发条件包括多 worker/多实例协调、可靠跨运行恢复或复杂 DAG、精确额度与计费限流、需要事务化 outbox/effect receipt，或不可变且可查询的审计要求。
@@ -216,6 +216,6 @@ Phase 6 需要的是符合一致性和运维要求的权威状态层，不等于
 - 通用 Agent 自动合并在 Policy Gate 进入要求检查前不得启用；managed 上游同步仅使用上述确定性原生 auto-merge 例外。
 - `writer`、`policy`、`merger` 和 `sync` Agent Environment 仅允许 `main`，不要求人工 reviewer，且管理员不能绕过 Environment 保护。
 - 发布 Secrets 仅保存在受保护的 `release` Environment；该 Environment 继续要求 `JinPengGeng` 人工审批，且管理员不能绕过。
-- Writer 启用前必须已有独立 `writer` Environment 和仓库级私有 GitHub App；App 不得拥有 branch-protection bypass。Writer workflow、受控生成器、发布前二次现场复核和真实 canary 仍是独立 activation blocker。
+- Writer 启用前必须已有独立 `writer` Environment 和仓库级私有 GitHub App；App 不得拥有 branch-protection bypass。代码侧 workflow、受控生成器、发布前逐 mutation 现场复核和 disabled canary harness 已完成；剩余 blocker 仅为现场 provisioning 和真实 App canary，步骤见 [Writer activation runbook](writer-activation-runbook.md)。
 
 任何远端设置变更都应记录在 Issue `#11`，并通过当前配置的现场读取结果验证。

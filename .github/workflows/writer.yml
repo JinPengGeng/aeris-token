@@ -1,0 +1,229 @@
+name: Writer Draft PR
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      canary:
+        description: Run the disabled, read-only Writer harness
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: writer-issue-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.canary == true) ||
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
+       (github.event.comment.body == '/agent implement' || github.event.comment.body == '/agent retry-write'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Check out trusted main
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/automation/package-lock.json
+      - name: Install trusted runtime
+        working-directory: .github/automation
+        run: npm ci --ignore-scripts
+      - name: Validate Writer invocation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
+          AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
+          AERIS_WRITER_CANARY: ${{ github.event_name == 'workflow_dispatch' && inputs.canary == true && 'true' || 'false' }}
+          AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_PUBLIC_KEY: ${{ vars.AERIS_WRITER_PUBLIC_KEY }}
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/writer-preflight/preflight.json
+        run: node .github/automation/src/run-writer-phase.mjs preflight
+      - name: Upload preflight
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: writer-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/writer-preflight/preflight.json
+          if-no-files-found: error
+          retention-days: 1
+
+  analyze:
+    needs: [preflight]
+    if: always() && needs.preflight.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted main
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/automation/package-lock.json
+      - name: Install trusted runtime
+        working-directory: .github/automation
+        run: npm ci --ignore-scripts
+      - name: Download preflight
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: writer-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/writer-preflight
+      - name: Read preflight state
+        id: state
+        shell: bash
+        run: |
+          state="$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],'utf8')).state)" "$RUNNER_TEMP/writer-preflight/preflight.json")"
+          case "$state" in ready|canary|terminal) ;; *) exit 1 ;; esac
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+      - name: Generate bounded candidate patch
+        if: steps.state.outputs.state == 'ready'
+        env:
+          AERIS_INPUT_PATH: ${{ runner.temp }}/writer-preflight/preflight.json
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/writer-analysis/analysis.json
+          AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
+          AERIS_AI_API_KEY: ${{ secrets.AERIS_AI_API_KEY }}
+          AERIS_AI_MODEL: ${{ vars.AERIS_AI_MODEL }}
+          AERIS_AI_MODEL_WRITER: ${{ vars.AERIS_AI_MODEL_WRITER }}
+          AERIS_AI_MODEL_FALLBACK: ${{ vars.AERIS_AI_MODEL_FALLBACK }}
+        run: node .github/automation/src/run-writer-phase.mjs analyze
+      - name: Pass through disabled canary or terminal state
+        if: steps.state.outputs.state != 'ready'
+        env:
+          AERIS_INPUT_PATH: ${{ runner.temp }}/writer-preflight/preflight.json
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/writer-analysis/analysis.json
+        run: node .github/automation/src/run-writer-phase.mjs analyze
+      - name: Upload analysis
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: writer-analysis-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/writer-analysis/analysis.json
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    needs: [analyze]
+    if: always() && needs.analyze.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted main without credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/automation/package-lock.json
+      - name: Install trusted runtime
+        working-directory: .github/automation
+        run: npm ci --ignore-scripts
+      - name: Download analysis
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: writer-analysis-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/writer-analysis
+      - name: Build and test candidate without credentials
+        env:
+          AERIS_INPUT_PATH: ${{ runner.temp }}/writer-analysis/analysis.json
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/writer-build/build.json
+        run: node .github/automation/src/run-writer-phase.mjs build
+      - name: Upload tested build
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: writer-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/writer-build/build.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [build]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: writer
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted main without credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/automation/package-lock.json
+      - name: Install trusted runtime
+        working-directory: .github/automation
+        run: npm ci --ignore-scripts
+      - name: Download tested build
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: writer-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/writer-build
+      - name: Read build state
+        id: state
+        shell: bash
+        run: |
+          state="$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],'utf8')).state)" "$RUNNER_TEMP/writer-build/build.json")"
+          case "$state" in ready|canary|terminal) ;; *) exit 1 ;; esac
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+      - name: Publish with repository-scoped Writer App
+        if: steps.state.outputs.state == 'ready'
+        env:
+          AERIS_INPUT_PATH: ${{ runner.temp }}/writer-build/build.json
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/writer-publish/receipt.json
+          AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
+          AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
+          AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_PUBLIC_KEY: ${{ vars.AERIS_WRITER_PUBLIC_KEY }}
+          AERIS_WRITER_PRIVATE_KEY: ${{ secrets.AERIS_WRITER_PRIVATE_KEY }}
+        run: node .github/automation/src/run-writer-phase.mjs publish
+      - name: Complete disabled canary without App credentials
+        if: steps.state.outputs.state != 'ready'
+        env:
+          AERIS_INPUT_PATH: ${{ runner.temp }}/writer-build/build.json
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/writer-publish/receipt.json
+        run: node .github/automation/src/run-writer-phase.mjs publish
+      - name: Upload immutable Writer receipt
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: writer-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/writer-publish/receipt.json
+          if-no-files-found: error
+          retention-days: 30
