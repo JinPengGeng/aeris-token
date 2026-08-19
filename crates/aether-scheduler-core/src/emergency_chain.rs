@@ -528,9 +528,20 @@ impl GatewayEmergencyChainAuthority {
 }
 
 impl EmergencyChainLedgerAuthority {
-    /// Constructs a proof only after the authoritative ledger has recorded
-    /// that this exact reserved slot is safely unmaterializable.
+    /// Refuses to mint a proof until the authoritative ledger integration is
+    /// present. A ledger entry ID alone is not evidence that a slot was
+    /// recorded as safely unmaterializable.
     pub fn authoritative_safe_skip_proof(
+        &self,
+        _permit: &EmergencyChainAttemptPermit,
+        _ledger_entry_id: impl Into<String>,
+        _observed_at: ServerEmergencyChainInstant,
+    ) -> Result<EmergencyChainSafeSkipProof, EmergencyChainLedgerError> {
+        Err(EmergencyChainLedgerError::AuthoritativeLedgerUnavailable)
+    }
+
+    #[cfg(test)]
+    fn test_verified_safe_skip_proof(
         &self,
         permit: &EmergencyChainAttemptPermit,
         ledger_entry_id: impl Into<String>,
@@ -549,6 +560,14 @@ impl EmergencyChainLedgerAuthority {
             observed_at_unix_secs: observed_at.unix_secs,
         })
     }
+}
+
+/// The preparatory domain slice has no authoritative materialization ledger.
+/// Production code must keep emergency progress locked until that integration
+/// can verify a committed record for the exact permit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmergencyChainLedgerError {
+    AuthoritativeLedgerUnavailable,
 }
 
 pub enum EmergencyChainGateRequest<'a> {
@@ -863,6 +882,16 @@ mod tests {
 
     fn ledger_authority() -> EmergencyChainLedgerAuthority {
         EmergencyChainLedgerAuthority { _sealed: () }
+    }
+
+    fn test_verified_safe_skip_proof(
+        permit: &EmergencyChainAttemptPermit,
+        ledger_entry_id: &str,
+        observed_at: ServerEmergencyChainInstant,
+    ) -> EmergencyChainSafeSkipProof {
+        ledger_authority()
+            .test_verified_safe_skip_proof(permit, ledger_entry_id, observed_at)
+            .unwrap()
     }
 
     fn instant(unix_secs: i64) -> ServerEmergencyChainInstant {
@@ -1327,9 +1356,8 @@ mod tests {
             authorize(&mut grant, &target_a, ISSUED_AT).unwrap_err(),
             EmergencyChainGateError::AttemptAlreadyOutstanding
         );
-        let proof_a = ledger_authority()
-            .authoritative_safe_skip_proof(&permit_a, "ledger-entry-a", instant(ISSUED_AT + 1))
-            .unwrap();
+        let proof_a =
+            test_verified_safe_skip_proof(&permit_a, "ledger-entry-a", instant(ISSUED_AT + 1));
         let context_a = context(&grant, ISSUED_AT + 1);
         assert_eq!(
             grant
@@ -1366,14 +1394,11 @@ mod tests {
         let target_a = target("a");
         let mut grant = issue_grant(vec![target_a.clone(), target("b")]);
         let future_permit = permit(authorize(&mut grant, &target_a, ISSUED_AT).unwrap());
-        let ledger_authority = ledger_authority();
-        let proof = ledger_authority
-            .authoritative_safe_skip_proof(
-                &future_permit,
-                "ledger-entry-future",
-                instant(ISSUED_AT + 2),
-            )
-            .unwrap();
+        let proof = test_verified_safe_skip_proof(
+            &future_permit,
+            "ledger-entry-future",
+            instant(ISSUED_AT + 2),
+        );
         let future_context = context(&grant, ISSUED_AT + 1);
         assert_eq!(
             grant.apply_authoritative_safe_skip(future_permit, proof, &future_context),
@@ -1382,13 +1407,89 @@ mod tests {
 
         let mut before_authorization = issue_grant(vec![target_a.clone(), target("b")]);
         let permit = permit(authorize(&mut before_authorization, &target_a, ISSUED_AT).unwrap());
-        let proof = ledger_authority
-            .authoritative_safe_skip_proof(&permit, "ledger-entry-before", instant(ISSUED_AT - 1))
-            .unwrap();
+        let proof =
+            test_verified_safe_skip_proof(&permit, "ledger-entry-before", instant(ISSUED_AT - 1));
         let context = context(&before_authorization, ISSUED_AT + 1);
         assert_eq!(
             before_authorization.apply_authoritative_safe_skip(permit, proof, &context),
             Err(EmergencyChainSafeSkipError::ProofMismatch)
+        );
+    }
+
+    #[test]
+    fn production_ledger_authority_refuses_forged_entry_ids() {
+        let target_a = target("a");
+        let mut grant = issue_grant(vec![target_a.clone()]);
+        let permit = permit(authorize(&mut grant, &target_a, ISSUED_AT).unwrap());
+
+        assert_eq!(
+            ledger_authority()
+                .authoritative_safe_skip_proof(&permit, "forged-ledger-entry", instant(ISSUED_AT))
+                .unwrap_err(),
+            EmergencyChainLedgerError::AuthoritativeLedgerUnavailable
+        );
+        assert_eq!(
+            authorize(&mut grant, &target_a, ISSUED_AT).unwrap_err(),
+            EmergencyChainGateError::AttemptAlreadyOutstanding
+        );
+    }
+
+    #[test]
+    fn safe_skip_rejects_wrong_slot_or_scope_and_expired_context() {
+        let target_a = target("a");
+        let mut wrong_slot_grant = issue_grant(vec![target_a.clone(), target("b")]);
+        let wrong_slot_permit =
+            permit(authorize(&mut wrong_slot_grant, &target_a, ISSUED_AT).unwrap());
+        let mut wrong_slot_proof = test_verified_safe_skip_proof(
+            &wrong_slot_permit,
+            "ledger-entry-wrong-slot",
+            instant(ISSUED_AT),
+        );
+        wrong_slot_proof.chain_position = 1;
+        assert_eq!(
+            wrong_slot_grant.apply_authoritative_safe_skip(
+                wrong_slot_permit,
+                wrong_slot_proof,
+                &context(&wrong_slot_grant, ISSUED_AT),
+            ),
+            Err(EmergencyChainSafeSkipError::ProofMismatch)
+        );
+
+        let mut wrong_scope_grant = issue_grant(vec![target_a.clone()]);
+        let wrong_scope_permit =
+            permit(authorize(&mut wrong_scope_grant, &target_a, ISSUED_AT).unwrap());
+        let mut wrong_scope_proof = test_verified_safe_skip_proof(
+            &wrong_scope_permit,
+            "ledger-entry-wrong-scope",
+            instant(ISSUED_AT),
+        );
+        wrong_scope_proof.request_scope = request_scope("other-request", 'b', "other-nonce");
+        assert_eq!(
+            wrong_scope_grant.apply_authoritative_safe_skip(
+                wrong_scope_permit,
+                wrong_scope_proof,
+                &context(&wrong_scope_grant, ISSUED_AT),
+            ),
+            Err(EmergencyChainSafeSkipError::ProofMismatch)
+        );
+
+        let mut expired_grant = issue_grant(vec![target_a.clone()]);
+        let expired_permit = permit(authorize(&mut expired_grant, &target_a, ISSUED_AT).unwrap());
+        let expired_proof = test_verified_safe_skip_proof(
+            &expired_permit,
+            "ledger-entry-expired",
+            instant(ISSUED_AT),
+        );
+        let expires_at = expired_grant.expires_at_unix_secs();
+        assert_eq!(
+            expired_grant.apply_authoritative_safe_skip(
+                expired_permit,
+                expired_proof,
+                &context(&expired_grant, expires_at),
+            ),
+            Err(EmergencyChainSafeSkipError::Gate(
+                EmergencyChainGateError::Expired
+            ))
         );
     }
 
@@ -1402,9 +1503,8 @@ mod tests {
             EmergencyChainGateError::TargetOutsideChain
         );
         let permit_a = permit(authorize(&mut grant, &target_a, ISSUED_AT).unwrap());
-        let proof_a = ledger_authority()
-            .authoritative_safe_skip_proof(&permit_a, "ledger-entry-last", instant(ISSUED_AT + 1))
-            .unwrap();
+        let proof_a =
+            test_verified_safe_skip_proof(&permit_a, "ledger-entry-last", instant(ISSUED_AT + 1));
         let context_a = context(&grant, ISSUED_AT + 1);
         assert_eq!(
             grant
@@ -1437,14 +1537,11 @@ mod tests {
         );
 
         let missing_a_permit = permit(authorize(&mut grant, &target_a, ISSUED_AT).unwrap());
-        let ledger_authority = ledger_authority();
-        let proof = ledger_authority
-            .authoritative_safe_skip_proof(
-                &missing_a_permit,
-                "ledger-entry-000001",
-                instant(ISSUED_AT + 1),
-            )
-            .unwrap();
+        let proof = test_verified_safe_skip_proof(
+            &missing_a_permit,
+            "ledger-entry-000001",
+            instant(ISSUED_AT + 1),
+        );
         let context = context(&grant, ISSUED_AT + 1);
         assert_eq!(
             grant

@@ -49,14 +49,19 @@ The scheduler core defines a separate `EmergencyChainGrant` capability:
 
 ## Trusted input boundary
 
-Route/auth/time values are minted through `GatewayEmergencyChainAuthority`,
-while safe-skip proof is minted through the separate
-`EmergencyChainLedgerAuthority`. Both are sealed capabilities with no safe
-public constructor, `Default`, `Clone`, or serde contract; ordinary dependency
-crates cannot forge them, and gateway dispatch authority cannot mint ledger
-proof. This preparatory slice deliberately exposes no bootstrap path, so the
-capability remains unusable until narrowly owned authority bootstraps are
-reviewed and added.
+Route/auth/time values are minted through `GatewayEmergencyChainAuthority`.
+`EmergencyChainLedgerAuthority` is separately sealed, but it deliberately
+returns `AuthoritativeLedgerUnavailable` for every production safe-skip proof
+request. A non-empty ledger-entry string is not authority evidence and cannot
+unlock progress. The test-only fixture used by this domain module is not
+compiled into production artifacts. The future ledger integration must verify a
+committed record for the exact request scope, chain hash, slot, permit/fencing
+identity, authorization instant, and observation instant before it can mint a
+proof. Both authorities have no safe public constructor, `Default`, `Clone`,
+or serde contract; ordinary dependency crates cannot forge them, and gateway
+dispatch authority cannot mint ledger proof. This preparatory slice deliberately
+exposes no bootstrap path, so the capability remains unusable until narrowly
+owned authority bootstraps are reviewed and added.
 
 `NormalRouting` requires `ServerNormalRoutingActivation`. Emergency principal
 and operation come from
