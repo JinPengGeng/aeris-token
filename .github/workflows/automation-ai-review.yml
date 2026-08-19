@@ -1,0 +1,136 @@
+name: Automation AI Review Attestation
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Pull request number to analyze
+        required: true
+        type: number
+
+permissions: {}
+
+concurrency:
+  group: aeris-ai-attestation-v3-${{ github.repository_id }}-${{ inputs.pull_request_number }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: vars.AERIS_AGENTS_ENABLED == 'true' && vars.AERIS_AI_ATTESTATION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v4
+        with:
+          node-version: '22'
+      - run: npm ci --ignore-scripts
+        working-directory: .github/automation
+      - name: Prepare exact review generation
+        env:
+          AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
+          AERIS_AI_ATTESTATION_ENABLED: ${{ vars.AERIS_AI_ATTESTATION_ENABLED }}
+          AERIS_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          AERIS_AI_MODEL_REVIEWER: ${{ vars.AERIS_AI_MODEL_REVIEWER }}
+          AERIS_AI_MODEL_SECURITY: ${{ vars.AERIS_AI_MODEL_SECURITY }}
+          AERIS_AI_MODEL_FALLBACK: ${{ vars.AERIS_AI_MODEL_FALLBACK }}
+          GITHUB_TOKEN: ${{ github.token }}
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/ai-review/candidate.json
+        run: node .github/automation/src/run-ai-review.mjs prepare
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: ai-review-candidate
+          path: ${{ runner.temp }}/ai-review/candidate.json
+          retention-days: 1
+          if-no-files-found: error
+
+  analyze:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions: {}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v4
+        with:
+          node-version: '22'
+      - run: npm ci --ignore-scripts
+        working-directory: .github/automation
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ai-review-candidate
+          path: ${{ runner.temp }}/ai-review
+      - name: Analyze without GitHub credentials
+        env:
+          AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
+          AERIS_AI_ATTESTATION_ENABLED: ${{ vars.AERIS_AI_ATTESTATION_ENABLED }}
+          AERIS_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          AERIS_AI_MODEL_REVIEWER: ${{ vars.AERIS_AI_MODEL_REVIEWER }}
+          AERIS_AI_MODEL_SECURITY: ${{ vars.AERIS_AI_MODEL_SECURITY }}
+          AERIS_AI_MODEL_FALLBACK: ${{ vars.AERIS_AI_MODEL_FALLBACK }}
+          AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
+          AERIS_AI_API_KEY: ${{ secrets.AERIS_AI_API_KEY }}
+          GITHUB_TOKEN: ''
+          AERIS_CANDIDATE_PATH: ${{ runner.temp }}/ai-review/candidate.json
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/ai-review/analysis.json
+        run: node .github/automation/src/run-ai-review.mjs analyze
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: ai-review-analysis
+          path: ${{ runner.temp }}/ai-review/analysis.json
+          retention-days: 1
+          if-no-files-found: error
+
+  finalize:
+    if: always() && vars.AERIS_AGENTS_ENABLED == 'true' && vars.AERIS_AI_ATTESTATION_ENABLED == 'true'
+    needs: [prepare, analyze]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v4
+        with:
+          node-version: '22'
+      - run: npm ci --ignore-scripts
+        working-directory: .github/automation
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          pattern: ai-review-*
+          path: ${{ runner.temp }}/ai-review
+          merge-multiple: true
+      - name: Revalidate and publish terminal checks
+        env:
+          AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
+          AERIS_AI_ATTESTATION_ENABLED: ${{ vars.AERIS_AI_ATTESTATION_ENABLED }}
+          AERIS_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          AERIS_AI_MODEL_REVIEWER: ${{ vars.AERIS_AI_MODEL_REVIEWER }}
+          AERIS_AI_MODEL_SECURITY: ${{ vars.AERIS_AI_MODEL_SECURITY }}
+          AERIS_AI_MODEL_FALLBACK: ${{ vars.AERIS_AI_MODEL_FALLBACK }}
+          AERIS_PREPARE_JOB_RESULT: ${{ needs.prepare.result }}
+          AERIS_ANALYZE_JOB_RESULT: ${{ needs.analyze.result }}
+          GITHUB_TOKEN: ${{ github.token }}
+          AERIS_CANDIDATE_PATH: ${{ runner.temp }}/ai-review/candidate.json
+          AERIS_ANALYSIS_PATH: ${{ runner.temp }}/ai-review/analysis.json
+          AERIS_DETAILS_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/ai-review/finalization.json
+        run: node .github/automation/src/run-ai-review.mjs finalize
