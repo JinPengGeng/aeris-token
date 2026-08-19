@@ -396,6 +396,7 @@ export async function runWriterPublish({
   client = null,
   fetchImpl = globalThis.fetch,
   repositoryPath = repoRoot,
+  writerExecFileImpl = undefined,
 }) {
   if (artifact.state === 'canary') return activation('canary', 'publish', { ...artifact.payload, mutations: 0 }, 'disabled_canary');
   if (artifact.state !== 'ready') return activation('terminal', 'publish', null, artifact.reason);
@@ -430,6 +431,7 @@ export async function runWriterPublish({
       repositoryId: candidate.intent.repository_id,
       writerApp,
       fetchImpl,
+      execFileImpl: writerExecFileImpl,
       totalTimeoutMs: 30_000,
       headersTimeoutMs: 10_000,
       bodyTimeoutMs: 15_000,

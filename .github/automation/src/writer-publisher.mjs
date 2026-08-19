@@ -118,6 +118,13 @@ function idempotentPull(snapshot, candidate, commitSha, metadata, repositoryId, 
     ? pull : null;
 }
 
+function exactManagedMetadata(pull, metadata) {
+  const expectedBody = metadata.body.length === 0
+    ? WRITER_OWNERSHIP_MARKER
+    : `${metadata.body}\n\n${WRITER_OWNERSHIP_MARKER}`;
+  return pull?.title === metadata.title && pull?.body === expectedBody;
+}
+
 function validRef(raw, expectedRef) {
   return raw?.ref === `refs/heads/${expectedRef}` && raw?.object?.type === 'commit' && SHA.test(raw.object.sha);
 }
@@ -346,14 +353,13 @@ export async function publishWriterCandidate({
     };
 
     if (snapshot.lifecycle.action === 'create') {
+      if (repositoryPath === null || typeof github.pushAgentRefFromRepository !== 'function') {
+        return terminalReceipt(candidate, 'failed', 'atomic_ref_cas_unavailable');
+      }
       const createRefBoundary = mutationBoundary({ kind: 'create_ref' });
       const refBoundary = await createRefBoundary();
       if (refBoundary.action !== 'write') return terminalReceipt(candidate, 'stale', refBoundary.reason);
-      if (repositoryPath !== null && typeof github.pushAgentRefFromRepository === 'function') {
-        await github.pushAgentRefFromRepository(candidate.intent.issue_number, null, commitSha, repositoryPath, createRefBoundary);
-      } else {
-        await github.createAgentRef(candidate.intent.issue_number, commitSha, createRefBoundary);
-      }
+      await github.pushAgentRefFromRepository(candidate.intent.issue_number, null, commitSha, repositoryPath, createRefBoundary);
 
       snapshot = await readSnapshot(github, candidate, repositoryId, writerApp);
       if (snapshot.mainSha !== candidate.intent.base_sha || !snapshot.branch.exists || snapshot.branch.headSha !== commitSha || snapshot.pulls.length !== 0) {
@@ -371,6 +377,12 @@ export async function publishWriterCandidate({
     }
 
     const pullNumber = snapshot.lifecycle.prNumber;
+    if (!exactManagedMetadata(snapshot.pulls[0], prMetadata)) {
+      return terminalReceipt(candidate, 'stale', 'managed_pr_metadata_change_requires_cas');
+    }
+    if (repositoryPath === null || typeof github.pushAgentRefFromRepository !== 'function') {
+      return terminalReceipt(candidate, 'failed', 'atomic_ref_cas_unavailable');
+    }
     const advanceRefBoundary = mutationBoundary({
       kind: 'advance_ref',
       refSha: candidate.intent.expected_remote_head,
@@ -379,22 +391,13 @@ export async function publishWriterCandidate({
     });
     const refBoundary = await advanceRefBoundary();
     if (refBoundary.action !== 'write') return terminalReceipt(candidate, 'stale', refBoundary.reason);
-    if (repositoryPath !== null && typeof github.pushAgentRefFromRepository === 'function') {
-      await github.pushAgentRefFromRepository(
-        candidate.intent.issue_number,
-        candidate.intent.expected_remote_head,
-        commitSha,
-        repositoryPath,
-        advanceRefBoundary,
-      );
-    } else {
-      await github.advanceAgentRef(
-        candidate.intent.issue_number,
-        candidate.intent.expected_remote_head,
-        commitSha,
-        advanceRefBoundary,
-      );
-    }
+    await github.pushAgentRefFromRepository(
+      candidate.intent.issue_number,
+      candidate.intent.expected_remote_head,
+      commitSha,
+      repositoryPath,
+      advanceRefBoundary,
+    );
 
     snapshot = await readSnapshot(github, candidate, repositoryId, writerApp);
     if (snapshot.mainSha !== candidate.intent.base_sha || snapshot.branch.headSha !== commitSha || snapshot.pulls.length !== 1) {
@@ -412,7 +415,7 @@ export async function publishWriterCandidate({
     });
     const prBoundary = await updatePrBoundary();
     if (prBoundary.action !== 'write') return residueReceipt(candidate, prBoundary.reason);
-    const updated = await github.updateManagedDraftPull(
+    const updated = await github.verifyManagedDraftPullMetadata(
       candidate.intent.issue_number,
       pull.number,
       commitSha,

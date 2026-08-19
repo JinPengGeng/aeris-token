@@ -77,6 +77,17 @@ function agentRef(issueNumber) {
   return `agent/issue-${positiveNumber(issueNumber, 'Issue number')}`;
 }
 
+export function writerRefPushArguments(issueNumber, expectedOldSha, newSha) {
+  const ref = `refs/heads/${agentRef(issueNumber)}`;
+  const verifiedNewSha = validateSha(newSha, 'New ref SHA');
+  const verifiedOldSha = expectedOldSha === null ? '' : validateSha(expectedOldSha, 'Expected old ref SHA');
+  if (verifiedOldSha === verifiedNewSha) fail('New ref SHA must differ from the expected old SHA');
+  return [
+    'push', '--porcelain', `--force-with-lease=${ref}:${verifiedOldSha}`, 'origin',
+    `${verifiedNewSha}:${ref}`,
+  ];
+}
+
 function validatedAgentRef(value) {
   if (typeof value !== 'string' || !/^agent\/issue-[1-9]\d*$/.test(value)) fail('Writer ref is invalid');
   const issueNumber = Number(value.slice('agent/issue-'.length));
@@ -266,13 +277,14 @@ export class WriterGitHubClient {
   #headersTimeoutMs;
   #bodyTimeoutMs;
   #randomUUIDImpl;
+  #execFileImpl;
   #identityVerified = false;
 
   constructor(options = {}) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) fail('Writer GitHub client options are invalid');
     const allowed = new Set([
       'appJwt', 'repository', 'repositoryId', 'writerApp', 'fetchImpl',
-      'totalTimeoutMs', 'headersTimeoutMs', 'bodyTimeoutMs', 'randomUUIDImpl',
+      'totalTimeoutMs', 'headersTimeoutMs', 'bodyTimeoutMs', 'randomUUIDImpl', 'execFileImpl',
     ]);
     if (Object.keys(options).some((key) => !allowed.has(key))) fail('Writer GitHub client options contain unsupported fields');
     const {
@@ -285,6 +297,7 @@ export class WriterGitHubClient {
       headersTimeoutMs,
       bodyTimeoutMs,
       randomUUIDImpl = randomUUID,
+      execFileImpl = execFileAsync,
     } = options;
     validateAppJwt(appJwt);
     validateRepository(repository);
@@ -292,6 +305,7 @@ export class WriterGitHubClient {
     const normalizedWriterApp = validateWriterApp(writerApp);
     if (typeof fetchImpl !== 'function') fail('GitHub fetch implementation is invalid');
     if (typeof randomUUIDImpl !== 'function') fail('Writer UUID implementation is invalid');
+    if (typeof execFileImpl !== 'function') fail('Writer subprocess implementation is invalid');
 
     this.#appJwt = appJwt;
     this.#repository = repository;
@@ -300,6 +314,7 @@ export class WriterGitHubClient {
     this.#writerApp = normalizedWriterApp;
     this.#fetchImpl = fetchImpl;
     this.#randomUUIDImpl = randomUUIDImpl;
+    this.#execFileImpl = execFileImpl;
     this.#totalTimeoutMs = boundedTimeout(totalTimeoutMs, 'Total timeout', DEFAULT_TOTAL_TIMEOUT_MS);
     this.#headersTimeoutMs = boundedTimeout(headersTimeoutMs, 'Headers timeout', DEFAULT_HEADERS_TIMEOUT_MS);
     this.#bodyTimeoutMs = boundedTimeout(bodyTimeoutMs, 'Body timeout', DEFAULT_BODY_TIMEOUT_MS);
@@ -544,10 +559,6 @@ export class WriterGitHubClient {
     return this.#request('GET', `/repos/${this.#repository}/git/ref/heads/main`);
   }
 
-  getRepository() {
-    return this.#request('GET', `/repos/${this.#repository}`);
-  }
-
   async listPullsForHead(ref) {
     const head = `${this.#owner}:${validatedAgentRef(ref)}`;
     const pulls = await this.#list(`/repos/${this.#repository}/pulls?state=all&head=${encodeURIComponent(head)}`);
@@ -669,119 +680,26 @@ export class WriterGitHubClient {
     return persisted;
   }
 
-  async updateManagedDraftPull(issueNumber, pullNumber, expectedHeadSha, metadata, mutationBoundary = null) {
+  async verifyManagedDraftPullMetadata(issueNumber, pullNumber, expectedHeadSha, metadata, mutationBoundary = null) {
     const normalized = validateMetadata(metadata);
     const verifiedIssueNumber = positiveNumber(issueNumber, 'Issue number');
     const verifiedPullNumber = positiveNumber(pullNumber, 'Pull request number');
     const verifiedHeadSha = validateSha(expectedHeadSha, 'Expected head SHA');
     this.#requireVerifiedIdentity();
     const path = `/repos/${this.#repository}/pulls/${verifiedPullNumber}`;
-    const before = await this.#request('GET', path);
-    this.#verifyManagedPull(before, {
+    this.#verifyManagedPull(await this.#request('GET', path), {
       issueNumber: verifiedIssueNumber,
       pullNumber: verifiedPullNumber,
       expectedHeadSha: verifiedHeadSha,
+      metadata: normalized,
     });
-    const fenced = await this.#request('GET', path);
-    this.#verifyManagedPull(fenced, {
+    await requireMutationBoundary(mutationBoundary);
+    return this.#verifyManagedPull(await this.#request('GET', path), {
       issueNumber: verifiedIssueNumber,
       pullNumber: verifiedPullNumber,
       expectedHeadSha: verifiedHeadSha,
+      metadata: normalized,
     });
-    await requireMutationBoundary(mutationBoundary);
-    let mutationError = null;
-    try {
-      await this.#request('PATCH', path, normalized);
-    } catch (error) {
-      if (!isAmbiguousMutationError(error)) throw error;
-      mutationError = error;
-    }
-    try {
-      const after = await this.#request('GET', path);
-      return this.#verifyManagedPull(after, {
-        issueNumber: verifiedIssueNumber,
-        pullNumber: verifiedPullNumber,
-        expectedHeadSha: verifiedHeadSha,
-        metadata: normalized,
-      });
-    } catch (error) {
-      if (mutationError) {
-        throw new AggregateError(
-          [mutationError, error],
-          'Writer could not reconcile an ambiguous Draft PR metadata update; platform state may have changed',
-        );
-      }
-      throw error;
-    }
-  }
-
-  async createAgentRef(issueNumber, sha, mutationBoundary = null) {
-    const verifiedIssueNumber = positiveNumber(issueNumber, 'Issue number');
-    const verifiedSha = validateSha(sha, 'Ref SHA');
-    this.#requireVerifiedIdentity();
-    try {
-      await this.#readAgentRef(verifiedIssueNumber);
-      fail('Writer ref already exists');
-    } catch (error) {
-      if (!(error instanceof WriterGitHubApiError) || error.status !== 404) throw error;
-    }
-    await requireMutationBoundary(mutationBoundary);
-    let mutationError = null;
-    try {
-      const created = await this.#request('POST', `/repos/${this.#repository}/git/refs`, {
-        ref: `refs/heads/${agentRef(verifiedIssueNumber)}`,
-        sha: verifiedSha,
-      });
-      this.#verifyRef(created, verifiedIssueNumber, verifiedSha);
-    } catch (error) {
-      if (!isAmbiguousMutationError(error)) throw error;
-      mutationError = error;
-    }
-    try {
-      return this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, verifiedSha);
-    } catch (error) {
-      if (mutationError) {
-        throw new AggregateError(
-          [mutationError, error],
-          'Writer could not reconcile an ambiguous agent ref creation; platform state may have changed',
-        );
-      }
-      throw error;
-    }
-  }
-
-  async advanceAgentRef(issueNumber, expectedOldSha, newSha, mutationBoundary = null) {
-    const verifiedIssueNumber = positiveNumber(issueNumber, 'Issue number');
-    const verifiedOldSha = validateSha(expectedOldSha, 'Expected old ref SHA');
-    const verifiedNewSha = validateSha(newSha, 'New ref SHA');
-    if (verifiedOldSha === verifiedNewSha) fail('New ref SHA must differ from the expected old SHA');
-    this.#requireVerifiedIdentity();
-    this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, verifiedOldSha);
-    this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, verifiedOldSha);
-    await requireMutationBoundary(mutationBoundary);
-    let mutationError = null;
-    try {
-      const updated = await this.#request(
-        'PATCH',
-        `/repos/${this.#repository}/git/refs/heads/${encodeURIComponent(agentRef(verifiedIssueNumber))}`,
-        { sha: verifiedNewSha, force: false },
-      );
-      this.#verifyRef(updated, verifiedIssueNumber, verifiedNewSha);
-    } catch (error) {
-      if (!isAmbiguousMutationError(error)) throw error;
-      mutationError = error;
-    }
-    try {
-      return this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, verifiedNewSha);
-    } catch (error) {
-      if (mutationError) {
-        throw new AggregateError(
-          [mutationError, error],
-          'Writer could not reconcile an ambiguous agent ref advance; platform state may have changed',
-        );
-      }
-      throw error;
-    }
   }
 
   async pushAgentRefFromRepository(issueNumber, expectedOldSha, newSha, repositoryPath, mutationBoundary = null) {
@@ -793,13 +711,13 @@ export class WriterGitHubClient {
       fail('Writer repository path must be absolute');
     }
     this.#requireVerifiedIdentity();
-    await execFileAsync('git', ['cat-file', '-e', `${verifiedNewSha}^{commit}`], {
+    await this.#execFileImpl('git', ['cat-file', '-e', `${verifiedNewSha}^{commit}`], {
       cwd: repositoryPath,
       timeout: 30_000,
       windowsHide: true,
       maxBuffer: 1024 * 1024,
     });
-    const remote = await execFileAsync('git', ['remote', 'get-url', '--push', 'origin'], {
+    const remote = await this.#execFileImpl('git', ['remote', 'get-url', '--push', 'origin'], {
       cwd: repositoryPath,
       timeout: 30_000,
       windowsHide: true,
@@ -827,10 +745,7 @@ export class WriterGitHubClient {
     const basic = Buffer.from(`x-access-token:${this.#token}`, 'utf8').toString('base64');
     let mutationError = null;
     try {
-      await execFileAsync('git', [
-        'push', '--porcelain', 'origin',
-        `${verifiedNewSha}:refs/heads/${agentRef(verifiedIssueNumber)}`,
-      ], {
+      await this.#execFileImpl('git', writerRefPushArguments(verifiedIssueNumber, verifiedOldSha, verifiedNewSha), {
         cwd: repositoryPath,
         timeout: 120_000,
         windowsHide: true,
@@ -856,7 +771,7 @@ export class WriterGitHubClient {
       if (mutationError) {
         throw new AggregateError(
           [new WriterGitHubApiError('Writer git push result was ambiguous'), error],
-          'Writer could not reconcile an ambiguous non-force agent ref push; platform state may have changed',
+          'Writer could not reconcile an ambiguous lease-protected agent ref push; platform state may have changed',
         );
       }
       throw error;

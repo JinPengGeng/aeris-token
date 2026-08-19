@@ -111,7 +111,7 @@ assert(
     JSON.stringify(agents.agents.writer.required_issue_labels) === JSON.stringify(['agent-ready']) &&
     JSON.stringify(agents.agents.writer.tools) ===
       JSON.stringify(['repository_read', 'isolated_shell', 'branch_write', 'draft_pull_request']) &&
-    JSON.stringify(agents.agents.writer.effects) === JSON.stringify(['create_or_update_draft_pull_request']) &&
+    JSON.stringify(agents.agents.writer.effects) === JSON.stringify(['create_draft_pull_request']) &&
     JSON.stringify(agents.agents.writer.handoff_to) === JSON.stringify(['reviewer', 'tester', 'security']),
   'writer registry capabilities changed',
 );
@@ -198,9 +198,12 @@ const expectedWriterCapabilityResiduals = {
 const expectedWriterDeterministicClientMitigations = {
   identity_verification: 'app_jwt_mints_installation_token_then_verify',
   ambiguous_create_recovery: 'unique_attempt_marker_then_read_only_reconcile_or_fail_closed_residue',
+  ref_update_cas: 'git_force_with_lease_exact_old_sha',
+  existing_pr_metadata: 'exact_match_read_only_no_patch',
   allowed_operations: [
-    'create_or_update_agent_ref',
-    'create_or_update_draft_pull_request',
+    'lease_cas_agent_ref',
+    'create_draft_pull_request',
+    'verify_existing_draft_pull_request_metadata',
   ],
   denied_operations: ['review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch'],
 };

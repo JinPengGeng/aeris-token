@@ -60,9 +60,12 @@ const WRITER_CAPABILITY_RESIDUALS = {
 };
 const WRITER_IDENTITY_VERIFICATION = 'app_jwt_mints_installation_token_then_verify';
 const WRITER_AMBIGUOUS_CREATE_RECOVERY = 'unique_attempt_marker_then_read_only_reconcile_or_fail_closed_residue';
+const WRITER_REF_UPDATE_CAS = 'git_force_with_lease_exact_old_sha';
+const WRITER_EXISTING_PR_METADATA = 'exact_match_read_only_no_patch';
 const WRITER_ALLOWED_OPERATIONS = [
-  'create_or_update_agent_ref',
-  'create_or_update_draft_pull_request',
+  'lease_cas_agent_ref',
+  'create_draft_pull_request',
+  'verify_existing_draft_pull_request_metadata',
 ];
 const WRITER_DENIED_OPERATIONS = [
   'review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch',
@@ -225,10 +228,13 @@ function validateWriterFoundation(writer, counterpart) {
   );
   requireCondition(
     sameStringSet(Object.keys(writer.deterministic_client_mitigations ?? {}), [
-      'identity_verification', 'ambiguous_create_recovery', 'allowed_operations', 'denied_operations',
+      'identity_verification', 'ambiguous_create_recovery', 'ref_update_cas', 'existing_pr_metadata',
+      'allowed_operations', 'denied_operations',
     ]) &&
       writer.deterministic_client_mitigations.identity_verification === WRITER_IDENTITY_VERIFICATION &&
       writer.deterministic_client_mitigations.ambiguous_create_recovery === WRITER_AMBIGUOUS_CREATE_RECOVERY &&
+      writer.deterministic_client_mitigations.ref_update_cas === WRITER_REF_UPDATE_CAS &&
+      writer.deterministic_client_mitigations.existing_pr_metadata === WRITER_EXISTING_PR_METADATA &&
       sameStringArray(writer.deterministic_client_mitigations.allowed_operations, WRITER_ALLOWED_OPERATIONS) &&
       sameStringArray(writer.deterministic_client_mitigations?.denied_operations, WRITER_DENIED_OPERATIONS),
     'writer deterministic client operations exceed the approved boundary',
@@ -250,7 +256,7 @@ function validateWriterFoundation(writer, counterpart) {
       sameStringArray(writer.required_commands, WRITER_REQUIRED_COMMANDS) &&
       sameStringArray(writer.allowed_branch_prefixes, [WRITER_BRANCH_PREFIX]) &&
       sameStringArray(writer.tools, ['repository_read', 'isolated_shell', 'branch_write', 'draft_pull_request']) &&
-      sameStringArray(writer.effects, ['create_or_update_draft_pull_request']) &&
+      sameStringArray(writer.effects, ['create_draft_pull_request']) &&
       sameStringArray(writer.handoff_to, ['reviewer', 'tester', 'security']),
     'writer registry capabilities exceed the approved Phase 3 boundary',
   );

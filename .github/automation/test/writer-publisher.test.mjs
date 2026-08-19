@@ -195,18 +195,13 @@ function mockGitHub({
       const visible = manual ? rawPull(branchSha, { user: { type: 'User', login: 'maintainer' } }) : rawPull(branchSha, pull);
       return duplicate ? [visible, rawPull(branchSha, { number: 78 })] : [visible];
     },
-    createAgentRef: async (_issue, nextSha, boundary) => {
+    pushAgentRefFromRepository: async (_issue, _oldSha, nextSha, _repositoryPath, boundary) => {
       await requireBoundary(boundary);
-      mutations.push('create_ref');
-      timeline.push('create_ref');
+      const action = branchSha === null ? 'create_ref' : 'advance_ref';
+      mutations.push(action);
+      timeline.push(action);
       branchSha = nextSha;
       if (ambiguous) throw new AggregateError([new Error('timeout')], 'ambiguous ref create; platform state may have changed');
-    },
-    advanceAgentRef: async (_issue, _oldSha, nextSha, boundary) => {
-      await requireBoundary(boundary);
-      mutations.push('advance_ref');
-      timeline.push('advance_ref');
-      branchSha = nextSha;
       if (pull) pull = {
         ...pull,
         head: { ...pull.head, sha: nextSha },
@@ -220,11 +215,9 @@ function mockGitHub({
       if (postCreateMainDrift) liveMainSha = sha('8');
       return pull;
     },
-    updateManagedDraftPull: async (_issue, _number, _sha, metadata, boundary) => {
+    verifyManagedDraftPullMetadata: async (_issue, _number, _sha, metadata, boundary) => {
       await requireBoundary(boundary);
-      mutations.push('update_pr');
-      timeline.push('update_pr');
-      pull = rawPull(branchSha, { title: metadata.title, body: `${metadata.body}\n\n<!-- aeris-writer-managed -->` });
+      timeline.push('verify_pr_metadata');
       return pull;
     },
   };
@@ -246,6 +239,7 @@ function options(github, value = candidate(), overrides = {}) {
     fixCycle: value.fix_cycle,
     verifyCandidateCommit: async () => true,
     clock: () => new Date('2026-08-19T10:30:00Z'),
+    repositoryPath: process.cwd(),
     ...overrides,
   };
 }
@@ -255,6 +249,21 @@ test('publisher revalidates immediately before ref and Draft PR creation', async
   const receipt = await publishWriterCandidate(options(github));
   assert.equal(receipt.state, 'draft_created');
   assert.deepEqual(github.mutations, ['create_ref', 'create_pr']);
+});
+
+test('publisher fails before mutation when atomic ref CAS is unavailable', async () => {
+  const withoutMethod = mockGitHub();
+  withoutMethod.pushAgentRefFromRepository = undefined;
+  const methodReceipt = await publishWriterCandidate(options(withoutMethod));
+  assert.equal(methodReceipt.state, 'failed');
+  assert.equal(methodReceipt.reason, 'atomic_ref_cas_unavailable');
+  assert.deepEqual(withoutMethod.mutations, []);
+
+  const withoutPath = mockGitHub();
+  const pathReceipt = await publishWriterCandidate(options(withoutPath, candidate(), { repositoryPath: null }));
+  assert.equal(pathReceipt.state, 'failed');
+  assert.equal(pathReceipt.reason, 'atomic_ref_cas_unavailable');
+  assert.deepEqual(withoutPath.mutations, []);
 });
 
 test('publisher replay returns the same successful receipt without another mutation', async () => {
@@ -314,7 +323,7 @@ test('post-create readback treats main drift as residue instead of a successful 
   assert.deepEqual(github.mutations, ['create_ref', 'create_pr']);
 });
 
-test('retry publish requires the signed prior receipt and detects full PR drift at the final PATCH fence', async () => {
+test('retry publish verifies its signed receipt but refuses metadata replacement without CAS', async () => {
   const retry = candidate({
     intent: {
       ...candidate().intent,
@@ -328,8 +337,9 @@ test('retry publish requires the signed prior receipt and detects full PR drift 
   const priorBody = `${signedReceipt({ cycle: 0, commentId: 91 })}\n\n<!-- aeris-writer-managed -->`;
   const success = mockGitHub({ existing: true, existingPullBody: priorBody, command: '/agent retry-write', commentId: 92 });
   const successReceipt = await publishWriterCandidate(options(success, retry));
-  assert.equal(successReceipt.state, 'draft_updated', JSON.stringify(successReceipt));
-  assert.deepEqual(success.mutations, ['advance_ref', 'update_pr']);
+  assert.equal(successReceipt.state, 'stale', JSON.stringify(successReceipt));
+  assert.equal(successReceipt.reason, 'managed_pr_metadata_change_requires_cas');
+  assert.deepEqual(success.mutations, []);
 
   const missing = mockGitHub({ existing: true, command: '/agent retry-write', commentId: 92 });
   const missingReceipt = await publishWriterCandidate(options(missing, retry));
@@ -344,8 +354,9 @@ test('retry publish requires the signed prior receipt and detects full PR drift 
     commentId: 92,
   });
   const driftReceipt = await publishWriterCandidate(options(drifted, retry));
-  assert.equal(driftReceipt.state, 'residue');
-  assert.deepEqual(drifted.mutations, ['advance_ref']);
+  assert.equal(driftReceipt.state, 'stale');
+  assert.equal(driftReceipt.reason, 'managed_pr_metadata_change_requires_cas');
+  assert.deepEqual(drifted.mutations, []);
 });
 
 test('publisher permanently rejects reopened and concurrently tombstoned PRs with a valid prior receipt', async () => {
@@ -382,7 +393,7 @@ test('publisher permanently rejects reopened and concurrently tombstoned PRs wit
   });
   const racedReceipt = await publishWriterCandidate(options(raced, retry));
   assert.equal(racedReceipt.state, 'stale');
-  assert.equal(racedReceipt.reason, 'advance_ref_expected_state_changed');
+  assert.equal(racedReceipt.reason, 'managed_pr_metadata_change_requires_cas');
   assert.deepEqual(raced.mutations, []);
 });
 

@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
-import { WriterGitHubApiError, WriterGitHubClient } from '../src/writer-github-client.mjs';
+import {
+  WriterGitHubApiError,
+  WriterGitHubClient,
+  writerRefPushArguments,
+} from '../src/writer-github-client.mjs';
 import { evaluateWriterLifecycle, WRITER_OWNERSHIP_MARKER } from '../src/writer-lifecycle.mjs';
 
 const repository = 'example/repository';
@@ -350,7 +358,7 @@ test('Writer verifies the installation App and exact selected repository before 
       return response({ message: 'unexpected' }, 500);
     });
     await assert.rejects(() => api.verifyInstallationIdentity(), /Writer/);
-    await assert.rejects(() => api.createAgentRef(7, oldSha), /identity is not verified/);
+    await assert.rejects(() => api.pushAgentRefFromRepository(7, null, oldSha, process.cwd()), /identity is not verified/);
     assert.equal(calls.some(({ url }) => url.includes('/git/refs')), false);
   }
 
@@ -360,7 +368,7 @@ test('Writer verifies the installation App and exact selected repository before 
     return response({});
   });
   assert.throws(() => unverified.getIssue(7), /token has not been minted and verified/);
-  await assert.rejects(() => unverified.createAgentRef(7, oldSha), /identity is not verified/);
+  await assert.rejects(() => unverified.pushAgentRefFromRepository(7, null, oldSha, process.cwd()), /identity is not verified/);
   assert.equal(unverifiedCalls, 0);
 });
 
@@ -410,7 +418,7 @@ test('Writer never enables an installation token from an unreadable 201 mint res
 
     await assert.rejects(() => api.verifyInstallationIdentity(), expectations.get(fixture.name), fixture.name);
     assert.throws(() => api.getIssue(7), /token has not been minted and verified/);
-    await assert.rejects(() => api.createAgentRef(7, oldSha), /identity is not verified/);
+    await assert.rejects(() => api.pushAgentRefFromRepository(7, null, oldSha, process.cwd()), /identity is not verified/);
     assert.equal(calls.some(({ url }) => url.includes('/installation/repositories')), false);
     assert.equal(calls.some(({ url }) => url.includes('/git/refs')), false);
     if (fixture.name === 'oversize body' || fixture.name === 'body timeout') {
@@ -486,7 +494,7 @@ test('Writer enforces hard headers, whole-body, and total API deadlines even whe
   assert.equal(totalSignal.aborted, true);
 });
 
-test('Writer forces its ownership marker on create and preserves it on managed metadata updates', async () => {
+test('Writer forces its ownership marker on create and verifies managed metadata without PATCH', async () => {
   const calls = [];
   let metadataUpdated = false;
   const api = await verifiedClient(async (url, init) => {
@@ -503,7 +511,8 @@ test('Writer forces its ownership marker on create and preserves it on managed m
   });
 
   await api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' });
-  await api.updateManagedDraftPull(7, 42, oldSha, { title: 'Updated title', body: 'Updated details' });
+  metadataUpdated = true;
+  await api.verifyManagedDraftPullMetadata(7, 42, oldSha, { title: 'Updated title', body: 'Updated details' });
 
   const writes = calls.filter(({ init }) => init.method === 'POST' || init.method === 'PATCH').map(({ url, init }) => ({
     method: init.method,
@@ -522,14 +531,9 @@ test('Writer forces its ownership marker on create and preserves it on managed m
         draft: true,
       },
     },
-    {
-      method: 'PATCH',
-      path: '/repos/example/repository/pulls/42',
-      body: { title: 'Updated title', body: `Updated details\n\n${WRITER_OWNERSHIP_MARKER}` },
-    },
   ]);
   assert.deepEqual(calls.map(({ init }) => init.method), [
-    'GET', 'GET', 'POST', 'GET', 'GET', 'GET', 'GET', 'PATCH', 'GET',
+    'GET', 'GET', 'POST', 'GET', 'GET', 'GET', 'GET',
   ]);
 });
 
@@ -1011,7 +1015,7 @@ test('createDraftPull reports platform residue without ever attempting cleanup c
   }
 });
 
-test('managed Draft PR update fails closed before PATCH for cross-PR, state, head, repository, and ownership violations', async () => {
+test('managed Draft PR metadata verification fails closed for identity and ownership violations', async () => {
   const candidates = [
     rawPull({ number: 41 }),
     rawPull({ state: 'closed' }),
@@ -1034,167 +1038,127 @@ test('managed Draft PR update fails closed before PATCH for cross-PR, state, hea
       return response(candidate);
     });
     await assert.rejects(
-      () => api.updateManagedDraftPull(7, 42, oldSha, { title: 'No write' }),
+      () => api.verifyManagedDraftPullMetadata(7, 42, oldSha, { title: 'No write' }),
       WriterGitHubApiError,
     );
-    assert.equal(calls, 1, 'an invalid pre-write snapshot must never reach PATCH');
+    assert.equal(calls, 1, 'an invalid metadata snapshot must fail on the first read');
   }
 });
 
-test('managed Draft PR update rereads and rejects marker removal or stale head after PATCH', async () => {
-  for (const after of [
-    rawPull({ title: 'Updated', body: 'marker removed' }),
-    rawPull({ title: 'Updated', head: { ref: 'agent/issue-7', sha: newSha, repo: { id: repositoryId, full_name: repository } } }),
-  ]) {
-    const methods = [];
-    const api = await verifiedClient(async (_url, init) => {
-      methods.push(init.method);
-      if (init.method === 'GET' && methods.length <= 2) return response(rawPull());
-      if (init.method === 'PATCH') return response(rawPull({ title: 'Updated' }));
-      return response(after);
-    });
-    await assert.rejects(() => api.updateManagedDraftPull(7, 42, oldSha, { title: 'Updated' }), WriterGitHubApiError);
-    assert.deepEqual(methods, ['GET', 'GET', 'PATCH', 'GET']);
-  }
-});
+test('managed Draft PR metadata is an exact-match no-op and rejects a concurrent drift without PATCH', async () => {
+  const exact = rawPull({ title: 'Updated', body: `Details\n\n${WRITER_OWNERSHIP_MARKER}` });
+  const exactMethods = [];
+  const exactApi = await verifiedClient(async (_url, init) => {
+    exactMethods.push(init.method);
+    return response(exact);
+  });
+  const verified = await exactApi.verifyManagedDraftPullMetadata(
+    7, 42, oldSha, { title: 'Updated', body: 'Details' },
+  );
+  assert.equal(verified.title, 'Updated');
+  assert.deepEqual(exactMethods, ['GET', 'GET']);
 
-test('managed Draft PR update refuses a second pre-PATCH fencing read that drifts', async () => {
   const methods = [];
   const api = await verifiedClient(async (_url, init) => {
     methods.push(init.method);
     return response(methods.length === 1
-      ? rawPull()
-      : rawPull({ head: { ref: 'agent/issue-7', sha: newSha, repo: { id: repositoryId, full_name: repository } } }));
+      ? exact
+      : rawPull({ title: 'Human edit', body: `Details\n\n${WRITER_OWNERSHIP_MARKER}` }));
   });
-
-  await assert.rejects(() => api.updateManagedDraftPull(7, 42, oldSha, { title: 'Updated' }), /head SHA changed/);
+  await assert.rejects(
+    () => api.verifyManagedDraftPullMetadata(7, 42, oldSha, { title: 'Updated', body: 'Details' }),
+    /title update was not persisted/,
+  );
   assert.deepEqual(methods, ['GET', 'GET']);
+  assert.equal(methods.includes('PATCH'), false);
 });
 
-test('managed Draft PR update reconciles ambiguous successful response bodies by exact readback', async () => {
-  for (const fixture of ambiguousSuccessBodies) {
-    const state = { updated: false, bodyCanceled: false };
-    const methods = [];
-    const api = await verifiedClient(async (_url, init) => {
-      methods.push(init.method);
-      if (init.method === 'PATCH') {
-        state.updated = true;
-        return fixture.make(state, 200);
-      }
-      return response(rawPull(state.updated ? { title: 'Updated' } : {}));
-    }, { totalTimeoutMs: 100, headersTimeoutMs: 20, bodyTimeoutMs: 15 });
-
-    const updated = await api.updateManagedDraftPull(7, 42, oldSha, { title: 'Updated' });
-    assert.equal(updated.title, 'Updated', fixture.name);
-    assert.deepEqual(methods, ['GET', 'GET', 'PATCH', 'GET'], fixture.name);
-    if (fixture.name === 'oversize body' || fixture.name === 'body timeout') {
-      assert.equal(state.bodyCanceled, true, fixture.name);
-    }
-  }
-});
-
-test('createAgentRef is issue-bound and verifies absence, response, and persisted head', async () => {
-  const calls = [];
-  const api = await verifiedClient(async (url, init) => {
-    calls.push({ url, init });
-    if (calls.length === 1) return response({ message: 'Not Found' }, 404);
-    return response(rawRef(7, oldSha));
-  });
-
-  assert.deepEqual(await api.createAgentRef(7, oldSha), rawRef(7, oldSha));
-  assert.deepEqual(calls.map(({ url, init }) => ({
-    method: init.method,
-    path: new URL(url).pathname,
-    body: init.body === undefined ? undefined : JSON.parse(init.body),
-  })), [
-    { method: 'GET', path: '/repos/example/repository/git/ref/heads/agent%2Fissue-7', body: undefined },
-    { method: 'POST', path: '/repos/example/repository/git/refs', body: { ref: 'refs/heads/agent/issue-7', sha: oldSha } },
-    { method: 'GET', path: '/repos/example/repository/git/ref/heads/agent%2Fissue-7', body: undefined },
-  ]);
-});
-
-test('createAgentRef reconciles ambiguous successful response bodies by exact ref readback', async () => {
-  for (const fixture of ambiguousSuccessBodies) {
-    const state = { created: false, bodyCanceled: false };
-    const methods = [];
-    const api = await verifiedClient(async (_url, init) => {
-      methods.push(init.method);
-      if (init.method === 'POST') {
-        state.created = true;
-        return fixture.make(state, 201);
-      }
-      if (!state.created) return response({ message: 'Not Found' }, 404);
-      return response(rawRef(7, oldSha));
-    }, { totalTimeoutMs: 100, headersTimeoutMs: 20, bodyTimeoutMs: 15 });
-
-    assert.deepEqual(await api.createAgentRef(7, oldSha), rawRef(7, oldSha), fixture.name);
-    assert.deepEqual(methods, ['GET', 'POST', 'GET'], fixture.name);
-    if (fixture.name === 'oversize body' || fixture.name === 'body timeout') {
-      assert.equal(state.bodyCanceled, true, fixture.name);
-    }
-  }
-});
-
-test('advanceAgentRef rejects stale heads and uses only a non-force issue-bound update', async () => {
-  let staleCalls = 0;
-  const stale = await verifiedClient(async () => {
-    staleCalls += 1;
-    return response(rawRef(7, newSha));
-  });
-  await assert.rejects(() => stale.advanceAgentRef(7, oldSha, newSha), /requested branch and SHA/);
-  assert.equal(staleCalls, 1);
-
-  const calls = [];
-  const api = await verifiedClient(async (url, init) => {
-    calls.push({ url, init });
-    return response(calls.length <= 2 ? rawRef(7, oldSha) : rawRef(7, newSha));
-  });
-  assert.deepEqual(await api.advanceAgentRef(7, oldSha, newSha), rawRef(7, newSha));
-  assert.deepEqual(calls.map(({ url, init }) => ({
-    method: init.method,
-    path: new URL(url).pathname,
-    body: init.body === undefined ? undefined : JSON.parse(init.body),
-  })), [
-    { method: 'GET', path: '/repos/example/repository/git/ref/heads/agent%2Fissue-7', body: undefined },
-    { method: 'GET', path: '/repos/example/repository/git/ref/heads/agent%2Fissue-7', body: undefined },
-    {
-      method: 'PATCH',
-      path: '/repos/example/repository/git/refs/heads/agent%2Fissue-7',
-      body: { sha: newSha, force: false },
-    },
-    { method: 'GET', path: '/repos/example/repository/git/ref/heads/agent%2Fissue-7', body: undefined },
-  ]);
-});
-
-test('advanceAgentRef refuses a second pre-PATCH fencing read that drifts', async () => {
+test('managed Draft PR metadata mismatch fails on the first read without PATCH', async () => {
   const methods = [];
   const api = await verifiedClient(async (_url, init) => {
     methods.push(init.method);
-    return response(rawRef(7, methods.length === 1 ? oldSha : newSha));
+    return response(rawPull({
+      title: 'Human-edited title',
+      body: `Human-edited body\n\n${WRITER_OWNERSHIP_MARKER}`,
+    }));
   });
 
-  await assert.rejects(() => api.advanceAgentRef(7, oldSha, newSha), /requested branch and SHA/);
-  assert.deepEqual(methods, ['GET', 'GET']);
+  await assert.rejects(
+    () => api.verifyManagedDraftPullMetadata(7, 42, oldSha, { title: 'Expected title', body: 'Expected body' }),
+    /title update was not persisted/,
+  );
+  assert.deepEqual(methods, ['GET']);
+  assert.equal(methods.includes('PATCH'), false);
 });
 
-test('advanceAgentRef reconciles ambiguous successful response bodies by exact ref readback', async () => {
-  for (const fixture of ambiguousSuccessBodies) {
-    const state = { advanced: false, bodyCanceled: false };
-    const methods = [];
-    const api = await verifiedClient(async (_url, init) => {
-      methods.push(init.method);
-      if (init.method === 'PATCH') {
-        state.advanced = true;
-        return fixture.make(state, 200);
-      }
-      return response(rawRef(7, state.advanced ? newSha : oldSha));
-    }, { totalTimeoutMs: 100, headersTimeoutMs: 20, bodyTimeoutMs: 15 });
+test('Writer ref pushes use an exact old-SHA lease for create and advance', () => {
+  const ref = 'refs/heads/agent/issue-7';
+  assert.deepEqual(writerRefPushArguments(7, null, newSha), [
+    'push', '--porcelain', `--force-with-lease=${ref}:`, 'origin', `${newSha}:${ref}`,
+  ]);
+  assert.deepEqual(writerRefPushArguments(7, oldSha, newSha), [
+    'push', '--porcelain', `--force-with-lease=${ref}:${oldSha}`, 'origin', `${newSha}:${ref}`,
+  ]);
+});
 
-    assert.deepEqual(await api.advanceAgentRef(7, oldSha, newSha), rawRef(7, newSha), fixture.name);
-    assert.deepEqual(methods, ['GET', 'GET', 'PATCH', 'GET'], fixture.name);
-    if (fixture.name === 'oversize body' || fixture.name === 'body timeout') {
-      assert.equal(state.bodyCanceled, true, fixture.name);
-    }
+test('Writer ref push arguments reject a malformed new SHA', () => {
+  assert.throws(
+    () => writerRefPushArguments(7, null, 'a'.repeat(39)),
+    /New ref SHA must be a lowercase 40-character SHA/,
+  );
+});
+
+test('Writer ref push arguments reject a malformed expected old SHA', () => {
+  assert.throws(
+    () => writerRefPushArguments(7, 'not-a-sha', newSha),
+    /Expected old ref SHA must be a lowercase 40-character SHA/,
+  );
+});
+
+test('Writer ref push arguments reject an unchanged target SHA', () => {
+  assert.throws(
+    () => writerRefPushArguments(7, oldSha, oldSha),
+    /must differ from the expected old SHA/,
+  );
+});
+
+test('Writer ref lease rejects concurrent create and advance races atomically', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-writer-lease-'));
+  const remote = path.join(root, 'remote.git');
+  const repositoryPath = path.join(root, 'repository');
+  const git = (args, cwd = repositoryPath) => execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+  try {
+    fs.mkdirSync(repositoryPath);
+    git(['init', '--bare', remote], root);
+    git(['init']);
+    git(['config', 'user.name', 'Writer Lease Test']);
+    git(['config', 'user.email', 'writer-lease@example.invalid']);
+    fs.writeFileSync(path.join(repositoryPath, 'state.txt'), 'old\n');
+    git(['add', 'state.txt']);
+    git(['commit', '-m', 'old']);
+    const old = git(['rev-parse', 'HEAD']);
+    git(['remote', 'add', 'origin', remote]);
+    git(['push', 'origin', `${old}:refs/heads/agent/issue-7`]);
+
+    fs.writeFileSync(path.join(repositoryPath, 'state.txt'), 'racer\n');
+    git(['commit', '-am', 'racer']);
+    const racer = git(['rev-parse', 'HEAD']);
+    git(['push', 'origin', `${racer}:refs/heads/agent/issue-7`]);
+    git(['reset', '--hard', old]);
+    fs.writeFileSync(path.join(repositoryPath, 'state.txt'), 'candidate\n');
+    git(['commit', '-am', 'candidate']);
+    const candidate = git(['rev-parse', 'HEAD']);
+
+    assert.throws(() => git(writerRefPushArguments(7, old, candidate)));
+    assert.throws(() => git(writerRefPushArguments(7, null, candidate)));
+    assert.equal(git(['--git-dir', remote, 'rev-parse', 'refs/heads/agent/issue-7'], root), racer);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -1236,18 +1200,21 @@ test('timeline permission failures, malformed events, and pagination exhaustion 
   await assert.rejects(() => exhausted.listPullsForHead('agent/issue-7'), /page limit/);
 });
 
-test('Writer invokes the live mutation callback after internal fencing and before REST writes', async () => {
+test('Writer invokes live callbacks between exact metadata reads and before PR create', async () => {
+  const exact = rawPull({ title: 'Updated', body: `Details\n\n${WRITER_OWNERSHIP_MARKER}` });
   const calls = [];
-  const api = await verifiedClient(async (url, init) => {
-    calls.push({ url, method: init.method });
-    if (url.includes('/git/ref/heads/')) return response({ message: 'missing' }, 404);
-    return response({ message: 'unexpected' }, 500);
+  const api = await verifiedClient(async (_url, init) => {
+    calls.push(init.method);
+    return response(exact);
   });
   await assert.rejects(
-    () => api.createAgentRef(7, oldSha, async () => ({ action: 'skip', reason: 'issue_changed' })),
+    () => api.verifyManagedDraftPullMetadata(
+      7, 42, oldSha, { title: 'Updated', body: 'Details' },
+      async () => ({ action: 'skip', reason: 'issue_changed' }),
+    ),
     /mutation boundary rejected: issue_changed/,
   );
-  assert.deepEqual(calls.map((call) => call.method), ['GET']);
+  assert.deepEqual(calls, ['GET']);
 
   const pullCalls = [];
   const pullApi = await verifiedClient(async (url, init) => {
@@ -1276,11 +1243,9 @@ test('Writer invalid input and ref bounds fail before issuing a network call', a
     () => api.getRef('refs/heads/main'),
     () => api.listPullsForHead('agent/issue-0'),
     () => api.createDraftPull(7, { title: 'x', body: 'x', draft: false }),
-    () => api.updateManagedDraftPull(7, 42, 'BAD', { title: 'x' }),
-    () => api.updateManagedDraftPull(7, 42, oldSha, { state: 'closed' }),
-    () => api.createAgentRef(0, oldSha),
-    () => api.createAgentRef(7, 'a'.repeat(39)),
-    () => api.advanceAgentRef(8, oldSha, oldSha),
+    () => api.verifyManagedDraftPullMetadata(7, 42, 'BAD', { title: 'x' }),
+    () => api.verifyManagedDraftPullMetadata(7, 42, oldSha, { state: 'closed' }),
+    () => writerRefPushArguments(0, null, oldSha),
   ];
   for (const invoke of invalidCalls) await assert.rejects(async () => invoke(), WriterGitHubApiError);
   assert.equal(calls, 0);
@@ -1300,6 +1265,7 @@ test('Writer bounds pagination and exposes no dangerous or generic operation met
     'request', 'list', 'createIssueComment', 'updateIssueComment', 'createReview',
     'approve', 'merge', 'enableAutoMerge', 'createCheckRun', 'closePull', 'markReady',
     'deleteRef', 'updateRef', 'forceUpdateRef', 'updateDraftPullMetadata',
+    'createAgentRef', 'advanceAgentRef', 'updateManagedDraftPull',
   ]) assert.equal(typeof api[method], 'undefined', `${method} must not be public`);
 });
 
@@ -1336,4 +1302,15 @@ test('Writer constructor rejects ambiguous repositories, insecure origin customi
       /create attempt ID|generate a create attempt ID/,
     );
   }
+});
+
+test('Writer constructor rejects a non-callable subprocess implementation', () => {
+  assert.throws(() => new WriterGitHubClient({
+    appJwt,
+    repository,
+    repositoryId,
+    writerApp,
+    fetchImpl: async () => response({}),
+    execFileImpl: 'not-a-function',
+  }), /Writer subprocess implementation is invalid/);
 });

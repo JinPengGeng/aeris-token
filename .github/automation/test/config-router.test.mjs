@@ -175,9 +175,12 @@ test('Writer Phase 3 foundation stays independently disabled and least-privilege
   assert.deepEqual(writer.deterministic_client_mitigations, {
     identity_verification: 'app_jwt_mints_installation_token_then_verify',
     ambiguous_create_recovery: 'unique_attempt_marker_then_read_only_reconcile_or_fail_closed_residue',
+    ref_update_cas: 'git_force_with_lease_exact_old_sha',
+    existing_pr_metadata: 'exact_match_read_only_no_patch',
     allowed_operations: [
-      'create_or_update_agent_ref',
-      'create_or_update_draft_pull_request',
+      'lease_cas_agent_ref',
+      'create_draft_pull_request',
+      'verify_existing_draft_pull_request_metadata',
     ],
     denied_operations: ['review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch'],
   });
@@ -193,6 +196,20 @@ test('Writer Phase 3 foundation stays independently disabled and least-privilege
     '.github/**', '**/CODEOWNERS', '.gitmodules', '**/.git', '**/.git/**',
   ]);
   assert.deepEqual(contracts.policy.writer.forbidden_paths, writer.denied_paths);
+});
+
+test('Writer activation validator accepts only a coordinated enabled contract', () => {
+  const activated = structuredClone(contracts);
+  activated.agents.agents.writer.enabled = true;
+  activated.policy.writer.enabled = true;
+  assert.doesNotThrow(() => validateContracts(activated.agents, activated.policy));
+
+  const registryOnly = structuredClone(activated);
+  registryOnly.policy.writer.enabled = false;
+  assert.throws(() => validateContracts(registryOnly.agents, registryOnly.policy), ContractError);
+  const policyOnly = structuredClone(activated);
+  policyOnly.agents.agents.writer.enabled = false;
+  assert.throws(() => validateContracts(policyOnly.agents, policyOnly.policy), ContractError);
 });
 
 test('Writer Phase 3 foundation rejects drift, broad permissions, and unsafe limits', () => {

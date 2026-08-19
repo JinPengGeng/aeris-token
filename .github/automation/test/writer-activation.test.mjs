@@ -250,6 +250,28 @@ test('ready publish crosses the real Writer client constructor and publishes wit
   let branchSha = null;
   let pull = null;
   const mutations = [];
+  const writerExecFileImpl = async (command, args, options) => {
+    assert.equal(command, 'git');
+    assert.equal(options.cwd, repoRoot);
+    if (args[0] === 'cat-file') {
+      assert.deepEqual(args, ['cat-file', '-e', `${commitSha}^{commit}`]);
+      return { stdout: '', stderr: '' };
+    }
+    if (args[0] === 'remote') {
+      assert.deepEqual(args, ['remote', 'get-url', '--push', 'origin']);
+      return { stdout: 'https://github.com/JinPengGeng/aeris-token.git\n', stderr: '' };
+    }
+    assert.deepEqual(args, [
+      'push',
+      '--porcelain',
+      '--force-with-lease=refs/heads/agent/issue-12:',
+      'origin',
+      `${commitSha}:refs/heads/agent/issue-12`,
+    ]);
+    branchSha = commitSha;
+    mutations.push('create_ref');
+    return { stdout: '', stderr: '' };
+  };
   const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
   const fetchImpl = async (url, init) => {
     const requestPath = new URL(url).pathname;
@@ -295,11 +317,6 @@ test('ready publish crosses the real Writer client constructor and publishes wit
         ref: 'refs/heads/agent/issue-12', object: { type: 'commit', sha: branchSha },
       });
     }
-    if (requestPath.endsWith('/git/refs') && method === 'POST') {
-      branchSha = JSON.parse(init.body).sha;
-      mutations.push('create_ref');
-      return json({ ref: 'refs/heads/agent/issue-12', object: { type: 'commit', sha: branchSha } }, 201);
-    }
     if (requestPath.endsWith('/pulls') && method === 'POST') {
       const body = JSON.parse(init.body);
       mutations.push('create_pr');
@@ -339,7 +356,8 @@ test('ready publish crosses the real Writer client constructor and publishes wit
       repoRoot,
       clock: () => new Date('2026-08-19T10:30:00Z'),
       fetchImpl,
-      repositoryPath: null,
+      repositoryPath: repoRoot,
+      writerExecFileImpl,
     });
     assert.equal(result.state, 'complete', JSON.stringify(result));
     assert.equal(result.payload.receipt.state, 'draft_created');
