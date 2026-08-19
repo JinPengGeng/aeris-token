@@ -138,8 +138,8 @@ test('publisher rejects duplicate current-generation checks before any mutation'
   const client = fakeClient({
     listCheckRunsForRef: async () => [
       ...(await base.listCheckRunsForRef()),
-      { id: 77, external_id: currentExternalId },
-      { id: 88, external_id: currentExternalId },
+      { id: 77, external_id: currentExternalId, status: 'in_progress', conclusion: null },
+      { id: 88, external_id: currentExternalId, status: 'in_progress', conclusion: null },
     ],
     beginPolicyCheck: async () => { mutationMethods.push('POST/PATCH'); throw new Error('must not begin'); },
     completePolicyCheck: async () => { mutationMethods.push('PATCH'); throw new Error('must not complete'); },
@@ -157,8 +157,40 @@ test('publisher rejects duplicate current-generation checks before any mutation'
     policyApp: { id: 9001, slug: 'aeris-token-policy' },
     runId: '321.1',
     detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
-  }), /multiple policy checks exist for the current generation/);
+  }), /multiple in-progress policy checks exist for the current generation/);
   assert.deepEqual(mutationMethods, []);
+});
+
+test('publisher accepts completed history for the current generation', async () => {
+  const currentExternalId = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
+  const base = fakeClient();
+  let begins = 0;
+  const client = fakeClient({
+    listCheckRunsForRef: async () => [
+      ...(await base.listCheckRunsForRef()),
+      { id: 70, external_id: currentExternalId, status: 'completed', conclusion: 'success' },
+      { id: 71, external_id: currentExternalId, status: 'completed', conclusion: 'neutral' },
+    ],
+    beginPolicyCheck: async () => {
+      begins += 1;
+      return { id: 77, html_url: 'https://github.com/JinPengGeng/aeris-token/runs/77' };
+    },
+  });
+
+  const receipt = await publishPolicyEvaluation({
+    client,
+    contracts: contracts(),
+    repository,
+    repositoryId: 123,
+    pullNumber: 37,
+    policySha: sha('c'),
+    expectedHeadSha: sha('a'),
+    policyApp: { id: 9001, slug: 'aeris-token-policy' },
+    runId: '321.1',
+    detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
+  });
+  assert.equal(receipt.state, 'published');
+  assert.equal(begins, 1);
 });
 
 test('publisher rejects an unexpected live head before any mutation', async () => {

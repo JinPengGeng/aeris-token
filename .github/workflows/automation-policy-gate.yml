@@ -196,17 +196,40 @@ jobs:
             const pullNumber = Number(process.env.AERIS_PULL_REQUEST_NUMBER);
             const repositoryId = Number(process.env.AERIS_REPOSITORY_ID);
             const sha = /^[0-9a-f]{40}$/;
+            const requestTimeoutMs = 15_000;
+            const boundedRequest = async (route, parameters = {}) => {
+              const controller = new AbortController();
+              let timeout;
+              const deadline = new Promise((_, reject) => {
+                timeout = setTimeout(() => {
+                  const error = new Error(`Policy fence GitHub request timed out: ${route}`);
+                  reject(error);
+                  controller.abort(error);
+                }, requestTimeoutMs);
+              });
+              try {
+                return await Promise.race([
+                  github.request(route, {
+                    ...parameters,
+                    request: { ...(parameters.request ?? {}), signal: controller.signal },
+                  }),
+                  deadline,
+                ]);
+              } finally {
+                clearTimeout(timeout);
+              }
+            };
             if (!Number.isSafeInteger(appId) || appId < 1 || !/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/.test(appSlug ?? '')) {
               throw new Error('Policy App identity is invalid');
             }
             if (!Number.isSafeInteger(pullNumber) || pullNumber < 1 || !Number.isSafeInteger(repositoryId) || repositoryId < 1) {
               throw new Error('Policy fence target is invalid');
             }
-            const repository = await github.request('GET /repos/{owner}/{repo}', context.repo);
+            const repository = await boundedRequest('GET /repos/{owner}/{repo}', context.repo);
             if (repository.data.id !== repositoryId || repository.data.full_name !== context.payload.repository.full_name || repository.data.default_branch !== 'main') {
               throw new Error('Policy fence repository identity is invalid');
             }
-            const branch = await github.request('GET /repos/{owner}/{repo}/git/ref/{ref}', {
+            const branch = await boundedRequest('GET /repos/{owner}/{repo}/git/ref/{ref}', {
               ...context.repo,
               ref: 'heads/main',
             });
@@ -214,7 +237,7 @@ jobs:
             if (branch.data?.ref !== 'refs/heads/main' || !sha.test(policySha ?? '')) {
               throw new Error('Policy fence trusted branch is invalid');
             }
-            const pull = await github.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+            const pull = await boundedRequest('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
               ...context.repo,
               pull_number: pullNumber,
             });
@@ -228,7 +251,7 @@ jobs:
             const externalId = `aeris-policy:v1:${repositoryId}:${pullNumber}:${headSha}:${policySha}`;
             const allChecks = [];
             for (let page = 1; page <= 10; page += 1) {
-              const response = await github.request('GET /repos/{owner}/{repo}/commits/{ref}/check-runs', {
+              const response = await boundedRequest('GET /repos/{owner}/{repo}/commits/{ref}/check-runs', {
                 ...context.repo,
                 ref: headSha,
                 filter: 'all',
@@ -243,10 +266,7 @@ jobs:
             const isManaged = (check) => check?.name === 'Automation Policy / gate' && check?.head_sha === headSha &&
               check?.app?.id === appId && check?.app?.slug === appSlug;
             const exactGeneration = allChecks.filter((check) => check?.external_id === externalId);
-            if (exactGeneration.length > 1) {
-              throw new Error('Policy fence current generation is duplicated');
-            }
-            if (exactGeneration.length === 1 && !isManaged(exactGeneration[0])) {
+            if (exactGeneration.some((check) => !isManaged(check))) {
               throw new Error('Policy fence current generation has an unexpected owner or identity');
             }
             const managed = allChecks.filter(isManaged);
@@ -260,31 +280,35 @@ jobs:
               throw new Error('Policy fence managed check identities are invalid');
             }
             const ordered = managed.sort((left, right) => right.id - left.id);
-            const currentGeneration = ordered.filter((check) => check.external_id === externalId);
-            const dominant = currentGeneration[0] ?? ordered[0] ?? null;
+            const inProgress = (check) => check?.status === 'in_progress' && check?.conclusion == null;
+            const dominant = inProgress(ordered[0]) ? ordered[0] : null;
             const fencePriorIdentity = async (check) => {
-              await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+              await boundedRequest('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
                 ...context.repo,
                 check_run_id: check.id,
                 name: 'Automation Policy / gate',
-                status: 'in_progress',
-                output,
+                status: 'completed',
+                conclusion: 'cancelled',
+                output: {
+                  title: 'Policy evaluation superseded',
+                  summary: `A newer Policy evaluation replaced this pending check.\nHead SHA: ${headSha}\nPolicy SHA: ${policySha}`,
+                },
                 details_url: detailsUrl,
               });
-              const cleaned = await github.request('GET /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+              const cleaned = await boundedRequest('GET /repos/{owner}/{repo}/check-runs/{check_run_id}', {
                 ...context.repo,
                 check_run_id: check.id,
               });
               if (cleaned.data?.id !== check.id || cleaned.data?.name !== 'Automation Policy / gate' ||
                   cleaned.data?.head_sha !== headSha || cleaned.data?.external_id !== check.external_id ||
-                  cleaned.data?.status !== 'in_progress' || cleaned.data?.conclusion !== null ||
+                  cleaned.data?.status !== 'completed' || cleaned.data?.conclusion !== 'cancelled' ||
                   cleaned.data?.app?.id !== appId || cleaned.data?.app?.slug !== appSlug) {
                 throw new Error(`Policy fence cleanup verification failed for check ${check.id}`);
               }
             };
             let fenced;
             if (dominant) {
-              fenced = await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+              fenced = await boundedRequest('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
                 ...context.repo,
                 check_run_id: dominant.id,
                 name: 'Automation Policy / gate',
@@ -294,7 +318,7 @@ jobs:
                 details_url: detailsUrl,
               });
             } else {
-              fenced = await github.request('POST /repos/{owner}/{repo}/check-runs', {
+              fenced = await boundedRequest('POST /repos/{owner}/{repo}/check-runs', {
                 ...context.repo,
                 name: 'Automation Policy / gate',
                 head_sha: headSha,
@@ -309,7 +333,7 @@ jobs:
                 (!dominant && ordered.length > 0 && fencedId <= ordered[0].id)) {
               throw new Error('Policy fence did not establish the dominant check identity');
             }
-            const persisted = await github.request('GET /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+            const persisted = await boundedRequest('GET /repos/{owner}/{repo}/check-runs/{check_run_id}', {
               ...context.repo,
               check_run_id: fencedId,
             });
@@ -318,7 +342,7 @@ jobs:
                 persisted.data?.app?.id !== appId || persisted.data?.app?.slug !== appSlug) {
               throw new Error('Policy fence persistence verification failed');
             }
-            for (const check of ordered.filter((candidate) => candidate.id !== fencedId)) {
+            for (const check of ordered.filter((candidate) => candidate.id !== fencedId && inProgress(candidate))) {
               await fencePriorIdentity(check);
             }
             core.setOutput('head_sha', headSha);

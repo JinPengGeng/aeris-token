@@ -450,10 +450,24 @@ export class PolicyGitHubClient {
     const existing = allChecks.filter((check) => check.name === checkName && check.external_id === id && (
       check.app?.id === this.#policyApp.id && check.app?.slug === this.#policyApp.slug
     )).sort((left, right) => right.id - left.id);
-    requireCondition(existing.length <= 1, 'Multiple managed policy checks exist for the same generation');
+    const managed = allChecks.filter((check) => check.name === checkName && check.head_sha === generation.head_sha && (
+      check.app?.id === this.#policyApp.id && check.app?.slug === this.#policyApp.slug
+    )).sort((left, right) => right.id - left.id);
+    const active = existing.filter((check) => check.status === 'in_progress' && check.conclusion === null);
+    const managedActive = managed.filter((check) => check.status === 'in_progress' && check.conclusion === null);
+    let target = null;
     if (expectedCheckRunId !== null) {
-      requireCondition(existing.some((check) => check.id === expectedCheckRunId), 'Expected early Policy fence is missing');
-      requireCondition(existing[0]?.id === expectedCheckRunId, 'Expected early Policy fence is not the dominant current generation');
+      requireCondition(managedActive.length <= 1, 'Multiple in-progress managed policy checks exist for the head');
+      target = existing.find((check) => check.id === expectedCheckRunId) ?? null;
+      requireCondition(target !== null, 'Expected early Policy fence is missing');
+      requireCondition(
+        target.status === 'in_progress' && target.conclusion === null,
+        'Expected early Policy fence is not in progress',
+      );
+      requireCondition(managed[0]?.id === expectedCheckRunId, 'Expected early Policy fence is not the dominant managed check');
+    } else {
+      requireCondition(active.length <= 1, 'Multiple in-progress managed policy checks exist for the same generation');
+      target = active[0] ?? null;
     }
 
     const body = {
@@ -465,10 +479,10 @@ export class PolicyGitHubClient {
       ...(detailsUrl === null ? {} : { details_url: detailsUrl }),
     };
     let response;
-    if (existing.length >= 1) {
+    if (target !== null) {
       const { head_sha: ignored, ...update } = body;
       void ignored;
-      response = await this.#request('PATCH', `/repos/${this.#repository}/check-runs/${existing[0].id}`, update);
+      response = await this.#request('PATCH', `/repos/${this.#repository}/check-runs/${target.id}`, update);
     } else {
       response = await this.#request('POST', `/repos/${this.#repository}/check-runs`, body);
     }
@@ -512,16 +526,31 @@ export class PolicyGitHubClient {
           (existing.status === 'completed' && typeof existing.conclusion === 'string')),
       'Policy check is not the expected recoverable App-owned generation',
     );
-    const response = normalizedCheck(await this.#request('PATCH', `/repos/${this.#repository}/check-runs/${checkRunId}`, {
+    const body = {
       name: checkName,
       status: 'in_progress',
       external_id: id,
       output,
       ...(detailsUrl === null ? {} : { details_url: detailsUrl }),
-    }));
-    requireCondition(response.id === checkRunId, 'Restored policy check response ID changed');
-    return this.#verifyPersistedCheck(await this.#getCheckRun(checkRunId), {
-      id: checkRunId,
+    };
+    let response;
+    if (existing.status === 'in_progress') {
+      response = normalizedCheck(await this.#request(
+        'PATCH',
+        `/repos/${this.#repository}/check-runs/${checkRunId}`,
+        body,
+      ));
+      requireCondition(response.id === checkRunId, 'Restored policy check response ID changed');
+    } else {
+      response = normalizedCheck(await this.#request('POST', `/repos/${this.#repository}/check-runs`, {
+        ...body,
+        head_sha: generation.head_sha,
+      }));
+      positiveInteger(response.id, 'Replacement policy check run ID');
+      requireCondition(response.id > checkRunId, 'Replacement policy check is not newer than the completed check run');
+    }
+    return this.#verifyPersistedCheck(await this.#getCheckRun(response.id), {
+      id: response.id,
       name: checkName,
       head_sha: generation.head_sha,
       external_id: id,

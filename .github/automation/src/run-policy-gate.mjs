@@ -254,10 +254,11 @@ export async function publishPolicyEvaluation({
     policySha,
   });
   const currentGenerationChecks = (await client.listCheckRunsForRef(generation.head_sha))
-    .filter((checkRun) => checkRun?.external_id === currentExternalId);
+    .filter((checkRun) => checkRun?.external_id === currentExternalId &&
+      checkRun?.status === 'in_progress' && checkRun?.conclusion == null);
   requireCondition(
     currentGenerationChecks.length <= 1,
-    'multiple policy checks exist for the current generation',
+    'multiple in-progress policy checks exist for the current generation',
   );
   const checkName = contracts.policy.policy_gate.check_name;
   if (expectedFenceCheckRunId !== null) positiveInteger(expectedFenceCheckRunId, 'expected Policy fence check run ID');
