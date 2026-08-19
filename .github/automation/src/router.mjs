@@ -72,6 +72,27 @@ function validCommentId(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
 
+function canonicalIssueUrl(value, issueNumber) {
+  if (typeof value !== 'string') return null;
+  try {
+    const url = new URL(value);
+    if (url.origin !== 'https://api.github.com' || url.search || url.hash) return null;
+    const parts = url.pathname.split('/');
+    if (
+      parts.length !== 6 || parts[1] !== 'repos' || !parts[2] || !parts[3] ||
+      parts[4] !== 'issues' || parts[5] !== String(issueNumber)
+    ) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function commentBelongsToIssue(comment, issue, issueNumber) {
+  const issueUrl = canonicalIssueUrl(issue?.url, issueNumber);
+  return issueUrl !== null && canonicalIssueUrl(comment?.issue_url, issueNumber) === issueUrl;
+}
+
 function matchingCommentAuthor(event, comment) {
   const sender = event?.sender?.login;
   const payloadAuthor = event?.comment?.user?.login;
@@ -107,6 +128,9 @@ export async function routeWriterInvocation({
     if (!Number.isSafeInteger(issue?.number) || issue.number !== issueNumber) {
       return { action: 'skip', reason: 'writer_live_validation_failed' };
     }
+    if (!commentBelongsToIssue(comment, issue, issueNumber)) {
+      return { action: 'skip', reason: 'comment_issue_mismatch' };
+    }
     const actorPermission = await github.getCollaboratorPermission(comment.user.login);
     const decision = evaluateWriterRequest({
       command,
@@ -126,6 +150,72 @@ export async function routeWriterInvocation({
     });
     return decision.allowed
       ? { action: 'write', command, branch: decision.branch, reason: 'writer_authorized' }
+      : { action: 'skip', reason: decision.reason };
+  } catch {
+    return { action: 'skip', reason: 'writer_live_validation_failed' };
+  }
+}
+
+/**
+ * Re-establish Writer authorization immediately before a publish mutation.
+ * The validated intent is only a binding claim: current GitHub state remains
+ * authoritative for the comment, Issue labels/state, actor permission, and
+ * feature switches.
+ */
+export async function revalidateWriterPublishBoundary({
+  intent, github, trustedContracts, environment, fixCycle, limits, changeSet = null, patchBytes,
+} = {}) {
+  const issueNumber = intent?.issue_number;
+  const commentId = intent?.comment_id;
+  const actor = intent?.actor;
+  const expectedCommand = canonicalWriterCommand(intent?.command);
+  if (
+    !github || typeof github.getIssueComment !== 'function' || typeof github.getIssue !== 'function' ||
+    typeof github.getCollaboratorPermission !== 'function' || !Number.isSafeInteger(issueNumber) || issueNumber <= 0 ||
+    !validCommentId(commentId) || typeof actor !== 'string' || actor.length === 0 || expectedCommand === null ||
+    typeof intent?.issue_updated_at !== 'string' || intent.issue_updated_at.length === 0
+  ) return { action: 'skip', reason: 'writer_publish_binding_invalid' };
+
+  try {
+    const comment = await github.getIssueComment(commentId);
+    const issue = await github.getIssue(issueNumber);
+    if (
+      !validCommentId(comment?.id) || comment.id !== commentId ||
+      !Number.isSafeInteger(issue?.number) || issue.number !== issueNumber ||
+      !commentBelongsToIssue(comment, issue, issueNumber)
+    ) return { action: 'skip', reason: 'writer_publish_binding_invalid' };
+    if (comment?.user?.login !== actor) return { action: 'skip', reason: 'writer_publish_actor_changed' };
+    const command = parseWriterCommand(comment.body, trustedContracts?.policy);
+    if (command !== expectedCommand) return { action: 'skip', reason: 'writer_publish_command_changed' };
+    if (issue.updated_at !== intent.issue_updated_at) return { action: 'skip', reason: 'writer_publish_issue_changed' };
+
+    const actorPermission = await github.getCollaboratorPermission(actor);
+    const request = {
+      command,
+      actorLogin: actor,
+      actorPermission,
+      issue: {
+        number: issue.number,
+        state: issue.state,
+        isPullRequest: Boolean(issue.pull_request),
+        labels: issue.labels,
+      },
+      fixCycle,
+      limits,
+      changeSet,
+      patchBytes,
+    };
+    const liveDecision = evaluateWriterRequest({
+      ...request,
+      switches: { globalEnabled: true, writerVariableEnabled: true, writerContractEnabled: true },
+    });
+    if (!liveDecision.allowed) return { action: 'skip', reason: liveDecision.reason };
+    const decision = evaluateWriterRequest({
+      ...request,
+      switches: writerSwitchesFromTrustedContracts({ trustedContracts, environment }),
+    });
+    return decision.allowed
+      ? { action: 'write', command, branch: decision.branch, reason: 'writer_publish_authorized' }
       : { action: 'skip', reason: decision.reason };
   } catch {
     return { action: 'skip', reason: 'writer_live_validation_failed' };

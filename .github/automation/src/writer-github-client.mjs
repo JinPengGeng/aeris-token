@@ -198,8 +198,6 @@ function isAmbiguousMutationError(error) {
   return status === 408 || (status >= 200 && status <= 299) || (status >= 500 && status <= 599);
 }
 
-const isAmbiguousCreateError = isAmbiguousMutationError;
-
 async function boundedText(response, bodyTimeoutMs, controller) {
   if (response.body === null) return '';
   const reader = response.body.getReader();
@@ -214,19 +212,24 @@ async function boundedText(response, bodyTimeoutMs, controller) {
     }, bodyTimeoutMs);
   });
   const readAll = (async () => {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!(value instanceof Uint8Array)) throw new WriterGitHubApiError('GitHub API response body is invalid', response.status);
-      bytes += value.byteLength;
-      if (bytes > MAX_RESPONSE_BYTES) {
-        controller.abort();
-        void reader.cancel().catch(() => {});
-        throw new WriterGitHubApiError('GitHub API response exceeds the configured limit', response.status);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!(value instanceof Uint8Array)) throw new WriterGitHubApiError('GitHub API response body is invalid', response.status);
+        bytes += value.byteLength;
+        if (bytes > MAX_RESPONSE_BYTES) {
+          controller.abort();
+          void reader.cancel().catch(() => {});
+          throw new WriterGitHubApiError('GitHub API response exceeds the configured limit', response.status);
+        }
+        chunks.push(value);
       }
-      chunks.push(value);
+      return Buffer.concat(chunks, bytes).toString('utf8');
+    } catch (error) {
+      if (error instanceof WriterGitHubApiError) throw error;
+      throw new WriterGitHubApiError('GitHub API response body could not be read', response.status);
     }
-    return Buffer.concat(chunks, bytes).toString('utf8');
   })();
   try {
     return await Promise.race([readAll, timeout]);
@@ -380,6 +383,12 @@ export class WriterGitHubClient {
     }
     if (access?.repository_selection !== 'selected') fail('Writer installation token repository selection is invalid');
     validateInstallationPermissions(access.permissions);
+    if (Object.hasOwn(access, 'repositories')) {
+      if (
+        !Array.isArray(access.repositories) || access.repositories.length !== 1 ||
+        !this.#sameRepository(access.repositories[0])
+      ) fail('Writer installation token repository list is invalid');
+    }
 
     const repositories = await this.#requestWithCredential(
       token,
@@ -387,7 +396,7 @@ export class WriterGitHubClient {
       '/installation/repositories?per_page=2&page=1',
     );
     if (
-      repositories?.repository_selection !== 'selected' ||
+      (Object.hasOwn(repositories ?? {}, 'repository_selection') && repositories.repository_selection !== 'selected') ||
       repositories?.total_count !== 1 ||
       !Array.isArray(repositories.repositories) ||
       repositories.repositories.length !== 1 ||
@@ -497,6 +506,10 @@ export class WriterGitHubClient {
     return this.#request('GET', `/repos/${this.#repository}/issues/${positiveNumber(number, 'Issue number')}`);
   }
 
+  getIssueComment(commentId) {
+    return this.#request('GET', `/repos/${this.#repository}/issues/comments/${positiveId(commentId, 'Issue comment ID')}`);
+  }
+
   getCollaboratorPermission(username) {
     if (typeof username !== 'string' || !USERNAME_PATTERN.test(username) || username.includes('--')) fail('GitHub username is invalid');
     return this.#request('GET', `/repos/${this.#repository}/collaborators/${encodeURIComponent(username)}/permission`)
@@ -529,7 +542,7 @@ export class WriterGitHubClient {
     const expectedHeadSha = validateSha(currentRef?.object?.sha, 'Writer ref SHA');
     this.#verifyRef(currentRef, verifiedIssueNumber, expectedHeadSha);
     this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, expectedHeadSha);
-    let pullNumber;
+    let pullNumber = null;
     try {
       const created = await this.#request('POST', `/repos/${this.#repository}/pulls`, {
         ...normalized,
@@ -539,34 +552,30 @@ export class WriterGitHubClient {
       }, 201);
       pullNumber = positiveNumber(created?.number, 'Created Draft PR number');
     } catch (error) {
-      if (!isAmbiguousCreateError(error)) throw error;
-      await this.#compensateAmbiguousCreatedPull({
-        issueNumber: verifiedIssueNumber,
-        expectedHeadSha,
-        metadata: normalized,
-      });
-      throw error;
+      if (!isAmbiguousMutationError(error)) throw error;
     }
-    const path = `/repos/${this.#repository}/pulls/${pullNumber}`;
-    try {
-      const persisted = await this.#request('GET', path);
-      const verified = this.#verifyManagedPull(persisted, {
-        issueNumber: verifiedIssueNumber,
-        pullNumber,
-        expectedHeadSha,
-        metadata: normalized,
-      });
-      this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, expectedHeadSha);
-      return verified;
-    } catch (error) {
-      await this.#compensateAmbiguousCreatedPull({
-        issueNumber: verifiedIssueNumber,
-        pullNumber,
-        expectedHeadSha,
-        metadata: normalized,
-      });
-      throw error;
+
+    if (pullNumber !== null) {
+      try {
+        const persisted = await this.#request('GET', `/repos/${this.#repository}/pulls/${pullNumber}`);
+        const verified = this.#verifyManagedPull(persisted, {
+          issueNumber: verifiedIssueNumber,
+          pullNumber,
+          expectedHeadSha,
+          metadata: normalized,
+        });
+        this.#verifyRef(await this.#readAgentRef(verifiedIssueNumber), verifiedIssueNumber, expectedHeadSha);
+        return verified;
+      } catch {
+        // Reconcile against the nonce below; no compensating mutation is safe.
+      }
     }
+
+    return this.#reconcileCreatedPull({
+      issueNumber: verifiedIssueNumber,
+      expectedHeadSha,
+      metadata: normalized,
+    });
   }
 
   #isAttributableCreatedPull(pull, issueNumber, expectedHeadSha, metadata, state) {
@@ -583,15 +592,16 @@ export class WriterGitHubClient {
       pull.author?.type === 'App' && pull.author.id === this.#writerApp.id;
   }
 
-  async #compensateAmbiguousCreatedPull({ issueNumber, pullNumber: _pullNumber = null, expectedHeadSha, metadata }) {
+  async #reconcileCreatedPull({ issueNumber, expectedHeadSha, metadata }) {
     validateSha(expectedHeadSha, 'Expected create-attempt head SHA');
     const markerStart = metadata.body.indexOf(WRITER_CREATE_ATTEMPT_PREFIX);
     const markerEnd = metadata.body.indexOf(' -->', markerStart);
-    if (markerStart < 0 || markerEnd < 0) fail('Writer compensation metadata is missing its create-attempt marker');
+    if (markerStart < 0 || markerEnd < 0) fail('Writer reconciliation metadata is missing its create-attempt marker');
     const attemptMarker = metadata.body.slice(markerStart, markerEnd + ' -->'.length);
 
-    // A POST response can be malformed, stale, or duplicated. Always enumerate the
-    // bounded head history so this attempt marker is globally unique before closing.
+    // GitHub does not offer an atomic "close only if head SHA still equals X"
+    // precondition. Recovery is therefore read-only: either prove one unchanged
+    // open PR belongs to this nonce, or leave fail-closed residue for later repair.
     const head = `${this.#owner}:${agentRef(issueNumber)}`;
     let pulls;
     try {
@@ -599,44 +609,33 @@ export class WriterGitHubClient {
         `/repos/${this.#repository}/pulls?state=all&base=main&head=${encodeURIComponent(head)}`,
       )).map((pull) => this.#normalizePull(pull));
     } catch {
-      fail('Writer could not enumerate a uniquely attributable Draft PR for compensation; platform residue may remain');
+      fail('Writer could not enumerate a uniquely attributable Draft PR after create; platform residue may remain');
     }
     const candidates = pulls.filter((pull) => typeof pull?.body === 'string' && pull.body.includes(attemptMarker));
     if (candidates.length !== 1) {
-      fail('Writer could not uniquely attribute the created Draft PR for compensation; platform residue may remain');
+      fail('Writer could not uniquely attribute the created Draft PR; platform residue may remain');
     }
     const candidate = candidates[0];
-    if (this.#isAttributableCreatedPull(candidate, issueNumber, expectedHeadSha, metadata, 'closed')) return;
     if (!this.#isAttributableCreatedPull(candidate, issueNumber, expectedHeadSha, metadata, 'open')) {
-      fail('Writer refused to close an unverified created Draft PR; platform residue may remain');
+      fail('Writer refused to reconcile a changed or unverified created Draft PR; platform residue may remain');
     }
 
-    let fenced;
+    let persisted;
     try {
-      fenced = this.#normalizePull(await this.#request('GET', `/repos/${this.#repository}/pulls/${candidate.number}`));
+      persisted = this.#normalizePull(await this.#request('GET', `/repos/${this.#repository}/pulls/${candidate.number}`));
     } catch {
-      fail('Writer could not re-read the attributable Draft PR before cleanup; platform residue may remain');
+      fail('Writer could not re-read the attributable Draft PR after create; platform residue may remain');
     }
-    if (!this.#isAttributableCreatedPull(fenced, issueNumber, expectedHeadSha, metadata, 'open')) {
-      fail('Writer refused to close a Draft PR that changed before cleanup; platform residue may remain');
+    if (!this.#isAttributableCreatedPull(persisted, issueNumber, expectedHeadSha, metadata, 'open')) {
+      fail('Writer refused to reconcile a Draft PR that changed after create; platform residue may remain');
     }
 
-    let patchError = null;
     try {
-      await this.#request('PATCH', `/repos/${this.#repository}/pulls/${candidate.number}`, { state: 'closed' }, 200);
-    } catch (error) {
-      patchError = error;
-    }
-    let closed;
-    try {
-      closed = this.#normalizePull(await this.#request('GET', `/repos/${this.#repository}/pulls/${candidate.number}`));
+      this.#verifyRef(await this.#readAgentRef(issueNumber), issueNumber, expectedHeadSha);
     } catch {
-      fail('Writer could not confirm cleanup of the attributable Draft PR; platform residue may remain');
+      fail('Writer branch changed while reconciling the created Draft PR; platform residue may remain');
     }
-    if (!this.#isAttributableCreatedPull(closed, issueNumber, expectedHeadSha, metadata, 'closed')) {
-      const suffix = patchError ? ' after an ambiguous close response' : '';
-      fail(`Writer failed to confirm cleanup of the attributable Draft PR${suffix}; platform residue may remain`);
-    }
+    return persisted;
   }
 
   async updateManagedDraftPull(issueNumber, pullNumber, expectedHeadSha, metadata) {

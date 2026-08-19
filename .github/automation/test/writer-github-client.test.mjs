@@ -122,6 +122,15 @@ const ambiguousSuccessBodies = [
     make: (_state, status) => textResponse('{"result":', status),
   },
   {
+    name: 'stream failure',
+    make: (_state, status) => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"result":'));
+        controller.error(new Error('socket reset'));
+      },
+    }), { status }),
+  },
+  {
     name: 'oversize body',
     make: (state, status) => new Response(new ReadableStream({
       start(controller) {
@@ -156,6 +165,7 @@ test('Writer reads are pinned to GitHub.com, reject redirects, retain tombstones
   });
 
   assert.deepEqual(await api.getIssue(7), { id: 7 });
+  assert.deepEqual(await api.getIssueComment(91), { id: 7 });
   assert.equal(await api.getCollaboratorPermission('writer-user'), 'write');
   assert.deepEqual((await api.getPull(42)).author, { type: 'App', id: writerApp.id });
   assert.deepEqual(await api.getRef('agent/issue-7'), { id: 7 });
@@ -163,6 +173,7 @@ test('Writer reads are pinned to GitHub.com, reject redirects, retain tombstones
 
   assert.deepEqual(calls.map(({ url, init }) => [url, init.method, init.redirect]), [
     ['https://api.github.com/repos/example/repository/issues/7', 'GET', 'error'],
+    ['https://api.github.com/repos/example/repository/issues/comments/91', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/collaborators/writer-user/permission', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/pulls/42', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/git/ref/heads/agent%2Fissue-7', 'GET', 'error'],
@@ -299,6 +310,8 @@ test('Writer verifies the installation App and exact selected repository before 
     },
     { app: writerApp, access: installationAccess({ repository_selection: 'all' }) },
     { app: writerApp, access: installationAccess({ permissions: { contents: 'write', pull_requests: 'write', checks: 'write' } }) },
+    { app: writerApp, access: installationAccess({ repositories: [] }) },
+    { app: writerApp, access: installationAccess({ repositories: [{ id: 999, full_name: repository }] }) },
     { app: writerApp, repositories: installationRepositories({ repository_selection: 'all' }) },
     { app: writerApp, repositories: installationRepositories({ total_count: 2 }) },
     { app: writerApp, repositories: installationRepositories({ repositories: [] }) },
@@ -345,6 +358,61 @@ test('Writer verifies the installation App and exact selected repository before 
   assert.throws(() => unverified.getIssue(7), /token has not been minted and verified/);
   await assert.rejects(() => unverified.createAgentRef(7, oldSha), /identity is not verified/);
   assert.equal(unverifiedCalls, 0);
+});
+
+test('Writer ignores optional token metadata but validates any optional repository list', async () => {
+  const api = client(async (url) => {
+    if (url === 'https://api.github.com/app') return response(writerApp);
+    if (url === 'https://api.github.com/repos/example/repository/installation') return response(installation());
+    if (url === `https://api.github.com/app/installations/${installationId}/access_tokens`) {
+      return response(installationAccess({
+        repositories: [{ id: repositoryId, full_name: repository }],
+        has_multiple_single_files: false,
+        single_file: null,
+      }), 201);
+    }
+    if (url.includes('/installation/repositories?')) {
+      const value = installationRepositories();
+      delete value.repository_selection;
+      return response(value);
+    }
+    return response({ message: 'unexpected' }, 500);
+  });
+
+  assert.equal((await api.verifyInstallationIdentity()).repositoryId, repositoryId);
+});
+
+test('Writer never enables an installation token from an unreadable 201 mint response', async () => {
+  const expectations = new Map([
+    ['invalid JSON', /invalid JSON/],
+    ['truncated JSON', /invalid JSON/],
+    ['stream failure', /response body could not be read/],
+    ['oversize body', /response exceeds the configured limit/],
+    ['body timeout', /response body timed out/],
+  ]);
+
+  for (const fixture of ambiguousSuccessBodies) {
+    const state = { bodyCanceled: false };
+    const calls = [];
+    const api = client(async (url, init) => {
+      calls.push({ url, init });
+      if (url === 'https://api.github.com/app') return response(writerApp);
+      if (url === 'https://api.github.com/repos/example/repository/installation') return response(installation());
+      if (url === `https://api.github.com/app/installations/${installationId}/access_tokens`) {
+        return fixture.make(state, 201);
+      }
+      return response({ message: 'unexpected' }, 500);
+    }, { totalTimeoutMs: 100, headersTimeoutMs: 20, bodyTimeoutMs: 15 });
+
+    await assert.rejects(() => api.verifyInstallationIdentity(), expectations.get(fixture.name), fixture.name);
+    assert.throws(() => api.getIssue(7), /token has not been minted and verified/);
+    await assert.rejects(() => api.createAgentRef(7, oldSha), /identity is not verified/);
+    assert.equal(calls.some(({ url }) => url.includes('/installation/repositories')), false);
+    assert.equal(calls.some(({ url }) => url.includes('/git/refs')), false);
+    if (fixture.name === 'oversize body' || fixture.name === 'body timeout') {
+      assert.equal(state.bodyCanceled, true, `${fixture.name} must cancel its response stream`);
+    }
+  }
 });
 
 test('Writer streams and cancels API responses above the one MiB limit', async () => {
@@ -537,7 +605,7 @@ test('createDraftPull uses a persisted PR snapshot instead of trusting an attack
   assert.deepEqual(calls.map(({ init }) => init.method), ['GET', 'GET', 'POST', 'GET', 'GET']);
 });
 
-test('createDraftPull falls back from a corrupt returned PR number to its unique attempt marker', async () => {
+test('createDraftPull reconciles a corrupt returned PR number to its unique attempt marker without closing', async () => {
   const calls = [];
   let closed = false;
   const api = await verifiedClient(async (url, init) => {
@@ -553,13 +621,10 @@ test('createDraftPull falls back from a corrupt returned PR number to its unique
     return response(rawPull({ state: closed ? 'closed' : 'open' }));
   });
 
-  await assert.rejects(
-    () => api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' }),
-    /ownership marker/,
-  );
-  assert.equal(closed, true);
-  const patch = calls.find(({ init }) => init.method === 'PATCH');
-  assert.equal(new URL(patch.url).pathname, '/repos/example/repository/pulls/42');
+  const pull = await api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' });
+  assert.equal(pull.number, 42);
+  assert.equal(closed, false);
+  assert.equal(calls.some(({ init }) => init.method === 'PATCH'), false);
   assert.equal(calls.filter(({ init }) => init.method === 'POST').length, 1);
 });
 
@@ -622,7 +687,7 @@ test('createDraftPull fails closed when POST/GET responses cannot establish the 
   );
 });
 
-test('createDraftPull compensates one nonce-attributable PR after ambiguous transport and 201 body outcomes', async () => {
+test('createDraftPull read-only reconciles one nonce-attributable PR after ambiguous transport and 201 bodies', async () => {
   const fixtures = [
     {
       name: 'connection failure',
@@ -634,6 +699,16 @@ test('createDraftPull compensates one nonce-attributable PR after ambiguous tran
     { name: 'server error', expected: /HTTP 500/, post: () => response({ message: 'server error' }, 500) },
     { name: 'invalid JSON', expected: /invalid JSON/, post: () => textResponse('not-json', 201) },
     { name: 'truncated JSON', expected: /invalid JSON/, post: () => textResponse('{"number":42', 201) },
+    {
+      name: 'stream failure',
+      expected: /response body could not be read/,
+      post: () => new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"number":'));
+          controller.error(new Error('socket reset'));
+        },
+      }), { status: 201 }),
+    },
     {
       name: 'oversize body',
       expected: /response exceeds the configured limit/,
@@ -677,18 +752,15 @@ test('createDraftPull compensates one nonce-attributable PR after ambiguous tran
       return response({ message: 'unexpected' }, 500);
     }, { totalTimeoutMs: 100, headersTimeoutMs: 20, bodyTimeoutMs: 15 });
 
-    await assert.rejects(
-      () => api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' }),
-      fixture.expected,
-      fixture.name,
-    );
+    const pull = await api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' });
+    assert.equal(pull.number, 42, fixture.name);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(state.closed, true, `${fixture.name} must close its attributable PR`);
+    assert.equal(state.closed, false, `${fixture.name} must leave the attributable PR open`);
     if (fixture.name === 'oversize body' || fixture.name === 'body timeout') {
       assert.equal(state.bodyCanceled, true, `${fixture.name} must cancel its response stream`);
     }
     assert.equal(calls.filter(({ init }) => init.method === 'POST').length, 1, 'an ambiguous create must never retry POST');
-    assert.deepEqual(calls.map(({ init }) => init.method), ['GET', 'GET', 'POST', 'GET', 'GET', 'PATCH', 'GET']);
+    assert.deepEqual(calls.map(({ init }) => init.method), ['GET', 'GET', 'POST', 'GET', 'GET', 'GET']);
     const recovery = new URL(calls[3].url);
     assert.equal(recovery.pathname, '/repos/example/repository/pulls');
     assert.equal(recovery.searchParams.get('state'), 'all');
@@ -708,19 +780,19 @@ test('createDraftPull refuses ambiguous recovery without exactly one fully verif
     {
       name: 'wrong identity',
       pulls: [rawPull({ user: { login: 'human', type: 'User' } })],
-      expected: /refused to close an unverified/,
+      expected: /refused to reconcile/,
     },
     {
       name: 'mutated body',
       pulls: [rawPull({ body: `${createAttemptMarker}\n\nforged` })],
-      expected: /refused to close an unverified/,
+      expected: /refused to reconcile/,
     },
     {
       name: 'wrong exact head',
       pulls: [rawPull({
         head: { ref: 'agent/issue-7', sha: newSha, repo: { id: repositoryId, full_name: repository } },
       })],
-      expected: /refused to close an unverified/,
+      expected: /refused to reconcile/,
     },
   ];
 
@@ -777,42 +849,31 @@ test('createDraftPull refuses a closed attributable candidate whose head has dri
     return response({ message: 'unexpected' }, 500);
   });
 
-  await assert.rejects(() => api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' }), /refused to close an unverified/);
+  await assert.rejects(() => api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' }), /refused to reconcile/);
   assert.equal(patches, 0);
 });
 
-test('createDraftPull refuses pre-PATCH candidate drift and reports post-PATCH head drift', async () => {
-  for (const phase of ['before', 'after']) {
-    let reads = 0;
-    let patches = 0;
-    const api = await verifiedClient(async (url, init) => {
-      if (url.includes('/git/ref/heads/')) return response(rawRef(7, oldSha));
-      if (init.method === 'POST') return textResponse('not-json', 201);
-      if (url.includes('/pulls?')) return response([rawPull()]);
-      if (init.method === 'PATCH') {
-        patches += 1;
-        return response(rawPull({ state: 'closed' }));
-      }
-      if (url.endsWith('/pulls/42')) {
-        reads += 1;
-        const drifted = (phase === 'before' && reads === 1) || (phase === 'after' && reads === 2);
-        return response(rawPull({
-          state: phase === 'after' && reads === 2 ? 'closed' : 'open',
-          head: { ref: 'agent/issue-7', sha: drifted ? newSha : oldSha, repo: { id: repositoryId, full_name: repository } },
-        }));
-      }
-      return response({ message: 'unexpected' }, 500);
-    });
+test('createDraftPull refuses candidate drift during read-only reconciliation without a cleanup mutation', async () => {
+  let patches = 0;
+  const api = await verifiedClient(async (url, init) => {
+    if (url.includes('/git/ref/heads/')) return response(rawRef(7, oldSha));
+    if (init.method === 'POST') return textResponse('not-json', 201);
+    if (url.includes('/pulls?')) return response([rawPull()]);
+    if (init.method === 'PATCH') patches += 1;
+    if (url.endsWith('/pulls/42')) return response(rawPull({
+      head: { ref: 'agent/issue-7', sha: newSha, repo: { id: repositoryId, full_name: repository } },
+    }));
+    return response({ message: 'unexpected' }, 500);
+  });
 
-    await assert.rejects(
-      () => api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' }),
-      phase === 'before' ? /changed before cleanup/ : /platform residue may remain/,
-    );
-    assert.equal(patches, phase === 'before' ? 0 : 1, `${phase} drift must not allow an additional mutation`);
-  }
+  await assert.rejects(
+    () => api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' }),
+    /changed after create/,
+  );
+  assert.equal(patches, 0);
 });
 
-test('createDraftPull confirms compensation when the close response is ambiguous but readback is closed', async () => {
+test('createDraftPull reconciles an unreadable create response without attempting close', async () => {
   let closed = false;
   const methods = [];
   const api = await verifiedClient(async (url, init) => {
@@ -827,12 +888,10 @@ test('createDraftPull confirms compensation when the close response is ambiguous
     return response(rawPull({ state: closed ? 'closed' : 'open' }));
   });
 
-  await assert.rejects(
-    () => api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' }),
-    /invalid JSON/,
-  );
-  assert.equal(closed, true);
-  assert.deepEqual(methods, ['GET', 'GET', 'POST', 'GET', 'GET', 'PATCH', 'GET']);
+  const pull = await api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' });
+  assert.equal(pull.number, 42);
+  assert.equal(closed, false);
+  assert.deepEqual(methods, ['GET', 'GET', 'POST', 'GET', 'GET', 'GET']);
 });
 
 test('createDraftPull fences pre-POST ref drift without creating a PR', async () => {
@@ -854,7 +913,7 @@ test('createDraftPull fences pre-POST ref drift without creating a PR', async ()
   assert.deepEqual(calls.map(({ init }) => init.method), ['GET', 'GET']);
 });
 
-test('createDraftPull compensates only its verified new Draft PR after post-POST ref drift', async () => {
+test('createDraftPull leaves fail-closed residue after post-POST ref drift and never closes', async () => {
   const calls = [];
   let refReads = 0;
   let closed = false;
@@ -883,14 +942,14 @@ test('createDraftPull compensates only its verified new Draft PR after post-POST
     () => api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' }),
     /platform residue may remain/,
   );
-  assert.equal(closed, true);
+  assert.equal(closed, false);
   assert.deepEqual(calls.map(({ init }) => init.method), [
-    'GET', 'GET', 'POST', 'GET', 'GET', 'GET', 'GET', 'PATCH', 'GET',
+    'GET', 'GET', 'POST', 'GET', 'GET', 'GET', 'GET', 'GET',
   ]);
-  assert.equal(new URL(calls.find(({ init }) => init.method === 'PATCH').url).pathname, '/repos/example/repository/pulls/42');
+  assert.equal(calls.some(({ init }) => init.method === 'PATCH'), false);
 });
 
-test('createDraftPull refuses to close a Draft PR whose exact head drifted during POST', async () => {
+test('createDraftPull refuses to reconcile a Draft PR whose exact head drifted during POST', async () => {
   const methods = [];
   let closed = false;
   const api = await verifiedClient(async (url, init) => {
@@ -915,13 +974,13 @@ test('createDraftPull refuses to close a Draft PR whose exact head drifted durin
 
   await assert.rejects(
     () => api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' }),
-    /refused to close an unverified/,
+    /refused to reconcile/,
   );
   assert.equal(closed, false);
   assert.deepEqual(methods, ['GET', 'GET', 'POST', 'GET', 'GET']);
 });
 
-test('createDraftPull reports platform residue when verified compensation cannot close or confirm the PR', async () => {
+test('createDraftPull reports platform residue without ever attempting cleanup close', async () => {
   for (const failure of ['patch', 'readback']) {
     let refReads = 0;
     let patchCalls = 0;
@@ -944,7 +1003,7 @@ test('createDraftPull reports platform residue when verified compensation cannot
       () => api.createDraftPull(7, { title: 'Fix issue 7', body: 'Details' }),
       /platform residue may remain/,
     );
-    assert.equal(patchCalls, 1);
+    assert.equal(patchCalls, 0);
   }
 });
 
@@ -1143,6 +1202,7 @@ test('Writer invalid input and ref bounds fail before issuing a network call', a
   });
   const invalidCalls = [
     () => api.getIssue(0),
+    () => api.getIssueComment(0),
     () => api.getCollaboratorPermission('../admin'),
     () => api.getPull(1.5),
     () => api.getRef('refs/heads/main'),

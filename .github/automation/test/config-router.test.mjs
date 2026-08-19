@@ -13,6 +13,7 @@ import {
 import {
   parseAgentCommand,
   parseWriterCommand,
+  revalidateWriterPublishBoundary,
   routeIssueInvocation,
   routePullInvocation,
   routeWriterInvocation,
@@ -32,6 +33,28 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..', '..');
 const contracts = loadContracts(repoRoot);
 const policy = contracts.policy;
+const writerIssueUrl = 'https://api.github.com/repos/example/repository/issues/41';
+
+function writerComment(overrides = {}) {
+  return {
+    id: 91,
+    body: '/agent implement',
+    issue_url: writerIssueUrl,
+    user: { login: 'maintainer' },
+    ...overrides,
+  };
+}
+
+function writerIssue(overrides = {}) {
+  return {
+    number: 41,
+    state: 'open',
+    updated_at: '2026-08-18T09:00:00Z',
+    url: writerIssueUrl,
+    labels: [{ name: 'agent-ready' }],
+    ...overrides,
+  };
+}
 
 test('trusted contracts load with only enabled agents declared', () => {
   assert.equal(Object.keys(contracts.agents.agents).length, 8);
@@ -174,6 +197,7 @@ test('Writer Phase 3 foundation rejects drift, broad permissions, and unsafe lim
     (agents) => { agents.agents.writer.timeouts.github_response_body_seconds = 16; },
     (agents) => { agents.agents.writer.timeouts.publish_job_minutes = 16; },
     (agents) => { agents.agents.writer.credentials.github_token_write = true; },
+    (agents) => { agents.agents.writer.credentials.private_key = 'AERIS_WRITER_PRIVATE_KEY'; },
     (agents) => { agents.agents.writer.permissions.denied.pop(); },
     (agents) => { agents.agents.writer.permissions.issues = 'write'; },
     (agents) => { agents.agents.writer.deterministic_client_mitigations.identity_verification = 'installation_token_only'; },
@@ -229,6 +253,10 @@ test('Writer Phase 3 foundation rejects drift, broad permissions, and unsafe lim
   const policyUnknownWriterField = structuredClone(contracts.policy);
   policyUnknownWriterField.writer.unrecognized_capability = true;
   assert.throws(() => validateContracts(contracts.agents, policyUnknownWriterField), ContractError);
+
+  const policyCredentialField = structuredClone(contracts.policy);
+  policyCredentialField.writer.credentials.installation_token = 'AERIS_WRITER_TOKEN';
+  assert.throws(() => validateContracts(contracts.agents, policyCredentialField), ContractError);
 
   const policyReleaseSecretAccess = structuredClone(contracts.policy);
   policyReleaseSecretAccess.writer.release_secret_access = true;
@@ -382,8 +410,8 @@ test('Writer parser and route keep the valid disabled contract disabled', async 
   };
   const trustedContracts = structuredClone(contracts);
   const environment = { AERIS_AGENTS_ENABLED: 'true', AERIS_WRITER_ENABLED: 'true' };
-  const liveComment = { id: 91, body: '/agent implement', user: { login: 'maintainer' } };
-  const liveIssue = { number: 41, state: 'open', labels: [{ name: 'agent-ready' }] };
+  const liveComment = writerComment();
+  const liveIssue = writerIssue();
   const github = {
     getIssueComment: async () => liveComment,
     getIssue: async () => liveIssue,
@@ -416,8 +444,8 @@ test('Writer rejects non-created events and live-state drift', async () => {
     comment: { id: 91, body: '/agent implement', user: { login: 'maintainer' } },
   };
   const github = {
-    getIssueComment: async () => ({ id: 91, body: '/agent implement', user: { login: 'maintainer' } }),
-    getIssue: async () => ({ number: 41, state: 'open', labels: [{ name: 'agent-ready' }] }),
+    getIssueComment: async () => writerComment(),
+    getIssue: async () => writerIssue(),
     getCollaboratorPermission: async () => 'write',
   };
   assert.equal((await routeWriterInvocation({
@@ -430,14 +458,14 @@ test('Writer rejects non-created events and live-state drift', async () => {
     eventName: 'issue_comment', event: { ...event, sender: { login: 'other-user' } }, github, trustedContracts, environment, fixCycle: 0,
   })).reason, 'comment_author_mismatch');
   assert.equal((await routeWriterInvocation({
-    eventName: 'issue_comment', event, github: { ...github, getIssueComment: async () => ({ ...event.comment, user: { login: 'other-user' } }) }, trustedContracts, environment, fixCycle: 0,
+    eventName: 'issue_comment', event, github: { ...github, getIssueComment: async () => writerComment({ user: { login: 'other-user' } }) }, trustedContracts, environment, fixCycle: 0,
   })).reason, 'comment_author_mismatch');
   let permissionCalls = 0;
   assert.equal((await routeWriterInvocation({
     eventName: 'issue_comment', event,
     github: {
       ...github,
-      getIssueComment: async () => ({ ...event.comment, id: 92 }),
+      getIssueComment: async () => writerComment({ id: 92 }),
       getCollaboratorPermission: async () => { permissionCalls += 1; return 'write'; },
     },
     trustedContracts, environment, fixCycle: 0,
@@ -447,17 +475,17 @@ test('Writer rejects non-created events and live-state drift', async () => {
     eventName: 'issue_comment', event,
     github: {
       ...github,
-      getIssue: async () => ({ number: 42, state: 'open', labels: [{ name: 'agent-ready' }] }),
+      getIssue: async () => writerIssue({ number: 42 }),
       getCollaboratorPermission: async () => { permissionCalls += 1; return 'write'; },
     },
     trustedContracts, environment, fixCycle: 0,
   })).reason, 'writer_live_validation_failed');
   assert.equal(permissionCalls, 0);
   assert.equal((await routeWriterInvocation({
-    eventName: 'issue_comment', event, github: { ...github, getIssue: async () => ({ number: 41, state: 'closed', labels: [{ name: 'agent-ready' }] }) }, trustedContracts, environment, fixCycle: 0,
+    eventName: 'issue_comment', event, github: { ...github, getIssue: async () => writerIssue({ state: 'closed' }) }, trustedContracts, environment, fixCycle: 0,
   })).reason, 'writer_disabled');
   assert.equal((await routeWriterInvocation({
-    eventName: 'issue_comment', event, github: { ...github, getIssue: async () => ({ number: 41, state: 'open', labels: [] }) }, trustedContracts, environment, fixCycle: 0,
+    eventName: 'issue_comment', event, github: { ...github, getIssue: async () => writerIssue({ labels: [] }) }, trustedContracts, environment, fixCycle: 0,
   })).reason, 'writer_disabled');
   assert.equal((await routeWriterInvocation({
     eventName: 'issue_comment', event, github: { ...github, getCollaboratorPermission: async () => null }, trustedContracts, environment, fixCycle: 0,
@@ -465,6 +493,61 @@ test('Writer rejects non-created events and live-state drift', async () => {
   assert.equal((await routeWriterInvocation({
     eventName: 'issue_comment', event, github: { ...github, getIssueComment: async () => { throw new Error('deleted'); } }, trustedContracts, environment, fixCycle: 0,
   })).reason, 'writer_live_validation_failed');
+
+  for (const mismatch of [
+    writerComment({ issue_url: 'https://api.github.com/repos/example/repository/issues/42' }),
+    writerComment({ issue_url: 'https://api.github.com/repos/attacker/repository/issues/41' }),
+    writerComment({ issue_url: 'https://api.github.com/repos/example/repository/issues/41?redirect=1' }),
+    writerComment({ issue_url: null }),
+  ]) {
+    assert.equal((await routeWriterInvocation({
+      eventName: 'issue_comment', event,
+      github: { ...github, getIssueComment: async () => mismatch },
+      trustedContracts, environment, fixCycle: 0,
+    })).reason, 'comment_issue_mismatch');
+  }
+});
+
+test('Writer publish boundary re-reads and binds comment, Issue, actor permission, and command', async () => {
+  const environment = { AERIS_AGENTS_ENABLED: 'true', AERIS_WRITER_ENABLED: 'true' };
+  const intent = {
+    issue_number: 41,
+    issue_updated_at: '2026-08-18T09:00:00Z',
+    comment_id: 91,
+    actor: 'maintainer',
+    command: '/agent implement',
+  };
+  let permissionCalls = 0;
+  const github = {
+    getIssueComment: async () => writerComment(),
+    getIssue: async () => writerIssue(),
+    getCollaboratorPermission: async () => { permissionCalls += 1; return 'write'; },
+  };
+
+  assert.equal((await revalidateWriterPublishBoundary({
+    intent, github, trustedContracts: contracts, environment, fixCycle: 0,
+  })).reason, 'writer_disabled');
+  assert.equal(permissionCalls, 1);
+
+  const adversarial = [
+    [{ ...intent, comment_id: 0 }, github, 'writer_publish_binding_invalid'],
+    [intent, { ...github, getIssueComment: async () => writerComment({ issue_url: 'https://api.github.com/repos/attacker/repository/issues/41' }) }, 'writer_publish_binding_invalid'],
+    [intent, { ...github, getIssueComment: async () => writerComment({ user: { login: 'other-user' } }) }, 'writer_publish_actor_changed'],
+    [intent, { ...github, getIssueComment: async () => writerComment({ body: '/agent retry-write' }) }, 'writer_publish_command_changed'],
+    [intent, { ...github, getIssue: async () => writerIssue({ updated_at: '2026-08-18T09:00:01Z' }) }, 'writer_publish_issue_changed'],
+    [intent, { ...github, getIssue: async () => writerIssue({ state: 'closed' }) }, 'issue_not_open'],
+    [intent, { ...github, getIssue: async () => writerIssue({ labels: [] }) }, 'missing_agent_ready_label'],
+    [intent, { ...github, getCollaboratorPermission: async () => 'read' }, 'insufficient_permission'],
+  ];
+  for (const [candidateIntent, candidateGitHub, reason] of adversarial) {
+    assert.equal((await revalidateWriterPublishBoundary({
+      intent: candidateIntent,
+      github: candidateGitHub,
+      trustedContracts: contracts,
+      environment,
+      fixCycle: 0,
+    })).reason, reason);
+  }
 });
 
 test('Writer switches accept only exact literal enable values', async () => {
@@ -490,8 +573,8 @@ test('Writer switches accept only exact literal enable values', async () => {
         comment: { id: 91, user: { login: 'maintainer' } },
       },
       github: {
-        getIssueComment: async () => ({ id: 91, body: '/agent implement', user: { login: 'maintainer' } }),
-        getIssue: async () => ({ number: 41, state: 'open', labels: [{ name: 'agent-ready' }] }),
+        getIssueComment: async () => writerComment(),
+        getIssue: async () => writerIssue(),
         getCollaboratorPermission: async () => 'write',
       },
       trustedContracts: contracts,
@@ -534,8 +617,8 @@ test('Writer switches fail closed for forged or malformed contracts', async () =
     issue: { number: 41 }, comment: { id: 91, user: { login: 'maintainer' } },
   };
   const github = {
-    getIssueComment: async () => ({ id: 91, body: '/agent implement', user: { login: 'maintainer' } }),
-    getIssue: async () => ({ number: 41, state: 'open', labels: [{ name: 'agent-ready' }] }),
+    getIssueComment: async () => writerComment(),
+    getIssue: async () => writerIssue(),
     getCollaboratorPermission: async () => 'write',
   };
   const forged = structuredClone(contracts);

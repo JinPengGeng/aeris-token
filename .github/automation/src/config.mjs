@@ -201,7 +201,8 @@ function validateWriterFoundation(writer, counterpart) {
     'writer API and publish job timeouts changed',
   );
   requireCondition(
-    sameStringArray(writer.credentials?.allowed_jobs, ['publish']) &&
+    sameStringSet(Object.keys(writer.credentials ?? {}), ['allowed_jobs', 'github_token_write']) &&
+      sameStringArray(writer.credentials?.allowed_jobs, ['publish']) &&
       writer.credentials.github_token_write === false,
     'writer credentials must be limited to publish without GITHUB_TOKEN write access',
   );
