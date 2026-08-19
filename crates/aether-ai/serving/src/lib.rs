@@ -55,8 +55,8 @@ pub use aether_pool_core::{
 };
 pub use attempt_budget::{
     AttemptBudget, AttemptBudgetDimension, AttemptBudgetError, AttemptBudgetExhausted,
-    AttemptBudgetLimits, AttemptBudgetReservation, AttemptBudgetUsage, AttemptRetryIntent,
-    AttemptTarget, AttemptTransitionViolation,
+    AttemptBudgetLimits, AttemptBudgetReservation, AttemptBudgetUsage, AttemptDispatchPermit,
+    AttemptRetryIntent, AttemptTarget, AttemptTransitionViolation,
 };
 pub use attempt_loop::{
     run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopOutcome, AiAttemptLoopPort,
