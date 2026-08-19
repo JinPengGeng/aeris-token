@@ -29,6 +29,10 @@ const syncScript = read('.github/workflows/scripts/sync-upstream.sh');
 const autoMergeScript = read('.github/workflows/scripts/manage-sync-automerge.sh');
 const autonomyScript = read('.github/workflows/scripts/github-autonomy.sh');
 const checkDispatchScript = read('.github/workflows/scripts/ensure-required-checks.sh');
+const verifyCandidateScript = read('.github/workflows/scripts/verify-sync-candidate.sh');
+const verifyCandidateMetadata = read(
+  '.github/workflows/scripts/validate-sync-candidate-metadata.cjs',
+);
 const state = JSON.parse(read('.github/upstream-sync-state.json'));
 
 for (const contract of [agents, automation, sync]) {
@@ -231,12 +235,49 @@ assert(
   'sync publication must use the bounded Sync App token',
 );
 const autoMergeStep = syncSteps.find((step) => step.name === 'Enable native auto-merge');
+const verifyCandidateStep = syncSteps.find(
+  (step) => step.name === 'Verify managed synchronization candidate',
+);
 const disarmCallIndex = syncScript.search(/^disarm_tracked_pr$/m);
 const rebuildLoopIndex = syncScript.search(/^for attempt in 1 2 3; do$/m);
 assert(autoMergeStep, 'sync workflow must expose the native auto-merge step');
+assert(verifyCandidateStep, 'sync workflow must verify the published candidate tree');
 assert(
-  autoMergeStep.if === "steps.sync.outputs.has_changes == 'true'",
-  'native auto-merge must require a published synchronization change',
+  verifyCandidateStep.env.GH_TOKEN === undefined &&
+    verifyCandidateStep.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
+    verifyCandidateStep.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}' &&
+    verifyCandidateStep.run.includes('verify-sync-candidate.sh'),
+  'candidate verification must bind the App-authored PR URL and exact published head',
+);
+assert(
+  verifyCandidateStep['timeout-minutes'] === 10,
+  'candidate verification must have a hard workflow runtime bound',
+);
+assert(
+  verifyCandidateScript.includes('"${expected_tree}" == "${actual_tree}"') &&
+    verifyCandidateScript.includes('git merge-base --is-ancestor "${checkpoint}" "${upstream_tip}"') &&
+    verifyCandidateScript.includes('"${upstream_tip}" == "${upstream_current}"') &&
+    !verifyCandidateScript.includes('--paginate'),
+  'candidate verification must regenerate the exact tree without trusting paginated metadata',
+);
+assert(
+  !verifyCandidateScript.includes('GH_TOKEN') &&
+    verifyCandidateScript.includes("--max-filesize \"${MAX_PR_BYTES}\"") &&
+    verifyCandidateScript.includes('-c credential.helper=') &&
+    verifyCandidateScript.includes('-c http.https://github.com/.extraheader='),
+  'candidate verification reads must be credentialless and resource-bounded',
+);
+assert(
+  verifyCandidateMetadata.includes('`${syncAppSlug}[bot]`') &&
+    verifyCandidateMetadata.includes("pr.user.type !== expectedAuthorType") &&
+    !verifyCandidateMetadata.includes("'github-actions[bot]'") &&
+    !verifyCandidateMetadata.includes("'app/github-actions'"),
+  'managed sync PR identity must be the exact configured Sync App bot without legacy fallback',
+);
+assert(
+  autoMergeStep.if.includes("steps.sync.outputs.has_changes == 'true'") &&
+    autoMergeStep.if.includes("steps.verify.outputs.verified == 'true'"),
+  'native auto-merge must require a verified published synchronization change',
 );
 assert(
   autoMergeStep.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
@@ -312,10 +353,20 @@ assert(
   'workflow validation must exercise Sync App comment identity migration',
 );
 assert(
+  validationStep?.run.includes('test-verify-sync-candidate.sh'),
+  'workflow validation must exercise deterministic candidate verification fixtures',
+);
+assert(
   frontendWorkflow.jobs.automation.steps.some(
     (step) => step.run === 'bash ../workflows/scripts/tests/test-github-autonomy.sh',
   ),
   'required CI must execute the fake-clock autonomy integration test',
+);
+assert(
+  frontendWorkflow.jobs.automation.steps.some(
+    (step) => step.run === 'bash ../workflows/scripts/tests/test-verify-sync-candidate.sh',
+  ),
+  'required CI must execute candidate tamper and replay fixtures',
 );
 assert(
   frontendWorkflow.jobs.automation.steps.some(
