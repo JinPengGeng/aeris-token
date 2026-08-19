@@ -97,13 +97,15 @@ assert(
 );
 assert(
   sameMembers(Object.keys(agents.agents.writer), [
-    'enabled', 'enabled_variable', 'phase', 'mode', 'identity', 'app_id_variable',
+    'enabled', 'enabled_variable', 'phase', 'mode', 'repository_id', 'repository_name', 'identity', 'app_id_variable',
     'app_slug_variable', 'private_key_secret', 'environment', 'timeouts', 'credentials', 'permissions', 'capability_residuals',
     'deterministic_client_mitigations', 'limits', 'model_variable', 'fallback_model_variable',
     'triggers', 'required_issue_labels', 'required_actor_permissions', 'required_commands',
     'allowed_branch_prefixes', 'tools', 'effects', 'denied_paths', 'handoff_to',
   ]) &&
     agents.agents.writer.phase === 3 &&
+    agents.agents.writer.repository_id === 1316750512 &&
+    agents.agents.writer.repository_name === 'JinPengGeng/aeris-token' &&
     agents.agents.writer.model_variable === 'AERIS_AI_MODEL_WRITER' &&
     agents.agents.writer.fallback_model_variable === 'AERIS_AI_MODEL_FALLBACK' &&
     JSON.stringify(agents.agents.writer.required_issue_labels) === JSON.stringify(['agent-ready']) &&
@@ -156,12 +158,14 @@ assert(
 assert(
   sameMembers(Object.keys(automation.writer), [
     'enabled', 'enabled_variable', 'branch_prefix', 'draft_pull_requests_only',
-    'maximum_open_pull_requests_per_issue', 'identity', 'app_id_variable', 'app_slug_variable', 'private_key_secret',
+    'maximum_open_pull_requests_per_issue', 'repository_id', 'repository_name', 'identity', 'app_id_variable', 'app_slug_variable', 'private_key_secret',
     'environment', 'timeouts', 'credentials', 'permissions', 'capability_residuals',
     'deterministic_client_mitigations', 'limits', 'forbidden_paths', 'release_secret_access',
     'pull_request_target_checkout',
   ]) &&
     automation.writer.branch_prefix === 'agent/' &&
+    automation.writer.repository_id === 1316750512 &&
+    automation.writer.repository_name === 'JinPengGeng/aeris-token' &&
     automation.writer.release_secret_access === false &&
     automation.writer.pull_request_target_checkout === false,
   'writer policy capabilities changed',
