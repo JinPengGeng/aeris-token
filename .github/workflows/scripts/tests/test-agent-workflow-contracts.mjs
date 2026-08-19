@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import test from 'node:test';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
+const execFileAsync = promisify(execFile);
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(testDirectory, '..', '..', '..', '..');
 const yamlCandidates = [
@@ -98,8 +101,15 @@ const actionLock = yaml.load(
   fs.readFileSync(path.join(repoRoot, '.github', 'action-lock.yml'), 'utf8'),
 );
 const actionReferencePattern = /^([A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*)@([0-9a-f]{40})$/;
-const dockerDigestPattern = /^docker:\/\/[^@\s]+@sha256:[0-9a-f]{64}$/;
 const imageDigestPattern = /^([a-z0-9]+(?:[._\/-][a-z0-9]+)*)@(sha256:[0-9a-f]{64})$/;
+const MAX_ACTION_ENTRIES = 64;
+const MAX_LOCAL_ACTION_NODES = 64;
+const MAX_LOCAL_ACTION_DEPTH = 8;
+const MAX_REMOTE_ACTION_NODES = 64;
+const MAX_REMOTE_ACTION_DEPTH = 8;
+const MAX_DESCRIPTOR_BYTES = 256 * 1024;
+const MAX_FETCH_CONCURRENCY = 4;
+const REMOTE_FETCH_TIMEOUT_MS = 60_000;
 const sourceRefPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const workflowUseEntryPattern = /^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#\s*([^\s#]+))?\s*$/gm;
 const workflowImageEntryPattern = /^\s*image:\s*([^\s#]+)(?:\s+#\s*([^\s#]+))?\s*$/gm;
@@ -132,21 +142,36 @@ const assertRawWorkflowUseEntriesCoverParsedUses = (parsedUses, rawEntries, desc
   );
 };
 
-const actionLockKey = ({ repository, ref }) => `${repository}\u0000${ref}`;
+const actionLockKey = ({ repository, ref }) => `${repository.toLowerCase()}\u0000${ref}`;
 const imageLockKey = ({ image, ref }) => `${image}\u0000${ref}`;
-
-const assertDockerDigest = (action, description) => {
-  assert.match(
-    action,
-    dockerDigestPattern,
-    `${description} container action must use a lowercase sha256 digest`,
-  );
-};
 
 const assertImageDigest = (image, description) => {
   const match = image.match(imageDigestPattern);
   assert.ok(match, `${description} runtime image must use a lowercase sha256 digest: ${image}`);
   return { image: match[1], digest: match[2] };
+};
+
+const collectStepRuntimeImages = (steps, description) => {
+  const images = [];
+  for (const [stepIndex, step] of steps.entries()) {
+    if (
+      typeof step?.uses !== 'string' ||
+      !step.uses.toLowerCase().startsWith('docker/setup-qemu-action@')
+    ) {
+      continue;
+    }
+    assert.ok(
+      step.with && typeof step.with === 'object' && !Array.isArray(step.with),
+      `${description} setup-qemu step ${stepIndex} must define with.image`,
+    );
+    assert.equal(
+      typeof step.with.image,
+      'string',
+      `${description} setup-qemu step ${stepIndex} with.image must be a string`,
+    );
+    images.push(step.with.image);
+  }
+  return images;
 };
 
 const collectRuntimeImages = (document, description) => {
@@ -186,35 +211,63 @@ const collectRuntimeImages = (document, description) => {
         images.push(service.image);
       }
     }
-    for (const [stepIndex, step] of (job.steps ?? []).entries()) {
-      if (typeof step?.uses !== 'string' || !step.uses.startsWith('docker/setup-qemu-action@')) {
-        continue;
-      }
-      assert.ok(
-        step.with && typeof step.with === 'object' && !Array.isArray(step.with),
-        `${description} job ${jobName} setup-qemu step ${stepIndex} must define with.image`,
-      );
-      assert.equal(
-        typeof step.with.image,
-        'string',
-        `${description} job ${jobName} setup-qemu step ${stepIndex} with.image must be a string`,
-      );
-      images.push(step.with.image);
-    }
+    images.push(...collectStepRuntimeImages(job.steps ?? [], `${description} job ${jobName}`));
   }
   return images;
+};
+
+const assertRawImageEntriesCoverParsedImages = (parsedImages, rawEntries, description) => {
+  assert.deepEqual(
+    rawEntries.map((entry) => entry.image).sort(),
+    [...parsedImages].sort(),
+    `${description} has an image whose source format is not covered by the image lock parser`,
+  );
 };
 
 const workflowImageEntries = (workflowFile, document) => {
   const source = fs.readFileSync(path.join(repoRoot, workflowFile), 'utf8');
   const parsedImages = collectRuntimeImages(document, workflowFile);
   const rawEntries = sourceImageEntries(source, workflowFile);
-  assert.deepEqual(
-    rawEntries.map((entry) => entry.image).sort(),
-    [...parsedImages].sort(),
-    `${workflowFile} has an image whose source format is not covered by the image lock parser`,
-  );
+  assertRawImageEntriesCoverParsedImages(parsedImages, rawEntries, workflowFile);
   return rawEntries;
+};
+
+const validateCompositeSteps = (steps, description) => {
+  assert.ok(Array.isArray(steps), `${description} composite action must define runs.steps`);
+  const parsedUses = [];
+  for (const [index, step] of steps.entries()) {
+    assert.ok(
+      step && typeof step === 'object' && !Array.isArray(step),
+      `${description} runs.steps[${index}] must be a map`,
+    );
+    const hasUses = Object.hasOwn(step, 'uses');
+    const hasRun = Object.hasOwn(step, 'run');
+    assert.notEqual(
+      hasUses,
+      hasRun,
+      `${description} runs.steps[${index}] must define exactly one of uses or run`,
+    );
+    if (hasUses) {
+      assert.equal(
+        typeof step.uses,
+        'string',
+        `${description} runs.steps[${index}].uses must be a string`,
+      );
+      parsedUses.push(step.uses);
+    } else {
+      assert.equal(
+        typeof step.run,
+        'string',
+        `${description} runs.steps[${index}].run must be a string`,
+      );
+      assert.equal(
+        typeof step.shell,
+        'string',
+        `${description} runs.steps[${index}] run step must define shell`,
+      );
+    }
+  }
+  return parsedUses;
 };
 
 const isInsidePath = (rootPath, candidatePath) => {
@@ -255,6 +308,10 @@ const resolveLocalActionDescriptor = (rootPath, action, description) => {
     fs.statSync(descriptors[0]).isFile(),
     `${description} local action descriptor must be a file: ${action}`,
   );
+  assert.ok(
+    fs.statSync(descriptors[0]).size <= MAX_DESCRIPTOR_BYTES,
+    `${description} local action descriptor exceeds ${MAX_DESCRIPTOR_BYTES} bytes: ${action}`,
+  );
   const realDescriptor = fs.realpathSync(descriptors[0]);
   assert.ok(
     isInsidePath(realRoot, realDescriptor),
@@ -263,15 +320,45 @@ const resolveLocalActionDescriptor = (rootPath, action, description) => {
   return realDescriptor;
 };
 
-const createUseAuditor = ({ rootPath, recordExternal }) => {
+const auditNonLocalUseEntry = (entry, description, recordExternal, recordImage) => {
+  const { action } = entry;
+  if (action.startsWith('docker://')) {
+    assert.match(
+      entry.ref ?? '',
+      sourceRefPattern,
+      `${description} container action must retain a source ref comment`,
+    );
+    const imageReference = action.slice('docker://'.length);
+    assertImageDigest(imageReference, `${description} container action`);
+    recordImage({ image: imageReference, ref: entry.ref, sourcePath: entry.sourcePath }, description);
+    return;
+  }
+  recordExternal(entry, description);
+};
+
+const createUseAuditor = ({
+  rootPath,
+  recordExternal,
+  recordImage,
+  maxLocalNodes = MAX_LOCAL_ACTION_NODES,
+  maxLocalDepth = MAX_LOCAL_ACTION_DEPTH,
+}) => {
   const scannedDescriptors = new Set();
   const activeDescriptors = new Set();
-  const dockerReferences = new Set();
+  const discoveredDescriptors = new Set();
 
-  const auditEntry = (entry, description = entry.sourcePath) => {
+  const auditEntry = (entry, description = entry.sourcePath, depth = 0) => {
     const { action } = entry;
     if (action.startsWith('./')) {
+      assert.ok(depth <= maxLocalDepth, `local action graph exceeds depth ${maxLocalDepth}`);
       const descriptorPath = resolveLocalActionDescriptor(rootPath, action, description);
+      if (!discoveredDescriptors.has(descriptorPath)) {
+        assert.ok(
+          discoveredDescriptors.size < maxLocalNodes,
+          `local action graph exceeds ${maxLocalNodes} nodes`,
+        );
+        discoveredDescriptors.add(descriptorPath);
+      }
       assert.equal(
         activeDescriptors.has(descriptorPath),
         false,
@@ -296,48 +383,18 @@ const createUseAuditor = ({ rootPath, recordExternal }) => {
           'composite',
           `${descriptorPath} only composite local actions are supported by the recursive audit`,
         );
-        assert.ok(
-          Array.isArray(document.runs.steps),
-          `${descriptorPath} composite action must define runs.steps`,
-        );
-
-        const parsedUses = [];
-        for (const [index, step] of document.runs.steps.entries()) {
-          assert.ok(
-            step && typeof step === 'object' && !Array.isArray(step),
-            `${descriptorPath} runs.steps[${index}] must be a map`,
-          );
-          const hasUses = Object.hasOwn(step, 'uses');
-          const hasRun = Object.hasOwn(step, 'run');
-          assert.notEqual(
-            hasUses,
-            hasRun,
-            `${descriptorPath} runs.steps[${index}] must define exactly one of uses or run`,
-          );
-          if (hasUses) {
-            assert.equal(
-              typeof step.uses,
-              'string',
-              `${descriptorPath} runs.steps[${index}].uses must be a string`,
-            );
-            parsedUses.push(step.uses);
-          } else {
-            assert.equal(
-              typeof step.run,
-              'string',
-              `${descriptorPath} runs.steps[${index}].run must be a string`,
-            );
-            assert.equal(
-              typeof step.shell,
-              'string',
-              `${descriptorPath} runs.steps[${index}] run step must define shell`,
-            );
-          }
-        }
+        const parsedUses = validateCompositeSteps(document.runs.steps, descriptorPath);
 
         const rawEntries = sourceUseEntries(source, descriptorPath);
         assertRawWorkflowUseEntriesCoverParsedUses(parsedUses, rawEntries, descriptorPath);
-        for (const nestedEntry of rawEntries) auditEntry(nestedEntry, descriptorPath);
+        const rawImageEntries = sourceImageEntries(source, descriptorPath);
+        assertRawImageEntriesCoverParsedImages(
+          collectStepRuntimeImages(document.runs.steps, descriptorPath),
+          rawImageEntries,
+          descriptorPath,
+        );
+        for (const imageEntry of rawImageEntries) recordImage(imageEntry, descriptorPath);
+        for (const nestedEntry of rawEntries) auditEntry(nestedEntry, descriptorPath, depth + 1);
         scannedDescriptors.add(descriptorPath);
       } finally {
         activeDescriptors.delete(descriptorPath);
@@ -345,16 +402,10 @@ const createUseAuditor = ({ rootPath, recordExternal }) => {
       return;
     }
 
-    if (action.startsWith('docker://')) {
-      assertDockerDigest(action, description);
-      dockerReferences.add(action);
-      return;
-    }
-
-    recordExternal(entry, description);
+    auditNonLocalUseEntry(entry, description, recordExternal, recordImage);
   };
 
-  return { auditEntry, dockerReferences, scannedDescriptors };
+  return { auditEntry, discoveredDescriptors, scannedDescriptors };
 };
 
 const withFixtureRepo = (files, callback) => {
@@ -371,8 +422,9 @@ const withFixtureRepo = (files, callback) => {
   }
 };
 
-const createFixtureUseAuditor = (rootPath) => {
+const createFixtureUseAuditor = (rootPath, options = {}) => {
   const externalReferences = [];
+  const imageEntries = [];
   const auditor = createUseAuditor({
     rootPath,
     recordExternal: ({ action, ref }, description) => {
@@ -381,8 +433,14 @@ const createFixtureUseAuditor = (rootPath) => {
       assert.match(ref ?? '', sourceRefPattern, `${description} indirect action must retain a source ref`);
       externalReferences.push({ repository: match[1], sha: match[2], ref });
     },
+    recordImage: (entry, description) => {
+      assert.match(entry.ref ?? '', sourceRefPattern, `${description} image must retain a source ref`);
+      assertImageDigest(entry.image, description);
+      imageEntries.push(entry);
+    },
+    ...options,
   });
-  return { ...auditor, externalReferences };
+  return { ...auditor, externalReferences, imageEntries };
 };
 
 const imageEntriesFromWorkflowSource = (source, description) => {
@@ -415,10 +473,270 @@ const assertFixtureImageLockCoverage = (lockImages, imageEntries, description) =
   );
 };
 
+const remoteDescriptorPaths = ['action.yml', 'action.yaml'];
+
+const validateRemoteActionDescriptor = (entry, candidates) => {
+  const description = `${entry.repository}@${entry.ref}`;
+  const found = [];
+  for (const descriptorPath of remoteDescriptorPaths) {
+    const candidate = candidates.get(descriptorPath);
+    assert.ok(candidate, `${description} did not return a result for ${descriptorPath}`);
+    assert.ok(
+      candidate.status === 200 || candidate.status === 404,
+      `${description}/${descriptorPath} returned unexpected HTTP ${candidate.status}`,
+    );
+    if (candidate.status === 200) {
+      assert.equal(typeof candidate.source, 'string', `${description}/${descriptorPath} body is missing`);
+      found.push({ path: descriptorPath, source: candidate.source });
+    }
+  }
+  assert.equal(found.length, 1, `${description} must expose exactly one root action.yml or action.yaml`);
+  assert.equal(
+    found[0].path,
+    entry.descriptor.path,
+    `${description} descriptor path does not match action-lock.yml`,
+  );
+
+  const document = yaml.load(found[0].source);
+  assert.ok(
+    document && typeof document === 'object' && !Array.isArray(document),
+    `${description} descriptor must be a YAML map`,
+  );
+  assert.ok(
+    document.runs && typeof document.runs === 'object' && !Array.isArray(document.runs),
+    `${description} descriptor must define runs`,
+  );
+  const using = document.runs.using;
+  const kind = using === 'composite' ? 'composite' : /^node[0-9]+$/.test(using) ? 'node' : null;
+  assert.ok(kind, `${description} runs.using is unsupported: ${using}`);
+  assert.equal(kind, entry.descriptor.kind, `${description} descriptor kind does not match action-lock.yml`);
+  if (kind === 'composite') {
+    validateCompositeSteps(document.runs.steps, description);
+  } else {
+    assert.equal(typeof document.runs.main, 'string', `${description} Node action must define runs.main`);
+  }
+  return { document, kind, path: found[0].path, source: found[0].source };
+};
+
+const readResponseTextBounded = async (response, maxBytes = MAX_DESCRIPTOR_BYTES) => {
+  const contentLength = Number(response.headers?.get?.('content-length'));
+  assert.ok(
+    !Number.isFinite(contentLength) || contentLength <= maxBytes,
+    `remote descriptor exceeds ${maxBytes} bytes`,
+  );
+  if (!response.body?.getReader) {
+    const source = await response.text();
+    assert.ok(Buffer.byteLength(source, 'utf8') <= maxBytes, `remote descriptor exceeds ${maxBytes} bytes`);
+    return source;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    assert.ok(total <= maxBytes, `remote descriptor exceeds ${maxBytes} bytes`);
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+};
+
+const signalForFetch = (globalSignal) =>
+  globalSignal ? AbortSignal.any([globalSignal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000);
+
+const fetchRemoteActionDescriptor = async (entry, fetchImpl = fetch, globalSignal) => {
+  const candidates = new Map();
+  for (const descriptorPath of remoteDescriptorPaths) {
+    const url = `https://raw.githubusercontent.com/${entry.repository}/${entry.sha}/${descriptorPath}`;
+    const response = await fetchImpl(url, {
+      headers: { Accept: 'text/plain' },
+      signal: signalForFetch(globalSignal),
+    });
+    candidates.set(descriptorPath, {
+      status: response.status,
+      source: response.status === 200 ? await readResponseTextBounded(response) : null,
+    });
+  }
+  return validateRemoteActionDescriptor(entry, candidates);
+};
+
+const runGitLsRemote = async (entry, globalSignal) => {
+  const repository = entry.repository.toLowerCase();
+  const headRef = `refs/heads/${entry.ref}`;
+  const tagRef = `refs/tags/${entry.ref}`;
+  const peeledTagRef = `${tagRef}^{}`;
+  const env = { ...process.env, GCM_INTERACTIVE: 'Never', GIT_TERMINAL_PROMPT: '0' };
+  for (const name of ['GH_TOKEN', 'GITHUB_TOKEN', 'GIT_ASKPASS', 'SSH_ASKPASS']) delete env[name];
+  const { stdout } = await execFileAsync(
+    'git',
+    [
+      '-c',
+      'credential.helper=',
+      '-c',
+      'http.https://github.com/.extraheader=',
+      'ls-remote',
+      '--heads',
+      '--tags',
+      `https://github.com/${repository}.git`,
+      headRef,
+      tagRef,
+      peeledTagRef,
+    ],
+    {
+      encoding: 'utf8',
+      env,
+      maxBuffer: 64 * 1024,
+      signal: globalSignal,
+      timeout: 15_000,
+      windowsHide: true,
+    },
+  );
+  return stdout;
+};
+
+const resolveActionRef = async (entry, lsRemoteImpl = runGitLsRemote, globalSignal) => {
+  const headRef = `refs/heads/${entry.ref}`;
+  const tagRef = `refs/tags/${entry.ref}`;
+  const peeledTagRef = `${tagRef}^{}`;
+  const allowedRefs = new Set([headRef, tagRef, peeledTagRef]);
+  const resolved = new Map();
+  const output = await lsRemoteImpl(entry, globalSignal);
+  assert.equal(typeof output, 'string', `${entry.repository}@${entry.ref} ls-remote output is missing`);
+  assert.ok(Buffer.byteLength(output, 'utf8') <= 64 * 1024, 'ls-remote output exceeds 65536 bytes');
+  for (const line of output.split(/\r?\n/).filter(Boolean)) {
+    const match = line.match(/^([0-9a-f]{40})\t([^\s]+)$/);
+    assert.ok(match, `${entry.repository}@${entry.ref} ls-remote output is malformed`);
+    assert.ok(allowedRefs.has(match[2]), `${entry.repository}@${entry.ref} returned an unexpected ref`);
+    assert.equal(resolved.has(match[2]), false, `${entry.repository}@${entry.ref} returned a duplicate ref`);
+    resolved.set(match[2], match[1]);
+  }
+  const branchSha = resolved.get(headRef) ?? null;
+  const tagSha = resolved.get(peeledTagRef) ?? resolved.get(tagRef) ?? null;
+  assert.ok(tagSha || branchSha, `${entry.repository}@${entry.ref} is neither a tag nor a branch`);
+  assert.equal(!tagSha || !branchSha, true, `${entry.repository}@${entry.ref} is ambiguously both tag and branch`);
+  const resolvedSha = tagSha ?? branchSha;
+  assert.equal(
+    resolvedSha,
+    entry.sha,
+    `${entry.repository}@${entry.ref} does not resolve to the locked commit SHA`,
+  );
+  return resolvedSha;
+};
+
+const fetchRemoteActionDescriptors = async (
+  entries,
+  fetchImpl = fetch,
+  lsRemoteImpl = runGitLsRemote,
+) => {
+  assert.ok(entries.length <= MAX_ACTION_ENTRIES, `action lock exceeds ${MAX_ACTION_ENTRIES} entries`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error('remote provenance aggregate timeout')), REMOTE_FETCH_TIMEOUT_MS);
+  const results = new Array(entries.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const index = next;
+      next += 1;
+      if (index >= entries.length) return;
+      const entry = entries[index];
+      const manifest = await fetchRemoteActionDescriptor(entry, fetchImpl, controller.signal);
+      await resolveActionRef(entry, lsRemoteImpl, controller.signal);
+      results[index] = manifest;
+    }
+  };
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_FETCH_CONCURRENCY, entries.length) }, () => worker()),
+    );
+    return results;
+  } catch (error) {
+    controller.abort(error);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const auditRemoteManifestGraph = ({
+  rootKeys,
+  lockEntries,
+  manifests,
+  recordExternal,
+  recordImage,
+  maxNodes = MAX_REMOTE_ACTION_NODES,
+  maxDepth = MAX_REMOTE_ACTION_DEPTH,
+}) => {
+  const scanned = new Set();
+  const active = new Set();
+  const discovered = new Set();
+
+  const auditKey = (key, depth = 0) => {
+    assert.ok(depth <= maxDepth, `remote action graph exceeds depth ${maxDepth}`);
+    if (!discovered.has(key)) {
+      assert.ok(discovered.size < maxNodes, `remote action graph exceeds ${maxNodes} nodes`);
+      discovered.add(key);
+    }
+    assert.equal(active.has(key), false, `remote composite action cycle includes ${key.replace('\u0000', '@')}`);
+    if (scanned.has(key)) return;
+    const entry = lockEntries.get(key);
+    assert.ok(entry, `remote action ${key.replace('\u0000', '@')} is missing from action-lock.yml`);
+    const manifest = manifests.get(key);
+    assert.ok(manifest, `remote action ${entry.repository}@${entry.ref} descriptor was not fetched`);
+    if (manifest.kind === 'node') {
+      scanned.add(key);
+      return;
+    }
+
+    active.add(key);
+    try {
+      const description = `${entry.repository}@${entry.ref}/${manifest.path}`;
+      const parsedUses = validateCompositeSteps(manifest.document.runs.steps, description);
+      const rawEntries = sourceUseEntries(manifest.source, description);
+      assertRawWorkflowUseEntriesCoverParsedUses(parsedUses, rawEntries, description);
+      const rawImageEntries = sourceImageEntries(manifest.source, description);
+      assertRawImageEntriesCoverParsedImages(
+        collectStepRuntimeImages(manifest.document.runs.steps, description),
+        rawImageEntries,
+        description,
+      );
+      for (const imageEntry of rawImageEntries) recordImage(imageEntry, description);
+      for (const nestedEntry of rawEntries) {
+        assert.equal(
+          nestedEntry.action.startsWith('./'),
+          false,
+          `${description} remote composite local uses are unsupported: ${nestedEntry.action}`,
+        );
+        if (nestedEntry.action.startsWith('docker://')) {
+          auditNonLocalUseEntry(nestedEntry, description, recordExternal, recordImage);
+          continue;
+        }
+        recordExternal(nestedEntry, description);
+        const match = nestedEntry.action.match(actionReferencePattern);
+        assert.ok(match, `${description} nested action is unsupported: ${nestedEntry.action}`);
+        auditKey(actionLockKey({ repository: match[1], ref: nestedEntry.ref }), depth + 1);
+      }
+      scanned.add(key);
+    } finally {
+      active.delete(key);
+    }
+  };
+
+  for (const key of rootKeys) auditKey(key);
+  return scanned;
+};
+
 const collectCheckoutSteps = (document) =>
   Object.values(document.jobs ?? {}).flatMap((job) =>
     (job.steps ?? []).filter(
-      (step) => typeof step.uses === 'string' && step.uses.startsWith('actions/checkout@'),
+      (step) =>
+        typeof step.uses === 'string' && step.uses.toLowerCase().startsWith('actions/checkout@'),
     ),
   );
 
@@ -699,11 +1017,67 @@ for (const spec of workflowSpecs) {
   }
 }
 
-test('action and image locks are strict, sorted, and exactly cover workflow supply-chain references', () => {
+test('every checkout declares an explicit credential policy with only two write-path exceptions', () => {
+  const allowedPersistentCheckouts = new Set([
+    '.github/workflows/build-tunnel.yml\u0000update-readme\u00000',
+    '.github/workflows/sync-upstream.yml\u0000sync\u00003',
+  ]);
+  const observedPersistentCheckouts = new Set();
+  let checkoutCount = 0;
+
+  for (const workflowFile of workflowFiles) {
+    const canonicalWorkflowFile = workflowFile.replaceAll('\\', '/');
+    const { source, document } = readWorkflow(workflowFile);
+    for (const [jobName, job] of Object.entries(document.jobs ?? {})) {
+      for (const [stepIndex, step] of (job.steps ?? []).entries()) {
+        if (
+          typeof step.uses !== 'string' ||
+          !step.uses.toLowerCase().startsWith('actions/checkout@')
+        ) {
+          continue;
+        }
+        checkoutCount += 1;
+        assert.equal(
+          typeof step.with?.['persist-credentials'],
+          'boolean',
+          `${workflowFile} ${jobName} checkout ${stepIndex} must explicitly declare boolean persist-credentials`,
+        );
+        if (step.with['persist-credentials']) {
+          const identity = `${canonicalWorkflowFile}\u0000${jobName}\u0000${stepIndex}`;
+          assert.ok(
+            allowedPersistentCheckouts.has(identity),
+            `${workflowFile} ${jobName} checkout ${stepIndex} may not persist credentials`,
+          );
+          observedPersistentCheckouts.add(identity);
+        }
+      }
+    }
+
+    if (canonicalWorkflowFile === '.github/workflows/build-tunnel.yml') {
+      assert.match(source, /This job pushes the generated README update with GITHUB_TOKEN/);
+    }
+    if (canonicalWorkflowFile === '.github/workflows/sync-upstream.yml') {
+      assert.match(source, /bounded sync script fetches and pushes with this Sync App token/);
+    }
+  }
+
+  assert.ok(checkoutCount > 0, 'repository must contain checkout steps');
+  assert.deepEqual(
+    [...observedPersistentCheckouts].sort(),
+    [...allowedPersistentCheckouts].sort(),
+    'only the two documented write-path checkouts may persist credentials',
+  );
+});
+
+const auditSupplyChainContracts = async ({ verifyRemote }) => {
   assert.deepEqual(Object.keys(actionLock).sort(), ['actions', 'images', 'version']);
   assert.equal(actionLock.version, 1, 'action lock must use version 1');
   assert.ok(Array.isArray(actionLock.actions), 'action lock actions must be an array');
   assert.ok(Array.isArray(actionLock.images), 'action lock images must be an array');
+  assert.ok(
+    actionLock.actions.length <= MAX_ACTION_ENTRIES,
+    `action lock must not exceed ${MAX_ACTION_ENTRIES} entries`,
+  );
 
   const lockKeys = new Set();
   const lockEntries = new Map();
@@ -711,8 +1085,8 @@ test('action and image locks are strict, sorted, and exactly cover workflow supp
   for (const entry of actionLock.actions) {
     assert.deepEqual(
       Object.keys(entry).sort(),
-      ['ref', 'repository', 'sha'],
-      'action lock entries must have only repository, ref, and sha',
+      ['descriptor', 'ref', 'repository', 'sha'],
+      'action lock entries must have only repository, ref, sha, and descriptor',
     );
     assert.match(
       entry.repository,
@@ -721,11 +1095,28 @@ test('action and image locks are strict, sorted, and exactly cover workflow supp
     );
     assert.match(entry.ref, sourceRefPattern, 'action lock source ref is invalid');
     assert.match(entry.sha, /^[0-9a-f]{40}$/, 'action lock SHA is invalid');
+    assert.ok(
+      entry.descriptor && typeof entry.descriptor === 'object' && !Array.isArray(entry.descriptor),
+      'action lock descriptor must be a map',
+    );
+    assert.deepEqual(
+      Object.keys(entry.descriptor).sort(),
+      ['kind', 'path'],
+      'action lock descriptor must have only kind and path',
+    );
+    assert.ok(
+      remoteDescriptorPaths.includes(entry.descriptor.path),
+      'action lock descriptor path must be action.yml or action.yaml',
+    );
+    assert.ok(
+      ['composite', 'node'].includes(entry.descriptor.kind),
+      'action lock descriptor kind must be composite or node',
+    );
     const key = actionLockKey(entry);
     assert.ok(key > previousKey, 'action lock entries must be strictly sorted by repository and ref');
     assert.equal(lockKeys.has(key), false, `action lock duplicates ${entry.repository}@${entry.ref}`);
     lockKeys.add(key);
-    lockEntries.set(key, entry.sha);
+    lockEntries.set(key, entry);
     previousKey = key;
   }
 
@@ -757,27 +1148,50 @@ test('action and image locks are strict, sorted, and exactly cover workflow supp
   const workflowRefs = new Map();
   const workflowImageKeys = new Set();
   const workflowImageRefs = new Map();
+  const recordImage = (entry, description) => {
+    assert.match(
+      entry.ref ?? '',
+      sourceRefPattern,
+      `${description} image must retain a source ref comment`,
+    );
+    const { image, digest } = assertImageDigest(entry.image, description);
+    const key = imageLockKey({ image, ref: entry.ref });
+    const priorDigest = workflowImageRefs.get(key);
+    assert.ok(
+      priorDigest === undefined || priorDigest === digest,
+      `${description} maps ${image}@${entry.ref} to more than one digest`,
+    );
+    workflowImageRefs.set(key, digest);
+    workflowImageKeys.add(key);
+    assert.equal(
+      imageLockEntries.get(key),
+      digest,
+      `${description} image ${image}@${entry.ref} must exactly match action-lock.yml`,
+    );
+  };
+  const recordExternal = ({ action, ref }, description) => {
+    const match = action.match(actionReferencePattern);
+    assert.ok(match, `${description} action is unsupported or not pinned to a full commit SHA: ${action}`);
+    assert.match(ref ?? '', sourceRefPattern, `${description} action must retain a source ref comment`);
+    const [, repository, sha] = match;
+    const key = actionLockKey({ repository, ref });
+    const priorSha = workflowRefs.get(key);
+    assert.ok(
+      priorSha === undefined || priorSha === sha,
+      `${description} maps ${repository}@${ref} to more than one SHA`,
+    );
+    workflowRefs.set(key, sha);
+    workflowKeys.add(key);
+    assert.equal(
+      lockEntries.get(key)?.sha,
+      sha,
+      `${description} action ${repository}@${ref} must exactly match action-lock.yml`,
+    );
+  };
   const useAuditor = createUseAuditor({
     rootPath: repoRoot,
-    recordExternal: ({ action, ref }, description) => {
-      const match = action.match(actionReferencePattern);
-      assert.ok(match, `${description} action is unsupported or not pinned to a full commit SHA: ${action}`);
-      assert.match(ref ?? '', sourceRefPattern, `${description} action must retain a source ref comment`);
-      const [, repository, sha] = match;
-      const key = actionLockKey({ repository, ref });
-      const priorSha = workflowRefs.get(key);
-      assert.ok(
-        priorSha === undefined || priorSha === sha,
-        `${description} maps ${repository}@${ref} to more than one SHA`,
-      );
-      workflowRefs.set(key, sha);
-      workflowKeys.add(key);
-      assert.equal(
-        lockEntries.get(key),
-        sha,
-        `${description} action ${repository}@${ref} must exactly match action-lock.yml`,
-      );
-    },
+    recordExternal,
+    recordImage,
   });
 
   assert.ok(workflowFiles.length > 0, 'repository must contain workflow files');
@@ -788,55 +1202,79 @@ test('action and image locks are strict, sorted, and exactly cover workflow supp
     assertRawWorkflowUseEntriesCoverParsedUses(parsedUses, rawEntries, workflowFile);
     for (const entry of rawEntries) useAuditor.auditEntry(entry, workflowFile);
 
-    for (const entry of workflowImageEntries(workflowFile, document)) {
-      assert.match(
-        entry.ref ?? '',
-        sourceRefPattern,
-        `${workflowFile} image must retain a source ref comment`,
-      );
-      const { image, digest } = assertImageDigest(entry.image, workflowFile);
-      const key = imageLockKey({ image, ref: entry.ref });
-      const priorDigest = workflowImageRefs.get(key);
-      assert.ok(
-        priorDigest === undefined || priorDigest === digest,
-        `${workflowFile} maps ${image}@${entry.ref} to more than one digest`,
-      );
-      workflowImageRefs.set(key, digest);
-      workflowImageKeys.add(key);
-      assert.equal(
-        imageLockEntries.get(key),
-        digest,
-        `${workflowFile} image ${image}@${entry.ref} must exactly match action-lock.yml`,
-      );
-    }
+    for (const entry of workflowImageEntries(workflowFile, document)) recordImage(entry, workflowFile);
   }
-  assert.deepEqual(
-    [...lockKeys].sort(),
-    [...workflowKeys].sort(),
-    'action lock must not contain unused entries and must cover every external workflow action',
-  );
-  assert.deepEqual(
-    [...imageLockKeys].sort(),
-    [...workflowImageKeys].sort(),
-    'image lock must not contain unused entries and must cover every workflow runtime image',
-  );
-  assert.ok(useAuditor.dockerReferences instanceof Set, 'docker action references must be explicitly audited');
+
+  if (verifyRemote) {
+    const fetchedManifests = await fetchRemoteActionDescriptors(actionLock.actions);
+    const manifests = new Map(
+      actionLock.actions.map((entry, index) => [actionLockKey(entry), fetchedManifests[index]]),
+    );
+    auditRemoteManifestGraph({
+      rootKeys: [...workflowKeys],
+      lockEntries,
+      manifests,
+      recordExternal,
+      recordImage,
+    });
+    assert.deepEqual(
+      [...lockKeys].sort(),
+      [...workflowKeys].sort(),
+      'action lock must not contain unused entries and must cover every external action',
+    );
+    assert.deepEqual(
+      [...imageLockKeys].sort(),
+      [...workflowImageKeys].sort(),
+      'image lock must not contain unused entries and must cover every runtime image',
+    );
+  }
+};
+
+test('action and image locks are strict and cover direct workflow references', async () => {
+  await auditSupplyChainContracts({ verifyRemote: false });
 });
 
-test('container workflow actions require immutable lowercase sha256 digests', () => {
-  assert.doesNotThrow(() =>
-    assertDockerDigest(
-      `docker://example.invalid/tool@sha256:${'a'.repeat(64)}`,
-      'valid container action',
-    ),
+test('required Automation Contracts CI runs the live provenance audit without credentials', () => {
+  const { document } = readWorkflow('.github/workflows/frontend-ci.yml');
+  const step = document.jobs?.automation?.steps?.find(
+    (candidate) => candidate.name === 'Verify remote action provenance',
   );
+  assert.ok(step, 'Automation Contracts must include the live remote provenance step');
+  assert.match(step.run ?? '', /--test-name-pattern="live remote action provenance"/);
+  assert.equal(step.env?.AERIS_VERIFY_REMOTE_ACTIONS, '1');
+  assert.equal(Object.hasOwn(step.env ?? {}, 'GITHUB_TOKEN'), false);
+  assert.equal(hasSecretReference(step), false);
+});
+
+test(
+  'live remote action provenance is verified at exact refs and SHAs',
+  { skip: process.env.AERIS_VERIFY_REMOTE_ACTIONS !== '1' },
+  async () => {
+    await auditSupplyChainContracts({ verifyRemote: true });
+  },
+);
+
+test('container workflow actions require immutable lowercase sha256 digests', () => {
+  const auditor = createFixtureUseAuditor(repoRoot);
+  auditor.auditEntry({
+    action: `docker://example.invalid/tool@sha256:${'a'.repeat(64)}`,
+    ref: 'v1',
+    sourcePath: 'valid container action',
+  });
+  assert.equal(auditor.imageEntries.length, 1);
   for (const action of [
     'docker://example.invalid/tool:latest',
     'docker://example.invalid/tool',
     `docker://example.invalid/tool@sha256:${'A'.repeat(64)}`,
     `docker://example.invalid/tool@sha256:${'a'.repeat(63)}`,
   ]) {
-    assert.throws(() => assertDockerDigest(action, 'invalid container action'));
+    assert.throws(() =>
+      createFixtureUseAuditor(repoRoot).auditEntry({
+        action,
+        ref: 'v1',
+        sourcePath: 'invalid container action',
+      }),
+    );
   }
 });
 
@@ -856,6 +1294,349 @@ test('action lock parser rejects YAML uses syntax it cannot map to a source ref'
       'synthetic workflow',
     ),
   );
+});
+
+test('remote descriptor validator fails closed on provenance and metadata mismatches', () => {
+  const entry = {
+    repository: 'example/action',
+    ref: 'v1',
+    sha: 'a'.repeat(40),
+    descriptor: { path: 'action.yml', kind: 'node' },
+  };
+  const candidates = (actionYml, actionYaml = { status: 404, source: null }) =>
+    new Map([
+      ['action.yml', actionYml],
+      ['action.yaml', actionYaml],
+    ]);
+  const nodeSource = ['name: fixture', 'runs:', '  using: node20', '  main: index.js'].join('\n');
+  assert.equal(
+    validateRemoteActionDescriptor(
+      entry,
+      candidates({ status: 200, source: nodeSource }),
+    ).kind,
+    'node',
+  );
+  assert.throws(
+    () =>
+      validateRemoteActionDescriptor(
+        entry,
+        candidates({ status: 404, source: null }),
+      ),
+    /exactly one/,
+  );
+  assert.throws(
+    () =>
+      validateRemoteActionDescriptor(
+        entry,
+        candidates(
+          { status: 200, source: nodeSource },
+          { status: 200, source: nodeSource },
+        ),
+      ),
+    /exactly one/,
+  );
+  assert.throws(
+    () =>
+      validateRemoteActionDescriptor(
+        { ...entry, descriptor: { path: 'action.yaml', kind: 'node' } },
+        candidates({ status: 200, source: nodeSource }),
+      ),
+    /path does not match/,
+  );
+  assert.throws(
+    () =>
+      validateRemoteActionDescriptor(
+        { ...entry, descriptor: { path: 'action.yml', kind: 'composite' } },
+        candidates({ status: 200, source: nodeSource }),
+      ),
+    /kind does not match/,
+  );
+  assert.throws(
+    () =>
+      validateRemoteActionDescriptor(
+        entry,
+        candidates({ status: 200, source: 'runs: [' }),
+      ),
+  );
+  assert.throws(
+    () =>
+      validateRemoteActionDescriptor(
+        entry,
+        candidates({ status: 200, source: ['runs:', '  using: docker', '  image: Dockerfile'].join('\n') }),
+      ),
+    /unsupported/,
+  );
+  assert.throws(
+    () =>
+      validateRemoteActionDescriptor(
+        entry,
+        candidates({ status: 503, source: null }),
+      ),
+    /unexpected HTTP 503/,
+  );
+});
+
+test('action repository identities are canonical across case aliases', () => {
+  assert.equal(
+    actionLockKey({ repository: 'Docker/Setup-QEMU-Action', ref: 'v3' }),
+    actionLockKey({ repository: 'docker/setup-qemu-action', ref: 'v3' }),
+  );
+});
+
+test('git source refs resolve unambiguously to the locked commit', async () => {
+  const lockedSha = 'a'.repeat(40);
+  const tagObjectSha = 'b'.repeat(40);
+  const entry = {
+    repository: 'example/action',
+    ref: 'v1',
+    sha: lockedSha,
+    descriptor: { path: 'action.yml', kind: 'node' },
+  };
+  const resolver = (output) => async () => output;
+  await assert.doesNotReject(() =>
+    resolveActionRef(
+      entry,
+      resolver(`${lockedSha}\trefs/tags/v1\n`),
+    ),
+  );
+  await assert.doesNotReject(() =>
+    resolveActionRef(
+      entry,
+      resolver(
+        `${tagObjectSha}\trefs/tags/v1\n${lockedSha}\trefs/tags/v1^{}\n`,
+      ),
+    ),
+  );
+  await assert.doesNotReject(() =>
+    resolveActionRef(
+      entry,
+      resolver(`${lockedSha}\trefs/heads/v1\n`),
+    ),
+  );
+  await assert.rejects(
+    () =>
+      resolveActionRef(
+        entry,
+        resolver(`${lockedSha}\trefs/tags/v1\n${lockedSha}\trefs/heads/v1\n`),
+      ),
+    /ambiguously both tag and branch/,
+  );
+  await assert.rejects(
+    () =>
+      resolveActionRef(
+        entry,
+        resolver(`${'c'.repeat(40)}\trefs/tags/v1\n`),
+      ),
+    /does not resolve to the locked commit SHA/,
+  );
+  await assert.rejects(
+    () =>
+      resolveActionRef(
+        entry,
+        resolver(`${lockedSha}\trefs/tags/v1\n${lockedSha}\trefs/tags/unexpected\n`),
+      ),
+    /unexpected ref/,
+  );
+  await assert.rejects(() => resolveActionRef(entry, resolver('not ls-remote output\n')), /malformed/);
+  await assert.rejects(
+    () => resolveActionRef(entry, async () => Promise.reject(new Error('network failed'))),
+    /network failed/,
+  );
+});
+
+test('remote provenance fetches are size, count, and concurrency bounded', async () => {
+  await assert.rejects(
+    () =>
+      readResponseTextBounded(
+        { headers: { get: () => null }, text: async () => 'x'.repeat(17) },
+        16,
+      ),
+    /exceeds 16 bytes/,
+  );
+  await assert.rejects(
+    () => fetchRemoteActionDescriptors(Array.from({ length: MAX_ACTION_ENTRIES + 1 })),
+    /action lock exceeds/,
+  );
+
+  const entries = Array.from({ length: MAX_FETCH_CONCURRENCY + 2 }, (_, index) => ({
+    repository: `example/action-${index}`,
+    ref: `v${index}`,
+    sha: String(index + 1).repeat(40),
+    descriptor: { path: 'action.yml', kind: 'node' },
+  }));
+  let active = 0;
+  let peak = 0;
+  const fetchImpl = async (url) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    active -= 1;
+    const entry = entries.find((candidate) => url.includes(`/${candidate.repository}/`));
+    assert.ok(entry, `unexpected bounded-fetch URL: ${url}`);
+    if (url.endsWith('/action.yml')) {
+      return {
+        status: 200,
+        headers: { get: () => null },
+        text: async () => ['name: fixture', 'runs:', '  using: node20', '  main: index.js'].join('\n'),
+      };
+    }
+    if (url.endsWith('/action.yaml')) {
+      return { status: 404, headers: { get: () => null }, text: async () => '' };
+    }
+    assert.fail(`unexpected bounded-fetch URL: ${url}`);
+  };
+  const lsRemoteImpl = async (entry) => `${entry.sha}\trefs/tags/${entry.ref}\n`;
+  assert.equal(
+    (await fetchRemoteActionDescriptors(entries, fetchImpl, lsRemoteImpl)).length,
+    entries.length,
+  );
+  assert.ok(peak <= MAX_FETCH_CONCURRENCY, `fetch concurrency exceeded limit: ${peak}`);
+});
+
+test('remote composite graph recursively audits actions and all runtime images', () => {
+  const digestA = `sha256:${'d'.repeat(64)}`;
+  const digestB = `sha256:${'e'.repeat(64)}`;
+  const root = {
+    repository: 'example/root',
+    ref: 'v1',
+    sha: 'a'.repeat(40),
+    descriptor: { path: 'action.yml', kind: 'composite' },
+  };
+  const dependency = {
+    repository: 'example/dependency',
+    ref: 'v2',
+    sha: 'b'.repeat(40),
+    descriptor: { path: 'action.yml', kind: 'node' },
+  };
+  const qemu = {
+    repository: 'docker/setup-qemu-action',
+    ref: 'v3',
+    sha: 'c'.repeat(40),
+    descriptor: { path: 'action.yml', kind: 'node' },
+  };
+  const source = [
+    'name: remote composite fixture',
+    'runs:',
+    '  using: composite',
+    '  steps:',
+    `    - uses: example/dependency@${dependency.sha} # v2`,
+    `    - uses: docker://example.invalid/tool@${digestA} # stable`,
+    `    - uses: docker/setup-qemu-action@${qemu.sha} # v3`,
+    '      with:',
+    `        image: docker.io/tonistiigi/binfmt@${digestB} # latest`,
+  ].join('\n');
+  const lockEntries = new Map([root, dependency, qemu].map((entry) => [actionLockKey(entry), entry]));
+  const manifests = new Map([
+    [actionLockKey(root), { document: yaml.load(source), kind: 'composite', path: 'action.yml', source }],
+    [actionLockKey(dependency), { document: {}, kind: 'node', path: 'action.yml', source: '' }],
+    [actionLockKey(qemu), { document: {}, kind: 'node', path: 'action.yml', source: '' }],
+  ]);
+  const observedActions = new Set([actionLockKey(root)]);
+  const images = [];
+  const recordExternal = ({ action, ref }, description) => {
+    const match = action.match(actionReferencePattern);
+    assert.ok(match, `${description} nested action must be pinned`);
+    const key = actionLockKey({ repository: match[1], ref });
+    assert.equal(lockEntries.get(key)?.sha, match[2], `${description} nested action must match lock`);
+    observedActions.add(key);
+  };
+  const recordImage = (entry, description) => {
+    assert.match(entry.ref ?? '', sourceRefPattern, `${description} image source ref is missing`);
+    assertImageDigest(entry.image, description);
+    images.push(entry);
+  };
+  assert.deepEqual(
+    [...auditRemoteManifestGraph({
+      rootKeys: [actionLockKey(root)],
+      lockEntries,
+      manifests,
+      recordExternal,
+      recordImage,
+    })].sort(),
+    [actionLockKey(dependency), actionLockKey(qemu), actionLockKey(root)].sort(),
+  );
+  assert.deepEqual([...observedActions].sort(), [...lockEntries.keys()].sort());
+  assert.deepEqual(
+    images.map((entry) => entry.image).sort(),
+    [`docker.io/tonistiigi/binfmt@${digestB}`, `example.invalid/tool@${digestA}`].sort(),
+  );
+  assert.throws(
+    () =>
+      auditRemoteManifestGraph({
+        rootKeys: [actionLockKey(root)],
+        lockEntries,
+        manifests,
+        recordExternal,
+        recordImage,
+        maxDepth: 0,
+      }),
+    /exceeds depth 0/,
+  );
+  assert.throws(
+    () =>
+      auditRemoteManifestGraph({
+        rootKeys: [actionLockKey(root)],
+        lockEntries,
+        manifests,
+        recordExternal,
+        recordImage,
+        maxNodes: 1,
+      }),
+    /exceeds 1 nodes/,
+  );
+
+  for (const unsafeUses of ['./nested', 'example/dependency@v2']) {
+    const unsafeSource = [
+      'name: unsafe remote composite',
+      'runs:',
+      '  using: composite',
+      '  steps:',
+      `    - uses: ${unsafeUses} # v2`,
+    ].join('\n');
+    const unsafeManifests = new Map(manifests);
+    unsafeManifests.set(actionLockKey(root), {
+      document: yaml.load(unsafeSource),
+      kind: 'composite',
+      path: 'action.yml',
+      source: unsafeSource,
+    });
+    assert.throws(() =>
+      auditRemoteManifestGraph({
+        rootKeys: [actionLockKey(root)],
+        lockEntries,
+        manifests: unsafeManifests,
+        recordExternal,
+        recordImage,
+      }),
+    );
+  }
+
+  for (const imageLines of [[], ['      with:', '        image: binfmt:latest # latest']]) {
+    const unsafeQemuSource = [
+      'name: unsafe remote qemu composite',
+      'runs:',
+      '  using: composite',
+      '  steps:',
+      `    - uses: docker/setup-qemu-action@${qemu.sha} # v3`,
+      ...imageLines,
+    ].join('\n');
+    const unsafeManifests = new Map(manifests);
+    unsafeManifests.set(actionLockKey(root), {
+      document: yaml.load(unsafeQemuSource),
+      kind: 'composite',
+      path: 'action.yml',
+      source: unsafeQemuSource,
+    });
+    assert.throws(() =>
+      auditRemoteManifestGraph({
+        rootKeys: [actionLockKey(root)],
+        lockEntries,
+        manifests: unsafeManifests,
+        recordExternal,
+        recordImage,
+      }),
+    );
+  }
 });
 
 test('local composite actions are recursively audited and expose indirect external actions', () => {
@@ -993,17 +1774,175 @@ test('recursive local action audit rejects cycles, missing or ambiguous descript
   );
 });
 
-test('docker action audit records digests and rejects mutable tags', () => {
+test('local composite audit bounds descriptor bytes, graph nodes, and recursion depth', () => {
+  const composite = (uses) =>
+    [
+      'name: bounded fixture',
+      'description: bounded fixture',
+      'runs:',
+      '  using: composite',
+      '  steps:',
+      `    - uses: ${uses}`,
+    ].join('\n');
+  const terminal = [
+    'name: terminal fixture',
+    'description: terminal fixture',
+    'runs:',
+    '  using: composite',
+    '  steps:',
+    '    - run: echo bounded',
+    '      shell: bash',
+  ].join('\n');
+
+  withFixtureRepo(
+    {
+      '.github/actions/oversized/action.yml': `${terminal}\n#${'x'.repeat(MAX_DESCRIPTOR_BYTES)}`,
+    },
+    (fixtureRoot) => {
+      assert.throws(
+        () =>
+          createFixtureUseAuditor(fixtureRoot).auditEntry({
+            action: './.github/actions/oversized',
+            sourcePath: 'oversized fixture workflow',
+          }),
+        /descriptor exceeds/,
+      );
+    },
+  );
+
+  withFixtureRepo(
+    {
+      '.github/actions/a/action.yml': composite('./.github/actions/b'),
+      '.github/actions/b/action.yml': composite('./.github/actions/c'),
+      '.github/actions/c/action.yml': terminal,
+    },
+    (fixtureRoot) => {
+      assert.throws(
+        () =>
+          createFixtureUseAuditor(fixtureRoot, { maxLocalNodes: 2 }).auditEntry({
+            action: './.github/actions/a',
+            sourcePath: 'node-bound fixture workflow',
+          }),
+        /exceeds 2 nodes/,
+      );
+      assert.throws(
+        () =>
+          createFixtureUseAuditor(fixtureRoot, { maxLocalDepth: 1 }).auditEntry({
+            action: './.github/actions/a',
+            sourcePath: 'depth-bound fixture workflow',
+          }),
+        /exceeds depth 1/,
+      );
+    },
+  );
+});
+
+test('docker action audit requires exact image lock coverage and rejects mutable tags', () => {
   withFixtureRepo({}, (fixtureRoot) => {
     const auditor = createFixtureUseAuditor(fixtureRoot);
-    const immutable = `docker://example.invalid/tool@sha256:${'c'.repeat(64)}`;
-    auditor.auditEntry({ action: immutable, sourcePath: 'fixture workflow' });
-    assert.deepEqual([...auditor.dockerReferences], [immutable]);
+    const digest = `sha256:${'c'.repeat(64)}`;
+    const immutable = `docker://example.invalid/tool@${digest}`;
+    auditor.auditEntry({ action: immutable, ref: 'v1', sourcePath: 'fixture workflow' });
+    const lock = [{ image: 'example.invalid/tool', ref: 'v1', digest }];
+    assert.doesNotThrow(() =>
+      assertFixtureImageLockCoverage(lock, auditor.imageEntries, 'docker action fixture'),
+    );
     assert.throws(
-      () => auditor.auditEntry({ action: 'docker://example.invalid/tool:latest', sourcePath: 'fixture workflow' }),
+      () => assertFixtureImageLockCoverage([], auditor.imageEntries, 'missing docker lock fixture'),
+      /missing from the fixture lock/,
+    );
+    assert.throws(
+      () =>
+        assertFixtureImageLockCoverage(
+          [...lock, { image: 'example.invalid/stale', ref: 'v1', digest }],
+          auditor.imageEntries,
+          'stale docker lock fixture',
+        ),
+      /stale entry/,
+    );
+    assert.throws(
+      () =>
+        assertFixtureImageLockCoverage(
+          [{ ...lock[0], digest: `sha256:${'d'.repeat(64)}` }],
+          auditor.imageEntries,
+          'wrong docker digest fixture',
+        ),
+      /missing from the fixture lock/,
+    );
+    assert.throws(
+      () =>
+        auditor.auditEntry({
+          action: 'docker://example.invalid/tool:latest',
+          ref: 'latest',
+          sourcePath: 'fixture workflow',
+        }),
       /lowercase sha256 digest/,
     );
+    assert.throws(
+      () => auditor.auditEntry({ action: immutable, sourcePath: 'fixture workflow' }),
+      /source ref comment/,
+    );
   });
+});
+
+test('recursive local composite setup-qemu images require explicit immutable lock coverage', () => {
+  const qemuDigest = `sha256:${'f'.repeat(64)}`;
+  const qemuAction = `docker/setup-qemu-action@${'a'.repeat(40)}`;
+  withFixtureRepo(
+    {
+      '.github/actions/qemu/action.yml': [
+        'name: qemu fixture',
+        'description: qemu fixture',
+        'runs:',
+        '  using: composite',
+        '  steps:',
+        `    - uses: ${qemuAction} # v3`,
+        '      with:',
+        `        image: docker.io/tonistiigi/binfmt@${qemuDigest} # latest`,
+      ].join('\n'),
+    },
+    (fixtureRoot) => {
+      const auditor = createFixtureUseAuditor(fixtureRoot);
+      auditor.auditEntry({ action: './.github/actions/qemu', sourcePath: 'fixture workflow' });
+      assert.doesNotThrow(() =>
+        assertFixtureImageLockCoverage(
+          [{ image: 'docker.io/tonistiigi/binfmt', ref: 'latest', digest: qemuDigest }],
+          auditor.imageEntries,
+          'nested qemu fixture',
+        ),
+      );
+      assert.throws(
+        () => assertFixtureImageLockCoverage([], auditor.imageEntries, 'unlocked nested qemu fixture'),
+        /missing from the fixture lock/,
+      );
+    },
+  );
+
+  for (const imageLine of [null, '        image: docker.io/tonistiigi/binfmt:latest # latest']) {
+    withFixtureRepo(
+      {
+        '.github/actions/qemu/action.yml': [
+          'name: unsafe qemu fixture',
+          'description: unsafe qemu fixture',
+          'runs:',
+          '  using: composite',
+          '  steps:',
+          `    - uses: ${qemuAction} # v3`,
+          ...(imageLine === null ? [] : ['      with:', imageLine]),
+        ].join('\n'),
+      },
+      (fixtureRoot) => {
+        assert.throws(
+          () =>
+            createFixtureUseAuditor(fixtureRoot).auditEntry({
+              action: './.github/actions/qemu',
+              sourcePath: 'fixture workflow',
+            }),
+          imageLine === null ? /must define with.image/ : /lowercase sha256 digest/,
+        );
+      },
+    );
+  }
 });
 
 test('runtime service, container, and setup-qemu images require exact immutable lock entries', () => {
@@ -1072,15 +2011,17 @@ test('runtime image audit rejects mutable tags and hidden setup-qemu defaults', 
     assert.throws(() => assertImageDigest(entries[0].image, 'mutable image fixture'), /sha256 digest/);
   }
 
-  const hiddenQemuDefault = [
-    'jobs:',
-    '  test:',
-    '    runs-on: ubuntu-latest',
-    '    steps:',
-    `      - uses: docker/setup-qemu-action@${'a'.repeat(40)}`,
-  ].join('\n');
-  assert.throws(
-    () => imageEntriesFromWorkflowSource(hiddenQemuDefault, 'setup-qemu fixture'),
-    /must define with.image/,
-  );
+  for (const repository of ['docker/setup-qemu-action', 'Docker/Setup-QEMU-Action']) {
+    const hiddenQemuDefault = [
+      'jobs:',
+      '  test:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      `      - uses: ${repository}@${'a'.repeat(40)}`,
+    ].join('\n');
+    assert.throws(
+      () => imageEntriesFromWorkflowSource(hiddenQemuDefault, 'setup-qemu fixture'),
+      /must define with.image/,
+    );
+  }
 });

@@ -87,6 +87,8 @@ jobs:
           ref: main
           fetch-depth: 0
           token: ${{ steps.sync_token.outputs.token }}
+          # The bounded sync script fetches and pushes with this Sync App token.
+          persist-credentials: true
 
       - name: Validate checkpoint synchronization
         shell: bash
