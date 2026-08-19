@@ -254,8 +254,9 @@ export async function publishPolicyEvaluation({
     policySha,
   });
   const checkName = contracts.policy.policy_gate.check_name;
-  const currentGenerationChecks = (await client.listCheckRunsForRef(generation.head_sha))
-    .filter((checkRun) => checkRun?.external_id === currentExternalId);
+  if (expectedFenceCheckRunId !== null) positiveInteger(expectedFenceCheckRunId, 'expected Policy fence check run ID');
+  const allChecks = await client.listCheckRunsForRef(generation.head_sha);
+  const currentGenerationChecks = allChecks.filter((checkRun) => checkRun?.external_id === currentExternalId);
   const identityConflicts = currentGenerationChecks.filter((checkRun) => (
     checkRun?.name !== checkName || checkRun?.head_sha !== generation.head_sha ||
     checkRun?.app?.id !== policyApp.id || checkRun?.app?.slug !== policyApp.slug
@@ -266,11 +267,27 @@ export async function publishPolicyEvaluation({
   );
   const currentGenerationPending = currentGenerationChecks.filter((checkRun) =>
     checkRun?.status === 'in_progress' && checkRun?.conclusion == null);
-  requireCondition(
-    currentGenerationPending.length <= 1,
-    'multiple in-progress policy checks exist for the current generation',
-  );
-  if (expectedFenceCheckRunId !== null) positiveInteger(expectedFenceCheckRunId, 'expected Policy fence check run ID');
+  if (expectedFenceCheckRunId === null) {
+    requireCondition(
+      currentGenerationPending.length <= 1,
+      'multiple in-progress policy checks exist for the current generation',
+    );
+  } else {
+    const managedChecks = allChecks.filter((checkRun) => (
+      checkRun?.name === checkName && checkRun?.head_sha === generation.head_sha &&
+      checkRun?.app?.id === policyApp.id && checkRun?.app?.slug === policyApp.slug
+    )).sort((left, right) => right.id - left.id);
+    requireCondition(
+      managedChecks.every((checkRun) => Number.isSafeInteger(checkRun?.id) && checkRun.id > 0) &&
+        new Set(managedChecks.map((checkRun) => checkRun.id)).size === managedChecks.length,
+      'managed policy check identities are invalid',
+    );
+    const expectedFence = currentGenerationPending.find((checkRun) => checkRun.id === expectedFenceCheckRunId);
+    requireCondition(
+      expectedFence && managedChecks[0]?.id === expectedFenceCheckRunId,
+      'expected early Policy fence is not the dominant in-progress check',
+    );
+  }
   let check = await client.beginPolicyCheck(generation, checkName, detailsUrl, expectedFenceCheckRunId);
   let current;
   let completionAttempted = false;

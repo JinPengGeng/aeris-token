@@ -454,6 +454,34 @@ test('policy check begin rejects a higher-ID fresh-list identity conflict before
   assert.equal(mutated, false);
 });
 
+test('policy check begin rejects a higher-ID managed check injected after the expected fence', async () => {
+  const external = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
+  const pendingOutput = {
+    title: 'Policy evaluation in progress',
+    summary: `Policy inputs are being revalidated.\nHead SHA: ${sha('a')}\nPolicy SHA: ${sha('c')}`,
+  };
+  let lists = 0;
+  let mutated = false;
+  const value = client(async (url, options) => {
+    if (url.endsWith('/pulls/37')) return response(pull());
+    if (url.includes(`/commits/${sha('a')}/check-runs`)) {
+      lists += 1;
+      const checks = [{ id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: external,
+        status: 'in_progress', conclusion: null, app: policyApp, output: pendingOutput }];
+      if (lists > 1) checks.push({ ...checks[0], id: 88 });
+      return response({ check_runs: checks });
+    }
+    if (options.method === 'POST' || options.method === 'PATCH') mutated = true;
+    throw new Error(`unexpected request ${url}`);
+  });
+
+  await assert.rejects(
+    () => value.beginPolicyCheck(generation(), 'Automation Policy / gate', null, 77),
+    /not the dominant in-progress check on the fresh check list/,
+  );
+  assert.equal(mutated, false);
+});
+
 test('policy check completion timeout is followed by a higher pending successor', async () => {
   const external = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
   const pendingOutput = {
@@ -525,7 +553,7 @@ test('policy check begin reuses the exact generation and rejects stale or impers
   assert.equal(patched, false);
   await assert.rejects(
     () => reused.beginPolicyCheck(generation(), 'Automation Policy / gate', null, 76),
-    /Expected early Policy fence is missing/,
+    /Expected early Policy fence is not the dominant in-progress check/,
   );
 
   let duplicateMutated = false;

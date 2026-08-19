@@ -6,6 +6,9 @@ import { fileURLToPath } from 'node:url';
 
 import yaml from 'js-yaml';
 
+import { PolicyGitHubClient } from '../src/policy-github-client.mjs';
+import { publishPolicyEvaluation } from '../src/run-policy-gate.mjs';
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..', '..');
 
@@ -16,6 +19,38 @@ function read(relativePath) {
 
 function serialize(value) {
   return JSON.stringify(value);
+}
+
+function jsonResponse(value, status = 200) {
+  return new Response(value === null ? '' : JSON.stringify(value), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function policyContracts() {
+  return {
+    agents: { agents: { policy: { enabled: true } } },
+    policy: {
+      trusted_source: { ref: 'refs/heads/main' },
+      policy_gate: {
+        enabled: true,
+        check_name: 'Automation Policy / gate',
+        mode: 'shadow',
+        human_enable_label: 'automerge-approved',
+        require_exact_head_sha: true,
+        require_base_up_to_date: true,
+        require_conversation_resolution: true,
+        required_checks: ['Rust CI / check', 'Frontend CI / check'],
+        required_check_sources: [
+          { context: 'Rust CI / check', app_id: 15368, app_slug: 'github-actions' },
+          { context: 'Frontend CI / check', app_id: 15368, app_slug: 'github-actions' },
+        ],
+        always_require_human_review: ['.github/**'],
+        allowlist_paths: [],
+      },
+    },
+  };
 }
 
 function collectUses(value, output = []) {
@@ -324,6 +359,136 @@ test('early fence creates a higher dominant successor above duplicate current-ge
   assert.equal(state.get(9).status, 'in_progress');
   assert.equal(state.get(7).status, 'in_progress');
   assert.equal(mutations.length, 1);
+});
+
+test('failed publish recovery and the next full early-fence run reconcile duplicate pending history', async () => {
+  const repository = 'JinPengGeng/aeris-token';
+  const head = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const policy = 'c'.repeat(40);
+  const policyApp = { id: 9001, slug: 'aeris-token-policy' };
+  const checks = new Map([
+    [1, { id: 1, name: 'Rust CI / check', head_sha: head, status: 'completed', conclusion: 'success', app: { id: 15368, slug: 'github-actions' } }],
+    [2, { id: 2, name: 'Frontend CI / check', head_sha: head, status: 'completed', conclusion: 'success', app: { id: 15368, slug: 'github-actions' } }],
+  ]);
+  let nextCheckId = 3;
+  let failNextCompletion = true;
+  const pull = {
+    number: 37,
+    state: 'open',
+    draft: false,
+    mergeable: true,
+    labels: [],
+    head: { sha: head, ref: 'feature', repo: { full_name: repository } },
+    base: { sha: base, ref: 'main', repo: { full_name: repository } },
+  };
+  const createCheck = (parameters) => {
+    const id = nextCheckId;
+    nextCheckId += 1;
+    const created = {
+      id,
+      name: parameters.name,
+      head_sha: parameters.head_sha,
+      external_id: parameters.external_id,
+      status: parameters.status,
+      conclusion: null,
+      app: policyApp,
+      output: structuredClone(parameters.output),
+      html_url: `https://github.com/JinPengGeng/aeris-token/runs/${id}`,
+    };
+    checks.set(id, created);
+    return created;
+  };
+  const earlyFenceRequest = async (route, parameters) => {
+    if (route === 'GET /repos/{owner}/{repo}') return { data: { id: 123, full_name: repository, default_branch: 'main' } };
+    if (route === 'GET /repos/{owner}/{repo}/git/ref/{ref}') return { data: { ref: 'refs/heads/main', object: { sha: policy } } };
+    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: structuredClone(pull) };
+    if (route === 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs') return { data: { check_runs: structuredClone([...checks.values()]) } };
+    if (route === 'POST /repos/{owner}/{repo}/check-runs') return { data: createCheck(parameters) };
+    throw new Error(`unexpected early-fence request ${route}`);
+  };
+  const fetchImpl = async (url, options) => {
+    const parsed = new URL(url);
+    const method = options.method;
+    const body = options.body === undefined ? null : JSON.parse(options.body);
+    if (method === 'GET' && parsed.pathname === '/repos/JinPengGeng/aeris-token') {
+      return jsonResponse({ id: 123, full_name: repository, default_branch: 'main' });
+    }
+    if (method === 'GET' && parsed.pathname === '/repos/JinPengGeng/aeris-token/git/ref/heads/main') {
+      return jsonResponse({ ref: 'refs/heads/main', object: { sha: policy } });
+    }
+    if (method === 'GET' && parsed.pathname === '/repos/JinPengGeng/aeris-token/pulls/37') return jsonResponse(pull);
+    if (method === 'GET' && parsed.pathname === '/repos/JinPengGeng/aeris-token/pulls/37/files') {
+      return jsonResponse([{ filename: 'docs/policy.md', status: 'modified', previous_filename: null }]);
+    }
+    if (method === 'GET' && parsed.pathname === `/repos/JinPengGeng/aeris-token/commits/${head}/check-runs`) {
+      return jsonResponse({ check_runs: [...checks.values()] });
+    }
+    if (method === 'GET' && parsed.pathname === `/repos/JinPengGeng/aeris-token/compare/${base}...${head}`) {
+      return jsonResponse({ status: 'ahead', base_commit: { sha: base }, commits: [{ sha: head }] });
+    }
+    if (method === 'POST' && parsed.pathname === '/graphql') {
+      return jsonResponse({ data: { repository: { databaseId: 123, pullRequest: {
+        number: 37,
+        headRefOid: head,
+        baseRefOid: base,
+        reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+      } } } });
+    }
+    if (method === 'GET' && /^\/repos\/JinPengGeng\/aeris-token\/check-runs\/\d+$/.test(parsed.pathname)) {
+      return jsonResponse(checks.get(Number(parsed.pathname.split('/').at(-1))));
+    }
+    if (method === 'POST' && parsed.pathname === '/repos/JinPengGeng/aeris-token/check-runs') {
+      return jsonResponse(createCheck(body));
+    }
+    if (method === 'PATCH' && /^\/repos\/JinPengGeng\/aeris-token\/check-runs\/\d+$/.test(parsed.pathname)) {
+      if (failNextCompletion) {
+        failNextCompletion = false;
+        return jsonResponse({ message: 'simulated completion failure' }, 500);
+      }
+      const id = Number(parsed.pathname.split('/').at(-1));
+      const updated = { ...checks.get(id), ...body };
+      checks.set(id, updated);
+      return jsonResponse(updated);
+    }
+    throw new Error(`unexpected publisher request ${method} ${parsed.pathname}`);
+  };
+  const client = new PolicyGitHubClient({
+    token: 'installation-token',
+    repository,
+    repositoryId: 123,
+    policyApp,
+    fetchImpl,
+  });
+  const publish = (expectedFenceCheckRunId, runId) => publishPolicyEvaluation({
+    client,
+    contracts: policyContracts(),
+    repository,
+    repositoryId: 123,
+    pullNumber: 37,
+    policySha: policy,
+    expectedHeadSha: head,
+    expectedPolicySha: policy,
+    policyApp,
+    runId,
+    detailsUrl: `https://github.com/JinPengGeng/aeris-token/actions/runs/${runId}`,
+    expectedFenceCheckRunId,
+    clock: () => new Date('2026-08-19T12:00:00Z'),
+  });
+
+  const firstFence = await runEarlyFence(earlyFenceRequest);
+  await assert.rejects(() => publish(Number(firstFence.check_run_id), '99'), /HTTP 500/);
+  assert.equal(checks.get(3).status, 'in_progress');
+  assert.equal(checks.get(4).status, 'in_progress');
+  const pendingHistory = structuredClone([checks.get(3), checks.get(4)]);
+
+  const nextFence = await runEarlyFence(earlyFenceRequest);
+  assert.equal(nextFence.check_run_id, '5');
+  const receipt = await publish(5, '100');
+  assert.equal(receipt.state, 'published');
+  assert.equal(receipt.check_run_id, 5);
+  assert.equal(checks.get(5).status, 'completed');
+  assert.deepEqual([checks.get(3), checks.get(4)], pendingHistory);
 });
 
 test('early fence creates another successor when the first successor completes before fresh-list adoption', async () => {

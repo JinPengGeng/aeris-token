@@ -517,14 +517,26 @@ export class PolicyGitHubClient {
     const allChecks = await this.listCheckRunsForRef(generation.head_sha);
     let state = this.#classifyPolicyChecks(allChecks, generation, checkName);
     if (expectedCheckRunId !== null) {
+      const expected = state.exact.find((check) => check.id === expectedCheckRunId);
       requireCondition(
-        state.exact.some((check) => check.id === expectedCheckRunId),
-        'Expected early Policy fence is missing',
+        expected && expected.status === 'in_progress' && expected.conclusion === null &&
+          state.managed[0]?.id === expectedCheckRunId,
+        'Expected early Policy fence is not the dominant in-progress check',
       );
     }
     const freshChecks = await this.listCheckRunsForRef(generation.head_sha);
     state = this.#classifyPolicyChecks(freshChecks, generation, checkName);
-    const reusable = state.exact.find((check) => (
+    const expectedFence = expectedCheckRunId === null
+      ? null
+      : state.exact.find((check) => check.id === expectedCheckRunId);
+    if (expectedCheckRunId !== null) {
+      requireCondition(
+        expectedFence && expectedFence.status === 'in_progress' && expectedFence.conclusion === null &&
+          state.managed[0]?.id === expectedCheckRunId,
+        'Expected early Policy fence is not the dominant in-progress check on the fresh check list',
+      );
+    }
+    const reusable = expectedFence ?? state.exact.find((check) => (
       check.status === 'in_progress' && check.conclusion === null && check.id === state.managed[0]?.id
     ));
     const persisted = reusable

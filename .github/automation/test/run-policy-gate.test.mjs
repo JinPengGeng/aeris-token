@@ -105,7 +105,14 @@ test('collector binds the executing checkout to the expected Policy SHA', async 
 
 test('publisher re-collects the live generation and emits a bounded receipt', async () => {
   let receivedFenceId = null;
+  const base = fakeClient();
+  const currentExternalId = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
   const client = fakeClient({
+    listCheckRunsForRef: async () => [
+      ...(await base.listCheckRunsForRef()),
+      { id: 77, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: currentExternalId,
+        status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' } },
+    ],
     beginPolicyCheck: async (_generation, _checkName, _detailsUrl, expectedFenceId) => {
       receivedFenceId = expectedFenceId;
       return { id: 77, html_url: 'https://github.com/JinPengGeng/aeris-token/runs/77' };
@@ -161,6 +168,84 @@ test('publisher rejects duplicate current-generation checks before any mutation'
     detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
   }), /multiple in-progress policy checks exist for the current generation/);
   assert.deepEqual(mutationMethods, []);
+});
+
+test('publisher accepts the expected dominant fence while retaining lower pending history', async () => {
+  const currentExternalId = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
+  const base = fakeClient();
+  let receivedFenceId = null;
+  const client = fakeClient({
+    listCheckRunsForRef: async () => [
+      ...(await base.listCheckRunsForRef()),
+      ...[88, 77].map((id) => ({
+        id,
+        name: 'Automation Policy / gate',
+        head_sha: sha('a'),
+        external_id: currentExternalId,
+        status: 'in_progress',
+        conclusion: null,
+        app: { id: 9001, slug: 'aeris-token-policy' },
+      })),
+    ],
+    beginPolicyCheck: async (_generation, _checkName, _detailsUrl, expectedFenceId) => {
+      receivedFenceId = expectedFenceId;
+      return { id: expectedFenceId, html_url: `https://github.com/JinPengGeng/aeris-token/runs/${expectedFenceId}` };
+    },
+    completePolicyCheck: async (checkRunId) => ({
+      id: checkRunId,
+      html_url: `https://github.com/JinPengGeng/aeris-token/runs/${checkRunId}`,
+    }),
+  });
+
+  const receipt = await publishPolicyEvaluation({
+    client,
+    contracts: contracts(),
+    repository,
+    repositoryId: 123,
+    pullNumber: 37,
+    policySha: sha('c'),
+    expectedHeadSha: sha('a'),
+    policyApp: { id: 9001, slug: 'aeris-token-policy' },
+    runId: '321.1',
+    detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
+    expectedFenceCheckRunId: 88,
+  });
+  assert.equal(receipt.state, 'published');
+  assert.equal(receipt.check_run_id, 88);
+  assert.equal(receivedFenceId, 88);
+});
+
+test('publisher rejects an expected fence below a higher managed check before mutation', async () => {
+  const mutations = [];
+  const currentExternalId = `aeris-policy:v1:123:37:${sha('a')}:${sha('c')}`;
+  const base = fakeClient();
+  const client = fakeClient({
+    listCheckRunsForRef: async () => [
+      ...(await base.listCheckRunsForRef()),
+      { id: 88, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: currentExternalId,
+        status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' } },
+      { id: 99, name: 'Automation Policy / gate', head_sha: sha('a'), external_id: 'aeris-policy:v1:123:37:older',
+        status: 'in_progress', conclusion: null, app: { id: 9001, slug: 'aeris-token-policy' } },
+    ],
+    beginPolicyCheck: async () => { mutations.push('begin'); },
+    completePolicyCheck: async () => { mutations.push('complete'); },
+    restorePolicyCheckInProgress: async () => { mutations.push('restore'); },
+  });
+
+  await assert.rejects(() => publishPolicyEvaluation({
+    client,
+    contracts: contracts(),
+    repository,
+    repositoryId: 123,
+    pullNumber: 37,
+    policySha: sha('c'),
+    expectedHeadSha: sha('a'),
+    policyApp: { id: 9001, slug: 'aeris-token-policy' },
+    runId: '321.1',
+    detailsUrl: 'https://github.com/JinPengGeng/aeris-token/actions/runs/321',
+    expectedFenceCheckRunId: 88,
+  }), /expected early Policy fence is not the dominant in-progress check/);
+  assert.deepEqual(mutations, []);
 });
 
 test('publisher accepts completed history for the current generation', async () => {
@@ -482,6 +567,7 @@ test('publisher restores success when a review thread becomes unresolved after c
   }), /policy inputs changed during check completion/);
   assert.equal(completions, 1);
   assert.equal(restores, 1);
+  assert.equal(threadReads, 3);
 });
 
 test('post-success hard abort plus recovery failure is reported as an explicit platform residual', async () => {
