@@ -42,4 +42,13 @@ jobs:
           AERIS_POLICY_SHA: ${{ github.event.pull_request.base.sha }}
           AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
-        run: node .github/automation/src/run-autonomy-policy.mjs
+        run: |
+          if [ ! -f .github/automation/src/run-autonomy-policy.mjs ]; then
+            if [ "$AERIS_POLICY_SHA" != "e801673d0b910990d4037d21c423070d9b6b1e46" ]; then
+              echo "::error title=Automation policy runtime missing::Trusted base revision does not contain the policy runtime."
+              exit 1
+            fi
+            echo "::notice title=Automation policy bootstrap::Trusted base revision does not contain the policy runtime; evaluation skipped."
+            exit 0
+          fi
+          node .github/automation/src/run-autonomy-policy.mjs
