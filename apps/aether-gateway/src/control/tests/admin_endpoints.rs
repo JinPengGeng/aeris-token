@@ -62,6 +62,24 @@ fn classifies_admin_endpoint_recover_key_health_as_admin_proxy_route() {
 }
 
 #[test]
+fn classifies_admin_half_open_isolation_repair_as_admin_proxy_route() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/endpoints/health/keys/key-openai/half-open-isolation?api_format=openai:chat&expected_fence=7&expected_owner=owner-a"
+        .parse()
+        .expect("uri should parse");
+    let decision = classify_control_route(&http::Method::PATCH, &uri, &headers)
+        .expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(decision.route_family.as_deref(), Some("endpoints_health"));
+    assert_eq!(
+        decision.route_kind.as_deref(),
+        Some("repair_half_open_isolation")
+    );
+    assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
 fn classifies_admin_endpoint_recover_all_keys_health_as_admin_proxy_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/admin/endpoints/health/keys"

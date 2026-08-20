@@ -6,6 +6,7 @@ use std::time::Duration;
 use aether_admin::provider::quota as admin_provider_quota_pure;
 use aether_cache::ExpiringMap;
 use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
+use aether_data_contracts::repository::half_open_probes::HalfOpenProbeOutcome;
 use aether_data_contracts::repository::pool_scores::{
     PoolMemberHardState, PoolMemberIdentity, PoolMemberScheduleFeedback,
 };
@@ -1263,20 +1264,26 @@ async fn record_health_failure_effect(
     context: LocalExecutionEffectContext<'_>,
     effect: LocalHealthFailureEffect,
 ) {
-    if !local_candidate_failure_should_apply_key_effects(
-        &context.plan.provider_api_format,
-        effect.classification,
-        effect.status_code,
-    ) {
-        return;
-    }
     let api_format = context.plan.provider_api_format.trim();
     if api_format.is_empty() {
+        return;
+    }
+    let probe_active = super::half_open_probe_is_active(context.plan).await;
+    if !probe_active
+        && !local_candidate_failure_should_apply_key_effects(
+            &context.plan.provider_api_format,
+            effect.classification,
+            effect.status_code,
+        )
+    {
         return;
     }
     let Some(auth_config_fence) =
         capture_local_execution_auth_config_fence(state, context.plan).await
     else {
+        if probe_active {
+            super::isolate_active_half_open_probe(state, context.plan).await;
+        }
         return;
     };
 
@@ -1285,7 +1292,16 @@ async fn record_health_failure_effect(
     let is_pool_provider = local_execution_plan_uses_pool(state, context.plan).await;
     let observed_at_unix_secs = current_unix_secs();
     provider_key_health_success_persist_gate_reset(&context.plan.key_id, api_format);
-
+    let mut probe_completion = match super::prepare_half_open_probe_completion(
+        state,
+        context.plan,
+        HalfOpenProbeOutcome::Failed,
+    )
+    .await
+    {
+        Ok(completion) => completion,
+        Err(()) => return,
+    };
     for _ in 0..PROVIDER_KEY_STATE_CAS_MAX_ATTEMPTS {
         let Some(current_key) = state
             .read_provider_catalog_keys_by_ids(std::slice::from_ref(&context.plan.key_id))
@@ -1293,12 +1309,14 @@ async fn record_health_failure_effect(
             .ok()
             .and_then(|mut keys| keys.drain(..).next())
         else {
+            super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
             return;
         };
         if auth_config_fence
             .encrypted_auth_config()
             .is_some_and(|expected| current_key.encrypted_auth_config.as_deref() != Some(expected))
         {
+            super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
             return;
         }
         let Some(health_by_format) = project_local_failure_health(
@@ -1308,6 +1326,7 @@ async fn record_health_failure_effect(
             effect.status_code,
             observed_at_unix_secs,
         ) else {
+            super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
             return;
         };
         let consecutive_failures = health_by_format
@@ -1315,7 +1334,7 @@ async fn record_health_failure_effect(
             .and_then(|value| value.get("consecutive_failures"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let circuit_breaker_by_format = if is_pool_provider {
+        let mut circuit_breaker_by_format = if is_pool_provider {
             None
         } else {
             project_local_key_circuit_failure(
@@ -1327,6 +1346,24 @@ async fn record_health_failure_effect(
             )
             .or_else(|| current_key.circuit_breaker_by_format.clone())
         };
+        if let Some(prepared) = probe_completion.as_ref() {
+            let Some(circuit) = circuit_breaker_by_format.as_mut() else {
+                super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
+                return;
+            };
+            if !super::clear_local_half_open_claim(
+                circuit,
+                api_format,
+                prepared.durable_fencing_token(),
+            ) {
+                super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
+                return;
+            }
+            if !super::attach_half_open_completion_pending(circuit, api_format, prepared) {
+                super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
+                return;
+            }
+        }
         let update = ProviderCatalogKeyHealthStateUpdate {
             key_id: context.plan.key_id.clone(),
             expected_encrypted_auth_config: auth_config_fence
@@ -1341,9 +1378,14 @@ async fn record_health_failure_effect(
             .compare_and_update_provider_catalog_key_health_state(&update)
             .await
         {
-            Ok(true) => return,
+            Ok(true) => {
+                super::commit_half_open_probe_after_health_cas(state, probe_completion.take())
+                    .await;
+                return;
+            }
             Ok(false) => tokio::task::yield_now().await,
             Err(err) => {
+                super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
                 warn!(
                     "gateway orchestration effects: failed to persist health failure projection for provider {} endpoint {} key {}: {:?}",
                     context.plan.provider_id, context.plan.endpoint_id, context.plan.key_id, err
@@ -1352,6 +1394,7 @@ async fn record_health_failure_effect(
             }
         }
     }
+    super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
     warn!(
         "gateway orchestration effects: health failure CAS retries exhausted for provider {} endpoint {} key {}",
         context.plan.provider_id, context.plan.endpoint_id, context.plan.key_id
@@ -1372,6 +1415,7 @@ async fn record_health_success_effect(
     let Some(auth_config_fence) =
         capture_local_execution_auth_config_fence(state, context.plan).await
     else {
+        super::isolate_active_half_open_probe(state, context.plan).await;
         return;
     };
 
@@ -1383,6 +1427,16 @@ async fn record_health_success_effect(
 
     let is_pool_provider = local_execution_plan_uses_pool(state, context.plan).await;
     let mut persist_gate_checked = false;
+    let mut probe_completion = match super::prepare_half_open_probe_completion(
+        state,
+        context.plan,
+        HalfOpenProbeOutcome::Succeeded,
+    )
+    .await
+    {
+        Ok(completion) => completion,
+        Err(()) => return,
+    };
 
     for _ in 0..PROVIDER_KEY_STATE_CAS_MAX_ATTEMPTS {
         let Some(current_key) = state
@@ -1391,17 +1445,20 @@ async fn record_health_success_effect(
             .ok()
             .and_then(|mut keys| keys.drain(..).next())
         else {
+            super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
             return;
         };
         if auth_config_fence
             .encrypted_auth_config()
             .is_some_and(|expected| current_key.encrypted_auth_config.as_deref() != Some(expected))
         {
+            super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
             return;
         }
         let Some(health_by_format) =
             project_local_success_health(current_key.health_by_format.as_ref(), api_format)
         else {
+            super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
             return;
         };
         let circuit_breaker_update_owned = if is_pool_provider {
@@ -1412,7 +1469,8 @@ async fn record_health_success_effect(
                 .as_ref()
                 .and_then(|current| project_local_key_circuit_closed(Some(current), api_format))
         };
-        if current_key.health_by_format.as_ref() == Some(&health_by_format)
+        if probe_completion.is_none()
+            && current_key.health_by_format.as_ref() == Some(&health_by_format)
             && ((is_pool_provider && current_key.circuit_breaker_by_format.is_none())
                 || (!is_pool_provider
                     && circuit_breaker_update_owned.as_ref()
@@ -1420,7 +1478,7 @@ async fn record_health_success_effect(
         {
             return;
         }
-        if !persist_gate_checked {
+        if probe_completion.is_none() && !persist_gate_checked {
             if !provider_key_health_success_persist_gate_allows(
                 &context.plan.key_id,
                 api_format,
@@ -1430,11 +1488,29 @@ async fn record_health_success_effect(
             }
             persist_gate_checked = true;
         }
-        let circuit_breaker_by_format = if is_pool_provider {
+        let mut circuit_breaker_by_format = if is_pool_provider {
             None
         } else {
             circuit_breaker_update_owned.or_else(|| current_key.circuit_breaker_by_format.clone())
         };
+        if let Some(prepared) = probe_completion.as_ref() {
+            let Some(circuit) = circuit_breaker_by_format.as_mut() else {
+                super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
+                return;
+            };
+            if !super::clear_local_half_open_claim(
+                circuit,
+                api_format,
+                prepared.durable_fencing_token(),
+            ) {
+                super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
+                return;
+            }
+            if !super::attach_half_open_completion_pending(circuit, api_format, prepared) {
+                super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
+                return;
+            }
+        }
         let update = ProviderCatalogKeyHealthStateUpdate {
             key_id: context.plan.key_id.clone(),
             expected_encrypted_auth_config: auth_config_fence
@@ -1449,9 +1525,14 @@ async fn record_health_success_effect(
             .compare_and_update_provider_catalog_key_health_state(&update)
             .await
         {
-            Ok(true) => return,
+            Ok(true) => {
+                super::commit_half_open_probe_after_health_cas(state, probe_completion.take())
+                    .await;
+                return;
+            }
             Ok(false) => tokio::task::yield_now().await,
             Err(err) => {
+                super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
                 warn!(
                     "gateway orchestration effects: failed to persist health success projection for provider {} endpoint {} key {}: {:?}",
                     context.plan.provider_id, context.plan.endpoint_id, context.plan.key_id, err
@@ -1460,6 +1541,7 @@ async fn record_health_success_effect(
             }
         }
     }
+    super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
     warn!(
         "gateway orchestration effects: health success CAS retries exhausted for provider {} endpoint {} key {}",
         context.plan.provider_id, context.plan.endpoint_id, context.plan.key_id
@@ -1623,6 +1705,17 @@ async fn clear_pool_key_circuit_breaker(
         if current_key.circuit_breaker_by_format.is_none() {
             return;
         }
+        let reset_circuit = super::reset_circuits_preserving_half_open_fences(
+            current_key.circuit_breaker_by_format.as_ref(),
+        );
+        let reset_circuit = if reset_circuit
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            None
+        } else {
+            Some(reset_circuit)
+        };
         let update = ProviderCatalogKeyHealthStateUpdate {
             key_id: context.plan.key_id.clone(),
             expected_encrypted_auth_config: auth_config_fence
@@ -1631,7 +1724,7 @@ async fn clear_pool_key_circuit_breaker(
             expected_health_by_format: current_key.health_by_format.clone(),
             expected_circuit_breaker_by_format: current_key.circuit_breaker_by_format,
             health_by_format: current_key.health_by_format,
-            circuit_breaker_by_format: None,
+            circuit_breaker_by_format: reset_circuit,
         };
         match state
             .compare_and_update_provider_catalog_key_health_state(&update)

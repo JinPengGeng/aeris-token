@@ -2435,21 +2435,13 @@ async fn provider_query_execute_openai_image_test_candidate(
             "chatgpt_web_image": true,
             "image_request": image_request.clone(),
         });
-        match crate::execution_runtime::maybe_execute_chatgpt_web_image_sync(
-            state.app(),
-            &plan,
-            Some(&report_context),
-        )
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?
-        {
-            Some(result) => result,
-            None => {
-                state
-                    .execute_execution_runtime_sync_plan(Some(trace_id), &plan)
-                    .await?
-            }
-        }
+        state
+            .execute_execution_runtime_sync_plan_with_report_context(
+                Some(trace_id),
+                &plan,
+                Some(&report_context),
+            )
+            .await?
     } else {
         state
             .execute_execution_runtime_sync_plan(Some(trace_id), &plan)

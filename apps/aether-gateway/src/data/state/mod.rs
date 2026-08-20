@@ -380,6 +380,7 @@ mod auth_api_key_cache;
 mod candidate_cache;
 mod catalog;
 mod core;
+mod half_open_probes;
 mod integrations;
 mod models;
 mod pool_scores;

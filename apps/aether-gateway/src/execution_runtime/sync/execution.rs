@@ -168,6 +168,7 @@ struct SyncAttemptTerminalGuard {
     request_diagnostics: Option<Arc<RequestDiagnostics>>,
     candidate_started_unix_ms: u64,
     candidate_started_at: Instant,
+    _half_open_probe_guard: Option<crate::orchestration::HalfOpenProbeTerminalGuard>,
     armed: bool,
 }
 
@@ -186,8 +187,16 @@ impl SyncAttemptTerminalGuard {
             request_diagnostics: current_request_diagnostics(),
             candidate_started_unix_ms,
             candidate_started_at,
+            _half_open_probe_guard: None,
             armed: true,
         }
+    }
+
+    fn arm_half_open_probe_guard(&mut self) {
+        self._half_open_probe_guard = Some(crate::orchestration::HalfOpenProbeTerminalGuard::new(
+            &self.state,
+            &self.plan,
+        ));
     }
 
     fn disarm(&mut self) {
@@ -329,6 +338,16 @@ async fn record_sync_attempt_forced_terminal_state(
 }
 
 impl SyncExecutionFailure {
+    fn from_half_open_admission(err: GatewayError) -> Self {
+        Self {
+            error_type: "half_open_probe_admission_denied",
+            message: err.into_message(),
+            status_code: Some(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
+            latency_ms: None,
+            fallback_kind: None,
+        }
+    }
+
     fn from_transport(err: ExecutionRuntimeTransportError) -> Self {
         let fallback_kind = match &err {
             ExecutionRuntimeTransportError::UpstreamResponseTooLarge { .. } => {
@@ -2038,6 +2057,8 @@ async fn execute_execution_runtime_sync_impl(
         report_context.as_ref(),
         candidate_started_unix_secs,
     );
+    crate::orchestration::enforce_half_open_probe_admission(state, &plan).await?;
+    terminal_guard.arm_half_open_probe_guard();
     #[cfg(not(test))]
     let mut result = {
         match maybe_execute_grok_sync(&plan, report_context.as_ref()).await {

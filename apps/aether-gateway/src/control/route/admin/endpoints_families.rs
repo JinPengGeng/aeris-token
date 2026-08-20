@@ -26,6 +26,17 @@ pub(super) fn classify_admin_endpoints_family_route(
         ))
     } else if method == http::Method::PATCH
         && normalized_path.starts_with("/api/admin/endpoints/health/keys/")
+        && normalized_path.ends_with("/half-open-isolation")
+    {
+        Some(classified(
+            "admin_proxy",
+            "endpoints_health",
+            "repair_half_open_isolation",
+            "admin:endpoints_health",
+            false,
+        ))
+    } else if method == http::Method::PATCH
+        && normalized_path.starts_with("/api/admin/endpoints/health/keys/")
     {
         Some(classified(
             "admin_proxy",

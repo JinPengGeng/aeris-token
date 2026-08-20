@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use aether_data_contracts::repository::half_open_probes::HalfOpenProbeCompletionRepository;
+
 use crate::database::SqlDatabaseConfig;
 use crate::driver::sqlite::{SqlitePool, SqlitePoolFactory};
 use crate::repository::announcements::{
@@ -31,6 +33,7 @@ use crate::repository::gemini_file_mappings::{
 use crate::repository::global_models::{
     GlobalModelReadRepository, GlobalModelWriteRepository, SqliteGlobalModelReadRepository,
 };
+use crate::repository::half_open_probes::SqliteHalfOpenProbeCompletionRepository;
 use crate::repository::management_tokens::{
     ManagementTokenReadRepository, ManagementTokenWriteRepository, SqliteManagementTokenRepository,
 };
@@ -173,6 +176,14 @@ impl SqliteBackend {
 
     pub fn global_model_write_repository(&self) -> Arc<dyn GlobalModelWriteRepository> {
         Arc::new(SqliteGlobalModelReadRepository::new(self.pool_clone()))
+    }
+
+    pub fn half_open_probe_completion_repository(
+        &self,
+    ) -> Arc<dyn HalfOpenProbeCompletionRepository> {
+        Arc::new(SqliteHalfOpenProbeCompletionRepository::new(
+            self.pool_clone(),
+        ))
     }
 
     pub fn user_read_repository(&self) -> Arc<dyn UserReadRepository> {

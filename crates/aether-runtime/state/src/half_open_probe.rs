@@ -69,24 +69,32 @@ impl DistributedHalfOpenProbeCoordinator {
         self.runtime.lock_release(&lease.inner).await
     }
 
-    /// Atomically consume a live Redis lease before attempting fenced SQL completion.
+    /// Validate and extend a live lease before the durable completion CAS.
     ///
-    /// A false result means the token was lost, replaced, or expired. Callers
-    /// must not write completion state in that case.
-    pub async fn consume_for_completion(
+    /// The Redis lease remains held until the caller has committed the circuit
+    /// transition and completion audit. This prevents a second probe from
+    /// entering between authorization and durable completion.
+    pub async fn authorize_completion(
         &self,
-        lease: HalfOpenProbeLease,
+        lease: &mut HalfOpenProbeLease,
+        durable_fencing_token: u64,
+        completing_ttl: Duration,
     ) -> Result<Option<HalfOpenProbeCompletionPermit>, DataLayerError> {
+        if durable_fencing_token == 0 {
+            return Err(DataLayerError::InvalidInput(
+                "half-open probe durable fencing token must be positive".to_string(),
+            ));
+        }
         if lease.is_expired_locally() {
             return Ok(None);
         }
-        if !self.runtime.lock_release(&lease.inner).await? {
+        if !self.renew(lease, completing_ttl).await? {
             return Ok(None);
         }
         Ok(Some(HalfOpenProbeCompletionPermit {
-            scope: lease.scope,
-            owner: lease.inner.owner,
-            fencing_token: lease.inner.fencing_token,
+            scope: lease.scope.clone(),
+            owner: lease.inner.owner.clone(),
+            fencing_token: durable_fencing_token,
         }))
     }
 }
@@ -190,6 +198,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::process::{Child, Command, Stdio};
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
 
     #[test]
     fn memory_backend_is_rejected_fail_closed() {
@@ -232,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn redis_claims_are_exclusive_expiring_and_monotonically_fenced() {
-        let Some(mut server) = TestRedisServer::start() else {
+        let Some(mut server) = required_test_redis_server() else {
             return;
         };
         let runtime = RuntimeState::redis(
@@ -248,7 +258,7 @@ mod tests {
             DistributedHalfOpenProbeCoordinator::new(runtime).expect("redis coordinator");
         let scope = HalfOpenProbeScope::new("key-1", "openai").expect("scope");
 
-        let first = coordinator
+        let mut first = coordinator
             .try_acquire(scope.clone(), "node-a", Duration::from_secs(1))
             .await
             .expect("first acquire")
@@ -261,13 +271,15 @@ mod tests {
             .expect("contended acquire")
             .is_none());
         let first_fence = first.fencing_token();
-        assert!(coordinator
-            .consume_for_completion(first)
+        let permit = coordinator
+            .authorize_completion(&mut first, 41, Duration::from_secs(1))
             .await
-            .expect("consume")
-            .is_some());
+            .expect("authorize completion")
+            .expect("live lease should authorize");
+        assert_eq!(permit.fencing_token(), 41);
+        assert!(coordinator.release(&first).await.expect("release"));
 
-        let second = coordinator
+        let mut second = coordinator
             .try_acquire(scope.clone(), "node-b", Duration::from_millis(30))
             .await
             .expect("second acquire")
@@ -275,11 +287,109 @@ mod tests {
         assert!(second.fencing_token() > first_fence);
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert!(coordinator
-            .consume_for_completion(second)
+            .authorize_completion(&mut second, 42, Duration::from_secs(1))
             .await
-            .expect("expired consume")
+            .expect("expired authorization")
             .is_none());
         server.stop();
+    }
+
+    #[tokio::test]
+    async fn independent_redis_clients_admit_exactly_one_barrier_contender() {
+        let Some(mut server) = required_test_redis_server() else {
+            return;
+        };
+        let prefix = format!("half-open-barrier-test-{}", std::process::id());
+        let first = RuntimeState::redis(
+            RedisClientConfig {
+                url: server.url(),
+                key_prefix: Some(prefix.clone()),
+            },
+            Some(1_000),
+        )
+        .await
+        .expect("first independent Redis client");
+        let second = RuntimeState::redis(
+            RedisClientConfig {
+                url: server.url(),
+                key_prefix: Some(prefix),
+            },
+            Some(1_000),
+        )
+        .await
+        .expect("second independent Redis client");
+        let first = DistributedHalfOpenProbeCoordinator::new(first).expect("first coordinator");
+        let second = DistributedHalfOpenProbeCoordinator::new(second).expect("second coordinator");
+        let scope = HalfOpenProbeScope::new("key-barrier", "openai").expect("scope");
+        let barrier = Arc::new(Barrier::new(3));
+
+        let first_task = {
+            let barrier = Arc::clone(&barrier);
+            let scope = scope.clone();
+            let coordinator = first.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                coordinator
+                    .try_acquire(scope, "node-a", Duration::from_secs(1))
+                    .await
+            })
+        };
+        let second_task = {
+            let barrier = Arc::clone(&barrier);
+            let coordinator = second.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                coordinator
+                    .try_acquire(scope, "node-b", Duration::from_secs(1))
+                    .await
+            })
+        };
+        barrier.wait().await;
+        let mut claims = vec![
+            first_task.await.expect("first task").expect("first claim"),
+            second_task
+                .await
+                .expect("second task")
+                .expect("second claim"),
+        ];
+        assert_eq!(claims.iter().filter(|claim| claim.is_some()).count(), 1);
+        let winner = claims
+            .drain(..)
+            .find_map(|claim| claim)
+            .expect("one winner");
+
+        let stale = HalfOpenProbeLease {
+            scope: winner.scope.clone(),
+            inner: RuntimeLockLease {
+                key: winner.inner.key.clone(),
+                owner: winner.inner.owner.clone(),
+                token: "stale-owner-token".to_string(),
+                fencing_token: winner.inner.fencing_token,
+                ttl_ms: winner.inner.ttl_ms,
+            },
+            expires_at_unix_ms: winner.expires_at_unix_ms,
+        };
+        assert!(!first.release(&stale).await.expect("stale release CAS"));
+        assert!(first.release(&winner).await.expect("winner release"));
+        server.stop();
+    }
+
+    fn required_test_redis_server() -> Option<TestRedisServer> {
+        let server = TestRedisServer::start();
+        if server.is_none() {
+            let required = std::env::var_os("CI").is_some()
+                || std::env::var("AETHER_REQUIRE_REDIS_TESTS")
+                    .ok()
+                    .is_some_and(|value| value == "1");
+            assert!(
+                !required,
+                "redis-server is required for distributed half-open probe tests"
+            );
+            eprintln!(
+                "skipping distributed half-open probe Redis test: redis-server unavailable; set AETHER_REQUIRE_REDIS_TESTS=1 to make this fatal"
+            );
+        }
+        server
     }
 
     struct TestRedisServer {
