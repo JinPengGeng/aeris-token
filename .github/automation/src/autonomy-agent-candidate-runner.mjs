@@ -1,12 +1,10 @@
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { buildCandidateArtifact } from './autonomy-extract.mjs';
-
-const NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null';
+import { createSafeGitContext, SafeGitError } from './autonomy-safe-git.mjs';
 
 export class AgentCandidateRunnerError extends Error {
   constructor(message) {
@@ -26,41 +24,25 @@ function required(value, name) {
   return value;
 }
 
-function git(repositoryRoot, args, environment = {}) {
-  try {
-    return execFileSync('git', args, {
-      cwd: repositoryRoot,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        ...environment,
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_CONFIG_GLOBAL: NULL_DEVICE,
-        GIT_CONFIG_SYSTEM: NULL_DEVICE,
-        GIT_TERMINAL_PROMPT: '0',
-      },
-      timeout: 30_000,
-      maxBuffer: 2 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch (error) {
-    const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
-    reject(`git ${args[0]} failed${stderr ? `: ${stderr}` : ''}`);
-  }
-}
-
 // Validate against HEAD in an isolated index so the Agent's unstaged changes
 // are never executed, staged, or otherwise treated as trusted repository code.
-export function validatePatchApplies({ repositoryRoot, patchPath, temporaryDirectory = os.tmpdir() }) {
+export function validatePatchApplies({ repositoryRoot, baseSha, patchPath, temporaryDirectory = os.tmpdir() }) {
   const root = path.resolve(required(repositoryRoot, 'repositoryRoot'));
+  const sha = required(baseSha, 'baseSha');
   const patch = path.resolve(required(patchPath, 'patchPath'));
-  const scratch = fs.mkdtempSync(path.join(path.resolve(temporaryDirectory), 'aeris-candidate-index-'));
-  const index = path.join(scratch, 'index');
+  let context;
   try {
-    git(root, ['read-tree', 'HEAD'], { GIT_INDEX_FILE: index });
-    git(root, ['apply', '--check', '--cached', '--whitespace=error-all', '--', patch], { GIT_INDEX_FILE: index });
+    context = createSafeGitContext({
+      repositoryRoot: root,
+      baseSha: sha,
+      temporaryDirectory,
+    });
+    context.run(['apply', '--check', '--cached', '--whitespace=error-all', '--', patch]);
+  } catch (error) {
+    if (error instanceof SafeGitError) reject(error.message);
+    throw error;
   } finally {
-    fs.rmSync(scratch, { recursive: true, force: true });
+    context?.dispose();
   }
 }
 
@@ -77,9 +59,11 @@ export function runAgentCandidateRunner(environment = process.env) {
       trigger_run_id: environment.GITHUB_RUN_ID,
       trigger_run_attempt: environment.GITHUB_RUN_ATTEMPT,
     },
+    temporaryDirectory: environment.RUNNER_TEMP || os.tmpdir(),
   });
   validatePatchApplies({
     repositoryRoot: environment.GITHUB_WORKSPACE,
+    baseSha: result.manifest.base_sha,
     patchPath: result.patchPath,
     temporaryDirectory: environment.RUNNER_TEMP || os.tmpdir(),
   });

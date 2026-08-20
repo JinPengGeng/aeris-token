@@ -182,7 +182,7 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 - 模型输出超大、非 JSON、未知 Agent、任意模型名或工具参数。
 - 上游 force-push、checkpoint 回退和同步分支未知提交。
 
-模型阶段不得获得 GitHub 写凭据、Writer App 私钥或发布凭据。Candidate 在临时隔离环境中运行；`agent` Environment 无人工审批但不能访问 Writer 或 release secret。Policy 是 Actions job，Finalizer 的写入仅限临时 Writer token 发起 native auto-merge 请求。
+模型阶段不得获得 GitHub 写凭据、Writer App 私钥或发布凭据。Candidate 在临时隔离环境中运行；`agent` Environment 无人工审批但不能访问 Writer 或 release secret。Candidate 的受信 extractor 由独立 job 从精确 base SHA 封装，必须在模型结束后下载，并通过隔离 Git directory/index 和空配置读取工作树，不能信任 Agent 可写的 runtime、`.git/config`、hooks、filters、textconv 或 fsmonitor。Policy 是 Actions job，Finalizer 的写入仅限临时 Writer token 发起 native auto-merge 请求。
 
 ## 11. 实施顺序
 

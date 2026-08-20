@@ -1,10 +1,11 @@
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { validateCandidateArtifact } from './autonomy-candidate.mjs';
+import { createSafeGitContext, SafeGitError } from './autonomy-safe-git.mjs';
 
 export class CandidateExtractionError extends Error {
   constructor(message) {
@@ -31,25 +32,6 @@ function positiveInteger(value, name) {
   return parsed;
 }
 
-function git(repositoryRoot, args, { encoding = 'utf8' } = {}) {
-  try {
-    return execFileSync('git', args, {
-      cwd: repositoryRoot,
-      encoding,
-      env: {
-        ...process.env,
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_TERMINAL_PROMPT: '0',
-      },
-      maxBuffer: 2 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch (error) {
-    const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
-    reject(`git ${args[0]} failed${stderr ? `: ${stderr}` : ''}`);
-  }
-}
-
 function normalizeMetadata(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) reject('candidate metadata is invalid');
   const repository = requiredString(value.repository, 'repository', /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
@@ -71,35 +53,49 @@ function normalizeMetadata(value) {
   });
 }
 
-export function buildCandidateArtifact({ repositoryRoot, outputDirectory, metadata, now = new Date() }) {
+export function buildCandidateArtifact({
+  repositoryRoot,
+  outputDirectory,
+  metadata,
+  now = new Date(),
+  temporaryDirectory = os.tmpdir(),
+}) {
   const normalized = normalizeMetadata(metadata);
   const root = path.resolve(requiredString(repositoryRoot, 'repositoryRoot'));
   const output = path.resolve(requiredString(outputDirectory, 'outputDirectory'));
-  const actualRoot = fs.realpathSync.native(path.resolve(git(root, ['rev-parse', '--show-toplevel']).trim()));
-  const expectedRoot = fs.realpathSync.native(root);
-  if (actualRoot.toLocaleLowerCase('en-US') !== expectedRoot.toLocaleLowerCase('en-US')) {
-    reject('repositoryRoot is not the Git worktree root');
+  let context;
+  let patch;
+  try {
+    context = createSafeGitContext({
+      repositoryRoot: root,
+      baseSha: normalized.base_sha,
+      temporaryDirectory,
+    });
+    // The isolated index exposes untracked files without consulting the
+    // Agent-writable index or repository-local executable Git configuration.
+    context.run(['add', '--intent-to-add', '--', '.', ':(exclude).git']);
+    patch = context.run(
+      [
+        'diff',
+        '--binary',
+        '--full-index',
+        '--no-ext-diff',
+        '--no-textconv',
+        '--src-prefix=a/',
+        '--dst-prefix=b/',
+        normalized.base_sha,
+        '--',
+        '.',
+        ':(exclude).git',
+      ],
+      { encoding: 'buffer' },
+    );
+  } catch (error) {
+    if (error instanceof SafeGitError) reject(error.message);
+    throw error;
+  } finally {
+    context?.dispose();
   }
-  const head = git(root, ['rev-parse', 'HEAD']).trim();
-  if (head !== normalized.base_sha) reject('repository HEAD changed during Agent execution');
-
-  // Intent-to-add makes untracked text files visible to git diff without
-  // staging their contents or executing repository code.
-  git(root, ['add', '--intent-to-add', '--', '.']);
-  const patch = git(
-    root,
-    [
-      'diff',
-      '--binary',
-      '--full-index',
-      '--no-ext-diff',
-      '--src-prefix=a/',
-      '--dst-prefix=b/',
-      'HEAD',
-      '--',
-    ],
-    { encoding: 'buffer' },
-  );
   if (!Buffer.isBuffer(patch) || patch.length === 0) reject('Agent produced no candidate changes');
 
   const createdAt = now.toISOString();

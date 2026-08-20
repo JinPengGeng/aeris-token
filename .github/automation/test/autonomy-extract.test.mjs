@@ -36,6 +36,18 @@ function metadata(root, overrides = {}) {
   };
 }
 
+function executableCommand(helper, marker) {
+  const quote = (value) => `"${value.replaceAll('\\', '/').replaceAll('"', '\\"')}"`;
+  return `${quote(process.execPath)} ${quote(helper)} ${quote(marker)}`;
+}
+
+function restoreEnvironment(snapshot) {
+  for (const [name, value] of Object.entries(snapshot)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+}
+
 test('extracts tracked and untracked text changes into a verified artifact', () => {
   const root = repository();
   const output = path.join(root, '.candidate-output');
@@ -95,4 +107,86 @@ test('rejects governed changes during extraction', () => {
     }),
     /governed/,
   );
+});
+
+test('resolves HEAD from packed refs without trusting unrelated refs', () => {
+  const root = repository();
+  const baseSha = command(root, ['rev-parse', 'HEAD']);
+  command(root, ['update-ref', 'refs/remotes/origin/main', baseSha]);
+  command(root, ['pack-refs', '--all']);
+  fs.appendFileSync(path.join(root, 'README.md'), 'candidate\n');
+  const result = buildCandidateArtifact({
+    repositoryRoot: root,
+    outputDirectory: fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-packed-output-')),
+    metadata: metadata(root, { base_sha: baseSha }),
+  });
+  assert.deepEqual(result.paths, ['README.md']);
+});
+
+test('ignores Agent-controlled Git commands and leaves the real index untouched', () => {
+  const root = repository();
+  fs.writeFileSync(path.join(root, '.gitattributes'), 'README.md diff=hostile filter=hostile\n');
+  command(root, ['add', '.gitattributes']);
+  command(root, ['commit', '-m', 'attributes']);
+  const expectedMetadata = metadata(root);
+  fs.appendFileSync(path.join(root, 'README.md'), 'candidate\n');
+
+  const helper = path.join(root, '.git', 'hostile-git-command.cjs');
+  fs.writeFileSync(
+    helper,
+    "const fs = require('node:fs');\nfs.writeFileSync(process.argv[2], 'executed');\nprocess.stdin.pipe(process.stdout);\n",
+  );
+  const markers = {
+    textconv: path.join(root, '.git', 'textconv-executed'),
+    filter: path.join(root, '.git', 'filter-executed'),
+    fsmonitor: path.join(root, '.git', 'fsmonitor-executed'),
+    environment: path.join(root, '.git', 'environment-executed'),
+  };
+  command(root, ['config', 'diff.hostile.textconv', executableCommand(helper, markers.textconv)]);
+  command(root, ['config', 'filter.hostile.clean', executableCommand(helper, markers.filter)]);
+  command(root, ['config', 'filter.hostile.smudge', executableCommand(helper, markers.filter)]);
+  command(root, ['config', 'core.fsmonitor', executableCommand(helper, markers.fsmonitor)]);
+
+  const environmentNames = [
+    'GIT_CONFIG_COUNT',
+    'GIT_CONFIG_KEY_0',
+    'GIT_CONFIG_VALUE_0',
+    'GIT_EXTERNAL_DIFF',
+    'GIT_INDEX_FILE',
+  ];
+  const environmentSnapshot = Object.fromEntries(environmentNames.map((name) => [name, process.env[name]]));
+  process.env.GIT_CONFIG_COUNT = '1';
+  process.env.GIT_CONFIG_KEY_0 = 'diff.inherited.textconv';
+  process.env.GIT_CONFIG_VALUE_0 = executableCommand(helper, markers.environment);
+  process.env.GIT_EXTERNAL_DIFF = executableCommand(helper, markers.environment);
+  process.env.GIT_INDEX_FILE = path.join(root, '.git', 'hostile-index');
+
+  const hostileOutput = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-hostile-output-'));
+  const cleanOutput = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-clean-output-'));
+  let hostilePatch;
+  try {
+    const result = buildCandidateArtifact({
+      repositoryRoot: root,
+      outputDirectory: hostileOutput,
+      metadata: expectedMetadata,
+    });
+    hostilePatch = fs.readFileSync(result.patchPath);
+  } finally {
+    restoreEnvironment(environmentSnapshot);
+  }
+
+  for (const marker of Object.values(markers)) assert.equal(fs.existsSync(marker), false);
+  assert.equal(command(root, ['diff', '--cached', '--name-only']), '');
+  assert.match(command(root, ['status', '--porcelain']), /^M README\.md$/m);
+
+  command(root, ['config', '--unset-all', 'diff.hostile.textconv']);
+  command(root, ['config', '--unset-all', 'filter.hostile.clean']);
+  command(root, ['config', '--unset-all', 'filter.hostile.smudge']);
+  command(root, ['config', '--unset-all', 'core.fsmonitor']);
+  const cleanResult = buildCandidateArtifact({
+    repositoryRoot: root,
+    outputDirectory: cleanOutput,
+    metadata: expectedMetadata,
+  });
+  assert.deepEqual(hostilePatch, fs.readFileSync(cleanResult.patchPath));
 });

@@ -31,11 +31,15 @@ function allUses(value, results = []) {
 test('candidate workflow is manual, disabled by default, and binds the trusted base', () => {
   const document = workflow();
   assert.deepEqual(Object.keys(document.on), ['workflow_dispatch']);
+  assert.match(String(document.jobs.preflight.if), /github\.ref == 'refs\/heads\/main'/);
   assert.match(String(document.jobs.preflight.if), /AERIS_CANDIDATE_AGENTS_ENABLED/);
   assert.match(String(document.jobs.preflight.if), /AERIS_AGENTS_ENABLED/);
   assert.equal(document.jobs.preflight.permissions.contents, 'read');
   assert.equal(document.jobs.preflight.permissions.issues, 'read');
   assert.equal(document.jobs.candidate.needs[0], 'preflight');
+  assert.equal(document.jobs.candidate.needs[1], 'runtime');
+  assert.equal(document.jobs.runtime.steps[0].with.ref, '${{ needs.preflight.outputs.base_sha }}');
+  assert.equal(document.jobs.runtime.steps[0].with['persist-credentials'], false);
   assert.equal(document.jobs.candidate.environment, 'agent');
   assert.equal(document.jobs.candidate.permissions.contents, 'read');
   assert.equal(document.jobs.candidate.steps[0].with.ref, '${{ needs.preflight.outputs.base_sha }}');
@@ -60,19 +64,29 @@ test('candidate workflow exposes the model secret only to the agent Environment 
 });
 
 test('candidate workflow emits only a short-lived patch and manifest after deterministic validation', () => {
-  const candidate = workflow().jobs.candidate;
-  const stage = candidate.steps.find((step) => /Stage trusted candidate runtime/.test(step.name));
+  const document = workflow();
+  const candidate = document.jobs.candidate;
+  const runtimeUpload = document.jobs.runtime.steps.find((step) => /Upload trusted candidate runtime/.test(step.name));
+  const nodePath = candidate.steps.find((step) => /Capture trusted Node/.test(step.name));
+  const reset = candidate.steps.find((step) => /Reset post-Agent scratch/.test(step.name));
+  const runtimeDownload = candidate.steps.find((step) => /Download trusted candidate runtime/.test(step.name));
   const extract = candidate.steps.find((step) => /Extract and validate/.test(step.name));
   const codexIndex = candidate.steps.findIndex((step) => step.uses?.startsWith('openai/codex-action@'));
-  const stageIndex = candidate.steps.indexOf(stage);
+  const nodePathIndex = candidate.steps.indexOf(nodePath);
+  const resetIndex = candidate.steps.indexOf(reset);
+  const downloadIndex = candidate.steps.indexOf(runtimeDownload);
   const extractIndex = candidate.steps.indexOf(extract);
-  assert.ok(stageIndex >= 0 && stageIndex < codexIndex);
-  assert.ok(extractIndex > codexIndex);
-  assert.match(stage.run, /autonomy-agent-candidate-runner\.mjs/);
-  assert.match(stage.run, /autonomy-candidate\.mjs/);
-  assert.match(stage.run, /autonomy-extract\.mjs/);
+  assert.ok(nodePathIndex >= 0 && nodePathIndex < codexIndex);
+  assert.ok(resetIndex > codexIndex && downloadIndex > resetIndex && extractIndex > downloadIndex);
+  assert.equal(runtimeUpload.with.name, 'agent-candidate-runtime-${{ github.run_id }}-${{ github.run_attempt }}');
+  assert.equal(runtimeUpload.with['retention-days'], 1);
+  assert.match(runtimeUpload.with.path, /autonomy-safe-git\.mjs/);
+  assert.match(reset.run, /rm -rf --/);
+  assert.match(runtimeDownload.uses, /^actions\/download-artifact@[0-9a-f]{40}$/);
+  assert.equal(extract.env.AERIS_NODE_BINARY, '${{ steps.trusted-node.outputs.binary }}');
   assert.match(extract.run, /\/usr\/bin\/env -i/);
   assert.match(extract.run, /\$\{runtime\}\/autonomy-agent-candidate-runner\.mjs/);
+  assert.match(extract.run, /autonomy-safe-git\.mjs/);
   assert.doesNotMatch(extract.run, /node \.github\/automation/);
   const upload = candidate.steps.find((step) => /Upload candidate artifact/.test(step.name));
   assert.equal(upload.with.name, 'agent-candidate-issue-${{ needs.preflight.outputs.issue_number }}-run-${{ github.run_id }}-${{ github.run_attempt }}');

@@ -122,9 +122,9 @@ Manifest 使用精确字段集合：
 - permission profile：`:workspace`；Codex `0.148.0` 的内置 profile 仅允许工作区/临时目录写入，并将命令网络设为 restricted。模型请求由 Action 的本地 Responses proxy 单独转发，不构成候选命令的网络权限。
 - safety strategy：`drop-sudo`。
 - 模型 endpoint：`${AERIS_AI_BASE_URL}/responses`，必须先做兼容性 canary。
-- Codex 是 Agent job 的最后一个可执行候选步骤；后续只允许运行预先复制到 runner temp 的受信 extractor 和 artifact upload。
+- Codex 是唯一可执行候选内容的步骤；后续只允许运行受信 extractor、校验器和 artifact upload。
 
-Codex 前先把 extractor 和 schema 复制到 workspace 外的 runner temp。Codex 后只使用绝对系统命令或该只读副本生成 patch；不得执行工作区中的脚本。模型 final message 只作审计说明，不是 Publisher 授权输入。
+受信 extractor 不在 Codex 前复制到 Agent 可写的 runner temp。独立无 Secret 的 `runtime` job 从精确 base SHA 打包不可变 runtime artifact；Codex 结束后，Candidate job 先删除 Agent 可写的同名临时目录，再下载该 artifact，并使用 Codex 前捕获的绝对 Node.js 路径执行。Extractor 以临时 Git directory、临时 index、空 system/global/local config 和原始 object database 的只读 alternate 生成 patch，同时禁用 textconv、external diff、replace refs、fsmonitor、hooks 和继承的 Git 环境变量；不得使用 Agent 可写的 `.git/config`、index、hooks 或 runtime。模型 final message 只作审计说明，不是 Publisher 授权输入。
 
 ## 7. Publisher 状态机
 

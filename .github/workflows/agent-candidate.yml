@@ -23,6 +23,7 @@ jobs:
   preflight:
     name: Bind candidate task
     if: >-
+      github.ref == 'refs/heads/main' &&
       (vars.AERIS_AGENTS_ENABLED == 'true' || vars.AERIS_AGENTS_ENABLED == '1') &&
       (vars.AERIS_CANDIDATE_AGENTS_ENABLED == 'true' || vars.AERIS_CANDIDATE_AGENTS_ENABLED == '1')
     runs-on: ubuntu-latest
@@ -62,10 +63,37 @@ jobs:
           AERIS_PREFLIGHT_OUTPUT: ${{ runner.temp }}/aeris-candidate/preflight.json
         run: node .github/automation/src/autonomy-preflight.mjs
 
-  candidate:
-    name: Generate candidate artifact
+  runtime:
+    name: Seal trusted candidate runtime
     needs: [preflight]
     if: needs.preflight.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out bound base revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.preflight.outputs.base_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Upload trusted candidate runtime
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: agent-candidate-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .github/automation/src/autonomy-agent-candidate-runner.mjs
+            .github/automation/src/autonomy-candidate.mjs
+            .github/automation/src/autonomy-extract.mjs
+            .github/automation/src/autonomy-safe-git.mjs
+          if-no-files-found: error
+          retention-days: 1
+
+  candidate:
+    name: Generate candidate artifact
+    needs: [preflight, runtime]
+    if: needs.preflight.result == 'success' && needs.runtime.result == 'success'
     runs-on: ubuntu-latest
     environment: agent
     permissions:
@@ -79,19 +107,19 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Stage trusted candidate runtime outside the checkout
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Capture trusted Node.js path
+        id: trusted-node
         shell: bash
         run: |
           set -euo pipefail
-          runtime="${RUNNER_TEMP}/aeris-candidate-runtime"
-          install -d -m 0700 "${runtime}"
-          install -m 0444 \
-            .github/automation/src/autonomy-agent-candidate-runner.mjs \
-            .github/automation/src/autonomy-candidate.mjs \
-            .github/automation/src/autonomy-extract.mjs \
-            "${runtime}/"
-          command -v node >"${runtime}/node-path"
-          chmod 0444 "${runtime}/node-path"
+          node_binary="$(command -v node)"
+          [[ "${node_binary}" == /* && -x "${node_binary}" ]]
+          echo "binary=${node_binary}" >>"${GITHUB_OUTPUT}"
 
       - name: Validate trusted model routing
         env:
@@ -122,6 +150,23 @@ jobs:
           output-schema-file: .github/codex/schemas/result.schema.json
           model: ${{ vars.AERIS_AI_MODEL }}
 
+      - name: Reset post-Agent scratch directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf -- \
+            "${RUNNER_TEMP}/aeris-candidate-runtime" \
+            "${RUNNER_TEMP}/aeris-candidate"
+          install -d -m 0700 \
+            "${RUNNER_TEMP}/aeris-candidate-runtime" \
+            "${RUNNER_TEMP}/aeris-candidate"
+
+      - name: Download trusted candidate runtime
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: agent-candidate-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-candidate-runtime
+
       - name: Extract and validate candidate patch
         env:
           GITHUB_REPOSITORY: ${{ needs.preflight.outputs.repository }}
@@ -131,11 +176,24 @@ jobs:
           AERIS_ISSUE_NUMBER: ${{ needs.preflight.outputs.issue_number }}
           AERIS_BASE_REF: ${{ needs.preflight.outputs.base_ref }}
           AERIS_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
+          AERIS_NODE_BINARY: ${{ steps.trusted-node.outputs.binary }}
         shell: bash
         run: |
           set -euo pipefail
           runtime="${RUNNER_TEMP}/aeris-candidate-runtime"
-          node_binary="$(<"${runtime}/node-path")"
+          [[ -d "${runtime}" && ! -L "${runtime}" ]]
+          expected="$(printf '%s\n' \
+            autonomy-agent-candidate-runner.mjs \
+            autonomy-candidate.mjs \
+            autonomy-extract.mjs \
+            autonomy-safe-git.mjs | sort)"
+          actual="$(find "${runtime}" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          [[ "${actual}" == "${expected}" ]]
+          while IFS= read -r file; do
+            [[ -f "${runtime}/${file}" && ! -L "${runtime}/${file}" ]]
+            chmod 0444 "${runtime}/${file}"
+          done <<<"${expected}"
+          node_binary="${AERIS_NODE_BINARY}"
           [[ "${node_binary}" == /* && -x "${node_binary}" ]]
           /usr/bin/env -i \
             HOME="${RUNNER_TEMP}" \
