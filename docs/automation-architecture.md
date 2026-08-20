@@ -10,7 +10,7 @@
 2. 自动化只通过分支和 Pull Request 修改代码，不直接写入 `main`。
 3. Issue、评论、PR 内容和模型输出均是不可信输入。
 4. 模型负责分析和建议；授权、路径限制和合并由确定性规则决定。
-5. Writer、Policy 和 Merger 是不同权限边界，不能由同一令牌完成全部动作。
+5. 唯一的 GitHub 写入身份是最小 Writer App；Policy 是 GitHub Actions 的确定性检查，Finalizer 只请求 GitHub native auto-merge，不存在独立 Policy 或 Merger App。
 6. 所有策略从受保护的 `main@SHA` 读取，不能从当前 PR checkout 读取。
 7. GitHub 事件按可能重复、乱序和重试处理；Actions-only 阶段只提供 best-effort 去重和收敛，不声明 strict exactly-once。
 8. 功能按只读分析、Draft PR、Policy Gate、自动合并的顺序逐级开放。
@@ -23,7 +23,7 @@
 - `.github/automation-policy.yml`：授权、限额、幂等、安全和合并门禁。
 - `.github/upstream-sync-policy.yml`：上游身份、路径所有权和 checkpoint 约束。
 
-这些文件当前默认关闭所有新 Agent：
+仓库文件中的生产开关默认关闭；这不代表 GitHub 远端的 Variables、Environment、App、ruleset 或 required checks 已完成配置：
 
 ```text
 AERIS_AGENTS_ENABLED != true
@@ -31,7 +31,7 @@ AERIS_AGENTS_ENABLED != true
 
 Phase 2.1 采用 Actions-only，不部署常驻 Coordinator 或外部数据库。每条只读 workflow 分成四个权限隔离的 job：`preflight` 读取受信配置并验证调用，`reserve` 对 managed comment 做 best-effort 预约，`analyze` 以只读 GitHub 权限调用模型，`publish` 确定性写回。只有真正进入 reserved 分支的 `analyze` step 接收 AI Key；terminal passthrough step 不接收 Secret。阶段间只传递经过 schema 校验的有界 JSON artifact，运行器不会把输入正文或 PR patch 直接复制进 artifact；`analyze` 重新读取输入并核对 fingerprint，`publish` 再次获取目标输入并复核 fingerprint 后更新 managed comment。artifact 不得包含 Secret、Authorization、Cookie 或请求头，并受 registry 中的字节上限约束；模型输出还会在 artifact 写入前拒绝当前 AI Key 和常见认证头/Bearer 形态，但这属于针对已知运行 Secret 的防泄漏护栏，不是通用 DLP。结构化模型输出仍可能概括或引用输入内容，因此 artifact 按目标仓库数据同级处理。`reserve` 不是强租约，artifact 也不是锁或权威状态源。
 
-Phase 2.1 的 workflow 和运行器已合并并通过远端 CI，triage 已完成端到端实证（真实模型分析发布 managed comment，修复链见 PR `#19`/`#20`/`#22`/`#23`）。当前显式启用的 Agent 是 `triage`、`planner` 和 `reviewer`（kill switch 与 registry 双开）；`reviewer` 合并后通过独立的 owner-authored canary PR 完成受控验证。`issue-triage.yml` 继续确定性添加 `status:triage`。这三个 Agent 的唯一 GitHub 写入投影是 managed comment；Reviewer 的 `analyze` job 保持 `pull-requests: read`，无 Secret 的确定性 `reserve`/`publish` job 使用 `pull-requests: write` 写入 PR 普通评论。其受信运行器只调用 Issue Comments 的 POST/PATCH，不包含 review、approve 或 merge API，也不发布 Check Run。由于同步 workflow 需要仓库级 Actions 创建 PR 开关，此 token 权限在能力层面仍覆盖 approval；canary PR `#34` 的 run `32109708799` 已证明仅改用 `issues: write` 会在 PR 评论写回时返回 HTTP 403。后续若要消除该能力残余，必须改用权限独立的 GitHub App，而不是再次缩减 `GITHUB_TOKEN`。Writer、Policy 和 Merger 继续关闭。Phase 2.1 不修改业务标签、代码、审批或合并状态。
+只读 Agent 仍保持 Actions-only：Candidate job 只持有 `contents:read` 和模型凭据，不持有 GitHub 写凭据、Writer App 私钥或 release secret。单 Writer 实现已在工作树中加入 Candidate、Publisher、Policy 和 Finalizer workflows；在 GitHub 现场 PoC、Environment/secret 配置、branch protection 和 required Policy 检查均有证据前，不能把它们描述为已在远端启用。`agent` Environment 必须不设置人工审批，且不得暴露 Writer 或 release secret；`writer` Environment 用于受保护的 Writer App 凭据；`release` Environment 继续保持人工审批。
 
 ## 3. 信任和配置来源
 
@@ -75,13 +75,14 @@ Fallback 仅适用于连接失败、超时、429 和 5xx。认证失败、权限
 | `triage` | 模型只读 | 分析 Issue、建议标签和更新 managed comment | shell、Secrets、代码写入 |
 | `planner` | 模型只读 | 拆分任务、验收标准和测试计划 | shell、代码写入 |
 | `reviewer` | 模型只读 | 读取仓库和 PR diff、在 managed comment 中发布 advisory 结论 | Check Run、修改代码、批准、合并 |
-| `writer` | 隔离写入 | 写 `agent/**` 分支、创建 Draft PR | `.github/**`、审批、Checks、合并 |
+| `candidate` | 隔离生成 | 在临时 runner 生成有界 patch artifact | GitHub 写入、Writer/release secret、候选外 shell |
+| `publisher` | 单 Writer App | 写 `agent/**` 分支、创建或复用 Draft PR | `.github/**`、审批、Checks、直接合并 |
 | `tester` | 确定性 | 触发和读取 CI | 修改源码、合并 |
 | `security` | 模型只读 | 审查敏感路径和依赖元数据 | 修改代码、合并 |
-| `policy` | 确定性 | 发布 `Automation Policy / gate` | 使用 LLM 决策、修改代码、合并 |
-| `merger` | 确定性 | 合并精确已验证 head SHA | 修改分支内容、绕过 Policy |
+| `policy` | GitHub Actions | 以 base 受信代码计算 `Automation Policy / gate` | 使用 LLM 决策、修改代码、合并 |
+| `finalizer` | GitHub Actions + Writer token | 复核精确状态并请求 native squash auto-merge | checkout PR head、直接 merge、绕过 Policy/保护 |
 
-多个逻辑 Agent 可以先运行在 GitHub Actions 中。只有开放代码写入和自动合并时，才需要独立 GitHub App 身份实现权限隔离。
+多个逻辑 Agent 运行在 GitHub Actions 中。开放代码写入和 native auto-merge 时，仅 Publisher/Finalizer 临时铸造同一个 Writer App installation token；Policy 与 Finalizer 的读侧复核使用 `GITHUB_TOKEN`。
 
 ## 6. 事件和命令
 
@@ -159,14 +160,14 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 
 ## 9. 自动合并
 
-`Automation Policy / gate` 是确定性检查，初始模式固定为 `shadow`。推进顺序是：
+`Automation Policy / gate` 是 GitHub Actions 的确定性检查。生产 required check 和 production flags 在 PoC 证据完成前均不得启用；PoC 后的推进顺序是：
 
 1. `shadow`：只报告本应允许或拒绝的原因。
 2. `human`：维护者参考 Policy 后手工合并。
-3. `label`：维护者添加 `automerge-approved` 后允许 Merger 执行。
+3. `label`：维护者添加 `automerge-approved` 后允许 Finalizer 请求 native auto-merge。
 4. `allowlist`：仅对经过历史验证的低风险范围自动合并。
 
-所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。`.github/**`、依赖文件、认证、安全、数据库、发布和其他策略标记路径默认需要人工审查。managed 上游同步 PR 是独立的确定性例外：它不使用模型或通用 Merger，只在 checkpoint 合并无冲突、fork-owned 路径已过滤且严格分支保护全部满足时执行原生 squash auto-merge。模型的自报置信度不能改变门禁。
+所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。`.github/**`、依赖文件、认证、安全、数据库、发布和其他策略标记路径默认需要人工审查。managed 上游同步 PR 是独立的确定性例外：它不使用模型或通用 Finalizer，只在 checkpoint 合并无冲突、fork-owned 路径已过滤且严格分支保护全部满足时执行原生 squash auto-merge。模型的自报置信度不能改变门禁。
 
 ## 10. 威胁模型
 
@@ -174,23 +175,23 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 
 - 公开 Issue 或评论造成的 prompt injection 和额度滥用。
 - PR 修改 workflow、registry 或 policy 后尝试提升自身权限。
-- Writer、Policy 或 Merger 凭据泄漏。
+- Writer App 凭据泄漏，或 Policy/Finalizer workflow 被篡改。
 - `pull_request_target` 或 `workflow_run` 误用导致不可信代码接触 Secrets。
 - webhook 重放、乱序、重复 delivery 和对象更新竞态。
 - artifact 超大、schema 被替换、跨 job 夹带 Secret 或复用到错误对象。
 - 模型输出超大、非 JSON、未知 Agent、任意模型名或工具参数。
 - 上游 force-push、checkpoint 回退和同步分支未知提交。
 
-模型阶段不得获得 shell 或任意网络工具。未来 Writer 必须运行在临时隔离环境中，且不能访问发布 Environment Secrets。Policy 和 Merger 不能与 Writer 共用可生成同等权限令牌的凭据。
+模型阶段不得获得 GitHub 写凭据、Writer App 私钥或发布凭据。Candidate 在临时隔离环境中运行；`agent` Environment 无人工审批但不能访问 Writer 或 release secret。Candidate 的受信 extractor 由独立 job 从精确 base SHA 封装，必须在模型结束后下载，并通过隔离 Git directory/index 和空配置读取工作树，不能信任 Agent 可写的 runtime、`.git/config`、hooks、filters、textconv 或 fsmonitor。Policy 是 Actions job，Finalizer 的写入仅限临时 Writer token 发起 native auto-merge 请求。
 
 ## 11. 实施顺序
 
 1. Phase 0：策略契约、威胁模型、kill switch 和仓库设置审计（已实现，默认关闭）。
 2. Phase 1：checkpoint 同步 PoC、测试和迁移（已实现；首次冲突路径已经 PR `#16` 人工三方解决并实证，checkpoint 已追平 `upstream/main`，后续回到定时 no-op/自动 PR 循环）。
-3. Phase 2.1：Actions-only 的只读 triage/planner/reviewer；模型分析与确定性写回分 job，通过有界无 Secret 的 JSON artifact 交接（已合并；`triage` 已双开关启用并进入远端端到端验证，`planner`/`reviewer` 保持关闭）。
-4. Phase 3：独立 Writer 身份和 Draft PR。
-5. Phase 4：独立 Policy 身份及 shadow/human gate。
-6. Phase 5：独立 Merger 身份及极小 allowlist。
+3. Phase 2.1：Actions-only 的只读 triage/planner/reviewer；模型分析与确定性写回分 job，通过有界无 Secret 的 JSON artifact 交接。
+4. Phase 3：Candidate artifact、单 Writer App Publisher 和 Draft PR；先完成 artifact、凭据隔离和事件语义 PoC。
+5. Phase 4：GitHub Actions Policy 的 shadow/human gate；仅在来源和漂移 PoC 完成后加入 required check。
+6. Phase 5：Finalizer 仅对 `docs/automation-canary/**/*.md` 请求 native auto-merge；production flags 仅在全部 PoC、撤销演练和稳定观察后启用。
 7. Phase 6：仅在真实运行证明 Actions-only 无法满足要求后，才引入外部状态或工作流服务。触发条件包括多 worker/多实例协调、可靠跨运行恢复或复杂 DAG、精确额度与计费限流、需要事务化 outbox/effect receipt，或不可变且可查询的审计要求。
 
 Phase 6 需要的是符合一致性和运维要求的权威状态层，不等于必须使用 Postgres。单实例可评估 SQLite；云原生环境可评估具备条件写入的托管 KV、Durable Objects、Kubernetes CRD 或工作流引擎；需要关系查询、多 worker 事务和 outbox 时 Postgres 通常更合适。选型必须由已观测的并发、恢复、审计和运维需求驱动，不能因为规划中的功能提前引入数据库。
@@ -205,7 +206,8 @@ Phase 6 需要的是符合一致性和运维要求的权威状态层，不等于
 - 仅在同步工作流需要时允许 GitHub Actions 创建 PR；不得以该设置绕过审批或分支保护。
 - 限制允许的 Actions 来源，关键写权限 Action 固定完整 SHA。
 - `Rust CI / check` 和 `Frontend CI / check` 保持 strict required checks。
-- 通用 Agent 自动合并在 Policy Gate 进入要求检查前不得启用；managed 上游同步仅使用上述确定性原生 auto-merge 例外。
-- 发布 Secrets 仅保存在受保护的 `release` Environment。
+- `agent` Environment 不得设置人工审批，且仅向 Candidate 暴露模型凭据；`writer` Environment 才保存 Writer App 凭据。
+- `release` Environment 必须保留人工审批；不得由 Agent 或 Writer App 使用。
+- 通用 Agent 自动合并、Policy required check 和 production flags 在对应 PoC 完成前不得启用；managed 上游同步仅在 Writer App 已配置后使用确定性原生 auto-merge。
 
 任何远端设置变更都应记录在 Issue `#11`，并通过当前配置的现场读取结果验证。

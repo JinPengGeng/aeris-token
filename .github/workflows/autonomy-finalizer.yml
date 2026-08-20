@@ -1,0 +1,172 @@
+name: Autonomy Finalizer
+
+on:
+  workflow_run:
+    workflows: [Automation Policy, Rust CI, Frontend CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autonomy-finalizer-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    name: Recompute merge eligibility
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'agent/issue-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.evaluate.outputs.eligible }}
+      reason: ${{ steps.evaluate.outputs.reason }}
+      pull_number: ${{ steps.evaluate.outputs.pull_number }}
+      head_sha: ${{ steps.evaluate.outputs.head_sha }}
+    steps:
+      - name: Check out current trusted policy
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Recompute all deterministic gates
+        id: evaluate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          AERIS_TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AERIS_POLICY_REF: ${{ github.event.repository.default_branch }}
+          AERIS_POLICY_SHA: ${{ github.sha }}
+          AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+        run: node .github/automation/src/autonomy-finalizer.mjs
+
+  finalize:
+    name: Request native auto-merge
+    needs: [evaluate]
+    if: >-
+      needs.evaluate.result == 'success' &&
+      needs.evaluate.outputs.eligible == 'true' &&
+      (vars.AERIS_WRITER_ENABLED == 'true' || vars.AERIS_WRITER_ENABLED == '1') &&
+      (vars.AERIS_AUTONOMOUS_MERGE_ENABLED == 'true' || vars.AERIS_AUTONOMOUS_MERGE_ENABLED == '1')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: writer
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    env:
+      AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
+      AERIS_AUTONOMY_MIN_REMAINING_SECONDS: 600
+    steps:
+      - name: Check out current trusted policy
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Recompute gates before token mint
+        id: recheck
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          AERIS_TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AERIS_POLICY_REF: ${{ github.event.repository.default_branch }}
+          AERIS_POLICY_SHA: ${{ github.sha }}
+          AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+        run: node .github/automation/src/autonomy-finalizer.mjs
+
+      - name: Confirm eligibility snapshot is unchanged
+        env:
+          VERIFIED_PULL_NUMBER: ${{ needs.evaluate.outputs.pull_number }}
+          VERIFIED_HEAD_SHA: ${{ needs.evaluate.outputs.head_sha }}
+          CURRENT_ELIGIBLE: ${{ steps.recheck.outputs.eligible }}
+          CURRENT_PULL_NUMBER: ${{ steps.recheck.outputs.pull_number }}
+          CURRENT_HEAD_SHA: ${{ steps.recheck.outputs.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${CURRENT_ELIGIBLE}" == true ]]
+          [[ "${CURRENT_PULL_NUMBER}" == "${VERIFIED_PULL_NUMBER}" ]]
+          [[ "${CURRENT_HEAD_SHA}" == "${VERIFIED_HEAD_SHA}" ]]
+
+      - name: Validate autonomy window before token mint
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${AERIS_AUTONOMY_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+          expires_epoch="$(date -u -d "${AERIS_AUTONOMY_EXPIRES_AT}" +%s)"
+          [[ "$(date -u -d "@${expires_epoch}" +%Y-%m-%dT%H:%M:%SZ)" == "${AERIS_AUTONOMY_EXPIRES_AT}" ]]
+          (( $(date -u +%s) + AERIS_AUTONOMY_MIN_REMAINING_SECONDS < expires_epoch ))
+
+      - name: Mint bounded Writer App token
+        id: writer_token
+        timeout-minutes: 2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AERIS_WRITER_APP_ID }}
+          private-key: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Request exact native auto-merge
+        id: finalize
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          AERIS_TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AERIS_POLICY_REF: ${{ github.event.repository.default_branch }}
+          AERIS_POLICY_SHA: ${{ github.sha }}
+          AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_TOKEN: ${{ steps.writer_token.outputs.token }}
+          AERIS_FINALIZER_MUTATE: "true"
+        run: node .github/automation/src/autonomy-finalizer.mjs
+
+      - name: Summarize finalization
+        env:
+          PULL_NUMBER: ${{ steps.finalize.outputs.pull_number }}
+          HEAD_SHA: ${{ steps.finalize.outputs.head_sha }}
+          ACTION: ${{ steps.finalize.outputs.action }}
+        shell: bash
+        run: |
+          {
+            echo "### Autonomy Finalizer"
+            echo
+            echo "- Pull request: #${PULL_NUMBER}"
+            echo "- Head SHA: \`${HEAD_SHA}\`"
+            echo "- Action: \`${ACTION}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"

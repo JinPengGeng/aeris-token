@@ -102,14 +102,14 @@ agents:
   writer:
     enabled: false
     phase: 3
-    mode: draft_pull_request
+    mode: credentialless_candidate
     model_variable: AERIS_AI_MODEL_WRITER
     fallback_model_variable: AERIS_AI_MODEL_FALLBACK
     triggers: [maintainer_command_implement, authorized_fix_cycle]
     required_issue_labels: [agent-ready]
-    allowed_branch_prefixes: [agent/]
-    tools: [repository_read, isolated_shell, branch_write, draft_pull_request]
-    effects: [create_or_update_draft_pull_request]
+    allowed_branch_prefixes: [agent/issue-]
+    tools: [repository_read, workspace_write]
+    effects: [publish_candidate_artifact]
     denied_paths:
       - .github/**
       - CODEOWNERS
@@ -142,8 +142,8 @@ agents:
     mode: deterministic
     model_variable: null
     triggers: [pull_request_changed, required_checks_completed]
-    tools: [repository_read, pull_request_metadata_read, checks_read]
-    effects: [publish_policy_check]
+    tools: [repository_read, pull_request_metadata_read]
+    effects: [github_actions_job_conclusion]
     handoff_to: [merger]
 
   merger:
@@ -152,6 +152,6 @@ agents:
     mode: deterministic
     model_variable: null
     triggers: [policy_passed]
-    tools: [pull_request_metadata_read, checks_read, exact_sha_merge]
-    effects: [enable_auto_merge, merge_exact_sha]
+    tools: [pull_request_metadata_read, checks_read, writer_app_auto_merge_request]
+    effects: [mark_ready, enable_native_auto_merge]
     handoff_to: []

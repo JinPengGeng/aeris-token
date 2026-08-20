@@ -8,9 +8,10 @@ source "${SCRIPT_DIR}/github-autonomy.sh"
 
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
-: "${AERIS_SYNC_APP_SLUG:?AERIS_SYNC_APP_SLUG is required}"
-[[ "${AERIS_SYNC_APP_SLUG}" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]] || {
-  echo 'AERIS_SYNC_APP_SLUG must be a lowercase GitHub App slug.' >&2
+: "${AERIS_ISSUES_GH_TOKEN:?AERIS_ISSUES_GH_TOKEN is required}"
+: "${AERIS_WRITER_APP_SLUG:?AERIS_WRITER_APP_SLUG is required}"
+[[ "${AERIS_WRITER_APP_SLUG}" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]] || {
+  echo 'AERIS_WRITER_APP_SLUG must be a lowercase GitHub App slug.' >&2
   exit 78
 }
 
@@ -25,7 +26,7 @@ AUTOMERGE_HELPER="${AUTOMERGE_HELPER:-${SCRIPT_ROOT}/manage-sync-automerge.sh}"
 
 MANAGED_MARKER='<!-- upstream-sync-managed -->'
 AUTO_CLOSED_MARKER='<!-- upstream-sync-auto-closed -->'
-SYNC_APP_BOT_LOGIN="${AERIS_SYNC_APP_SLUG}[bot]"
+WRITER_APP_BOT_LOGIN="${AERIS_WRITER_APP_SLUG}[bot]"
 LEGACY_BOT_LOGIN='github-actions[bot]'
 BOT_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
 
@@ -45,6 +46,13 @@ checkpoint_sha=''
 
 output() {
   printf '%s=%s\n' "$1" "$2" >>"${GITHUB_OUTPUT}"
+}
+
+# Writer App credentials are restricted to branch and PR publication. Issue
+# reads and writes use the workflow token through this isolated channel.
+aeris_issues_gh() {
+  aeris_require_active_autonomy_window || return
+  GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"
 }
 
 list_sync_prs() {
@@ -93,13 +101,13 @@ refresh_prs() {
 }
 
 pr_bot_comments() {
-  aeris_gh api --paginate \
+  aeris_issues_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/$1/comments?per_page=100" \
-    --jq ".[] | select(.user.login == \"${SYNC_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") | .body"
+    --jq ".[] | select(.user.login == \"${WRITER_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") | .body"
 }
 
 is_sync_automation_login() {
-  [[ "$1" == "${SYNC_APP_BOT_LOGIN}" || "$1" == "${LEGACY_BOT_LOGIN}" || "$1" == app/github-actions ]]
+  [[ "$1" == "${WRITER_APP_BOT_LOGIN}" || "$1" == "${LEGACY_BOT_LOGIN}" || "$1" == app/github-actions ]]
 }
 
 issue_comment_once() {
@@ -107,7 +115,7 @@ issue_comment_once() {
   marker="<!-- upstream-sync-${key} -->"
   comments="$(pr_bot_comments "${number}")"
   if [[ "${comments}" != *"${marker}"* ]]; then
-    aeris_gh api --method POST \
+    aeris_issues_gh api --method POST \
       "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" \
       -f body="${marker}
 ${message}" >/dev/null
@@ -124,22 +132,22 @@ set_pending_tip() {
   local number="$1" sha="$2" comment_id body
   body="<!-- upstream-sync-pending-tip:${sha} -->
 Prepared automation branch tip ${sha}."
-  comment_id="$(aeris_gh api --paginate \
+  comment_id="$(aeris_issues_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/${number}/comments?per_page=100" \
-    --jq ".[] | select((.user.login == \"${SYNC_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") and (.body | startswith(\"<!-- upstream-sync-pending-tip:\"))) | .id" |
+    --jq ".[] | select((.user.login == \"${WRITER_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") and (.body | startswith(\"<!-- upstream-sync-pending-tip:\"))) | .id" |
     tail -n1)"
   if [[ -n "${comment_id}" ]]; then
-    aeris_gh api \
+    aeris_issues_gh api \
       --method PATCH \
       "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
       -f body="${body}" >/dev/null
   else
-    aeris_gh pr comment --repo "${GITHUB_REPOSITORY}" "${number}" --body "${body}" >/dev/null
+    aeris_issues_gh pr comment --repo "${GITHUB_REPOSITORY}" "${number}" --body "${body}" >/dev/null
   fi
 }
 
 latest_close_actor() {
-  aeris_gh api --paginate \
+  aeris_issues_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/$1/events?per_page=100" \
     --jq '.[] | select(.event == "closed") | .actor.login' | tail -n1
 }
@@ -370,7 +378,7 @@ report_workflow_drift() {
   [[ -n "${changed}" ]] || return 0
 
   title="[sync-upstream] Review upstream workflow tree ${current_tree:0:12}"
-  existing="$(aeris_gh issue list \
+  existing="$(aeris_issues_gh issue list \
     --repo "${GITHUB_REPOSITORY}" \
     --state all \
     --limit 100 \
@@ -378,7 +386,7 @@ report_workflow_drift() {
     --json title \
     --jq ".[] | select(.title == \"${title}\") | .title" | head -n1)"
   if [[ -z "${existing}" ]]; then
-    aeris_gh issue create \
+    aeris_issues_gh issue create \
       --repo "${GITHUB_REPOSITORY}" \
       --title "${title}" \
       --body "<!-- upstream-sync-workflow-tree:${current_tree} -->
@@ -393,7 +401,7 @@ report_sync_alert() {
   local kind="$1" key="$2" message="$3" title existing number marker
   title="[sync-upstream] ${kind}: ${key}"
   marker="<!-- upstream-sync-alert:${kind}:${key} -->"
-  existing="$(aeris_gh issue list \
+  existing="$(aeris_issues_gh issue list \
     --repo "${GITHUB_REPOSITORY}" \
     --state open \
     --limit 100 \
@@ -401,7 +409,7 @@ report_sync_alert() {
     --json number,title,body \
     --jq ".[] | select(.title == \"${title}\" and ((.body // \"\") | contains(\"${marker}\"))) | .number" | head -n1)"
   if [[ -z "${existing}" ]]; then
-    aeris_gh issue create \
+    aeris_issues_gh issue create \
       --repo "${GITHUB_REPOSITORY}" \
       --title "${title}" \
       --body "${marker}
