@@ -144,6 +144,10 @@ const AUXILIARY_TABLES: &[AuxiliaryTable] = &[
         primary_key: &["id"],
     },
     AuxiliaryTable {
+        name: "half_open_probe_completions",
+        primary_key: &["provider_key_id", "api_format"],
+    },
+    AuxiliaryTable {
         name: "gemini_file_mappings",
         primary_key: &["id"],
     },

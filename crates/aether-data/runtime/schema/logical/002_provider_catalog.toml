@@ -583,6 +583,44 @@ columns = ["provider_id"]
 name = "idx_provider_api_keys_provider_default_sort"
 columns = ["provider_id", "internal_priority", "name", "id"]
 
+[table.half_open_probe_completions]
+domain = "provider_catalog"
+order = 42
+primary_key = ["provider_key_id", "api_format"]
+
+[[table.half_open_probe_completions.columns]]
+name = "provider_key_id"
+type = "text_id"
+length = 191
+
+[[table.half_open_probe_completions.columns]]
+name = "api_format"
+type = "text"
+length = 191
+
+[[table.half_open_probe_completions.columns]]
+name = "completion_id"
+type = "text_id"
+length = 64
+
+[[table.half_open_probe_completions.columns]]
+name = "owner"
+type = "text"
+length = 255
+
+[[table.half_open_probe_completions.columns]]
+name = "fencing_token"
+type = "int64"
+
+[[table.half_open_probe_completions.columns]]
+name = "completed_at_unix_ms"
+type = "unix_millis"
+
+[[table.half_open_probe_completions.columns]]
+name = "outcome"
+type = "text"
+length = 16
+
 [table.pool_member_scores]
 domain = "provider_catalog"
 order = 44

@@ -135,6 +135,18 @@ ALTER TABLE ONLY public.provider_api_keys ADD CONSTRAINT provider_api_keys_pkey 
 CREATE INDEX IF NOT EXISTS provider_api_keys_provider_id_idx ON public.provider_api_keys USING btree (provider_id);
 CREATE INDEX IF NOT EXISTS idx_provider_api_keys_provider_default_sort ON public.provider_api_keys USING btree (provider_id, internal_priority, name, id);
 
+CREATE TABLE IF NOT EXISTS public.half_open_probe_completions (
+    provider_key_id character varying(191) NOT NULL,
+    api_format character varying(191) NOT NULL,
+    completion_id character varying(64) NOT NULL,
+    owner character varying(255) NOT NULL,
+    fencing_token bigint NOT NULL,
+    completed_at_unix_ms bigint NOT NULL,
+    outcome character varying(16) NOT NULL
+);
+
+ALTER TABLE ONLY public.half_open_probe_completions ADD CONSTRAINT half_open_probe_completions_pkey PRIMARY KEY (provider_key_id, api_format);
+
 CREATE TABLE IF NOT EXISTS public.pool_member_scores (
     id character varying(192) NOT NULL,
     pool_kind character varying(64) NOT NULL,

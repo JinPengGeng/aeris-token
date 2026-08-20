@@ -127,6 +127,17 @@ CREATE TABLE IF NOT EXISTS provider_api_keys (
 CREATE INDEX IF NOT EXISTS provider_api_keys_provider_id_idx ON provider_api_keys (provider_id);
 CREATE INDEX IF NOT EXISTS idx_provider_api_keys_provider_default_sort ON provider_api_keys (provider_id, internal_priority, name, id);
 
+CREATE TABLE IF NOT EXISTS half_open_probe_completions (
+    provider_key_id TEXT NOT NULL,
+    api_format TEXT NOT NULL,
+    completion_id TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL,
+    completed_at_unix_ms INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    PRIMARY KEY (provider_key_id, api_format)
+);
+
 CREATE TABLE IF NOT EXISTS pool_member_scores (
     id TEXT PRIMARY KEY NOT NULL,
     pool_kind TEXT NOT NULL,

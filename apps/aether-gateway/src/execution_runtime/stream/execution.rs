@@ -14102,9 +14102,6 @@ mod tests {
                 .expect("server should start");
         });
 
-        let state = AppState::new()
-            .expect("app state should build")
-            .with_execution_runtime_override_base_url(format!("http://{addr}"));
         let plan = ExecutionPlan {
             request_id: "req-remote-runtime-image-sync-json-stream".into(),
             candidate_id: Some("cand-remote-runtime-image-sync-json-stream".into()),
@@ -14137,6 +14134,15 @@ mod tests {
                 ..ExecutionTimeouts::default()
             }),
         };
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            "development-key",
+        );
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_execution_runtime_override_base_url(format!("http://{addr}"))
+            .with_data_state_for_tests(data_state);
         let decision = GatewayControlDecision::synthetic(
             "/v1/images/generations",
             Some("ai_public".to_string()),
