@@ -11,6 +11,12 @@ to_node_path() {
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECKPOINT_HELPER="${CHECKPOINT_HELPER:-${SCRIPT_ROOT}/checkpoint-merge.sh}"
+BOUNDED_FETCH_HELPER="${BOUNDED_FETCH_HELPER:-${SCRIPT_ROOT}/bounded-git-fetch.sh}"
+source "${BOUNDED_FETCH_HELPER}"
+
+bounded_tree_git() {
+  aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git "$@"
+}
 
 fork_base="${1:?fork base is required}"
 upstream_tip="${2:?upstream tip is required}"
@@ -35,11 +41,11 @@ valid_repo_path "${policy_path}" || fail_error "invalid policy path: ${policy_pa
 for entry in "fork:${fork_base}" "upstream:${upstream_tip}"; do
   label="${entry%%:*}"
   ref="${entry#*:}"
-  git rev-parse --verify "${ref}^{commit}" >/dev/null 2>&1 ||
+  bounded_tree_git rev-parse --verify "${ref}^{commit}" >/dev/null 2>&1 ||
     fail_error "invalid ${label} commit: ${ref}"
 done
-fork_base="$(git rev-parse "${fork_base}^{commit}")"
-upstream_tip="$(git rev-parse "${upstream_tip}^{commit}")"
+fork_base="$(bounded_tree_git rev-parse "${fork_base}^{commit}")"
+upstream_tip="$(bounded_tree_git rev-parse "${upstream_tip}^{commit}")"
 
 tmp_root="${AERIS_TMP_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}"
 mkdir -p "${tmp_root}"
@@ -61,9 +67,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-git show "${fork_base}:${state_path}" >"${state_json}" 2>/dev/null ||
+bounded_tree_git show "${fork_base}:${state_path}" >"${state_json}" 2>/dev/null ||
   fail_error "state file is missing from fork base: ${state_path}"
-git show "${fork_base}:${policy_path}" >"${policy_yaml}" 2>/dev/null ||
+bounded_tree_git show "${fork_base}:${policy_path}" >"${policy_yaml}" 2>/dev/null ||
   fail_error "policy file is missing from fork base: ${policy_path}"
 
 policy_version="$(awk '/^version:[[:space:]]*[0-9]+[[:space:]]*$/ {print $2; exit}' "${policy_yaml}")"
@@ -138,11 +144,11 @@ set -e
   exit 3
 }
 
-git rev-parse --verify "${checkpoint}^{commit}" >/dev/null 2>&1 ||
+bounded_tree_git rev-parse --verify "${checkpoint}^{commit}" >/dev/null 2>&1 ||
   fail_error "checkpoint commit is unavailable: ${checkpoint}"
 
 set +e
-git merge-base --is-ancestor "${checkpoint}" "${upstream_tip}"
+bounded_tree_git merge-base --is-ancestor "${checkpoint}" "${upstream_tip}"
 ancestor_status=$?
 set -e
 case "${ancestor_status}" in
@@ -207,33 +213,33 @@ path_is_fork_owned() {
 
 if [[ "${checkpoint}" == "${upstream_tip}" ]]; then
   printf 'state=noop\n'
-  printf 'tree=%s\n' "$(git rev-parse "${fork_base}^{tree}")"
+  printf 'tree=%s\n' "$(bounded_tree_git rev-parse "${fork_base}^{tree}")"
   printf 'filtered_paths=0\n'
   exit 0
 fi
 
-git diff --no-renames --name-only -z "${checkpoint}" "${upstream_tip}" -- >"${changed_paths}" ||
+bounded_tree_git diff --no-renames --name-only -z "${checkpoint}" "${upstream_tip}" -- >"${changed_paths}" ||
   fail_error 'unable to enumerate upstream changes'
-GIT_INDEX_FILE="${filtered_index}" git read-tree "${upstream_tip}"
+GIT_INDEX_FILE="${filtered_index}" bounded_tree_git read-tree "${upstream_tip}"
 
 filtered_count=0
 while IFS= read -r -d '' path; do
   path_is_fork_owned "${path}" || continue
-  entry="$(git ls-tree "${checkpoint}" -- "${path}" | awk 'NR == 1 { print $1, $3 }')"
+  entry="$(bounded_tree_git ls-tree "${checkpoint}" -- "${path}" | awk 'NR == 1 { print $1, $3 }')"
   if [[ -n "${entry}" ]]; then
     read -r mode object extra <<<"${entry}"
     [[ -n "${mode}" && -n "${object}" && -z "${extra:-}" ]] ||
       fail_error "unable to read checkpoint entry: ${path}"
-    GIT_INDEX_FILE="${filtered_index}" git update-index \
+    GIT_INDEX_FILE="${filtered_index}" bounded_tree_git update-index \
       --add --cacheinfo "${mode}" "${object}" "${path}"
   else
-    GIT_INDEX_FILE="${filtered_index}" git update-index --force-remove -- "${path}"
+    GIT_INDEX_FILE="${filtered_index}" bounded_tree_git update-index --force-remove -- "${path}"
   fi
   ((filtered_count += 1))
 done <"${changed_paths}"
 
-filtered_tree="$(GIT_INDEX_FILE="${filtered_index}" git write-tree)"
-upstream_date="$(git show -s --format=%cI "${upstream_tip}")"
+filtered_tree="$(GIT_INDEX_FILE="${filtered_index}" bounded_tree_git write-tree)"
+upstream_date="$(bounded_tree_git show -s --format=%cI "${upstream_tip}")"
 synthetic_commit="$({
   printf 'Filtered upstream tree for checkpoint sync\n\n'
   printf 'Source: %s\n' "${upstream_tip}"
@@ -243,10 +249,10 @@ synthetic_commit="$({
   GIT_COMMITTER_NAME='aeris-sync' \
   GIT_COMMITTER_EMAIL='aeris-sync@invalid' \
   GIT_COMMITTER_DATE="${upstream_date}" \
-  git commit-tree "${filtered_tree}" -p "${checkpoint}")"
+  bounded_tree_git commit-tree "${filtered_tree}" -p "${checkpoint}")"
 
 set +e
-merge_output="$("${CHECKPOINT_HELPER}" \
+merge_output="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" "${CHECKPOINT_HELPER}" \
   "${checkpoint}" "${fork_base}" "${synthetic_commit}")"
 merge_status=$?
 set -e
@@ -256,7 +262,7 @@ if ((merge_status != 0)); then
 fi
 
 merged_tree="$(sed -n 's/^tree=//p' <<<"${merge_output}")"
-git rev-parse --verify "${merged_tree}^{tree}" >/dev/null 2>&1 ||
+bounded_tree_git rev-parse --verify "${merged_tree}^{tree}" >/dev/null 2>&1 ||
   fail_error 'checkpoint helper did not return a valid tree'
 
 node - "$(to_node_path "${state_json}")" "$(to_node_path "${updated_state}")" "${upstream_tip}" <<'NODE'
@@ -268,16 +274,16 @@ state.last_integrated_sha = upstreamTip;
 fs.writeFileSync(destination, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
 NODE
 
-state_entry="$(git ls-tree "${fork_base}" -- "${state_path}" | awk 'NR == 1 { print $1, $3 }')"
+state_entry="$(bounded_tree_git ls-tree "${fork_base}" -- "${state_path}" | awk 'NR == 1 { print $1, $3 }')"
 read -r state_mode state_object state_extra <<<"${state_entry}"
 [[ "${state_mode}" == 100644 && -n "${state_object}" && -z "${state_extra:-}" ]] ||
   fail_error 'state file must be a regular non-executable file'
-updated_state_object="$(git hash-object -w "${updated_state}")"
+updated_state_object="$(bounded_tree_git hash-object -w "${updated_state}")"
 
-GIT_INDEX_FILE="${final_index}" git read-tree "${merged_tree}"
-GIT_INDEX_FILE="${final_index}" git update-index \
+GIT_INDEX_FILE="${final_index}" bounded_tree_git read-tree "${merged_tree}"
+GIT_INDEX_FILE="${final_index}" bounded_tree_git update-index \
   --add --cacheinfo 100644 "${updated_state_object}" "${state_path}"
-final_tree="$(GIT_INDEX_FILE="${final_index}" git write-tree)"
+final_tree="$(GIT_INDEX_FILE="${final_index}" bounded_tree_git write-tree)"
 
 printf 'state=clean\n'
 printf 'tree=%s\n' "${final_tree}"

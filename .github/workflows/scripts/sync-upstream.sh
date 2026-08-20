@@ -5,6 +5,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Every authenticated GitHub operation rechecks the time-bounded authorization.
 source "${SCRIPT_DIR}/github-autonomy.sh"
+BOUNDED_FETCH_HELPER="${BOUNDED_FETCH_HELPER:-${SCRIPT_DIR}/bounded-git-fetch.sh}"
+source "${BOUNDED_FETCH_HELPER}"
+
+bounded_tree_git() {
+  aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git "$@"
+}
 
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
@@ -42,6 +48,14 @@ upstream_branch=''
 base_sha=''
 upstream_sha=''
 checkpoint_sha=''
+prepared_checkpoint_sha=''
+fetched_base_sha=''
+fetched_upstream_sha=''
+sync_app_bot_id=''
+sync_app_bot_type=''
+published_pr_number=''
+published_pr_url=''
+published_pr_body=''
 
 output() {
   printf '%s=%s\n' "$1" "$2" >>"${GITHUB_OUTPUT}"
@@ -198,21 +212,21 @@ latest_manual_pause_pr() {
 is_automation_commit() {
   local sha="$1" current_base="$2"
   local subject body author committer source automation base_trailer actual_parent
-  subject="$(git show -s --format=%s "${sha}")"
-  body="$(git show -s --format=%B "${sha}")"
-  author="$(git show -s --format=%ae "${sha}")"
-  committer="$(git show -s --format=%ce "${sha}")"
+  subject="$(bounded_tree_git show -s --format=%s "${sha}")"
+  body="$(bounded_tree_git show -s --format=%B "${sha}")"
+  author="$(bounded_tree_git show -s --format=%ae "${sha}")"
+  committer="$(bounded_tree_git show -s --format=%ce "${sha}")"
   source="$(sed -n 's/^Sync-Upstream-Source: //p' <<<"${body}" | tail -n1)"
   automation="$(sed -n 's/^Sync-Upstream-Automation: //p' <<<"${body}" | tail -n1)"
   base_trailer="$(sed -n 's/^Sync-Upstream-Base: //p' <<<"${body}" | tail -n1)"
-  [[ "$(git rev-list --parents -n1 "${sha}" | wc -w)" -eq 2 ]] || return 1
+  [[ "$(bounded_tree_git rev-list --parents -n1 "${sha}" | wc -w)" -eq 2 ]] || return 1
   actual_parent="$(git rev-parse "${sha}^")"
   [[ "${author}" == "${BOT_EMAIL}" && "${committer}" == "${BOT_EMAIL}" ]] || return 1
   [[ "${automation}" == true && "${source}" == "${parent}@"* ]] || return 1
   [[ "${source##*@}" =~ ^[0-9a-f]{40}$ ]] || return 1
   [[ "${subject}" == "chore: sync ${source}" ]] || return 1
   [[ "${base_trailer}" == "${actual_parent}" ]] || return 1
-  git merge-base --is-ancestor "${actual_parent}" "${current_base}"
+  bounded_tree_git merge-base --is-ancestor "${actual_parent}" "${current_base}"
 }
 
 is_legacy_tip() {
@@ -222,23 +236,142 @@ is_legacy_tip() {
   source="$(source_from_pr "${pr_json}")"
   [[ "${source}" == "${parent}@"* && "${source##*@}" =~ ^[0-9a-f]{40}$ ]] || return 1
   source_sha="${source##*@}"
-  subject="$(git show -s --format=%s "${sha}")"
-  author="$(git show -s --format=%ae "${sha}")"
-  committer="$(git show -s --format=%ce "${sha}")"
-  [[ "$(git rev-list --parents -n1 "${sha}" | wc -w)" -eq 2 ]] || return 1
+  subject="$(bounded_tree_git show -s --format=%s "${sha}")"
+  author="$(bounded_tree_git show -s --format=%ae "${sha}")"
+  committer="$(bounded_tree_git show -s --format=%ce "${sha}")"
+  [[ "$(bounded_tree_git rev-list --parents -n1 "${sha}" | wc -w)" -eq 2 ]] || return 1
   actual_parent="$(git rev-parse "${sha}^")"
   [[ "${author}" == "${BOT_EMAIL}" && "${committer}" == "${BOT_EMAIL}" ]] || return 1
   [[ "${subject}" == "chore: sync ${parent}@${source_sha}" ||
      "${subject}" == "chore: sync ${parent}@${source_sha:0:12}" ]] || return 1
-  git merge-base --is-ancestor "${actual_parent}" "${current_base}"
+  bounded_tree_git merge-base --is-ancestor "${actual_parent}" "${current_base}"
 }
 
 fetch_remote_tip() {
-  remote_sha="$(aeris_git_network ls-remote --heads origin "refs/heads/${SYNC_BRANCH}" | awk '{print $1}')"
+  aeris_bounded_read_remote_ref origin "refs/heads/${SYNC_BRANCH}" \
+    'synchronization branch' true
+  remote_sha="${AERIS_BOUNDED_REMOTE_SHA}"
   if [[ -n "${remote_sha}" ]]; then
-    aeris_git_network fetch --no-tags origin \
-      "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
+    aeris_bounded_fetch_ref origin "refs/heads/${SYNC_BRANCH}" "${remote_sha}" \
+      "refs/remotes/origin/${SYNC_BRANCH}" 'synchronization branch'
   fi
+}
+
+fetch_source_refs() {
+  aeris_bounded_read_remote_ref origin "refs/heads/${BASE_BRANCH}" 'protected base branch'
+  fetched_base_sha="${AERIS_BOUNDED_REMOTE_SHA}"
+  aeris_bounded_fetch_ref origin "refs/heads/${BASE_BRANCH}" "${fetched_base_sha}" \
+    "refs/remotes/origin/${BASE_BRANCH}" 'protected base branch'
+
+  aeris_bounded_read_remote_ref upstream "refs/heads/${upstream_branch}" 'upstream branch'
+  fetched_upstream_sha="${AERIS_BOUNDED_REMOTE_SHA}"
+  aeris_bounded_fetch_ref upstream "refs/heads/${upstream_branch}" "${fetched_upstream_sha}" \
+    "refs/remotes/upstream/${upstream_branch}" 'upstream branch'
+}
+
+aeris_assert_publication_refs_exact() {
+  local expected_base="$1" expected_upstream="$2" expected_head="$3"
+  local current_base current_upstream current_head
+  if [[ "${AERIS_SYNC_TEST_MODE:-false}" == true &&
+        "${AERIS_SYNC_TEST_FIXTURE:-false}" == true &&
+        -n "${AERIS_SYNC_BEFORE_FINAL_REF_FENCE_HOOK:-}" ]]; then
+    "${AERIS_SYNC_BEFORE_FINAL_REF_FENCE_HOOK}" || return 1
+  fi
+  aeris_bounded_read_remote_ref origin "refs/heads/${BASE_BRANCH}" 'protected base branch' || return
+  current_base="${AERIS_BOUNDED_REMOTE_SHA}"
+  aeris_bounded_read_remote_ref upstream "refs/heads/${upstream_branch}" 'upstream branch' || return
+  current_upstream="${AERIS_BOUNDED_REMOTE_SHA}"
+  aeris_bounded_read_remote_ref origin "refs/heads/${SYNC_BRANCH}" \
+    'synchronization branch' true || return
+  current_head="${AERIS_BOUNDED_REMOTE_SHA}"
+  [[ "${current_base}" == "${expected_base}" &&
+     "${current_upstream}" == "${expected_upstream}" &&
+     "${current_head}" == "${expected_head}" ]]
+}
+
+aeris_bounded_publish_git() {
+  aeris_require_active_autonomy_window || return
+  GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=echo \
+    aeris_bounded_run "${AERIS_FETCH_MAX_IMPORT_BYTES}" git "$@"
+}
+
+aeris_validate_authoritative_published_pr() {
+  local pr_file pr_size status
+  [[ "${published_pr_number}" =~ ^[1-9][0-9]*$ && -n "${published_pr_body}" ]] || return 1
+  pr_file="$(mktemp)" || return 1
+  aeris_require_active_autonomy_window || {
+    rm -f -- "${pr_file}"
+    return 1
+  }
+  if ! aeris_bounded_run 2097152 gh api \
+    "repos/${GITHUB_REPOSITORY}/pulls/${published_pr_number}" >"${pr_file}"; then
+    rm -f -- "${pr_file}"
+    return 1
+  fi
+  pr_size="$(wc -c <"${pr_file}")"
+  if [[ ! "${pr_size}" =~ ^[0-9]+$ || ${pr_size} -le 0 || ${pr_size} -gt 2097152 ]]; then
+    rm -f -- "${pr_file}"
+    return 1
+  fi
+  set +e
+  AERIS_EXPECTED_PR_BODY="${published_pr_body}" node - "${pr_file}" \
+    "${published_pr_number}" "${GITHUB_REPOSITORY}" "${BASE_BRANCH}" "${base_sha}" \
+    "${SYNC_BRANCH}" "${published_sha}" "${SYNC_APP_BOT_LOGIN}" \
+    "${sync_app_bot_id}" "${sync_app_bot_type}" <<'NODE'
+const fs = require('node:fs');
+const [path, number, repository, baseRef, baseSha, headRef, headSha,
+  authorLogin, authorId, authorType] = process.argv.slice(2);
+const pr = JSON.parse(fs.readFileSync(path, 'utf8'));
+const body = pr.body;
+const valid = pr && !Array.isArray(pr) && pr.number === Number(number) &&
+  pr.state === 'open' && pr.draft === false &&
+  pr.user?.login === authorLogin && pr.user?.id === Number(authorId) &&
+  pr.user?.type === authorType &&
+  pr.base?.repo?.full_name === repository && pr.base?.ref === baseRef &&
+  pr.base?.sha === baseSha && pr.head?.repo?.full_name === repository &&
+  pr.head?.ref === headRef && pr.head?.sha === headSha &&
+  typeof body === 'string' && body === process.env.AERIS_EXPECTED_PR_BODY &&
+  body.includes('<!-- upstream-sync-managed -->') &&
+  body.includes(`<!-- upstream-sync-owned-tip:${headSha} -->`);
+process.exit(valid ? 0 : 1);
+NODE
+  status=$?
+  set -e
+  rm -f -- "${pr_file}"
+  return "${status}"
+}
+
+aeris_post_publish_fence() {
+  aeris_assert_publication_refs_exact \
+    "${base_sha}" "${upstream_sha}" "${published_sha}" || return
+  if [[ "${AERIS_SYNC_TEST_MODE:-false}" == true &&
+        "${AERIS_SYNC_TEST_FIXTURE:-false}" == true &&
+        -n "${AERIS_SYNC_AFTER_PUBLISH_REF_FENCE_HOOK:-}" ]]; then
+    "${AERIS_SYNC_AFTER_PUBLISH_REF_FENCE_HOOK}" || return 1
+  fi
+  aeris_validate_authoritative_published_pr || return
+  if [[ "${AERIS_SYNC_TEST_MODE:-false}" == true &&
+        "${AERIS_SYNC_TEST_FIXTURE:-false}" == true &&
+        -n "${AERIS_SYNC_BEFORE_SUCCESS_REF_FENCE_HOOK:-}" ]]; then
+    "${AERIS_SYNC_BEFORE_SUCCESS_REF_FENCE_HOOK}" || return 1
+  fi
+  aeris_assert_publication_refs_exact \
+    "${base_sha}" "${upstream_sha}" "${published_sha}"
+}
+
+read_checkpoint_from_base() {
+  local base="$1"
+  node - "${base}" "${STATE_FILE}" "${parent}" "${upstream_branch}" <<'NODE'
+const { execFileSync } = require('node:child_process');
+const [base, path, repository, branch] = process.argv.slice(2);
+const state = JSON.parse(execFileSync('git', ['show', `${base}:${path}`], { encoding: 'utf8' }));
+if (state === null || Array.isArray(state) || typeof state !== 'object' ||
+    state.schema_version !== 1 || state.policy_version !== 1 ||
+    state.repository !== repository || state.branch !== branch ||
+    typeof state.last_integrated_sha !== 'string' ||
+    !/^[0-9a-f]{40}$/.test(state.last_integrated_sha)) process.exit(1);
+process.stdout.write(state.last_integrated_sha);
+NODE
 }
 
 remote_tip_owned() {
@@ -365,8 +498,8 @@ disarm_tracked_pr() {
 report_workflow_drift() {
   local current_tree changed title existing
   [[ -n "${checkpoint_sha}" && "${checkpoint_sha}" != "${upstream_sha}" ]] || return 0
-  current_tree="$(git rev-parse "${upstream_sha}:.github/workflows" 2>/dev/null || printf absent)"
-  changed="$(git diff --name-only "${checkpoint_sha}" "${upstream_sha}" -- .github/workflows || true)"
+  current_tree="$(bounded_tree_git rev-parse "${upstream_sha}:.github/workflows" 2>/dev/null || printf absent)"
+  changed="$(bounded_tree_git diff --name-only "${checkpoint_sha}" "${upstream_sha}" -- .github/workflows || true)"
   [[ -n "${changed}" ]] || return 0
 
   title="[sync-upstream] Review upstream workflow tree ${current_tree:0:12}"
@@ -499,7 +632,9 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
   refresh_prs
   [[ "$(jq 'length' <<<"${open_prs}")" -eq 1 &&
      "$(jq -r '.headRefOid' <<<"${open_pr}")" == "${published_sha}" ]] || return 1
-  output pr_url "${pr_url}"
+  published_pr_number="$(jq -r '.number' <<<"${open_pr}")"
+  published_pr_url="${pr_url}"
+  published_pr_body="${body}"
 }
 
 parent="$(aeris_gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.full_name // empty')"
@@ -508,6 +643,12 @@ parent="$(aeris_gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.full_name // e
   exit 1
 }
 upstream_branch="$(aeris_gh api "repos/${parent}" --jq '.default_branch')"
+sync_app_bot_id="$(aeris_gh api "users/${AERIS_SYNC_APP_SLUG}%5Bbot%5D" --jq '.id')"
+sync_app_bot_type="$(aeris_gh api "users/${AERIS_SYNC_APP_SLUG}%5Bbot%5D" --jq '.type')"
+[[ "${sync_app_bot_id}" =~ ^[1-9][0-9]*$ && "${sync_app_bot_type}" == Bot ]] || {
+  echo 'Unable to resolve the authoritative Sync App bot identity.' >&2
+  exit 1
+}
 output parent "${parent}"
 output upstream_branch "${upstream_branch}"
 
@@ -515,6 +656,8 @@ git remote remove upstream >/dev/null 2>&1 || true
 git remote add upstream "https://github.com/${parent}.git"
 git config user.name 'github-actions[bot]'
 git config user.email "${BOT_EMAIL}"
+AERIS_BOUNDED_FETCH_PREFLIGHT=aeris_require_active_autonomy_window
+aeris_bounded_fetch_init "${SYNC_POLICY_FILE}"
 
 if pause_or_resume; then
   :
@@ -526,10 +669,9 @@ fi
 disarm_tracked_pr
 
 for attempt in 1 2 3; do
-  aeris_git_network fetch --no-tags origin "${BASE_BRANCH}"
-  aeris_git_network fetch --no-tags upstream "${upstream_branch}"
-  base_sha="$(git rev-parse "origin/${BASE_BRANCH}")"
-  upstream_sha="$(git rev-parse "upstream/${upstream_branch}")"
+  fetch_source_refs
+  base_sha="${fetched_base_sha}"
+  upstream_sha="${fetched_upstream_sha}"
   output upstream_sha "${upstream_sha}"
 
   refresh_prs
@@ -537,8 +679,31 @@ for attempt in 1 2 3; do
   expected_remote_sha="${remote_sha}"
   assert_remote_owned "${base_sha}"
 
+  checkpoint_sha="$(read_checkpoint_from_base "${base_sha}")" || {
+    message="Protected checkpoint state is invalid at base ${base_sha}. Synchronization stopped before processing the upstream tree."
+    report_sync_alert invalid-state "${base_sha:0:12}" "${message}"
+    output state error
+    output has_changes false
+    exit 1
+  }
+  if ! bounded_tree_git merge-base --is-ancestor "${checkpoint_sha}" "${upstream_sha}"; then
+    message="Checkpoint ${checkpoint_sha} is not an ancestor of upstream ${upstream_sha}. Synchronization stopped without changing the branch, PR, or checkpoint."
+    report_sync_alert history-rewrite "${upstream_sha:0:12}" "${message}"
+    output state history_rewrite
+    output has_changes false
+    exit 1
+  fi
+  if ! aeris_enforce_change_bounds "${checkpoint_sha}" "${upstream_sha}" \
+    'upstream source delta'; then
+    message="Upstream ${upstream_sha} exceeds the protected Git resource bounds. Synchronization stopped before processing its tree."
+    report_sync_alert resource-limit "${upstream_sha:0:12}" "${message}"
+    output state resource_limit
+    output has_changes false
+    exit 1
+  fi
+
   set +e
-  prepare_output="$("${PREPARE_HELPER}" \
+  prepare_output="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" "${PREPARE_HELPER}" \
     "${base_sha}" \
     "${upstream_sha}" \
     "${parent}" \
@@ -547,7 +712,7 @@ for attempt in 1 2 3; do
     "${SYNC_POLICY_FILE}")"
   prepare_status=$?
   set -e
-  checkpoint_sha="$(sed -n 's/^checkpoint=//p' <<<"${prepare_output}" | tail -n1)"
+  prepared_checkpoint_sha="$(sed -n 's/^checkpoint=//p' <<<"${prepare_output}" | tail -n1)"
   prepare_state="$(sed -n 's/^state=//p' <<<"${prepare_output}" | tail -n1)"
 
   if ((prepare_status != 0)); then
@@ -579,8 +744,8 @@ for attempt in 1 2 3; do
     exit 1
   fi
 
-  [[ -n "${checkpoint_sha}" ]] || {
-    echo 'Checkpoint helper did not return a checkpoint.' >&2
+  [[ -n "${prepared_checkpoint_sha}" && "${prepared_checkpoint_sha}" == "${checkpoint_sha}" ]] || {
+    echo 'Checkpoint helper did not preserve the prevalidated checkpoint.' >&2
     exit 1
   }
   filtered_paths="$(sed -n 's/^filtered_paths=//p' <<<"${prepare_output}" | tail -n1)"
@@ -598,12 +763,15 @@ for attempt in 1 2 3; do
   git rev-parse --verify "${prepared_tree}^{tree}" >/dev/null
   report_workflow_drift
 
-  git switch --force-create "${SYNC_BRANCH}" "${base_sha}"
-  git read-tree --reset -u "${prepared_tree}"
+  aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
+    git switch --force-create "${SYNC_BRANCH}" "${base_sha}"
+  aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
+    git read-tree --reset -u "${prepared_tree}"
 
-  git diff --cached --quiet && close_obsolete_pr
+  aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
+    git diff --cached --quiet && close_obsolete_pr
 
-  git commit \
+  aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git commit \
     -m "chore: sync ${parent}@${upstream_sha}" \
     -m 'Sync-Upstream-Automation: true' \
     -m "Sync-Upstream-Source: ${parent}@${upstream_sha}" \
@@ -611,10 +779,9 @@ for attempt in 1 2 3; do
     -m "Sync-Upstream-Base: ${base_sha}"
   local_sha="$(git rev-parse HEAD)"
 
-  aeris_git_network fetch --no-tags origin "${BASE_BRANCH}"
-  aeris_git_network fetch --no-tags upstream "${upstream_branch}"
-  if [[ "${base_sha}" != "$(git rev-parse "origin/${BASE_BRANCH}")" ||
-        "${upstream_sha}" != "$(git rev-parse "upstream/${upstream_branch}")" ]]; then
+  fetch_source_refs
+  if [[ "${base_sha}" != "${fetched_base_sha}" ||
+        "${upstream_sha}" != "${fetched_upstream_sha}" ]]; then
     continue
   fi
 
@@ -622,8 +789,13 @@ for attempt in 1 2 3; do
   fetch_remote_tip
   [[ "${remote_sha}" == "${expected_remote_sha}" ]] || continue
   assert_remote_owned "${base_sha}"
+  if ! aeris_assert_publication_refs_exact \
+    "${base_sha}" "${upstream_sha}" "${expected_remote_sha}"; then
+    continue
+  fi
 
-  if [[ -n "${remote_sha}" ]] && git diff --quiet "${remote_sha}" "${local_sha}"; then
+  if [[ -n "${remote_sha}" ]] && aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
+    git diff --quiet "${remote_sha}" "${local_sha}"; then
     published_sha="${remote_sha}"
   else
     reference_pr="${tracked_pr:-${latest_pr}}"
@@ -631,20 +803,22 @@ for attempt in 1 2 3; do
       set_pending_tip "$(jq -r '.number' <<<"${reference_pr}")" "${local_sha}"
     fi
     if [[ -n "${remote_sha}" ]]; then
-      aeris_git_network push \
+      aeris_bounded_publish_git push \
         --force-with-lease="refs/heads/${SYNC_BRANCH}:${remote_sha}" \
         origin "${local_sha}:refs/heads/${SYNC_BRANCH}"
     else
-      aeris_git_network push \
+      aeris_bounded_publish_git push \
         --force-with-lease="refs/heads/${SYNC_BRANCH}:" \
         origin "${local_sha}:refs/heads/${SYNC_BRANCH}"
     fi
     published_sha="${local_sha}"
   fi
 
-  fetch_remote_tip
-  [[ "${remote_sha}" == "${published_sha}" ]] || exit 1
+  aeris_assert_publication_refs_exact \
+    "${base_sha}" "${upstream_sha}" "${published_sha}" || exit 1
   publish_pr
+  aeris_post_publish_fence || exit 1
+  output pr_url "${published_pr_url}"
   output state published
   output has_changes true
   output synced_sha "${published_sha}"

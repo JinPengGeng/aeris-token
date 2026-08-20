@@ -29,6 +29,7 @@ expect_rejected() {
   status=$?
   set -e
   [[ ${status} -ne 0 ]] || fail "${label} was accepted"
+  ! grep -qx 'verified=true' "${OUTPUT}" || fail "${label} emitted verified=true"
 }
 
 write_state() {
@@ -49,6 +50,20 @@ sync:
   base_branch: main
   branch: automation/sync-upstream
   state_file: .github/upstream-sync-state.json
+resource_bounds:
+  fetch_timeout_seconds: 90
+  max_received_bytes: 268435456
+  max_received_expanded_bytes: 1073741824
+  max_received_objects: 250000
+  max_import_bytes: 268435456
+  max_import_objects: 250000
+  max_process_memory_bytes: 536870912
+  max_object_bytes: 33554432
+  max_blob_bytes: 33554432
+  max_changed_blob_bytes: 268435456
+  max_changed_paths: 20000
+  max_tree_entries: 500000
+  max_diff_bytes: 33554432
 matching:
   enforced_fork_owned_subset: exact_or_directory_recursive
 fork_owned:
@@ -127,6 +142,15 @@ run_verifier() {
     AUTONOMY_HELPER="${HELPER_ROOT}/github-autonomy.sh" \
     PREPARE_HELPER="${HELPER_ROOT}/prepare-checkpoint-sync.sh" \
     CHECKPOINT_HELPER="${HELPER_ROOT}/checkpoint-merge.sh" \
+    AERIS_BOUNDED_FETCH_TEST_MODE=true AERIS_BOUNDED_FETCH_TEST_FIXTURE=true \
+    AERIS_TEST_FETCH_TIMEOUT_SECONDS=300 \
+    AERIS_VERIFY_TEST_MODE="${AERIS_VERIFY_TEST_MODE:-false}" \
+    AERIS_VERIFY_TEST_FIXTURE="${AERIS_VERIFY_TEST_FIXTURE:-false}" \
+    AERIS_VERIFY_BEFORE_FINAL_FENCE_HOOK="${AERIS_VERIFY_BEFORE_FINAL_FENCE_HOOK:-}" \
+    AERIS_VERIFY_AFTER_REF_FENCE_HOOK="${AERIS_VERIFY_AFTER_REF_FENCE_HOOK:-}" \
+    AERIS_VERIFY_BEFORE_SUCCESS_REF_FENCE_HOOK="${AERIS_VERIFY_BEFORE_SUCCESS_REF_FENCE_HOOK:-}" \
+    AERIS_TEST_UPSTREAM="${UPSTREAM}" AERIS_TEST_DRIFT_SHA="${AERIS_TEST_DRIFT_SHA:-}" \
+    AERIS_TEST_ORIGIN="${ORIGIN}" AERIS_TEST_PR_JSON="${PR_JSON}" \
     GIT_ALLOW_PROTOCOL='file' GIT_CONFIG_COUNT=2 \
     GIT_CONFIG_KEY_0="url.file://${UPSTREAM}.insteadOf" \
     GIT_CONFIG_VALUE_0='https://github.com/example/Upstream.git' \
@@ -163,7 +187,7 @@ esac
 printf '200'
 EOF
 chmod +x "${FAKE_BIN}/curl"
-for helper in github-autonomy.sh prepare-checkpoint-sync.sh checkpoint-merge.sh; do
+for helper in github-autonomy.sh bounded-git-fetch.sh prepare-checkpoint-sync.sh checkpoint-merge.sh; do
   awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/${helper}" >"${HELPER_ROOT}/${helper}"
   chmod +x "${HELPER_ROOT}/${helper}"
 done
@@ -214,6 +238,68 @@ valid_output="$(run_verifier "${VALID}")"
 [[ "${valid_output}" == *"verified sync candidate PR #36"* ]] || fail 'valid PR #36-like case was not verified'
 grep -qx 'verified=true' "${OUTPUT}" || fail 'valid verification output is missing'
 run_verifier "${VALID}" >/dev/null || fail 'deterministic replay of the same candidate failed'
+
+PR_METADATA_HOOK="${RUN_ROOT}/drift-pr-after-ref-fence.sh"
+cat >"${PR_METADATA_HOOK}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+node - "${AERIS_TEST_PR_JSON}" <<'NODE'
+const fs = require('node:fs');
+const path = process.argv[2];
+const pr = JSON.parse(fs.readFileSync(path, 'utf8'));
+pr.draft = true;
+pr.body += '\nmetadata drift';
+fs.writeFileSync(path, JSON.stringify(pr));
+NODE
+EOF
+chmod +x "${PR_METADATA_HOOK}"
+AERIS_VERIFY_TEST_MODE=true
+AERIS_VERIFY_TEST_FIXTURE=true
+AERIS_VERIFY_AFTER_REF_FENCE_HOOK="${PR_METADATA_HOOK}"
+expect_rejected 'PR metadata drift after verifier ref fence' "${VALID}"
+unset AERIS_VERIFY_AFTER_REF_FENCE_HOOK
+write_pr "${BASE}" "${VALID}"
+
+HEAD_DRIFT="$(git commit-tree "${EXPECTED_TREE}" -p "${BASE}" -m 'late head drift')"
+HEAD_DRIFT_HOOK="${RUN_ROOT}/drift-head-before-success.sh"
+cat >"${HEAD_DRIFT_HOOK}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+git push -q --force "${AERIS_TEST_ORIGIN}" \
+  "${AERIS_TEST_DRIFT_SHA}:refs/heads/automation/sync-upstream"
+EOF
+chmod +x "${HEAD_DRIFT_HOOK}"
+AERIS_VERIFY_BEFORE_SUCCESS_REF_FENCE_HOOK="${HEAD_DRIFT_HOOK}"
+AERIS_TEST_DRIFT_SHA="${HEAD_DRIFT}"
+expect_rejected 'head force-push after authoritative PR verification' "${VALID}"
+unset AERIS_VERIFY_TEST_MODE AERIS_VERIFY_TEST_FIXTURE \
+  AERIS_VERIFY_BEFORE_SUCCESS_REF_FENCE_HOOK AERIS_TEST_DRIFT_SHA
+publish_refs "${BASE}" "${VALID}"
+write_pr "${BASE}" "${VALID}"
+
+git switch -q upstream
+printf 'upstream drift after validation\n' >late-drift.txt
+git add late-drift.txt
+git commit -qm 'late upstream drift'
+LATE_UPSTREAM="$(git rev-parse HEAD)"
+git switch -q --detach "${VALID}"
+FINAL_FENCE_HOOK="${RUN_ROOT}/drift-before-final-fence.sh"
+cat >"${FINAL_FENCE_HOOK}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+git push -q --force "${AERIS_TEST_UPSTREAM}" \
+  "${AERIS_TEST_DRIFT_SHA}:refs/heads/main"
+EOF
+chmod +x "${FINAL_FENCE_HOOK}"
+AERIS_VERIFY_TEST_MODE=true
+AERIS_VERIFY_TEST_FIXTURE=true
+AERIS_VERIFY_BEFORE_FINAL_FENCE_HOOK="${FINAL_FENCE_HOOK}"
+AERIS_TEST_DRIFT_SHA="${LATE_UPSTREAM}"
+expect_rejected 'upstream drift immediately before verifier success' "${VALID}"
+unset AERIS_VERIFY_TEST_MODE AERIS_VERIFY_TEST_FIXTURE \
+  AERIS_VERIFY_BEFORE_FINAL_FENCE_HOOK AERIS_TEST_DRIFT_SHA
+git push -q --force "${UPSTREAM}" "${U1}:refs/heads/main"
+
 write_pr "${BASE}" "${VALID}" github-actions[bot]
 expect_rejected 'legacy GitHub Actions bot author' "${VALID}"
 write_pr "${BASE}" "${VALID}" app/github-actions

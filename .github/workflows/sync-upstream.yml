@@ -85,7 +85,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: main
-          fetch-depth: 0
+          fetch-depth: 1
           token: ${{ steps.sync_token.outputs.token }}
 
       - name: Validate checkpoint synchronization
@@ -93,6 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           bash -n .github/workflows/scripts/checkpoint-merge.sh
+          bash -n .github/workflows/scripts/bounded-git-fetch.sh
           bash -n .github/workflows/scripts/ensure-required-checks.sh
           bash -n .github/workflows/scripts/manage-sync-automerge.sh
           bash -n .github/workflows/scripts/github-autonomy.sh
@@ -105,6 +106,8 @@ jobs:
           bash .github/workflows/scripts/tests/test-manage-sync-automerge.sh
           bash .github/workflows/scripts/tests/test-sync-upstream-identity.sh
           AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
+            bash .github/workflows/scripts/tests/test-bounded-git-fetch.sh
+          AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
             bash .github/workflows/scripts/tests/test-checkpoint-merge.sh
           AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
             bash .github/workflows/scripts/tests/test-prepare-checkpoint-sync.sh
@@ -113,8 +116,10 @@ jobs:
 
       - name: Build and publish automation branch
         id: sync
+        timeout-minutes: 15
         env:
           GH_TOKEN: ${{ steps.sync_token.outputs.token }}
+          AERIS_BOUNDED_BOOTSTRAP_SHALLOW: 'true'
         shell: bash
         run: bash .github/workflows/scripts/sync-upstream.sh
 
@@ -148,6 +153,15 @@ jobs:
           GH_TOKEN: ${{ steps.sync_token.outputs.token }}
           PR_URL: ${{ steps.sync.outputs.pr_url }}
           SYNCED_SHA: ${{ steps.sync.outputs.synced_sha }}
+          VERIFIED_PR_NUMBER: ${{ steps.verify.outputs.verified_pr_number }}
+          VERIFIED_BASE_REF: ${{ steps.verify.outputs.verified_base_ref }}
+          VERIFIED_BASE_SHA: ${{ steps.verify.outputs.verified_base }}
+          VERIFIED_HEAD_REF: ${{ steps.verify.outputs.verified_head_ref }}
+          VERIFIED_HEAD_SHA: ${{ steps.verify.outputs.verified_head }}
+          VERIFIED_AUTHOR_LOGIN: ${{ steps.verify.outputs.verified_author_login }}
+          VERIFIED_AUTHOR_ID: ${{ steps.verify.outputs.verified_author_id }}
+          VERIFIED_AUTHOR_TYPE: ${{ steps.verify.outputs.verified_author_type }}
+          VERIFIED_BODY_SHA256: ${{ steps.verify.outputs.verified_body_sha256 }}
         shell: bash
         run: |
           bash .github/workflows/scripts/manage-sync-automerge.sh \

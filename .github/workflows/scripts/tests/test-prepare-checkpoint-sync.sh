@@ -366,6 +366,30 @@ test_policy_identity_mismatch() {
     'policy identity mismatch state'
 }
 
+test_unenforced_tree_stage_rejected() {
+  local repo="${RUN_ROOT}/unenforced-tree-stage" checkpoint main output status
+  new_repo "${repo}"
+  cd "${repo}"
+  printf 'base\n' >app.txt
+  git add app.txt
+  git commit -qm 'checkpoint'
+  checkpoint="$(git rev-parse HEAD)"
+  write_state "${checkpoint}"
+  write_policy
+  git add .github
+  git commit -qm 'protected base'
+  main="$(git rev-parse HEAD)"
+  set +e
+  output="$(GITHUB_ACTIONS=true AERIS_BOUNDED_FETCH_TEST_MODE=true \
+    AERIS_BOUNDED_FETCH_TEST_FIXTURE=true AERIS_BOUNDED_TEST_DISABLE_LIMITS=true \
+    prepare "${main}" "${checkpoint}" 2>/dev/null)"
+  status=$?
+  set -e
+  [[ ${status} -ne 0 ]] || fail 'unenforced prepare tree stage was accepted'
+  [[ "${output}" == *'state=error'* ]] ||
+    fail 'unenforced prepare tree stage did not fail closed'
+}
+
 test_squash_checkpoint_noop
 test_fork_owned_filter_and_state_advance
 test_exact_path_and_recursive_directory_filter
@@ -373,5 +397,6 @@ test_non_fork_conflict
 test_invalid_state_and_history_rewrite
 test_unsupported_policy_pattern
 test_policy_identity_mismatch
+test_unenforced_tree_stage_rejected
 
 printf 'PASS prepare checkpoint sync (%s)\n' "${RUN_ROOT}"
