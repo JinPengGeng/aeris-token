@@ -13822,6 +13822,12 @@ mod tests {
                 ..ExecutionTimeouts::default()
             }),
         };
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            "development-key",
+        );
+        let state = state.with_data_state_for_tests(data_state);
         let decision = GatewayControlDecision::synthetic(
             "/v1/responses",
             Some("ai_public".to_string()),
