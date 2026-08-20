@@ -93,7 +93,7 @@ function validateEnvelope(value, artifactType, keys) {
 }
 
 function validateIdentity(value, name = 'intent') {
-  exactKeys(value, ['repository_id', 'repository_name', 'issue_number', 'issue_url', 'issue_updated_at', 'issue_labels', 'input_sha', 'comment_id', 'actor', 'command', 'base_sha', 'source_sha', 'policy_sha', 'config_sha', 'run_id', 'agent', 'branch', 'expected_remote_head', 'lease_token', 'cancel_epoch', 'lease_expires_at'], name);
+  exactKeys(value, ['repository_id', 'repository_name', 'issue_number', 'issue_url', 'issue_updated_at', 'issue_labels', 'input_sha', 'comment_id', 'actor', 'command', 'base_sha', 'source_sha', 'policy_sha', 'config_sha', 'run_id', 'agent', 'branch', 'expected_remote_head', 'pull_metadata_sha', 'lease_token', 'cancel_epoch', 'lease_expires_at'], name);
   const repositoryName = string(value.repository_name, `${name} repository_name`, 201, REPOSITORY_NAME);
   const issueNumber = positiveInteger(value.issue_number, `${name} issue_number`, 10 ** 9);
   requireCondition(Array.isArray(value.issue_labels), `${name} issue_labels must be an array`);
@@ -119,6 +119,7 @@ function validateIdentity(value, name = 'intent') {
     agent: string(value.agent, `${name} agent`, 6, /^writer$/),
     branch: string(value.branch, `${name} branch`, 80, BRANCH),
     expected_remote_head: nullableString(value.expected_remote_head, `${name} expected_remote_head`, 40, COMMIT_SHA),
+    pull_metadata_sha: nullableString(value.pull_metadata_sha, `${name} pull_metadata_sha`, 64, SHA256),
     lease_token: string(value.lease_token, `${name} lease_token`, 171, /^(?:[0-9a-f]{32,128}|[A-Za-z0-9_-]{43,171})$/),
     cancel_epoch: nonNegativeInteger(value.cancel_epoch, `${name} cancel_epoch`),
     lease_expires_at: string(value.lease_expires_at, `${name} lease_expires_at`, 30, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/),
@@ -134,8 +135,8 @@ function validateIdentity(value, name = 'intent') {
   );
   requireCondition(identity.branch === `agent/issue-${identity.issue_number}`, `${name} branch must bind the issue number`);
   requireCondition(Number.isFinite(Date.parse(identity.lease_expires_at)), `${name} lease_expires_at must be an ISO timestamp`);
-  if (identity.command === '/agent implement') requireCondition(identity.expected_remote_head === null && identity.source_sha === identity.base_sha, `${name} implement must bind source_sha to base_sha and not bind a remote head`);
-  if (identity.command === '/agent retry-write') requireCondition(identity.expected_remote_head !== null && identity.source_sha === identity.expected_remote_head, `${name} retry-write must bind source_sha to expected_remote_head`);
+  if (identity.command === '/agent implement') requireCondition(identity.expected_remote_head === null && identity.pull_metadata_sha === null && identity.source_sha === identity.base_sha, `${name} implement must bind source_sha to base_sha and not bind remote PR state`);
+  if (identity.command === '/agent retry-write') requireCondition(identity.expected_remote_head !== null && identity.pull_metadata_sha !== null && identity.source_sha === identity.expected_remote_head, `${name} retry-write must bind source_sha to expected_remote_head and detailed PR metadata`);
   return identity;
 }
 

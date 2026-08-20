@@ -1,4 +1,4 @@
-import { createVerify } from 'node:crypto';
+import { createHash, createVerify } from 'node:crypto';
 
 export const WRITER_LIFECYCLE_ACTIONS = Object.freeze(['create', 'update', 'noop']);
 export const WRITER_OWNERSHIP_MARKER = '<!-- aeris-writer-managed -->';
@@ -9,6 +9,7 @@ const COMMANDS = new Set(['/agent implement', '/agent retry-write']);
 const SHA = /^[0-9a-f]{40}$/;
 const APP_SLUG = /^[a-z\d](?:[a-z\d-]{0,98}[a-z\d])?$/;
 const RECEIPT_MARKER = /^<!-- aeris-writer-receipt:v2 issue=([1-9][0-9]*) comment=([1-9][0-9]*) epoch=([0-9]+) cycle=([0-9]+) candidate=([0-9a-f]{64}) commit=([0-9a-f]{40}) signature=([A-Za-z0-9_-]{80,1024}) -->$/;
+const RETRY_COMMIT_MESSAGE = /^writer: implement issue #([1-9][0-9]*)\n\nAeris-Writer-Cycle: ([1-9][0-9]*)\nAeris-Writer-Comment: ([1-9][0-9]*)\nAeris-Writer-Candidate: ([0-9a-f]{64})\nAeris-Writer-PR-Metadata: ([0-9a-f]{64})$/;
 
 function noop(reason) {
   return { action: 'noop', reason };
@@ -134,6 +135,145 @@ export function verifyWriterReceiptMarker(body, publicKey) {
   } catch {
     return null;
   }
+}
+
+function canonicalJson(value) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value))) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (!value || typeof value !== 'object') throw new Error('Writer PR metadata contains a non-JSON value');
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+}
+
+function canonicalSet(value, name) {
+  if (!Array.isArray(value)) throw new Error(`Writer detailed PR ${name} is invalid`);
+  return [...value].sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right), 'en'));
+}
+
+export function writerPullMetadataDigest(pull) {
+  if (!pull || typeof pull !== 'object' || Array.isArray(pull) || !validPositiveNumber(pull.number) ||
+    (pull.state !== 'open' && pull.state !== 'closed') || typeof pull.merged !== 'boolean' ||
+    typeof pull.draft !== 'boolean' || typeof pull.locked !== 'boolean' ||
+    typeof pull.title !== 'string' || typeof pull.body !== 'string' ||
+    typeof pull.html_url !== 'string' || typeof pull.maintainer_can_modify !== 'boolean') {
+    throw new Error('Writer detailed PR metadata is invalid');
+  }
+  const snapshot = {
+    number: pull.number,
+    state: pull.state,
+    state_reason: pull.state_reason ?? null,
+    merged: pull.merged,
+    draft: pull.draft,
+    locked: pull.locked,
+    active_lock_reason: pull.active_lock_reason ?? null,
+    title: pull.title,
+    body: pull.body,
+    html_url: pull.html_url,
+    maintainer_can_modify: pull.maintainer_can_modify,
+    labels: canonicalSet(pull.labels, 'labels'),
+    milestone: pull.milestone ?? null,
+    assignee: pull.assignee ?? null,
+    assignees: canonicalSet(pull.assignees, 'assignees'),
+    requested_reviewers: canonicalSet(pull.requested_reviewers, 'requested_reviewers'),
+    requested_teams: canonicalSet(pull.requested_teams, 'requested_teams'),
+    auto_merge: pull.auto_merge ?? null,
+    merge_queue_entry: pull.merge_queue_entry ?? null,
+    base: {
+      label: pull.base?.label ?? null,
+      ref: pull.base?.ref ?? null,
+      sha: pull.base?.sha ?? null,
+      user: pull.base?.user ?? null,
+      repo_id: pull.base?.repo?.id ?? null,
+      repo_name: pull.base?.repo?.full_name ?? null,
+    },
+    head: {
+      label: pull.head?.label ?? null,
+      ref: pull.head?.ref ?? null,
+      user: pull.head?.user ?? null,
+      repo_id: pull.head?.repo?.id ?? null,
+      repo_name: pull.head?.repo?.full_name ?? null,
+    },
+    user: pull.user ?? null,
+    performed_via_github_app: pull.performed_via_github_app ?? null,
+  };
+  return createHash('sha256')
+    .update(`aeris-writer-pr-metadata:v1\n${canonicalJson(snapshot)}`, 'utf8')
+    .digest('hex');
+}
+
+export function writerCommitMessage({ issueNumber, fixCycle, commentId, candidateSha, pullMetadataSha = null } = {}) {
+  if (!validPositiveNumber(issueNumber) || !validPositiveNumber(commentId) ||
+    !Number.isSafeInteger(fixCycle) || fixCycle < 0 || fixCycle > 2 ||
+    typeof candidateSha !== 'string' || !/^[0-9a-f]{64}$/.test(candidateSha) ||
+    (fixCycle === 0 && pullMetadataSha !== null) ||
+    (fixCycle > 0 && (typeof pullMetadataSha !== 'string' || !/^[0-9a-f]{64}$/.test(pullMetadataSha)))) {
+    throw new Error('Writer commit message fields are invalid');
+  }
+  const metadataLedger = fixCycle === 0 ? '' : `\nAeris-Writer-PR-Metadata: ${pullMetadataSha}`;
+  return `writer: implement issue #${issueNumber}\n\nAeris-Writer-Cycle: ${fixCycle}\nAeris-Writer-Comment: ${commentId}\nAeris-Writer-Candidate: ${candidateSha}${metadataLedger}`;
+}
+
+function retryCommit(raw, expectedParentSha, issueNumber, expectedCycle) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !validSha(raw.sha) ||
+    !Array.isArray(raw.parents) || raw.parents.length !== 1 || raw.parents[0]?.sha !== expectedParentSha) return null;
+  const match = RETRY_COMMIT_MESSAGE.exec(raw.commit?.message ?? '');
+  if (!match || Number(match[1]) !== issueNumber || Number(match[2]) !== expectedCycle) return null;
+  const commentId = Number(match[3]);
+  if (!validPositiveNumber(commentId)) return null;
+  return {
+    sha: raw.sha,
+    cycle: expectedCycle,
+    comment_id: commentId,
+    candidate_sha: match[4],
+    pull_metadata_sha: match[5],
+  };
+}
+
+export function evaluateWriterRetryLineage({
+  receipt,
+  sourceSha,
+  compare = null,
+  issueNumber,
+  commentId,
+  maximumFixCycles,
+} = {}) {
+  if (!receipt || receipt.issue_number !== issueNumber || receipt.lifecycle_epoch !== WRITER_LIFECYCLE_EPOCH ||
+    receipt.fix_cycle !== 0 || !validSha(receipt.commit_sha) || !validSha(sourceSha) || !validPositiveNumber(commentId) ||
+    !Number.isSafeInteger(maximumFixCycles) || maximumFixCycles < 0 || maximumFixCycles > 2) {
+    return { allowed: false, reason: 'managed_pr_retry_lineage_invalid' };
+  }
+  if (receipt.comment_id === commentId) return { allowed: false, reason: 'retry_comment_already_applied' };
+
+  const commits = [];
+  const appliedCommentIds = new Set([receipt.comment_id]);
+  if (sourceSha !== receipt.commit_sha) {
+    if (!compare || typeof compare !== 'object' || Array.isArray(compare) || compare.status !== 'ahead' ||
+      compare.base_commit?.sha !== receipt.commit_sha || compare.merge_base_commit?.sha !== receipt.commit_sha ||
+      compare.ahead_by !== compare.total_commits || !Number.isSafeInteger(compare.ahead_by) ||
+      compare.ahead_by < 1 || compare.ahead_by > maximumFixCycles ||
+      !Array.isArray(compare.commits) || compare.commits.length !== compare.ahead_by) {
+      return { allowed: false, reason: 'managed_pr_retry_lineage_invalid' };
+    }
+    let parentSha = receipt.commit_sha;
+    for (let index = 0; index < compare.commits.length; index += 1) {
+      const parsed = retryCommit(compare.commits[index], parentSha, issueNumber, index + 1);
+      if (!parsed) return { allowed: false, reason: 'managed_pr_retry_lineage_invalid' };
+      if (appliedCommentIds.has(parsed.comment_id)) {
+        return { allowed: false, reason: 'retry_comment_already_applied', commits };
+      }
+      appliedCommentIds.add(parsed.comment_id);
+      commits.push(parsed);
+      parentSha = parsed.sha;
+    }
+    if (parentSha !== sourceSha) return { allowed: false, reason: 'managed_pr_retry_lineage_invalid' };
+  }
+
+  if (appliedCommentIds.has(commentId)) {
+    return { allowed: false, reason: 'retry_comment_already_applied', commits };
+  }
+  const fixCycle = commits.length + 1;
+  if (fixCycle > maximumFixCycles) return { allowed: false, reason: 'maximum_fix_cycles_exceeded', commits };
+  return { allowed: true, fixCycle, commits };
 }
 
 export function writerPullLifecycleAttestation(events, truncated = false) {

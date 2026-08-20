@@ -61,11 +61,11 @@ const WRITER_CAPABILITY_RESIDUALS = {
 const WRITER_IDENTITY_VERIFICATION = 'app_jwt_mints_installation_token_then_verify';
 const WRITER_AMBIGUOUS_CREATE_RECOVERY = 'unique_attempt_marker_then_read_only_reconcile_or_fail_closed_residue';
 const WRITER_REF_UPDATE_CAS = 'git_force_with_lease_exact_old_sha';
-const WRITER_EXISTING_PR_METADATA = 'exact_match_read_only_no_patch';
+const WRITER_EXISTING_PR_METADATA = 'preserve_exact_snapshot_no_patch';
 const WRITER_ALLOWED_OPERATIONS = [
   'lease_cas_agent_ref',
   'create_draft_pull_request',
-  'verify_existing_draft_pull_request_metadata',
+  'compare_retry_commit_lineage',
 ];
 const WRITER_DENIED_OPERATIONS = [
   'review', 'approve', 'merge', 'enable_auto_merge', 'mark_ready', 'close_pr', 'delete_branch',

@@ -3,7 +3,9 @@ import test from 'node:test';
 
 import {
   evaluateWriterLifecycle,
+  evaluateWriterRetryLineage,
   hasCanonicalWriterOwnershipMarker,
+  writerCommitMessage,
   WRITER_LIFECYCLE_ACTIONS,
   WRITER_LIFECYCLE_EPOCH,
   WRITER_OWNERSHIP_MARKER,
@@ -14,6 +16,83 @@ const repositoryId = 123;
 const writerApp = Object.freeze({ id: 456, slug: 'aeris-writer' });
 const issueNumber = 42;
 const branch = { ref: 'agent/issue-42', exists: true, headSha: sha('a') };
+
+function retryCompare({ candidateSha = '1'.repeat(64), message = null, parentSha = sha('a'), headSha = sha('b') } = {}) {
+  return {
+    status: 'ahead',
+    ahead_by: 1,
+    total_commits: 1,
+    base_commit: { sha: sha('a') },
+    merge_base_commit: { sha: sha('a') },
+    commits: [{
+      sha: headSha,
+      parents: [{ sha: parentSha }],
+      commit: { message: message ?? writerCommitMessage({ issueNumber, fixCycle: 1, commentId: 92, candidateSha, pullMetadataSha: '2'.repeat(64) }) },
+    }],
+  };
+}
+
+test('retry lineage binds exact parent, cycle, comment, candidate, PR metadata, and head', () => {
+  const receipt = {
+    issue_number: issueNumber,
+    comment_id: 91,
+    lifecycle_epoch: WRITER_LIFECYCLE_EPOCH,
+    fix_cycle: 0,
+    candidate_sha: '0'.repeat(64),
+    commit_sha: sha('a'),
+  };
+  const accepted = evaluateWriterRetryLineage({
+    receipt,
+    sourceSha: sha('b'),
+    compare: retryCompare(),
+    issueNumber,
+    commentId: 93,
+    maximumFixCycles: 2,
+  });
+  assert.equal(accepted.allowed, true);
+  assert.equal(accepted.fixCycle, 2);
+  assert.equal(accepted.commits[0].candidate_sha, '1'.repeat(64));
+  assert.equal(accepted.commits[0].pull_metadata_sha, '2'.repeat(64));
+  assert.throws(() => writerCommitMessage({
+    issueNumber,
+    fixCycle: 1,
+    commentId: 92,
+    candidateSha: '1'.repeat(64),
+  }), /fields are invalid/);
+
+  for (const compare of [
+    retryCompare({ parentSha: sha('9') }),
+    retryCompare({ message: writerCommitMessage({ issueNumber, fixCycle: 2, commentId: 92, candidateSha: '1'.repeat(64), pullMetadataSha: '2'.repeat(64) }) }),
+    { ...retryCompare(), status: 'diverged' },
+  ]) {
+    assert.equal(evaluateWriterRetryLineage({
+      receipt, sourceSha: sha('b'), compare, issueNumber, commentId: 93, maximumFixCycles: 2,
+    }).reason, 'managed_pr_retry_lineage_invalid');
+  }
+  assert.equal(evaluateWriterRetryLineage({
+    receipt, sourceSha: sha('b'), compare: retryCompare(), issueNumber, commentId: 92, maximumFixCycles: 2,
+  }).reason, 'retry_comment_already_applied');
+  assert.equal(evaluateWriterRetryLineage({
+    receipt,
+    sourceSha: sha('b'),
+    compare: retryCompare({
+      message: writerCommitMessage({
+        issueNumber,
+        fixCycle: 1,
+        commentId: receipt.comment_id,
+        candidateSha: '1'.repeat(64),
+        pullMetadataSha: '2'.repeat(64),
+      }),
+    }),
+    issueNumber,
+    commentId: 93,
+    maximumFixCycles: 2,
+  }).reason, 'retry_comment_already_applied');
+  assert.equal(evaluateWriterRetryLineage({
+    receipt: { ...receipt, fix_cycle: 1 },
+    sourceSha: sha('b'), compare: retryCompare(), issueNumber, commentId: 93, maximumFixCycles: 2,
+  }).reason, 'managed_pr_retry_lineage_invalid');
+});
 
 function pull(overrides = {}) {
   return {

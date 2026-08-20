@@ -10,9 +10,12 @@ import { routeWriterInvocation } from './router.mjs';
 import { WriterGitHubClient } from './writer-github-client.mjs';
 import {
   evaluateWriterLifecycle,
+  evaluateWriterRetryLineage,
   verifyWriterReceiptMarker,
   WRITER_LIFECYCLE_EPOCH,
   writerPullLifecycleAttestation,
+  writerCommitMessage,
+  writerPullMetadataDigest,
   writerReceiptSigningPayload,
 } from './writer-lifecycle.mjs';
 import { calculateWriterCandidateSha, validateWriterCandidateArtifact } from './writer-phase-contract.mjs';
@@ -80,6 +83,7 @@ export function deriveNextWriterFixCycle({
   pulls,
   writerApp,
   receiptPublicKey,
+  compare = null,
 } = {}) {
   const sameRepository = (repo) => repo?.id === configuredRepository.repository_id &&
     typeof repo.full_name === 'string' &&
@@ -101,15 +105,25 @@ export function deriveNextWriterFixCycle({
   if (lifecycle.action !== 'update' || pulls.length !== 1) return { allowed: false, reason: lifecycle.reason };
   const receipt = verifyWriterReceiptMarker(pulls[0].body, receiptPublicKey);
   if (!receipt || receipt.issue_number !== issue.number ||
-    receipt.lifecycle_epoch !== WRITER_LIFECYCLE_EPOCH || receipt.commit_sha !== sourceSha) {
+    receipt.lifecycle_epoch !== WRITER_LIFECYCLE_EPOCH || receipt.fix_cycle !== 0) {
     return { allowed: false, reason: 'managed_pr_receipt_invalid' };
   }
-  if (receipt.comment_id === comment.id) return { allowed: false, reason: 'retry_comment_already_applied' };
-  const fixCycle = receipt.fix_cycle + 1;
-  if (fixCycle > configuredRepository.limits.maximum_fix_cycles) {
-    return { allowed: false, reason: 'maximum_fix_cycles_exceeded' };
+  const lineage = evaluateWriterRetryLineage({
+    receipt,
+    sourceSha,
+    compare,
+    issueNumber: issue.number,
+    commentId: comment.id,
+    maximumFixCycles: configuredRepository.limits.maximum_fix_cycles,
+  });
+  if (!lineage.allowed) return lineage;
+  let pullMetadataSha;
+  try {
+    pullMetadataSha = writerPullMetadataDigest(pulls[0]);
+  } catch {
+    return { allowed: false, reason: 'managed_pr_detail_invalid' };
   }
-  return { allowed: true, fixCycle, sourceSha, expectedRemoteHead: sourceSha };
+  return { allowed: true, fixCycle: lineage.fixCycle, sourceSha, expectedRemoteHead: sourceSha, pullMetadataSha };
 }
 
 async function deriveRetryFixCycle({ client, configuredRepository, environment, issue, comment, branch, mainSha }) {
@@ -144,7 +158,28 @@ async function deriveRetryFixCycle({ client, configuredRepository, environment, 
     }
     const writerLifecycle = writerPullLifecycleAttestation(timeline?.events, timeline?.truncated);
     if (writerLifecycle === null) return { allowed: false, reason: 'managed_pr_timeline_invalid' };
-    pulls.push({ ...normalizedWriterPull(rawPull), writer_lifecycle: writerLifecycle });
+    let detailedPull;
+    try {
+      detailedPull = await client.getPull(rawPull?.number);
+    } catch {
+      return { allowed: false, reason: 'managed_pr_detail_unavailable' };
+    }
+    if (detailedPull?.number !== rawPull?.number) return { allowed: false, reason: 'managed_pr_detail_invalid' };
+    pulls.push({ ...normalizedWriterPull(detailedPull), writer_lifecycle: writerLifecycle });
+  }
+  let compare = null;
+  if (pulls.length === 1) {
+    const receipt = verifyWriterReceiptMarker(pulls[0].body, environment.AERIS_WRITER_PUBLIC_KEY);
+    if (receipt && receipt.commit_sha !== sourceSha) {
+      try {
+        compare = await client.request(
+          'GET',
+          `/repos/${environment.GITHUB_REPOSITORY}/compare/${receipt.commit_sha}...${sourceSha}`,
+        );
+      } catch {
+        return { allowed: false, reason: 'managed_pr_retry_lineage_unavailable' };
+      }
+    }
   }
   return deriveNextWriterFixCycle({
     configuredRepository,
@@ -156,6 +191,7 @@ async function deriveRetryFixCycle({ client, configuredRepository, environment, 
     pulls,
     writerApp: { id: appId, slug: appSlug },
     receiptPublicKey: environment.AERIS_WRITER_PUBLIC_KEY,
+    compare,
   });
 }
 
@@ -177,6 +213,7 @@ export async function runWriterPreflight({ event, environment, repoRoot, github 
   let fixCycle = 0;
   let sourceSha = main.object.sha;
   let expectedRemoteHead = null;
+  let pullMetadataSha = null;
   if (event.comment?.body === '/agent retry-write') {
     const branch = `agent/issue-${event.issue.number}`;
     const retry = await deriveRetryFixCycle({
@@ -192,6 +229,7 @@ export async function runWriterPreflight({ event, environment, repoRoot, github 
     fixCycle = retry.fixCycle;
     sourceSha = retry.sourceSha;
     expectedRemoteHead = retry.expectedRemoteHead;
+    pullMetadataSha = retry.pullMetadataSha;
   }
   const decision = await routeWriterInvocation({
     eventName: environment.GITHUB_EVENT_NAME,
@@ -222,6 +260,7 @@ export async function runWriterPreflight({ event, environment, repoRoot, github 
     agent: 'writer',
     branch: decision.branch,
     expected_remote_head: expectedRemoteHead,
+    pull_metadata_sha: pullMetadataSha,
     lease_token: randomBytes(32).toString('hex'),
     cancel_epoch: 0,
     lease_expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
@@ -342,7 +381,13 @@ export function runWriterBuild({ artifact, repoRoot }) {
       GIT_COMMITTER_NAME: 'Aeris Writer', GIT_COMMITTER_EMAIL: 'aeris-writer@users.noreply.github.com',
       GIT_AUTHOR_DATE: intent.issue_updated_at, GIT_COMMITTER_DATE: intent.issue_updated_at,
     };
-    git(repoRoot, ['commit', '--no-gpg-sign', '-m', `writer: implement issue #${intent.issue_number}`], { timeout: 60_000, env });
+    git(repoRoot, ['commit', '--no-gpg-sign', '-m', writerCommitMessage({
+      issueNumber: intent.issue_number,
+      fixCycle,
+      commentId: intent.comment_id,
+      candidateSha: candidate.candidate_sha,
+      pullMetadataSha: intent.pull_metadata_sha,
+    })], { timeout: 60_000, env });
     const commitSha = trustedSha(repoRoot);
     return activation('ready', 'build', { candidate, commit_sha: commitSha, patch, metadata: { title: generated.title, body: generated.body } });
   } catch (error) {
@@ -417,7 +462,13 @@ export async function runWriterPublish({
     };
     const stagedPatch = `${git(repoRoot, ['diff', '--cached', '--binary'], { maxBuffer: MAX_PATCH_BYTES + 4096 })}\n`;
     if (sha256(stagedPatch) !== candidate.patch_sha) return activation('terminal', 'publish', null, 'candidate_patch_changed');
-    git(repoRoot, ['commit', '--no-gpg-sign', '-m', `writer: implement issue #${candidate.intent.issue_number}`], { timeout: 60_000, env });
+    git(repoRoot, ['commit', '--no-gpg-sign', '-m', writerCommitMessage({
+      issueNumber: candidate.intent.issue_number,
+      fixCycle: candidate.fix_cycle,
+      commentId: candidate.intent.comment_id,
+      candidateSha: candidate.candidate_sha,
+      pullMetadataSha: candidate.intent.pull_metadata_sha,
+    })], { timeout: 60_000, env });
     if (trustedSha(repoRoot) !== expectedCommitSha) return activation('terminal', 'publish', null, 'candidate_commit_mismatch');
     const appId = Number(environment.AERIS_WRITER_APP_ID);
     const writerApp = { id: appId, slug: environment.AERIS_WRITER_APP_SLUG };

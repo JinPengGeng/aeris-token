@@ -9,6 +9,8 @@ import { calculateWriterCandidateSha } from '../src/writer-phase-contract.mjs';
 import { WriterGitHubApiError } from '../src/writer-github-client.mjs';
 import {
   createWriterReceiptMarker,
+  writerCommitMessage,
+  writerPullMetadataDigest,
   writerReceiptSigningPayload,
   WRITER_LIFECYCLE_EPOCH,
 } from '../src/writer-lifecycle.mjs';
@@ -74,6 +76,7 @@ function candidate(overrides = {}) {
       agent: 'writer',
       branch: 'agent/issue-12',
       expected_remote_head: null,
+      pull_metadata_sha: null,
       lease_token: sha('e', 64),
       cancel_epoch: 0,
       lease_expires_at: '2026-08-19T11:00:00Z',
@@ -95,6 +98,10 @@ function candidate(overrides = {}) {
     tests: { state: 'passed', plan_ids: ['diff-check-v1'], summary: 'trusted diff check passed' },
     ...overrides,
   };
+  if (value.intent.command === '/agent retry-write' && value.intent.pull_metadata_sha === null) {
+    const body = `${signedReceipt({ cycle: 0, commentId: 91 })}\n\n<!-- aeris-writer-managed -->`;
+    value.intent.pull_metadata_sha = writerPullMetadataDigest(rawPull(baseSha, { body }));
+  }
   value.candidate_sha = calculateWriterCandidateSha(value);
   return value;
 }
@@ -106,8 +113,19 @@ function rawPull(headSha, overrides = {}) {
     merged: false,
     merged_at: null,
     draft: true,
+    locked: false,
+    active_lock_reason: null,
     title: 'Writer: implement Issue #12',
     body: '<!-- aeris-writer-managed -->',
+    maintainer_can_modify: false,
+    labels: [{ id: 1, name: 'agent-ready', color: '00ff00', description: null, default: false }],
+    milestone: null,
+    assignee: null,
+    assignees: [],
+    requested_reviewers: [],
+    requested_teams: [],
+    auto_merge: null,
+    merge_queue_entry: null,
     html_url: `https://github.com/${repository}/pull/77`,
     user: { type: 'Bot', login: 'aeris-writer[bot]' },
     performed_via_github_app: writerApp,
@@ -130,6 +148,11 @@ function mockGitHub({
   postCreateMainDrift = false,
   existingPullBody = null,
   pullTitleDriftAtBoundary = null,
+  pullBodyDriftAtBoundary = null,
+  pullMetadataDriftAtBoundary = null,
+  mutatePullMetadata = null,
+  postAdvanceMetadataDrift = null,
+  refDriftDuringPush = false,
   tombstoned = false,
   tombstoneAtBoundary = null,
   command = '/agent implement',
@@ -141,6 +164,7 @@ function mockGitHub({
     writer_lifecycle: { epoch: WRITER_LIFECYCLE_EPOCH, tombstoned },
   }) : null;
   let liveMainSha = mainSha;
+  let ambiguousPushes = ambiguous ? 1 : 0;
   let boundaryReads = 0;
   const mutations = [];
   const timeline = [];
@@ -162,6 +186,10 @@ function mockGitHub({
       if (mainDriftAtBoundary === boundaryReads) liveMainSha = sha('8');
       if (injectPullAtBoundary === boundaryReads) pull = rawPull(branchSha ?? commitSha, { number: 79 });
       if (pullTitleDriftAtBoundary === boundaryReads && pull) pull = { ...pull, title: 'Concurrent edit' };
+      if (pullBodyDriftAtBoundary === boundaryReads && pull) pull = { ...pull, body: `${pull.body}\nmanual edit` };
+      if (pullMetadataDriftAtBoundary === boundaryReads && pull && typeof mutatePullMetadata === 'function') {
+        pull = mutatePullMetadata(pull);
+      }
       if (tombstoneAtBoundary === boundaryReads && pull) pull = {
         ...pull,
         writer_lifecycle: { epoch: WRITER_LIFECYCLE_EPOCH, tombstoned: true },
@@ -195,17 +223,25 @@ function mockGitHub({
       const visible = manual ? rawPull(branchSha, { user: { type: 'User', login: 'maintainer' } }) : rawPull(branchSha, pull);
       return duplicate ? [visible, rawPull(branchSha, { number: 78 })] : [visible];
     },
-    pushAgentRefFromRepository: async (_issue, _oldSha, nextSha, _repositoryPath, boundary) => {
+    pushAgentRefFromRepository: async (_issue, oldSha, nextSha, _repositoryPath, boundary) => {
       await requireBoundary(boundary);
+      if (refDriftDuringPush) branchSha = sha('9');
+      if ((oldSha === null && branchSha !== null) || (oldSha !== null && branchSha !== oldSha)) {
+        throw new AggregateError([new Error('lease rejected')], 'ambiguous ref update; platform state may have changed');
+      }
       const action = branchSha === null ? 'create_ref' : 'advance_ref';
       mutations.push(action);
       timeline.push(action);
       branchSha = nextSha;
-      if (ambiguous) throw new AggregateError([new Error('timeout')], 'ambiguous ref create; platform state may have changed');
       if (pull) pull = {
         ...pull,
         head: { ...pull.head, sha: nextSha },
       };
+      if (pull && typeof postAdvanceMetadataDrift === 'function') pull = postAdvanceMetadataDrift(pull);
+      if (ambiguousPushes > 0) {
+        ambiguousPushes -= 1;
+        throw new AggregateError([new Error('timeout')], 'ambiguous ref update; platform state may have changed');
+      }
     },
     createDraftPull: async (_issue, metadata, boundary) => {
       await requireBoundary(boundary);
@@ -220,6 +256,42 @@ function mockGitHub({
       timeline.push('verify_pr_metadata');
       return pull;
     },
+    compareCommits: async (fromSha, toSha) => ({
+      status: 'ahead',
+      ahead_by: 1,
+      total_commits: 1,
+      base_commit: { sha: fromSha },
+      merge_base_commit: { sha: fromSha },
+      commits: [{
+        sha: toSha,
+        parents: [{ sha: fromSha }],
+        commit: { message: writerCommitMessage({
+          issueNumber: 12,
+          fixCycle: 1,
+          commentId: 92,
+           candidateSha: candidate({
+            intent: {
+              ...candidate().intent,
+              command: '/agent retry-write',
+              source_sha: baseSha,
+              expected_remote_head: baseSha,
+              comment_id: 92,
+            },
+             fix_cycle: 1,
+           }).candidate_sha,
+           pullMetadataSha: candidate({
+             intent: {
+               ...candidate().intent,
+               command: '/agent retry-write',
+               source_sha: baseSha,
+               expected_remote_head: baseSha,
+               comment_id: 92,
+             },
+             fix_cycle: 1,
+           }).intent.pull_metadata_sha,
+         }) },
+      }],
+    }),
   };
 }
 
@@ -323,7 +395,7 @@ test('post-create readback treats main drift as residue instead of a successful 
   assert.deepEqual(github.mutations, ['create_ref', 'create_pr']);
 });
 
-test('retry publish verifies its signed receipt but refuses metadata replacement without CAS', async () => {
+test('retry publish advances the exact managed branch while preserving PR metadata', async () => {
   const retry = candidate({
     intent: {
       ...candidate().intent,
@@ -337,9 +409,12 @@ test('retry publish verifies its signed receipt but refuses metadata replacement
   const priorBody = `${signedReceipt({ cycle: 0, commentId: 91 })}\n\n<!-- aeris-writer-managed -->`;
   const success = mockGitHub({ existing: true, existingPullBody: priorBody, command: '/agent retry-write', commentId: 92 });
   const successReceipt = await publishWriterCandidate(options(success, retry));
-  assert.equal(successReceipt.state, 'stale', JSON.stringify(successReceipt));
-  assert.equal(successReceipt.reason, 'managed_pr_metadata_change_requires_cas');
-  assert.deepEqual(success.mutations, []);
+  assert.equal(successReceipt.state, 'draft_updated', JSON.stringify(successReceipt));
+  assert.equal(successReceipt.reason, 'branch_updated_metadata_preserved');
+  assert.equal(successReceipt.candidate_sha, retry.candidate_sha);
+  assert.equal(successReceipt.commit_sha, commitSha);
+  assert.deepEqual(success.mutations, ['advance_ref']);
+  assert.ok(!success.timeline.includes('verify_pr_metadata'));
 
   const missing = mockGitHub({ existing: true, command: '/agent retry-write', commentId: 92 });
   const missingReceipt = await publishWriterCandidate(options(missing, retry));
@@ -349,14 +424,140 @@ test('retry publish verifies its signed receipt but refuses metadata replacement
   const drifted = mockGitHub({
     existing: true,
     existingPullBody: priorBody,
-    pullTitleDriftAtBoundary: 5,
+    pullTitleDriftAtBoundary: 3,
     command: '/agent retry-write',
     commentId: 92,
   });
   const driftReceipt = await publishWriterCandidate(options(drifted, retry));
-  assert.equal(driftReceipt.state, 'stale');
-  assert.equal(driftReceipt.reason, 'managed_pr_metadata_change_requires_cas');
+  assert.equal(driftReceipt.state, 'residue');
+  assert.equal(driftReceipt.reason, 'ambiguous_platform_residue');
   assert.deepEqual(drifted.mutations, []);
+});
+
+test('retry publish re-entry proves a crash-after-push from the commit metadata ledger', async () => {
+  const retry = candidate({
+    intent: {
+      ...candidate().intent,
+      command: '/agent retry-write',
+      source_sha: baseSha,
+      expected_remote_head: baseSha,
+      comment_id: 92,
+    },
+    fix_cycle: 1,
+  });
+  const priorBody = `${signedReceipt({ cycle: 0, commentId: 91 })}\n\n<!-- aeris-writer-managed -->`;
+  const github = mockGitHub({
+    existing: true,
+    existingPullBody: priorBody,
+    command: '/agent retry-write',
+    commentId: 92,
+    ambiguous: true,
+  });
+
+  const interrupted = await publishWriterCandidate(options(github, retry));
+  assert.equal(interrupted.state, 'residue');
+  assert.deepEqual(github.mutations, ['advance_ref']);
+
+  const reentered = await publishWriterCandidate(options(github, retry));
+  assert.equal(reentered.state, 'draft_updated', JSON.stringify(reentered));
+  assert.equal(reentered.reason, 'branch_updated_metadata_preserved');
+  assert.deepEqual(github.mutations, ['advance_ref']);
+});
+
+test('retry fails closed on receipt metadata drift, ref CAS drift, and candidate mismatch', async () => {
+  const retry = candidate({
+    intent: {
+      ...candidate().intent,
+      command: '/agent retry-write',
+      source_sha: baseSha,
+      expected_remote_head: baseSha,
+      comment_id: 92,
+    },
+    fix_cycle: 1,
+  });
+  const priorBody = `${signedReceipt({ cycle: 0, commentId: 91 })}\n\n<!-- aeris-writer-managed -->`;
+
+  const metadataDrift = mockGitHub({
+    existing: true,
+    existingPullBody: priorBody,
+    pullBodyDriftAtBoundary: 3,
+    command: '/agent retry-write',
+    commentId: 92,
+  });
+  const metadataReceipt = await publishWriterCandidate(options(metadataDrift, retry));
+  assert.equal(metadataReceipt.state, 'residue');
+  assert.equal(metadataReceipt.reason, 'ambiguous_platform_residue');
+  assert.deepEqual(metadataDrift.mutations, []);
+
+  const refDrift = mockGitHub({
+    existing: true,
+    existingPullBody: priorBody,
+    refDriftDuringPush: true,
+    command: '/agent retry-write',
+    commentId: 92,
+  });
+  const refReceipt = await publishWriterCandidate(options(refDrift, retry));
+  assert.equal(refReceipt.state, 'residue');
+  assert.deepEqual(refDrift.mutations, []);
+
+  const candidateDrift = mockGitHub({
+    existing: true,
+    existingPullBody: priorBody,
+    command: '/agent retry-write',
+    commentId: 92,
+  });
+  const candidateReceipt = await publishWriterCandidate(options(candidateDrift, retry, {
+    verifyCandidateCommit: async () => false,
+  }));
+  assert.equal(candidateReceipt.reason, 'candidate_commit_mismatch');
+  assert.deepEqual(candidateDrift.mutations, []);
+});
+
+test('retry snapshots every mutable PR metadata family before exact ref CAS', async () => {
+  const retry = candidate({
+    intent: {
+      ...candidate().intent,
+      command: '/agent retry-write', source_sha: baseSha, expected_remote_head: baseSha, comment_id: 92,
+    },
+    fix_cycle: 1,
+  });
+  const priorBody = `${signedReceipt({ cycle: 0, commentId: 91 })}\n\n<!-- aeris-writer-managed -->`;
+  const mutations = [
+    (pull) => ({ ...pull, labels: [...pull.labels, { id: 2, name: 'manual', color: 'ffffff' }] }),
+    (pull) => ({ ...pull, milestone: { id: 3, number: 1, title: 'manual milestone', state: 'open' } }),
+    (pull) => ({ ...pull, assignee: { id: 4, login: 'maintainer' }, assignees: [{ id: 4, login: 'maintainer' }] }),
+    (pull) => ({ ...pull, requested_reviewers: [{ id: 5, login: 'reviewer', type: 'User' }] }),
+    (pull) => ({ ...pull, requested_teams: [{ id: 6, slug: 'security', name: 'Security' }] }),
+    (pull) => ({ ...pull, maintainer_can_modify: true }),
+    (pull) => ({ ...pull, auto_merge: { enabled_by: { id: 7, login: 'maintainer' }, merge_method: 'squash' } }),
+    (pull) => ({ ...pull, locked: true, active_lock_reason: 'resolved' }),
+    (pull) => ({ ...pull, merge_queue_entry: { id: 8 } }),
+  ];
+  for (const mutatePullMetadata of mutations) {
+    const github = mockGitHub({
+      existing: true,
+      existingPullBody: priorBody,
+      pullMetadataDriftAtBoundary: 3,
+      mutatePullMetadata,
+      command: '/agent retry-write',
+      commentId: 92,
+    });
+    const receipt = await publishWriterCandidate(options(github, retry));
+    assert.equal(receipt.state, 'residue');
+    assert.deepEqual(github.mutations, []);
+  }
+
+  const postPush = mockGitHub({
+    existing: true,
+    existingPullBody: priorBody,
+    postAdvanceMetadataDrift: (pull) => ({ ...pull, requested_reviewers: [{ id: 9, login: 'late-reviewer' }] }),
+    command: '/agent retry-write',
+    commentId: 92,
+  });
+  const receipt = await publishWriterCandidate(options(postPush, retry));
+  assert.equal(receipt.state, 'residue');
+  assert.equal(receipt.reason, 'managed_pr_lifecycle_drift');
+  assert.deepEqual(postPush.mutations, ['advance_ref']);
 });
 
 test('publisher permanently rejects reopened and concurrently tombstoned PRs with a valid prior receipt', async () => {
@@ -393,8 +594,23 @@ test('publisher permanently rejects reopened and concurrently tombstoned PRs wit
   });
   const racedReceipt = await publishWriterCandidate(options(raced, retry));
   assert.equal(racedReceipt.state, 'stale');
-  assert.equal(racedReceipt.reason, 'managed_pr_metadata_change_requires_cas');
+  assert.equal(racedReceipt.reason, 'advance_ref_expected_state_changed');
   assert.deepEqual(raced.mutations, []);
+
+  const postPushTombstone = mockGitHub({
+    existing: true,
+    existingPullBody: priorBody,
+    postAdvanceMetadataDrift: (pull) => ({
+      ...pull,
+      writer_lifecycle: { epoch: WRITER_LIFECYCLE_EPOCH, tombstoned: true },
+    }),
+    command: '/agent retry-write',
+    commentId: 92,
+  });
+  const postPushReceipt = await publishWriterCandidate(options(postPushTombstone, retry));
+  assert.equal(postPushReceipt.state, 'residue');
+  assert.equal(postPushReceipt.reason, 'managed_pr_lifecycle_drift');
+  assert.deepEqual(postPushTombstone.mutations, ['advance_ref']);
 });
 
 test('publisher rejects stale policy, config, base, artifact commit, and autonomy expiry before mutation', async () => {

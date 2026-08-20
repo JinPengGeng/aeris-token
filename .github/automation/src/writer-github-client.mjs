@@ -563,8 +563,12 @@ export class WriterGitHubClient {
     const head = `${this.#owner}:${validatedAgentRef(ref)}`;
     const pulls = await this.#list(`/repos/${this.#repository}/pulls?state=all&head=${encodeURIComponent(head)}`);
     return Promise.all(pulls.map(async (rawPull) => {
-      const pull = this.#normalizePull(rawPull);
-      const pullNumber = positiveNumber(pull?.number, 'Pull request number');
+      const pullNumber = positiveNumber(rawPull?.number, 'Pull request number');
+      const pull = this.#normalizePull(await this.#request(
+        'GET',
+        `/repos/${this.#repository}/pulls/${pullNumber}`,
+      ));
+      if (pull?.number !== pullNumber) fail('Writer detailed pull response does not match the listed pull');
       const events = await this.#list(`/repos/${this.#repository}/issues/${pullNumber}/timeline`);
       const writerLifecycle = writerPullLifecycleAttestation(events);
       if (writerLifecycle === null) fail('Writer pull lifecycle timeline is invalid');
@@ -700,6 +704,13 @@ export class WriterGitHubClient {
       expectedHeadSha: verifiedHeadSha,
       metadata: normalized,
     });
+  }
+
+  async compareCommits(baseSha, headSha) {
+    const verifiedBaseSha = validateSha(baseSha, 'Compare base SHA');
+    const verifiedHeadSha = validateSha(headSha, 'Compare head SHA');
+    this.#requireVerifiedIdentity();
+    return this.#request('GET', `/repos/${this.#repository}/compare/${verifiedBaseSha}...${verifiedHeadSha}`);
   }
 
   async pushAgentRefFromRepository(issueNumber, expectedOldSha, newSha, repositoryPath, mutationBoundary = null) {

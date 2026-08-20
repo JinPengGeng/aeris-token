@@ -13,10 +13,14 @@ import {
   deriveNextWriterFixCycle,
   runWriterAnalyze,
   runWriterBuild,
+  runWriterPreflight,
   runWriterPublish,
 } from '../src/writer-activation.mjs';
+import { GitHubClient } from '../src/github-client.mjs';
 import {
   createWriterReceiptMarker,
+  writerCommitMessage,
+  writerPullMetadataDigest,
   WRITER_LIFECYCLE_EPOCH,
   WRITER_OWNERSHIP_MARKER,
 } from '../src/writer-lifecycle.mjs';
@@ -77,6 +81,7 @@ function retryPull({
   cycle,
   commentId,
   headSha = sha('a'),
+  receiptCommitSha = headSha,
   user = { type: 'Bot', login: 'aeris-writer[bot]' },
   writerLifecycle = { epoch: WRITER_LIFECYCLE_EPOCH, tombstoned: false },
 } = {}) {
@@ -86,7 +91,7 @@ function retryPull({
     lifecycleEpoch: WRITER_LIFECYCLE_EPOCH,
     fixCycle: cycle,
     candidateSha: sha(String(cycle + 1), 64),
-    commitSha: headSha,
+    commitSha: receiptCommitSha,
   };
   const receipt = createWriterReceiptMarker({ ...fields, signature: receiptSigner(fields) });
   return {
@@ -94,7 +99,20 @@ function retryPull({
     state: 'open',
     merged: false,
     draft: true,
+    locked: false,
+    active_lock_reason: null,
+    title: 'Writer retry',
     body: `${receipt}\n\n${WRITER_OWNERSHIP_MARKER}`,
+    html_url: 'https://github.com/JinPengGeng/aeris-token/pull/77',
+    maintainer_can_modify: false,
+    labels: [],
+    milestone: null,
+    assignee: null,
+    assignees: [],
+    requested_reviewers: [],
+    requested_teams: [],
+    auto_merge: null,
+    merge_queue_entry: null,
     user,
     performed_via_github_app: { id: 456, slug: 'aeris-writer' },
     writer_lifecycle: writerLifecycle,
@@ -103,7 +121,7 @@ function retryPull({
   };
 }
 
-function deriveCycle(pull, currentCommentId) {
+function deriveCycle(pull, currentCommentId, compare = null) {
   return deriveNextWriterFixCycle({
     configuredRepository: {
       repository_id: 1_316_750_512,
@@ -114,21 +132,43 @@ function deriveCycle(pull, currentCommentId) {
     comment: { id: currentCommentId },
     branch: 'agent/issue-12',
     mainSha: sha('b'),
-    sourceSha: sha('a'),
+    sourceSha: pull.head.sha,
     pulls: [pull],
     writerApp: { id: 456, slug: 'aeris-writer' },
     receiptPublicKey,
+    compare,
   });
 }
 
 test('retry cycle is derived from the verified persistent PR receipt and increases across runs', () => {
-  assert.equal(deriveCycle(retryPull({ cycle: 0, commentId: 91 }), 92).fixCycle, 1);
-  assert.equal(deriveCycle(retryPull({ cycle: 1, commentId: 92 }), 93).fixCycle, 2);
+  const origin = retryPull({ cycle: 0, commentId: 91 });
+  assert.equal(deriveCycle(origin, 92).fixCycle, 1);
+  const firstRetrySha = sha('b');
+  const firstCandidateSha = sha('2', 64);
+  const advanced = retryPull({ cycle: 0, commentId: 91, headSha: firstRetrySha, receiptCommitSha: sha('a') });
+  const compare = {
+    status: 'ahead', ahead_by: 1, total_commits: 1,
+    base_commit: { sha: sha('a') }, merge_base_commit: { sha: sha('a') },
+    commits: [{
+      sha: firstRetrySha,
+      parents: [{ sha: sha('a') }],
+      commit: { message: writerCommitMessage({
+        issueNumber: 12,
+        fixCycle: 1,
+        commentId: 92,
+        candidateSha: firstCandidateSha,
+        pullMetadataSha: writerPullMetadataDigest(origin),
+      }) },
+    }],
+  };
+  assert.equal(deriveCycle(advanced, 93, compare).fixCycle, 2);
+  assert.equal(deriveCycle(advanced, 92, compare).reason, 'retry_comment_already_applied');
 });
 
-test('retry replay, exhausted budget, forged receipt, and non-App ownership fail closed', () => {
-  assert.equal(deriveCycle(retryPull({ cycle: 1, commentId: 92 }), 92).reason, 'retry_comment_already_applied');
-  assert.equal(deriveCycle(retryPull({ cycle: 2, commentId: 93 }), 94).reason, 'maximum_fix_cycles_exceeded');
+test('retry replay, non-origin receipts, forged receipt, and non-App ownership fail closed', () => {
+  assert.equal(deriveCycle(retryPull({ cycle: 0, commentId: 92 }), 92).reason, 'retry_comment_already_applied');
+  assert.equal(deriveCycle(retryPull({ cycle: 2, commentId: 93 }), 94).reason, 'managed_pr_receipt_invalid');
+  assert.equal(deriveCycle(retryPull({ cycle: 1, commentId: 91 }), 92).reason, 'managed_pr_receipt_invalid');
   assert.equal(deriveCycle({ ...retryPull({ cycle: 0, commentId: 91 }), body: WRITER_OWNERSHIP_MARKER }, 92).reason, 'managed_pr_receipt_invalid');
   const signed = retryPull({ cycle: 0, commentId: 91 });
   assert.equal(
@@ -160,7 +200,7 @@ test('receipt signer rejects a public key that does not match the App private ke
   assert.throws(() => createWriterReceiptSigner(receiptPrivateKey, other), /does not match/);
 });
 
-test('ready publish crosses the real Writer client constructor and publishes with separately wired receipt dependencies', async () => {
+test('implement and retry cross preflight, real Writer client compare, lease push, reconciliation, and replay fences', async () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-writer-ready-'));
   const repoRoot = path.join(temporaryRoot, 'repo');
   const buildRoot = path.join(temporaryRoot, 'build');
@@ -202,6 +242,7 @@ test('ready publish crosses the real Writer client constructor and publishes wit
     agent: 'writer',
     branch: 'agent/issue-12',
     expected_remote_head: null,
+    pull_metadata_sha: null,
     lease_token: sha('e', 64),
     cancel_epoch: 0,
     lease_expires_at: '2026-08-19T11:00:00Z',
@@ -237,7 +278,12 @@ test('ready publish crosses the real Writer client constructor and publishes wit
     GIT_AUTHOR_DATE: intent.issue_updated_at,
     GIT_COMMITTER_DATE: intent.issue_updated_at,
   };
-  git(buildRoot, ['commit', '--no-gpg-sign', '-m', 'writer: implement issue #12'], commitEnvironment);
+  git(buildRoot, ['commit', '--no-gpg-sign', '-m', writerCommitMessage({
+    issueNumber: 12,
+    fixCycle: 0,
+    commentId: 91,
+    candidateSha: candidate.candidate_sha,
+  })], commitEnvironment);
   const commitSha = git(buildRoot, ['rev-parse', 'HEAD']);
   const artifact = {
     schema_version: 1,
@@ -250,26 +296,40 @@ test('ready publish crosses the real Writer client constructor and publishes wit
   let branchSha = null;
   let pull = null;
   const mutations = [];
+  const leasePushes = [];
+  const compareRequests = [];
+  let crashAfterNextAdvance = false;
+  let failNextRefRead = false;
   const writerExecFileImpl = async (command, args, options) => {
     assert.equal(command, 'git');
     assert.equal(options.cwd, repoRoot);
     if (args[0] === 'cat-file') {
-      assert.deepEqual(args, ['cat-file', '-e', `${commitSha}^{commit}`]);
+      assert.equal(args[1], '-e');
+      assert.match(args[2], /^[0-9a-f]{40}\^\{commit\}$/);
+      git(repoRoot, ['cat-file', '-e', args[2]]);
       return { stdout: '', stderr: '' };
     }
     if (args[0] === 'remote') {
       assert.deepEqual(args, ['remote', 'get-url', '--push', 'origin']);
       return { stdout: 'https://github.com/JinPengGeng/aeris-token.git\n', stderr: '' };
     }
-    assert.deepEqual(args, [
-      'push',
-      '--porcelain',
-      '--force-with-lease=refs/heads/agent/issue-12:',
-      'origin',
-      `${commitSha}:refs/heads/agent/issue-12`,
-    ]);
-    branchSha = commitSha;
-    mutations.push('create_ref');
+    assert.equal(args[0], 'push');
+    assert.equal(args[1], '--porcelain');
+    const expectedOldSha = args[2].slice('--force-with-lease=refs/heads/agent/issue-12:'.length);
+    const newCommitSha = args[4].split(':')[0];
+    assert.equal(expectedOldSha, branchSha ?? '');
+    assert.equal(args[3], 'origin');
+    assert.equal(args[4], `${newCommitSha}:refs/heads/agent/issue-12`);
+    leasePushes.push({ expectedOldSha, newCommitSha });
+    const action = branchSha === null ? 'create_ref' : 'advance_ref';
+    mutations.push(action);
+    branchSha = newCommitSha;
+    if (pull) pull = { ...pull, head: { ...pull.head, sha: branchSha } };
+    if (action === 'advance_ref' && crashAfterNextAdvance) {
+      crashAfterNextAdvance = false;
+      failNextRefRead = true;
+      throw new Error('simulated process interruption after successful push');
+    }
     return { stdout: '', stderr: '' };
   };
   const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
@@ -297,15 +357,21 @@ test('ready publish crosses the real Writer client constructor and publishes wit
       repositories: [{ id: intent.repository_id, full_name: intent.repository_name }],
     });
     if (requestPath === '/repos/JinPengGeng/aeris-token') return json({ id: intent.repository_id, full_name: intent.repository_name });
-    if (requestPath === '/repos/JinPengGeng/aeris-token/issues/comments/91') return json({
-      id: 91,
-      body: '/agent implement',
-      issue_url: intent.issue_url,
-      user: { login: 'maintainer' },
-    });
+    const commentMatch = /^\/repos\/JinPengGeng\/aeris-token\/issues\/comments\/(91|92|93)$/.exec(requestPath);
+    if (commentMatch) {
+      const id = Number(commentMatch[1]);
+      return json({
+        id,
+        body: id === 91 ? '/agent implement' : '/agent retry-write',
+        issue_url: intent.issue_url,
+        user: { login: 'maintainer' },
+      });
+    }
     if (requestPath === '/repos/JinPengGeng/aeris-token/issues/12') return json({
       number: 12,
       state: 'open',
+      title: 'Writer retry integration',
+      body: 'Exercise the bounded Writer retry path.',
       updated_at: intent.issue_updated_at,
       url: intent.issue_url,
       labels: [{ name: 'agent-ready' }],
@@ -313,8 +379,36 @@ test('ready publish crosses the real Writer client constructor and publishes wit
     if (requestPath.endsWith('/collaborators/maintainer/permission')) return json({ permission: 'write' });
     if (requestPath.endsWith('/git/ref/heads/main')) return json({ ref: 'refs/heads/main', object: { type: 'commit', sha: baseSha } });
     if (requestPath.endsWith('/git/ref/heads/agent%2Fissue-12')) {
+      if (failNextRefRead) {
+        failNextRefRead = false;
+        return json({ message: 'simulated unavailable readback' }, 503);
+      }
       return branchSha === null ? json({ message: 'Not Found' }, 404) : json({
         ref: 'refs/heads/agent/issue-12', object: { type: 'commit', sha: branchSha },
+      });
+    }
+    const compareMatch = /^\/repos\/JinPengGeng\/aeris-token\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(requestPath);
+    if (compareMatch) {
+      const [, compareBase, compareHead] = compareMatch;
+      compareRequests.push({
+        base: compareBase,
+        head: compareHead,
+        authorization: init.headers.authorization,
+      });
+      const mergeBase = git(repoRoot, ['merge-base', compareBase, compareHead]);
+      const commitShas = git(repoRoot, ['rev-list', '--reverse', `${compareBase}..${compareHead}`])
+        .split(/\r?\n/).filter(Boolean);
+      return json({
+        status: mergeBase === compareBase ? 'ahead' : 'diverged',
+        ahead_by: commitShas.length,
+        total_commits: commitShas.length,
+        base_commit: { sha: compareBase },
+        merge_base_commit: { sha: mergeBase },
+        commits: commitShas.map((shaValue) => ({
+          sha: shaValue,
+          parents: git(repoRoot, ['show', '-s', '--format=%P', shaValue]).split(' ').filter(Boolean).map((parentSha) => ({ sha: parentSha })),
+          commit: { message: git(repoRoot, ['show', '-s', '--format=%B', shaValue]) },
+        })),
       });
     }
     if (requestPath.endsWith('/pulls') && method === 'POST') {
@@ -326,8 +420,19 @@ test('ready publish crosses the real Writer client constructor and publishes wit
         merged: false,
         merged_at: null,
         draft: true,
+        locked: false,
+        active_lock_reason: null,
         title: body.title,
         body: body.body,
+        maintainer_can_modify: false,
+        labels: [{ id: 1, name: 'agent-ready', color: '00ff00' }],
+        milestone: null,
+        assignee: null,
+        assignees: [],
+        requested_reviewers: [],
+        requested_teams: [],
+        auto_merge: null,
+        merge_queue_entry: null,
         html_url: 'https://github.com/JinPengGeng/aeris-token/pull/77',
         user: { type: 'Bot', login: 'aeris-writer[bot]' },
         performed_via_github_app: { id: 456, slug: 'aeris-writer' },
@@ -337,7 +442,11 @@ test('ready publish crosses the real Writer client constructor and publishes wit
       return json({ number: 77 }, 201);
     }
     if (requestPath === '/repos/JinPengGeng/aeris-token/pulls/77') return json(pull);
-    if (requestPath === '/repos/JinPengGeng/aeris-token/pulls') return json(pull === null ? [] : [pull]);
+    if (requestPath === '/repos/JinPengGeng/aeris-token/pulls') {
+      if (pull === null) return json([]);
+      const { maintainer_can_modify: _omitted, ...listPull } = pull;
+      return json([listPull]);
+    }
     if (requestPath === '/repos/JinPengGeng/aeris-token/issues/77/timeline') return json([]);
     throw new Error(`unexpected ready-path request: ${method} ${url}`);
   };
@@ -363,6 +472,125 @@ test('ready publish crosses the real Writer client constructor and publishes wit
     assert.equal(result.payload.receipt.state, 'draft_created');
     assert.deepEqual(mutations, ['create_ref', 'create_pr']);
     assert.match(pull.body, /aeris-writer-receipt:v2 .* epoch=0 /);
+
+    const readonlyClient = new GitHubClient({
+      token: 'readonly-token',
+      repository: intent.repository_name,
+      fetchImpl,
+    });
+    const writerEnvironment = {
+      GITHUB_REPOSITORY: intent.repository_name,
+      GITHUB_EVENT_NAME: 'issue_comment',
+      GITHUB_RUN_ID: 'retry-integration',
+      AERIS_AGENTS_ENABLED: 'true',
+      AERIS_WRITER_ENABLED: 'true',
+      AERIS_WRITER_APP_ID: '456',
+      AERIS_WRITER_APP_SLUG: 'aeris-writer',
+      AERIS_WRITER_PUBLIC_KEY: receiptPublicKey,
+    };
+    const eventFor = (commentId) => ({
+      action: 'created',
+      repository: { id: intent.repository_id },
+      issue: { number: 12 },
+      comment: {
+        id: commentId,
+        body: '/agent retry-write',
+        author_association: 'OWNER',
+        user: { login: 'maintainer', type: 'User' },
+      },
+      sender: { login: 'maintainer', type: 'User' },
+    });
+    const patchFor = (sourceSha, name, content) => {
+      const scratch = path.join(temporaryRoot, `scratch-${name}`);
+      git(temporaryRoot, ['clone', '--quiet', '--shared', '--no-checkout', repoRoot, scratch]);
+      git(scratch, ['checkout', '--detach', sourceSha]);
+      fs.writeFileSync(path.join(scratch, 'docs', name), content);
+      git(scratch, ['add', `docs/${name}`]);
+      return `${git(scratch, ['diff', '--cached', '--binary'])}\n`;
+    };
+    const runRetry = async (commentId, name, content, { crashAfterPush = false } = {}) => {
+      git(repoRoot, ['checkout', '--detach', baseSha]);
+      const preflight = await runWriterPreflight({
+        event: eventFor(commentId),
+        environment: writerEnvironment,
+        repoRoot,
+        github: readonlyClient,
+        clock: () => new Date('2026-08-19T10:30:00Z'),
+      });
+      assert.equal(preflight.state, 'ready', JSON.stringify(preflight));
+      const generatedPatch = patchFor(preflight.payload.intent.source_sha, name, content);
+      const analysis = {
+        schema_version: 1,
+        artifact_type: 'writer_activation',
+        phase: 'analyze',
+        state: 'ready',
+        reason: null,
+        payload: {
+          intent: preflight.payload.intent,
+          fix_cycle: preflight.payload.fix_cycle,
+          generated: { title: `Retry ${commentId}`, body: `Retry ${commentId} body`, patch: generatedPatch },
+        },
+      };
+      git(repoRoot, ['checkout', '--detach', baseSha]);
+      const built = runWriterBuild({ artifact: analysis, repoRoot });
+      assert.equal(built.state, 'ready', JSON.stringify(built));
+      git(repoRoot, ['checkout', '--detach', baseSha]);
+      if (crashAfterPush) crashAfterNextAdvance = true;
+      let published = await runWriterPublish({
+        artifact: built,
+        environment: { ...writerEnvironment, AERIS_WRITER_PRIVATE_KEY: receiptPrivateKey },
+        repoRoot,
+        clock: () => new Date('2026-08-19T10:30:00Z'),
+        fetchImpl,
+        repositoryPath: repoRoot,
+        writerExecFileImpl,
+      });
+      if (crashAfterPush) {
+        assert.equal(published.payload.receipt.state, 'residue', JSON.stringify(published));
+        assert.equal(published.payload.receipt.reason, 'ambiguous_platform_residue');
+        git(repoRoot, ['checkout', '--detach', baseSha]);
+        published = await runWriterPublish({
+          artifact: built,
+          environment: { ...writerEnvironment, AERIS_WRITER_PRIVATE_KEY: receiptPrivateKey },
+          repoRoot,
+          clock: () => new Date('2026-08-19T10:30:00Z'),
+          fetchImpl,
+          repositoryPath: repoRoot,
+          writerExecFileImpl,
+        });
+      }
+      assert.equal(published.state, 'complete', JSON.stringify(published));
+      assert.equal(published.payload.receipt.state, 'draft_updated', JSON.stringify(published));
+      assert.equal(published.payload.receipt.reason, 'branch_updated_metadata_preserved');
+      assert.equal(published.payload.receipt.commit_sha, branchSha);
+      return { preflight, built, published };
+    };
+
+    const bodyAfterCreate = pull.body;
+    const firstRetry = await runRetry(92, 'writer-retry-1.md', 'retry one\n', { crashAfterPush: true });
+    assert.equal(firstRetry.preflight.payload.fix_cycle, 1);
+    assert.equal(pull.body, bodyAfterCreate);
+
+    const secondRetry = await runRetry(93, 'writer-retry-2.md', 'retry two\n');
+    assert.equal(secondRetry.preflight.payload.fix_cycle, 2);
+    assert.equal(pull.body, bodyAfterCreate);
+    assert.deepEqual(mutations, ['create_ref', 'create_pr', 'advance_ref', 'advance_ref']);
+    assert.equal(leasePushes.length, 3);
+    assert.equal(leasePushes[1].expectedOldSha, commitSha);
+    assert.equal(leasePushes[2].expectedOldSha, firstRetry.built.payload.commit_sha);
+    assert.ok(compareRequests.some(({ authorization }) => authorization === 'Bearer ready-installation-token'));
+
+    git(repoRoot, ['checkout', '--detach', baseSha]);
+    const replay = await runWriterPreflight({
+      event: eventFor(93),
+      environment: writerEnvironment,
+      repoRoot,
+      github: readonlyClient,
+      clock: () => new Date('2026-08-19T10:30:00Z'),
+    });
+    assert.equal(replay.state, 'terminal');
+    assert.equal(replay.reason, 'retry_comment_already_applied');
+    assert.deepEqual(mutations, ['create_ref', 'create_pr', 'advance_ref', 'advance_ref']);
   } finally {
     const resolved = path.resolve(temporaryRoot);
     assert.ok(resolved.startsWith(path.resolve(os.tmpdir()) + path.sep));

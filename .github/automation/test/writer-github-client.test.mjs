@@ -169,13 +169,14 @@ test('Writer reads are pinned to GitHub.com, reject redirects, retain tombstones
     if (url.includes('/permission')) return response({ permission: 'write' });
     if (url.includes('/timeline')) return response([]);
     if (url.includes('/pulls?')) return response([rawPull({ state: 'closed', merged_at: null })]);
-    if (url.includes('/pulls/')) return response(rawPull());
+    if (url.includes('/pulls/42')) return response(rawPull({ state: calls.length > 8 ? 'closed' : 'open' }));
     return response({ id: 7 });
   });
 
   assert.deepEqual(await api.getRepository(), { id: 7 });
   assert.deepEqual(await api.getIssue(7), { id: 7 });
   assert.deepEqual(await api.getIssueComment(91), { id: 7 });
+  assert.deepEqual(await api.compareCommits(oldSha, newSha), { id: 7 });
   assert.equal(await api.getCollaboratorPermission('writer-user'), 'write');
   assert.deepEqual((await api.getPull(42)).author, { type: 'App', id: writerApp.id });
   assert.deepEqual(await api.getRef('agent/issue-7'), { id: 7 });
@@ -185,10 +186,12 @@ test('Writer reads are pinned to GitHub.com, reject redirects, retain tombstones
     ['https://api.github.com/repos/example/repository', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/issues/7', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/issues/comments/91', 'GET', 'error'],
+    [`https://api.github.com/repos/example/repository/compare/${oldSha}...${newSha}`, 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/collaborators/writer-user/permission', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/pulls/42', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/git/ref/heads/agent%2Fissue-7', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/pulls?state=all&head=example%3Aagent%2Fissue-7&per_page=100&page=1', 'GET', 'error'],
+    ['https://api.github.com/repos/example/repository/pulls/42', 'GET', 'error'],
     ['https://api.github.com/repos/example/repository/issues/42/timeline?per_page=100&page=1', 'GET', 'error'],
   ]);
   assert.equal(calls.every(({ init }) => init.headers.authorization === `Bearer ${installationToken}`), true);
@@ -209,7 +212,11 @@ test('state=all list fixtures normalize merged_at for lifecycle tombstones', asy
     }),
     rawPull({ number: 44, state: 'open', merged: undefined, merged_at: null }),
   ];
-  const api = await verifiedClient(async (url) => response(url.includes('/timeline') ? [] : fixtures));
+  const api = await verifiedClient(async (url) => {
+    if (url.includes('/timeline')) return response([]);
+    const detail = /\/pulls\/(\d+)$/.exec(new URL(url).pathname);
+    return response(detail ? fixtures.find(({ number }) => number === Number(detail[1])) : fixtures);
+  });
   const pulls = await api.listPullsForHead('agent/issue-7');
   assert.deepEqual(pulls.map(({ merged }) => merged), [true, false, false]);
   assert.equal(evaluateWriterLifecycle({
@@ -237,7 +244,11 @@ test('merged_at normalization fails closed for invalid or open-merged list fixtu
     rawPull({ state: 'closed', merged: undefined, merged_at: '2026-02-31T01:02:03Z' }),
     rawPull({ state: 'closed', merged: undefined }),
   ];
-  const api = await verifiedClient(async (url) => response(url.includes('/timeline') ? [] : fixtures));
+  const api = await verifiedClient(async (url) => {
+    if (url.includes('/timeline')) return response([]);
+    const detail = /\/pulls\/(\d+)$/.exec(new URL(url).pathname);
+    return response(detail ? fixtures.find(({ number }) => number === Number(detail[1])) : fixtures);
+  });
   const pulls = await api.listPullsForHead('agent/issue-7');
   assert.deepEqual(pulls.map(({ merged }) => merged), [null, null, null, null]);
 });
@@ -1168,7 +1179,8 @@ test('open-after-reopen remains tombstoned from the authoritative pull timeline'
       { id: 501, event: 'closed', created_at: '2026-08-19T01:00:00Z' },
       { id: 502, event: 'reopened', created_at: '2026-08-19T01:01:00Z' },
     ]);
-    return response([rawPull({ state: 'open', merged: false, draft: true })]);
+    const value = rawPull({ state: 'open', merged: false, draft: true });
+    return response(url.includes('/pulls/') ? value : [value]);
   });
   const pulls = await api.listPullsForHead('agent/issue-7');
   assert.deepEqual(pulls[0].writer_lifecycle, { epoch: 0, tombstoned: true });
@@ -1188,15 +1200,15 @@ test('open-after-reopen remains tombstoned from the authoritative pull timeline'
 test('timeline permission failures, malformed events, and pagination exhaustion fail closed', async () => {
   const denied = await verifiedClient(async (url) => url.includes('/timeline')
     ? response({ message: 'forbidden' }, 403)
-    : response([rawPull()]));
+    : response(url.includes('/pulls/') ? rawPull() : [rawPull()]));
   await assert.rejects(() => denied.listPullsForHead('agent/issue-7'), /HTTP 403/);
 
-  const malformed = await verifiedClient(async (url) => response(url.includes('/timeline') ? [{ event: 'closed' }] : [rawPull()]));
+  const malformed = await verifiedClient(async (url) => response(url.includes('/timeline') ? [{ event: 'closed' }] : url.includes('/pulls/') ? rawPull() : [rawPull()]));
   await assert.rejects(() => malformed.listPullsForHead('agent/issue-7'), /timeline is invalid/);
 
   const exhausted = await verifiedClient(async (url) => response(url.includes('/timeline')
     ? Array.from({ length: 100 }, (_, index) => ({ id: index + 1, event: 'commented' }))
-    : [rawPull()]));
+    : url.includes('/pulls/') ? rawPull() : [rawPull()]));
   await assert.rejects(() => exhausted.listPullsForHead('agent/issue-7'), /page limit/);
 });
 

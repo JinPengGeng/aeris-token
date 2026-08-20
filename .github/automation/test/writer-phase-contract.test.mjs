@@ -14,7 +14,7 @@ function intent(overrides = {}) {
       issue_url: 'https://api.github.com/repos/aeris/token/issues/12', issue_labels: ['agent-ready', 'bug'],
       issue_updated_at: '2026-08-18T09:00:00.000Z', input_sha: sha('b', 64), comment_id: 91, actor: 'maintainer',
       command: '/agent implement', base_sha: sha('c'), source_sha: sha('c'), policy_sha: sha('d'), config_sha: sha('a'), run_id: '12345',
-      agent: 'writer', branch: 'agent/issue-12', expected_remote_head: null, lease_token: sha('e', 64), cancel_epoch: 0, lease_expires_at: '2026-08-18T10:00:00.000Z',
+      agent: 'writer', branch: 'agent/issue-12', expected_remote_head: null, pull_metadata_sha: null, lease_token: sha('e', 64), cancel_epoch: 0, lease_expires_at: '2026-08-18T10:00:00.000Z',
     }, ...overrides,
   };
 }
@@ -64,11 +64,11 @@ test('intent fixes writer branch to its issue and validates command and hashes',
   assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, branch: 'agent/issue-13' } })), /bind the issue number/);
   assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, command: '/agent implement parser' } })), /command format/);
   assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, input_sha: 'bad' } })), /input_sha format/);
-  assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, command: '/agent implement', expected_remote_head: sha('a') } })), /not bind a remote head/);
+  assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, command: '/agent implement', expected_remote_head: sha('a') } })), /not bind remote PR state/);
   assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, command: '/agent retry-write' } })), /retry-write must bind source_sha/);
   assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, issue_url: 'https://api.github.com/repos/aeris/token/issues/13' } })), /bind repository and Issue/);
   assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, issue_labels: ['bug', 'agent-ready'] } })), /canonical sort order/);
-  assert.equal(validateWriteIntentArtifact(intent({ intent: { ...intent().intent, command: '/agent retry-write', source_sha: sha('a'), expected_remote_head: sha('a') } })).intent.command, '/agent retry-write');
+  assert.equal(validateWriteIntentArtifact(intent({ intent: { ...intent().intent, command: '/agent retry-write', source_sha: sha('a'), expected_remote_head: sha('a'), pull_metadata_sha: sha('f', 64) } })).intent.command, '/agent retry-write');
   assert.throws(() => validateWriteIntentArtifact(intent({ intent: { ...intent().intent, issue_updated_at: 'not-a-timestamp' } })), /issue_updated_at format/);
   assert.equal(writerFenceIsLive(intent().intent, new Date('2026-08-18T09:30:00.000Z')), true);
   assert.equal(writerFenceIsLive(intent().intent, new Date('2026-08-18T10:00:00.000Z')), false);
@@ -105,8 +105,8 @@ test('candidate enforces actual path count, quota, patch state, and bounded test
   assert.throws(() => validateWriterCandidateArtifact(candidate({ changed_paths: ['src/file.'] })), /Windows-reserved segment/);
   assert.throws(() => validateWriterCandidateArtifact(candidate({ patch_bytes: 0 })), /requires a non-empty patch/);
   assert.throws(() => validateWriterCandidateArtifact(candidate({ fix_cycle: 1 })), /implement candidate fix_cycle must be zero/);
-  assert.throws(() => validateWriterCandidateArtifact(candidate({ intent: { ...intent().intent, command: '/agent retry-write', source_sha: sha('a'), expected_remote_head: sha('a') }, fix_cycle: 0 })), /retry-write candidate fix_cycle must be positive/);
-  assert.equal(validateWriterCandidateArtifact(candidate({ intent: { ...intent().intent, command: '/agent retry-write', source_sha: sha('a'), expected_remote_head: sha('a') }, fix_cycle: 2 })).fix_cycle, 2);
+  assert.throws(() => validateWriterCandidateArtifact(candidate({ intent: { ...intent().intent, command: '/agent retry-write', source_sha: sha('a'), expected_remote_head: sha('a'), pull_metadata_sha: sha('f', 64) }, fix_cycle: 0 })), /retry-write candidate fix_cycle must be positive/);
+  assert.equal(validateWriterCandidateArtifact(candidate({ intent: { ...intent().intent, command: '/agent retry-write', source_sha: sha('a'), expected_remote_head: sha('a'), pull_metadata_sha: sha('f', 64) }, fix_cycle: 2 })).fix_cycle, 2);
   const rejected = candidate({ state: 'rejected', patch_sha: null, changed_paths: [], file_sizes: [], file_count: 0, patch_bytes: 0, total_file_bytes: 0 });
   assert.equal(validateWriterCandidateArtifact(rejected).state, 'rejected');
 });
@@ -115,7 +115,7 @@ test('receipt enforces command-bound published states and terminal candidate mat
   assert.throws(() => validateWriterReceiptArtifact(receipt({ ref: 'agent/issue-99' })), /does not bind candidate branch/);
   assert.throws(() => validateWriterReceiptArtifact(receipt({ pr_url: 'http://github.com/aeris/token/pull/45' })), /GitHub HTTPS/);
   assert.throws(() => validateWriterReceiptArtifact(receipt({ pr_url: 'https://github.com/aeris/token/pull/45?tab=files' })), /query or hash/);
-  const retryCandidate = candidate({ intent: { ...intent().intent, command: '/agent retry-write', source_sha: sha('a'), expected_remote_head: sha('a') }, fix_cycle: 1 });
+  const retryCandidate = candidate({ intent: { ...intent().intent, command: '/agent retry-write', source_sha: sha('a'), expected_remote_head: sha('a'), pull_metadata_sha: sha('f', 64) }, fix_cycle: 1 });
   assert.throws(() => validateWriterReceiptArtifact(receipt({ candidate: retryCandidate })), /draft_created receipt requires implement command/);
   assert.throws(() => validateWriterReceiptArtifact(receipt({ state: 'draft_updated' })), /draft_updated receipt requires retry-write command/);
   assert.equal(validateWriterReceiptArtifact(receipt({ state: 'draft_updated', candidate: retryCandidate, reason: 'draft_updated' })).state, 'draft_updated');

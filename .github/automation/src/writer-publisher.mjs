@@ -2,10 +2,12 @@ import { revalidateWriterPublishBoundary } from './router.mjs';
 import {
   createWriterReceiptMarker,
   evaluateWriterLifecycle,
+  evaluateWriterRetryLineage,
   verifyWriterReceiptMarker,
   WRITER_LIFECYCLE_EPOCH,
   WRITER_OWNERSHIP_MARKER,
   WRITER_RECEIPT_MARKER_PREFIX,
+  writerPullMetadataDigest,
 } from './writer-lifecycle.mjs';
 import {
   validateWriterCandidateArtifact,
@@ -38,7 +40,7 @@ function publishedReceipt(candidate, state, commitSha, pull) {
     schema_version: 2,
     artifact_type: 'receipt',
     state,
-    reason: state,
+    reason: state === 'draft_updated' ? 'branch_updated_metadata_preserved' : state,
     candidate,
     candidate_sha: candidate.candidate_sha,
     commit_sha: commitSha,
@@ -118,13 +120,6 @@ function idempotentPull(snapshot, candidate, commitSha, metadata, repositoryId, 
     ? pull : null;
 }
 
-function exactManagedMetadata(pull, metadata) {
-  const expectedBody = metadata.body.length === 0
-    ? WRITER_OWNERSHIP_MARKER
-    : `${metadata.body}\n\n${WRITER_OWNERSHIP_MARKER}`;
-  return pull?.title === metadata.title && pull?.body === expectedBody;
-}
-
 function validRef(raw, expectedRef) {
   return raw?.ref === `refs/heads/${expectedRef}` && raw?.object?.type === 'commit' && SHA.test(raw.object.sha);
 }
@@ -185,26 +180,13 @@ function ownedPullAt(snapshot, candidate, repositoryId, writerApp, expectedHeadS
 }
 
 function samePullState(left, right) {
-  if (!left || !right) return false;
-  const fields = (pull) => ({
-    number: pull.number,
-    state: pull.state,
-    merged: pull.merged,
-    draft: pull.draft,
-    title: pull.title,
-    body: pull.body,
-    html_url: pull.html_url,
-    base: { ref: pull.base?.ref, repo_id: pull.base?.repo?.id, repo_name: pull.base?.repo?.full_name },
-    head: { ref: pull.head?.ref, sha: pull.head?.sha, repo_id: pull.head?.repo?.id, repo_name: pull.head?.repo?.full_name },
-    user: { type: pull.user?.type, login: pull.user?.login },
-    app: { id: pull.performed_via_github_app?.id ?? null, slug: pull.performed_via_github_app?.slug ?? null },
-    author: { type: pull.author?.type, id: pull.author?.id },
-    writer_lifecycle: {
-      epoch: pull.writer_lifecycle?.epoch,
-      tombstoned: pull.writer_lifecycle?.tombstoned,
-    },
-  });
-  return JSON.stringify(fields(left)) === JSON.stringify(fields(right));
+  try {
+    return writerPullMetadataDigest(left) === writerPullMetadataDigest(right) &&
+      left.writer_lifecycle?.epoch === right.writer_lifecycle?.epoch &&
+      left.writer_lifecycle?.tombstoned === right.writer_lifecycle?.tombstoned;
+  } catch {
+    return false;
+  }
 }
 
 function exactSnapshotReason(snapshot, expected, candidate, repositoryId, writerApp) {
@@ -241,14 +223,26 @@ function publishedPullMatches(snapshot, returnedPull, candidate, commitSha, repo
     marker.candidate_sha === candidate.candidate_sha && marker.commit_sha === commitSha;
 }
 
-function priorRetryReceiptMatches(snapshot, candidate, receiptPublicKey) {
+async function priorRetryReceiptMatches(snapshot, candidate, receiptPublicKey, github) {
   if (candidate.intent.command !== '/agent retry-write' || snapshot.pulls.length !== 1) return false;
   const marker = verifyWriterReceiptMarker(snapshot.pulls[0].body, receiptPublicKey);
-  return marker?.issue_number === candidate.intent.issue_number &&
-    marker.lifecycle_epoch === WRITER_LIFECYCLE_EPOCH &&
-    marker.comment_id !== candidate.intent.comment_id &&
-    marker.fix_cycle === candidate.fix_cycle - 1 &&
-    marker.commit_sha === candidate.intent.source_sha;
+  if (!marker || marker.issue_number !== candidate.intent.issue_number ||
+    marker.lifecycle_epoch !== WRITER_LIFECYCLE_EPOCH || marker.fix_cycle !== 0) return false;
+  let compare = null;
+  if (marker.commit_sha !== candidate.intent.source_sha) {
+    if (typeof github.compareCommits !== 'function') return false;
+    compare = await github.compareCommits(marker.commit_sha, candidate.intent.source_sha);
+  }
+  const lineage = evaluateWriterRetryLineage({
+    receipt: marker,
+    sourceSha: candidate.intent.source_sha,
+    compare,
+    issueNumber: candidate.intent.issue_number,
+    commentId: candidate.intent.comment_id,
+    maximumFixCycles: candidate.limits.maximum_fix_cycles,
+  });
+  return lineage.allowed && lineage.fixCycle === candidate.fix_cycle &&
+    writerPullMetadataDigest(snapshot.pulls[0]) === candidate.intent.pull_metadata_sha;
 }
 
 function isResidueError(error) {
@@ -319,21 +313,50 @@ export async function publishWriterCandidate({
   try {
     let snapshot = await readSnapshot(github, candidate, repositoryId, writerApp);
     if (snapshot.mainSha !== candidate.intent.base_sha) return terminalReceipt(candidate, 'stale', 'base_main_changed');
-    const prMetadata = pullMetadata(candidate, commitSha, metadata, receiptSigner);
+    const prMetadata = candidate.intent.command === '/agent implement'
+      ? pullMetadata(candidate, commitSha, metadata, receiptSigner)
+      : null;
     if (candidate.intent.command === '/agent retry-write' &&
-      !priorRetryReceiptMatches(snapshot, candidate, receiptPublicKey)) {
+      !(await priorRetryReceiptMatches(snapshot, candidate, receiptPublicKey, github))) {
       return terminalReceipt(candidate, 'stale', 'managed_pr_receipt_changed');
     }
     if (snapshot.lifecycle.action === 'noop') {
-      const replay = idempotentPull(
-        snapshot,
-        candidate,
-        commitSha,
-        prMetadata,
-        repositoryId,
-        writerApp,
-        receiptPublicKey,
-      );
+      if (candidate.intent.command === '/agent retry-write' &&
+        snapshot.lifecycle.reason === 'expected_head_sha_mismatch' &&
+        snapshot.branch.headSha === commitSha && snapshot.pulls.length === 1) {
+        const pull = ownedPullAt(snapshot, candidate, repositoryId, writerApp, commitSha);
+        const marker = pull && verifyWriterReceiptMarker(pull.body, receiptPublicKey);
+        let compare = null;
+        if (marker && marker.commit_sha !== commitSha && typeof github.compareCommits === 'function') {
+          compare = await github.compareCommits(marker.commit_sha, commitSha);
+        }
+        const lineage = marker && evaluateWriterRetryLineage({
+          receipt: marker,
+          sourceSha: commitSha,
+          compare,
+          issueNumber: candidate.intent.issue_number,
+          commentId: candidate.intent.comment_id,
+          maximumFixCycles: candidate.limits.maximum_fix_cycles,
+        });
+        const applied = lineage?.commits?.at(-1);
+        if (pull && applied?.sha === commitSha && applied.cycle === candidate.fix_cycle &&
+          applied.comment_id === candidate.intent.comment_id && applied.candidate_sha === candidate.candidate_sha &&
+          applied.pull_metadata_sha === candidate.intent.pull_metadata_sha &&
+          writerPullMetadataDigest(pull) === candidate.intent.pull_metadata_sha) {
+          return publishedReceipt(candidate, 'draft_updated', commitSha, pull);
+        }
+      }
+      const replay = candidate.intent.command === '/agent implement'
+        ? idempotentPull(
+          snapshot,
+          candidate,
+          commitSha,
+          prMetadata,
+          repositoryId,
+          writerApp,
+          receiptPublicKey,
+        )
+        : null;
       if (replay) return publishedReceipt(
         candidate,
         candidate.intent.command === '/agent implement' ? 'draft_created' : 'draft_updated',
@@ -377,9 +400,6 @@ export async function publishWriterCandidate({
     }
 
     const pullNumber = snapshot.lifecycle.prNumber;
-    if (!exactManagedMetadata(snapshot.pulls[0], prMetadata)) {
-      return terminalReceipt(candidate, 'stale', 'managed_pr_metadata_change_requires_cas');
-    }
     if (repositoryPath === null || typeof github.pushAgentRefFromRepository !== 'function') {
       return terminalReceipt(candidate, 'failed', 'atomic_ref_cas_unavailable');
     }
@@ -404,29 +424,14 @@ export async function publishWriterCandidate({
       return residueReceipt(candidate, 'post_ref_advance_drift');
     }
     const pull = snapshot.pulls[0];
-    if (pull.number !== snapshot.lifecycle.prNumber && snapshot.lifecycle.action !== 'noop') {
+    const expectedPostPushLifecycle = snapshot.lifecycle.action === 'update' ||
+      (snapshot.lifecycle.action === 'noop' &&
+        snapshot.lifecycle.reason === 'expected_head_sha_mismatch');
+    if (pull.number !== pullNumber || writerPullMetadataDigest(pull) !== candidate.intent.pull_metadata_sha ||
+      !expectedPostPushLifecycle) {
       return residueReceipt(candidate, 'managed_pr_lifecycle_drift');
     }
-    const updatePrBoundary = mutationBoundary({
-      kind: 'update_pr',
-      refSha: commitSha,
-      pullNumber: pull.number,
-      pull,
-    });
-    const prBoundary = await updatePrBoundary();
-    if (prBoundary.action !== 'write') return residueReceipt(candidate, prBoundary.reason);
-    const updated = await github.verifyManagedDraftPullMetadata(
-      candidate.intent.issue_number,
-      pull.number,
-      commitSha,
-      prMetadata,
-      updatePrBoundary,
-    );
-    snapshot = await readSnapshot(github, candidate, repositoryId, writerApp);
-    if (!publishedPullMatches(snapshot, updated, candidate, commitSha, repositoryId, writerApp, receiptPublicKey)) {
-      return residueReceipt(candidate, 'post_pr_update_drift');
-    }
-    return publishedReceipt(candidate, 'draft_updated', commitSha, updated);
+    return publishedReceipt(candidate, 'draft_updated', commitSha, pull);
   } catch (error) {
     return isResidueError(error)
       ? residueReceipt(candidate, 'ambiguous_platform_residue')
