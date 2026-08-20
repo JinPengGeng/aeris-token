@@ -1,0 +1,54 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import test from 'node:test';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const yaml = require('js-yaml');
+const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(testDirectory, '..', '..', '..');
+const workflowPath = path.join(repoRoot, '.github', 'workflows', 'autonomy-finalizer.yml');
+
+function workflow() {
+  return yaml.load(fs.readFileSync(workflowPath, 'utf8'));
+}
+
+test('Finalizer listens to every required workflow to avoid completion-order races', () => {
+  const document = workflow();
+  assert.deepEqual(document.on.workflow_run.workflows, ['Automation Policy', 'Rust CI', 'Frontend CI']);
+  assert.deepEqual(document.on.workflow_run.types, ['completed']);
+  assert.match(document.jobs.evaluate.if, /pull_request/);
+  assert.match(document.jobs.evaluate.if, /agent\/issue-/);
+  assert.match(document.jobs.finalize.if, /AERIS_AUTONOMOUS_MERGE_ENABLED/);
+  assert.equal(document.concurrency.group, 'autonomy-finalizer-${{ github.event.workflow_run.head_branch }}');
+  assert.doesNotMatch(document.concurrency.group, /head_sha/);
+});
+
+test('Finalizer repeats read-only gates before the sole Writer token mint', () => {
+  const document = workflow();
+  assert.doesNotMatch(JSON.stringify(document.jobs.evaluate), /secrets\.|AERIS_WRITER_TOKEN/);
+  const steps = document.jobs.finalize.steps;
+  const recheck = steps.findIndex((step) => /Recompute gates before token mint/.test(step.name));
+  const mint = steps.findIndex((step) => /Mint bounded Writer App token/.test(step.name));
+  assert.ok(recheck >= 0 && recheck < mint);
+  assert.equal(steps.filter((step) => /create-github-app-token@/.test(step.uses ?? '')).length, 1);
+  assert.deepEqual(
+    Object.keys(steps[mint].with).filter((key) => key.startsWith('permission-')).sort(),
+    ['permission-contents', 'permission-pull-requests'],
+  );
+  assert.doesNotMatch(JSON.stringify(document.jobs.finalize.permissions), /write/);
+});
+
+test('Finalizer never checks out the pull request head and pins every action', () => {
+  const document = workflow();
+  for (const job of Object.values(document.jobs)) {
+    const checkout = job.steps.find((step) => String(step.uses).startsWith('actions/checkout@'));
+    assert.equal(checkout.with.ref, '${{ github.sha }}');
+    assert.equal(checkout.with['persist-credentials'], false);
+    for (const step of job.steps) {
+      if (step.uses) assert.match(step.uses, /^[^@\s]+@[0-9a-f]{40}$/);
+    }
+  }
+});

@@ -36,7 +36,7 @@ case "$*" in
       shift
     done
     [[ -n "${filter}" ]] || { printf 'missing jq filter\n' >&2; exit 1; }
-    [[ "${filter}" == *'aeris-sync[bot]'* && "${filter}" == *'github-actions[bot]'* ]] || {
+    [[ "${filter}" == *'aeris-writer[bot]'* && "${filter}" == *'github-actions[bot]'* ]] || {
       printf 'comment filter omitted an accepted bot identity\n' >&2
       exit 1
     }
@@ -65,17 +65,17 @@ EOF
 
   PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" COMMENT_ID="${comment_id}" COMMENT_LOGIN="${login}" \
     GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
-    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_ISSUES_GH_TOKEN=test-issues-token AERIS_WRITER_APP_SLUG=aeris-writer \
     bash "${harness}"
 
   assert_eq 0 "$(grep -Ec -- '--method POST|^pr comment ' "${calls}" || true)" \
     "${name} comments must not be duplicated"
   assert_eq 1 "$(grep -c -- "--method PATCH repos/example/repo/issues/comments/${comment_id}" "${calls}" || true)" \
     "${name} pending-tip comment must be updated"
-  grep -q 'aeris-sync\[bot\]' "${calls}" || fail "${name} query omitted the Sync App bot"
+  grep -q 'aeris-writer\[bot\]' "${calls}" || fail "${name} query omitted the Writer App bot"
   grep -q 'github-actions\[bot\]' "${calls}" || fail "${name} query omitted the legacy bot"
 }
 
-run_identity_case app 'aeris-sync[bot]' 102
+run_identity_case app 'aeris-writer[bot]' 102
 run_identity_case legacy 'github-actions[bot]' 202
 printf 'PASS sync upstream identity migration (%s)\n' "${RUN_ROOT}"

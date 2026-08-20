@@ -26,7 +26,7 @@
 
 1. 禁止直接推送、强制推送和删除分支。
 2. 要求通过 PR 合并并解决全部 review 讨论。当前仓库只有一名维护者时将审批数设为 0；增加协作者后再启用至少一位审批和 CODEOWNERS review。
-3. 要求状态检查 `Rust CI / check` 和 `Frontend CI / check` 成功后才可合并。
+3. 要求状态检查 `Rust CI / check` 和 `Frontend CI / check` 成功后才可合并。`Automation Policy / gate` 只有在单 Writer PoC 完成、来源绑定验证完毕后才加入 required checks；在此之前不得把它标记为已启用。
 4. 只允许 Squash merge并在合并后自动删除源分支。增加独立 reviewer 后启用 CODEOWNERS review。
 
 仓库管理员应保留紧急恢复能力，仅用于仓库解锁，并在后续 Issue 中记录原因。
@@ -35,7 +35,9 @@
 
 建立 GitHub Project v2，字段为 `Status`、`Priority`、`Area`、`Risk` 和 `Target release`。使用 Project 内置 workflow：新 Issue 进入 `Inbox`，PR 创建后进入 `In progress`，合并 PR 后进入 `Done`。
 
-为发布创建受保护的 `release` Environment。发布凭据只放入该 Environment；Issue 或外部 PR 的文本不得在可访问 secrets 的工作流中执行。不要以 `pull_request_target` checkout 外部 PR 代码。
+为发布创建受保护且需要人工审批的 `release` Environment。发布凭据只放入该 Environment；Issue 或外部 PR 的文本不得在可访问 secrets 的工作流中执行。不要以 `pull_request_target` checkout 外部 PR 代码。
+
+单 Writer 上线时另建两个 Environment：`agent` 不设人工审批，只暴露模型凭据，绝不包含 GitHub 写凭据、Writer App 私钥或 release secret；`writer` 保存 Writer App ID/私钥，并用于 Publisher、Finalizer 和同步。这里是管理员待完成的远端设置清单，仓库文件本身不能证明已经配置。
 
 ### Fork 上游同步
 
@@ -53,7 +55,7 @@
 
 Agent 的模型路由、权限隔离、事件幂等、上游同步 checkpoint 和自动合并门禁见 [GitHub 自动化与 Agent 架构](automation-architecture.md)。该架构默认关闭新 Agent；只有对应阶段的 workflow、测试和仓库设置全部完成后才可启用。
 
-当前仓库已打开全局只读 Agent 开关，registry 显式启用 `triage`、`planner` 和 `reviewer`；其他 Agent 仍保持关闭。`reviewer` 合并后必须先在独立的 owner-authored canary PR 上验证托管评论写回，并确认其不修改代码、Checks、审批或合并状态。启用只读阶段不等于授权 `writer`、Policy Gate 或 Merger。
+仓库中的只读 Agent registry 与开关应分别审计；远端实际启用状态必须以 GitHub Variables、Actions run 和 managed comment 现场证据为准。启用只读阶段不等于授权 Candidate、Publisher、Policy required check 或 Finalizer。单 Writer production flags 和 required Policy 仅在全部 PoC、撤销演练和稳定观察后启用。
 
 Scheduler、重试、路由、池、额度或故障转移变更必须说明状态转换、确定性选择规则、依赖失败行为和回滚，并覆盖失败与恢复测试。
 
@@ -80,4 +82,4 @@ npm run build
 
 Dependabot 每周为 Cargo、`frontend` npm 和 GitHub Actions 创建更新 PR。依赖更新与其他 PR 一样需要 CI 和审查；重大版本升级需要单独记录兼容性与回滚风险。
 
-发布只能由已通过 `main` CI 的 tag 触发；`workflow_dispatch` 仅用于不发布的手工构建验证。发布工作流的镜像、下载链接和 Release 目标必须使用当前仓库所有者，不能保留上游 fork 的 `fawney19/Aether` 标识。具有写权限或可访问发布 secrets 的第三方 GitHub Actions 应优先固定到完整 commit SHA；其余 Action 至少固定到明确版本，并由 Dependabot 持续更新。
+发布只能由已通过 `main` CI 的 tag 触发，并须经 `release` Environment 人工审批；`workflow_dispatch` 仅用于不发布的手工构建验证。发布工作流的镜像、下载链接和 Release 目标必须使用当前仓库所有者，不能保留上游 fork 的 `fawney19/Aether` 标识。具有写权限或可访问发布 secrets 的第三方 GitHub Actions 应优先固定到完整 commit SHA；其余 Action 至少固定到明确版本，并由 Dependabot 持续更新。

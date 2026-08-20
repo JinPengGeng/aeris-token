@@ -86,9 +86,10 @@ for (const name of ['tester', 'policy', 'merger']) {
   assert(agents.agents[name].model_variable === null, `${name} must not select a model`);
 }
 assert(
-  agents.agents.writer.mode === 'draft_pull_request' &&
+  agents.agents.writer.mode === 'credentialless_candidate' &&
+    agents.agents.writer.effects.includes('publish_candidate_artifact') &&
     agents.agents.writer.denied_paths.includes('.github/**'),
-  'writer boundary must remain Draft PR only and deny .github',
+  'Agent writer must remain credentialless and deny .github',
 );
 assert(
   !agents.agents.reviewer.handoff_to.includes('writer'),
@@ -103,10 +104,10 @@ assert(
   'writer policy boundary changed',
 );
 assert(automation.policy_gate.enabled === false, 'policy gate must default off');
-assert(automation.policy_gate.mode === 'shadow', 'policy gate must start in shadow mode');
+assert(automation.policy_gate.mode === 'canary_allowlist', 'policy gate must remain limited to the canary allowlist');
 assert(
-  automation.policy_gate.allowlist_paths.length === 0,
-  'automatic merge allowlist must start empty',
+  JSON.stringify(automation.policy_gate.allowlist_paths) === JSON.stringify(['docs/automation-canary/**/*.md']),
+  'automatic merge allowlist must remain restricted to canary Markdown',
 );
 for (const immutablePath of [
   '.github/agents.yml',
@@ -115,6 +116,11 @@ for (const immutablePath of [
   '.github/upstream-sync-policy.yml',
   '.github/upstream-sync-state.json',
   '.github/workflows/**',
+  'CODEOWNERS',
+  'Cargo.toml',
+  'Cargo.lock',
+  'frontend/package.json',
+  'frontend/package-lock.json',
 ]) {
   assert(
     automation.trusted_source.immutable_paths.includes(immutablePath),
@@ -151,24 +157,27 @@ assert(
 assert(sync.conflicts.overwrite_unknown_tip === false, 'unknown sync tips must not be overwritten');
 assert(sync.conflicts.create_or_update_alert === true, 'sync failures must create alerts');
 const syncSteps = syncWorkflow.jobs.sync.steps;
-assert(syncWorkflow.jobs.sync.environment === 'sync', 'sync must use the dedicated sync environment');
+assert(syncWorkflow.jobs.sync.environment === 'writer', 'sync must use the shared writer environment');
 assert(
-  syncWorkflow.jobs.sync.if.includes("vars.AERIS_SYNC_APP_ENABLED == 'true'") &&
-    syncWorkflow.jobs.sync.if.includes("vars.AERIS_SYNC_APP_ENABLED == '1'") &&
+  syncWorkflow.jobs.sync.if.includes("vars.AERIS_WRITER_ENABLED == 'true'") &&
+    syncWorkflow.jobs.sync.if.includes("vars.AERIS_WRITER_ENABLED == '1'") &&
+    syncWorkflow.jobs.sync.if.includes("vars.AERIS_UPSTREAM_SYNC_ENABLED == 'true'") &&
+    syncWorkflow.jobs.sync.if.includes("vars.AERIS_UPSTREAM_SYNC_ENABLED == '1'") &&
     syncWorkflow.jobs.sync.if.includes("vars.AERIS_AGENTS_ENABLED == 'true'") &&
     syncWorkflow.jobs.sync.if.includes("vars.AERIS_AGENTS_ENABLED == '1'"),
-  'sync must remain disabled unless the bounded Sync App switch is enabled',
+  'sync must remain disabled unless both the shared Writer identity and upstream-sync lane are enabled',
 );
 assert(
   syncWorkflow.jobs.sync.permissions.contents === 'read' &&
     syncWorkflow.jobs.sync.permissions['pull-requests'] === 'read' &&
     syncWorkflow.jobs.sync.permissions.actions === 'write' &&
-    syncWorkflow.jobs.sync.permissions.checks === 'read' &&
-    syncWorkflow.jobs.sync.permissions.statuses === 'read',
-  'sync GITHUB_TOKEN permissions must remain read-only for repository mutation',
+    syncWorkflow.jobs.sync.permissions.issues === 'write' &&
+    syncWorkflow.jobs.sync.permissions.checks === undefined &&
+    syncWorkflow.jobs.sync.permissions.statuses === undefined,
+  'sync GITHUB_TOKEN permissions must be limited to issue writes and required dispatch',
 );
-const syncTokenStep = syncSteps.find((step) => step.name === 'Mint bounded Sync App token');
-assert(syncTokenStep && syncTokenStep.uses.includes('create-github-app-token@'), 'sync must mint its independent App token');
+const syncTokenStep = syncSteps.find((step) => step.name === 'Mint bounded Writer App token');
+assert(syncTokenStep && syncTokenStep.uses.includes('create-github-app-token@'), 'sync must mint a bounded Writer App token');
 assert(
   syncTokenStep['timeout-minutes'] === 2,
   'App token mint must remain within the reserved autonomy margin',
@@ -176,10 +185,10 @@ assert(
 assert(
   syncTokenStep.with['permission-contents'] === 'write' &&
     syncTokenStep.with['permission-pull-requests'] === 'write' &&
-    syncTokenStep.with['permission-issues'] === 'write' &&
-    syncTokenStep.with['permission-checks'] === 'read' &&
-    syncTokenStep.with['permission-statuses'] === 'read',
-  'Sync App token permissions exceed or miss the approved minimum',
+    syncTokenStep.with['permission-issues'] === undefined &&
+    syncTokenStep.with['permission-checks'] === undefined &&
+    syncTokenStep.with['permission-statuses'] === undefined,
+  'Writer App token permissions exceed or miss the approved minimum',
 );
 assert(
   syncWorkflow.jobs.sync.env.AERIS_AUTONOMY_EXPIRES_AT ===
@@ -187,8 +196,8 @@ assert(
   'every sync phase must receive the bounded autonomy expiry',
 );
 assert(
-  syncWorkflow.jobs.sync.env.AERIS_SYNC_APP_SLUG === '${{ vars.AERIS_SYNC_APP_SLUG }}',
-  'sync must receive its explicit GitHub App slug for actor identity migration',
+  syncWorkflow.jobs.sync.env.AERIS_WRITER_APP_SLUG === '${{ vars.AERIS_WRITER_APP_SLUG }}',
+  'sync must receive the shared Writer App slug for actor identity migration',
 );
 assert(
   syncWorkflow.jobs.sync.env.AERIS_AUTONOMY_MIN_REMAINING_SECONDS === 600,
@@ -200,14 +209,14 @@ assert(
   preMintExpiryStep?.name === 'Validate autonomy before token mint' &&
     typeof preMintExpiryStep.run === 'string' &&
     preMintExpiryStep.run.includes('AERIS_AUTONOMY_EXPIRES_AT') &&
-    preMintExpiryStep.run.includes('AERIS_SYNC_APP_SLUG') &&
+    preMintExpiryStep.run.includes('AERIS_WRITER_APP_SLUG') &&
     preMintExpiryStep.run.includes(
       'now_epoch + AERIS_AUTONOMY_MIN_REMAINING_SECONDS',
     ),
   'sync must fail closed immediately before minting the App token',
 );
 const checkoutStep = syncSteps.find((step) => step.name === 'Check out fork default branch');
-assert(checkoutStep?.with?.token === '${{ steps.sync_token.outputs.token }}', 'sync checkout must use the Sync App token');
+assert(checkoutStep?.with?.token === '${{ steps.sync_token.outputs.token }}', 'sync checkout must use the Writer App token');
 assert(
   checkoutStep['timeout-minutes'] === 5,
   'authenticated checkout must remain within the reserved autonomy margin',
@@ -228,7 +237,14 @@ const publishStep = syncSteps.find(
 );
 assert(
   publishStep?.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}',
-  'sync publication must use the bounded Sync App token',
+  'sync publication must use the bounded Writer App token',
+);
+assert(
+  publishStep?.env.AERIS_ISSUES_GH_TOKEN === '${{ github.token }}' &&
+    syncScript.includes(': "${AERIS_ISSUES_GH_TOKEN:?AERIS_ISSUES_GH_TOKEN is required}"') &&
+    syncScript.includes('aeris_issues_gh()') &&
+    syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"'),
+  'sync Issue and comment operations must use the separate workflow token channel',
 );
 const autoMergeStep = syncSteps.find((step) => step.name === 'Enable native auto-merge');
 const disarmCallIndex = syncScript.search(/^disarm_tracked_pr$/m);
@@ -269,13 +285,13 @@ assert(
   'sync and auto-merge must not bypass the expiry-guarded GitHub wrapper',
 );
 assert(
-  syncScript.includes('SYNC_APP_BOT_LOGIN="${AERIS_SYNC_APP_SLUG}[bot]"') &&
+  syncScript.includes('WRITER_APP_BOT_LOGIN="${AERIS_WRITER_APP_SLUG}[bot]"') &&
     syncScript.includes("LEGACY_BOT_LOGIN='github-actions[bot]'") &&
     syncScript.includes(
-      '.user.login == \\"${SYNC_APP_BOT_LOGIN}\\" or .user.login == \\"${LEGACY_BOT_LOGIN}\\"',
+      '.user.login == \\"${WRITER_APP_BOT_LOGIN}\\" or .user.login == \\"${LEGACY_BOT_LOGIN}\\"',
     ) &&
     syncScript.includes('is_sync_automation_login'),
-  'comment and PR identity checks must accept the Sync App bot and migrate legacy Actions state',
+  'comment and PR identity checks must accept the Writer App bot and migrate legacy Actions state',
 );
 assert(
   !/(^|\n)\s*git\s+(fetch|push|ls-remote)\b/.test(syncScript),
@@ -309,7 +325,11 @@ assert(
 );
 assert(
   validationStep?.run.includes('test-sync-upstream-identity.sh'),
-  'workflow validation must exercise Sync App comment identity migration',
+  'workflow validation must exercise Writer App comment identity migration',
+);
+assert(
+  validationStep?.run.includes('test-sync-upstream-alerts.sh'),
+  'workflow validation must exercise Writer App sync alert identity migration',
 );
 assert(
   frontendWorkflow.jobs.automation.steps.some(
@@ -327,7 +347,13 @@ assert(
   frontendWorkflow.jobs.automation.steps.some(
     (step) => step.run === 'bash ../workflows/scripts/tests/test-sync-upstream-identity.sh',
   ),
-  'required CI must execute the Sync App comment identity integration test',
+  'required CI must execute the Writer App comment identity integration test',
+);
+assert(
+  frontendWorkflow.jobs.automation.steps.some(
+    (step) => step.run === 'bash ../workflows/scripts/tests/test-sync-upstream-alerts.sh',
+  ),
+  'required CI must execute the Writer App alert identity integration test',
 );
 assert(
   automation.authorization.external_pull_request_analysis_requires_label === 'agent-analyze',

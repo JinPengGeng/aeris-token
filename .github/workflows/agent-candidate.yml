@@ -1,0 +1,163 @@
+name: Agent candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Open, agent-ready Issue number to address
+        required: true
+        type: number
+      task_description:
+        description: Bounded implementation request for the candidate patch
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-candidate-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Bind candidate task
+    if: >-
+      (vars.AERIS_AGENTS_ENABLED == 'true' || vars.AERIS_AGENTS_ENABLED == '1') &&
+      (vars.AERIS_CANDIDATE_AGENTS_ENABLED == 'true' || vars.AERIS_CANDIDATE_AGENTS_ENABLED == '1')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      repository: ${{ steps.bind.outputs.repository }}
+      repository_id: ${{ steps.bind.outputs.repository_id }}
+      issue_number: ${{ steps.bind.outputs.issue_number }}
+      base_ref: ${{ steps.bind.outputs.base_ref }}
+      base_sha: ${{ steps.bind.outputs.base_sha }}
+    steps:
+      - name: Check out trusted automation
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/automation/package-lock.json
+
+      - name: Install trusted automation runtime
+        working-directory: .github/automation
+        run: npm ci --ignore-scripts
+
+      - name: Bind repository, Issue, and base SHA
+        id: bind
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AERIS_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          AERIS_PREFLIGHT_OUTPUT: ${{ runner.temp }}/aeris-candidate/preflight.json
+        run: node .github/automation/src/autonomy-preflight.mjs
+
+  candidate:
+    name: Generate candidate artifact
+    needs: [preflight]
+    if: needs.preflight.result == 'success'
+    runs-on: ubuntu-latest
+    environment: agent
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - name: Check out bound base revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.preflight.outputs.base_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Stage trusted candidate runtime outside the checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime="${RUNNER_TEMP}/aeris-candidate-runtime"
+          install -d -m 0700 "${runtime}"
+          install -m 0444 \
+            .github/automation/src/autonomy-agent-candidate-runner.mjs \
+            .github/automation/src/autonomy-candidate.mjs \
+            .github/automation/src/autonomy-extract.mjs \
+            "${runtime}/"
+          command -v node >"${runtime}/node-path"
+          chmod 0444 "${runtime}/node-path"
+
+      - name: Validate trusted model routing
+        env:
+          AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
+          AERIS_AI_MODEL: ${{ vars.AERIS_AI_MODEL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${AERIS_AI_BASE_URL}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[-A-Za-z0-9._~:/?#\[\]@!$\&'()*+,;=%]*)?$ ]]
+          [[ "${AERIS_AI_MODEL}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]]
+
+      - name: Generate bounded candidate changes
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        env:
+          AERIS_TASK_ID: issue:${{ needs.preflight.outputs.issue_number }}
+          AERIS_ISSUE_NUMBER: ${{ needs.preflight.outputs.issue_number }}
+          AERIS_BASE_REF: ${{ needs.preflight.outputs.base_ref }}
+          AERIS_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
+          AERIS_TASK_DESCRIPTION: ${{ inputs.task_description }}
+        with:
+          prompt-file: .github/codex/candidate-prompt.md
+          openai-api-key: ${{ secrets.AERIS_AI_API_KEY }}
+          responses-api-endpoint: ${{ format('{0}/responses', vars.AERIS_AI_BASE_URL) }}
+          codex-version: 0.148.0
+          permission-profile: :workspace
+          safety-strategy: drop-sudo
+          working-directory: ${{ github.workspace }}
+          output-schema-file: .github/codex/schemas/result.schema.json
+          model: ${{ vars.AERIS_AI_MODEL }}
+
+      - name: Extract and validate candidate patch
+        env:
+          GITHUB_REPOSITORY: ${{ needs.preflight.outputs.repository }}
+          GITHUB_REPOSITORY_ID: ${{ needs.preflight.outputs.repository_id }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          AERIS_ISSUE_NUMBER: ${{ needs.preflight.outputs.issue_number }}
+          AERIS_BASE_REF: ${{ needs.preflight.outputs.base_ref }}
+          AERIS_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime="${RUNNER_TEMP}/aeris-candidate-runtime"
+          node_binary="$(<"${runtime}/node-path")"
+          [[ "${node_binary}" == /* && -x "${node_binary}" ]]
+          /usr/bin/env -i \
+            HOME="${RUNNER_TEMP}" \
+            PATH=/usr/bin:/bin \
+            TMPDIR="${RUNNER_TEMP}" \
+            GITHUB_WORKSPACE="${GITHUB_WORKSPACE}" \
+            GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
+            GITHUB_REPOSITORY_ID="${GITHUB_REPOSITORY_ID}" \
+            GITHUB_RUN_ID="${GITHUB_RUN_ID}" \
+            GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}" \
+            AERIS_ISSUE_NUMBER="${AERIS_ISSUE_NUMBER}" \
+            AERIS_BASE_REF="${AERIS_BASE_REF}" \
+            AERIS_BASE_SHA="${AERIS_BASE_SHA}" \
+            AERIS_CANDIDATE_OUTPUT="${RUNNER_TEMP}/aeris-candidate" \
+            "${node_binary}" "${runtime}/autonomy-agent-candidate-runner.mjs"
+
+      - name: Upload candidate artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: agent-candidate-issue-${{ needs.preflight.outputs.issue_number }}-run-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/aeris-candidate/candidate.patch
+            ${{ runner.temp }}/aeris-candidate/candidate-manifest.json
+          if-no-files-found: error
+          retention-days: 1
