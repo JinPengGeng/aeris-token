@@ -50,8 +50,9 @@ output() {
   printf '%s=%s\n' "$1" "$2" >>"${GITHUB_OUTPUT}"
 }
 
-# Writer App credentials are restricted to branch and PR publication. Issue
-# reads and writes use the workflow token through this isolated channel.
+# Writer App credentials are restricted to branch, PR, and pending-tip comment
+# publication. Issue inventory and ordinary issue comments use the workflow
+# token through this isolated channel.
 aeris_issues_gh() {
   aeris_require_active_autonomy_window || return
   GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"
@@ -102,8 +103,14 @@ refresh_prs() {
   fi
 }
 
-pr_bot_comments() {
+issue_bot_comments() {
   aeris_issues_gh api --paginate \
+    "repos/${GITHUB_REPOSITORY}/issues/$1/comments?per_page=100" \
+    --jq ".[] | select(.user.login == \"${WRITER_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") | .body"
+}
+
+pr_bot_comments() {
+  aeris_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/$1/comments?per_page=100" \
     --jq ".[] | select(.user.login == \"${WRITER_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") | .body"
 }
@@ -115,7 +122,7 @@ is_sync_automation_login() {
 issue_comment_once() {
   local number="$1" key="$2" message="$3" marker comments
   marker="<!-- upstream-sync-${key} -->"
-  comments="$(pr_bot_comments "${number}")"
+  comments="$(issue_bot_comments "${number}")"
   if [[ "${comments}" != *"${marker}"* ]]; then
     aeris_issues_gh api --method POST \
       "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" \
@@ -125,7 +132,15 @@ ${message}" >/dev/null
 }
 
 pr_comment_once() {
-  issue_comment_once "$@"
+  local number="$1" key="$2" message="$3" marker comments
+  marker="<!-- upstream-sync-${key} -->"
+  comments="$(pr_bot_comments "${number}")"
+  if [[ "${comments}" != *"${marker}"* ]]; then
+    aeris_gh api --method POST \
+      "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" \
+      -f body="${marker}
+${message}" >/dev/null
+  fi
 }
 
 # Authenticate the planned SHA before push so an interrupted publication can
@@ -134,21 +149,22 @@ set_pending_tip() {
   local number="$1" sha="$2" comment_id body
   body="<!-- upstream-sync-pending-tip:${sha} -->
 Prepared automation branch tip ${sha}."
-  comment_id="$(aeris_issues_gh api --paginate \
+  comment_id="$(aeris_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/${number}/comments?per_page=100" \
     --jq ".[] | select((.user.login == \"${WRITER_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") and (.body | startswith(\"<!-- upstream-sync-pending-tip:\"))) | .id" |
     tail -n1)"
   if [[ -n "${comment_id}" ]]; then
-    aeris_issues_gh api \
+    # GitHub authorizes a PR comment mutation with pull_requests:write even
+    # when the REST route is under /issues. Use the bounded Writer App token;
+    # the workflow token intentionally has only pull-requests:read.
+    aeris_gh api \
       --method PATCH \
       "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
       -f body="${body}" >/dev/null
   else
-    # Use the issue-comments REST endpoint for PRs as well. The workflow token
-    # intentionally has issues:write but only pull-requests:read; `gh pr
-    # comment` routes through GraphQL addComment and requires the latter write
-    # permission even though the REST issue-comment endpoint does not.
-    aeris_issues_gh api --method POST \
+    # Keep this on the REST issue-comments endpoint so the mutation is
+    # idempotent and does not rely on the GraphQL CLI fallback.
+    aeris_gh api --method POST \
       "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" \
       -f body="${body}" >/dev/null
   fi

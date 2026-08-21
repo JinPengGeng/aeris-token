@@ -252,8 +252,13 @@ assert(
   publishStep?.env.AERIS_ISSUES_GH_TOKEN === '${{ github.token }}' &&
     syncScript.includes(': "${AERIS_ISSUES_GH_TOKEN:?AERIS_ISSUES_GH_TOKEN is required}"') &&
     syncScript.includes('aeris_issues_gh()') &&
-    syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"'),
-  'sync Issue and comment operations must use the separate workflow token channel',
+    syncScript.includes('issue_bot_comments() {\n  aeris_issues_gh api') &&
+    syncScript.includes('pr_bot_comments() {\n  aeris_gh api') &&
+    syncScript.includes('pr_comment_once() {') &&
+    syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"') &&
+    syncScript.includes('aeris_gh api \\\n      --method PATCH') &&
+    syncScript.includes('aeris_gh api --method POST \\\n      "repos/${GITHUB_REPOSITORY}/issues/${number}/comments"'),
+  'sync issue inventory uses the workflow token while pending-tip mutations use the Writer token',
 );
 const mergeStep = syncSteps.find((step) => step.name === 'Merge synchronization PR');
 const disarmCallIndex = syncScript.search(/^disarm_tracked_pr$/m);
