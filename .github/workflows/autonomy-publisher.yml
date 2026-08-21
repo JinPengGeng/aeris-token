@@ -87,6 +87,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: writer
+    concurrency:
+      group: aeris-writer-mutation
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: read
@@ -94,7 +97,7 @@ jobs:
       pull-requests: read
     env:
       AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
-      AERIS_AUTONOMY_MIN_REMAINING_SECONDS: 600
+      AERIS_AUTONOMY_MIN_REMAINING_SECONDS: 3600
     steps:
       - name: Check out bound trusted base
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

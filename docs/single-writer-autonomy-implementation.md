@@ -249,3 +249,37 @@ PoC 使用 disposable issue、`docs/automation-canary/` 和 Draft PR；在全部
 - `docs/development-workflow.md`
 
 所有 workflow 和第三方 Action 固定完整 commit SHA。每个生产开关默认关闭；GitHub 设置 mutation 必须有 mutation 前快照和可执行回滚记录。实施文件已在当前工作树中出现不等于远端设置、production flags 或 required Policy 已启用。
+
+## 13. Writer App 硬到期撤销
+
+`.github/workflows/autonomy-expiry-revoker.yml` 每 5 分钟运行一次，并在
+`AERIS_AUTONOMY_EXPIRES_AT` 前 45 分钟进入撤销阶段；所有 Writer token mint 在到期前
+60 分钟停止，因此撤销前至少留出 15 分钟静默期。它在 `writer`
+Environment 中使用同一个 `AERIS_WRITER_APP_PRIVATE_KEY` 生成短期 App JWT，严格校验
+App ID、slug、installation account、repository ID 和 repository 名称。App name、URL、webhook、
+events、slug、permission 集合、installation repository selection 等可变元数据即使漂移也不能阻止撤权；
+App ID 是管理身份锚点，实时 slug 与配置 slug 会同时用于捕获 rename 前后创建的 Writer PR。
+
+PR inventory 以不可伪造的作者身份为边界：Writer App bot 创建的所有开放 PR 都进入撤销范围，
+即使 marker、head、base 或 issue 元数据已经漂移；legacy sync 只接受精确 legacy bot、同仓库 head
+和 `automation/sync-upstream`。外部作者伪造 marker 或分支名只作为不可信提示忽略，不能阻断卸载。
+每轮完整分页连续读取两次并比较全部 PR identity；mutation 后还要求连续两轮受管 inventory 一致且
+`autoMergeRequest == null`。
+
+Publisher、Finalizer、Sync 和 Revoker 的 mutation job 共用 `aeris-writer-mutation` concurrency lock。
+撤销先使用仅具 `contents: read`、`pull-requests: write` 的 workflow `GITHUB_TOKEN` 做 pre-disarm，
+随后用 App JWT 卸载 installation 并通过 404 和 installation 列表复核，再以独立的 workflow token
+做 post-uninstall 收敛；因此最后一次复核前发生的 rearm 或新 Writer PR 仍会被捕获。pre-disarm
+具有 60 秒总预算，超时即继续 uninstall，不能耗尽 10 分钟 runner deadline；post-disarm 具有独立
+180 秒预算。DELETE 响应、卸载确认或 installation 列表失败均不能跳过 post-disarm，最终会聚合报告
+撤权与 cleanup 状态。pre-disarm 失败不能保留 Writer authority；post-disarm 失败则明确报告 cleanup incomplete。旧 installation ID
+返回 404 时会重新发现目标 account 上的 installation，稳定重复执行返回 `already_uninstalled`。
+
+`workflow_dispatch` 默认执行同一撤销路径；检查演练必须显式选择 `dry_run`。`force` 只绕过时间窗口，
+且要求 Agent、Writer、Sync 和 autonomous merge 四个生产开关均已关闭。启用生产前必须通过 disposable
+PR 实测 `GITHUB_TOKEN` 的 GraphQL `disablePullRequestAutoMerge` 权限；该 canary 是上线阻断条件，
+因为 GitHub 没有为该 mutation 提供可静态证明的细粒度权限表。该 token 不能写 contents，且
+`GITHUB_TOKEN` 无法删除 repository/environment secrets 或 variables，因此密钥记录仍需后续人工清理；
+installation 卸载后，该密钥无法再获得仓库访问权，除非人工重新安装 App。GitHub schedule 延迟、
+GitHub API 故障，以及没有服务端 required lease check 时 pre-disarm 到 uninstall 之间仍可能完成 merge，
+是必须保留并监控的残余边界。
