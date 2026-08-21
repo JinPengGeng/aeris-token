@@ -131,6 +131,17 @@ CREATE TABLE IF NOT EXISTS provider_api_keys (
     KEY idx_provider_api_keys_provider_default_sort (`provider_id`, `internal_priority`, `name`, `id`)
 );
 
+CREATE TABLE IF NOT EXISTS half_open_probe_completions (
+    `provider_key_id` VARCHAR(191) NOT NULL,
+    `api_format` VARCHAR(191) NOT NULL,
+    `completion_id` VARCHAR(64) NOT NULL,
+    `owner` VARCHAR(255) NOT NULL,
+    `fencing_token` BIGINT NOT NULL,
+    `completed_at_unix_ms` BIGINT NOT NULL,
+    `outcome` VARCHAR(16) NOT NULL,
+    PRIMARY KEY (`provider_key_id`, `api_format`)
+);
+
 CREATE TABLE IF NOT EXISTS pool_member_scores (
     `id` VARCHAR(192) NOT NULL,
     `pool_kind` VARCHAR(64) NOT NULL,

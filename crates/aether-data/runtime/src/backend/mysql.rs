@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use aether_data_contracts::repository::half_open_probes::HalfOpenProbeCompletionRepository;
+
 use crate::database::SqlDatabaseConfig;
 use crate::driver::mysql::{MysqlPool, MysqlPoolFactory};
 use crate::repository::announcements::{
@@ -31,6 +33,7 @@ use crate::repository::gemini_file_mappings::{
 use crate::repository::global_models::{
     GlobalModelReadRepository, GlobalModelWriteRepository, MysqlGlobalModelReadRepository,
 };
+use crate::repository::half_open_probes::MysqlHalfOpenProbeCompletionRepository;
 use crate::repository::management_tokens::{
     ManagementTokenReadRepository, ManagementTokenWriteRepository, MysqlManagementTokenRepository,
 };
@@ -172,6 +175,14 @@ impl MysqlBackend {
 
     pub fn global_model_write_repository(&self) -> Arc<dyn GlobalModelWriteRepository> {
         Arc::new(MysqlGlobalModelReadRepository::new(self.pool_clone()))
+    }
+
+    pub fn half_open_probe_completion_repository(
+        &self,
+    ) -> Arc<dyn HalfOpenProbeCompletionRepository> {
+        Arc::new(MysqlHalfOpenProbeCompletionRepository::new(
+            self.pool_clone(),
+        ))
     }
 
     pub fn oauth_provider_read_repository(&self) -> Arc<dyn OAuthProviderReadRepository> {

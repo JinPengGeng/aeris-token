@@ -736,6 +736,8 @@ pub(crate) enum DirectUpstreamResponse {
 }
 
 pub(crate) struct DirectUpstreamStreamExecution {
+    pub(crate) half_open_probe_terminal_guard:
+        Option<crate::orchestration::HalfOpenProbeTerminalGuard>,
     pub(crate) request_id: String,
     pub(crate) candidate_id: Option<String>,
     pub(crate) status_code: u16,
@@ -863,6 +865,7 @@ impl DirectSyncExecutionRuntime {
         let stream_summary_report_context = build_stream_summary_report_context(plan);
 
         Ok(DirectUpstreamStreamExecution {
+            half_open_probe_terminal_guard: None,
             request_id: plan.request_id.clone(),
             candidate_id: plan.candidate_id.clone(),
             status_code,
@@ -898,73 +901,114 @@ pub(crate) async fn execute_sync_plan_with_report_context(
     plan: &ExecutionPlan,
     report_context: Option<&serde_json::Value>,
 ) -> Result<ExecutionResult, GatewayError> {
-    #[cfg(test)]
-    {
-        let remote_execution_runtime_base_url = state
-            .execution_runtime_override_base_url()
-            .unwrap_or_default();
-        if !remote_execution_runtime_base_url.trim().is_empty() {
-            return execute_sync_plan_via_remote_execution_runtime(
-                state,
-                remote_execution_runtime_base_url,
-                trace_id,
-                plan,
-            )
-            .await;
-        }
-    }
+    crate::orchestration::enforce_half_open_probe_admission(state, plan).await?;
+    let _half_open_probe_terminal_guard =
+        crate::orchestration::HalfOpenProbeTerminalGuard::new(state, plan);
 
-    if resolve_local_tunnel_node_id(state, plan.proxy.as_ref()).is_some() {
-        return execute_sync_plan_via_local_tunnel(state, plan, report_context)
+    let result = async {
+        #[cfg(test)]
+        {
+            let remote_execution_runtime_base_url = state
+                .execution_runtime_override_base_url()
+                .unwrap_or_default();
+            if !remote_execution_runtime_base_url.trim().is_empty() {
+                return execute_sync_plan_via_remote_execution_runtime(
+                    state,
+                    remote_execution_runtime_base_url,
+                    trace_id,
+                    plan,
+                )
+                .await;
+            }
+        }
+
+        if resolve_local_tunnel_node_id(state, plan.proxy.as_ref()).is_some() {
+            return execute_sync_plan_via_local_tunnel(state, plan, report_context)
+                .await
+                .map_err(|err| GatewayError::Internal(err.to_string()));
+        }
+
+        match super::grok::maybe_execute_grok_sync(plan, report_context).await {
+            Ok(Some(result)) => {
+                record_manual_proxy_request_outcome(state, plan, result.status_code).await;
+                return Ok(result);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                record_manual_proxy_request_failure(state, plan).await;
+                return Err(GatewayError::Internal(err.to_string()));
+            }
+        }
+
+        let _ = trace_id;
+        match maybe_execute_windsurf_sync(state, plan, None).await {
+            Ok(Some(result)) => return Ok(result),
+            Ok(None) => {}
+            Err(err) => return Err(GatewayError::Internal(err.to_string())),
+        }
+        let state_for_response_started = state.clone();
+        match DirectSyncExecutionRuntime::new()
+            .execute_sync_with_response_started(plan, move |event| {
+                crate::orchestration::spawn_local_oauth_success_effect(
+                    state_for_response_started,
+                    plan,
+                    report_context,
+                    crate::orchestration::LocalOAuthSuccessEffect {
+                        status_code: event.status_code,
+                        request_started_at_unix_ms: Some(
+                            event.response_observation.request_started_at_unix_ms,
+                        ),
+                        request_order_id: Some(&event.response_observation.request_order_id),
+                    },
+                );
+            })
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()));
-    }
-
-    match super::grok::maybe_execute_grok_sync(plan, report_context).await {
-        Ok(Some(result)) => {
-            record_manual_proxy_request_outcome(state, plan, result.status_code).await;
-            return Ok(result);
-        }
-        Ok(None) => {}
-        Err(err) => {
-            record_manual_proxy_request_failure(state, plan).await;
-            return Err(GatewayError::Internal(err.to_string()));
+        {
+            Ok(result) => {
+                record_manual_proxy_request_outcome(state, plan, result.status_code).await;
+                Ok(result)
+            }
+            Err(err) => {
+                record_manual_proxy_request_failure(state, plan).await;
+                Err(GatewayError::Internal(err.to_string()))
+            }
         }
     }
-
-    let _ = trace_id;
-    match maybe_execute_windsurf_sync(state, plan, None).await {
-        Ok(Some(result)) => return Ok(result),
-        Ok(None) => {}
-        Err(err) => return Err(GatewayError::Internal(err.to_string())),
+    .await;
+    if !crate::orchestration::half_open_probe_is_active(plan).await {
+        return result;
     }
-    let state_for_response_started = state.clone();
-    match DirectSyncExecutionRuntime::new()
-        .execute_sync_with_response_started(plan, move |event| {
-            crate::orchestration::spawn_local_oauth_success_effect(
-                state_for_response_started,
-                plan,
-                report_context,
-                crate::orchestration::LocalOAuthSuccessEffect {
-                    status_code: event.status_code,
-                    request_started_at_unix_ms: Some(
-                        event.response_observation.request_started_at_unix_ms,
-                    ),
-                    request_order_id: Some(&event.response_observation.request_order_id),
-                },
-            );
-        })
-        .await
-    {
-        Ok(result) => {
-            record_manual_proxy_request_outcome(state, plan, result.status_code).await;
-            Ok(result)
+    let health_effect = match result.as_ref() {
+        Ok(response) if response.status_code < 400 => {
+            crate::orchestration::LocalExecutionEffect::HealthSuccess(
+                crate::orchestration::LocalHealthSuccessEffect,
+            )
         }
-        Err(err) => {
-            record_manual_proxy_request_failure(state, plan).await;
-            Err(GatewayError::Internal(err.to_string()))
-        }
-    }
+        Ok(response) => crate::orchestration::LocalExecutionEffect::HealthFailure(
+            crate::orchestration::LocalHealthFailureEffect {
+                status_code: response.status_code,
+                classification:
+                    crate::orchestration::LocalFailoverClassification::RetryUpstreamFailure,
+            },
+        ),
+        Err(_) => crate::orchestration::LocalExecutionEffect::HealthFailure(
+            crate::orchestration::LocalHealthFailureEffect {
+                status_code: 503,
+                classification:
+                    crate::orchestration::LocalFailoverClassification::RetryUpstreamFailure,
+            },
+        ),
+    };
+    crate::orchestration::apply_local_execution_effect(
+        state,
+        crate::orchestration::LocalExecutionEffectContext {
+            plan,
+            report_context,
+        },
+        health_effect,
+    )
+    .await;
+    result
 }
 
 pub(crate) async fn execute_stream_plan_via_local_tunnel(
@@ -1003,6 +1047,7 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
     let response_headers_observed_at_unix_ms = crate::clock::current_unix_ms();
 
     Ok(Some(DirectUpstreamStreamExecution {
+        half_open_probe_terminal_guard: None,
         request_id: plan.request_id.clone(),
         candidate_id: plan.candidate_id.clone(),
         status_code,
@@ -4307,6 +4352,7 @@ pub(crate) fn build_execution_response_body(
 mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
     use aether_contracts::{
@@ -4316,9 +4362,11 @@ mod tests {
         TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_BACKEND_REQWEST_RUSTLS, TRANSPORT_HTTP_MODE_AUTO,
         TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE, TRANSPORT_HTTP_MODE_HTTP1_ONLY,
     };
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data::repository::proxy_nodes::{
         InMemoryProxyNodeRepository, ProxyNodeReadRepository, StoredProxyNode,
     };
+    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use axum::body::{Body, Bytes};
     use axum::extract::ws::Message;
     use axum::extract::Path;
@@ -4355,6 +4403,91 @@ mod tests {
     use crate::AppState;
 
     const LOCAL_HTTP_SUCCESS_TIMEOUT_MS: u64 = 15_000;
+
+    #[tokio::test]
+    async fn half_open_admission_denial_sends_zero_upstream_requests() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_for_route = Arc::clone(&requests);
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local address");
+        let app = Router::new().route(
+            "/probe",
+            post(move || {
+                let requests = Arc::clone(&requests_for_route);
+                async move {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"ok": true}))
+                }
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let key = StoredProviderCatalogKey::new(
+            "key-half-open".to_string(),
+            "provider-half-open".to_string(),
+            "probe-key".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("provider key")
+        .with_health_fields(
+            None,
+            Some(json!({
+                "openai:chat": {
+                    "open": true,
+                    "next_probe_at_unix_secs": 1,
+                    "half_open_fencing_token": 9
+                }
+            })),
+        );
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            Vec::new(),
+            Vec::new(),
+            vec![key],
+        ));
+        let data =
+            crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(repository);
+        let state = AppState::new()
+            .expect("app state")
+            .with_data_state_for_tests(data);
+        let plan = ExecutionPlan {
+            request_id: "request-half-open-denied".to_string(),
+            candidate_id: Some("candidate-half-open-denied".to_string()),
+            provider_name: Some("test".to_string()),
+            provider_id: "provider-half-open".to_string(),
+            endpoint_id: "endpoint-half-open".to_string(),
+            key_id: "key-half-open".to_string(),
+            method: "POST".to_string(),
+            url: format!("http://{addr}/probe"),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({})),
+            stream: false,
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: "openai:chat".to_string(),
+            model_name: None,
+            proxy: None,
+            transport_profile: None,
+            timeouts: Some(ExecutionTimeouts {
+                total_ms: Some(1_000),
+                ..ExecutionTimeouts::default()
+            }),
+        };
+
+        let result = execute_sync_plan(&state, None, &plan).await;
+        server.abort();
+
+        assert!(result.is_err());
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn upstream_error_url_sanitization_removes_secrets_everywhere() {

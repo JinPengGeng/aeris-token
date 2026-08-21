@@ -9,6 +9,7 @@ mod attempt;
 mod classifier;
 mod codex_quota_breaker;
 mod effects;
+mod half_open_probe;
 mod health;
 mod oauth_error;
 mod policy;
@@ -47,9 +48,17 @@ pub(crate) use self::effects::{
     LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect,
     LocalPoolErrorEffect, LocalStreamFailureEffect,
 };
+pub(crate) use self::half_open_probe::{
+    attach_half_open_completion_pending, commit_half_open_probe_after_health_cas,
+    enforce_half_open_probe_admission, half_open_probe_is_active,
+    isolate_aborted_half_open_completion, isolate_active_half_open_probe,
+    prepare_half_open_probe_completion, HalfOpenProbeAdmission, HalfOpenProbeAdmissionDeniedReason,
+    HalfOpenProbeTerminalGuard, PreparedHalfOpenProbeCompletion,
+};
 pub(crate) use self::health::{
-    project_local_failure_health, project_local_key_circuit_closed,
+    clear_local_half_open_claim, project_local_failure_health, project_local_key_circuit_closed,
     project_local_key_circuit_failure, project_local_success_health,
+    reset_circuits_preserving_half_open_fences,
 };
 pub(crate) use self::oauth_error::{
     oauth_status_may_be_invalid, oauth_status_proves_access_token_invalid,

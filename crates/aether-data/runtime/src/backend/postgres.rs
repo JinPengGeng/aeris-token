@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use aether_data_contracts::repository::half_open_probes::HalfOpenProbeCompletionRepository;
+
 use crate::driver::postgres::{
     PostgresLeaseRunner, PostgresLeaseRunnerConfig, PostgresPool, PostgresPoolConfig,
     PostgresPoolFactory, PostgresTransactionRunner,
@@ -33,6 +35,7 @@ use crate::repository::gemini_file_mappings::{
 use crate::repository::global_models::{
     GlobalModelReadRepository, GlobalModelWriteRepository, SqlxGlobalModelReadRepository,
 };
+use crate::repository::half_open_probes::PostgresHalfOpenProbeCompletionRepository;
 use crate::repository::management_tokens::{
     ManagementTokenReadRepository, ManagementTokenWriteRepository, SqlxManagementTokenRepository,
 };
@@ -167,6 +170,14 @@ impl PostgresBackend {
 
     pub fn global_model_write_repository(&self) -> Arc<dyn GlobalModelWriteRepository> {
         Arc::new(SqlxGlobalModelReadRepository::new(self.pool_clone()))
+    }
+
+    pub fn half_open_probe_completion_repository(
+        &self,
+    ) -> Arc<dyn HalfOpenProbeCompletionRepository> {
+        Arc::new(PostgresHalfOpenProbeCompletionRepository::new(
+            self.pool_clone(),
+        ))
     }
 
     pub fn management_token_read_repository(&self) -> Arc<dyn ManagementTokenReadRepository> {

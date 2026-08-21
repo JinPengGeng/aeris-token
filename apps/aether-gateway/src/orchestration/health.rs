@@ -115,6 +115,10 @@ pub(crate) fn project_local_key_circuit_open(
         .saturating_add(u64::from(current_bool(&current, "open")));
     let request_results_window =
         append_request_result_window(&current, observed_at_unix_secs, false);
+    let half_open_fencing_token = current_u64(&current, "half_open_fencing_token");
+    let half_open_claim = current.get("half_open_claim").cloned();
+    let half_open_until_unix_ms = current.get("half_open_until_unix_ms").cloned();
+    let half_open_completion_pending = current.get("half_open_completion_pending").cloned();
     circuit_by_format.insert(
         api_format.to_string(),
         json!({
@@ -134,6 +138,10 @@ pub(crate) fn project_local_key_circuit_open(
             "half_open_until": Value::Null,
             "half_open_successes": 0,
             "half_open_failures": half_open_failures,
+            "half_open_fencing_token": half_open_fencing_token,
+            "half_open_claim": half_open_claim,
+            "half_open_until_unix_ms": half_open_until_unix_ms,
+            "half_open_completion_pending": half_open_completion_pending,
             "request_results_window": request_results_window,
         }),
     );
@@ -164,6 +172,10 @@ pub(crate) fn project_local_key_circuit_failure(
     let request_results_window =
         append_request_result_window(&current, observed_at_unix_secs, false);
     let already_open = current_bool(&current, "open");
+    let half_open_fencing_token = current_u64(&current, "half_open_fencing_token");
+    let half_open_claim = current.get("half_open_claim").cloned();
+    let half_open_until_unix_ms = current.get("half_open_until_unix_ms").cloned();
+    let half_open_completion_pending = current.get("half_open_completion_pending").cloned();
     if !already_open && consecutive_failures < LOCAL_KEY_CIRCUIT_FAILURE_THRESHOLD {
         circuit_by_format.insert(
             api_format.to_string(),
@@ -181,6 +193,10 @@ pub(crate) fn project_local_key_circuit_failure(
                 "half_open_until": Value::Null,
                 "half_open_successes": 0,
                 "half_open_failures": 0,
+                "half_open_fencing_token": half_open_fencing_token,
+                "half_open_claim": half_open_claim,
+                "half_open_until_unix_ms": half_open_until_unix_ms,
+                "half_open_completion_pending": half_open_completion_pending,
                 "request_results_window": request_results_window,
             }),
         );
@@ -224,6 +240,10 @@ pub(crate) fn project_local_key_circuit_failure(
             "half_open_until": Value::Null,
             "half_open_successes": 0,
             "half_open_failures": half_open_failures,
+            "half_open_fencing_token": half_open_fencing_token,
+            "half_open_claim": half_open_claim,
+            "half_open_until_unix_ms": half_open_until_unix_ms,
+            "half_open_completion_pending": half_open_completion_pending,
             "request_results_window": request_results_window,
         }),
     );
@@ -243,6 +263,26 @@ pub(crate) fn project_local_key_circuit_closed(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let half_open_fencing_token = circuit_by_format
+        .get(api_format)
+        .and_then(Value::as_object)
+        .map(|current| current_u64(current, "half_open_fencing_token"))
+        .unwrap_or(0);
+    let half_open_claim = circuit_by_format
+        .get(api_format)
+        .and_then(Value::as_object)
+        .and_then(|current| current.get("half_open_claim"))
+        .cloned();
+    let half_open_until_unix_ms = circuit_by_format
+        .get(api_format)
+        .and_then(Value::as_object)
+        .and_then(|current| current.get("half_open_until_unix_ms"))
+        .cloned();
+    let half_open_completion_pending = circuit_by_format
+        .get(api_format)
+        .and_then(Value::as_object)
+        .and_then(|current| current.get("half_open_completion_pending"))
+        .cloned();
     circuit_by_format.insert(
         api_format.to_string(),
         json!({
@@ -254,6 +294,10 @@ pub(crate) fn project_local_key_circuit_closed(
             "half_open_until": Value::Null,
             "half_open_successes": 0,
             "half_open_failures": 0,
+            "half_open_fencing_token": half_open_fencing_token,
+            "half_open_claim": half_open_claim,
+            "half_open_until_unix_ms": half_open_until_unix_ms,
+            "half_open_completion_pending": half_open_completion_pending,
         }),
     );
     Some(Value::Object(circuit_by_format))
@@ -261,6 +305,63 @@ pub(crate) fn project_local_key_circuit_closed(
 
 fn current_bool(current: &serde_json::Map<String, Value>, field: &str) -> bool {
     current.get(field).and_then(Value::as_bool).unwrap_or(false)
+}
+
+pub(crate) fn clear_local_half_open_claim(
+    circuit_by_format: &mut Value,
+    api_format: &str,
+    expected_fencing_token: u64,
+) -> bool {
+    let Some(circuit) = circuit_by_format
+        .as_object_mut()
+        .and_then(|circuits| circuits.get_mut(api_format))
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    if current_u64(circuit, "half_open_fencing_token") != expected_fencing_token {
+        return false;
+    }
+    circuit.remove("half_open_claim");
+    circuit.remove("half_open_until_unix_ms");
+    true
+}
+
+pub(crate) fn reset_circuits_preserving_half_open_fences(
+    current_circuit_by_format: Option<&Value>,
+) -> Value {
+    let mut reset = serde_json::Map::new();
+    let Some(circuits) = current_circuit_by_format.and_then(Value::as_object) else {
+        return Value::Object(reset);
+    };
+    for (api_format, value) in circuits {
+        let Some(circuit) = value.as_object() else {
+            continue;
+        };
+        let fence = current_u64(circuit, "half_open_fencing_token");
+        let active_claim = circuit.get("half_open_claim").cloned();
+        let pending = circuit.get("half_open_completion_pending").cloned();
+        if active_claim.is_some() || pending.is_some() {
+            reset.insert(api_format.clone(), value.clone());
+        } else if fence > 0 {
+            reset.insert(
+                api_format.clone(),
+                json!({
+                    "open": false,
+                    "open_at": Value::Null,
+                    "reason": Value::Null,
+                    "next_probe_at": Value::Null,
+                    "next_probe_at_unix_secs": Value::Null,
+                    "half_open_fencing_token": fence,
+                }),
+            );
+        }
+    }
+    Value::Object(reset)
+}
+
+fn current_u64(current: &serde_json::Map<String, Value>, field: &str) -> u64 {
+    current.get(field).and_then(Value::as_u64).unwrap_or(0)
 }
 
 fn normalize_max_probe_interval_minutes(value: i32) -> u64 {
@@ -509,7 +610,9 @@ mod tests {
                 "openai:chat": {
                     "open": true,
                     "reason": "account_deactivated_401",
-                    "next_probe_at_unix_secs": 1_760_001_920u64
+                    "next_probe_at_unix_secs": 1_760_001_920u64,
+                    "half_open_fencing_token": 19,
+                    "half_open_claim": {"owner": "node-a"}
                 }
             })),
             "openai:chat",
@@ -522,5 +625,45 @@ mod tests {
             projected["openai:chat"]["next_probe_at_unix_secs"],
             Value::Null
         );
+        assert_eq!(
+            projected["openai:chat"]["half_open_fencing_token"],
+            json!(19)
+        );
+        assert_eq!(
+            projected["openai:chat"]["half_open_claim"]["owner"],
+            json!("node-a")
+        );
+        let mut completed = projected;
+        assert!(super::clear_local_half_open_claim(
+            &mut completed,
+            "openai:chat",
+            19
+        ));
+        assert!(completed["openai:chat"].get("half_open_claim").is_none());
+    }
+
+    #[test]
+    fn reset_preserves_authoritative_fence_and_active_recovery_records() {
+        let reset = super::reset_circuits_preserving_half_open_fences(Some(&json!({
+            "openai:chat": {
+                "open": false,
+                "half_open_fencing_token": 41
+            },
+            "claude:messages": {
+                "open": true,
+                "half_open_fencing_token": 42,
+                "half_open_claim": {"owner": "node-a"},
+                "half_open_completion_pending": {"completion_id": "completion-a"}
+            },
+            "gemini": {"open": false}
+        })));
+
+        assert_eq!(reset["openai:chat"]["half_open_fencing_token"], json!(41));
+        assert_eq!(reset["openai:chat"]["open"], json!(false));
+        assert_eq!(
+            reset["claude:messages"]["half_open_claim"]["owner"],
+            json!("node-a")
+        );
+        assert!(reset.get("gemini").is_none());
     }
 }

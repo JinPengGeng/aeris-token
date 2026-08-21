@@ -1,6 +1,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use aether_data_contracts::repository::half_open_probes::HalfOpenProbeCompletionRepository;
+
 #[cfg(feature = "mysql")]
 use super::MysqlBackend;
 #[cfg(feature = "postgres")]
@@ -35,6 +37,7 @@ pub struct DataWriteRepositories {
     request_candidates: Option<Arc<dyn RequestCandidateWriteRepository>>,
     gemini_file_mappings: Option<Arc<dyn GeminiFileMappingWriteRepository>>,
     global_models: Option<Arc<dyn GlobalModelWriteRepository>>,
+    half_open_probe_completions: Option<Arc<dyn HalfOpenProbeCompletionRepository>>,
     management_tokens: Option<Arc<dyn ManagementTokenWriteRepository>>,
     oauth_providers: Option<Arc<dyn OAuthProviderWriteRepository>>,
     pool_scores: Option<Arc<dyn PoolMemberScoreWriteRepository>>,
@@ -61,6 +64,10 @@ impl fmt::Debug for DataWriteRepositories {
                 &self.gemini_file_mappings.is_some(),
             )
             .field("has_global_models", &self.global_models.is_some())
+            .field(
+                "has_half_open_probe_completions",
+                &self.half_open_probe_completions.is_some(),
+            )
             .field("has_management_tokens", &self.management_tokens.is_some())
             .field("has_oauth_providers", &self.oauth_providers.is_some())
             .field("has_pool_scores", &self.pool_scores.is_some())
@@ -125,6 +132,11 @@ impl DataWriteRepositories {
         if self.global_models.is_none() {
             self.global_models = Some(PostgresBackend::global_model_write_repository(backend));
         }
+        if self.half_open_probe_completions.is_none() {
+            self.half_open_probe_completions = Some(
+                PostgresBackend::half_open_probe_completion_repository(backend),
+            );
+        }
         if self.management_tokens.is_none() {
             self.management_tokens =
                 Some(PostgresBackend::management_token_write_repository(backend));
@@ -187,6 +199,10 @@ impl DataWriteRepositories {
         if self.global_models.is_none() {
             self.global_models = Some(MysqlBackend::global_model_write_repository(backend));
         }
+        if self.half_open_probe_completions.is_none() {
+            self.half_open_probe_completions =
+                Some(MysqlBackend::half_open_probe_completion_repository(backend));
+        }
         if self.management_tokens.is_none() {
             self.management_tokens = Some(MysqlBackend::management_token_write_repository(backend));
         }
@@ -246,6 +262,11 @@ impl DataWriteRepositories {
         }
         if self.global_models.is_none() {
             self.global_models = Some(SqliteBackend::global_model_write_repository(backend));
+        }
+        if self.half_open_probe_completions.is_none() {
+            self.half_open_probe_completions = Some(
+                SqliteBackend::half_open_probe_completion_repository(backend),
+            );
         }
         if self.management_tokens.is_none() {
             self.management_tokens =
@@ -326,6 +347,12 @@ impl DataWriteRepositories {
         self.global_models.clone()
     }
 
+    pub fn half_open_probe_completions(
+        &self,
+    ) -> Option<Arc<dyn HalfOpenProbeCompletionRepository>> {
+        self.half_open_probe_completions.clone()
+    }
+
     pub fn management_tokens(&self) -> Option<Arc<dyn ManagementTokenWriteRepository>> {
         self.management_tokens.clone()
     }
@@ -374,6 +401,7 @@ impl DataWriteRepositories {
             || self.request_candidates.is_some()
             || self.gemini_file_mappings.is_some()
             || self.global_models.is_some()
+            || self.half_open_probe_completions.is_some()
             || self.management_tokens.is_some()
             || self.oauth_providers.is_some()
             || self.pool_scores.is_some()

@@ -1198,8 +1198,10 @@ async fn execute_in_process_stream_with_oauth_retry(
     plan: &mut ExecutionPlan,
     trace_id: &str,
     report_context: Option<&Value>,
+    mut half_open_probe_terminal_guard: Option<crate::orchestration::HalfOpenProbeTerminalGuard>,
 ) -> Result<DirectUpstreamStreamExecution, InProcessStreamExecutionError> {
     let mut execution = execute_in_process_stream(state, plan, trace_id).await?;
+    execution.half_open_probe_terminal_guard = half_open_probe_terminal_guard.take();
     apply_stream_summary_report_context(&mut execution, report_context);
     let uses_oauth_credential = stream_plan_uses_oauth_credential(state, plan).await;
     let embedded_oauth_credential = execution.status_code == 200
@@ -1256,8 +1258,11 @@ async fn execute_in_process_stream_with_oauth_retry(
         )
         .await
     {
+        half_open_probe_terminal_guard = execution.half_open_probe_terminal_guard.take();
         drop(execution);
+        crate::orchestration::enforce_half_open_probe_admission(state, plan).await?;
         execution = execute_in_process_stream(state, plan, trace_id).await?;
+        execution.half_open_probe_terminal_guard = half_open_probe_terminal_guard.take();
         apply_stream_summary_report_context(&mut execution, report_context);
     }
     Ok(execution)
@@ -1747,6 +1752,7 @@ struct DirectPassthroughFinalizer {
 struct DirectPassthroughFinalizerCore {
     state: AppState,
     plan: ExecutionPlan,
+    _half_open_probe_terminal_guard: crate::orchestration::HalfOpenProbeTerminalGuard,
     trace_id: String,
     report_kind: Option<String>,
     report_context: Option<Value>,
@@ -2123,6 +2129,7 @@ impl DirectPassthroughFinalizerCore {
         let DirectPassthroughFinalizerCore {
             state,
             plan,
+            _half_open_probe_terminal_guard,
             trace_id,
             report_kind,
             report_context,
@@ -2812,6 +2819,7 @@ async fn execute_stream_from_direct_passthrough(
     pending_recorded: bool,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let DirectUpstreamStreamExecution {
+        half_open_probe_terminal_guard,
         request_id: _,
         candidate_id: _,
         status_code,
@@ -2941,6 +2949,9 @@ async fn execute_stream_from_direct_passthrough(
         );
         let finalizer = DirectPassthroughFinalizer::new(DirectPassthroughFinalizerCore {
             state: state.clone(),
+            _half_open_probe_terminal_guard: half_open_probe_terminal_guard.unwrap_or_else(|| {
+                crate::orchestration::HalfOpenProbeTerminalGuard::new(state, &plan)
+            }),
             plan,
             trace_id: trace_id.to_string(),
             report_kind,
@@ -2998,6 +3009,8 @@ async fn execute_stream_from_direct_passthrough(
 
     let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(direct_passthrough_channel_capacity());
     let state_for_report = state.clone();
+    let half_open_probe_terminal_guard = half_open_probe_terminal_guard
+        .unwrap_or_else(|| crate::orchestration::HalfOpenProbeTerminalGuard::new(state, &plan));
     let plan_for_report = plan;
     let trace_id_owned = trace_id.to_string();
     let report_kind_owned = report_kind;
@@ -3026,6 +3039,7 @@ async fn execute_stream_from_direct_passthrough(
     let provider_pool_in_flight_guard_for_report = in_flight_guard;
     record_stream_pre_first_byte_spawn();
     tokio::spawn(async move {
+        let _half_open_probe_terminal_guard = half_open_probe_terminal_guard;
         let mut stage_trace_for_report = stage_trace_for_report;
         let _stream_total_guard =
             StageElapsedGuard::from_started_at("stream_total", stream_started_at_for_report);
@@ -3820,6 +3834,10 @@ async fn execute_execution_runtime_stream_inner(
         "stream_provider_in_flight",
         provider_in_flight_started_at.elapsed().as_millis() as u64,
     );
+    crate::orchestration::enforce_half_open_probe_admission(state, &plan).await?;
+    let mut half_open_probe_terminal_guard = Some(
+        crate::orchestration::HalfOpenProbeTerminalGuard::new(state, &plan),
+    );
     match maybe_execute_grok_stream(&plan, report_context.as_ref()).await {
         Ok(Some(grok_stream)) => {
             return execute_stream_from_frame_stream_with_retry_scope(
@@ -3840,6 +3858,7 @@ async fn execute_execution_runtime_stream_inner(
                 retry_scope_out.as_deref_mut(),
                 retry_fallback_out.as_deref_mut(),
                 None,
+                half_open_probe_terminal_guard.take(),
             )
             .await;
         }
@@ -3913,6 +3932,7 @@ async fn execute_execution_runtime_stream_inner(
                 retry_scope_out.as_deref_mut(),
                 retry_fallback_out.as_deref_mut(),
                 None,
+                half_open_probe_terminal_guard.take(),
             )
             .await;
         }
@@ -3986,6 +4006,7 @@ async fn execute_execution_runtime_stream_inner(
                 retry_scope_out.as_deref_mut(),
                 retry_fallback_out.as_deref_mut(),
                 None,
+                half_open_probe_terminal_guard.take(),
             )
             .await;
         }
@@ -4059,6 +4080,7 @@ async fn execute_execution_runtime_stream_inner(
                 retry_scope_out.as_deref_mut(),
                 retry_fallback_out.as_deref_mut(),
                 None,
+                half_open_probe_terminal_guard.take(),
             )
             .await;
         }
@@ -4120,6 +4142,7 @@ async fn execute_execution_runtime_stream_inner(
             &mut plan,
             trace_id,
             report_context.as_ref(),
+            half_open_probe_terminal_guard.take(),
         )
         .await
         {
@@ -4225,6 +4248,8 @@ async fn execute_execution_runtime_stream_inner(
                 .response_headers_observed_at_unix_ms,
             &execution.response_observation.request_order_id,
         );
+        let mut execution = execution;
+        let half_open_probe_terminal_guard = execution.half_open_probe_terminal_guard.take();
         let stream_precommit_committed = execution.stream_precommit_committed;
         let frame_stream = build_direct_execution_frame_stream(execution).boxed();
         return execute_stream_from_frame_stream_with_retry_scope(
@@ -4245,6 +4270,7 @@ async fn execute_execution_runtime_stream_inner(
             retry_scope_out,
             retry_fallback_out,
             None,
+            half_open_probe_terminal_guard,
         )
         .await;
     }
@@ -4260,6 +4286,7 @@ async fn execute_execution_runtime_stream_inner(
                 &mut plan,
                 trace_id,
                 report_context.as_ref(),
+                half_open_probe_terminal_guard.take(),
             )
             .await
             {
@@ -4370,6 +4397,8 @@ async fn execute_execution_runtime_stream_inner(
                     .response_headers_observed_at_unix_ms,
                 &execution.response_observation.request_order_id,
             );
+            let mut execution = execution;
+            let half_open_probe_terminal_guard = execution.half_open_probe_terminal_guard.take();
             let stream_precommit_committed = execution.stream_precommit_committed;
             let frame_stream = build_direct_execution_frame_stream(execution).boxed();
             return execute_stream_from_frame_stream_with_retry_scope(
@@ -4390,6 +4419,7 @@ async fn execute_execution_runtime_stream_inner(
                 retry_scope_out.as_deref_mut(),
                 retry_fallback_out.as_deref_mut(),
                 None,
+                half_open_probe_terminal_guard,
             )
             .await;
         }
@@ -4505,6 +4535,7 @@ async fn execute_execution_runtime_stream_inner(
             retry_scope_out.as_deref_mut(),
             retry_fallback_out.as_deref_mut(),
             Some(remote_fallback_observation),
+            half_open_probe_terminal_guard.take(),
         )
         .await;
     }
@@ -5535,6 +5566,7 @@ async fn execute_stream_from_frame_stream(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -5558,6 +5590,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     mut retry_scope_out: Option<&mut AiAttemptRetryScope>,
     mut retry_fallback_out: Option<&mut Option<Response<Body>>>,
     fallback_response_observation: Option<ExecutionResponseObservation>,
+    half_open_probe_terminal_guard: Option<crate::orchestration::HalfOpenProbeTerminalGuard>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let request_id = plan.request_id.as_str();
     let request_id_for_log = short_request_id(request_id);
@@ -6743,6 +6776,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let request_diagnostics_for_report = current_request_diagnostics();
     let provider_pool_in_flight_guard_for_report = in_flight_guard;
     tokio::spawn(async move {
+        let _half_open_probe_terminal_guard = half_open_probe_terminal_guard;
         let mut stage_trace_for_report = stage_trace_for_report;
         let _stream_total_guard =
             StageElapsedGuard::from_started_at("stream_total", stream_started_at_for_report);
@@ -8512,6 +8546,7 @@ mod tests {
             Some(&mut retry_scope),
             None,
             None,
+            None,
         )
         .await
         .expect("prefetch transport execution should resolve");
@@ -8605,6 +8640,7 @@ mod tests {
             Some(&mut retry_scope),
             None,
             None,
+            None,
         )
         .await
         .expect("prefetch HTTP status execution should resolve");
@@ -8663,6 +8699,9 @@ mod tests {
         let plan = native_anthropic_stream_plan(request_id);
         let lifecycle_seed = aether_usage_runtime::build_lifecycle_usage_seed(&plan, None);
         DirectPassthroughFinalizer::new(DirectPassthroughFinalizerCore {
+            _half_open_probe_terminal_guard: crate::orchestration::HalfOpenProbeTerminalGuard::new(
+                &state, &plan,
+            ),
             state,
             trace_id: format!("trace-{request_id}"),
             report_kind: None,
@@ -8810,6 +8849,7 @@ mod tests {
             Some(&mut retry_scope),
             Some(&mut fallback_response),
             None,
+            None,
         )
         .await
         .expect("native Anthropic stream execution should succeed");
@@ -8922,6 +8962,7 @@ mod tests {
             &mut plan,
             "trace-non-agent-401",
             None,
+            None,
         )
         .await
         .expect("stream request should execute");
@@ -8999,6 +9040,7 @@ mod tests {
             &state,
             &mut plan,
             "trace-agent-non-task-401",
+            None,
             None,
         )
         .await
@@ -9130,6 +9172,7 @@ mod tests {
             &state,
             &mut plan,
             "trace-agent-invalid-task",
+            None,
             None,
         )
         .await
@@ -9268,6 +9311,7 @@ mod tests {
             &mut plan,
             "trace-anthropic-embedded-oauth-refresh",
             None,
+            None,
         )
         .await
         .expect("embedded authentication error should recover");
@@ -9379,6 +9423,7 @@ mod tests {
             &state,
             &mut plan,
             "trace-anthropic-http-oauth-permission",
+            None,
             None,
         )
         .await
@@ -9500,6 +9545,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             ),
         )
         .await
@@ -9565,6 +9611,7 @@ mod tests {
             &state,
             &mut plan,
             "trace-anthropic-embedded-api-key",
+            None,
             None,
         )
         .await
@@ -9785,6 +9832,9 @@ mod tests {
             crate::request_candidate_runtime::snapshot_local_request_candidate_status(&plan, None);
         let stream_started_at = Instant::now();
         let finalizer = DirectPassthroughFinalizer::new(DirectPassthroughFinalizerCore {
+            _half_open_probe_terminal_guard: crate::orchestration::HalfOpenProbeTerminalGuard::new(
+                &state, &plan,
+            ),
             state,
             trace_id: "trace-inline-first-chunk-candidate-handoff".to_string(),
             report_kind: None,
@@ -13772,6 +13822,12 @@ mod tests {
                 ..ExecutionTimeouts::default()
             }),
         };
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            "development-key",
+        );
+        let state = state.with_data_state_for_tests(data_state);
         let decision = GatewayControlDecision::synthetic(
             "/v1/responses",
             Some("ai_public".to_string()),
@@ -14052,9 +14108,6 @@ mod tests {
                 .expect("server should start");
         });
 
-        let state = AppState::new()
-            .expect("app state should build")
-            .with_execution_runtime_override_base_url(format!("http://{addr}"));
         let plan = ExecutionPlan {
             request_id: "req-remote-runtime-image-sync-json-stream".into(),
             candidate_id: Some("cand-remote-runtime-image-sync-json-stream".into()),
@@ -14087,6 +14140,15 @@ mod tests {
                 ..ExecutionTimeouts::default()
             }),
         };
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            "development-key",
+        );
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_execution_runtime_override_base_url(format!("http://{addr}"))
+            .with_data_state_for_tests(data_state);
         let decision = GatewayControlDecision::synthetic(
             "/v1/images/generations",
             Some("ai_public".to_string()),

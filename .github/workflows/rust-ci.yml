@@ -313,6 +313,11 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@d5f9268ff7620505a81ada10ddf18cdd72240185 # nextest
 
+      - name: Install Redis server
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes redis-server
+
       - name: Test
         env:
           RUSTC_WRAPPER: sccache

@@ -35,6 +35,7 @@ pub(crate) fn build_direct_execution_frame_stream(
 ) -> impl Stream<Item = Result<Bytes, IoError>> + Send + 'static {
     stream! {
         let DirectUpstreamStreamExecution {
+            half_open_probe_terminal_guard,
             request_id: _,
             candidate_id: _,
             status_code,
@@ -49,6 +50,7 @@ pub(crate) fn build_direct_execution_frame_stream(
             stream_first_byte_timeout,
             upstream_target_permit,
         } = execution;
+        let _half_open_probe_terminal_guard = half_open_probe_terminal_guard;
         let _upstream_target_permit = upstream_target_permit;
 
         let mut observer_context = stream_summary_report_context;

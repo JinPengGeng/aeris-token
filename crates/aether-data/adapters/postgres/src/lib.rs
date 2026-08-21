@@ -11,6 +11,7 @@ mod candidates;
 mod error;
 mod gemini_file_mappings;
 mod global_models;
+mod half_open_probes;
 mod lease;
 mod management_tokens;
 mod migrations;
@@ -40,6 +41,7 @@ pub use candidate_selection::SqlxMinimalCandidateSelectionReadRepository;
 pub use candidates::SqlxRequestCandidateReadRepository;
 pub use gemini_file_mappings::SqlxGeminiFileMappingRepository;
 pub use global_models::SqlxGlobalModelReadRepository;
+pub use half_open_probes::PostgresHalfOpenProbeCompletionRepository;
 pub use lease::{
     build_postgres_lease_claim_sql, build_postgres_lease_release_sql,
     build_postgres_lease_renew_sql, PostgresLeaseClaimOptions, PostgresLeaseClaimSpec,

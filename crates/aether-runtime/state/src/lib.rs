@@ -1,4 +1,5 @@
 mod error;
+mod half_open_probe;
 mod memory;
 pub mod redis;
 
@@ -15,6 +16,9 @@ pub use crate::redis::{
 };
 use async_trait::async_trait;
 pub use error::DataLayerError;
+pub use half_open_probe::{
+    DistributedHalfOpenProbeCoordinator, HalfOpenProbeCompletionPermit, HalfOpenProbeLease,
+};
 use memory::MemoryRuntimeBackend;
 pub use memory::MemoryRuntimeStateConfig;
 use tokio::task::JoinHandle;

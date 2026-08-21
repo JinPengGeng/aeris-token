@@ -140,6 +140,15 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn compare_and_update_provider_catalog_key_health_state(
+        &self,
+        update: &aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyHealthStateUpdate,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .compare_and_update_provider_catalog_key_health_state(update)
+            .await
+    }
+
     pub(crate) async fn reset_provider_catalog_key_error_count(
         &self,
         key_id: &str,
@@ -313,8 +322,11 @@ impl<'a> AdminAppState<'a> {
             {
                 return Ok(None);
             }
+            let reset_circuit = crate::orchestration::reset_circuits_preserving_half_open_fences(
+                current.circuit_breaker_by_format.as_ref(),
+            );
             if current.health_by_format.as_ref() == Some(&empty)
-                && current.circuit_breaker_by_format.as_ref() == Some(&empty)
+                && current.circuit_breaker_by_format.as_ref() == Some(&reset_circuit)
             {
                 health_reset = true;
                 break;
@@ -328,7 +340,7 @@ impl<'a> AdminAppState<'a> {
                         expected_health_by_format: current.health_by_format,
                         expected_circuit_breaker_by_format: current.circuit_breaker_by_format,
                         health_by_format: Some(empty.clone()),
-                        circuit_breaker_by_format: Some(empty.clone()),
+                        circuit_breaker_by_format: Some(reset_circuit),
                     },
                 )
                 .await?

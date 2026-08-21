@@ -1,4 +1,7 @@
-use super::extractors::{admin_health_key_id, admin_recover_key_id};
+use super::extractors::{
+    admin_health_key_id, admin_recover_key_id, admin_repair_half_open_isolation_key_id,
+};
+use super::health_builders::HalfOpenIsolationRepair;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
 use crate::handlers::public::{
@@ -81,6 +84,61 @@ pub(super) async fn maybe_build_local_admin_endpoints_health_response(
                 None => (
                     http::StatusCode::NOT_FOUND,
                     Json(json!({ "detail": format!("Key {key_id} 不存在") })),
+                )
+                    .into_response(),
+            },
+        ));
+    }
+
+    if decision.route_family.as_deref() == Some("endpoints_health")
+        && decision.route_kind.as_deref() == Some("repair_half_open_isolation")
+        && request_context
+            .request_path
+            .ends_with("/half-open-isolation")
+    {
+        if !state.has_provider_catalog_data_reader() || !state.has_provider_catalog_data_writer() {
+            return Ok(Some(build_admin_endpoint_health_data_unavailable_response()));
+        }
+        let Some(key_id) = admin_repair_half_open_isolation_key_id(request_context.path()) else {
+            return Ok(Some(build_admin_endpoint_health_bad_request_response(
+                "invalid half-open isolation repair key path",
+            )));
+        };
+        let api_format = query_param_value(request_context.query_string(), "api_format")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let expected_owner = query_param_value(request_context.query_string(), "expected_owner")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let expected_fence = query_param_value(request_context.query_string(), "expected_fence")
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0);
+        let (Some(api_format), Some(expected_owner), Some(expected_fence)) =
+            (api_format, expected_owner, expected_fence)
+        else {
+            return Ok(Some(build_admin_endpoint_health_bad_request_response(
+                "api_format, expected_owner, and a positive expected_fence are required",
+            )));
+        };
+        return Ok(Some(
+            match state
+                .repair_admin_half_open_isolation(
+                    &key_id,
+                    &api_format,
+                    expected_fence,
+                    &expected_owner,
+                )
+                .await?
+            {
+                HalfOpenIsolationRepair::Repaired(payload) => Json(payload).into_response(),
+                HalfOpenIsolationRepair::NotFound => (
+                    http::StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": format!("Key {key_id} 或 API 格式不存在") })),
+                )
+                    .into_response(),
+                HalfOpenIsolationRepair::Rejected(detail) => (
+                    http::StatusCode::CONFLICT,
+                    Json(json!({ "detail": detail })),
                 )
                     .into_response(),
             },
