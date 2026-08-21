@@ -144,7 +144,13 @@ Prepared automation branch tip ${sha}."
       "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
       -f body="${body}" >/dev/null
   else
-    aeris_issues_gh pr comment --repo "${GITHUB_REPOSITORY}" "${number}" --body "${body}" >/dev/null
+    # Use the issue-comments REST endpoint for PRs as well. The workflow token
+    # intentionally has issues:write but only pull-requests:read; `gh pr
+    # comment` routes through GraphQL addComment and requires the latter write
+    # permission even though the REST issue-comment endpoint does not.
+    aeris_issues_gh api --method POST \
+      "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" \
+      -f body="${body}" >/dev/null
   fi
 }
 
