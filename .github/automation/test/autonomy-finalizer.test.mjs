@@ -47,6 +47,7 @@ const writerTrust = Object.freeze({
   proof_installation_account_type: 'User',
   proof_repository_selection: 'selected',
   token_installation_id: 155342531,
+  token_app_slug: 'aeris-writer',
   app_slug: 'aeris-writer',
 });
 const configValue = {
@@ -480,6 +481,42 @@ test('Finalizer marks ready, revalidates, and requests native auto-merge at the 
   assert.ok(client.protectionReads >= 3);
 });
 
+test('Finalizer does not mark a draft ready when branch protection drifts after hold acquisition', async () => {
+  const client = new FakeClient({
+    protection: (_read, state) => state.hold === null
+      ? protection()
+      : protection({ bypassPullRequestAllowances: completeConnection([{ id: 'allowance-1' }]) }),
+  });
+  await assert.rejects(
+    () => finalizeAutonomyPull({
+      readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {},
+    }),
+    /bypassPullRequestAllowances are not empty/,
+  );
+  assert.equal(client.events.filter((event) => event === 'ready').length, 0);
+  assert.equal(client.hold.status, 'in_progress');
+  assert.equal(client.events.includes('hold_success'), false);
+});
+
+test('Finalizer does not mark a draft ready when a required business check drifts after hold acquisition', async () => {
+  const client = new FakeClient({
+    checks: (_read, state) => [
+      check('Rust CI / check', 1, state.hold === null ? {} : { conclusion: 'failure' }),
+      check('Frontend CI / check', 2),
+      check('Automation Policy / gate', 3),
+    ],
+  });
+  await assert.rejects(
+    () => finalizeAutonomyPull({
+      readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {},
+    }),
+    /pre-ready verification failed: required_checks_not_successful:Rust CI \/ check/,
+  );
+  assert.equal(client.events.filter((event) => event === 'ready').length, 0);
+  assert.equal(client.hold.status, 'in_progress');
+  assert.equal(client.events.includes('hold_success'), false);
+});
+
 test('preliminary Finalizer proof never reads branch protection', async () => {
   const client = new FakeClient();
   client.getBranchProtection = async () => {
@@ -668,6 +705,11 @@ test('Finalizer binds Writer token scope and trusted action outputs before mutat
       error: /does not match the configured installation/,
     },
     {
+      client: new FakeClient(),
+      writerTrust: { ...writerTrust, token_app_slug: 'other-writer' },
+      error: /Writer token App does not match the configured App/,
+    },
+    {
       client: new FakeClient({ writerBot: { login: 'person', id: 7, node_id: 'U_7', type: 'User', site_admin: false } }),
       writerTrust,
       error: /Writer Bot REST identity is invalid/,
@@ -824,6 +866,40 @@ test('Finalizer accepts GitHub UNSTABLE while the exact required hold is pending
   });
   assert.equal(result.action, 'armed');
   assert.equal(client.hold.status, 'completed');
+});
+
+test('Finalizer keeps the hold pending when aggregate merge state drifts after arming', async (t) => {
+  for (const mergeStateStatus of ['CLEAN', 'BEHIND', 'DRAFT', 'HAS_HOOKS', 'UNKNOWN']) {
+    await t.test(mergeStateStatus, async () => {
+      const client = new FakeClient({
+        governance: (_read, state) => state.armed ? { mergeStateStatus } : {},
+      });
+      await assert.rejects(
+        () => finalizeAutonomyPull({
+          readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {},
+        }),
+        AutonomyFinalizerError,
+      );
+      assert.equal(client.armed, true);
+      assert.equal(client.hold.status, 'in_progress');
+      assert.equal(client.events.includes('hold_success'), false);
+    });
+  }
+});
+
+test('Finalizer keeps the hold pending when the base commit drifts after arming', async () => {
+  const client = new FakeClient({
+    governance: (_read, state) => state.armed ? { baseRefOid: '9'.repeat(40) } : {},
+  });
+  await assert.rejects(
+    () => finalizeAutonomyPull({
+      readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {},
+    }),
+    /base drifted/,
+  );
+  assert.equal(client.armed, true);
+  assert.equal(client.hold.status, 'in_progress');
+  assert.equal(client.events.includes('hold_success'), false);
 });
 
 test('Finalizer leaves an armed pull held when post-arm governance is inconclusive', async () => {

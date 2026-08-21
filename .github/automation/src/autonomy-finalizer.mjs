@@ -913,10 +913,17 @@ async function releaseHoldAfterArm({
     reject('final independent governance proof drifted from the exact pull request');
   }
   assertGovernanceReleaseStable(baseline, final.governance, expected);
+  validatePendingHoldAggregateState(final.governance);
   if (!exactAutoMergeArmed(final.governance, expected)) {
     reject('final independent governance proof did not confirm exact native auto-merge');
   }
   const pending = await confirmPendingHold(holdClient, hold, expected);
+  const beforeRelease = await readClient.getPullGovernance(expected.pull_number);
+  assertGovernanceReleaseStable(final.governance, beforeRelease, expected);
+  validatePendingHoldAggregateState(beforeRelease);
+  if (!exactAutoMergeArmed(beforeRelease, expected)) {
+    reject('final release read did not confirm exact native auto-merge');
+  }
   let mutationError = null;
   try { await holdClient.completeHoldCheck(pending.id, hold.externalId); } catch (error) { mutationError = error; }
   const completed = await holdClient.getCheckRun(pending.id);
@@ -928,6 +935,13 @@ async function releaseHoldAfterArm({
 function exactAutoMergeArmed(governance, expected) {
   validateGovernance(governance, expected, { requireReady: true });
   return governance.autoMergeRequest !== null && governance.autoMergeRequest.mergeMethod === 'SQUASH';
+}
+
+function validatePendingHoldAggregateState(governance) {
+  const state = required(object(governance, 'pull request governance').mergeStateStatus, 'pull request mergeStateStatus');
+  if (!['BLOCKED', 'UNSTABLE'].includes(state)) {
+    reject('managed pull request aggregate merge state is incompatible with the pending hold');
+  }
 }
 
 const GOVERNANCE_RELEASE_FIELDS = Object.freeze([
@@ -975,6 +989,9 @@ export async function finalizeAutonomyPull({
   }
   if (positiveInteger(configuredWriter.token_installation_id, 'Writer token installation id') !== writerInstallationId) {
     reject('Writer token installation does not match the configured installation');
+  }
+  if (required(configuredWriter.token_app_slug, 'Writer token App slug') !== writerAppSlug) {
+    reject('Writer token App does not match the configured App');
   }
   const writerIdentity = await proveWriterIdentity(writerClient, Object.freeze({
     app_id: writerAppId,
@@ -1031,11 +1048,19 @@ export async function finalizeAutonomyPull({
   let attemptedReadyTransition = false;
   if (current.governance.isDraft) {
     await confirmPendingHold(holdClient, hold, expected);
-    const beforeReady = await readClient.getPullGovernance(pullNumber);
-    validateGovernance(beforeReady, expected);
-    if (beforeReady.id !== pullRequestId || beforeReady.isDraft !== true || beforeReady.autoMergeRequest !== null ||
-        JSON.stringify(beforeReady) !== JSON.stringify(current.governance)) {
-      reject('pull request drifted immediately before the ready-for-review transition');
+    const beforeReady = await evaluateAutonomyFinalizer({
+      client: readClient, protectionClient, trigger, trust, config, checkAttempts: 1, sleepImpl,
+    });
+    if (!beforeReady.eligible) reject(`pre-ready verification failed: ${beforeReady.reason}`);
+    if (beforeReady.proof_level !== 'full' || beforeReady.bound.pull_number !== expected.pull_number ||
+        beforeReady.bound.head_sha !== expected.head_sha) {
+      reject('pre-ready full proof drifted from the exact pull request');
+    }
+    validateGovernance(beforeReady.governance, expected);
+    if (beforeReady.governance.id !== pullRequestId || beforeReady.governance.isDraft !== true ||
+        beforeReady.governance.autoMergeRequest !== null ||
+        JSON.stringify(beforeReady.governance) !== JSON.stringify(current.governance)) {
+      reject('pull request drifted after hold acquisition and before the ready-for-review transition');
     }
     attemptedReadyTransition = true;
     try {
@@ -1072,12 +1097,9 @@ export async function finalizeAutonomyPull({
         JSON.stringify(beforeArm) !== JSON.stringify(current.governance)) {
       reject('pull request drifted immediately before the native auto-merge request');
     }
-    // GitHub exposes only an aggregate merge state. BLOCKED/UNSTABLE are
-    // compatible with the pending required hold but do not prove that it is
-    // the sole blocker; the exact governance profile above is the authority.
-    if (!['BLOCKED', 'UNSTABLE'].includes(beforeArm.mergeStateStatus)) {
-      reject('managed pull request aggregate merge state is incompatible with the pending hold');
-    }
+    // The aggregate state is only a compatibility signal. Exact governance,
+    // required-check, protection, and hold proofs remain the authority.
+    validatePendingHoldAggregateState(beforeArm);
     let armError = null;
     try { await writerClient.enableAutoMerge(pullRequestId, current.bound.head_sha); } catch (error) { armError = error; }
     let confirmedArm;
@@ -1151,7 +1173,8 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
           proof_installation_account_type: required(environment.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE, 'AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE'),
           proof_repository_selection: required(environment.AERIS_WRITER_PROOF_REPOSITORY_SELECTION, 'AERIS_WRITER_PROOF_REPOSITORY_SELECTION'),
           token_installation_id: positiveInteger(environment.AERIS_WRITER_TOKEN_INSTALLATION_ID, 'AERIS_WRITER_TOKEN_INSTALLATION_ID'),
-          app_slug: required(environment.AERIS_WRITER_TOKEN_APP_SLUG, 'AERIS_WRITER_TOKEN_APP_SLUG'),
+          token_app_slug: required(environment.AERIS_WRITER_TOKEN_APP_SLUG, 'AERIS_WRITER_TOKEN_APP_SLUG'),
+          app_slug: required(environment.AERIS_WRITER_APP_SLUG, 'AERIS_WRITER_APP_SLUG'),
         }),
         trigger, trust, config, sleepImpl: dependencies.sleepImpl,
       })
