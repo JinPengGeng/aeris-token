@@ -11930,8 +11930,9 @@ mod tests {
         assert_eq!(blocked_snapshot.terminal_submission_max_pending, 0);
         assert_eq!(blocked_snapshot.terminal_submission_in_flight, 0);
         assert!(blocked_snapshot.lifecycle_submission_pending >= 2);
+        assert_eq!(store.policy_reads.load(Ordering::Acquire), 1);
 
-        store.release_policy.notify_waiters();
+        store.release_policy.notify_one();
         timeout(Duration::from_secs(2), async {
             loop {
                 let snapshot = runtime.metrics_snapshot();
@@ -11955,6 +11956,7 @@ mod tests {
             recovered_snapshot.terminal_enqueue_deferred_dropped_total,
             0
         );
+        assert_eq!(store.policy_reads.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]
@@ -12025,8 +12027,9 @@ mod tests {
         );
         assert_eq!(blocked_snapshot.terminal_submission_in_flight, 1);
         assert!(blocked_snapshot.lifecycle_submission_pending <= BACKLOG + 1);
+        assert_eq!(store.policy_reads.load(Ordering::Acquire), 1);
 
-        store.release_policy.notify_waiters();
+        store.release_policy.notify_one();
         timeout(Duration::from_secs(5), async {
             loop {
                 let snapshot = runtime.metrics_snapshot();
@@ -12054,6 +12057,7 @@ mod tests {
             recovered_snapshot.terminal_enqueue_deferred_dropped_total,
             0
         );
+        assert_eq!(store.policy_reads.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]
