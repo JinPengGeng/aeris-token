@@ -90,11 +90,44 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers(
     request_headers: Option<&http::HeaderMap>,
     enable_model_directives: bool,
 ) -> Option<Value> {
+    // This compatibility API has no tenant identity, so it must not attempt
+    // conversation-history lookup with an API-key-only pseudo-scope.
+    build_standard_request_body_with_model_directives_request_headers_and_history_scope(
+        body_json,
+        client_api_format,
+        mapped_model,
+        provider_type,
+        provider_api_format,
+        request_path,
+        upstream_is_stream,
+        body_rules,
+        user_api_key_id,
+        None,
+        request_headers,
+        enable_model_directives,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_standard_request_body_with_model_directives_request_headers_and_history_scope(
+    body_json: &Value,
+    client_api_format: &str,
+    mapped_model: &str,
+    provider_type: &str,
+    provider_api_format: &str,
+    request_path: &str,
+    upstream_is_stream: bool,
+    body_rules: Option<&Value>,
+    user_api_key_id: Option<&str>,
+    history_scope: Option<&str>,
+    request_headers: Option<&http::HeaderMap>,
+    enable_model_directives: bool,
+) -> Option<Value> {
     let mut format_context = FormatContext::default()
         .with_mapped_model(mapped_model)
         .with_request_path(request_path)
         .with_upstream_stream(upstream_is_stream);
-    if let Some(history_scope) = user_api_key_id {
+    if let Some(history_scope) = history_scope {
         format_context = format_context.with_history_scope(history_scope);
     }
     let source_api_format = compatible_source_format_for_standard_request(
@@ -347,11 +380,14 @@ fn normalize_standard_request_to_openai_chat_request_cow<'a>(
 
 #[cfg(test)]
 mod tests {
-    use crate::formats::openai::responses::history::record_converted_response_history;
+    use crate::formats::openai::responses::history::{
+        conversation_history_scope, record_converted_response_history,
+    };
 
     use super::{
         build_standard_request_body, build_standard_request_body_from_canonical,
         build_standard_request_body_with_model_directives,
+        build_standard_request_body_with_model_directives_request_headers_and_history_scope,
         normalize_standard_request_to_openai_chat_request,
     };
     use serde_json::{json, Value};
@@ -501,12 +537,13 @@ mod tests {
     }
 
     #[test]
-    fn standard_request_body_scopes_previous_response_history_by_api_key() {
+    fn standard_request_body_scopes_previous_response_history_by_tenant_and_api_key() {
         record_converted_response_history(
             &json!({
                 "needs_conversion": true,
                 "client_api_format": "openai:responses",
                 "provider_api_format": "openai:chat",
+                "user_id": "standard-history-user-a",
                 "api_key_id": "standard-history-key-a",
                 "original_request_body": {
                     "model": "source-model",
@@ -534,27 +571,12 @@ mod tests {
                 "output": "inspection-complete"
             }]
         });
-
-        let owner = build_standard_request_body(
-            &continuation,
-            "openai:responses",
-            "mapped-model",
-            "custom",
-            "openai:chat",
-            "/v1/responses",
-            false,
-            None,
-            Some("standard-history-key-a"),
-        )
-        .expect("the owning API key should restore response history");
-        assert_eq!(
-            owner["messages"][1]["tool_calls"][0]["id"],
-            "call_standard_history_scope_1"
-        );
-        assert_eq!(
-            owner["messages"][2]["tool_call_id"],
-            "call_standard_history_scope_1"
-        );
+        let owner_scope =
+            conversation_history_scope("standard-history-user-a", "standard-history-key-a")
+                .unwrap();
+        let other_scope =
+            conversation_history_scope("standard-history-user-b", "standard-history-key-a")
+                .unwrap();
 
         assert!(build_standard_request_body(
             &continuation,
@@ -565,9 +587,52 @@ mod tests {
             "/v1/responses",
             false,
             None,
-            Some("standard-history-key-b"),
+            Some("standard-history-key-a"),
         )
         .is_none());
+
+        let owner =
+            build_standard_request_body_with_model_directives_request_headers_and_history_scope(
+                &continuation,
+                "openai:responses",
+                "mapped-model",
+                "custom",
+                "openai:chat",
+                "/v1/responses",
+                false,
+                None,
+                Some("standard-history-key-a"),
+                Some(owner_scope.as_str()),
+                None,
+                false,
+            )
+            .expect("the owning tenant and API key should restore response history");
+        assert_eq!(
+            owner["messages"][1]["tool_calls"][0]["id"],
+            "call_standard_history_scope_1"
+        );
+        assert_eq!(
+            owner["messages"][2]["tool_call_id"],
+            "call_standard_history_scope_1"
+        );
+
+        assert!(
+            build_standard_request_body_with_model_directives_request_headers_and_history_scope(
+                &continuation,
+                "openai:responses",
+                "mapped-model",
+                "custom",
+                "openai:chat",
+                "/v1/responses",
+                false,
+                None,
+                Some("standard-history-key-a"),
+                Some(other_scope.as_str()),
+                None,
+                false,
+            )
+            .is_none()
+        );
     }
 
     #[test]

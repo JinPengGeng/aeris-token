@@ -1347,6 +1347,7 @@ mod tests {
             "provider_api_format": "openai:chat",
             "client_api_format": "openai:responses",
             "needs_conversion": true,
+            "user_id": "sync-bridge-history-user",
             "api_key_id": "sync-bridge-history-key",
             "original_request_body": {
                 "model": "deepseek-v4-flash",
