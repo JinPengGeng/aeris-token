@@ -130,6 +130,8 @@ jobs:
           set -euo pipefail
           trusted_url_pattern='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[-A-Za-z0-9._~:/?#@!$&*+,;=%]*)?$'
           trusted_model_pattern='^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'
+          [[ "${AERIS_AI_BASE_URL}" != *$'\n'* && "${AERIS_AI_BASE_URL}" != *$'\r'* ]]
+          [[ "${AERIS_AI_MODEL}" != *$'\n'* && "${AERIS_AI_MODEL}" != *$'\r'* ]]
           printf '%s\n' "${AERIS_AI_BASE_URL}" | grep -Eq "$trusted_url_pattern"
           printf '%s\n' "${AERIS_AI_MODEL}" | grep -Eq "$trusted_model_pattern"
 

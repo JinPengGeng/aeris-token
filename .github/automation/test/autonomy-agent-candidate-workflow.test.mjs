@@ -72,6 +72,8 @@ test('candidate workflow parses and strictly validates trusted model routing wit
   const routingValidation = candidate.steps.find((step) => step.name === 'Validate trusted model routing');
   assert.match(routingValidation.run, new RegExp(`trusted_url_pattern='${trustedUrlPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
   assert.match(routingValidation.run, new RegExp(`trusted_model_pattern='${trustedModelPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
+  assert.match(routingValidation.run, /AERIS_AI_BASE_URL.*\$'\\n'.*AERIS_AI_BASE_URL.*\$'\\r'/);
+  assert.match(routingValidation.run, /AERIS_AI_MODEL.*\$'\\n'.*AERIS_AI_MODEL.*\$'\\r'/);
   assert.match(routingValidation.run, /printf '%s\\n' "\$\{AERIS_AI_BASE_URL\}" \| grep -Eq "\$trusted_url_pattern"/);
   assert.match(routingValidation.run, /printf '%s\\n' "\$\{AERIS_AI_MODEL\}" \| grep -Eq "\$trusted_model_pattern"/);
   assert.doesNotMatch(routingValidation.run, /AERIS_AI_API_KEY|secrets\./i);
