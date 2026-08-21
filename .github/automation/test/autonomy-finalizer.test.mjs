@@ -8,6 +8,7 @@ import {
   evaluateAutonomyFinalizerPreliminary,
   finalizeAutonomyPull,
   runAutonomyFinalizer,
+  validateResponseLossCanaryBinding,
 } from '../src/autonomy-finalizer.mjs';
 
 const REPOSITORY = 'JinPengGeng/aeris-token';
@@ -493,6 +494,100 @@ test('lost merge response counts as success only after independent exact outcome
   assert.equal(result.action, 'merged');
   assert.equal(result.merge_commit_sha, MERGE_SHA);
   assert.equal(client.draftRestores, 0);
+});
+
+test('response-loss canary binding is absent by default and rejects malformed bindings', () => {
+  const expected = { pull_number: PULL_NUMBER, head_sha: HEAD_SHA, base_sha: BASE_SHA };
+  assert.equal(validateResponseLossCanaryBinding(undefined, expected), false);
+  assert.equal(validateResponseLossCanaryBinding('', expected), false);
+  const valid = { version: 1, fault: 'drop_merge_response_after_success', pull_number: PULL_NUMBER, head_sha: HEAD_SHA, base_sha: BASE_SHA };
+  assert.equal(validateResponseLossCanaryBinding(JSON.stringify(valid), expected), true);
+  for (const value of [
+    'not-json',
+    JSON.stringify({ ...valid, extra: true }),
+    JSON.stringify({ ...valid, version: 2 }),
+    JSON.stringify({ ...valid, fault: 'other' }),
+    JSON.stringify({ ...valid, head_sha: 'not-a-sha' }),
+  ]) {
+    assert.throws(() => validateResponseLossCanaryBinding(value, expected), AutonomyFinalizerError);
+  }
+});
+
+test('response-loss canary for a different PR is dormant but same-PR head or base drift fails closed', () => {
+  const expected = { pull_number: PULL_NUMBER, head_sha: HEAD_SHA, base_sha: BASE_SHA };
+  const valid = { version: 1, fault: 'drop_merge_response_after_success', pull_number: PULL_NUMBER, head_sha: HEAD_SHA, base_sha: BASE_SHA };
+  assert.equal(validateResponseLossCanaryBinding(JSON.stringify({
+    ...valid, pull_number: PULL_NUMBER + 1, head_sha: '8'.repeat(40), base_sha: '7'.repeat(40),
+  }), expected), false);
+  assert.throws(
+    () => validateResponseLossCanaryBinding(JSON.stringify({ ...valid, head_sha: '8'.repeat(40) }), expected),
+    /exact eligibility snapshot/,
+  );
+  assert.throws(
+    () => validateResponseLossCanaryBinding(JSON.stringify({ ...valid, base_sha: '7'.repeat(40) }), expected),
+    /exact eligibility snapshot/,
+  );
+});
+
+test('exact response-loss canary drops only the successful merge response and accepts exact independent merge proof', async () => {
+  const client = new FakeClient();
+  const result = await finalize(client, {
+    responseLossCanaryBinding: JSON.stringify({
+      version: 1, fault: 'drop_merge_response_after_success', pull_number: PULL_NUMBER,
+      head_sha: HEAD_SHA, base_sha: BASE_SHA,
+    }),
+  });
+  assert.equal(result.action, 'merged');
+  assert.equal(result.canary_marker, 'response_loss_after_merge_response');
+  assert.equal(client.events.filter((event) => event === 'merge').length, 1);
+});
+
+test('response-loss canary fails closed on open or ambiguous readback and never attempts a second merge', async (t) => {
+  const binding = JSON.stringify({
+    version: 1, fault: 'drop_merge_response_after_success', pull_number: PULL_NUMBER,
+    head_sha: HEAD_SHA, base_sha: BASE_SHA,
+  });
+  for (const [name, client] of [
+    ['open', new FakeClient({ persistMerge: false })],
+    ['ambiguous', new FakeClient({ governance: (_read, state) => state.merged ? { mergedBy: null } : {} })],
+  ]) {
+    await t.test(name, async () => {
+      await assert.rejects(() => finalize(client, { responseLossCanaryBinding: binding }));
+      assert.equal(client.events.filter((event) => event === 'merge').length, 1);
+    });
+  }
+});
+
+test('same-PR head or base canary drift fails before any Writer mutation', async (t) => {
+  for (const [name, drift] of [
+    ['head', { head_sha: '8'.repeat(40) }],
+    ['base', { base_sha: '7'.repeat(40) }],
+  ]) {
+    await t.test(name, async () => {
+      const client = new FakeClient();
+      await assert.rejects(() => finalize(client, {
+        responseLossCanaryBinding: JSON.stringify({
+          version: 1, fault: 'drop_merge_response_after_success', pull_number: PULL_NUMBER,
+          head_sha: HEAD_SHA, base_sha: BASE_SHA, ...drift,
+        }),
+      }), /exact eligibility snapshot/);
+      assert.deepEqual(client.events, []);
+    });
+  }
+});
+
+test('response-loss canary bound to another PR leaves ordinary finalization unchanged', async () => {
+  const client = new FakeClient();
+  const result = await finalize(client, {
+    responseLossCanaryBinding: JSON.stringify({
+      version: 1, fault: 'drop_merge_response_after_success', pull_number: PULL_NUMBER + 1,
+      head_sha: '8'.repeat(40), base_sha: '7'.repeat(40),
+    }),
+  });
+  assert.deepEqual(result, {
+    action: 'merged', pull_number: PULL_NUMBER, head_sha: HEAD_SHA, merge_commit_sha: MERGE_SHA,
+  });
+  assert.equal(client.events.filter((event) => event === 'merge').length, 1);
 });
 
 test('merge mutation payload is not trusted', async () => {

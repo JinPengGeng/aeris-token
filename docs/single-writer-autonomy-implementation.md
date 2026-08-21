@@ -308,3 +308,31 @@ PR 实测 `GITHUB_TOKEN` 的 GraphQL `disablePullRequestAutoMerge` 权限；该 
 installation 卸载后，该密钥无法再获得仓库访问权，除非人工重新安装 App。GitHub schedule 延迟、
 GitHub API 故障，以及没有服务端 required lease check 时 pre-disarm 到 uninstall 之间仍可能完成 merge，
 是必须保留并监控的残余边界。
+
+## 14. Writer 现场证明与 response-loss canary 运维
+
+在启用 Writer mutation 前，从 default branch 手工运行
+`.github/workflows/writer-readonly-attestation.yml`。该 workflow 没有输入，只进入受保护的 `writer`
+Environment；workflow `GITHUB_TOKEN` 仅有 `contents: read`，临时 installation token 也显式缩窄为
+`administration: read`、`contents: read`、`pull-requests: read`。运行必须证明 App/installation 的
+ID、slug、owner、未暂停、`repository_selection=selected`、精确 Writer 权限、仅当前一个仓库可访问，
+以及 REST/GraphQL Bot 身份一致；它不执行 Git、PR、Issue 或其他写 mutation。
+
+Finalizer response-loss live canary 仅通过 repository variable
+`AERIS_FINALIZER_RESPONSE_LOSS_CANARY` 配置，值必须是无额外字段的单行 JSON：
+
+```json
+{"version":1,"fault":"drop_merge_response_after_success","pull_number":17,"head_sha":"<40hex>","base_sha":"<40hex>"}
+```
+
+`pull_number` 必须绑定 disposable 目标 PR，`head_sha` 和 `base_sha` 分别取该次 eligibility snapshot
+的精确 head 与 default-branch base。畸形 JSON、未知字段、错误版本/fault 或非法 SHA 一律 fail closed；
+PR 号与当前 PR 相同时，任一 SHA 不同也 fail closed，防止目标 PR 静默退化为普通合并。结构合法但
+PR 号不同的历史绑定保持 dormant，不激活 canary、不阻断其他 PR，也不输出 dormant 日志。精确匹配时，
+Finalizer 只在一次 GraphQL squash merge 响应已经返回后丢弃该响应，随后仅用独立 readback 接受精确
+merged outcome；open、未知或歧义结果均失败，且不得第二次调用 merge。
+
+Canary 完成或失败后立即删除 `AERIS_FINALIZER_RESPONSE_LOSS_CANARY`，不能把 dormant 语义当作长期配置。
+保存只读 attestation 与 Finalizer 的 run URL、job log、step summary、非敏感 App/installation 权限与
+repository/Bot API 证明，以及 `AERIS_FINALIZER_CANARY=response_loss_after_merge_response` marker；不得保存
+private key 或 installation token。删除变量后再保存变量缺失截图或 API 查询结果，作为现场清理证据。

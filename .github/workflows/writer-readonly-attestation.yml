@@ -1,0 +1,92 @@
+name: Writer App read-only attestation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  attest:
+    name: Prove Writer App and bounded read-only token
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: writer
+    permissions:
+      contents: read
+    steps:
+      - name: Check out default branch policy
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Attest live Writer App and installation
+        id: writer_app_attestation
+        env:
+          AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
+          AERIS_WRITER_APP_PRIVATE_KEY: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+        run: node .github/automation/src/github-app-attestation.mjs
+
+      - name: Mint explicitly read-only Writer token
+        id: writer_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AERIS_WRITER_APP_ID }}
+          private-key: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+
+      - name: Prove exact repository and Bot identity with bounded token
+        id: writer_token_proof
+        env:
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
+          AERIS_WRITER_TOKEN: ${{ steps.writer_token.outputs.token }}
+          AERIS_WRITER_TOKEN_INSTALLATION_ID: ${{ steps.writer_token.outputs.installation-id }}
+          AERIS_WRITER_TOKEN_APP_SLUG: ${{ steps.writer_token.outputs.app-slug }}
+        run: node .github/automation/src/github-app-attestation.mjs prove-token
+
+      - name: Summarize read-only attestation
+        env:
+          APP_ID: ${{ steps.writer_app_attestation.outputs.app_id }}
+          APP_SLUG: ${{ steps.writer_app_attestation.outputs.app_slug }}
+          APP_OWNER: ${{ steps.writer_app_attestation.outputs.app_owner_login }}
+          APP_OWNER_TYPE: ${{ steps.writer_app_attestation.outputs.app_owner_type }}
+          APP_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.app_permissions }}
+          INSTALLATION_ID: ${{ steps.writer_app_attestation.outputs.installation_id }}
+          INSTALLATION_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.installation_permissions }}
+          REPOSITORY_SELECTION: ${{ steps.writer_app_attestation.outputs.repository_selection }}
+          REPOSITORY: ${{ steps.writer_token_proof.outputs.repository }}
+          BOT_REST_LOGIN: ${{ steps.writer_token_proof.outputs.rest_login }}
+          BOT_GRAPHQL_LOGIN: ${{ steps.writer_token_proof.outputs.graphql_login }}
+          BOT_DATABASE_ID: ${{ steps.writer_token_proof.outputs.bot_database_id }}
+          BOT_NODE_ID: ${{ steps.writer_token_proof.outputs.bot_node_id }}
+        shell: bash
+        run: |
+          {
+            echo "### Writer App read-only attestation"
+            echo
+            echo "- App: `${APP_SLUG}` (#${APP_ID})"
+            echo "- App owner: `${APP_OWNER}` (`${APP_OWNER_TYPE}`)"
+            echo "- App permissions: `${APP_PERMISSIONS}`"
+            echo "- Installation: `${INSTALLATION_ID}`"
+            echo "- Installation permissions: `${INSTALLATION_PERMISSIONS}`"
+            echo "- Repository selection: `${REPOSITORY_SELECTION}`"
+            echo "- Repository scope: `${REPOSITORY}`"
+            echo "- Bot REST identity: `${BOT_REST_LOGIN}` (#${BOT_DATABASE_ID})"
+            echo "- Bot GraphQL identity: `${BOT_GRAPHQL_LOGIN}` (`${BOT_NODE_ID}`)"
+          } >>"${GITHUB_STEP_SUMMARY}"

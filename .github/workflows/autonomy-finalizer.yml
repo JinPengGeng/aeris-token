@@ -189,6 +189,7 @@ jobs:
           AERIS_WRITER_PROOF_REPOSITORY_SELECTION: ${{ steps.writer_app_attestation.outputs.repository_selection }}
           AERIS_WRITER_TOKEN_INSTALLATION_ID: ${{ steps.writer_token.outputs.installation-id }}
           AERIS_WRITER_TOKEN_APP_SLUG: ${{ steps.writer_token.outputs.app-slug }}
+          AERIS_FINALIZER_RESPONSE_LOSS_CANARY: ${{ vars.AERIS_FINALIZER_RESPONSE_LOSS_CANARY }}
           AERIS_FINALIZER_PROOF_LEVEL: full
           AERIS_FINALIZER_MUTATE: "true"
         run: node .github/automation/src/autonomy-finalizer.mjs
@@ -198,6 +199,7 @@ jobs:
           PULL_NUMBER: ${{ steps.finalize.outputs.pull_number }}
           HEAD_SHA: ${{ steps.finalize.outputs.head_sha }}
           ACTION: ${{ steps.finalize.outputs.action }}
+          CANARY_MARKER: ${{ steps.finalize.outputs.canary_marker }}
         shell: bash
         run: |
           {
@@ -206,4 +208,7 @@ jobs:
             echo "- Pull request: #${PULL_NUMBER}"
             echo "- Head SHA: \`${HEAD_SHA}\`"
             echo "- Action: \`${ACTION}\`"
+            if [[ -n "${CANARY_MARKER}" ]]; then
+              echo "- Canary: \`${CANARY_MARKER}\`"
+            fi
           } >>"${GITHUB_STEP_SUMMARY}"

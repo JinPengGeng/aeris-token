@@ -24,6 +24,8 @@ const WORKFLOW_IDENTITIES = Object.freeze(new Map([
   ['Frontend CI', '.github/workflows/frontend-ci.yml'],
 ]));
 const MAXIMUM_GRAPHQL_BYTES = 4 * 1024 * 1024;
+const RESPONSE_LOSS_CANARY_FAULT = 'drop_merge_response_after_success';
+const RESPONSE_LOSS_CANARY_MARKER = 'response_loss_after_merge_response';
 
 export class AutonomyFinalizerError extends Error {
   constructor(message) {
@@ -71,6 +73,31 @@ function nullableString(value, name) {
 function multilineString(value, name) {
   if (typeof value !== 'string' || value.length === 0 || /[\u0000\u007f]/.test(value)) reject(`${name} is invalid`);
   return value;
+}
+
+export function validateResponseLossCanaryBinding(value, expected) {
+  if (value === undefined || value === '') return false;
+  if (typeof value !== 'string' || value.length > 1024 || /[\u0000-\u001f\u007f]/.test(value)) {
+    reject('Finalizer response-loss canary binding is invalid');
+  }
+  let binding;
+  try { binding = JSON.parse(value); } catch { reject('Finalizer response-loss canary binding is not valid JSON'); }
+  object(binding, 'Finalizer response-loss canary binding');
+  const requiredKeys = ['base_sha', 'fault', 'head_sha', 'pull_number', 'version'];
+  if (JSON.stringify(Object.keys(binding).sort()) !== JSON.stringify(requiredKeys)) {
+    reject('Finalizer response-loss canary binding fields are invalid');
+  }
+  if (binding.version !== 1 || binding.fault !== RESPONSE_LOSS_CANARY_FAULT) {
+    reject('Finalizer response-loss canary binding version or fault is invalid');
+  }
+  const pullNumber = positiveInteger(binding.pull_number, 'Finalizer response-loss canary pull number');
+  const headSha = required(binding.head_sha, 'Finalizer response-loss canary head SHA', SHA);
+  const baseSha = required(binding.base_sha, 'Finalizer response-loss canary base SHA', SHA);
+  if (pullNumber !== expected.pull_number) return false;
+  if (headSha !== expected.head_sha || baseSha !== expected.base_sha) {
+    reject('Finalizer response-loss canary does not match the exact eligibility snapshot');
+  }
+  return true;
 }
 
 function checkCandidates(checkRuns) {
@@ -861,7 +888,7 @@ async function readOutcomeOrReject({ readClient, pullNumber, mutationError }) {
 
 export async function finalizeAutonomyPull({
   readClient, writerClient, protectionClient = writerClient, trigger, trust, config,
-  writerTrust = config.writer_trust, sleepImpl,
+  writerTrust = config.writer_trust, responseLossCanaryBinding, sleepImpl,
 }) {
   const configuredWriter = object(writerTrust, 'Writer trust configuration');
   const writerAppSlug = required(configuredWriter.app_slug, 'Writer trusted App slug');
@@ -930,6 +957,8 @@ export async function finalizeAutonomyPull({
   const pullRequestId = initial.governance.id;
   const pullNumber = initial.bound.pull_number;
   validateGovernance(initial.governance, expected);
+  if (initial.proof_level !== 'full') reject('response-loss canary requires a full eligibility proof');
+  const responseLossCanary = validateResponseLossCanaryBinding(responseLossCanaryBinding, expected);
   let transitionedToReady = false;
 
   if (initial.governance.isDraft) {
@@ -1035,12 +1064,19 @@ export async function finalizeAutonomyPull({
   }
 
   let mutationError = null;
-  try { await writerClient.mergePullRequest(pullRequestId, expected.head_sha); } catch (error) { mutationError = error; }
+  try {
+    await writerClient.mergePullRequest(pullRequestId, expected.head_sha);
+    if (responseLossCanary) {
+      console.log(`AERIS_FINALIZER_CANARY=${RESPONSE_LOSS_CANARY_MARKER}`);
+      mutationError = new AutonomyFinalizerError('exact-bound live canary discarded the merge mutation response');
+    }
+  } catch (error) { mutationError = error; }
   const outcome = await readOutcomeOrReject({ readClient, pullNumber, mutationError });
   if (exactMergedOutcome(outcome, expected, pullRequestId)) {
     return Object.freeze({
       action: 'merged', pull_number: pullNumber, head_sha: expected.head_sha,
       merge_commit_sha: outcome.mergeCommit.oid,
+      ...(responseLossCanary ? { canary_marker: RESPONSE_LOSS_CANARY_MARKER } : {}),
     });
   }
   if (exactOpenPull(outcome, expected, pullRequestId)) {
@@ -1106,7 +1142,9 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
           token_app_slug: required(environment.AERIS_WRITER_TOKEN_APP_SLUG, 'AERIS_WRITER_TOKEN_APP_SLUG'),
           app_slug: required(environment.AERIS_WRITER_APP_SLUG, 'AERIS_WRITER_APP_SLUG'),
         }),
-        trigger, trust, config, sleepImpl: dependencies.sleepImpl,
+        trigger, trust, config,
+        responseLossCanaryBinding: environment.AERIS_FINALIZER_RESPONSE_LOSS_CANARY,
+        sleepImpl: dependencies.sleepImpl,
       })
     : await evaluateAutonomyFinalizerPreliminary({
         client: readClient, trigger, trust, config, sleepImpl: dependencies.sleepImpl,
@@ -1120,6 +1158,7 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
       `head_sha=${result.head_sha ?? result.bound?.head_sha ?? ''}`,
       `action=${result.action ?? (result.proof_level === 'preliminary' ? 'candidate' : 'verified')}`,
       `proof_level=${result.proof_level ?? proofLevel}`,
+      `canary_marker=${result.canary_marker ?? ''}`,
       '',
     ].join('\n'));
   }
