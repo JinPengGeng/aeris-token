@@ -49,7 +49,7 @@ test('Finalizer repeats preliminary gates before the sole Writer token mint', ()
     ['permission-administration', 'permission-contents', 'permission-pull-requests'],
   );
   assert.equal(steps[mint].with['permission-administration'], 'read');
-  assert.equal(document.jobs.finalize.permissions.checks, undefined);
+  assert.equal(document.jobs.finalize.permissions.checks, 'read');
   assert.deepEqual(
     Object.entries(document.jobs.finalize.permissions).filter(([, permission]) => permission === 'write'),
     [],
