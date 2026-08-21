@@ -59,8 +59,9 @@ schedule / workflow_dispatch
   -> checkpoint 三方合并
   -> automation/sync-upstream
   -> 单一 managed PR
-  -> Rust + Frontend + Policy
-  -> 上游同步的独立合并路径（其持久授权边界另行审查）
+  -> bounded required-check success gate
+  -> 一次 exact-head REST squash merge + strict readback
+  -> 上游同步的独立合并路径（不设置持久授权）
 ```
 
 ## 4. 身份与权限
@@ -228,7 +229,7 @@ PoC 使用 disposable issue、`docs/automation-canary/` 和 Draft PR。当前 Dr
 7. PoC 通过后将 Policy 加为 required check，并绑定 GitHub Actions source。
 8. 回读 `main` 保护配置，确认只有 Rust、Frontend、Policy 三项 strict required checks 且来源绑定 GitHub Actions；不得加入 Finalizer hold context。
 9. 仅对 canary allowlist 启用 Finalizer 并完成一次 direct squash merge canary。
-10. 迁移 Sync 使用同一 Writer App；同步分支/PR 写入用 Writer token，冲突和 state/policy drift 的 Issue/comment 告警用 `GITHUB_TOKEN`。
+10. 迁移 Sync 使用同一 Writer App；同步分支/PR 写入与一次 exact-head REST squash merge 用 Writer token，冲突和 state/policy drift 的 Issue/comment 告警用 `GITHUB_TOKEN`。Sync 只在本轮有界 required-check gate 成功后发起一次 `PUT /pulls/{number}/merge`（`merge_method=squash`、精确 `sha`）；无论 mutation 响应如何都只独立回读一次，无法证明 Writer bot 对同一 head/base 产生单 parent squash commit 且 `auto_merge=null` 时 fail closed，保留开放 managed PR 供后续同步复用，不设置 native auto-merge。
 11. 观察稳定窗口后删除旧 policy/merger/sync Environment、变量和废弃 PR。
 
 ### PR #72 的安全复用

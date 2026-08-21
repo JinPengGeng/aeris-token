@@ -31,6 +31,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       actions: write
+      checks: read
       contents: read
       issues: write
       pull-requests: read
@@ -118,13 +119,15 @@ jobs:
 
       - name: Ensure required checks are dispatched
         if: steps.sync.outputs.has_changes == 'true'
+        timeout-minutes: 35
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ steps.sync.outputs.pr_url }}
           SYNCED_SHA: ${{ steps.sync.outputs.synced_sha }}
         shell: bash
         run: bash .github/workflows/scripts/ensure-required-checks.sh
 
-      - name: Enable native auto-merge
+      - name: Merge synchronization PR
         if: steps.sync.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ steps.sync_token.outputs.token }}
@@ -133,7 +136,7 @@ jobs:
         shell: bash
         run: |
           bash .github/workflows/scripts/manage-sync-automerge.sh \
-            arm "${GITHUB_REPOSITORY}" "${PR_URL}" "${SYNCED_SHA}"
+            merge "${GITHUB_REPOSITORY}" "${PR_URL}" "${SYNCED_SHA}"
 
       - name: Write summary
         if: always()

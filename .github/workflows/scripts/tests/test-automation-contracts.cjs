@@ -176,9 +176,9 @@ assert(
     syncWorkflow.jobs.sync.permissions['pull-requests'] === 'read' &&
     syncWorkflow.jobs.sync.permissions.actions === 'write' &&
     syncWorkflow.jobs.sync.permissions.issues === 'write' &&
-    syncWorkflow.jobs.sync.permissions.checks === undefined &&
+    syncWorkflow.jobs.sync.permissions.checks === 'read' &&
     syncWorkflow.jobs.sync.permissions.statuses === undefined,
-  'sync GITHUB_TOKEN permissions must be limited to issue writes and required dispatch',
+  'sync GITHUB_TOKEN permissions must be limited to issue writes, check reads, and required dispatch',
 );
 const syncTokenStep = syncSteps.find((step) => step.name === 'Mint bounded Writer App token');
 assert(syncTokenStep && syncTokenStep.uses.includes('create-github-app-token@'), 'sync must mint a bounded Writer App token');
@@ -250,25 +250,46 @@ assert(
     syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"'),
   'sync Issue and comment operations must use the separate workflow token channel',
 );
-const autoMergeStep = syncSteps.find((step) => step.name === 'Enable native auto-merge');
+const mergeStep = syncSteps.find((step) => step.name === 'Merge synchronization PR');
 const disarmCallIndex = syncScript.search(/^disarm_tracked_pr$/m);
 const rebuildLoopIndex = syncScript.search(/^for attempt in 1 2 3; do$/m);
-assert(autoMergeStep, 'sync workflow must expose the native auto-merge step');
+assert(mergeStep, 'sync workflow must expose the direct synchronization merge step');
 assert(
-  autoMergeStep.if === "steps.sync.outputs.has_changes == 'true'",
-  'native auto-merge must require a published synchronization change',
+  mergeStep.if === "steps.sync.outputs.has_changes == 'true'",
+  'direct merge must require a published synchronization change',
 );
 assert(
-  autoMergeStep.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
-    autoMergeStep.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}' &&
-    autoMergeStep.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}',
-  'native auto-merge must bind the published PR URL and exact head SHA',
+  mergeStep.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
+    mergeStep.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}' &&
+    mergeStep.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}',
+  'direct merge must bind the published PR URL and exact head SHA',
 );
 assert(
-  typeof autoMergeStep.run === 'string' &&
-    autoMergeStep.run.includes('manage-sync-automerge.sh') &&
-    autoMergeStep.run.includes(' arm '),
-  'native auto-merge must use the managed helper arm action',
+  typeof mergeStep.run === 'string' &&
+    mergeStep.run.includes('manage-sync-automerge.sh') &&
+    mergeStep.run.includes(' merge ') &&
+    !mergeStep.run.includes(' arm '),
+  'direct merge must use the managed helper merge action',
+);
+assert(
+  !autoMergeScript.includes('--auto'),
+  'sync merge helper must not create persistent native auto-merge requests',
+);
+assert(
+  autoMergeScript.includes('api --method PUT') &&
+    autoMergeScript.includes('pulls/${PR_NUMBER}/merge') &&
+    autoMergeScript.includes('.merged == true') &&
+    autoMergeScript.includes('test("^[0-9a-fA-F]{40}$")') &&
+    autoMergeScript.includes('pulls/${PR_NUMBER}') &&
+    autoMergeScript.includes('merged_by.login') &&
+    autoMergeScript.includes('merge_commit_sha') &&
+    autoMergeScript.includes('.merge_commit_sha != .base.sha') &&
+    autoMergeScript.includes('commits/${merge_commit_sha}') &&
+    autoMergeScript.includes('.sha == $merge_commit_sha') &&
+    autoMergeScript.includes('.parents | type == "array" and length == 1') &&
+    autoMergeScript.includes('set +e') &&
+    autoMergeScript.includes('readback_status'),
+  'direct merge must use one REST merge and prove the exact post-merge outcome',
 );
 assert(
   disarmCallIndex >= 0 && rebuildLoopIndex >= 0 && disarmCallIndex < rebuildLoopIndex,
@@ -304,18 +325,30 @@ assert(
 const checkDispatchStep = syncSteps.find(
   (step) => step.name === 'Ensure required checks are dispatched',
 );
-assert(
-  syncWorkflow.jobs.sync.permissions.actions === 'write' &&
-    checkDispatchStep?.env.GH_TOKEN === '${{ github.token }}',
-  'fallback dispatch must explicitly use a workflow job token with actions:write',
-);
-assert(
-  checkDispatchStep?.run === 'bash .github/workflows/scripts/ensure-required-checks.sh' &&
-    checkDispatchScript.includes('source "${SCRIPT_DIR}/github-autonomy.sh"') &&
-    checkDispatchScript.includes('aeris_gh workflow run') &&
-    !/(^|\n)\s*gh\s/.test(checkDispatchScript),
-  'check discovery and dispatch must revalidate expiry before every GitHub token use',
-);
+  assert(
+    syncWorkflow.jobs.sync.permissions.actions === 'write' &&
+      syncWorkflow.jobs.sync.permissions.checks === 'read' &&
+      checkDispatchStep?.env.GH_TOKEN === '${{ github.token }}' &&
+      checkDispatchStep?.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
+      checkDispatchStep?.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}' &&
+      checkDispatchStep?.['timeout-minutes'] === 35,
+    'fallback dispatch and bounded required-check wait must use the exact PR and head',
+  );
+  assert(
+    checkDispatchStep?.run === 'bash .github/workflows/scripts/ensure-required-checks.sh' &&
+      checkDispatchScript.includes('source "${SCRIPT_DIR}/github-autonomy.sh"') &&
+      checkDispatchScript.includes('aeris_gh workflow run') &&
+      checkDispatchScript.includes('wait_for_required_checks') &&
+      checkDispatchScript.includes('Automation Policy / gate') &&
+      checkDispatchScript.includes('Frontend CI / check') &&
+      checkDispatchScript.includes('Rust CI / check') &&
+      checkDispatchScript.includes('.app.id == 15368') &&
+      checkDispatchScript.includes('.app.slug == "github-actions"') &&
+      checkDispatchScript.includes('.headRefOid == $head_sha') &&
+      checkDispatchScript.includes('.autoMergeRequest == null') &&
+      !/(^|\n)\s*gh\s/.test(checkDispatchScript),
+    'check discovery, dispatch, and exact-head success wait must revalidate expiry before every GitHub token use',
+  );
 const validationStep = syncSteps.find(
   (step) => step.name === 'Validate checkpoint synchronization',
 );
