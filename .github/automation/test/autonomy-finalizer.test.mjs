@@ -5,7 +5,9 @@ import {
   AutonomyFinalizerError,
   AutonomyFinalizerGitHubClient,
   evaluateAutonomyFinalizer,
+  evaluateAutonomyFinalizerPreliminary,
   finalizeAutonomyPull,
+  runAutonomyFinalizer,
 } from '../src/autonomy-finalizer.mjs';
 
 const REPOSITORY = 'JinPengGeng/aeris-token';
@@ -18,6 +20,12 @@ const DOCS_TREE = 'e'.repeat(40);
 const CANARY_TREE = 'f'.repeat(40);
 const ISSUE_NUMBER = 123;
 const PULL_NUMBER = 17;
+const WRITER_BOT = Object.freeze({
+  login: 'aeris-writer[bot]',
+  graphqlLogin: 'aeris-writer',
+  databaseId: 319277066,
+  nodeId: 'BOT_writer_node',
+});
 
 const trigger = Object.freeze({ run_id: 77, run_attempt: 1 });
 const trust = Object.freeze({
@@ -44,6 +52,36 @@ const configValue = {
 Object.defineProperty(configValue, 'writer_trust', { value: writerTrust, enumerable: false });
 const config = Object.freeze(configValue);
 
+function preliminaryEnvironment(overrides = {}) {
+  return {
+    GITHUB_REPOSITORY: REPOSITORY,
+    GITHUB_REPOSITORY_ID: String(REPOSITORY_ID),
+    GITHUB_TOKEN: 'actions-token',
+    AERIS_TRIGGER_RUN_ID: String(trigger.run_id),
+    AERIS_TRIGGER_RUN_ATTEMPT: String(trigger.run_attempt),
+    AERIS_DEFAULT_BRANCH: 'main',
+    AERIS_POLICY_REF: 'main',
+    AERIS_POLICY_SHA: BASE_SHA,
+    AERIS_WRITER_ENABLED: 'true',
+    AERIS_WRITER_APP_SLUG: writerTrust.app_slug,
+    AERIS_FINALIZER_PROOF_LEVEL: 'preliminary',
+    ...overrides,
+  };
+}
+
+function fullEnvironment(overrides = {}) {
+  return preliminaryEnvironment({
+    AERIS_WRITER_TOKEN: 'writer-token',
+    AERIS_WRITER_APP_ID: String(writerTrust.app_id),
+    AERIS_WRITER_INSTALLATION_ID: String(writerTrust.installation_id),
+    AERIS_WRITER_TOKEN_INSTALLATION_ID: String(writerTrust.token_installation_id),
+    AERIS_WRITER_TOKEN_APP_SLUG: writerTrust.app_slug,
+    AERIS_FINALIZER_PROOF_LEVEL: 'full',
+    AERIS_FINALIZER_MUTATE: 'true',
+    ...overrides,
+  });
+}
+
 function pull() {
   return {
     number: PULL_NUMBER,
@@ -59,7 +97,9 @@ function governance(overrides = {}) {
     id: 'PR_node', number: PULL_NUMBER, state: 'OPEN', isDraft: true,
     body: `<!-- aeris-autonomy-managed -->\n<!-- aeris-autonomy-task:issue:${ISSUE_NUMBER} -->`,
     headRefName: `agent/issue-${ISSUE_NUMBER}`, headRefOid: HEAD_SHA, headRepository: REPOSITORY,
-    baseRefName: 'main', baseRefOid: BASE_SHA, authorType: 'Bot', author: 'aeris-writer',
+    baseRefName: 'main', baseRefOid: BASE_SHA,
+    authorType: 'Bot', author: WRITER_BOT.graphqlLogin,
+    authorId: WRITER_BOT.nodeId, authorDatabaseId: WRITER_BOT.databaseId,
     mergeable: 'MERGEABLE', mergeStateStatus: 'DRAFT', reviewDecision: null,
     autoMergeRequest: null, labels: [], reviewThreads: [], ...overrides,
   };
@@ -83,12 +123,30 @@ function completeConnection(nodes = []) {
 function protectionRule(overrides = {}) {
   return {
     pattern: 'main',
+    allowsDeletions: false,
+    allowsForcePushes: false,
+    blocksCreations: false,
+    dismissesStaleReviews: true,
     requiresStatusChecks: true,
     requiresStrictStatusChecks: true,
     isAdminEnforced: true,
+    lockAllowsFetchAndMerge: false,
+    lockBranch: false,
+    requireLastPushApproval: false,
+    requiredApprovingReviewCount: 0,
+    requiredDeploymentEnvironments: [],
+    requiresApprovingReviews: true,
+    requiresCodeOwnerReviews: false,
+    requiresCommitSignatures: false,
     requiresConversationResolution: true,
+    requiresDeployments: false,
+    requiresLinearHistory: true,
+    restrictsPushes: false,
+    restrictsReviewDismissals: false,
     bypassPullRequestAllowances: completeConnection(),
     bypassForcePushAllowances: completeConnection(),
+    pushAllowances: completeConnection(),
+    reviewDismissalAllowances: completeConnection(),
     requiredStatusChecks: REQUIRED_PROTECTION_CONTEXTS.map((context) => ({
       context,
       app: { databaseId: 15368, slug: 'github-actions' },
@@ -99,6 +157,13 @@ function protectionRule(overrides = {}) {
 
 function protection(overrides = {}) {
   return {
+    autoMergeAllowed: true,
+    mergeCommitAllowed: false,
+    rebaseMergeAllowed: false,
+    squashMergeAllowed: true,
+    isArchived: false,
+    isDisabled: false,
+    isLocked: false,
     branchProtectionRules: completeConnection([protectionRule(overrides)]),
     rulesets: completeConnection(),
   };
@@ -177,6 +242,15 @@ class FakeClient {
       repositories: [{ id: REPOSITORY_ID, full_name: REPOSITORY, owner: { login: 'JinPengGeng' } }],
     };
   }
+  async getUser() {
+    return this.overrides.writerBot ?? {
+      login: WRITER_BOT.login,
+      id: WRITER_BOT.databaseId,
+      node_id: WRITER_BOT.nodeId,
+      type: 'Bot',
+      site_admin: false,
+    };
+  }
   async getBranchProtection() {
     this.protectionReads += 1;
     const override = typeof this.overrides.protection === 'function'
@@ -211,7 +285,14 @@ class FakeClient {
     return governance({
       isDraft: !this.ready,
       mergeStateStatus: this.ready && this.hold?.status === 'in_progress' ? 'BLOCKED' : this.ready ? 'CLEAN' : 'DRAFT',
-      autoMergeRequest: this.armed ? { enabledAt: '2026-08-20T00:00:00Z', mergeMethod: 'SQUASH' } : null,
+      autoMergeRequest: this.armed ? {
+        enabledAt: '2026-08-20T00:00:00Z',
+        mergeMethod: 'SQUASH',
+        enabledBy: {
+          type: 'Bot', login: WRITER_BOT.graphqlLogin,
+          id: WRITER_BOT.nodeId, databaseId: WRITER_BOT.databaseId,
+        },
+      } : null,
       ...override,
     });
   }
@@ -267,7 +348,18 @@ class FakeClient {
     if (this.overrides.armErrorBefore) throw this.overrides.armErrorBefore;
     this.armed = true;
     if (this.overrides.armErrorAfter) throw this.overrides.armErrorAfter;
-    return { id, headRefOid: head, autoMergeRequest: { enabledAt: '2026-08-20T00:00:00Z', mergeMethod: 'SQUASH' } };
+    return {
+      id,
+      headRefOid: head,
+      autoMergeRequest: {
+        enabledAt: '2026-08-20T00:00:00Z',
+        mergeMethod: 'SQUASH',
+        enabledBy: {
+          __typename: 'Bot', login: WRITER_BOT.graphqlLogin,
+          id: WRITER_BOT.nodeId, databaseId: WRITER_BOT.databaseId,
+        },
+      },
+    };
   }
 }
 
@@ -366,25 +458,82 @@ test('Finalizer marks ready, revalidates, and requests native auto-merge at the 
   assert.ok(client.protectionReads >= 3);
 });
 
+test('preliminary Finalizer proof never reads branch protection', async () => {
+  const client = new FakeClient();
+  client.getBranchProtection = async () => {
+    throw new Error('Actions token must not read protected repository governance');
+  };
+  const direct = await evaluateAutonomyFinalizerPreliminary({
+    client, trigger, trust, config, checkAttempts: 1,
+  });
+  assert.equal(direct.eligible, true);
+  assert.equal(direct.proof_level, 'preliminary');
+  assert.equal(direct.protection, null);
+  assert.equal(client.protectionReads, 0);
+
+  const cli = await runAutonomyFinalizer(preliminaryEnvironment(), {
+    readClient: client,
+    sleepImpl: async () => {},
+  });
+  assert.equal(cli.eligible, true);
+  assert.equal(cli.proof_level, 'preliminary');
+  assert.equal(client.protectionReads, 0);
+});
+
+test('preliminary proof cannot enter mutation mode', async () => {
+  await assert.rejects(
+    () => runAutonomyFinalizer(preliminaryEnvironment({ AERIS_FINALIZER_MUTATE: 'true' }), {
+      readClient: new FakeClient(),
+    }),
+    /mutation mode requires full proof/,
+  );
+});
+
 test('Finalizer requires strict source-bound hold branch protection before eligibility', async () => {
   const requiredContexts = REQUIRED_PROTECTION_CONTEXTS;
   const validRule = protectionRule;
   const proof = (rule) => ({
+    ...protection(),
     branchProtectionRules: completeConnection(rule === null ? [] : [rule]),
     rulesets: completeConnection(),
   });
   const invalid = [
     proof(null),
-    { branchProtectionRules: { ...completeConnection([validRule()]), totalCount: 2 }, rulesets: completeConnection() },
-    { branchProtectionRules: completeConnection([validRule()]), rulesets: { ...completeConnection(), pageInfo: { hasNextPage: true, endCursor: 'next' } } },
+    { ...proof(validRule()), branchProtectionRules: { ...completeConnection([validRule()]), totalCount: 2 } },
+    { ...proof(validRule()), rulesets: { ...completeConnection(), pageInfo: { hasNextPage: true, endCursor: 'next' } } },
+    { ...proof(validRule()), autoMergeAllowed: false },
+    { ...proof(validRule()), mergeCommitAllowed: true },
+    { ...proof(validRule()), rebaseMergeAllowed: true },
+    { ...proof(validRule()), squashMergeAllowed: false },
+    { ...proof(validRule()), isArchived: true },
+    { ...proof(validRule()), isDisabled: true },
+    { ...proof(validRule()), isLocked: true },
     proof(validRule({ requiresStrictStatusChecks: false })),
     proof(validRule({ isAdminEnforced: false })),
     proof(validRule({ requiresConversationResolution: false })),
+    proof(validRule({ allowsDeletions: true })),
+    proof(validRule({ allowsForcePushes: true })),
+    proof(validRule({ blocksCreations: true })),
+    proof(validRule({ dismissesStaleReviews: false })),
+    proof(validRule({ lockAllowsFetchAndMerge: true })),
+    proof(validRule({ lockBranch: true })),
+    proof(validRule({ requireLastPushApproval: true })),
+    proof(validRule({ requiredApprovingReviewCount: 1 })),
+    proof(validRule({ requiredDeploymentEnvironments: ['production'] })),
+    proof(validRule({ requiresApprovingReviews: false })),
+    proof(validRule({ requiresCodeOwnerReviews: true })),
+    proof(validRule({ requiresCommitSignatures: true })),
+    proof(validRule({ requiresDeployments: true })),
+    proof(validRule({ requiresLinearHistory: false })),
+    proof(validRule({ restrictsPushes: true })),
+    proof(validRule({ restrictsReviewDismissals: true })),
     proof(validRule({ bypassPullRequestAllowances: completeConnection([{ id: 'allowance-1' }]) })),
     proof(validRule({ bypassPullRequestAllowances: { ...completeConnection(), pageInfo: { hasNextPage: true, endCursor: 'next' } } })),
     proof(validRule({ bypassForcePushAllowances: completeConnection([{ id: 'allowance-1' }]) })),
+    proof(validRule({ pushAllowances: completeConnection([{ id: 'allowance-1' }]) })),
+    proof(validRule({ reviewDismissalAllowances: completeConnection([{ id: 'allowance-1' }]) })),
     {
-      branchProtectionRules: completeConnection([validRule()]),
+      ...proof(validRule()),
       rulesets: completeConnection([{ id: 'ruleset-1', enforcement: 'ACTIVE', target: 'BRANCH' }]),
     },
     proof(validRule({
@@ -401,6 +550,13 @@ test('Finalizer requires strict source-bound hold branch protection before eligi
           app: { databaseId: context === 'Autonomy Finalizer / hold' ? 999 : 15368, slug: 'github-actions' },
         })),
       })),
+    {
+      ...protection(),
+      branchProtectionRules: completeConnection([
+        validRule(),
+        validRule({ pattern: '*' }),
+      ]),
+    },
   ];
   for (const protection of invalid) {
     await assert.rejects(
@@ -449,6 +605,24 @@ test('Finalizer binds Writer token scope and trusted action outputs before mutat
       writerTrust: { ...writerTrust, token_installation_id: 155342532 },
       error: /does not match the configured installation/,
     },
+    {
+      client: new FakeClient({ writerBot: { login: 'person', id: 7, node_id: 'U_7', type: 'User', site_admin: false } }),
+      writerTrust,
+      error: /Writer Bot REST identity is invalid/,
+    },
+    {
+      client: new FakeClient({
+        writerBot: {
+          login: WRITER_BOT.login,
+          id: WRITER_BOT.databaseId + 1,
+          node_id: 'BOT_other',
+          type: 'Bot',
+          site_admin: false,
+        },
+      }),
+      writerTrust,
+      error: /author does not match the live Writer Bot/,
+    },
   ];
   for (const value of cases) {
     await assert.rejects(
@@ -477,6 +651,43 @@ test('Finalizer rejects a User with the Writer App GraphQL login', async () => {
   );
 });
 
+test('Finalizer accepts only auto-merge enabled by the live Writer Bot', async () => {
+  const human = new FakeClient({
+    governance: {
+      autoMergeRequest: {
+        enabledAt: '2026-08-20T00:00:00Z', mergeMethod: 'SQUASH',
+        enabledBy: { type: 'User', login: WRITER_BOT.graphqlLogin, id: 'U_same_login', databaseId: 8 },
+      },
+    },
+  });
+  human.ready = true;
+  human.armed = true;
+  await assert.rejects(
+    () => finalizeAutonomyPull({ readClient: human, writerClient: human, trigger, trust, config, sleepImpl: async () => {} }),
+    /auto-merge was not enabled by the Writer App/,
+  );
+  assert.deepEqual(human.events, []);
+
+  const otherBot = new FakeClient({
+    governance: {
+      autoMergeRequest: {
+        enabledAt: '2026-08-20T00:00:00Z', mergeMethod: 'SQUASH',
+        enabledBy: {
+          type: 'Bot', login: WRITER_BOT.graphqlLogin,
+          id: 'BOT_other', databaseId: WRITER_BOT.databaseId + 1,
+        },
+      },
+    },
+  });
+  otherBot.ready = true;
+  otherBot.armed = true;
+  await assert.rejects(
+    () => finalizeAutonomyPull({ readClient: otherBot, writerClient: otherBot, trigger, trust, config, sleepImpl: async () => {} }),
+    /auto-merge actor does not match the live Writer Bot/,
+  );
+  assert.deepEqual(otherBot.events, []);
+});
+
 test('Finalizer trusts an independent arm read, not an untrustworthy mutation response', async () => {
   const client = new FakeClient();
   const originalEnable = client.enableAutoMerge.bind(client);
@@ -499,11 +710,11 @@ test('Finalizer recovers when arming succeeds but its response is lost', async (
   assert.equal(client.draftRestores, 0);
 });
 
-test('Finalizer does not arm unless the pending hold is effective in branch protection', async () => {
+test('Finalizer refuses aggregate merge states incompatible with a pending hold', async () => {
   const client = new FakeClient({ governance: { mergeStateStatus: 'CLEAN' } });
   await assert.rejects(
     () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /hold is not effective/,
+    /aggregate merge state is incompatible/,
   );
   assert.equal(client.armed, false);
   assert.equal(client.hold.status, 'in_progress');
@@ -700,7 +911,11 @@ function graphqlPull(overrides = {}) {
     body: `<!-- aeris-autonomy-managed -->\n<!-- aeris-autonomy-task:issue:${ISSUE_NUMBER} -->`,
     headRefName: `agent/issue-${ISSUE_NUMBER}`, headRefOid: HEAD_SHA,
     baseRefName: 'main', baseRefOid: BASE_SHA,
-    headRepository: { nameWithOwner: REPOSITORY }, author: { __typename: 'Bot', login: 'aeris-writer' },
+    headRepository: { nameWithOwner: REPOSITORY },
+    author: {
+      __typename: 'Bot', login: WRITER_BOT.graphqlLogin,
+      id: WRITER_BOT.nodeId, databaseId: WRITER_BOT.databaseId,
+    },
     mergeable: 'MERGEABLE', mergeStateStatus: 'DRAFT', reviewDecision: null,
     autoMergeRequest: null,
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
@@ -736,6 +951,13 @@ test('GraphQL governance rejects missing labels, threads, pageInfo, node fields,
     graphqlPull({ reviewThreads: { nodes: [], pageInfo: { hasNextPage: true, endCursor: null } } }),
     graphqlPull({ autoMergeRequest: undefined }),
     graphqlPull({ autoMergeRequest: { enabledAt: '2026-08-20T00:00:00Z' } }),
+    graphqlPull({ autoMergeRequest: {
+      enabledAt: '2026-08-20T00:00:00Z', mergeMethod: 'SQUASH', enabledBy: null,
+    } }),
+    graphqlPull({ autoMergeRequest: {
+      enabledAt: '2026-08-20T00:00:00Z', mergeMethod: 'SQUASH',
+      enabledBy: { __typename: 'Bot', login: WRITER_BOT.graphqlLogin, id: WRITER_BOT.nodeId },
+    } }),
   ];
   for (const pullValue of invalid) {
     await assert.rejects(
@@ -746,7 +968,9 @@ test('GraphQL governance rejects missing labels, threads, pageInfo, node fields,
 });
 
 test('GraphQL governance requires the Bot author type as well as the Writer slug', async () => {
-  const invalid = graphqlPull({ author: { __typename: 'User', login: 'aeris-writer' } });
+  const invalid = graphqlPull({
+    author: { __typename: 'User', login: WRITER_BOT.graphqlLogin, id: 'U_same_login', databaseId: 7 },
+  });
   const snapshot = await graphqlClient([invalid, invalid]).getPullGovernance(PULL_NUMBER);
   const client = new FakeClient({ governance: snapshot });
   await assert.rejects(
@@ -796,25 +1020,12 @@ test('GraphQL governance accepts two identical complete strict snapshots', async
   const snapshot = await graphqlClient([pullValue, pullValue]).getPullGovernance(PULL_NUMBER);
   assert.deepEqual(snapshot.labels, ['safe-label']);
   assert.deepEqual(snapshot.reviewThreads, [{ id: 'thread-1', isResolved: true }]);
+  assert.equal(snapshot.authorId, WRITER_BOT.nodeId);
+  assert.equal(snapshot.authorDatabaseId, WRITER_BOT.databaseId);
 });
 
 test('GraphQL branch protection reads source-bound required check descriptions', async () => {
-  const proof = {
-    branchProtectionRules: completeConnection([{
-      pattern: 'main',
-      requiresStatusChecks: true,
-      requiresStrictStatusChecks: true,
-      isAdminEnforced: true,
-      requiresConversationResolution: true,
-      bypassPullRequestAllowances: completeConnection(),
-      bypassForcePushAllowances: completeConnection(),
-      requiredStatusChecks: [{
-        context: 'Autonomy Finalizer / hold',
-        app: { databaseId: 15368, slug: 'github-actions' },
-      }],
-    }]),
-    rulesets: completeConnection(),
-  };
+  const proof = protection();
   let requestBody;
   const client = new AutonomyFinalizerGitHubClient({
     token: 'test-token',
@@ -832,6 +1043,15 @@ test('GraphQL branch protection reads source-bound required check descriptions',
   assert.match(requestBody.query, /requiredStatusChecks\s*\{\s*context\s+app\s*\{\s*databaseId\s+slug/);
   assert.match(requestBody.query, /isAdminEnforced/);
   assert.match(requestBody.query, /requiresConversationResolution/);
+  assert.match(requestBody.query, /autoMergeAllowed/);
+  assert.match(requestBody.query, /mergeCommitAllowed/);
+  assert.match(requestBody.query, /rebaseMergeAllowed/);
+  assert.match(requestBody.query, /squashMergeAllowed/);
+  assert.match(requestBody.query, /requiredApprovingReviewCount/);
+  assert.match(requestBody.query, /requiredDeploymentEnvironments/);
+  assert.match(requestBody.query, /requiresLinearHistory/);
+  assert.match(requestBody.query, /pushAllowances\(first: 100\)/);
+  assert.match(requestBody.query, /reviewDismissalAllowances\(first: 100\)/);
   assert.match(requestBody.query, /bypassPullRequestAllowances\(first: 100\)\s*\{\s*totalCount/);
   assert.match(requestBody.query, /bypassForcePushAllowances\(first: 100\)\s*\{\s*totalCount/);
   assert.match(requestBody.query, /rulesets\(first: 100, includeParents: true, targets: \[BRANCH\]\)/);
@@ -839,26 +1059,86 @@ test('GraphQL branch protection reads source-bound required check descriptions',
   assert.match(requestBody.query, /totalCount pageInfo\s*\{\s*hasNextPage endCursor\s*\}/);
 });
 
-test('Writer token proof uses the installation repository endpoint only', async () => {
+test('Writer token proof reads only its repository scope and live Bot identity', async () => {
   const calls = [];
   const client = new AutonomyFinalizerGitHubClient({
     token: 'writer-token', repository: REPOSITORY,
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
+      const body = url.includes('/installation/repositories') ? {
+        total_count: 1,
+        repositories: [{ id: REPOSITORY_ID, full_name: REPOSITORY, owner: { login: 'JinPengGeng' } }],
+      } : {
+        login: WRITER_BOT.login,
+        id: WRITER_BOT.databaseId,
+        node_id: WRITER_BOT.nodeId,
+        type: 'Bot',
+        site_admin: false,
+      };
       return {
         ok: true,
         status: 200,
-        text: async () => JSON.stringify({
-          total_count: 1,
-          repositories: [{ id: REPOSITORY_ID, full_name: REPOSITORY, owner: { login: 'JinPengGeng' } }],
-        }),
+        text: async () => JSON.stringify(body),
       };
     },
   });
   await client.getInstallationRepositories();
-  assert.equal(calls.length, 1);
+  await client.getUser(WRITER_BOT.login);
+  assert.equal(calls.length, 2);
   assert.match(calls[0].url, /\/installation\/repositories\?per_page=100&page=1$/);
   assert.equal(calls[0].options.method, 'GET');
+  assert.match(calls[1].url, /\/users\/aeris-writer%5Bbot%5D$/);
+  assert.equal(calls[1].options.method, 'GET');
+});
+
+test('mutating CLI routes protection proof through the Writer client', async () => {
+  const readClient = new FakeClient();
+  const writerClient = new FakeClient();
+  const originalMarkReady = writerClient.markPullReady.bind(writerClient);
+  writerClient.markPullReady = async (...args) => {
+    const result = await originalMarkReady(...args);
+    readClient.ready = writerClient.ready;
+    return result;
+  };
+  const originalEnableAutoMerge = writerClient.enableAutoMerge.bind(writerClient);
+  writerClient.enableAutoMerge = async (...args) => {
+    const result = await originalEnableAutoMerge(...args);
+    readClient.armed = writerClient.armed;
+    return result;
+  };
+  readClient.getBranchProtection = async () => {
+    throw new Error('Actions token must not read protected repository governance');
+  };
+  const result = await runAutonomyFinalizer(fullEnvironment(), {
+    readClient,
+    writerClient,
+    sleepImpl: async () => {},
+  });
+  assert.equal(result.action, 'armed');
+  assert.ok(writerClient.protectionReads >= 3);
+  assert.equal(readClient.protectionReads, 0);
+});
+
+test('full proof failure occurs before every Writer and hold mutation', async () => {
+  const readClient = new FakeClient();
+  const writerClient = new FakeClient();
+  writerClient.getBranchProtection = async () => {
+    writerClient.protectionReads += 1;
+    throw new Error('Writer administration read denied');
+  };
+  await assert.rejects(
+    () => runAutonomyFinalizer(fullEnvironment(), {
+      readClient,
+      writerClient,
+      sleepImpl: async () => {},
+    }),
+    /Writer administration read denied/,
+  );
+  assert.equal(writerClient.protectionReads, 1);
+  assert.equal(readClient.protectionReads, 0);
+  assert.equal(readClient.hold, null);
+  assert.deepEqual(readClient.events, []);
+  assert.deepEqual(writerClient.events, []);
 });
 
 test('hold check REST methods bind creation and completion to one exact check run', async () => {

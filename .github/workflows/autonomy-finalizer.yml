@@ -32,6 +32,7 @@ jobs:
       reason: ${{ steps.evaluate.outputs.reason }}
       pull_number: ${{ steps.evaluate.outputs.pull_number }}
       head_sha: ${{ steps.evaluate.outputs.head_sha }}
+      proof_level: ${{ steps.evaluate.outputs.proof_level }}
     steps:
       - name: Check out current trusted policy
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -57,6 +58,7 @@ jobs:
           AERIS_POLICY_SHA: ${{ github.sha }}
           AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_FINALIZER_PROOF_LEVEL: preliminary
         run: node .github/automation/src/autonomy-finalizer.mjs
 
   finalize:
@@ -106,21 +108,26 @@ jobs:
           AERIS_POLICY_SHA: ${{ github.sha }}
           AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_FINALIZER_PROOF_LEVEL: preliminary
         run: node .github/automation/src/autonomy-finalizer.mjs
 
       - name: Confirm eligibility snapshot is unchanged
         env:
           VERIFIED_PULL_NUMBER: ${{ needs.evaluate.outputs.pull_number }}
           VERIFIED_HEAD_SHA: ${{ needs.evaluate.outputs.head_sha }}
+          VERIFIED_PROOF_LEVEL: ${{ needs.evaluate.outputs.proof_level }}
           CURRENT_ELIGIBLE: ${{ steps.recheck.outputs.eligible }}
           CURRENT_PULL_NUMBER: ${{ steps.recheck.outputs.pull_number }}
           CURRENT_HEAD_SHA: ${{ steps.recheck.outputs.head_sha }}
+          CURRENT_PROOF_LEVEL: ${{ steps.recheck.outputs.proof_level }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "${CURRENT_ELIGIBLE}" == true ]]
           [[ "${CURRENT_PULL_NUMBER}" == "${VERIFIED_PULL_NUMBER}" ]]
           [[ "${CURRENT_HEAD_SHA}" == "${VERIFIED_HEAD_SHA}" ]]
+          [[ "${VERIFIED_PROOF_LEVEL}" == preliminary ]]
+          [[ "${CURRENT_PROOF_LEVEL}" == preliminary ]]
 
       - name: Validate autonomy window before token mint
         shell: bash
@@ -140,6 +147,7 @@ jobs:
           private-key: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permission-administration: read
           permission-contents: write
           permission-pull-requests: write
 
@@ -160,6 +168,7 @@ jobs:
           AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
           AERIS_WRITER_TOKEN_INSTALLATION_ID: ${{ steps.writer_token.outputs.installation-id }}
           AERIS_WRITER_TOKEN_APP_SLUG: ${{ steps.writer_token.outputs.app-slug }}
+          AERIS_FINALIZER_PROOF_LEVEL: full
           AERIS_FINALIZER_MUTATE: "true"
         run: node .github/automation/src/autonomy-finalizer.mjs
 

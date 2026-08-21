@@ -139,10 +139,26 @@ function validateCompleteConnection(connection, name) {
 }
 
 function validateBranchProtection(proof, defaultBranch) {
+  const repository = object(proof, 'branch protection proof');
+  const repositoryProfile = Object.freeze({
+    autoMergeAllowed: true,
+    mergeCommitAllowed: false,
+    rebaseMergeAllowed: false,
+    squashMergeAllowed: true,
+    isArchived: false,
+    isDisabled: false,
+    isLocked: false,
+  });
+  for (const [field, expected] of Object.entries(repositoryProfile)) {
+    if (boolean(repository[field], `repository ${field}`) !== expected) {
+      reject(`repository ${field} does not match the autonomous merge profile`);
+    }
+  }
   const value = validateCompleteConnection(
-    object(proof, 'branch protection proof').branchProtectionRules,
+    repository.branchProtectionRules,
     'branch protection rules',
   );
+  if (value.totalCount !== 1) reject('repository branch protection profile is ambiguous');
   const rules = value.nodes.filter((rule) => rule?.pattern === defaultBranch);
   if (rules.length !== 1) reject('default branch protection rule is missing or ambiguous');
   const rule = object(rules[0], 'default branch protection rule');
@@ -153,7 +169,39 @@ function validateBranchProtection(proof, defaultBranch) {
   if (rule.requiresConversationResolution !== true) {
     reject('default branch conversation resolution is not required');
   }
-  for (const field of ['bypassPullRequestAllowances', 'bypassForcePushAllowances']) {
+  const booleanProfile = Object.freeze({
+    allowsDeletions: false,
+    allowsForcePushes: false,
+    blocksCreations: false,
+    dismissesStaleReviews: true,
+    lockAllowsFetchAndMerge: false,
+    lockBranch: false,
+    requireLastPushApproval: false,
+    requiresApprovingReviews: true,
+    requiresCodeOwnerReviews: false,
+    requiresCommitSignatures: false,
+    requiresDeployments: false,
+    requiresLinearHistory: true,
+    restrictsPushes: false,
+    restrictsReviewDismissals: false,
+  });
+  for (const [field, expected] of Object.entries(booleanProfile)) {
+    if (boolean(rule[field], `default branch ${field}`) !== expected) {
+      reject(`default branch ${field} does not match the autonomous merge profile`);
+    }
+  }
+  if (nonNegativeInteger(rule.requiredApprovingReviewCount, 'default branch required approving review count') !== 0) {
+    reject('default branch requires approving reviews');
+  }
+  if (!Array.isArray(rule.requiredDeploymentEnvironments) || rule.requiredDeploymentEnvironments.length !== 0) {
+    reject('default branch required deployment environments are not empty');
+  }
+  for (const field of [
+    'bypassPullRequestAllowances',
+    'bypassForcePushAllowances',
+    'pushAllowances',
+    'reviewDismissalAllowances',
+  ]) {
     const allowance = validateCompleteConnection(rule[field], `default branch ${field}`);
     if (allowance.totalCount !== 0) {
       reject(`default branch ${field} are not empty`);
@@ -180,7 +228,7 @@ function validateBranchProtection(proof, defaultBranch) {
     }
   }
   const rulesets = validateCompleteConnection(
-    object(proof, 'branch protection proof').rulesets,
+    repository.rulesets,
     'branch rulesets including parents',
   );
   for (const ruleset of rulesets.nodes) {
@@ -189,7 +237,12 @@ function validateBranchProtection(proof, defaultBranch) {
     if (ruleset?.target !== 'BRANCH') reject('branch ruleset target is invalid');
     if (enforcement === 'ACTIVE') reject('an active branch ruleset can alter merge governance');
   }
-  return Object.freeze({ pattern: rule.pattern, contexts: REQUIRED_PROTECTION_CHECKS, rulesets: rulesets.totalCount });
+  return Object.freeze({
+    pattern: rule.pattern,
+    contexts: REQUIRED_PROTECTION_CHECKS,
+    rulesets: rulesets.totalCount,
+    profile: 'native-squash-v1',
+  });
 }
 
 function validateWriterIdentity(repositories, expected) {
@@ -207,8 +260,29 @@ function validateWriterIdentity(repositories, expected) {
   return Object.freeze({ app_id: expected.app_id, app_slug: expected.app_slug, installation_id: expected.installation_id });
 }
 
+function validateWriterBot(user, expected) {
+  const bot = object(user, 'Writer Bot identity');
+  const login = required(bot.login, 'Writer Bot login');
+  if (bot.type !== 'Bot' || login !== expected.writer_login || boolean(bot.site_admin, 'Writer Bot site_admin')) {
+    reject('Writer Bot REST identity is invalid');
+  }
+  return Object.freeze({
+    login,
+    graphql_login: expected.graphql_login,
+    database_id: positiveInteger(bot.id, 'Writer Bot database id'),
+    node_id: required(bot.node_id, 'Writer Bot node id'),
+  });
+}
+
 async function proveWriterIdentity(writerClient, expected) {
-  return validateWriterIdentity(await writerClient.getInstallationRepositories(), expected);
+  const [repositories, bot] = await Promise.all([
+    writerClient.getInstallationRepositories(),
+    writerClient.getUser(expected.writer_login),
+  ]);
+  return Object.freeze({
+    installation: validateWriterIdentity(repositories, expected),
+    bot: validateWriterBot(bot, expected),
+  });
 }
 
 function workflowRunIdFromCheck(check, repository) {
@@ -303,6 +377,14 @@ function validateGovernance(snapshot, expected, { requireReady = false } = {}) {
   if (snapshot.authorType !== 'Bot' || snapshot.author !== expectedGraphQlLogin) {
     reject('managed pull request author is not the Writer App');
   }
+  if (!Number.isSafeInteger(snapshot.authorDatabaseId) || snapshot.authorDatabaseId <= 0 ||
+      typeof snapshot.authorId !== 'string' || snapshot.authorId.length === 0) {
+    reject('managed pull request author identity is incomplete');
+  }
+  if (expected.writer_bot && (snapshot.authorId !== expected.writer_bot.node_id ||
+      snapshot.authorDatabaseId !== expected.writer_bot.database_id)) {
+    reject('managed pull request author does not match the live Writer Bot');
+  }
   if (typeof snapshot.body !== 'string' || !snapshot.body.includes(MANAGED_MARKER) ||
       !snapshot.body.includes(`<!-- aeris-autonomy-task:${expected.task_id} -->`)) reject('managed pull request marker is invalid');
   if (!Array.isArray(snapshot.labels) || snapshot.labels.some((label) => MANUAL_LABELS.has(label))) {
@@ -312,8 +394,22 @@ function validateGovernance(snapshot, expected, { requireReady = false } = {}) {
     reject('managed pull request has unresolved review discussions');
   }
   if (![null, 'APPROVED'].includes(snapshot.reviewDecision)) reject('managed pull request review decision is blocking');
-  if (snapshot.autoMergeRequest !== null && snapshot.autoMergeRequest?.mergeMethod !== 'SQUASH') {
-    reject('managed pull request auto-merge method is invalid');
+  if (snapshot.autoMergeRequest !== null) {
+    if (snapshot.autoMergeRequest?.mergeMethod !== 'SQUASH') {
+      reject('managed pull request auto-merge method is invalid');
+    }
+    const enabledBy = object(snapshot.autoMergeRequest.enabledBy, 'pull request auto-merge actor');
+    if (enabledBy.type !== 'Bot' || enabledBy.login !== expectedGraphQlLogin) {
+      reject('managed pull request auto-merge was not enabled by the Writer App');
+    }
+    if (!Number.isSafeInteger(enabledBy.databaseId) || enabledBy.databaseId <= 0 ||
+        typeof enabledBy.id !== 'string' || enabledBy.id.length === 0) {
+      reject('managed pull request auto-merge actor identity is incomplete');
+    }
+    if (expected.writer_bot && (enabledBy.id !== expected.writer_bot.node_id ||
+        enabledBy.databaseId !== expected.writer_bot.database_id)) {
+      reject('managed pull request auto-merge actor does not match the live Writer Bot');
+    }
   }
   if (snapshot.mergeable !== 'MERGEABLE') reject('managed pull request is conflicting or mergeability is unknown');
   if (requireReady) {
@@ -388,12 +484,20 @@ function normalizeGovernancePage(pull) {
   let autoMergeRequest = null;
   if (pull.autoMergeRequest !== null) {
     const request = object(pull.autoMergeRequest, 'pull request autoMergeRequest');
+    const enabledBy = object(request.enabledBy, 'pull request autoMergeRequest.enabledBy');
     autoMergeRequest = Object.freeze({
       enabledAt: required(request.enabledAt, 'pull request autoMergeRequest.enabledAt'),
       mergeMethod: required(request.mergeMethod, 'pull request autoMergeRequest.mergeMethod'),
+      enabledBy: Object.freeze({
+        type: required(enabledBy.__typename, 'pull request autoMergeRequest.enabledBy.__typename'),
+        login: required(enabledBy.login, 'pull request autoMergeRequest.enabledBy.login'),
+        id: required(enabledBy.id, 'pull request autoMergeRequest.enabledBy.id'),
+        databaseId: positiveInteger(enabledBy.databaseId, 'pull request autoMergeRequest.enabledBy.databaseId'),
+      }),
     });
   }
 
+  const author = object(pull.author, 'pull request author');
   const core = Object.freeze({
     id: required(pull.id, 'pull request node id'),
     number: positiveInteger(pull.number, 'pull request number'),
@@ -405,8 +509,10 @@ function normalizeGovernancePage(pull) {
     headRepository: required(object(pull.headRepository, 'pull request headRepository').nameWithOwner, 'pull request headRepository.nameWithOwner'),
     baseRefName: required(pull.baseRefName, 'pull request baseRefName'),
     baseRefOid: required(pull.baseRefOid, 'pull request baseRefOid', SHA),
-    authorType: required(object(pull.author, 'pull request author').__typename, 'pull request author.__typename'),
-    author: required(object(pull.author, 'pull request author').login, 'pull request author.login'),
+    authorType: required(author.__typename, 'pull request author.__typename'),
+    author: required(author.login, 'pull request author.login'),
+    authorId: required(author.id, 'pull request author.id'),
+    authorDatabaseId: positiveInteger(author.databaseId, 'pull request author.databaseId'),
     mergeable: required(pull.mergeable, 'pull request mergeable'),
     mergeStateStatus: required(pull.mergeStateStatus, 'pull request mergeStateStatus'),
     reviewDecision: nullableString(pull.reviewDecision, 'pull request reviewDecision'),
@@ -429,9 +535,20 @@ async function readGovernanceSnapshot(client, owner, name, number) {
           pullRequest(number: $number) {
             id number state isDraft body headRefName headRefOid baseRefName baseRefOid
             headRepository { nameWithOwner }
-            author { __typename login }
+            author {
+              __typename login
+              ... on Bot { id databaseId }
+              ... on User { id databaseId }
+            }
             mergeable mergeStateStatus reviewDecision
-            autoMergeRequest { enabledAt mergeMethod }
+            autoMergeRequest {
+              enabledAt mergeMethod
+              enabledBy {
+                __typename login
+                ... on Bot { id databaseId }
+                ... on User { id databaseId }
+              }
+            }
             labels(first: 100) { nodes { name } pageInfo { hasNextPage } }
             reviewThreads(first: 100, after: $cursor) {
               nodes { id isResolved }
@@ -475,17 +592,46 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
     const data = await boundedGraphql(this, `
       query($owner: String!, $name: String!) {
         repository(owner: $owner, name: $name) {
+          autoMergeAllowed
+          mergeCommitAllowed
+          rebaseMergeAllowed
+          squashMergeAllowed
+          isArchived
+          isDisabled
+          isLocked
           branchProtectionRules(first: 100) {
             nodes {
               pattern
+              allowsDeletions
+              allowsForcePushes
+              blocksCreations
+              dismissesStaleReviews
               requiresStatusChecks
               requiresStrictStatusChecks
               isAdminEnforced
+              lockAllowsFetchAndMerge
+              lockBranch
+              requireLastPushApproval
+              requiredApprovingReviewCount
+              requiredDeploymentEnvironments
+              requiresApprovingReviews
+              requiresCodeOwnerReviews
+              requiresCommitSignatures
               requiresConversationResolution
+              requiresDeployments
+              requiresLinearHistory
+              restrictsPushes
+              restrictsReviewDismissals
               bypassPullRequestAllowances(first: 100) {
                 totalCount nodes { id } pageInfo { hasNextPage endCursor }
               }
               bypassForcePushAllowances(first: 100) {
+                totalCount nodes { id } pageInfo { hasNextPage endCursor }
+              }
+              pushAllowances(first: 100) {
+                totalCount nodes { id } pageInfo { hasNextPage endCursor }
+              }
+              reviewDismissalAllowances(first: 100) {
                 totalCount nodes { id } pageInfo { hasNextPage endCursor }
               }
               requiredStatusChecks { context app { databaseId slug } }
@@ -499,6 +645,13 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
         }
       }`, { owner, name });
     return Object.freeze({
+      autoMergeAllowed: data?.repository?.autoMergeAllowed,
+      mergeCommitAllowed: data?.repository?.mergeCommitAllowed,
+      rebaseMergeAllowed: data?.repository?.rebaseMergeAllowed,
+      squashMergeAllowed: data?.repository?.squashMergeAllowed,
+      isArchived: data?.repository?.isArchived,
+      isDisabled: data?.repository?.isDisabled,
+      isLocked: data?.repository?.isLocked,
       branchProtectionRules: data?.repository?.branchProtectionRules,
       rulesets: data?.repository?.rulesets,
     });
@@ -506,6 +659,10 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
 
   getInstallationRepositories() {
     return this.request('GET', '/installation/repositories?per_page=100&page=1');
+  }
+
+  getUser(login) {
+    return this.request('GET', `/users/${encodeURIComponent(required(login, 'GitHub user login'))}`);
   }
 
   getCheckRun(checkRunId) {
@@ -574,21 +731,42 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
     const data = await boundedGraphql(this, `
       mutation($id: ID!, $head: GitObjectID!) {
         enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH, expectedHeadOid: $head }) {
-          pullRequest { id headRefOid autoMergeRequest { enabledAt mergeMethod } }
+          pullRequest {
+            id headRefOid
+            autoMergeRequest {
+              enabledAt mergeMethod
+              enabledBy {
+                __typename login
+                ... on Bot { id databaseId }
+                ... on User { id databaseId }
+              }
+            }
+          }
         }
       }`, { id: pullRequestId, head: expectedHeadOid });
     return data?.enablePullRequestAutoMerge?.pullRequest;
   }
 }
 
-export async function evaluateAutonomyFinalizer({ client, trigger, trust, config, checkAttempts = 3, sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+async function evaluateAutonomyFinalizerGates({
+  client, protectionClient, trigger, trust, config, proofLevel,
+  checkAttempts = 3, sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
   const run = await client.getWorkflowRun(trigger.run_id);
   const bound = validateWorkflowRun(run, { ...trigger, repository: trust.repository, repository_id: trust.repository_id });
   const policy = await evaluateAutonomyPolicy({ client, trigger: bound, trust, config });
   if (policy.decision.classification !== 'eligible') {
-    return Object.freeze({ eligible: false, reason: `policy_${policy.decision.classification}`, bound, policy });
+    return Object.freeze({
+      eligible: false,
+      reason: `policy_${policy.decision.classification}`,
+      proof_level: proofLevel,
+      bound,
+      policy,
+    });
   }
-  const protection = validateBranchProtection(await client.getBranchProtection(), trust.default_branch);
+  const protection = proofLevel === 'full'
+    ? validateBranchProtection(await protectionClient.getBranchProtection(), trust.default_branch)
+    : null;
   const issue = managedIssueBinding(policy, config);
   const expected = Object.freeze({
     ...bound,
@@ -609,16 +787,61 @@ export async function evaluateAutonomyFinalizer({ client, trigger, trust, config
     validateGovernance(governance, expected);
     readiness = await requiredChecksReady(client, checks, expected);
     if (readiness.ready) {
-      return Object.freeze({ eligible: true, reason: null, bound, policy, governance, checks: readiness, protection });
+      return Object.freeze({
+        eligible: true,
+        reason: null,
+        proof_level: proofLevel,
+        bound,
+        policy,
+        governance,
+        checks: readiness,
+        protection,
+      });
     }
     if (attempt < checkAttempts) await sleepImpl(2_000 * attempt);
   }
   return Object.freeze({
     eligible: false,
     reason: `required_checks_not_successful:${readiness.unsuccessful.join(',')}`,
+    proof_level: proofLevel,
     bound,
     policy,
     governance,
+  });
+}
+
+export async function evaluateAutonomyFinalizerPreliminary({
+  client, trigger, trust, config,
+  checkAttempts = 3, sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
+  return evaluateAutonomyFinalizerGates({
+    client,
+    protectionClient: null,
+    trigger,
+    trust,
+    config,
+    proofLevel: 'preliminary',
+    checkAttempts,
+    sleepImpl,
+  });
+}
+
+export async function evaluateAutonomyFinalizer({
+  client, protectionClient = client, trigger, trust, config,
+  checkAttempts = 3, sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
+  if (!protectionClient || typeof protectionClient.getBranchProtection !== 'function') {
+    reject('full Finalizer proof requires a branch-protection client');
+  }
+  return evaluateAutonomyFinalizerGates({
+    client,
+    protectionClient,
+    trigger,
+    trust,
+    config,
+    proofLevel: 'full',
+    checkAttempts,
+    sleepImpl,
   });
 }
 
@@ -678,10 +901,12 @@ async function confirmPendingHold(holdClient, hold, expected) {
   return check;
 }
 
-async function releaseHoldAfterArm({ readClient, holdClient, hold, expected, baseline, trigger, trust, config, sleepImpl }) {
+async function releaseHoldAfterArm({
+  readClient, protectionClient, holdClient, hold, expected, baseline, trigger, trust, config, sleepImpl,
+}) {
   await confirmPendingHold(holdClient, hold, expected);
   const final = await evaluateAutonomyFinalizer({
-    client: readClient, trigger, trust, config, checkAttempts: 1, sleepImpl,
+    client: readClient, protectionClient, trigger, trust, config, checkAttempts: 1, sleepImpl,
   });
   if (!final.eligible) reject(`post-arm verification failed: ${final.reason}`);
   if (final.bound.pull_number !== expected.pull_number || final.bound.head_sha !== expected.head_sha) {
@@ -708,6 +933,7 @@ function exactAutoMergeArmed(governance, expected) {
 const GOVERNANCE_RELEASE_FIELDS = Object.freeze([
   'id', 'number', 'state', 'isDraft', 'body', 'headRefName', 'headRefOid',
   'headRepository', 'baseRefName', 'baseRefOid', 'authorType', 'author',
+  'authorId', 'authorDatabaseId',
   'mergeable', 'reviewDecision', 'labels', 'reviewThreads',
 ]);
 
@@ -721,22 +947,9 @@ function assertGovernanceReleaseStable(before, after, expected) {
 }
 
 export async function finalizeAutonomyPull({
-  readClient, writerClient, holdClient = readClient, trigger, trust, config,
+  readClient, writerClient, protectionClient = writerClient, holdClient = readClient, trigger, trust, config,
   writerTrust = config.writer_trust, sleepImpl,
 }) {
-  let current = await evaluateAutonomyFinalizer({ client: readClient, trigger, trust, config, sleepImpl });
-  if (!current.eligible) return Object.freeze({ action: 'skipped', ...current });
-  const expected = {
-    ...current.bound,
-    ...managedIssueBinding(current.policy, config),
-    repository: trust.repository,
-    repository_id: trust.repository_id,
-    base_sha: trust.policy_sha,
-    writer_login: config.writer_login,
-    writer_graphql_login: config.writer_login.replace(/\[bot\]$/, ''),
-  };
-  const pullRequestId = current.governance.id;
-  const pullNumber = current.bound.pull_number;
   const configuredWriter = object(writerTrust, 'Writer trust configuration');
   const writerAppSlug = required(configuredWriter.app_slug, 'Writer trusted App slug');
   if (`${writerAppSlug}[bot]` !== config.writer_login) reject('Writer trusted App slug does not match policy');
@@ -744,14 +957,33 @@ export async function finalizeAutonomyPull({
   if (positiveInteger(configuredWriter.token_installation_id, 'Writer token installation id') !== writerInstallationId) {
     reject('Writer token installation does not match the configured installation');
   }
-  await proveWriterIdentity(writerClient, Object.freeze({
+  const writerIdentity = await proveWriterIdentity(writerClient, Object.freeze({
     app_id: positiveInteger(configuredWriter.app_id, 'Writer trusted App id'),
     installation_id: writerInstallationId,
     app_slug: writerAppSlug,
+    writer_login: config.writer_login,
+    graphql_login: config.writer_login.replace(/\[bot\]$/, ''),
     owner: trust.repository.split('/')[0],
     repository: trust.repository,
     repository_id: trust.repository_id,
   }));
+  let current = await evaluateAutonomyFinalizer({
+    client: readClient, protectionClient, trigger, trust, config, sleepImpl,
+  });
+  if (!current.eligible) return Object.freeze({ action: 'skipped', ...current });
+  const expected = Object.freeze({
+    ...current.bound,
+    ...managedIssueBinding(current.policy, config),
+    repository: trust.repository,
+    repository_id: trust.repository_id,
+    base_sha: trust.policy_sha,
+    writer_login: config.writer_login,
+    writer_graphql_login: config.writer_login.replace(/\[bot\]$/, ''),
+    writer_bot: writerIdentity.bot,
+  });
+  const pullRequestId = current.governance.id;
+  const pullNumber = current.bound.pull_number;
+  validateGovernance(current.governance, expected);
   const hold = await acquireHold(holdClient, expected);
 
   if (hold.check.status === 'completed') {
@@ -759,7 +991,7 @@ export async function finalizeAutonomyPull({
       reject('Autonomy Finalizer hold was released without exact native auto-merge');
     }
     const verification = await evaluateAutonomyFinalizer({
-      client: readClient, trigger, trust, config, sleepImpl,
+      client: readClient, protectionClient, trigger, trust, config, sleepImpl,
     });
     if (!verification.eligible || !exactAutoMergeArmed(verification.governance, expected)) {
       reject('completed Autonomy Finalizer hold no longer matches exact native auto-merge');
@@ -771,7 +1003,8 @@ export async function finalizeAutonomyPull({
   if (current.governance.autoMergeRequest !== null) {
     if (!exactAutoMergeArmed(current.governance, expected)) reject('managed pull request auto-merge state is invalid');
     await releaseHoldAfterArm({
-      readClient, holdClient, hold, expected, baseline: current.governance, trigger, trust, config, sleepImpl,
+      readClient, protectionClient, holdClient, hold, expected, baseline: current.governance,
+      trigger, trust, config, sleepImpl,
     });
     return Object.freeze({ action: 'already_armed', pull_number: pullNumber, head_sha: current.bound.head_sha });
   }
@@ -801,12 +1034,15 @@ export async function finalizeAutonomyPull({
   }
 
   try {
-    current = await evaluateAutonomyFinalizer({ client: readClient, trigger, trust, config, sleepImpl });
+    current = await evaluateAutonomyFinalizer({
+      client: readClient, protectionClient, trigger, trust, config, sleepImpl,
+    });
     if (!current.eligible) reject('pull request drifted after the ready-for-review transition');
     validateGovernance(current.governance, expected, { requireReady: true });
     if (current.governance.autoMergeRequest !== null) {
       await releaseHoldAfterArm({
-        readClient, holdClient, hold, expected, baseline: current.governance, trigger, trust, config, sleepImpl,
+        readClient, protectionClient, holdClient, hold, expected, baseline: current.governance,
+        trigger, trust, config, sleepImpl,
       });
       return Object.freeze({ action: 'already_armed', pull_number: pullNumber, head_sha: current.bound.head_sha });
     }
@@ -817,8 +1053,11 @@ export async function finalizeAutonomyPull({
         JSON.stringify(beforeArm) !== JSON.stringify(current.governance)) {
       reject('pull request drifted immediately before the native auto-merge request');
     }
+    // GitHub exposes only an aggregate merge state. BLOCKED/UNSTABLE are
+    // compatible with the pending required hold but do not prove that it is
+    // the sole blocker; the exact governance profile above is the authority.
     if (!['BLOCKED', 'UNSTABLE'].includes(beforeArm.mergeStateStatus)) {
-      reject('required Autonomy Finalizer hold is not effective for the exact head');
+      reject('managed pull request aggregate merge state is incompatible with the pending hold');
     }
     let armError = null;
     try { await writerClient.enableAutoMerge(pullRequestId, current.bound.head_sha); } catch (error) { armError = error; }
@@ -829,7 +1068,8 @@ export async function finalizeAutonomyPull({
       reject('GitHub did not persist the exact native auto-merge request');
     }
     await releaseHoldAfterArm({
-      readClient, holdClient, hold, expected, baseline: beforeArm, trigger, trust, config, sleepImpl,
+      readClient, protectionClient, holdClient, hold, expected, baseline: beforeArm,
+      trigger, trust, config, sleepImpl,
     });
   } catch (error) {
     if (attemptedReadyTransition) {
@@ -862,13 +1102,24 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
   const readClient = dependencies.readClient ?? new AutonomyFinalizerGitHubClient({
     token: required(environment.GITHUB_TOKEN, 'GITHUB_TOKEN'), repository, apiUrl: environment.GITHUB_API_URL,
   });
+  const proofLevel = required(environment.AERIS_FINALIZER_PROOF_LEVEL, 'AERIS_FINALIZER_PROOF_LEVEL');
+  if (!['preliminary', 'full'].includes(proofLevel)) reject('AERIS_FINALIZER_PROOF_LEVEL is invalid');
   const mutate = environment.AERIS_FINALIZER_MUTATE === 'true';
+  if (mutate !== (proofLevel === 'full')) {
+    reject('Finalizer mutation mode requires full proof and preliminary proof must be read-only');
+  }
+  const writerClient = mutate
+    ? dependencies.writerClient ?? new AutonomyFinalizerGitHubClient({
+        token: required(environment.AERIS_WRITER_TOKEN, 'AERIS_WRITER_TOKEN'),
+        repository,
+        apiUrl: environment.GITHUB_API_URL,
+      })
+    : null;
   const result = mutate
     ? await finalizeAutonomyPull({
         readClient,
-        writerClient: dependencies.writerClient ?? new AutonomyFinalizerGitHubClient({
-          token: required(environment.AERIS_WRITER_TOKEN, 'AERIS_WRITER_TOKEN'), repository, apiUrl: environment.GITHUB_API_URL,
-        }),
+        writerClient,
+        protectionClient: dependencies.protectionClient ?? writerClient,
         writerTrust: Object.freeze({
           app_id: positiveInteger(environment.AERIS_WRITER_APP_ID, 'AERIS_WRITER_APP_ID'),
           installation_id: positiveInteger(environment.AERIS_WRITER_INSTALLATION_ID, 'AERIS_WRITER_INSTALLATION_ID'),
@@ -877,7 +1128,9 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
         }),
         trigger, trust, config, sleepImpl: dependencies.sleepImpl,
       })
-    : await evaluateAutonomyFinalizer({ client: readClient, trigger, trust, config, sleepImpl: dependencies.sleepImpl });
+    : await evaluateAutonomyFinalizerPreliminary({
+        client: readClient, trigger, trust, config, sleepImpl: dependencies.sleepImpl,
+      });
   if (environment.GITHUB_OUTPUT) {
     const eligible = mutate ? result.action !== 'skipped' : result.eligible;
     fs.appendFileSync(environment.GITHUB_OUTPUT, [
@@ -885,7 +1138,8 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
       `reason=${result.reason ?? ''}`,
       `pull_number=${result.pull_number ?? result.bound?.pull_number ?? ''}`,
       `head_sha=${result.head_sha ?? result.bound?.head_sha ?? ''}`,
-      `action=${result.action ?? 'verified'}`,
+      `action=${result.action ?? (result.proof_level === 'preliminary' ? 'candidate' : 'verified')}`,
+      `proof_level=${result.proof_level ?? proofLevel}`,
       '',
     ].join('\n'));
   }

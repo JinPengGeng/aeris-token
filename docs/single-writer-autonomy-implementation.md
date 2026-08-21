@@ -13,7 +13,7 @@
 
 1. Agent job 不持有 GitHub 写凭据、Writer App 私钥或 release secret。
 2. Publisher 不执行候选代码，只验证并应用有界 patch。
-3. Writer App 仅安装到本仓库，仅有 `contents:write` 和 `pull_requests:write`。
+3. Writer App 仅安装到本仓库，仅有 `administration:read`、`contents:write` 和 `pull_requests:write`；没有任何 Administration 写权限或 bypass。
 4. PR CI 使用 `pull_request`、只读 token、无 secrets。
 5. `Automation Policy / gate` 来自 GitHub Actions，并由 `main` 的受信策略代码计算。
 6. `main` 严格要求 Rust、Frontend、Policy 和 `Autonomy Finalizer / hold` 四个检查，且来源绑定 GitHub Actions。
@@ -22,7 +22,7 @@
 9. 上游同步复用同一个 Writer App、固定分支和单一开放 PR。
 10. 冲突、状态漂移、敏感路径、读取不完整和凭据异常全部 fail closed。
 11. `release` Environment 仍需人工审批且管理员不可绕过。
-12. 六项 GitHub 现场 PoC、fork PR canary、Actions token branch-protection 读取 canary 和撤销演练均有 run、PR、SHA 和 API 快照证据。
+12. 六项 GitHub 现场 PoC、fork PR canary、Writer token 完整治理读取 canary 和撤销演练均有 run、PR、SHA 和 API 快照证据。
 
 ## 2. 非目标
 
@@ -45,6 +45,9 @@ workflow_dispatch / 受信调度器
   -> pull_request CI（无 secrets）
   -> Automation Policy / gate（base 受信代码；不执行 PR 内容）
   -> Autonomy Finalizer / hold（精确 head；受管 PR 保持 pending）
+  -> Finalizer preliminary gate（Actions token；不读取 branch protection）
+  -> mint 单仓 Writer token + 身份/权限范围证明
+  -> Finalizer full proof（Writer administration:read）
   -> Finalizer（API-only；不 checkout PR head）
   -> hold success（仅在 native auto-merge 独立回读确认后）
   -> GitHub native auto-merge
@@ -73,7 +76,7 @@ schedule / workflow_dispatch
 | PR CI | `GITHUB_TOKEN` | `contents:read` | 无 | 特权 environment、持久 runner |
 | Policy | `GITHUB_TOKEN` | contents/PR read | 无 | 模型、候选 checkout、发布自定义 Check API |
 | Hold initializer | `GITHUB_TOKEN` | checks write、contents/PR read | 无 | checkout/执行 PR head、Writer 凭据 |
-| Finalizer | `GITHUB_TOKEN` + Writer App token | Actions token 仅写 hold check；Writer 仅 PR/contents write | App private key | checkout PR、直接 merge、admin bypass |
+| Finalizer | `GITHUB_TOKEN` + Writer App token | Actions token 读取 CI/PR 并写 hold；Writer 仅 `administration:read`、PR/contents write | App private key | checkout PR、直接 merge、admin write/bypass |
 | Release | 维护者 | 现有 release 权限 | `release` Environment；人工审批 | 无人工审批发布 |
 
 Writer App 的残余能力必须明确记录：GitHub 的 `contents:write` 不能硬限制为分支前缀，`pull_requests:write` 也包含广于“创建 PR”的 API 能力。当前硬边界由 `main` 保护、无 bypass、Environment、受信 Publisher 和实时复核共同形成；不得把软件检查描述为 App capability 隔离。
@@ -180,23 +183,29 @@ Finalizer 在 Policy workflow 完成后运行，但只有以下条件全部成�
 1. 受信 workflow 名称、event、repository ID、base branch 匹配。
 2. PR 仍开放，head/base SHA 与触发快照一致。
 3. head repo 为本仓库、branch 为 `agent/issue-*`；受管同步走独立确定性流程。
-4. PR author 为配置的 Writer App bot。
+4. PR author 的 GraphQL `Bot` login、database ID 和 node ID 均与 Writer token 实时读取的 REST Bot 身份一致。
 5. Policy 对当前 diff 重新计算为 `eligible`。
 6. 当前 head 上的 Policy check 为 GitHub Actions expected source 且成功。
-7. branch protection 仍是 strict，并包含四个 required checks 及正确 source。
+7. repository 仍允许 native auto-merge，且只允许 squash merge；branch protection 的 review、deployment、push、lock、signature、linear-history、admin、bypass、conversation、ruleset 和四个 required checks 均与受审计 profile 精确一致。
 8. 无冲突、无阻塞 review、无未解决讨论、无 manual-only 标签。
 9. auto-merge 开关和授权有效期仍有效。
 
 安全时序固定如下：
 
 1. base 受信的 API-only initializer 为 `agent/issue-*` 受管 PR 的精确 head 创建 `in_progress` hold；普通非 Writer PR 获得 success，避免全局阻塞正常 PR；Writer App 仅有精确 `automation/sync-upstream` 分支及完整同步 marker 可直接获得 success，其他 Writer 分支或 malformed metadata 一律 failure。
-2. Finalizer 复核前三项业务检查、GraphQL Bot 身份和 strict branch protection，并确认 hold 已作为第四项 required check 绑定 GitHub Actions App。固定版本的 token action 必须证明 mint 所用 App ID、实时 App slug、配置 installation ID 与实时 installation ID 一致；installation token 还必须独立证明只可访问当前仓库。
-3. Finalizer 再次确认 exact-head hold pending 后才把 Draft PR 转为 ready；此时 `mergeStateStatus` 必须为 `BLOCKED`。
+2. Finalizer 的两个 mint 前步骤只执行显式 `preliminary` gate，验证 trigger、Policy、PR governance 和三项业务检查，绝不读取 branch protection/ruleset；其结果只决定是否值得进入 Writer Environment 和 mint token，不构成合并资格证明。mint 后使用同一枚、仅限当前仓库的 Writer installation token，以 `administration:read` 重新执行 `full` proof；只有 full proof 才能执行 hold、Ready、auto-merge 或 hold release mutation。Actions `GITHUB_TOKEN` 继续负责 CI/PR 读取和 hold mutation。固定版本的 token action 必须证明 mint 所用 App ID、实时 App slug、配置 installation ID 与实时 installation ID一致；installation token 还必须独立证明只可访问当前仓库，并以 `GET /users/{slug}[bot]` 取得实时 REST login、database ID、node ID。PR author 必须与这三个字段一致。
+3. Finalizer 再次确认 exact-head hold pending 后才把 Draft PR 转为 ready。GitHub 的 `mergeStateStatus` 只是汇总枚举，`BLOCKED` 和 `UNSTABLE` 都不能证明“唯一阻塞项就是 hold”；它们只能作为与 pending hold 相容的附加信号。授权依据是完整 profile、业务 checks、PR 治理快照和 exact hold 的组合证明，而不是对该枚举原因的猜测。
 4. Writer token 只调用 `enablePullRequestAutoMerge`，方法固定 `SQUASH` 并携带 `expectedHeadOid`；不存在直接 merge 路径。
-5. mutation 返回值不作为授权证据。Finalizer 通过独立 GraphQL 读取确认相同 PR/head 已持久化 `autoMergeRequest`。
+5. mutation 返回值不作为授权证据。Finalizer 通过独立 GraphQL 读取确认相同 PR/head 已持久化 `autoMergeRequest`，方法仍为 `SQUASH`，且 `enabledBy` 的 Bot login、database ID、node ID 与同一次 Writer 身份证明完全一致。人工或其他 App 预先启用的 auto-merge 不可被接纳。
 6. 最后才把同一个 hold check 完成为 success；GitHub 随后按 native auto-merge 和实时保护状态决定是否合并。
 
 任一步骤失败时 hold 保持 pending。若 arming 明确未生效，可恢复 Draft；若远端结果不确定或已 armed，则不猜测性回滚或释放 hold，由下一次可信事件重入收敛。
+
+### Native auto-merge 的原子性边界
+
+GitHub 没有提供把 PR/branch-protection 读取、`enablePullRequestAutoMerge` 和 Check Run `success` 更新合并成一个带条件版本的服务端事务。仓库级 Actions concurrency 只能串行本仓库的 Finalizer/initializer run，不能锁住维护者、其他 App 或 GitHub 自身对 label、review、discussion、check 和保护设置的并发变更。因此，即使在释放 hold 前执行完整双读，最后一次读取与 Check Run PATCH 之间仍存在不可消除的 TOCTOU 窗口；代码和文档不得宣称 terminal success hold 提供了绝对原子授权。
+
+当前实现把该窗口压缩到“Writer auto-merge 已独立回读、完整治理再次通过、exact hold 再次确认 pending”之后，并依赖 GitHub 在真正合并时重新执行 native branch protection。若 hold success 后 PR 因其他条件继续开放，后续条件解除可能由 GitHub 直接完成 auto-merge，而不保证新的 Finalizer run 先执行。上线验收必须把这一点作为显式残余风险：在 canary 中验证正常路径立即合并，并验证并发 label/review/check/protection 漂移仍受 native required checks 或运维 disarm 约束。若要求“任何未来条件解除前都必须重新运行 Finalizer”的强不变量，则单个 terminal Check Run + native auto-merge 方案本身不足，必须改用具备可续期授权或服务端原子合并边界的不同架构。
 
 ## 10. PoC 顺序
 
@@ -204,7 +213,7 @@ Finalizer 在 Policy workflow 完成后运行，但只有以下条件全部成�
 2. **身份与权限**：验证受管分支/PR 成功，`main`、workflow、checks、statuses、admin 和 release 写入失败；记录其他未保护分支的真实残余能力。
 3. **Artifact 隔离**：篡改 schema、digest、repo/base/task/path/mode/大小，证明均在 token mint 前失败。
 4. **Policy 来源**：将 Policy 加为 required check 并绑定 GitHub Actions；用其他来源同名状态证明不能满足保护。
-5. **hold 与 native auto-merge**：先 shadow 初始化并为所有开放 PR 回填 hold，再把 hold 绑定为 required check；逐一构造 head/base/check/draft/conflict/discussion 漂移和 mutation 响应丢失，证明不会直接 merge 或绕过 pending hold。额外以 fork PR 验证 `pull_request_target` initializer 不 checkout 或执行 fork head，且能在精确 head 上发布正确来源的 hold；以独立 Actions `GITHUB_TOKEN` canary 验证可读取目标分支 protection/ruleset。两项均为上线前阻断证据，未取得 run、PR、SHA 和 API 回读快照前不得声称已完成。
+5. **hold 与 native auto-merge**：先 shadow 初始化并为所有开放 PR 回填 hold，再把 hold 绑定为 required check；逐一构造 head/base/check/draft/conflict/discussion 漂移和 mutation 响应丢失，证明不会直接 merge 或绕过 pending hold。真实 canary 必须记录 `autoMergeRequest.enabledBy`，并与 Writer Bot 的 REST/GraphQL login、database ID、node ID 对照；另用人工或不同 Bot 预先启用的 disposable PR 证明 Finalizer 拒绝接纳。额外以 fork PR 验证 `pull_request_target` initializer 不 checkout 或执行 fork head，且能在精确 head 上发布正确来源的 hold；以 Writer installation token canary 验证 `administration:read` 可读取目标分支完整治理 profile，同时证明 Actions token preliminary gate 的 protection 读取次数为零。两项均为上线前阻断证据，未取得 run、PR、SHA 和 API 回读快照前不得声称已完成。
 6. **同步幂等**：连续三轮验证固定分支、最多一个开放 PR和 no-op；冲突、unknown tip、历史重写、人工关闭全部停止。
 7. **撤销**：关闭变量、disarm managed PR、suspend App、轮换 key，再验证无新写入。
 8. **Release**：触发 release lane，确认仍等待维护者审批且无 Agent secret。
@@ -213,7 +222,7 @@ PoC 使用 disposable issue、`docs/automation-canary/` 和 Draft PR。当前 Dr
 
 上线前必须记录每次 canary 的 `main` base SHA、PR base/head SHA、required contexts 快照和 GraphQL/REST 读取时间。若 `main` 推进、PR base 更新或 required context/source 漂移，当前 run 标记为 stale 并停止，必须以新 base SHA 重跑，不能沿用旧 Policy/hold 结论。以下远端能力是上线阻断条件：
 
-- Finalizer 使用的 Actions `GITHUB_TOKEN` 实测可以读取当前仓库 GraphQL `branchProtectionRules`，并看到 strict、required status checks 及 GitHub Actions source；权限不足或读取不完整时保持 hold pending。
+- Writer App 已授予且仅授予 `administration:read`，Finalizer mint 的单仓 installation token 实测可以读取当前仓库 GraphQL `branchProtectionRules`/rulesets，并看到完整治理 profile、strict required status checks 及 GitHub Actions source；权限不足、权限超出或读取不完整时保持 hold pending。无密钥 preliminary gate 不得作为完整授权证明。
 - disposable fork PR 实测 `pull_request_target` initializer 能在 fork head SHA 创建并独立回读 `Autonomy Finalizer / hold` Check Run。若 GitHub 拒绝该 head，fork PR 必须进入明确的 fail-closed/manual 路径，不得把缺失 hold 当作 success，也不得启用 hold required context。
 
 malformed terminal hold（错误 `head_sha`、`external_id`、name、重复检查，或已 completed 但结论/auto-merge 不匹配）不可复用、覆盖或手工改写为 success。initializer/finalizer 必须报告冲突并保持 PR 不可合并；由受信 Publisher 生成新精确 head 后创建新 hold，固定分支上的现有 PR 保持开放，不能为恢复而关闭。远端响应丢失时不得根据失败响应猜测状态，必须独立回读；无法确认则保持 fail closed，禁止人工补写绕过时序屏障。
@@ -226,8 +235,8 @@ malformed terminal hold（错误 `head_sha`、`external_id`、name、重复检�
 2. Policy shadow 运行并核对分类。
 3. 创建并仅安装一个 Writer App。
 4. 配置 `agent` Environment（无人工审批，仅模型凭据）和 `writer` Environment（App ID/私钥），并记录远端设置快照；`release` Environment 继续人工审批。
-5. 运行 Draft canary，不启用 auto-merge。
-6. 完成并保留 fork PR initializer canary 与 Actions `GITHUB_TOKEN` branch-protection/ruleset 读取 canary 的 run、PR、SHA、API 回读快照；任一失败均不得继续修改保护规则。
+5. 将同一 Writer App 的 Repository permissions 增加为 `Administration: read-only`，接受 installation 的权限更新，并以 API 回读确认没有 Administration 写权限或额外仓库范围；随后运行 Draft canary，仍不启用 auto-merge。
+6. 完成并保留 fork PR initializer canary 与 Writer token branch-protection/ruleset 完整读取 canary 的 run、PR、SHA、API 回读快照，并证明 preliminary gate 未调用保护规则 API；任一失败均不得继续修改保护规则。
 7. PoC 通过后将 Policy 加为 required check，并绑定 GitHub Actions source。
 8. 以 shadow 模式运行 hold initializer，为全部开放 PR 精确回填；确认受管 PR pending、非受管和 fork PR success，并回读每个 check 的 exact head、external ID 和 GitHub Actions source。
 9. 将 hold 加为第四项 strict required check 并绑定 GitHub Actions source；回读配置后才允许 Finalizer mint Writer token。
@@ -237,7 +246,7 @@ malformed terminal hold（错误 `head_sha`、`external_id`、name、重复检�
 
 ### PR #72 的安全复用
 
-当前 PR #72 的 base SHA 已落后于 `main`，不能把既有 head、checks 或 base 快照当作可复用授权。不得关闭该 PR，以免触发 managed branch tombstone。仅可通过 GitHub 的安全 retarget/更新路径让同一个开放 PR 的 base 与当前 `main` 一致，然后实时双读 PR 的 number、state、head ref/OID、base ref/OID、head repository、author、Draft 状态及 required checks；只有 base OID 与当时 `main` 精确相等、所有 check 都对应新 head，且 Finalizer hold 仍为新 head 的 pending 状态，才能继续复用。任一更新冲突、API 结果不完整、回读不一致或 base 再次漂移时停止，保留 Draft 并重新走受管发布/验证，不关闭 PR 或猜测性 force-push。
+2026-08-21 已通过 GitHub `update-branch` 安全更新同一个开放 PR #72：head 从 `17bf0c20961fa8033674a6668b76c2ce96c919eb` 更新为 `3d94425470209e0116848b19262c9526690c8226`，`baseRefOid/base.sha` 同步刷新为当时 `main` 的 `8355f83b7bc27865c741f6b2aa0c11cb1f04a73d`，compare 回读为 `behind_by=0`。旧 head 的 checks 不再作为授权；新 head 的 Rust CI 首轮命中 `truncated_sse_is_a_partial_body_error_over_h2c` 波动失败，failed-jobs 重跑后成功。PR 仍保持 `OPEN + Draft` 且 `autoMergeRequest=null`，未关闭、未 force-push。后续复用仍必须实时双读 PR 的 number、state、head ref/OID、base ref/OID、head repository、author、Draft 状态及 required checks；只有 base OID 与当时 `main` 精确相等、所有 check 都对应新 head，且 Finalizer hold 为新 head 的 pending 状态，才能继续。任一更新冲突、API 结果不完整、回读不一致或 base 再次漂移时停止，保留 Draft 并重新走受管发布/验证。
 
 紧急回滚顺序：
 

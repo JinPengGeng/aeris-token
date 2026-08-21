@@ -29,18 +29,23 @@ test('Finalizer listens to every required workflow to avoid completion-order rac
   assert.doesNotMatch(document.concurrency.group, /head_sha/);
 });
 
-test('Finalizer repeats read-only gates before the sole Writer token mint', () => {
+test('Finalizer repeats preliminary gates before the sole Writer token mint', () => {
   const document = workflow();
   assert.doesNotMatch(JSON.stringify(document.jobs.evaluate), /secrets\.|AERIS_WRITER_TOKEN/);
+  const evaluate = document.jobs.evaluate.steps.find((step) => step.id === 'evaluate');
   const steps = document.jobs.finalize.steps;
   const recheck = steps.findIndex((step) => /Recompute gates before token mint/.test(step.name));
   const mint = steps.findIndex((step) => /Mint bounded Writer App token/.test(step.name));
   assert.ok(recheck >= 0 && recheck < mint);
+  assert.equal(evaluate.env.AERIS_FINALIZER_PROOF_LEVEL, 'preliminary');
+  assert.equal(steps[recheck].env.AERIS_FINALIZER_PROOF_LEVEL, 'preliminary');
+  assert.equal(document.jobs.evaluate.outputs.proof_level, '${{ steps.evaluate.outputs.proof_level }}');
   assert.equal(steps.filter((step) => /create-github-app-token@/.test(step.uses ?? '')).length, 1);
   assert.deepEqual(
     Object.keys(steps[mint].with).filter((key) => key.startsWith('permission-')).sort(),
-    ['permission-contents', 'permission-pull-requests'],
+    ['permission-administration', 'permission-contents', 'permission-pull-requests'],
   );
+  assert.equal(steps[mint].with['permission-administration'], 'read');
   assert.equal(document.jobs.finalize.permissions.checks, 'write');
   assert.deepEqual(
     Object.entries(document.jobs.finalize.permissions).filter(([, permission]) => permission === 'write'),
@@ -53,6 +58,8 @@ test('Finalizer repeats read-only gates before the sole Writer token mint', () =
   assert.equal(finalize.env.AERIS_WRITER_TOKEN_INSTALLATION_ID, '${{ steps.writer_token.outputs.installation-id }}');
   assert.equal(finalize.env.AERIS_WRITER_TOKEN_APP_SLUG, '${{ steps.writer_token.outputs.app-slug }}');
   assert.equal(finalize.env.AERIS_WRITER_TOKEN, '${{ steps.writer_token.outputs.token }}');
+  assert.equal(finalize.env.AERIS_FINALIZER_PROOF_LEVEL, 'full');
+  assert.equal(finalize.env.AERIS_FINALIZER_MUTATE, 'true');
   assert.doesNotMatch(JSON.stringify(finalize.env), /PRIVATE_KEY/);
 });
 

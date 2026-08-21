@@ -82,7 +82,7 @@ Fallback 仅适用于连接失败、超时、429 和 5xx。认证失败、权限
 | `policy` | GitHub Actions | 以 base 受信代码计算 `Automation Policy / gate` | 使用 LLM 决策、修改代码、合并 |
 | `finalizer` | GitHub Actions + Writer token | 复核精确状态并请求 native squash auto-merge | checkout PR head、直接 merge、绕过 Policy/保护 |
 
-多个逻辑 Agent 运行在 GitHub Actions 中。开放代码写入和 native auto-merge 时，仅 Publisher/Finalizer 临时铸造同一个 Writer App installation token；Policy 与 Finalizer 的读侧复核使用 `GITHUB_TOKEN`。
+多个逻辑 Agent 运行在 GitHub Actions 中。开放代码写入和 native auto-merge 时，仅 Publisher/Finalizer 临时铸造同一个 Writer App installation token；Policy 与 Finalizer 的普通 PR/CI 读侧复核使用 `GITHUB_TOKEN`。Finalizer 在 token mint 前只执行不读取 branch protection/ruleset 的 preliminary gate，该结果只允许进入 mint；完整治理证明必须在 mint 后使用同一 Writer token 的 `administration:read` 重新计算，且只有 full proof 可以执行 Writer/hold mutation。Writer App 不具备 Administration 写权限。
 
 ## 6. 事件和命令
 
