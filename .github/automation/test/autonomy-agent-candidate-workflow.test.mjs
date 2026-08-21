@@ -87,6 +87,9 @@ test('candidate workflow parses and strictly validates trusted model routing wit
 test('candidate workflow emits only a short-lived patch and manifest after deterministic validation', () => {
   const document = workflow();
   const candidate = document.jobs.candidate;
+  const artifactUploads = Object.values(document.jobs)
+    .flatMap((job) => job.steps ?? [])
+    .filter((step) => /^actions\/upload-artifact@/.test(step.uses ?? ''));
   const runtimeUpload = document.jobs.runtime.steps.find((step) => /Upload trusted candidate runtime/.test(step.name));
   const nodePath = candidate.steps.find((step) => /Capture trusted Node/.test(step.name));
   const reset = candidate.steps.find((step) => /Reset post-Agent scratch/.test(step.name));
@@ -99,6 +102,14 @@ test('candidate workflow emits only a short-lived patch and manifest after deter
   const extractIndex = candidate.steps.indexOf(extract);
   assert.ok(nodePathIndex >= 0 && nodePathIndex < codexIndex);
   assert.ok(resetIndex > codexIndex && downloadIndex > resetIndex && extractIndex > downloadIndex);
+  assert.equal(artifactUploads.length, 2);
+  assert.deepEqual(
+    artifactUploads.map((step) => step.with.name).sort(),
+    [
+      'agent-candidate-issue-${{ needs.preflight.outputs.issue_number }}-run-${{ github.run_id }}-${{ github.run_attempt }}',
+      'agent-candidate-runtime-${{ github.run_id }}-${{ github.run_attempt }}',
+    ],
+  );
   assert.equal(runtimeUpload.with.name, 'agent-candidate-runtime-${{ github.run_id }}-${{ github.run_attempt }}');
   assert.equal(runtimeUpload.with['retention-days'], 1);
   assert.match(runtimeUpload.with.path, /autonomy-safe-git\.mjs/);
