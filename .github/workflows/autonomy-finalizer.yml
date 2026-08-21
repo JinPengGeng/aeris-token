@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: autonomy-finalizer-${{ github.event.workflow_run.head_branch }}
+  group: aeris-autonomy-pr-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
@@ -75,7 +75,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       actions: read
-      checks: read
+      checks: write
       contents: read
       pull-requests: read
     env:
@@ -156,6 +156,10 @@ jobs:
           AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
           AERIS_WRITER_TOKEN: ${{ steps.writer_token.outputs.token }}
+          AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
+          AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
+          AERIS_WRITER_TOKEN_INSTALLATION_ID: ${{ steps.writer_token.outputs.installation-id }}
+          AERIS_WRITER_TOKEN_APP_SLUG: ${{ steps.writer_token.outputs.app-slug }}
           AERIS_FINALIZER_MUTATE: "true"
         run: node .github/automation/src/autonomy-finalizer.mjs
 

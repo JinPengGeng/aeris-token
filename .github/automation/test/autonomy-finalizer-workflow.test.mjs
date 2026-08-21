@@ -22,7 +22,10 @@ test('Finalizer listens to every required workflow to avoid completion-order rac
   assert.match(document.jobs.evaluate.if, /pull_request/);
   assert.match(document.jobs.evaluate.if, /agent\/issue-/);
   assert.match(document.jobs.finalize.if, /AERIS_AUTONOMOUS_MERGE_ENABLED/);
-  assert.equal(document.concurrency.group, 'autonomy-finalizer-${{ github.event.workflow_run.head_branch }}');
+  assert.equal(
+    document.concurrency.group,
+    'aeris-autonomy-pr-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch }}',
+  );
   assert.doesNotMatch(document.concurrency.group, /head_sha/);
 });
 
@@ -38,7 +41,19 @@ test('Finalizer repeats read-only gates before the sole Writer token mint', () =
     Object.keys(steps[mint].with).filter((key) => key.startsWith('permission-')).sort(),
     ['permission-contents', 'permission-pull-requests'],
   );
-  assert.doesNotMatch(JSON.stringify(document.jobs.finalize.permissions), /write/);
+  assert.equal(document.jobs.finalize.permissions.checks, 'write');
+  assert.deepEqual(
+    Object.entries(document.jobs.finalize.permissions).filter(([, permission]) => permission === 'write'),
+    [['checks', 'write']],
+  );
+  const finalize = steps.find((step) => /Request exact native auto-merge/.test(step.name));
+  assert.equal(steps[mint].with['app-id'], '${{ vars.AERIS_WRITER_APP_ID }}');
+  assert.equal(finalize.env.AERIS_WRITER_APP_ID, '${{ vars.AERIS_WRITER_APP_ID }}');
+  assert.equal(finalize.env.AERIS_WRITER_INSTALLATION_ID, '${{ vars.AERIS_WRITER_INSTALLATION_ID }}');
+  assert.equal(finalize.env.AERIS_WRITER_TOKEN_INSTALLATION_ID, '${{ steps.writer_token.outputs.installation-id }}');
+  assert.equal(finalize.env.AERIS_WRITER_TOKEN_APP_SLUG, '${{ steps.writer_token.outputs.app-slug }}');
+  assert.equal(finalize.env.AERIS_WRITER_TOKEN, '${{ steps.writer_token.outputs.token }}');
+  assert.doesNotMatch(JSON.stringify(finalize.env), /PRIVATE_KEY/);
 });
 
 test('Finalizer never checks out the pull request head and pins every action', () => {

@@ -1,0 +1,45 @@
+name: Autonomy Hold
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited]
+  workflow_dispatch:
+    inputs:
+      pull_number:
+        description: Pull request number
+        required: true
+        type: string
+
+permissions:
+  checks: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: aeris-autonomy-pr-${{ github.event.pull_request.number || inputs.pull_number }}
+  cancel-in-progress: false
+
+jobs:
+  initialize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out trusted default branch policy
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Initialize exact-head autonomy hold
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_PULL_NUMBER: ${{ github.event.pull_request.number || inputs.pull_number }}
+          AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+        run: node .github/automation/src/autonomy-hold-initializer.mjs
