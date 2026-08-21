@@ -38,6 +38,11 @@ function labels(issue) {
   return issue.labels.map((label) => typeof label === 'string' ? label : label?.name).filter(Boolean);
 }
 
+export function writeAutonomyPreflightOutput(outputPath, result) {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(outputPath, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
+}
+
 export async function evaluateAutonomyPreflight(input, client) {
   const repository = required(input?.repository, 'repository', REPOSITORY);
   const repositoryId = positiveInteger(input?.repository_id, 'repository_id');
@@ -94,7 +99,7 @@ export async function runAutonomyPreflight(environment = process.env) {
     base_ref: 'refs/heads/main',
   }, client);
   if (environment.AERIS_PREFLIGHT_OUTPUT) {
-    fs.writeFileSync(environment.AERIS_PREFLIGHT_OUTPUT, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
+    writeAutonomyPreflightOutput(environment.AERIS_PREFLIGHT_OUTPUT, result);
   }
   if (environment.GITHUB_OUTPUT) {
     fs.appendFileSync(
