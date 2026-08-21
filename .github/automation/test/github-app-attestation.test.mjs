@@ -158,6 +158,22 @@ test('attestation HTTP failures, timeouts, invalid JSON, and body failures are f
   }
 });
 
+test('attestation timeout remains active while reading the response body', async () => {
+  const fetchImpl = async (_url, { signal }) => ({
+    ok: true,
+    status: 200,
+    text: () => new Promise((_resolve, rejectPromise) => {
+      signal.addEventListener('abort', () => rejectPromise(new Error('body timeout secret')), { once: true });
+    }),
+  });
+  const client = new GitHubAppAttestationClient({ jwt: 'jwt', fetchImpl, timeoutMs: 20 });
+  await assert.rejects(() => client.getApp(), (error) => {
+    assert.equal(error instanceof GitHubAppAttestationError, true);
+    assert.doesNotMatch(error.message, /secret|jwt/i);
+    return true;
+  });
+});
+
 test('attestation CLI derives owner from the repository and rejects missing configuration before HTTP', async () => {
   const environment = {
     GITHUB_REPOSITORY: 'JinPengGeng/aeris-token',

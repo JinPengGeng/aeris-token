@@ -96,11 +96,10 @@ export class GitHubAppAttestationClient {
   }
 
   async request(pathname) {
-    let response;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      response = await this.fetchImpl(`${this.apiUrl}${pathname}`, {
+      const response = await this.fetchImpl(`${this.apiUrl}${pathname}`, {
         method: 'GET',
         headers: {
           accept: 'application/vnd.github+json',
@@ -109,20 +108,21 @@ export class GitHubAppAttestationClient {
         },
         signal: controller.signal,
       });
-    } catch {
+      if (!response || typeof response.status !== 'number' || typeof response.text !== 'function') {
+        reject('GitHub App attestation response is invalid');
+      }
+      let text;
+      try { text = await response.text(); } catch { reject('GitHub App attestation response body failed'); }
+      let value;
+      try { value = JSON.parse(text); } catch { reject('GitHub App attestation returned invalid JSON', response.status); }
+      if (!response.ok) reject(`GitHub App attestation returned HTTP ${response.status}`, response.status);
+      return object(value, 'GitHub App attestation response');
+    } catch (error) {
+      if (error instanceof GitHubAppAttestationError) throw error;
       reject('GitHub App attestation request failed');
     } finally {
       clearTimeout(timeout);
     }
-    if (!response || typeof response.status !== 'number' || typeof response.text !== 'function') {
-      reject('GitHub App attestation response is invalid');
-    }
-    let text;
-    try { text = await response.text(); } catch { reject('GitHub App attestation response body failed'); }
-    let value;
-    try { value = JSON.parse(text); } catch { reject('GitHub App attestation returned invalid JSON', response.status); }
-    if (!response.ok) reject(`GitHub App attestation returned HTTP ${response.status}`, response.status);
-    return object(value, 'GitHub App attestation response');
   }
 
   getApp() { return this.request('/app'); }
