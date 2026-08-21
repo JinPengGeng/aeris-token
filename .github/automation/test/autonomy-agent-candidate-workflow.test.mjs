@@ -12,6 +12,10 @@ const repoRoot = path.resolve(testDirectory, '..', '..', '..');
 const workflowPath = path.join(repoRoot, '.github', 'workflows', 'agent-candidate.yml');
 const promptPath = path.join(repoRoot, '.github', 'codex', 'candidate-prompt.md');
 const schemaPath = path.join(repoRoot, '.github', 'codex', 'schemas', 'result.schema.json');
+const trustedUrlPattern = '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[-A-Za-z0-9._~:/?#@!$&*+,;=%]*)?$';
+const trustedModelPattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$';
+const trustedUrl = new RegExp(trustedUrlPattern);
+const trustedModel = new RegExp(trustedModelPattern);
 
 function workflow() {
   return yaml.load(fs.readFileSync(workflowPath, 'utf8'));
@@ -61,6 +65,23 @@ test('candidate workflow exposes the model secret only to the agent Environment 
   assert.equal(secretSteps[0].with.model, '${{ vars.AERIS_AI_MODEL }}');
   assert.equal(JSON.stringify(candidate), JSON.stringify(candidate).replace(/AERIS_WRITER|release/i, ''));
   for (const action of allUses(document.jobs)) assert.match(action, /^[^@\s]+@[0-9a-f]{40}$/);
+});
+
+test('candidate workflow parses and strictly validates trusted model routing without exposing a secret', () => {
+  const candidate = workflow().jobs.candidate;
+  const routingValidation = candidate.steps.find((step) => step.name === 'Validate trusted model routing');
+  assert.match(routingValidation.run, new RegExp(`trusted_url_pattern='${trustedUrlPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
+  assert.match(routingValidation.run, new RegExp(`trusted_model_pattern='${trustedModelPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
+  assert.match(routingValidation.run, /AERIS_AI_BASE_URL.*\$'\\n'.*AERIS_AI_BASE_URL.*\$'\\r'/);
+  assert.match(routingValidation.run, /AERIS_AI_MODEL.*\$'\\n'.*AERIS_AI_MODEL.*\$'\\r'/);
+  assert.match(routingValidation.run, /printf '%s\\n' "\$\{AERIS_AI_BASE_URL\}" \| grep -Eq "\$trusted_url_pattern"/);
+  assert.match(routingValidation.run, /printf '%s\\n' "\$\{AERIS_AI_MODEL\}" \| grep -Eq "\$trusted_model_pattern"/);
+  assert.doesNotMatch(routingValidation.run, /AERIS_AI_API_KEY|secrets\./i);
+  assert.equal(trustedUrl.test('https://ai.example.test/v1?tenant=canary'), true);
+  assert.equal(trustedUrl.test('http://ai.example.test/v1'), false);
+  assert.equal(trustedUrl.test("https://ai.example.test/v1/it's-not-allowed"), false);
+  assert.equal(trustedModel.test('gpt-5.6-sol'), true);
+  assert.equal(trustedModel.test('model with spaces'), false);
 });
 
 test('candidate workflow emits only a short-lived patch and manifest after deterministic validation', () => {

@@ -128,8 +128,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${AERIS_AI_BASE_URL}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[-A-Za-z0-9._~:/?#\[\]@!$\&'()*+,;=%]*)?$ ]]
-          [[ "${AERIS_AI_MODEL}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]]
+          trusted_url_pattern='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[-A-Za-z0-9._~:/?#@!$&*+,;=%]*)?$'
+          trusted_model_pattern='^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'
+          [[ "${AERIS_AI_BASE_URL}" != *$'\n'* && "${AERIS_AI_BASE_URL}" != *$'\r'* ]]
+          [[ "${AERIS_AI_MODEL}" != *$'\n'* && "${AERIS_AI_MODEL}" != *$'\r'* ]]
+          printf '%s\n' "${AERIS_AI_BASE_URL}" | grep -Eq "$trusted_url_pattern"
+          printf '%s\n' "${AERIS_AI_MODEL}" | grep -Eq "$trusted_model_pattern"
 
       - name: Generate bounded candidate changes
         uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
