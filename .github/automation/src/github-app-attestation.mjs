@@ -97,6 +97,8 @@ export class GitHubAppAttestationClient {
 
   async request(pathname) {
     let response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       response = await this.fetchImpl(`${this.apiUrl}${pathname}`, {
         method: 'GET',
@@ -105,10 +107,12 @@ export class GitHubAppAttestationClient {
           authorization: `Bearer ${this.jwt}`,
           'x-github-api-version': '2022-11-28',
         },
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: controller.signal,
       });
     } catch {
       reject('GitHub App attestation request failed');
+    } finally {
+      clearTimeout(timeout);
     }
     if (!response || typeof response.status !== 'number' || typeof response.text !== 'function') {
       reject('GitHub App attestation response is invalid');
