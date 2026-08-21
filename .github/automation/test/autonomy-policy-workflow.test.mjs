@@ -20,7 +20,7 @@ test('Policy is a secretless pull_request job sourced from the exact base SHA', 
   assert.deepEqual(Object.keys(document.on), ['pull_request']);
   assert.deepEqual(document.on.pull_request.types, ['opened', 'reopened', 'synchronize', 'labeled', 'unlabeled']);
   assert.deepEqual(document.permissions, { contents: 'read', 'pull-requests': 'read' });
-  assert.equal(document.jobs.gate.name, 'gate');
+  assert.equal(document.jobs.gate.name, 'Automation Policy / gate');
   assert.equal(document.jobs.gate.environment, undefined);
   assert.doesNotMatch(JSON.stringify(document), /secrets\.|checks:\s*write|statuses:\s*write/i);
   const checkout = document.jobs.gate.steps.find((step) => String(step.uses).startsWith('actions/checkout@'));
