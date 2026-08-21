@@ -134,12 +134,12 @@ result = three_way_merge(base=U0, ours=M, theirs=U1)
 路径分类按下列优先级执行：
 
 ```text
-fork_owned > review_required > generated > upstream_owned > default
+sensitive > review_required > fork_owned > generated > upstream_owned > default
 ```
 
-准备合并树时，先将上游的 fork-owned 路径还原为 `U0` 版本，再执行 `base=U0, ours=M, theirs=filtered(U1)` 的三方合并；这样 fork 在 `M` 中的新增、修改和删除均被保留，fork-owned 冲突也不会阻断其他上游增量。当前执行器对 fork-owned 支持精确路径和目录末尾 `/**`；策略出现其他 glob 时拒绝运行，避免静默误分类。
+准备合并树时，先将上游的 fork-owned 路径还原为 `U0` 版本，再执行 `base=U0, ours=M, theirs=filtered(U1)` 的三方合并；这样 fork 在 `M` 中的新增、修改和删除均被保留，fork-owned 冲突也不会阻断其他上游增量。当前执行器只支持 `aeris-glob-v1` 的精确路径、目录末尾 `/**`、单段 `*`/`?` 和无斜线 basename 模式；negation、rooted pattern、backslash、character class、空 pattern、尾 `/` 和其他语法均拒绝，不静默猜测。
 
-默认分类是 `review_required`，用于标识同步后的审查风险，不会让未知路径被误认为 `upstream_owned`。managed 上游同步是通用 Agent Finalizer 之外的确定性例外：fork-owned 路径先被过滤，候选树必须通过 checkpoint、来源、固定分支和精确 head 验证。上游 workflow drift 仍生成或更新审查 Issue，且不会被同步候选覆盖。非 fork-owned 冲突时，自动化会 disarm 历史遗留的 native auto-merge（若存在），不生成伪解决方案或覆盖未知同步分支；维护者应通过普通 PR 完成人工三方解决，并在同一 PR 中把 `last_integrated_sha` 更新为已实际纳入的上游 SHA。该 PR 合并后，下一轮从新 checkpoint 继续，不再重复旧冲突。
+默认分类是 `review_required`，用于标识同步后的审查风险，不会让未知路径被误认为 `upstream_owned`。`auth`、`migrations`、`security` 路径只要求人工审查；真正禁止发布的 sensitive 集合仅包括 `.gitmodules` 和私钥/证书扩展名。managed 上游同步是通用 Agent Finalizer 之外的确定性例外：fork-owned 路径先被过滤，候选树必须通过 checkpoint、来源、固定分支和精确 head 验证；review-required 或 unknown verdict 可发布人工 PR，但 `autonomous_eligible=false`，不会 direct merge。上游 workflow drift 仍生成或更新审查 Issue，且不会被同步候选覆盖。非 fork-owned 冲突时，自动化会 disarm 历史遗留的 native auto-merge（若存在），不生成伪解决方案或覆盖未知同步分支；维护者应通过普通 PR 完成人工三方解决，并在同一 PR 中把 `last_integrated_sha` 更新为已实际纳入的上游 SHA。该 PR 合并后，下一轮从新 checkpoint 继续，不再重复旧冲突。
 
 ## 8. 幂等、限流和审计边界
 
@@ -162,7 +162,7 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 
 ## 9. 自动合并
 
-`Automation Policy / gate` 是 GitHub Actions 的确定性检查。生产 required check 和 production flags 在 PoC 证据完成前均不得启用；PoC 后的推进顺序是：
+`Automation Policy / gate` 是 GitHub Actions 的确定性检查。对同步 PR，它只证明 required-check health，不是 upstream policy eligibility attestation；direct merge 的 eligibility 必须来自受信 prepare 输出、精确 commit trailer 和 merge helper 的再次校验。生产 required check 和 production flags 在 PoC 证据完成前均不得启用；PoC 后的推进顺序是：
 
 1. `shadow`：只报告本应允许或拒绝的原因。
 2. `human`：维护者参考 Policy 后手工合并。

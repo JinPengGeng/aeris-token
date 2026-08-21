@@ -9,9 +9,14 @@ source "${SCRIPT_DIR}/github-autonomy.sh"
 : "${SYNC_BRANCH:?SYNC_BRANCH is required}"
 : "${SYNCED_SHA:?SYNCED_SHA is required}"
 : "${PR_URL:?PR_URL is required}"
+: "${EXPECTED_BASE_SHA:?EXPECTED_BASE_SHA is required}"
 
 [[ "${SYNCED_SHA}" =~ ^[0-9A-Fa-f]{40}$ ]] || {
   echo 'error: SYNCED_SHA must be a full 40-character hexadecimal commit SHA' >&2
+  exit 78
+}
+[[ "${EXPECTED_BASE_SHA}" =~ ^[0-9A-Fa-f]{40}$ ]] || {
+  echo 'error: EXPECTED_BASE_SHA must be a full 40-character hexadecimal commit SHA' >&2
   exit 78
 }
 if [[ "${PR_URL}" =~ ^https://github\.com/([A-Za-z0-9][A-Za-z0-9._-]*)/([A-Za-z0-9][A-Za-z0-9._-]*)/pull/([1-9][0-9]*)/?$ ]]; then
@@ -112,12 +117,13 @@ wait_for_required_checks() {
   local attempt pr checks state
   for ((attempt = 1; attempt <= wait_attempts; attempt++)); do
     pr="$(aeris_gh pr view "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
-      --json state,isDraft,headRefOid,headRefName,headRepository,baseRefName,autoMergeRequest)"
+      --json state,isDraft,headRefOid,headRefName,headRepository,baseRefName,baseRefOid,autoMergeRequest)"
     jq -e --arg head_sha "${SYNCED_SHA}" --arg head_branch "${SYNC_BRANCH}" \
-      --arg repository "${GITHUB_REPOSITORY}" '
+      --arg base_sha "${EXPECTED_BASE_SHA}" --arg repository "${GITHUB_REPOSITORY}" '
       type == "object" and .state == "OPEN" and .isDraft == false and
       .headRefOid == $head_sha and .headRefName == $head_branch and
       .headRepository.nameWithOwner == $repository and .baseRefName == "main" and
+      .baseRefOid == $base_sha and
       .autoMergeRequest == null
     ' <<<"${pr}" >/dev/null || {
       echo 'error: synchronization pull request identity or state drifted while waiting for checks' >&2

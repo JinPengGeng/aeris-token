@@ -125,19 +125,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ steps.sync.outputs.pr_url }}
           SYNCED_SHA: ${{ steps.sync.outputs.synced_sha }}
+          EXPECTED_BASE_SHA: ${{ steps.sync.outputs.expected_base_sha }}
         shell: bash
         run: bash .github/workflows/scripts/ensure-required-checks.sh
 
       - name: Merge synchronization PR
-        if: steps.sync.outputs.has_changes == 'true'
+        if: >-
+          steps.sync.outputs.has_changes == 'true' &&
+          steps.sync.outputs.autonomous_eligible == 'true' &&
+          steps.sync.outputs.policy_verdict == 'eligible'
         env:
           GH_TOKEN: ${{ steps.sync_token.outputs.token }}
           PR_URL: ${{ steps.sync.outputs.pr_url }}
           SYNCED_SHA: ${{ steps.sync.outputs.synced_sha }}
+          EXPECTED_BASE_SHA: ${{ steps.sync.outputs.expected_base_sha }}
+          SYNCED_SOURCE: ${{ steps.sync.outputs.synced_source }}
+          SYNC_POLICY_VERDICT: ${{ steps.sync.outputs.policy_verdict }}
         shell: bash
         run: |
           bash .github/workflows/scripts/manage-sync-automerge.sh \
-            merge "${GITHUB_REPOSITORY}" "${PR_URL}" "${SYNCED_SHA}"
+            merge "${GITHUB_REPOSITORY}" "${PR_URL}" "${SYNCED_SHA}" \
+            "${EXPECTED_BASE_SHA}" "${SYNCED_SOURCE}" "${SYNC_POLICY_VERDICT}"
 
       - name: Write summary
         if: always()
@@ -149,6 +157,7 @@ jobs:
           CHECKPOINT_SHA: ${{ steps.sync.outputs.checkpoint_sha }}
           FILTERED_PATHS: ${{ steps.sync.outputs.filtered_paths }}
           PR_URL: ${{ steps.sync.outputs.pr_url }}
+          POLICY_VERDICT: ${{ steps.sync.outputs.policy_verdict }}
         shell: bash
         run: |
           {
@@ -159,6 +168,7 @@ jobs:
             echo "- State: \`${STATE:-failed}\`"
             echo "- Changes found: \`${HAS_CHANGES:-unknown}\`"
             echo "- Fork-owned paths filtered: \`${FILTERED_PATHS:-0}\`"
+            echo "- Autonomous policy verdict: \`${POLICY_VERDICT:-unknown}\`"
             if [[ -n "${PR_URL}" ]]; then
               echo "- Pull request: ${PR_URL}"
             fi

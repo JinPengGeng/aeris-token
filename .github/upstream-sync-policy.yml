@@ -1,5 +1,5 @@
-# Path ownership contract for checkpoint-based upstream sync. Rules use
-# gitignore-style globs and the precedence listed below.
+# Path ownership contract for checkpoint-based upstream sync. Rules use the
+# deliberately small aeris-glob-v1 matcher implemented by the sync runtime.
 version: 1
 
 upstream:
@@ -12,13 +12,15 @@ sync:
   state_file: .github/upstream-sync-state.json
   pull_request_limit: 1
   fail_closed: true
+  autonomous_merge: eligible
 
 matching:
-  syntax: gitignore
+  syntax: aeris-glob-v1
   enforced_fork_owned_subset: exact_or_directory_recursive
   precedence:
-    - fork_owned
+    - sensitive
     - review_required
+    - fork_owned
     - generated
     - upstream_owned
   default: review_required
@@ -52,6 +54,13 @@ review_required:
   - "**/auth/**"
   - "**/migrations/**"
   - "**/security/**"
+
+# These paths are not safe to advance past, even through a manual sync PR.
+sensitive:
+  - .gitmodules
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/*.p12"
 
 generated: []
 

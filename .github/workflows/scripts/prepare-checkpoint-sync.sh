@@ -50,13 +50,21 @@ changed_paths="${work_dir}/changed-paths"
 filtered_index="${work_dir}/filtered.index"
 final_index="${work_dir}/final.index"
 updated_state="${work_dir}/updated-state.json"
+review_patterns_file="${work_dir}/review-required"
+sensitive_patterns_file="${work_dir}/sensitive"
+generated_patterns_file="${work_dir}/generated"
+upstream_patterns_file="${work_dir}/upstream-owned"
+fork_patterns_file="${work_dir}/fork-owned"
 
 cleanup() {
   printf 'Removing temporary workspace: %s\n' "${work_dir}" >&2
   rm -f -- \
     "${state_json}" "${policy_yaml}" "${changed_paths}" \
     "${filtered_index}" "${filtered_index}.lock" \
-    "${final_index}" "${final_index}.lock" "${updated_state}"
+    "${final_index}" "${final_index}.lock" "${updated_state}" \
+    "${review_patterns_file}" "${sensitive_patterns_file}" \
+    "${generated_patterns_file}" "${upstream_patterns_file}" \
+    "${fork_patterns_file}"
   rmdir -- "${work_dir}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -90,15 +98,60 @@ policy_field() {
 policy_repository="$(policy_field upstream repository)"
 policy_branch="$(policy_field upstream branch)"
 policy_state_path="$(policy_field sync state_file)"
+policy_fail_closed="$(policy_field sync fail_closed)"
+policy_autonomous_merge="$(policy_field sync autonomous_merge)"
 policy_matcher="$(policy_field matching enforced_fork_owned_subset)"
+policy_syntax="$(policy_field matching syntax)"
+policy_default="$(policy_field matching default)"
 [[ "${policy_repository}" == "${expected_repository}" ]] ||
   fail_error 'policy upstream repository does not match the requested repository'
 [[ "${policy_branch}" == "${expected_branch}" ]] ||
   fail_error 'policy upstream branch does not match the requested branch'
 [[ "${policy_state_path}" == "${state_path}" ]] ||
   fail_error 'policy state path does not match the requested state file'
+[[ "${policy_fail_closed}" == true ]] || fail_error 'sync policy must fail closed'
+[[ "${policy_autonomous_merge}" == eligible || "${policy_autonomous_merge}" == manual ]] ||
+  fail_error 'sync autonomous_merge policy must be eligible or manual'
 [[ "${policy_matcher}" == exact_or_directory_recursive ]] ||
   fail_error 'policy fork_owned matcher is not supported by this runtime'
+[[ "${policy_syntax}" == aeris-glob-v1 && "${policy_default}" == review_required ]] ||
+  fail_error 'sync policy matching contract is not fail closed'
+mapfile -t policy_precedence < <(
+  awk '
+    $0 == "  precedence:" { in_section = 1; next }
+    in_section && /^  [^[:space:]-]/ { exit }
+    in_section && /^[[:space:]]*-[[:space:]]*/ {
+      value = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", value)
+      print value
+    }
+  ' "${policy_yaml}"
+)
+[[ "${policy_precedence[*]}" == 'sensitive review_required fork_owned generated upstream_owned' ]] ||
+  fail_error 'sync policy precedence is not supported by this runtime'
+
+write_policy_patterns() {
+  local section="$1" destination="$2"
+  awk -v section="${section}" '
+    $0 == section ":" { in_section = 1; next }
+    in_section && /^[^[:space:]#]/ { exit }
+    in_section && /^[[:space:]]*-[[:space:]]*/ {
+      value = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      if (value ~ /^".*"$/ || value ~ /^\047.*\047$/) value = substr(value, 2, length(value) - 2)
+      print value
+    }
+  ' "${policy_yaml}" >"${destination}"
+}
+write_policy_patterns review_required "${review_patterns_file}"
+write_policy_patterns sensitive "${sensitive_patterns_file}"
+write_policy_patterns generated "${generated_patterns_file}"
+write_policy_patterns upstream_owned "${upstream_patterns_file}"
+write_policy_patterns fork_owned "${fork_patterns_file}"
+[[ -s "${review_patterns_file}" ]] || fail_error 'review_required policy must contain at least one path'
+[[ -s "${sensitive_patterns_file}" ]] || fail_error 'sensitive policy must contain at least one path'
+[[ -s "${upstream_patterns_file}" ]] || fail_error 'upstream_owned policy must contain at least one path'
 
 set +e
 checkpoint="$(node - \
@@ -180,7 +233,9 @@ for index in "${!fork_patterns[@]}"; do
     pattern="${pattern:1:${#pattern}-2}"
   fi
   valid_repo_path "${pattern}" || fail_error "invalid fork_owned pattern: ${pattern}"
-  if [[ "${pattern}" == *'/**' ]]; then
+  if [[ -z "${pattern}" || "${pattern}" == */ || "${pattern}" == /* || "${pattern}" == *'\\'* || "${pattern}" == *'['* || "${pattern}" == *']'* || "${pattern}" == '!'* ]]; then
+    fail_error "unsupported policy pattern: ${pattern}"
+  elif [[ "${pattern}" == *'/**' ]]; then
     prefix="${pattern%/**}"
     contains_glob "${prefix}" &&
       fail_error "unsupported fork_owned pattern: ${pattern}"
@@ -209,11 +264,65 @@ if [[ "${checkpoint}" == "${upstream_tip}" ]]; then
   printf 'state=noop\n'
   printf 'tree=%s\n' "$(git rev-parse "${fork_base}^{tree}")"
   printf 'filtered_paths=0\n'
+  printf 'autonomous_eligible=false\n'
+  printf 'policy_verdict=noop\n'
   exit 0
 fi
 
 git diff --no-renames --name-only -z "${checkpoint}" "${upstream_tip}" -- >"${changed_paths}" ||
   fail_error 'unable to enumerate upstream changes'
+
+# Classify the complete upstream backlog before fork-owned filtering. A review
+# verdict can publish for humans; sensitive and unknown paths cannot publish.
+policy_result="$(node - \
+  "$(to_node_path "${changed_paths}")" \
+  "$(to_node_path "${review_patterns_file}")" \
+  "$(to_node_path "${sensitive_patterns_file}")" \
+  "$(to_node_path "${generated_patterns_file}")" \
+  "$(to_node_path "${upstream_patterns_file}")" \
+  "$(to_node_path "${fork_patterns_file}")" <<'NODE'
+const fs = require('node:fs');
+const [changed, reviewFile, sensitiveFile, generatedFile, upstreamFile, forkFile] = process.argv.slice(2);
+const readLines = (file) => fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean);
+const paths = fs.readFileSync(changed).toString('utf8').split('\0').filter(Boolean);
+const patterns = {
+  review: readLines(reviewFile), sensitive: readLines(sensitiveFile),
+  generated: readLines(generatedFile), upstream: readLines(upstreamFile), fork: readLines(forkFile),
+};
+function regex(pattern) {
+  if (!pattern || pattern.startsWith('!') || pattern.startsWith('/') || pattern.endsWith('/') || pattern.includes('\\') || pattern.includes('[') || pattern.includes(']')) throw new Error(`unsupported policy pattern: ${pattern}`);
+  let source = '';
+  for (let i = 0; i < pattern.length; i += 1) {
+    const c = pattern[i];
+    if (c === '*' && pattern[i + 1] === '*' && pattern[i + 2] === '/') { source += '(?:.*/)?'; i += 2; }
+    else if (c === '*' && pattern[i + 1] === '*') { source += '.*'; i += 1; }
+    else if (c === '*') source += '[^/]*';
+    else if (c === '?') source += '[^/]';
+    else if ('\\.^$+{}()|[]'.includes(c)) source += `\\${c}`;
+    else source += c;
+  }
+  if (!pattern.includes('/')) source = `(?:.*/)?${source}`;
+  return new RegExp(`^${source}(?:/.*)?$`);
+}
+const compiled = Object.fromEntries(Object.entries(patterns).map(([key, values]) => [key, values.map(regex)]));
+const matches = (kind, path) => compiled[kind].some((matcher) => matcher.test(path));
+let manual = false;
+for (const path of paths) {
+  if (matches('sensitive', path)) throw new Error(`sensitive upstream path: ${path}`);
+  if (matches('review', path)) manual = true;
+  if (!matches('fork', path) && !matches('review', path) && !matches('generated', path) && !matches('upstream', path)) {
+    manual = true;
+  }
+}
+const verdict = manual ? 'manual_review' : 'eligible';
+process.stdout.write(verdict);
+NODE
+)" || fail_error 'upstream policy classification failed closed'
+[[ "${policy_result}" == eligible || "${policy_result}" == manual_review ]] ||
+  fail_error 'upstream policy classification returned an invalid verdict'
+if [[ "${policy_autonomous_merge}" == manual ]]; then
+  policy_result=manual_review
+fi
 GIT_INDEX_FILE="${filtered_index}" git read-tree "${upstream_tip}"
 
 filtered_count=0
@@ -278,6 +387,13 @@ GIT_INDEX_FILE="${final_index}" git read-tree "${merged_tree}"
 GIT_INDEX_FILE="${final_index}" git update-index \
   --add --cacheinfo 100644 "${updated_state_object}" "${state_path}"
 final_tree="$(GIT_INDEX_FILE="${final_index}" git write-tree)"
+
+printf 'policy_verdict=%s\n' "${policy_result}"
+if [[ "${policy_result}" == eligible ]]; then
+  printf 'autonomous_eligible=true\n'
+else
+  printf 'autonomous_eligible=false\n'
+fi
 
 printf 'state=clean\n'
 printf 'tree=%s\n' "${final_tree}"

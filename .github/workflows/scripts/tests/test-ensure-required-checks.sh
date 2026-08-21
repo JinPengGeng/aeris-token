@@ -28,8 +28,9 @@ if [[ "${1:-}" == api && "$*" == *' --jq '* ]]; then
 fi
 if [[ "${1:-}" == pr && "${2:-}" == view ]]; then
   pr_head="${FAKE_PR_HEAD_SHA:-${SYNCED_SHA}}"
-  printf '{"state":"OPEN","isDraft":false,"headRefOid":"%s","headRefName":"%s","headRepository":{"nameWithOwner":"%s"},"baseRefName":"main","autoMergeRequest":null}\n' \
-    "${pr_head}" "${SYNC_BRANCH}" "${GITHUB_REPOSITORY}"
+  pr_base="${FAKE_PR_BASE_SHA:-${EXPECTED_BASE_SHA}}"
+  printf '{"state":"OPEN","isDraft":false,"headRefOid":"%s","headRefName":"%s","headRepository":{"nameWithOwner":"%s"},"baseRefName":"main","baseRefOid":"%s","autoMergeRequest":null}\n' \
+    "${pr_head}" "${SYNC_BRANCH}" "${GITHUB_REPOSITORY}" "${pr_base}"
   exit 0
 fi
 if [[ "${1:-}" == api && "${2:-}" == *'/check-runs?per_page=100' ]]; then
@@ -60,6 +61,7 @@ common_env=(
   'GITHUB_REPOSITORY=example/repo'
   'SYNC_BRANCH=automation/sync-upstream'
   'SYNCED_SHA=0123456789abcdef0123456789abcdef01234567'
+  'EXPECTED_BASE_SHA=abcdefabcdefabcdefabcdefabcdefabcdefabcd'
   'PR_URL=https://github.com/example/repo/pull/42'
   'AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z'
   'AERIS_CHECK_POLL_ATTEMPTS=1'
@@ -83,7 +85,7 @@ grep -Fxq 'workflow run --repo example/repo rust-ci.yml --ref automation/sync-up
   fail 'Rust CI fallback was not dispatched with the workflow job token'
 grep -Fxq 'workflow run --repo example/repo frontend-ci.yml --ref automation/sync-upstream' "${CALLS}" ||
   fail 'Frontend CI fallback was not dispatched with the workflow job token'
-grep -Fq 'pr view 42 --repo example/repo --json state,isDraft,headRefOid,headRefName,headRepository,baseRefName,autoMergeRequest' "${CALLS}" ||
+grep -Fq 'pr view 42 --repo example/repo --json state,isDraft,headRefOid,headRefName,headRepository,baseRefName,baseRefOid,autoMergeRequest' "${CALLS}" ||
   fail 'required-check wait did not bind the synchronization PR identity'
 grep -Fxq 'api repos/example/repo/commits/0123456789abcdef0123456789abcdef01234567/check-runs?per_page=100' "${CALLS}" ||
   fail 'required-check wait did not inspect the exact synchronization head'
@@ -92,6 +94,11 @@ if env "${common_env[@]}" GH_TOKEN=expected-job-token \
   FAKE_PR_HEAD_SHA=fedcba9876543210fedcba9876543210fedcba98 \
   bash "${SCRIPT_ROOT}/ensure-required-checks.sh" >/dev/null 2>&1; then
   fail 'required-check wait accepted a drifted pull request head'
+fi
+if env "${common_env[@]}" GH_TOKEN=expected-job-token \
+  FAKE_PR_BASE_SHA=fedcba9876543210fedcba9876543210fedcba98 \
+  bash "${SCRIPT_ROOT}/ensure-required-checks.sh" >/dev/null 2>&1; then
+  fail 'required-check wait accepted a drifted pull request base'
 fi
 
 set +e
