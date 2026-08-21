@@ -6,6 +6,7 @@ mod model;
 mod provider;
 mod ranking;
 mod request_candidate;
+mod send_admission;
 
 pub use affinity::{
     build_scheduler_affinity_cache_key_for_api_key_id,
@@ -64,4 +65,10 @@ pub use request_candidate::{
     LocalRequestCandidateStatusRecordInput, ReportRequestCandidateStatusRecordInput,
     SchedulerExecutionRequestCandidateSeed, SchedulerRequestCandidateReportContext,
     SchedulerRequestCandidateStatusUpdate, SchedulerResolvedReportRequestCandidateSlot,
+};
+pub use send_admission::{
+    request_send_admission, AdmittedSend, AuthorizedPhysicalSend, SendAdmissionBinding,
+    SendAdmissionBudgetEffect, SendAdmissionDecision, SendAdmissionDispatchError,
+    SendAdmissionEvidenceError, SendAdmissionIdentity, SendAdmissionRetryScope, SendAdmissionSkip,
+    SendAdmissionSkipReason, SendAdmissionStop, SendAdmissionStopReason, SendAuthorityRevision,
 };
