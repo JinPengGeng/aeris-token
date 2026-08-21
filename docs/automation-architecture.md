@@ -116,7 +116,9 @@ Agent handoff 只能选择 registry 中允许的目标，并受最大 handoff、
 
 ## 7. 上游同步
 
-当前同步 workflow 继续保持固定分支、单一开放 PR、人工关闭暂停、显式恢复、`force-with-lease` 和未知 tip 拒绝。其既有 GitHub 原生 squash auto-merge 路径与通用 Finalizer 分离，必须单独复审其持久授权边界；本次 Finalizer 改造不将该同步路径作为等价安全保证。
+当前同步 workflow 继续保持固定分支、单一开放 PR、人工关闭暂停、显式恢复、`force-with-lease` 和未知 tip 拒绝。Sync 不设置 GitHub native auto-merge：在有变更的本轮中，先等待受保护分支所要求的检查在该精确 head 上成功，再以该 head SHA 调用一次 `PUT /repos/{owner}/{repo}/pulls/{number}/merge`，固定 `merge_method=squash`。这是一笔一次性 mutation，不是可被未来检查、review 或其他状态变化触发的持久授权。
+
+该门禁是有界等待的 required-check success gate；超时、检查未成功、mutation 失败或响应不确定都不重试 merge mutation。每种结果最多做一次独立 PR 回读；只有回读能证明同一 PR 已以 Writer App bot 合并、head SHA 和 base 一致、`auto_merge=null`，且 merge commit 是以当时 base 为唯一 parent 的 squash commit，才算成功。无法证明时 fail closed，保留固定分支和开放 managed PR，供后续同步在身份、tip 和状态仍受信时复用，而不是创建新的 PR 或留下 auto-merge 授权。
 
 同步 workflow 使用 checkpoint 模型，不再依赖 squash 后无法前进的 Git merge-base：
 
@@ -137,7 +139,7 @@ fork_owned > review_required > generated > upstream_owned > default
 
 准备合并树时，先将上游的 fork-owned 路径还原为 `U0` 版本，再执行 `base=U0, ours=M, theirs=filtered(U1)` 的三方合并；这样 fork 在 `M` 中的新增、修改和删除均被保留，fork-owned 冲突也不会阻断其他上游增量。当前执行器对 fork-owned 支持精确路径和目录末尾 `/**`；策略出现其他 glob 时拒绝运行，避免静默误分类。
 
-默认分类是 `review_required`，用于标识同步后的审查风险，不会让未知路径被误认为 `upstream_owned`。managed 上游同步是通用 Agent Finalizer 之外的确定性例外：fork-owned 路径先被过滤，候选树必须通过 checkpoint、来源、固定分支和精确 head 验证。上游 workflow drift 仍生成或更新审查 Issue，且不会被同步候选覆盖。非 fork-owned 冲突时，自动化会撤销旧 native auto-merge，不生成伪解决方案或覆盖未知同步分支；维护者应通过普通 PR 完成人工三方解决，并在同一 PR 中把 `last_integrated_sha` 更新为已实际纳入的上游 SHA。该 PR 合并后，下一轮从新 checkpoint 继续，不再重复旧冲突。
+默认分类是 `review_required`，用于标识同步后的审查风险，不会让未知路径被误认为 `upstream_owned`。managed 上游同步是通用 Agent Finalizer 之外的确定性例外：fork-owned 路径先被过滤，候选树必须通过 checkpoint、来源、固定分支和精确 head 验证。上游 workflow drift 仍生成或更新审查 Issue，且不会被同步候选覆盖。非 fork-owned 冲突时，自动化会 disarm 历史遗留的 native auto-merge（若存在），不生成伪解决方案或覆盖未知同步分支；维护者应通过普通 PR 完成人工三方解决，并在同一 PR 中把 `last_integrated_sha` 更新为已实际纳入的上游 SHA。该 PR 合并后，下一轮从新 checkpoint 继续，不再重复旧冲突。
 
 ## 8. 幂等、限流和审计边界
 
@@ -167,7 +169,7 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 3. `label`：维护者添加 `automerge-approved` 后允许 Finalizer 在完整 proof 后执行一次 direct squash merge。
 4. `allowlist`：仅对经过历史验证的低风险范围自动合并。
 
-所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。Finalizer 在 Draft 转 Ready 前和转 Ready 后各运行一次 full proof；proof 同时覆盖 Writer App、installation、单仓 scope、Bot 身份和 `administration:read` 治理读取。第二次 proof 后才调用 `mergePullRequest`，固定 `SQUASH + expectedHeadOid`。mutation 失败不遗留持久授权；响应不确定时停止重试并独立回读合并状态，不能确认即 fail closed。`.github/**`、依赖文件、认证、安全、数据库、发布和其他策略标记路径默认需要人工审查。managed 上游同步 PR 是独立的确定性例外，仍需对其持久授权路径进行单独审计。模型的自报置信度不能改变门禁。
+所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。Finalizer 在 Draft 转 Ready 前和转 Ready 后各运行一次 full proof；proof 同时覆盖 Writer App、installation、单仓 scope、Bot 身份和 `administration:read` 治理读取。第二次 proof 后才调用 `mergePullRequest`，固定 `SQUASH + expectedHeadOid`。mutation 失败不遗留持久授权；响应不确定时停止重试并独立回读合并状态，不能确认即 fail closed。`.github/**`、依赖文件、认证、安全、数据库、发布和其他策略标记路径默认需要人工审查。managed 上游同步 PR 是独立的确定性例外：它使用有界 required-check gate 加一次 exact-head REST squash merge 和严格回读，而不保留 native auto-merge。模型的自报置信度不能改变门禁。
 
 ## 10. 威胁模型
 
@@ -208,6 +210,6 @@ Phase 6 需要的是符合一致性和运维要求的权威状态层，不等于
 - `Rust CI / check`、`Frontend CI / check` 和 `Automation Policy / gate` 是 `main` 唯一的三项 strict required checks，并绑定 GitHub Actions source；不新增 Finalizer hold 的第四 required context。
 - `agent` Environment 不得设置人工审批，且仅向 Candidate 暴露模型凭据；`writer` Environment 才保存 Writer App 凭据。
 - `release` Environment 必须保留人工审批；不得由 Agent 或 Writer App 使用。
-- 通用 Agent 自动合并、Policy required check 和 production flags 在对应 PoC 完成前不得启用；managed 上游同步的持久 auto-merge 路径不因 Finalizer 通过 direct-merge PoC 而自动获准，须单独审计。
+- 通用 Agent 自动合并、Policy required check 和 production flags 在对应 PoC 完成前不得启用；managed 上游同步的一次性 REST merge 路径也须单独审计，不能因 Finalizer 通过 GraphQL direct-merge PoC 而自动获准。
 
 任何远端设置变更都应记录在 Issue `#11`，并通过当前配置的现场读取结果验证。

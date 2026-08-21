@@ -470,7 +470,7 @@ publish_pr() {
 Automated synchronization from ${parent}:${upstream_branch} at ${upstream_sha}.
 Checkpoint advanced from ${checkpoint_sha} to ${upstream_sha}.
 
-This pull request is configured for native auto-merge after protected branch checks pass.
+This pull request is merged once after protected branch checks pass; no persistent auto-merge is configured.
 Configured fork-owned paths are preserved; upstream workflow changes are reviewed separately."
 
   if [[ -n "${tracked_pr}" ]]; then
