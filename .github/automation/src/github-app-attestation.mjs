@@ -6,6 +6,12 @@ import { pathToFileURL } from 'node:url';
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const APP_SLUG = /^[a-z0-9][a-z0-9-]{0,99}$/;
 const ACCOUNT_TYPES = new Set(['User', 'Organization']);
+const REQUIRED_WRITER_PERMISSIONS = Object.freeze({
+  administration: 'read',
+  contents: 'write',
+  pull_requests: 'write',
+});
+const IMPLICIT_WRITER_PERMISSIONS = Object.freeze({ metadata: 'read' });
 
 export class GitHubAppAttestationError extends Error {
   constructor(message, status = null) {
@@ -49,6 +55,35 @@ function account(value, name) {
   const type = required(candidate.type, `${name} type`);
   if (!ACCOUNT_TYPES.has(type)) reject(`${name} type is invalid`);
   return Object.freeze({ login, type });
+}
+
+function writerPermissions(value, name) {
+  const permissions = object(value, name);
+  const allowed = new Set([...Object.keys(REQUIRED_WRITER_PERMISSIONS), ...Object.keys(IMPLICIT_WRITER_PERMISSIONS)]);
+  for (const key of Object.keys(permissions)) {
+    if (!allowed.has(key)) reject(`${name} contains an unapproved permission: ${key}`);
+    if (typeof permissions[key] !== 'string' || !['read', 'write', 'admin'].includes(permissions[key])) {
+      reject(`${name}.${key} is invalid`);
+    }
+  }
+  const normalized = {};
+  for (const [key, expected] of Object.entries(REQUIRED_WRITER_PERMISSIONS)) {
+    if (permissions[key] !== expected) reject(`${name}.${key} must be ${expected}`);
+    normalized[key] = expected;
+  }
+  if (permissions.metadata !== undefined && permissions.metadata !== IMPLICIT_WRITER_PERMISSIONS.metadata) {
+    reject(`${name}.metadata must be read`);
+  }
+  normalized.metadata = IMPLICIT_WRITER_PERMISSIONS.metadata;
+  return Object.freeze(normalized);
+}
+
+export function validateWriterPermissions(value, name = 'Writer permissions') {
+  let parsed = value;
+  if (typeof value === 'string') {
+    try { parsed = JSON.parse(value); } catch { reject(`${name} is not valid JSON`); }
+  }
+  return writerPermissions(parsed, name);
 }
 
 export function createGitHubAppJwt({ appId, privateKey, nowMs = Date.now() }) {
@@ -141,6 +176,7 @@ export function validateGitHubAppAttestation({ app, installation, expected }) {
 
   const liveApp = object(app, 'authenticated Writer App');
   const appOwner = account(liveApp.owner, 'authenticated Writer App owner');
+  const appPermissions = writerPermissions(liveApp.permissions, 'authenticated Writer App permissions');
   if (positiveInteger(liveApp.id, 'authenticated Writer App id') !== appId ||
       required(liveApp.slug, 'authenticated Writer App slug', APP_SLUG) !== appSlug ||
       appOwner.login !== ownerLogin) {
@@ -149,6 +185,10 @@ export function validateGitHubAppAttestation({ app, installation, expected }) {
 
   const liveInstallation = object(installation, 'authenticated Writer App installation');
   const installationAccount = account(liveInstallation.account, 'authenticated Writer App installation account');
+  const installationPermissions = writerPermissions(
+    liveInstallation.permissions,
+    'authenticated Writer App installation permissions',
+  );
   if (positiveInteger(liveInstallation.id, 'authenticated Writer installation id') !== installationId ||
       positiveInteger(liveInstallation.app_id, 'authenticated Writer installation App id') !== appId ||
       required(liveInstallation.app_slug, 'authenticated Writer installation App slug', APP_SLUG) !== appSlug ||
@@ -166,6 +206,8 @@ export function validateGitHubAppAttestation({ app, installation, expected }) {
     installation_account_login: installationAccount.login,
     installation_account_type: installationAccount.type,
     repository_selection: 'selected',
+    app_permissions: appPermissions,
+    installation_permissions: installationPermissions,
   });
 }
 
@@ -204,10 +246,12 @@ export async function runGitHubAppAttestation(environment = process.env, depende
       `app_slug=${result.app_slug}`,
       `app_owner_login=${result.app_owner_login}`,
       `app_owner_type=${result.app_owner_type}`,
+      `app_permissions=${JSON.stringify(result.app_permissions)}`,
       `installation_id=${result.installation_id}`,
       `installation_account_login=${result.installation_account_login}`,
       `installation_account_type=${result.installation_account_type}`,
       `repository_selection=${result.repository_selection}`,
+      `installation_permissions=${JSON.stringify(result.installation_permissions)}`,
       '',
     ].join('\n'));
   }

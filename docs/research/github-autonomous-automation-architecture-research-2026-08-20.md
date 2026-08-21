@@ -6,9 +6,15 @@
 > 适用对象：单个公开 GitHub fork，周期性同步上游，AI 可提交代码 PR，低风险变更在确定性门禁通过后可无人值守合并，冲突和语义不明时 fail closed，release 保持人工审批
 > 边界：本报告是架构依据；实际完成状态以实施规格、自动化测试和 GitHub 现场验收证据为准，不恢复旧四 App 方案
 
+> **后续决策（2026-08-21，取代本报告中关于 terminal hold 与 persistent GitHub native auto-merge 的实施建议）：** 为消除阻塞条件在未来解除后、未重新执行 Finalizer 即合并的陈旧授权风险，生产实现改为一次性的服务端 GraphQL `mergePullRequest`：在 Draft 转 Ready 前及 Ready 后完成完整证明后，以固定 `SQUASH` 和 `expectedHeadOid` 直接请求合并。失败不保留持久 auto-merge 授权，响应不确定时必须回读 PR 结果；其余研究历史、证据和方案比较仍保留供追溯。
+
 ## 1. 结论先行
 
 ### 1.1 推荐结论
+
+#### 后续实施决策
+
+本节原推荐的 GitHub native auto-merge 已不再作为生产合并执行方式。当前实施保留 GitHub 保护规则、最小 Writer App、Draft PR、CI 和确定性 Policy 门禁，但由 Finalizer 在两次完整证明均通过后调用一次性 GraphQL direct squash merge；任何错误、head/governance 漂移或结果不确定都 fail closed，且不得留下持久的 auto-merge 请求。
 
 四 App 方案属于过度设计。当前目标不需要四个长期高权限身份，也不需要自建合并器。
 

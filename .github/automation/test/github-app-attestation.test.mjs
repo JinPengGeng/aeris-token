@@ -23,6 +23,7 @@ function app(overrides = {}) {
     id: expected.app_id,
     slug: expected.app_slug,
     owner: { login: expected.owner_login, type: 'User' },
+    permissions: { administration: 'read', contents: 'write', pull_requests: 'write', metadata: 'read' },
     ...overrides,
   };
 }
@@ -35,6 +36,7 @@ function installation(overrides = {}) {
     account: { login: expected.owner_login, type: 'User' },
     repository_selection: 'selected',
     suspended_at: null,
+    permissions: { administration: 'read', contents: 'write', pull_requests: 'write', metadata: 'read' },
     ...overrides,
   };
 }
@@ -82,6 +84,8 @@ test('App JWT attestation binds App, owner, selected installation, and account i
     installation_account_login: expected.owner_login,
     installation_account_type: 'User',
     repository_selection: 'selected',
+    app_permissions: { administration: 'read', contents: 'write', metadata: 'read', pull_requests: 'write' },
+    installation_permissions: { administration: 'read', contents: 'write', metadata: 'read', pull_requests: 'write' },
   });
   assert.deepEqual(calls, ['app', `installation:${expected.installation_id}`]);
   assert.equal(Object.isFrozen(result), true);
@@ -101,6 +105,18 @@ test('App JWT attestation fails closed on wrong or missing live identity fields'
     [app(), installation({ account: null })],
     [app(), installation({ repository_selection: 'all' })],
     [app(), installation({ suspended_at: '2026-08-21T00:00:00Z' })],
+    [app({ permissions: undefined }), installation()],
+    [app({ permissions: { administration: 'read', contents: 'write' } }), installation()],
+    [app({ permissions: { administration: 'read', contents: false, pull_requests: 'write' } }), installation()],
+    [app({ permissions: { administration: 'write', contents: 'write', pull_requests: 'write' } }), installation()],
+    [app({ permissions: { administration: 'read', contents: 'write', pull_requests: 'write', metadata: 'write' } }), installation()],
+    [app({ permissions: { administration: 'read', contents: 'write', pull_requests: 'write', issues: 'read' } }), installation()],
+    [app(), installation({ permissions: undefined })],
+    [app(), installation({ permissions: { administration: 'read', contents: 'write' } })],
+    [app(), installation({ permissions: { administration: 'read', contents: 'write', pull_requests: null } })],
+    [app(), installation({ permissions: { administration: 'write', contents: 'write', pull_requests: 'write' } })],
+    [app(), installation({ permissions: { administration: 'read', contents: 'write', pull_requests: 'write', metadata: 'write' } })],
+    [app(), installation({ permissions: { administration: 'read', contents: 'write', pull_requests: 'write', issues: 'read' } })],
   ];
   for (const [liveApp, liveInstallation] of cases) {
     assert.throws(

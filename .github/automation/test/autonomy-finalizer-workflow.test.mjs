@@ -49,12 +49,12 @@ test('Finalizer repeats preliminary gates before the sole Writer token mint', ()
     ['permission-administration', 'permission-contents', 'permission-pull-requests'],
   );
   assert.equal(steps[mint].with['permission-administration'], 'read');
-  assert.equal(document.jobs.finalize.permissions.checks, 'write');
+  assert.equal(document.jobs.finalize.permissions.checks, undefined);
   assert.deepEqual(
     Object.entries(document.jobs.finalize.permissions).filter(([, permission]) => permission === 'write'),
-    [['checks', 'write']],
+    [],
   );
-  const finalize = steps.find((step) => /Request exact native auto-merge/.test(step.name));
+  const finalize = steps.find((step) => /Directly squash merge exact eligible pull request/.test(step.name));
   assert.equal(steps[proof].env.AERIS_WRITER_APP_ID, '${{ vars.AERIS_WRITER_APP_ID }}');
   assert.equal(steps[proof].env.AERIS_WRITER_APP_SLUG, '${{ vars.AERIS_WRITER_APP_SLUG }}');
   assert.equal(steps[proof].env.AERIS_WRITER_INSTALLATION_ID, '${{ vars.AERIS_WRITER_INSTALLATION_ID }}');
@@ -66,10 +66,12 @@ test('Finalizer repeats preliminary gates before the sole Writer token mint', ()
   assert.equal(finalize.env.AERIS_WRITER_PROOF_APP_SLUG, '${{ steps.writer_app_attestation.outputs.app_slug }}');
   assert.equal(finalize.env.AERIS_WRITER_PROOF_APP_OWNER_LOGIN, '${{ steps.writer_app_attestation.outputs.app_owner_login }}');
   assert.equal(finalize.env.AERIS_WRITER_PROOF_APP_OWNER_TYPE, '${{ steps.writer_app_attestation.outputs.app_owner_type }}');
+  assert.equal(finalize.env.AERIS_WRITER_PROOF_APP_PERMISSIONS, '${{ steps.writer_app_attestation.outputs.app_permissions }}');
   assert.equal(finalize.env.AERIS_WRITER_INSTALLATION_ID, '${{ vars.AERIS_WRITER_INSTALLATION_ID }}');
   assert.equal(finalize.env.AERIS_WRITER_PROOF_INSTALLATION_ID, '${{ steps.writer_app_attestation.outputs.installation_id }}');
   assert.equal(finalize.env.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN, '${{ steps.writer_app_attestation.outputs.installation_account_login }}');
   assert.equal(finalize.env.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE, '${{ steps.writer_app_attestation.outputs.installation_account_type }}');
+  assert.equal(finalize.env.AERIS_WRITER_PROOF_INSTALLATION_PERMISSIONS, '${{ steps.writer_app_attestation.outputs.installation_permissions }}');
   assert.equal(finalize.env.AERIS_WRITER_PROOF_REPOSITORY_SELECTION, '${{ steps.writer_app_attestation.outputs.repository_selection }}');
   assert.equal(finalize.env.AERIS_WRITER_TOKEN_INSTALLATION_ID, '${{ steps.writer_token.outputs.installation-id }}');
   assert.equal(finalize.env.AERIS_WRITER_TOKEN_APP_SLUG, '${{ steps.writer_token.outputs.app-slug }}');

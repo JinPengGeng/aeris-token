@@ -10,7 +10,7 @@
 2. 自动化只通过分支和 Pull Request 修改代码，不直接写入 `main`。
 3. Issue、评论、PR 内容和模型输出均是不可信输入。
 4. 模型负责分析和建议；授权、路径限制和合并由确定性规则决定。
-5. 唯一的 GitHub 写入身份是最小 Writer App；Policy 是 GitHub Actions 的确定性检查，Finalizer 只请求 GitHub native auto-merge，不存在独立 Policy 或 Merger App。
+5. 唯一的 GitHub 写入身份是最小 Writer App；Policy 是 GitHub Actions 的确定性检查，Finalizer 只在实时复核后调用一次 GitHub GraphQL direct squash merge，不存在独立 Policy 或 Merger App，也不存在 Finalizer 持久 auto-merge 授权。
 6. 所有策略从受保护的 `main@SHA` 读取，不能从当前 PR checkout 读取。
 7. GitHub 事件按可能重复、乱序和重试处理；Actions-only 阶段只提供 best-effort 去重和收敛，不声明 strict exactly-once。
 8. 功能按只读分析、Draft PR、Policy Gate、自动合并的顺序逐级开放。
@@ -80,9 +80,9 @@ Fallback 仅适用于连接失败、超时、429 和 5xx。认证失败、权限
 | `tester` | 确定性 | 触发和读取 CI | 修改源码、合并 |
 | `security` | 模型只读 | 审查敏感路径和依赖元数据 | 修改代码、合并 |
 | `policy` | GitHub Actions | 以 base 受信代码计算 `Automation Policy / gate` | 使用 LLM 决策、修改代码、合并 |
-| `finalizer` | GitHub Actions + Writer token | 复核精确状态并请求 native squash auto-merge | checkout PR head、直接 merge、绕过 Policy/保护 |
+| `finalizer` | GitHub Actions + Writer token | 复核精确状态后调用一次 `mergePullRequest(SQUASH, expectedHeadOid)` | checkout PR head、native auto-merge、绕过 Policy/保护 |
 
-多个逻辑 Agent 运行在 GitHub Actions 中。开放代码写入和 native auto-merge 时，仅 Publisher/Finalizer 临时铸造同一个 Writer App installation token；Policy 与 Finalizer 的普通 PR/CI 读侧复核使用 `GITHUB_TOKEN`。Finalizer 在 token mint 前只执行不读取 branch protection/ruleset 的 preliminary gate，该结果只允许进入 mint；完整治理证明必须在 mint 后使用同一 Writer token 的 `administration:read` 重新计算，且只有 full proof 可以执行 Writer/hold mutation。Writer App 不具备 Administration 写权限。
+多个逻辑 Agent 运行在 GitHub Actions 中。开放代码写入和 direct merge 时，仅 Publisher/Finalizer 临时铸造同一个 Writer App installation token；Policy 与 Finalizer 的普通 PR/CI 读侧复核使用 `GITHUB_TOKEN`。Finalizer 在 token mint 前只执行不读取 branch protection/ruleset 的 preliminary proof，该结果只允许进入 mint；完整治理证明必须在 mint 后使用同一 Writer token 的 `administration:read` 重新计算。Draft 转 Ready 前和 Ready 后均须完成 full proof，才可执行一次 Writer direct merge mutation。Writer App 不具备 Administration 写权限，Finalizer 不启用 native auto-merge。
 
 ## 6. 事件和命令
 
@@ -116,7 +116,7 @@ Agent handoff 只能选择 registry 中允许的目标，并受最大 handoff、
 
 ## 7. 上游同步
 
-当前同步 workflow 继续保持固定分支、单一开放 PR、人工关闭暂停、显式恢复、`force-with-lease` 和未知 tip 拒绝。干净生成的 managed 同步 PR 使用 GitHub 原生 squash auto-merge；分支保护负责等待精确 head 的必需 CI、最新 `main`、讨论解决和无冲突状态。
+当前同步 workflow 继续保持固定分支、单一开放 PR、人工关闭暂停、显式恢复、`force-with-lease` 和未知 tip 拒绝。其既有 GitHub 原生 squash auto-merge 路径与通用 Finalizer 分离，必须单独复审其持久授权边界；本次 Finalizer 改造不将该同步路径作为等价安全保证。
 
 同步 workflow 使用 checkpoint 模型，不再依赖 squash 后无法前进的 Git merge-base：
 
@@ -137,7 +137,7 @@ fork_owned > review_required > generated > upstream_owned > default
 
 准备合并树时，先将上游的 fork-owned 路径还原为 `U0` 版本，再执行 `base=U0, ours=M, theirs=filtered(U1)` 的三方合并；这样 fork 在 `M` 中的新增、修改和删除均被保留，fork-owned 冲突也不会阻断其他上游增量。当前执行器对 fork-owned 支持精确路径和目录末尾 `/**`；策略出现其他 glob 时拒绝运行，避免静默误分类。
 
-默认分类是 `review_required`，用于标识同步后的审查风险，不会让未知路径被误认为 `upstream_owned`。managed 上游同步是通用 Agent Merger 之外的确定性例外：fork-owned 路径先被过滤，候选树必须通过 checkpoint、来源、固定分支和精确 head 验证，随后仅由分支保护决定原生 auto-merge。上游 workflow drift 仍生成或更新审查 Issue，且不会被同步候选覆盖。非 fork-owned 冲突时，自动化会先撤销旧 auto-merge，不生成伪解决方案或覆盖未知同步分支；维护者应通过普通 PR 完成人工三方解决，并在同一 PR 中把 `last_integrated_sha` 更新为已实际纳入的上游 SHA。该 PR 合并后，下一轮从新 checkpoint 继续，不再重复旧冲突。
+默认分类是 `review_required`，用于标识同步后的审查风险，不会让未知路径被误认为 `upstream_owned`。managed 上游同步是通用 Agent Finalizer 之外的确定性例外：fork-owned 路径先被过滤，候选树必须通过 checkpoint、来源、固定分支和精确 head 验证。上游 workflow drift 仍生成或更新审查 Issue，且不会被同步候选覆盖。非 fork-owned 冲突时，自动化会撤销旧 native auto-merge，不生成伪解决方案或覆盖未知同步分支；维护者应通过普通 PR 完成人工三方解决，并在同一 PR 中把 `last_integrated_sha` 更新为已实际纳入的上游 SHA。该 PR 合并后，下一轮从新 checkpoint 继续，不再重复旧冲突。
 
 ## 8. 幂等、限流和审计边界
 
@@ -164,10 +164,10 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 
 1. `shadow`：只报告本应允许或拒绝的原因。
 2. `human`：维护者参考 Policy 后手工合并。
-3. `label`：维护者添加 `automerge-approved` 后允许 Finalizer 请求 native auto-merge。
+3. `label`：维护者添加 `automerge-approved` 后允许 Finalizer 在完整 proof 后执行一次 direct squash merge。
 4. `allowlist`：仅对经过历史验证的低风险范围自动合并。
 
-所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。`.github/**`、依赖文件、认证、安全、数据库、发布和其他策略标记路径默认需要人工审查。managed 上游同步 PR 是独立的确定性例外：它不使用模型或通用 Finalizer，只在 checkpoint 合并无冲突、fork-owned 路径已过滤且严格分支保护全部满足时执行原生 squash auto-merge。模型的自报置信度不能改变门禁。
+所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。Finalizer 在 Draft 转 Ready 前和转 Ready 后各运行一次 full proof；proof 同时覆盖 Writer App、installation、单仓 scope、Bot 身份和 `administration:read` 治理读取。第二次 proof 后才调用 `mergePullRequest`，固定 `SQUASH + expectedHeadOid`。mutation 失败不遗留持久授权；响应不确定时停止重试并独立回读合并状态，不能确认即 fail closed。`.github/**`、依赖文件、认证、安全、数据库、发布和其他策略标记路径默认需要人工审查。managed 上游同步 PR 是独立的确定性例外，仍需对其持久授权路径进行单独审计。模型的自报置信度不能改变门禁。
 
 ## 10. 威胁模型
 
@@ -182,7 +182,7 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 - 模型输出超大、非 JSON、未知 Agent、任意模型名或工具参数。
 - 上游 force-push、checkpoint 回退和同步分支未知提交。
 
-模型阶段不得获得 GitHub 写凭据、Writer App 私钥或发布凭据。Candidate 在临时隔离环境中运行；`agent` Environment 无人工审批但不能访问 Writer 或 release secret。Candidate 的受信 extractor 由独立 job 从精确 base SHA 封装，必须在模型结束后下载，并通过隔离 Git directory/index 和空配置读取工作树，不能信任 Agent 可写的 runtime、`.git/config`、hooks、filters、textconv 或 fsmonitor。Policy 是 Actions job，Finalizer 的写入仅限临时 Writer token 发起 native auto-merge 请求。
+模型阶段不得获得 GitHub 写凭据、Writer App 私钥或发布凭据。Candidate 在临时隔离环境中运行；`agent` Environment 无人工审批但不能访问 Writer 或 release secret。Candidate 的受信 extractor 由独立 job 从精确 base SHA 封装，必须在模型结束后下载，并通过隔离 Git directory/index 和空配置读取工作树，不能信任 Agent 可写的 runtime、`.git/config`、hooks、filters、textconv 或 fsmonitor。Policy 是 Actions job；Finalizer 的唯一写入是在第二次 full proof 后，使用临时 Writer token 调用一次 `mergePullRequest(SQUASH, expectedHeadOid)`。它不得启用 native auto-merge，`release` Environment 仍需人工审批。
 
 ## 11. 实施顺序
 
@@ -191,7 +191,7 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 3. Phase 2.1：Actions-only 的只读 triage/planner/reviewer；模型分析与确定性写回分 job，通过有界无 Secret 的 JSON artifact 交接。
 4. Phase 3：Candidate artifact、单 Writer App Publisher 和 Draft PR；先完成 artifact、凭据隔离和事件语义 PoC。
 5. Phase 4：GitHub Actions Policy 的 shadow/human gate；仅在来源和漂移 PoC 完成后加入 required check。
-6. Phase 5：Finalizer 仅对 `docs/automation-canary/**/*.md` 请求 native auto-merge；production flags 仅在全部 PoC、撤销演练和稳定观察后启用。
+6. Phase 5：Finalizer 仅对 `docs/automation-canary/**/*.md` 在双重 full proof 后执行一次 direct squash merge；production flags 仅在全部 PoC、撤销演练和稳定观察后启用。
 7. Phase 6：仅在真实运行证明 Actions-only 无法满足要求后，才引入外部状态或工作流服务。触发条件包括多 worker/多实例协调、可靠跨运行恢复或复杂 DAG、精确额度与计费限流、需要事务化 outbox/effect receipt，或不可变且可查询的审计要求。
 
 Phase 6 需要的是符合一致性和运维要求的权威状态层，不等于必须使用 Postgres。单实例可评估 SQLite；云原生环境可评估具备条件写入的托管 KV、Durable Objects、Kubernetes CRD 或工作流引擎；需要关系查询、多 worker 事务和 outbox 时 Postgres 通常更合适。选型必须由已观测的并发、恢复、审计和运维需求驱动，不能因为规划中的功能提前引入数据库。
@@ -205,9 +205,9 @@ Phase 6 需要的是符合一致性和运维要求的权威状态层，不等于
 - Actions 默认令牌保持只读。
 - 仅在同步工作流需要时允许 GitHub Actions 创建 PR；不得以该设置绕过审批或分支保护。
 - 限制允许的 Actions 来源，关键写权限 Action 固定完整 SHA。
-- `Rust CI / check` 和 `Frontend CI / check` 保持 strict required checks。
+- `Rust CI / check`、`Frontend CI / check` 和 `Automation Policy / gate` 是 `main` 唯一的三项 strict required checks，并绑定 GitHub Actions source；不新增 Finalizer hold 的第四 required context。
 - `agent` Environment 不得设置人工审批，且仅向 Candidate 暴露模型凭据；`writer` Environment 才保存 Writer App 凭据。
 - `release` Environment 必须保留人工审批；不得由 Agent 或 Writer App 使用。
-- 通用 Agent 自动合并、Policy required check 和 production flags 在对应 PoC 完成前不得启用；managed 上游同步仅在 Writer App 已配置后使用确定性原生 auto-merge。
+- 通用 Agent 自动合并、Policy required check 和 production flags 在对应 PoC 完成前不得启用；managed 上游同步的持久 auto-merge 路径不因 Finalizer 通过 direct-merge PoC 而自动获准，须单独审计。
 
 任何远端设置变更都应记录在 Issue `#11`，并通过当前配置的现场读取结果验证。

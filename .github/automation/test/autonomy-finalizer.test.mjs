@@ -18,6 +18,7 @@ const HEAD_TREE = 'c'.repeat(40);
 const BASE_TREE = 'd'.repeat(40);
 const DOCS_TREE = 'e'.repeat(40);
 const CANARY_TREE = 'f'.repeat(40);
+const MERGE_SHA = '9'.repeat(40);
 const ISSUE_NUMBER = 123;
 const PULL_NUMBER = 17;
 const WRITER_BOT = Object.freeze({
@@ -41,10 +42,12 @@ const writerTrust = Object.freeze({
   proof_app_slug: 'aeris-writer',
   proof_app_owner_login: 'JinPengGeng',
   proof_app_owner_type: 'User',
+  proof_app_permissions: { administration: 'read', contents: 'write', metadata: 'read', pull_requests: 'write' },
   installation_id: 155342531,
   proof_installation_id: 155342531,
   proof_installation_account_login: 'JinPengGeng',
   proof_installation_account_type: 'User',
+  proof_installation_permissions: { administration: 'read', contents: 'write', metadata: 'read', pull_requests: 'write' },
   proof_repository_selection: 'selected',
   token_installation_id: 155342531,
   token_app_slug: 'aeris-writer',
@@ -53,7 +56,7 @@ const writerTrust = Object.freeze({
 const configValue = {
   repository: REPOSITORY,
   base_ref: 'main',
-  writer_login: 'aeris-writer[bot]',
+  writer_login: WRITER_BOT.login,
   branch_prefix: 'agent/issue-',
   maximum_files: 20,
   maximum_changes: 2000,
@@ -86,10 +89,12 @@ function fullEnvironment(overrides = {}) {
     AERIS_WRITER_PROOF_APP_SLUG: writerTrust.proof_app_slug,
     AERIS_WRITER_PROOF_APP_OWNER_LOGIN: writerTrust.proof_app_owner_login,
     AERIS_WRITER_PROOF_APP_OWNER_TYPE: writerTrust.proof_app_owner_type,
+    AERIS_WRITER_PROOF_APP_PERMISSIONS: JSON.stringify(writerTrust.proof_app_permissions),
     AERIS_WRITER_INSTALLATION_ID: String(writerTrust.installation_id),
     AERIS_WRITER_PROOF_INSTALLATION_ID: String(writerTrust.proof_installation_id),
     AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN: writerTrust.proof_installation_account_login,
     AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE: writerTrust.proof_installation_account_type,
+    AERIS_WRITER_PROOF_INSTALLATION_PERMISSIONS: JSON.stringify(writerTrust.proof_installation_permissions),
     AERIS_WRITER_PROOF_REPOSITORY_SELECTION: writerTrust.proof_repository_selection,
     AERIS_WRITER_TOKEN_INSTALLATION_ID: String(writerTrust.token_installation_id),
     AERIS_WRITER_TOKEN_APP_SLUG: writerTrust.app_slug,
@@ -98,12 +103,6 @@ function fullEnvironment(overrides = {}) {
     ...overrides,
   });
 }
-
-const apiResponse = (payload, status = 200) =>
-  new Response(payload === null ? null : JSON.stringify(payload), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
 
 function pull() {
   return {
@@ -124,23 +123,33 @@ function governance(overrides = {}) {
     authorType: 'Bot', author: WRITER_BOT.graphqlLogin,
     authorId: WRITER_BOT.nodeId, authorDatabaseId: WRITER_BOT.databaseId,
     mergeable: 'MERGEABLE', mergeStateStatus: 'DRAFT', reviewDecision: null,
-    autoMergeRequest: null, labels: [], reviewThreads: [], ...overrides,
+    merged: false, mergedAt: null, mergedBy: null, mergeCommit: null,
+    autoMergeRequest: null, labels: [], reviewThreads: [],
+    ...overrides,
   };
+}
+
+function mergedGovernance(overrides = {}) {
+  return governance({
+    state: 'MERGED', isDraft: false, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN',
+    baseRefOid: MERGE_SHA, merged: true, mergedAt: '2026-08-21T00:00:00Z',
+    mergedBy: {
+      type: 'Bot', login: WRITER_BOT.graphqlLogin,
+      id: WRITER_BOT.nodeId, databaseId: WRITER_BOT.databaseId,
+    },
+    mergeCommit: { oid: MERGE_SHA, parentCount: 1, parents: [{ oid: BASE_SHA }] },
+    ...overrides,
+  });
 }
 
 const REQUIRED_PROTECTION_CONTEXTS = Object.freeze([
   'Rust CI / check',
   'Frontend CI / check',
   'Automation Policy / gate',
-  'Autonomy Finalizer / hold',
 ]);
 
 function completeConnection(nodes = []) {
-  return {
-    nodes,
-    totalCount: nodes.length,
-    pageInfo: { hasNextPage: false, endCursor: null },
-  };
+  return { nodes, totalCount: nodes.length, pageInfo: { hasNextPage: false, endCursor: null } };
 }
 
 function protectionRule(overrides = {}) {
@@ -171,8 +180,7 @@ function protectionRule(overrides = {}) {
     pushAllowances: completeConnection(),
     reviewDismissalAllowances: completeConnection(),
     requiredStatusChecks: REQUIRED_PROTECTION_CONTEXTS.map((context) => ({
-      context,
-      app: { databaseId: 15368, slug: 'github-actions' },
+      context, app: { databaseId: 15368, slug: 'github-actions' },
     })),
     ...overrides,
   };
@@ -205,8 +213,7 @@ function check(name, id, overrides = {}) {
   return {
     id, name, head_sha: HEAD_SHA, status: 'completed', conclusion: 'success',
     details_url: `https://github.com/${REPOSITORY}/actions/runs/${runId}/job/${id}`,
-    check_suite: { id: suiteId },
-    app: { id: 15368, slug: 'github-actions' },
+    check_suite: { id: suiteId }, app: { id: 15368, slug: 'github-actions' },
     ...overrides,
   };
 }
@@ -227,14 +234,13 @@ function workflowRun(name, overrides = {}) {
 class FakeClient {
   constructor(overrides = {}) {
     this.overrides = overrides;
-    this.pullReads = 0;
     this.governanceReads = 0;
     this.protectionReads = 0;
     this.checkReads = 0;
+    this.labelReads = 0;
     this.draftRestores = 0;
-    this.ready = false;
-    this.armed = false;
-    this.hold = null;
+    this.ready = overrides.initialReady ?? false;
+    this.merged = false;
     this.events = [];
   }
 
@@ -251,9 +257,7 @@ class FakeClient {
 
   async getCheckSuite(suiteId) {
     return this.overrides.suites?.get(suiteId) ?? {
-      id: suiteId,
-      head_sha: HEAD_SHA,
-      app: { id: 15368, slug: 'github-actions' },
+      id: suiteId, head_sha: HEAD_SHA, app: { id: 15368, slug: 'github-actions' },
       pull_requests: [{ number: PULL_NUMBER }],
     };
   }
@@ -267,35 +271,37 @@ class FakeClient {
   }
   async getUser() {
     return this.overrides.writerBot ?? {
-      login: WRITER_BOT.login,
-      id: WRITER_BOT.databaseId,
-      node_id: WRITER_BOT.nodeId,
-      type: 'Bot',
-      site_admin: false,
+      login: WRITER_BOT.login, id: WRITER_BOT.databaseId, node_id: WRITER_BOT.nodeId,
+      type: 'Bot', site_admin: false,
     };
   }
   async getBranchProtection() {
     this.protectionReads += 1;
-    const override = typeof this.overrides.protection === 'function'
+    const value = typeof this.overrides.protection === 'function'
       ? this.overrides.protection(this.protectionReads, this)
       : this.overrides.protection;
-    return override ?? protection();
+    return value ?? protection();
   }
-  async getPull() { this.pullReads += 1; return pull(); }
+  async getPull() { return pull(); }
   async getGitRef() { return { object: { sha: BASE_SHA } }; }
   async getPullFilePage() {
     return [{ filename: 'docs/automation-canary/example.md', status: 'modified', additions: 1, deletions: 0, changes: 1, patch: '@@' }];
   }
-  async getPullLabelPage() { return []; }
+  async getPullLabelPage() {
+    this.labelReads += 1;
+    const value = typeof this.overrides.policyLabels === 'function'
+      ? this.overrides.policyLabels(this.labelReads, this)
+      : this.overrides.policyLabels;
+    return value ?? [];
+  }
   async getGitCommit(sha) { return { sha, tree: { sha: sha === HEAD_SHA ? HEAD_TREE : BASE_TREE } }; }
   async getGitTree(sha) {
-    const values = new Map([
+    return new Map([
       [HEAD_TREE, { sha, truncated: false, tree: [{ path: 'docs', mode: '040000', type: 'tree', sha: DOCS_TREE }] }],
       [BASE_TREE, { sha, truncated: false, tree: [] }],
       [DOCS_TREE, { sha, truncated: false, tree: [{ path: 'automation-canary', mode: '040000', type: 'tree', sha: CANARY_TREE }] }],
       [CANARY_TREE, { sha, truncated: false, tree: [{ path: 'example.md', mode: '100644', type: 'blob', sha: '1'.repeat(40) }] }],
-    ]);
-    return values.get(sha);
+    ]).get(sha);
   }
   async getPullGovernance() {
     this.governanceReads += 1;
@@ -305,145 +311,91 @@ class FakeClient {
     const override = typeof this.overrides.governance === 'function'
       ? this.overrides.governance(this.governanceReads, this)
       : this.overrides.governance;
-    return governance({
-      isDraft: !this.ready,
-      mergeStateStatus: this.ready && this.hold?.status === 'in_progress' ? 'BLOCKED' : this.ready ? 'CLEAN' : 'DRAFT',
-      autoMergeRequest: this.armed ? {
-        enabledAt: '2026-08-20T00:00:00Z',
-        mergeMethod: 'SQUASH',
-        enabledBy: {
-          type: 'Bot', login: WRITER_BOT.graphqlLogin,
-          id: WRITER_BOT.nodeId, databaseId: WRITER_BOT.databaseId,
-        },
-      } : null,
-      ...override,
-    });
+    const current = this.merged
+      ? mergedGovernance()
+      : governance({ isDraft: !this.ready, mergeStateStatus: this.ready ? 'CLEAN' : 'DRAFT' });
+    return { ...current, ...override };
   }
   async listCheckRunsForRef() {
     this.checkReads += 1;
-    const override = typeof this.overrides.checks === 'function'
+    const value = typeof this.overrides.checks === 'function'
       ? this.overrides.checks(this.checkReads, this)
       : this.overrides.checks;
-    const checks = override ?? [
+    return value ?? [
       check('Rust CI / check', 1), check('Frontend CI / check', 2), check('Automation Policy / gate', 3),
     ];
-    return this.hold === null ? checks : [...checks, this.hold];
-  }
-  async createHoldCheck(headSha, externalId) {
-    this.events.push('hold_pending');
-    if (this.overrides.holdCreateError) throw this.overrides.holdCreateError;
-    this.hold = {
-      id: 91, name: 'Autonomy Finalizer / hold', head_sha: headSha, external_id: externalId,
-      status: 'in_progress', conclusion: null,
-      app: { id: 15368, slug: 'github-actions' }, pull_requests: [{ number: PULL_NUMBER }],
-    };
-    return this.overrides.holdCreateResult ?? this.hold;
-  }
-  async getCheckRun(id) {
-    if (this.overrides.holdReadError) throw this.overrides.holdReadError;
-    if (this.hold?.id !== id) throw new Error(`unexpected check run ${id}`);
-    return this.overrides.holdReadResult ?? this.hold;
-  }
-  async completeHoldCheck(id, externalId) {
-    this.events.push('hold_success');
-    if (this.overrides.holdCompleteError) throw this.overrides.holdCompleteError;
-    if (this.hold?.id === id && this.hold?.external_id === externalId) {
-      this.hold = { ...this.hold, status: 'completed', conclusion: 'success' };
-    }
-    return this.overrides.holdCompleteResult ?? this.hold;
   }
   async markPullReady(id) {
     this.events.push('ready');
+    if (this.overrides.readyErrorBefore) throw this.overrides.readyErrorBefore;
     this.ready = true;
-    if (this.overrides.readyError) throw this.overrides.readyError;
+    if (this.overrides.readyErrorAfter) throw this.overrides.readyErrorAfter;
     return this.overrides.readyResult ?? { id, isDraft: false, headRefOid: HEAD_SHA };
   }
   async convertPullToDraft(id) {
     this.events.push('draft_rollback');
     this.draftRestores += 1;
     this.ready = false;
-    this.armed = false;
-    if (this.overrides.draftError) throw this.overrides.draftError;
-    return { id, isDraft: true, headRefOid: HEAD_SHA };
+    if (this.overrides.draftErrorAfter) throw this.overrides.draftErrorAfter;
+    return this.overrides.draftResult ?? { id, isDraft: true, headRefOid: HEAD_SHA };
   }
-  async enableAutoMerge(id, head) {
-    this.events.push('auto_merge');
-    if (this.overrides.armErrorBefore) throw this.overrides.armErrorBefore;
-    this.armed = true;
-    if (this.overrides.armErrorAfter) throw this.overrides.armErrorAfter;
-    return {
-      id,
-      headRefOid: head,
-      autoMergeRequest: {
-        enabledAt: '2026-08-20T00:00:00Z',
-        mergeMethod: 'SQUASH',
-        enabledBy: {
-          __typename: 'Bot', login: WRITER_BOT.graphqlLogin,
-          id: WRITER_BOT.nodeId, databaseId: WRITER_BOT.databaseId,
-        },
-      },
-    };
+  async mergePullRequest(id, head) {
+    this.events.push('merge');
+    this.mergeArguments = { id, head };
+    if (this.overrides.mergeErrorBefore) throw this.overrides.mergeErrorBefore;
+    if (this.overrides.persistMerge !== false) this.merged = true;
+    if (this.overrides.mergeErrorAfter) throw this.overrides.mergeErrorAfter;
+    return this.overrides.mergeResult ?? { id, headRefOid: head, merged: true, mergeCommit: { oid: MERGE_SHA } };
   }
 }
 
-test('eligible Writer canary requires all three successful GitHub Actions checks', async () => {
-  const result = await evaluateAutonomyFinalizer({ client: new FakeClient(), trigger, trust, config, checkAttempts: 1 });
-  assert.equal(result.eligible, true);
-  assert.equal(result.bound.pull_number, PULL_NUMBER);
-  assert.equal(result.policy.decision.classification, 'eligible');
-
-  const wrongSource = new FakeClient({ checks: [
-    check('Rust CI / check', 1), check('Frontend CI / check', 2),
-    { ...check('Automation Policy / gate', 3), app: { id: 999, slug: 'other' } },
-  ] });
-  const blocked = await evaluateAutonomyFinalizer({ client: wrongSource, trigger, trust, config, checkAttempts: 1 });
-  assert.equal(blocked.eligible, false);
-  assert.match(blocked.reason, /Automation Policy \/ gate/);
-
-  const policySuiteId = CHECK_IDENTITIES.get('Automation Policy / gate').suite_id;
-  const wrongPull = new FakeClient({ suites: new Map([[policySuiteId, {
-    id: policySuiteId,
-    head_sha: HEAD_SHA,
-    app: { id: 15368, slug: 'github-actions' },
-    pull_requests: [{ number: PULL_NUMBER + 1 }],
-  }]]) });
-  const suiteBlocked = await evaluateAutonomyFinalizer({ client: wrongPull, trigger, trust, config, checkAttempts: 1 });
-  assert.equal(suiteBlocked.eligible, false);
-  assert.match(suiteBlocked.reason, /Automation Policy \/ gate/);
+const finalize = (client, overrides = {}) => finalizeAutonomyPull({
+  readClient: client,
+  writerClient: client,
+  trigger,
+  trust,
+  config,
+  sleepImpl: async () => {},
+  ...overrides,
 });
 
-test('a newer workflow_dispatch success cannot replace the latest pull_request check result', async () => {
-  const dispatchedRunId = 900;
-  const dispatchedSuiteId = 901;
-  const pullRequestFailure = check('Rust CI / check', 1, { conclusion: 'failure' });
-  const dispatchedSuccess = check('Rust CI / check', 99, {
-    run_id: dispatchedRunId,
-    suite_id: dispatchedSuiteId,
-  });
-  const runs = new Map([[dispatchedRunId, workflowRun('Rust CI / check', {
-    id: dispatchedRunId,
-    check_suite_id: dispatchedSuiteId,
-    event: 'workflow_dispatch',
-    pull_requests: [],
-  })]]);
+test('eligible Writer canary requires all three source-bound successful checks', async () => {
+  const eligible = await evaluateAutonomyFinalizer({ client: new FakeClient(), trigger, trust, config, checkAttempts: 1 });
+  assert.equal(eligible.eligible, true);
+  for (const name of REQUIRED_PROTECTION_CONTEXTS) {
+    const blocked = await evaluateAutonomyFinalizer({
+      client: new FakeClient({ checks: [
+        check('Rust CI / check', 1), check('Frontend CI / check', 2), check('Automation Policy / gate', 3),
+      ].map((value) => value.name === name ? { ...value, conclusion: 'failure' } : value) }),
+      trigger, trust, config, checkAttempts: 1,
+    });
+    assert.equal(blocked.eligible, false);
+    assert.match(blocked.reason, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+});
+
+test('workflow_dispatch success cannot impersonate a pull_request check', async () => {
+  const runId = 900;
+  const suiteId = 901;
   const client = new FakeClient({
     checks: [
-      pullRequestFailure,
-      dispatchedSuccess,
-      check('Frontend CI / check', 2),
-      check('Automation Policy / gate', 3),
+      check('Rust CI / check', 1, { conclusion: 'failure' }),
+      check('Rust CI / check', 99, { run_id: runId, suite_id: suiteId }),
+      check('Frontend CI / check', 2), check('Automation Policy / gate', 3),
     ],
-    runs,
+    runs: new Map([[runId, workflowRun('Rust CI / check', {
+      id: runId, check_suite_id: suiteId, event: 'workflow_dispatch', pull_requests: [],
+    })]]),
   });
   const result = await evaluateAutonomyFinalizer({ client, trigger, trust, config, checkAttempts: 1 });
   assert.equal(result.eligible, false);
   assert.match(result.reason, /Rust CI \/ check/);
 });
 
-test('conflict, unresolved discussion, manual label, or blocking review fails closed', async () => {
+test('conflict, unresolved discussion, manual label, and blocking review fail closed', async () => {
   for (const value of [
     { mergeable: 'CONFLICTING' },
-    { reviewThreads: [{ isResolved: false }] },
+    { reviewThreads: [{ id: 'thread', isResolved: false }] },
     { labels: ['autonomy-manual'] },
     { reviewDecision: 'CHANGES_REQUESTED' },
   ]) {
@@ -454,627 +406,277 @@ test('conflict, unresolved discussion, manual label, or blocking review fails cl
   }
 });
 
-test('Finalizer binds the managed branch to the Issue marker, not the pull request number', async () => {
-  const result = await evaluateAutonomyFinalizer({ client: new FakeClient(), trigger, trust, config, checkAttempts: 1 });
-  assert.equal(result.bound.pull_number, PULL_NUMBER);
-  assert.equal(result.governance.headRefName, `agent/issue-${ISSUE_NUMBER}`);
-
-  for (const value of [
-    { headRefName: `agent/issue-${PULL_NUMBER}` },
-    { body: `<!-- aeris-autonomy-managed -->\n<!-- aeris-autonomy-task:issue:${PULL_NUMBER} -->` },
-  ]) {
-    await assert.rejects(
-      () => evaluateAutonomyFinalizer({ client: new FakeClient({ governance: value }), trigger, trust, config, checkAttempts: 1 }),
-      AutonomyFinalizerError,
-    );
-  }
-});
-
-test('Finalizer marks ready, revalidates, and requests native auto-merge at the exact head', async () => {
+test('preliminary proof is read-only and cannot enter mutation mode', async () => {
   const client = new FakeClient();
-  const result = await finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} });
-  assert.deepEqual(result, { action: 'armed', pull_number: PULL_NUMBER, head_sha: HEAD_SHA });
-  assert.equal(client.ready, true);
-  assert.equal(client.armed, true);
-  assert.deepEqual(client.events, ['hold_pending', 'ready', 'auto_merge', 'hold_success']);
-  assert.ok(client.pullReads >= 4);
-  assert.ok(client.protectionReads >= 3);
-});
-
-test('Finalizer does not mark a draft ready when branch protection drifts after hold acquisition', async () => {
-  const client = new FakeClient({
-    protection: (_read, state) => state.hold === null
-      ? protection()
-      : protection({ bypassPullRequestAllowances: completeConnection([{ id: 'allowance-1' }]) }),
-  });
+  client.getBranchProtection = async () => { throw new Error('must not read protection'); };
+  const result = await evaluateAutonomyFinalizerPreliminary({ client, trigger, trust, config, checkAttempts: 1 });
+  assert.equal(result.eligible, true);
+  assert.equal(result.proof_level, 'preliminary');
   await assert.rejects(
-    () => finalizeAutonomyPull({
-      readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {},
-    }),
-    /bypassPullRequestAllowances are not empty/,
-  );
-  assert.equal(client.events.filter((event) => event === 'ready').length, 0);
-  assert.equal(client.hold.status, 'in_progress');
-  assert.equal(client.events.includes('hold_success'), false);
-});
-
-test('Finalizer does not mark a draft ready when a required business check drifts after hold acquisition', async () => {
-  const client = new FakeClient({
-    checks: (_read, state) => [
-      check('Rust CI / check', 1, state.hold === null ? {} : { conclusion: 'failure' }),
-      check('Frontend CI / check', 2),
-      check('Automation Policy / gate', 3),
-    ],
-  });
-  await assert.rejects(
-    () => finalizeAutonomyPull({
-      readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {},
-    }),
-    /pre-ready verification failed: required_checks_not_successful:Rust CI \/ check/,
-  );
-  assert.equal(client.events.filter((event) => event === 'ready').length, 0);
-  assert.equal(client.hold.status, 'in_progress');
-  assert.equal(client.events.includes('hold_success'), false);
-});
-
-test('preliminary Finalizer proof never reads branch protection', async () => {
-  const client = new FakeClient();
-  client.getBranchProtection = async () => {
-    throw new Error('Actions token must not read protected repository governance');
-  };
-  const direct = await evaluateAutonomyFinalizerPreliminary({
-    client, trigger, trust, config, checkAttempts: 1,
-  });
-  assert.equal(direct.eligible, true);
-  assert.equal(direct.proof_level, 'preliminary');
-  assert.equal(direct.protection, null);
-  assert.equal(client.protectionReads, 0);
-
-  const cli = await runAutonomyFinalizer(preliminaryEnvironment(), {
-    readClient: client,
-    sleepImpl: async () => {},
-  });
-  assert.equal(cli.eligible, true);
-  assert.equal(cli.proof_level, 'preliminary');
-  assert.equal(client.protectionReads, 0);
-});
-
-test('preliminary proof cannot enter mutation mode', async () => {
-  await assert.rejects(
-    () => runAutonomyFinalizer(preliminaryEnvironment({ AERIS_FINALIZER_MUTATE: 'true' }), {
-      readClient: new FakeClient(),
-    }),
+    () => runAutonomyFinalizer(preliminaryEnvironment({ AERIS_FINALIZER_MUTATE: 'true' }), { readClient: client }),
     /mutation mode requires full proof/,
   );
 });
 
-test('Finalizer requires strict source-bound hold branch protection before eligibility', async () => {
-  const requiredContexts = REQUIRED_PROTECTION_CONTEXTS;
-  const validRule = protectionRule;
-  const proof = (rule) => ({
-    ...protection(),
-    branchProtectionRules: completeConnection(rule === null ? [] : [rule]),
-    rulesets: completeConnection(),
-  });
+test('full proof requires exactly three source-bound business contexts and squash-only merges', async () => {
   const invalid = [
-    proof(null),
-    { ...proof(validRule()), branchProtectionRules: { ...completeConnection([validRule()]), totalCount: 2 } },
-    { ...proof(validRule()), rulesets: { ...completeConnection(), pageInfo: { hasNextPage: true, endCursor: 'next' } } },
-    { ...proof(validRule()), autoMergeAllowed: false },
-    { ...proof(validRule()), mergeCommitAllowed: true },
-    { ...proof(validRule()), rebaseMergeAllowed: true },
-    { ...proof(validRule()), squashMergeAllowed: false },
-    { ...proof(validRule()), isArchived: true },
-    { ...proof(validRule()), isDisabled: true },
-    { ...proof(validRule()), isLocked: true },
-    proof(validRule({ requiresStrictStatusChecks: false })),
-    proof(validRule({ isAdminEnforced: false })),
-    proof(validRule({ requiresConversationResolution: false })),
-    proof(validRule({ allowsDeletions: true })),
-    proof(validRule({ allowsForcePushes: true })),
-    proof(validRule({ blocksCreations: true })),
-    proof(validRule({ dismissesStaleReviews: false })),
-    proof(validRule({ lockAllowsFetchAndMerge: true })),
-    proof(validRule({ lockBranch: true })),
-    proof(validRule({ requireLastPushApproval: true })),
-    proof(validRule({ requiredApprovingReviewCount: 1 })),
-    proof(validRule({ requiredDeploymentEnvironments: ['production'] })),
-    proof(validRule({ requiresApprovingReviews: false })),
-    proof(validRule({ requiresCodeOwnerReviews: true })),
-    proof(validRule({ requiresCommitSignatures: true })),
-    proof(validRule({ requiresDeployments: true })),
-    proof(validRule({ requiresLinearHistory: false })),
-    proof(validRule({ restrictsPushes: true })),
-    proof(validRule({ restrictsReviewDismissals: true })),
-    proof(validRule({ bypassPullRequestAllowances: completeConnection([{ id: 'allowance-1' }]) })),
-    proof(validRule({ bypassPullRequestAllowances: { ...completeConnection(), pageInfo: { hasNextPage: true, endCursor: 'next' } } })),
-    proof(validRule({ bypassForcePushAllowances: completeConnection([{ id: 'allowance-1' }]) })),
-    proof(validRule({ pushAllowances: completeConnection([{ id: 'allowance-1' }]) })),
-    proof(validRule({ reviewDismissalAllowances: completeConnection([{ id: 'allowance-1' }]) })),
-    {
-      ...proof(validRule()),
-      rulesets: completeConnection([{ id: 'ruleset-1', enforcement: 'ACTIVE', target: 'BRANCH' }]),
-    },
-    proof(validRule({
-        requiredStatusChecks: [
-          ...requiredContexts.map((context) => ({
-            context, app: { databaseId: 15368, slug: 'github-actions' },
-          })),
-          { context: 'Unexpected / bypass', app: { databaseId: 15368, slug: 'github-actions' } },
-        ],
-      })),
-    proof(validRule({
-        requiredStatusChecks: requiredContexts.map((context) => ({
-          context,
-          app: { databaseId: context === 'Autonomy Finalizer / hold' ? 999 : 15368, slug: 'github-actions' },
-        })),
-      })),
-    {
-      ...protection(),
-      branchProtectionRules: completeConnection([
-        validRule(),
-        validRule({ pattern: '*' }),
-      ]),
-    },
+    protection({ requiredStatusChecks: [
+      ...protectionRule().requiredStatusChecks,
+      { context: 'Autonomy Finalizer / hold', app: { databaseId: 15368, slug: 'github-actions' } },
+    ] }),
+    protection({ requiredStatusChecks: protectionRule().requiredStatusChecks.slice(0, 2) }),
+    protection({ requiredStatusChecks: protectionRule().requiredStatusChecks.map((value, index) => (
+      index === 0 ? { ...value, app: { databaseId: 999, slug: 'github-actions' } } : value
+    )) }),
+    { ...protection(), mergeCommitAllowed: true },
+    { ...protection(), rebaseMergeAllowed: true },
+    { ...protection(), squashMergeAllowed: false },
+    protection({ requiresStrictStatusChecks: false }),
+    protection({ bypassPullRequestAllowances: completeConnection([{ id: 'allowance' }]) }),
+    { ...protection(), rulesets: completeConnection([{ id: 'r', enforcement: 'ACTIVE', target: 'BRANCH' }]) },
   ];
-  for (const protection of invalid) {
+  for (const value of invalid) {
     await assert.rejects(
-      () => evaluateAutonomyFinalizer({
-        client: new FakeClient({ protection }), trigger, trust, config, checkAttempts: 1,
-      }),
+      () => evaluateAutonomyFinalizer({ client: new FakeClient({ protection: value }), trigger, trust, config, checkAttempts: 1 }),
       AutonomyFinalizerError,
     );
   }
 });
 
-test('Finalizer binds Writer token scope and trusted action outputs before mutation', async () => {
+test('Writer App JWT, installation scope, and live Bot identity are proven before mutation', async () => {
   const cases = [
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, app_id: writerTrust.app_id + 1 },
-      error: /Writer App JWT proof does not match the trusted App identity/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, proof_app_id: writerTrust.app_id + 1 },
-      error: /Writer App JWT proof does not match the trusted App identity/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, proof_app_id: undefined },
-      error: /Writer proof App id must be a positive integer/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, proof_app_owner_login: 'other-owner' },
-      error: /does not match the repository owner/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, proof_app_owner_type: undefined },
-      error: /Writer proof App owner type is invalid/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, proof_installation_id: writerTrust.installation_id + 1 },
-      error: /Writer App JWT proof does not match the trusted installation/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, proof_installation_account_login: 'other-owner' },
-      error: /does not match the repository installation/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, proof_repository_selection: 'all' },
-      error: /does not match the repository installation/,
-    },
-    {
-      client: new FakeClient({ installationRepositories: { total_count: 2, repositories: [] } }),
-      writerTrust,
-      error: /repository scope is not exact/,
-    },
-    {
-      client: new FakeClient({
-        installationRepositories: {
-          total_count: 1,
-          repositories: [{ id: 999, full_name: REPOSITORY, owner: { login: 'JinPengGeng' } }],
-        },
-      }),
-      writerTrust,
-      error: /repository identity is invalid/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, app_slug: 'wrong-writer' },
-      error: /does not match policy/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, app_id: 0 },
-      error: /trusted App id must be a positive integer/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, installation_id: 0 },
-      error: /trusted installation id must be a positive integer/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, token_installation_id: 155342532 },
-      error: /does not match the configured installation/,
-    },
-    {
-      client: new FakeClient(),
-      writerTrust: { ...writerTrust, token_app_slug: 'other-writer' },
-      error: /Writer token App does not match the configured App/,
-    },
-    {
-      client: new FakeClient({ writerBot: { login: 'person', id: 7, node_id: 'U_7', type: 'User', site_admin: false } }),
-      writerTrust,
-      error: /Writer Bot REST identity is invalid/,
-    },
-    {
-      client: new FakeClient({
-        writerBot: {
-          login: WRITER_BOT.login,
-          id: WRITER_BOT.databaseId + 1,
-          node_id: 'BOT_other',
-          type: 'Bot',
-          site_admin: false,
-        },
-      }),
-      writerTrust,
-      error: /author does not match the live Writer Bot/,
-    },
+    { writerTrust: { ...writerTrust, proof_app_id: writerTrust.app_id + 1 }, error: /JWT proof/ },
+    { writerTrust: { ...writerTrust, proof_app_owner_login: 'other' }, error: /repository owner/ },
+    { writerTrust: { ...writerTrust, proof_app_permissions: { administration: 'write', contents: 'write', metadata: 'read', pull_requests: 'write' } }, error: /permissions/ },
+    { writerTrust: { ...writerTrust, proof_installation_permissions: { administration: 'read', contents: 'write', metadata: 'read', pull_requests: 'read' } }, error: /permissions/ },
+    { writerTrust: { ...writerTrust, proof_installation_permissions: undefined }, error: /permissions/ },
+    { writerTrust: { ...writerTrust, token_installation_id: writerTrust.installation_id + 1 }, error: /installation/ },
+    { writerTrust: { ...writerTrust, token_app_slug: 'other' }, error: /configured App/ },
   ];
   for (const value of cases) {
-    await assert.rejects(
-      () => finalizeAutonomyPull({
-        readClient: value.client,
-        writerClient: value.client,
-        trigger,
-        trust,
-        config,
-        writerTrust: value.writerTrust,
-        sleepImpl: async () => {},
-      }),
-      value.error,
-    );
-    assert.deepEqual(value.client.events, []);
+    const client = new FakeClient();
+    await assert.rejects(() => finalize(client, { writerTrust: value.writerTrust }), value.error);
+    assert.deepEqual(client.events, []);
   }
-});
-
-test('Finalizer adopts exact hold checks from the real REST check-runs envelope', async () => {
-  const client = new FakeClient();
-  const calls = [];
-  const api = new AutonomyFinalizerGitHubClient({
-    token: 'actions-token',
-    repository: REPOSITORY,
-    fetchImpl: async (url) => {
-      calls.push(url);
-      const checkRuns = [
-        check('Rust CI / check', 1),
-        check('Frontend CI / check', 2),
-        check('Automation Policy / gate', 3),
-        ...(client.hold === null ? [] : [client.hold]),
-      ];
-      return apiResponse({ total_count: checkRuns.length, check_runs: checkRuns });
-    },
-  });
-  client.listCheckRunsForRef = (ref) => api.listCheckRunsForRef(ref);
-
-  const result = await finalizeAutonomyPull({
-    readClient: client,
-    writerClient: client,
-    trigger,
-    trust,
-    config,
-    sleepImpl: async () => {},
-  });
-
-  assert.equal(result.action, 'armed');
-  assert.equal(client.hold.status, 'completed');
-  assert.ok(calls.length >= 2);
-  assert.ok(calls.every((url) => url.includes(`/commits/${HEAD_SHA}/check-runs?filter=all&per_page=100&page=1`)));
-});
-
-test('Finalizer rejects a User with the Writer App GraphQL login', async () => {
-  await assert.rejects(
-    () => evaluateAutonomyFinalizer({
-      client: new FakeClient({ governance: { authorType: 'User', author: 'aeris-writer' } }),
-      trigger, trust, config, checkAttempts: 1,
-    }),
-    /author is not the Writer App/,
-  );
-});
-
-test('Finalizer accepts only auto-merge enabled by the live Writer Bot', async () => {
-  const human = new FakeClient({
-    governance: {
-      autoMergeRequest: {
-        enabledAt: '2026-08-20T00:00:00Z', mergeMethod: 'SQUASH',
-        enabledBy: { type: 'User', login: WRITER_BOT.graphqlLogin, id: 'U_same_login', databaseId: 8 },
-      },
-    },
-  });
-  human.ready = true;
-  human.armed = true;
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: human, writerClient: human, trigger, trust, config, sleepImpl: async () => {} }),
-    /auto-merge was not enabled by the Writer App/,
-  );
+  const scoped = new FakeClient({ installationRepositories: { total_count: 2, repositories: [] } });
+  await assert.rejects(() => finalize(scoped), /repository scope is not exact/);
+  assert.deepEqual(scoped.events, []);
+  const human = new FakeClient({ writerBot: { login: WRITER_BOT.login, id: 7, node_id: 'U', type: 'User', site_admin: false } });
+  await assert.rejects(() => finalize(human), /Writer Bot REST identity is invalid/);
   assert.deepEqual(human.events, []);
-
-  const otherBot = new FakeClient({
-    governance: {
-      autoMergeRequest: {
-        enabledAt: '2026-08-20T00:00:00Z', mergeMethod: 'SQUASH',
-        enabledBy: {
-          type: 'Bot', login: WRITER_BOT.graphqlLogin,
-          id: 'BOT_other', databaseId: WRITER_BOT.databaseId + 1,
-        },
-      },
-    },
-  });
-  otherBot.ready = true;
-  otherBot.armed = true;
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: otherBot, writerClient: otherBot, trigger, trust, config, sleepImpl: async () => {} }),
-    /auto-merge actor does not match the live Writer Bot/,
-  );
-  assert.deepEqual(otherBot.events, []);
 });
 
-test('Finalizer trusts an independent arm read, not an untrustworthy mutation response', async () => {
+test('Finalizer makes one exact-head squash merge after fresh pre-ready and pre-merge proofs', async () => {
   const client = new FakeClient();
-  const originalEnable = client.enableAutoMerge.bind(client);
-  client.enableAutoMerge = async (id, head) => {
-    await originalEnable(id, head);
-    return { id, headRefOid: head, autoMergeRequest: null };
-  };
-  const result = await finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} });
-  assert.equal(result.action, 'armed');
-  assert.equal(client.draftRestores, 0);
-  assert.equal(client.hold.status, 'completed');
-});
-
-test('Finalizer recovers when arming succeeds but its response is lost', async () => {
-  const client = new FakeClient({ armErrorAfter: new Error('connection lost') });
-  const result = await finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} });
-  assert.equal(result.action, 'armed');
-  assert.equal(client.armed, true);
-  assert.equal(client.hold.status, 'completed');
+  const result = await finalize(client);
+  assert.deepEqual(result, {
+    action: 'merged', pull_number: PULL_NUMBER, head_sha: HEAD_SHA, merge_commit_sha: MERGE_SHA,
+  });
+  assert.deepEqual(client.mergeArguments, { id: 'PR_node', head: HEAD_SHA });
+  assert.deepEqual(client.events, ['ready', 'merge']);
+  assert.equal(client.protectionReads, 3);
+  assert.ok(client.governanceReads >= 5);
   assert.equal(client.draftRestores, 0);
 });
 
-test('Finalizer refuses aggregate merge states incompatible with a pending hold', async () => {
-  const client = new FakeClient({ governance: { mergeStateStatus: 'CLEAN' } });
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /aggregate merge state is incompatible/,
-  );
-  assert.equal(client.armed, false);
-  assert.equal(client.hold.status, 'in_progress');
+test('already-ready pull skips the ready mutation but still receives a fresh full proof', async () => {
+  const client = new FakeClient({ initialReady: true });
+  const result = await finalize(client);
+  assert.equal(result.action, 'merged');
+  assert.deepEqual(client.events, ['merge']);
+  assert.equal(client.protectionReads, 2);
+});
+
+test('lost merge response counts as success only after independent exact outcome proof', async () => {
+  const client = new FakeClient({ mergeErrorAfter: new Error('response lost') });
+  const result = await finalize(client);
+  assert.equal(result.action, 'merged');
+  assert.equal(result.merge_commit_sha, MERGE_SHA);
+  assert.equal(client.draftRestores, 0);
+});
+
+test('merge mutation payload is not trusted', async () => {
+  const client = new FakeClient({
+    mergeResult: { id: 'wrong', headRefOid: '0'.repeat(40), merged: false, mergeCommit: null },
+  });
+  const result = await finalize(client);
+  assert.equal(result.action, 'merged');
+  assert.equal(result.merge_commit_sha, MERGE_SHA);
+});
+
+test('definite failed merge restores Draft and leaves no persistent authorization', async () => {
+  const client = new FakeClient({ mergeErrorBefore: new Error('merge rejected') });
+  await assert.rejects(() => finalize(client), /merge rejected/);
+  assert.deepEqual(client.events, ['ready', 'merge', 'draft_rollback']);
+  assert.equal(client.ready, false);
+  assert.equal(client.merged, false);
   assert.equal(client.draftRestores, 1);
 });
 
-test('Finalizer accepts GitHub UNSTABLE while the exact required hold is pending', async () => {
-  const client = new FakeClient({ governance: { mergeStateStatus: 'UNSTABLE' } });
-  const result = await finalizeAutonomyPull({
-    readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {},
-  });
-  assert.equal(result.action, 'armed');
-  assert.equal(client.hold.status, 'completed');
+test('untrusted success response without a persisted merge restores Draft', async () => {
+  const client = new FakeClient({ persistMerge: false });
+  await assert.rejects(() => finalize(client), /did not persist the exact squash merge/);
+  assert.deepEqual(client.events, ['ready', 'merge', 'draft_rollback']);
+  assert.equal(client.ready, false);
 });
 
-test('Finalizer keeps the hold pending when aggregate merge state drifts after arming', async (t) => {
-  for (const mergeStateStatus of ['CLEAN', 'BEHIND', 'DRAFT', 'HAS_HOOKS', 'UNKNOWN']) {
-    await t.test(mergeStateStatus, async () => {
-      const client = new FakeClient({
-        governance: (_read, state) => state.armed ? { mergeStateStatus } : {},
-      });
-      await assert.rejects(
-        () => finalizeAutonomyPull({
-          readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {},
-        }),
-        AutonomyFinalizerError,
-      );
-      assert.equal(client.armed, true);
-      assert.equal(client.hold.status, 'in_progress');
-      assert.equal(client.events.includes('hold_success'), false);
+test('lost Draft rollback response is accepted only after independent Draft proof', async () => {
+  const client = new FakeClient({
+    mergeErrorBefore: new Error('merge rejected'),
+    draftErrorAfter: new Error('Draft response lost'),
+  });
+  await assert.rejects(() => finalize(client), /merge rejected/);
+  assert.equal(client.ready, false);
+  assert.equal(client.draftRestores, 1);
+});
+
+test('lost ready response continues only after independent exact ready proof', async () => {
+  const client = new FakeClient({ readyErrorAfter: new Error('ready response lost') });
+  const result = await finalize(client);
+  assert.equal(result.action, 'merged');
+  assert.deepEqual(client.events, ['ready', 'merge']);
+});
+
+test('lost ready response does not grant Draft rollback authority after merge failure', async () => {
+  const client = new FakeClient({
+    readyErrorAfter: new Error('ready response lost'),
+    mergeErrorBefore: new Error('merge rejected'),
+  });
+  await assert.rejects(() => finalize(client), /merge rejected/);
+  assert.deepEqual(client.events, ['ready', 'merge']);
+  assert.equal(client.ready, true);
+  assert.equal(client.draftRestores, 0);
+});
+
+test('definite rejected ready mutation leaves the original Draft unchanged', async () => {
+  const client = new FakeClient({ readyErrorBefore: new Error('ready rejected') });
+  await assert.rejects(() => finalize(client), /ready rejected/);
+  assert.deepEqual(client.events, ['ready']);
+  assert.equal(client.ready, false);
+  assert.equal(client.draftRestores, 0);
+});
+
+test('preexisting auto-merge fails closed before every Writer mutation', async () => {
+  const client = new FakeClient({ governance: { autoMergeRequest: {
+    enabledAt: '2026-08-20T00:00:00Z', mergeMethod: 'SQUASH',
+    enabledBy: { type: 'Bot', login: WRITER_BOT.graphqlLogin, id: WRITER_BOT.nodeId, databaseId: WRITER_BOT.databaseId },
+  } } });
+  await assert.rejects(() => finalize(client), /preexisting auto-merge request/);
+  assert.deepEqual(client.events, []);
+});
+
+test('wrong merger, merged head, base parent, or merge topology is ambiguous and never rolled back', async (t) => {
+  const cases = [
+    ['merger', { mergedBy: { type: 'User', login: 'person', id: 'U', databaseId: 7 } }],
+    ['head', { headRefOid: '8'.repeat(40) }],
+    ['base', { mergeCommit: { oid: MERGE_SHA, parentCount: 1, parents: [{ oid: '8'.repeat(40) }] } }],
+    ['method', { mergeCommit: { oid: MERGE_SHA, parentCount: 2, parents: [{ oid: BASE_SHA }, { oid: HEAD_SHA }] } }],
+  ];
+  for (const [name, drift] of cases) {
+    await t.test(name, async () => {
+      const client = new FakeClient({ governance: (_read, state) => state.merged ? drift : {} });
+      await assert.rejects(() => finalize(client), /outcome is ambiguous/);
+      assert.equal(client.events.filter((event) => event === 'merge').length, 1);
+      assert.equal(client.draftRestores, 0);
     });
   }
 });
 
-test('Finalizer keeps the hold pending when the base commit drifts after arming', async () => {
-  const client = new FakeClient({
-    governance: (_read, state) => state.armed ? { baseRefOid: '9'.repeat(40) } : {},
-  });
-  await assert.rejects(
-    () => finalizeAutonomyPull({
-      readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {},
-    }),
-    /base drifted/,
-  );
-  assert.equal(client.armed, true);
-  assert.equal(client.hold.status, 'in_progress');
-  assert.equal(client.events.includes('hold_success'), false);
+test('ambiguous outcome read never guesses or attempts Draft rollback', async () => {
+  const client = new FakeClient({ governanceErrors: new Set([6]), mergeErrorAfter: new Error('response lost') });
+  await assert.rejects(() => finalize(client), /independent merge outcome is ambiguous/);
+  assert.equal(client.merged, true);
+  assert.equal(client.draftRestores, 0);
 });
 
-test('Finalizer leaves an armed pull held when post-arm governance is inconclusive', async () => {
-  const client = new FakeClient({ governanceErrors: new Set([5, 6]) });
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /governance read 5 failed/,
-  );
-  assert.equal(client.armed, true);
+test('an already-ready pull remains Ready after a definite merge failure', async () => {
+  const client = new FakeClient({ initialReady: true, mergeErrorBefore: new Error('merge rejected') });
+  await assert.rejects(() => finalize(client), /merge rejected/);
+  assert.deepEqual(client.events, ['merge']);
   assert.equal(client.ready, true);
   assert.equal(client.draftRestores, 0);
-  assert.equal(client.hold.status, 'in_progress');
 });
 
-test('Finalizer leaves an armed pull held when branch protection drifts after arming', async () => {
-  const client = new FakeClient({
-    protection: (_read, state) => state.armed
-      ? protection({ bypassPullRequestAllowances: completeConnection([{ id: 'allowance-1' }]) })
-      : protection(),
-  });
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /bypassPullRequestAllowances are not empty/,
-  );
-  assert.equal(client.armed, true);
-  assert.equal(client.hold.status, 'in_progress');
-  assert.equal(client.events.includes('hold_success'), false);
-});
-
-test('Finalizer leaves an armed pull held when a business check drifts after arming', async () => {
-  const client = new FakeClient({
-    checks: (_read, state) => [
-      check('Rust CI / check', 1, state.armed ? { conclusion: 'failure' } : {}),
-      check('Frontend CI / check', 2),
-      check('Automation Policy / gate', 3),
-    ],
-  });
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /post-arm verification failed: required_checks_not_successful:Rust CI \/ check/,
-  );
-  assert.equal(client.armed, true);
-  assert.equal(client.hold.status, 'in_progress');
-  assert.equal(client.events.includes('hold_success'), false);
-});
-
-test('Finalizer leaves an armed pull held when non-blocking governance fields drift after arming', async () => {
-  const client = new FakeClient({
-    governance: (read) => read >= 6 ? { labels: ['safe-but-new-label'] } : {},
-  });
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /governance drifted after native auto-merge request: labels/,
-  );
-  assert.equal(client.armed, true);
-  assert.equal(client.hold.status, 'in_progress');
-  assert.equal(client.events.includes('hold_success'), false);
-});
-
-test('Finalizer leaves an armed pull held when the exact hold is no longer pending at release', async () => {
-  const client = new FakeClient();
-  const getCheckRun = client.getCheckRun.bind(client);
-  client.getCheckRun = async (id) => {
-    const value = await getCheckRun(id);
-    return client.armed ? { ...value, status: 'completed', conclusion: 'cancelled' } : value;
-  };
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /hold check is not pending/,
-  );
-  assert.equal(client.armed, true);
-  assert.equal(client.hold.status, 'in_progress');
-  assert.equal(client.events.includes('hold_success'), false);
-});
-
-test('Finalizer retries an armed pending hold without rearming', async () => {
-  const client = new FakeClient({ holdCompleteError: new Error('hold response lost') });
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /hold response lost/,
-  );
-  assert.equal(client.armed, true);
-  assert.equal(client.hold.status, 'in_progress');
-  client.overrides.holdCompleteError = null;
-  const result = await finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} });
-  assert.equal(result.action, 'already_armed');
-  assert.equal(client.events.filter((event) => event === 'auto_merge').length, 1);
-  assert.equal(client.hold.status, 'completed');
-});
-
-test('Finalizer confirms a hold release whose HTTP response was lost', async () => {
-  const client = new FakeClient();
-  const complete = client.completeHoldCheck.bind(client);
-  client.completeHoldCheck = async (...args) => {
-    await complete(...args);
-    throw new Error('completion response lost');
-  };
-  const result = await finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} });
-  assert.equal(result.action, 'armed');
-  assert.equal(client.hold.status, 'completed');
-});
-
-test('Finalizer keeps the hold pending and restores Draft after a definite unarmed failure', async () => {
-  const client = new FakeClient({ armErrorBefore: new Error('arming rejected') });
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /arming rejected/,
-  );
-  assert.equal(client.draftRestores, 1);
-  assert.equal(client.hold.status, 'in_progress');
-  assert.deepEqual(client.events, ['hold_pending', 'ready', 'auto_merge', 'draft_rollback']);
-});
-
-test('Finalizer fails closed on an ambiguous exact-head hold', async () => {
-  const client = new FakeClient();
-  const originalChecks = client.listCheckRunsForRef.bind(client);
-  client.listCheckRunsForRef = async () => [
-    ...(await originalChecks()),
-    {
-      id: 92, name: 'Autonomy Finalizer / hold', head_sha: HEAD_SHA,
-      external_id: 'foreign-generation', status: 'in_progress', conclusion: null,
-      app: { id: 15368, slug: 'github-actions' }, pull_requests: [{ number: PULL_NUMBER }],
-    },
+test('governance, protection, and check drift before Ready cause zero mutation', async (t) => {
+  const cases = [
+    ['governance', new FakeClient({ governance: (read) => read === 2 ? { labels: ['autonomy-manual'] } : {} })],
+    ['protection', new FakeClient({ protection: (read) => read === 2
+      ? protection({ bypassPullRequestAllowances: completeConnection([{ id: 'allowance' }]) })
+      : protection() })],
+    ['checks', new FakeClient({ checks: (read) => [
+      check('Rust CI / check', 1, read === 2 ? { conclusion: 'failure' } : {}),
+      check('Frontend CI / check', 2), check('Automation Policy / gate', 3),
+    ] })],
   ];
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /hold check/,
-  );
-  assert.deepEqual(client.events, []);
+  for (const [name, client] of cases) {
+    await t.test(name, async () => {
+      await assert.rejects(() => finalize(client));
+      assert.deepEqual(client.events, []);
+    });
+  }
 });
 
-test('Finalizer restores Draft when the ready mutation response reports head drift', async () => {
+test('governance, protection, and check drift immediately before merge roll back Ready with zero merge mutation', async (t) => {
+  const cases = [
+    ['governance', new FakeClient({ governance: (read) => read === 4 ? { labels: ['autonomy-manual'] } : {} })],
+    ['protection', new FakeClient({ protection: (read) => read === 3
+      ? protection({ bypassPullRequestAllowances: completeConnection([{ id: 'allowance' }]) })
+      : protection() })],
+    ['checks', new FakeClient({ checks: (read) => [
+      check('Rust CI / check', 1, read === 3 ? { conclusion: 'failure' } : {}),
+      check('Frontend CI / check', 2), check('Automation Policy / gate', 3),
+    ] })],
+    ['base', new FakeClient({ governance: (read) => read === 4 ? { baseRefOid: '8'.repeat(40) } : {} })],
+  ];
+  for (const [name, client] of cases) {
+    await t.test(name, async () => {
+      await assert.rejects(() => finalize(client));
+      assert.equal(client.events.includes('merge'), false);
+      assert.equal(client.draftRestores, 1);
+      assert.equal(client.ready, false);
+    });
+  }
+});
+
+test('pre-merge Policy denial independently confirms exact Ready before rollback', async () => {
   const client = new FakeClient({
-    readyResult: { id: 'PR_node', isDraft: false, headRefOid: '9'.repeat(40) },
+    policyLabels: (read) => read >= 5 ? [{ id: 1, name: 'autonomy-manual' }] : [],
   });
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /exact ready-for-review transition/,
-  );
-  assert.equal(client.draftRestores, 1);
+  await assert.rejects(() => finalize(client), /pre-merge verification failed: policy_deny/);
+  assert.deepEqual(client.events, ['ready', 'draft_rollback']);
+  assert.equal(client.events.includes('merge'), false);
   assert.equal(client.ready, false);
-  assert.equal(client.armed, false);
 });
 
-test('Finalizer restores Draft when governance fails after the ready transition', async () => {
-  const client = new FakeClient({
-    governance: (read) => read === 3 ? { labels: ['autonomy-manual'] } : {},
-  });
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /manual-only label/,
-  );
-  assert.equal(client.draftRestores, 1);
-  assert.equal(client.ready, false);
-  assert.equal(client.armed, false);
-});
-
-test('Finalizer rereads governance immediately before ready without mutating drifted state', async () => {
-  const client = new FakeClient({
-    governance: (read) => read === 2 ? { labels: ['autonomy-manual'] } : {},
-  });
-  await assert.rejects(
-    () => finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} }),
-    /manual-only label/,
-  );
+test('head drift after Ready is ambiguous and causes zero merge mutation', async () => {
+  const client = new FakeClient({ governance: (read) => read === 3 ? { headRefOid: '8'.repeat(40) } : {} });
+  await assert.rejects(() => finalize(client), /ready-for-review state is ambiguous/);
+  assert.equal(client.events.includes('merge'), false);
   assert.equal(client.draftRestores, 0);
-  assert.equal(client.ready, false);
 });
 
-test('an already armed exact pull is idempotent', async () => {
-  const client = new FakeClient();
-  client.ready = true;
-  client.armed = true;
-  const result = await finalizeAutonomyPull({ readClient: client, writerClient: client, trigger, trust, config, sleepImpl: async () => {} });
-  assert.equal(result.action, 'already_armed');
+test('base drift in the final stable governance read is ambiguous and never rolls back', async () => {
+  const client = new FakeClient({ governance: (read) => read >= 5 ? { baseRefOid: '8'.repeat(40) } : {} });
+  await assert.rejects(() => finalize(client), /base drifted/);
+  assert.equal(client.events.includes('merge'), false);
+  assert.equal(client.draftRestores, 0);
+});
+
+test('governance drift in the final stable read is caught before merge and rolls back this run Ready', async () => {
+  const client = new FakeClient({ governance: (read) => read === 5 ? { labels: ['safe-new-label'] } : {} });
+  await assert.rejects(() => finalize(client), /governance drifted immediately before merge mutation/);
+  assert.deepEqual(client.events, ['ready', 'draft_rollback']);
+  assert.equal(client.draftRestores, 1);
+});
+
+test('Draft rollback re-reads exact governance immediately before its Writer mutation', async () => {
+  const client = new FakeClient({
+    mergeErrorBefore: new Error('merge rejected'),
+    governance: (read) => read === 7 ? { baseRefOid: '8'.repeat(40) } : {},
+  });
+  await assert.rejects(() => finalize(client), /Draft rollback/);
+  assert.equal(client.events.includes('draft_rollback'), false);
+  assert.equal(client.ready, true);
 });
 
 function graphqlPull(overrides = {}) {
@@ -1089,6 +691,7 @@ function graphqlPull(overrides = {}) {
       id: WRITER_BOT.nodeId, databaseId: WRITER_BOT.databaseId,
     },
     mergeable: 'MERGEABLE', mergeStateStatus: 'DRAFT', reviewDecision: null,
+    merged: false, mergedAt: null, mergedBy: null, mergeCommit: null,
     autoMergeRequest: null,
     labels: { nodes: [], pageInfo: { hasNextPage: false } },
     reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
@@ -1096,14 +699,28 @@ function graphqlPull(overrides = {}) {
   };
 }
 
+function graphqlMergedPull(overrides = {}) {
+  return graphqlPull({
+    state: 'MERGED', isDraft: false, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN',
+    baseRefOid: MERGE_SHA, merged: true, mergedAt: '2026-08-21T00:00:00Z',
+    mergedBy: {
+      __typename: 'Bot', login: WRITER_BOT.graphqlLogin,
+      id: WRITER_BOT.nodeId, databaseId: WRITER_BOT.databaseId,
+    },
+    mergeCommit: {
+      oid: MERGE_SHA,
+      parents: completeConnection([{ oid: BASE_SHA }]),
+    },
+    ...overrides,
+  });
+}
+
 function graphqlClient(pulls) {
   let index = 0;
   return new AutonomyFinalizerGitHubClient({
-    token: 'test-token',
-    repository: REPOSITORY,
+    token: 'test-token', repository: REPOSITORY,
     fetchImpl: async () => ({
-      ok: true,
-      status: 200,
+      ok: true, status: 200,
       text: async () => JSON.stringify({
         data: { repository: { pullRequest: pulls[Math.min(index++, pulls.length - 1)] } },
       }),
@@ -1111,240 +728,99 @@ function graphqlClient(pulls) {
   });
 }
 
-test('GraphQL governance rejects missing labels, threads, pageInfo, node fields, and auto-merge fields', async () => {
+test('GraphQL governance requires complete merge outcome and auto-merge fields', async () => {
   const invalid = [
-    graphqlPull({ labels: null }),
-    graphqlPull({ labels: { nodes: null, pageInfo: { hasNextPage: false } } }),
-    graphqlPull({ labels: { nodes: [{}], pageInfo: { hasNextPage: false } } }),
-    graphqlPull({ labels: { nodes: [], pageInfo: null } }),
-    graphqlPull({ reviewThreads: null }),
-    graphqlPull({ reviewThreads: { nodes: null, pageInfo: { hasNextPage: false, endCursor: null } } }),
-    graphqlPull({ reviewThreads: { nodes: [], pageInfo: null } }),
-    graphqlPull({ reviewThreads: { nodes: [], pageInfo: { hasNextPage: true, endCursor: null } } }),
+    graphqlPull({ merged: undefined }),
+    graphqlPull({ mergedAt: undefined }),
+    graphqlPull({ mergedBy: undefined }),
+    graphqlPull({ mergeCommit: undefined }),
     graphqlPull({ autoMergeRequest: undefined }),
-    graphqlPull({ autoMergeRequest: { enabledAt: '2026-08-20T00:00:00Z' } }),
-    graphqlPull({ autoMergeRequest: {
-      enabledAt: '2026-08-20T00:00:00Z', mergeMethod: 'SQUASH', enabledBy: null,
-    } }),
-    graphqlPull({ autoMergeRequest: {
-      enabledAt: '2026-08-20T00:00:00Z', mergeMethod: 'SQUASH',
-      enabledBy: { __typename: 'Bot', login: WRITER_BOT.graphqlLogin, id: WRITER_BOT.nodeId },
-    } }),
+    graphqlMergedPull({ mergedBy: { __typename: 'Bot', login: WRITER_BOT.graphqlLogin } }),
+    graphqlMergedPull({ mergeCommit: { oid: MERGE_SHA, parents: null } }),
+    graphqlMergedPull({ mergeCommit: { oid: MERGE_SHA, parents: completeConnection([{ oid: 'bad' }]) } }),
   ];
-  for (const pullValue of invalid) {
-    await assert.rejects(
-      () => graphqlClient([pullValue]).getPullGovernance(PULL_NUMBER),
-      AutonomyFinalizerError,
-    );
+  for (const value of invalid) {
+    await assert.rejects(() => graphqlClient([value]).getPullGovernance(PULL_NUMBER), AutonomyFinalizerError);
   }
 });
 
-test('GraphQL governance requires the Bot author type as well as the Writer slug', async () => {
-  const invalid = graphqlPull({
-    author: { __typename: 'User', login: WRITER_BOT.graphqlLogin, id: 'U_same_login', databaseId: 7 },
+test('GraphQL governance independently normalizes an exact merged outcome', async () => {
+  const value = graphqlMergedPull();
+  const snapshot = await graphqlClient([value, value]).getPullGovernance(PULL_NUMBER);
+  assert.equal(snapshot.merged, true);
+  assert.equal(snapshot.mergedBy.id, WRITER_BOT.nodeId);
+  assert.deepEqual(snapshot.mergeCommit, {
+    oid: MERGE_SHA, parentCount: 1, parents: [{ oid: BASE_SHA }],
   });
-  const snapshot = await graphqlClient([invalid, invalid]).getPullGovernance(PULL_NUMBER);
-  const client = new FakeClient({ governance: snapshot });
-  await assert.rejects(
-    () => evaluateAutonomyFinalizer({ client, trigger, trust, config, checkAttempts: 1 }),
-    /author is not the Writer App/,
-  );
 });
 
 test('GraphQL governance rejects drift between complete reads', async () => {
-  const initial = graphqlPull();
-  const changed = graphqlPull({
-    labels: { nodes: [{ name: 'autonomy-manual' }], pageInfo: { hasNextPage: false } },
-  });
   await assert.rejects(
-    () => graphqlClient([initial, changed]).getPullGovernance(PULL_NUMBER),
+    () => graphqlClient([graphqlPull(), graphqlPull({ labels: {
+      nodes: [{ name: 'changed' }], pageInfo: { hasNextPage: false },
+    } })]).getPullGovernance(PULL_NUMBER),
     /drifted between complete reads/,
   );
 });
 
-test('GraphQL governance rejects pagination duplicates and non-thread field drift', async () => {
-  const first = graphqlPull({
-    reviewThreads: { nodes: [{ id: 'thread-1', isResolved: true }], pageInfo: { hasNextPage: true, endCursor: 'cursor-1' } },
-  });
-  const duplicate = graphqlPull({
-    reviewThreads: { nodes: [{ id: 'thread-1', isResolved: true }], pageInfo: { hasNextPage: false, endCursor: 'cursor-1' } },
-  });
-  await assert.rejects(
-    () => graphqlClient([first, duplicate]).getPullGovernance(PULL_NUMBER),
-    /contains duplicates/,
-  );
-
-  const drifted = graphqlPull({
-    labels: { nodes: [{ name: 'changed' }], pageInfo: { hasNextPage: false } },
-    reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: 'cursor-1' } },
-  });
-  await assert.rejects(
-    () => graphqlClient([first, drifted]).getPullGovernance(PULL_NUMBER),
-    /drifted during pagination/,
-  );
+test('GraphQL governance rejects review-thread pagination duplicates', async () => {
+  const first = graphqlPull({ reviewThreads: {
+    nodes: [{ id: 'thread', isResolved: true }], pageInfo: { hasNextPage: true, endCursor: 'next' },
+  } });
+  const second = graphqlPull({ reviewThreads: {
+    nodes: [{ id: 'thread', isResolved: true }], pageInfo: { hasNextPage: false, endCursor: 'next' },
+  } });
+  await assert.rejects(() => graphqlClient([first, second]).getPullGovernance(PULL_NUMBER), /contains duplicates/);
 });
 
-test('GraphQL governance accepts two identical complete strict snapshots', async () => {
-  const pullValue = graphqlPull({
-    labels: { nodes: [{ name: 'safe-label' }], pageInfo: { hasNextPage: false } },
-    reviewThreads: { nodes: [{ id: 'thread-1', isResolved: true }], pageInfo: { hasNextPage: false, endCursor: 'cursor-1' } },
-  });
-  const snapshot = await graphqlClient([pullValue, pullValue]).getPullGovernance(PULL_NUMBER);
-  assert.deepEqual(snapshot.labels, ['safe-label']);
-  assert.deepEqual(snapshot.reviewThreads, [{ id: 'thread-1', isResolved: true }]);
-  assert.equal(snapshot.authorId, WRITER_BOT.nodeId);
-  assert.equal(snapshot.authorDatabaseId, WRITER_BOT.databaseId);
-});
-
-test('GraphQL branch protection reads source-bound required check descriptions', async () => {
-  const proof = protection();
-  let requestBody;
-  const client = new AutonomyFinalizerGitHubClient({
-    token: 'test-token',
-    repository: REPOSITORY,
-    fetchImpl: async (_url, options) => {
-      requestBody = JSON.parse(options.body);
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({ data: { repository: proof } }),
-      };
-    },
-  });
-  assert.deepEqual(await client.getBranchProtection(), proof);
-  assert.match(requestBody.query, /requiredStatusChecks\s*\{\s*context\s+app\s*\{\s*databaseId\s+slug/);
-  assert.match(requestBody.query, /isAdminEnforced/);
-  assert.match(requestBody.query, /requiresConversationResolution/);
-  assert.match(requestBody.query, /autoMergeAllowed/);
-  assert.match(requestBody.query, /mergeCommitAllowed/);
-  assert.match(requestBody.query, /rebaseMergeAllowed/);
-  assert.match(requestBody.query, /squashMergeAllowed/);
-  assert.match(requestBody.query, /requiredApprovingReviewCount/);
-  assert.match(requestBody.query, /requiredDeploymentEnvironments/);
-  assert.match(requestBody.query, /requiresLinearHistory/);
-  assert.match(requestBody.query, /pushAllowances\(first: 100\)/);
-  assert.match(requestBody.query, /reviewDismissalAllowances\(first: 100\)/);
-  assert.match(requestBody.query, /bypassPullRequestAllowances\(first: 100\)\s*\{\s*totalCount/);
-  assert.match(requestBody.query, /bypassForcePushAllowances\(first: 100\)\s*\{\s*totalCount/);
-  assert.match(requestBody.query, /rulesets\(first: 100, includeParents: true, targets: \[BRANCH\]\)/);
-  assert.match(requestBody.query, /nodes\s*\{\s*id databaseId name enforcement target\s*\}/);
-  assert.match(requestBody.query, /totalCount pageInfo\s*\{\s*hasNextPage endCursor\s*\}/);
-});
-
-test('Writer token proof reads only its repository scope and live Bot identity', async () => {
-  const calls = [];
+test('mergePullRequest hard-codes SQUASH and binds expectedHeadOid', async () => {
+  let request;
   const client = new AutonomyFinalizerGitHubClient({
     token: 'writer-token', repository: REPOSITORY,
-    fetchImpl: async (url, options) => {
-      calls.push({ url, options });
-      const body = url.includes('/installation/repositories') ? {
-        total_count: 1,
-        repositories: [{ id: REPOSITORY_ID, full_name: REPOSITORY, owner: { login: 'JinPengGeng' } }],
-      } : {
-        login: WRITER_BOT.login,
-        id: WRITER_BOT.databaseId,
-        node_id: WRITER_BOT.nodeId,
-        type: 'Bot',
-        site_admin: false,
-      };
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify(body),
-      };
+    fetchImpl: async (_url, options) => {
+      request = JSON.parse(options.body);
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        data: { mergePullRequest: { pullRequest: { id: 'PR_node', headRefOid: HEAD_SHA, merged: true, mergeCommit: { oid: MERGE_SHA } } } },
+      }) };
     },
   });
-  await client.getInstallationRepositories();
-  await client.getUser(WRITER_BOT.login);
-  assert.equal(calls.length, 2);
-  assert.match(calls[0].url, /\/installation\/repositories\?per_page=100&page=1$/);
-  assert.equal(calls[0].options.method, 'GET');
-  assert.match(calls[1].url, /\/users\/aeris-writer%5Bbot%5D$/);
-  assert.equal(calls[1].options.method, 'GET');
+  await client.mergePullRequest('PR_node', HEAD_SHA);
+  assert.match(request.query, /mergePullRequest\(input: \{ pullRequestId: \$id, mergeMethod: SQUASH, expectedHeadOid: \$head \}\)/);
+  assert.deepEqual(request.variables, { id: 'PR_node', head: HEAD_SHA });
+  assert.doesNotMatch(request.query, /enablePullRequestAutoMerge|disablePullRequestAutoMerge/);
 });
 
-test('mutating CLI routes protection proof through the Writer client', async () => {
+test('mutating CLI routes all protection proofs and merge mutation through Writer', async () => {
   const readClient = new FakeClient();
   const writerClient = new FakeClient();
-  const originalMarkReady = writerClient.markPullReady.bind(writerClient);
+  const ready = writerClient.markPullReady.bind(writerClient);
   writerClient.markPullReady = async (...args) => {
-    const result = await originalMarkReady(...args);
+    const result = await ready(...args);
     readClient.ready = writerClient.ready;
     return result;
   };
-  const originalEnableAutoMerge = writerClient.enableAutoMerge.bind(writerClient);
-  writerClient.enableAutoMerge = async (...args) => {
-    const result = await originalEnableAutoMerge(...args);
-    readClient.armed = writerClient.armed;
+  const merge = writerClient.mergePullRequest.bind(writerClient);
+  writerClient.mergePullRequest = async (...args) => {
+    const result = await merge(...args);
+    readClient.merged = writerClient.merged;
     return result;
   };
-  readClient.getBranchProtection = async () => {
-    throw new Error('Actions token must not read protected repository governance');
-  };
-  const result = await runAutonomyFinalizer(fullEnvironment(), {
-    readClient,
-    writerClient,
-    sleepImpl: async () => {},
-  });
-  assert.equal(result.action, 'armed');
-  assert.ok(writerClient.protectionReads >= 3);
+  readClient.getBranchProtection = async () => { throw new Error('Actions token must not read protection'); };
+  const result = await runAutonomyFinalizer(fullEnvironment(), { readClient, writerClient, sleepImpl: async () => {} });
+  assert.equal(result.action, 'merged');
   assert.equal(readClient.protectionReads, 0);
+  assert.equal(writerClient.protectionReads, 3);
+  assert.deepEqual(writerClient.events, ['ready', 'merge']);
 });
 
-test('full proof failure occurs before every Writer and hold mutation', async () => {
+test('full proof failure occurs before every Writer mutation', async () => {
   const readClient = new FakeClient();
   const writerClient = new FakeClient();
-  writerClient.getBranchProtection = async () => {
-    writerClient.protectionReads += 1;
-    throw new Error('Writer administration read denied');
-  };
+  writerClient.getBranchProtection = async () => { throw new Error('administration read denied'); };
   await assert.rejects(
-    () => runAutonomyFinalizer(fullEnvironment(), {
-      readClient,
-      writerClient,
-      sleepImpl: async () => {},
-    }),
-    /Writer administration read denied/,
+    () => runAutonomyFinalizer(fullEnvironment(), { readClient, writerClient, sleepImpl: async () => {} }),
+    /administration read denied/,
   );
-  assert.equal(writerClient.protectionReads, 1);
-  assert.equal(readClient.protectionReads, 0);
-  assert.equal(readClient.hold, null);
   assert.deepEqual(readClient.events, []);
   assert.deepEqual(writerClient.events, []);
-});
-
-test('hold check REST methods bind creation and completion to one exact check run', async () => {
-  const calls = [];
-  const responseCheck = {
-    id: 91, name: 'Autonomy Finalizer / hold', head_sha: HEAD_SHA,
-    external_id: `aeris-finalizer-hold:v1:${REPOSITORY_ID}:${PULL_NUMBER}:${HEAD_SHA}`,
-    status: 'in_progress', conclusion: null,
-    app: { id: 15368, slug: 'github-actions' }, pull_requests: [{ number: PULL_NUMBER }],
-  };
-  const client = new AutonomyFinalizerGitHubClient({
-    token: 'actions-token', repository: REPOSITORY,
-    fetchImpl: async (url, options) => {
-      calls.push({ url, options, body: options.body ? JSON.parse(options.body) : null });
-      const value = options.method === 'PATCH'
-        ? { ...responseCheck, status: 'completed', conclusion: 'success' }
-        : responseCheck;
-      return { ok: true, status: 200, text: async () => JSON.stringify(value) };
-    },
-  });
-  await client.createHoldCheck(HEAD_SHA, responseCheck.external_id);
-  await client.getCheckRun(91);
-  await client.completeHoldCheck(91, responseCheck.external_id);
-
-  assert.match(calls[0].url, /\/repos\/JinPengGeng\/aeris-token\/check-runs$/);
-  assert.deepEqual(
-    { name: calls[0].body.name, head_sha: calls[0].body.head_sha, external_id: calls[0].body.external_id, status: calls[0].body.status },
-    { name: 'Autonomy Finalizer / hold', head_sha: HEAD_SHA, external_id: responseCheck.external_id, status: 'in_progress' },
-  );
-  assert.match(calls[1].url, /\/check-runs\/91$/);
-  assert.equal(calls[1].options.method, 'GET');
-  assert.equal(calls[2].options.method, 'PATCH');
-  assert.equal(calls[2].body.external_id, responseCheck.external_id);
-  assert.equal(calls[2].body.status, 'completed');
-  assert.equal(calls[2].body.conclusion, 'success');
-  assert.match(calls[2].body.completed_at, /^\d{4}-\d{2}-\d{2}T/);
 });

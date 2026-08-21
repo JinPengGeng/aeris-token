@@ -63,7 +63,7 @@ jobs:
         run: node .github/automation/src/autonomy-finalizer.mjs
 
   finalize:
-    name: Request native auto-merge
+    name: Directly merge eligible pull request
     needs: [evaluate]
     if: >-
       needs.evaluate.result == 'success' &&
@@ -78,7 +78,6 @@ jobs:
       cancel-in-progress: false
     permissions:
       actions: read
-      checks: write
       contents: read
       pull-requests: read
     env:
@@ -162,7 +161,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - name: Request exact native auto-merge
+      - name: Directly squash merge exact eligible pull request
         id: finalize
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -180,10 +179,12 @@ jobs:
           AERIS_WRITER_PROOF_APP_SLUG: ${{ steps.writer_app_attestation.outputs.app_slug }}
           AERIS_WRITER_PROOF_APP_OWNER_LOGIN: ${{ steps.writer_app_attestation.outputs.app_owner_login }}
           AERIS_WRITER_PROOF_APP_OWNER_TYPE: ${{ steps.writer_app_attestation.outputs.app_owner_type }}
+          AERIS_WRITER_PROOF_APP_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.app_permissions }}
           AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
           AERIS_WRITER_PROOF_INSTALLATION_ID: ${{ steps.writer_app_attestation.outputs.installation_id }}
           AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN: ${{ steps.writer_app_attestation.outputs.installation_account_login }}
           AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE: ${{ steps.writer_app_attestation.outputs.installation_account_type }}
+          AERIS_WRITER_PROOF_INSTALLATION_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.installation_permissions }}
           AERIS_WRITER_PROOF_REPOSITORY_SELECTION: ${{ steps.writer_app_attestation.outputs.repository_selection }}
           AERIS_WRITER_TOKEN_INSTALLATION_ID: ${{ steps.writer_token.outputs.installation-id }}
           AERIS_WRITER_TOKEN_APP_SLUG: ${{ steps.writer_token.outputs.app-slug }}

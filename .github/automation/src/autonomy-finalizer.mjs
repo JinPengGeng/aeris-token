@@ -3,15 +3,12 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { AutonomyPolicyGitHubClient, evaluateAutonomyPolicy } from './autonomy-policy-runtime.mjs';
-import {
-  GITHUB_ACTIONS_APP_ID,
-  GITHUB_ACTIONS_APP_SLUG,
-  HOLD_CHECK_NAME,
-  MANAGED_MARKER,
-  holdExternalId,
-} from './autonomy-hold-initializer.mjs';
+import { validateWriterPermissions } from './github-app-attestation.mjs';
 import { policyConfigFromEnvironment } from './run-autonomy-policy.mjs';
 
+const GITHUB_ACTIONS_APP_ID = 15368;
+const GITHUB_ACTIONS_APP_SLUG = 'github-actions';
+const MANAGED_MARKER = '<!-- aeris-autonomy-managed -->';
 const SHA = /^[0-9a-f]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const REQUIRED_CHECKS = Object.freeze(new Map([
@@ -19,10 +16,7 @@ const REQUIRED_CHECKS = Object.freeze(new Map([
   ['Frontend CI / check', Object.freeze({ workflow_name: 'Frontend CI', workflow_path: '.github/workflows/frontend-ci.yml' })],
   ['Automation Policy / gate', Object.freeze({ workflow_name: 'Automation Policy', workflow_path: '.github/workflows/automation-policy.yml' })],
 ]));
-const REQUIRED_PROTECTION_CHECKS = Object.freeze([
-  ...REQUIRED_CHECKS.keys(),
-  HOLD_CHECK_NAME,
-]);
+const REQUIRED_PROTECTION_CHECKS = Object.freeze([...REQUIRED_CHECKS.keys()]);
 const MANUAL_LABELS = new Set(['autonomy-manual', 'do-not-merge']);
 const WORKFLOW_IDENTITIES = Object.freeze(new Map([
   ['Automation Policy', '.github/workflows/automation-policy.yml'],
@@ -90,43 +84,6 @@ function checkCandidates(checkRuns) {
   return candidates;
 }
 
-function holdCheckMatches(check, expected, externalId) {
-  return check?.name === HOLD_CHECK_NAME && check?.head_sha === expected.head_sha &&
-    check?.external_id === externalId;
-}
-
-function validateHoldCheck(check, expected, externalId, { requirePending = false } = {}) {
-  if (!check || !Number.isSafeInteger(check.id) || check.id <= 0 ||
-      !holdCheckMatches(check, expected, externalId) ||
-      check?.app?.id !== GITHUB_ACTIONS_APP_ID || check?.app?.slug !== GITHUB_ACTIONS_APP_SLUG ||
-      !Array.isArray(check.pull_requests) || check.pull_requests.length !== 1 ||
-      check.pull_requests[0]?.number !== expected.pull_number) {
-    reject('Autonomy Finalizer hold check identity is invalid');
-  }
-  if (requirePending && (check.status !== 'in_progress' || check.conclusion !== null)) {
-    reject('Autonomy Finalizer hold check is not pending');
-  }
-  return check;
-}
-
-function holdCheckFromRuns(checkRuns, expected, externalId) {
-  if (!Array.isArray(checkRuns)) reject('check run projection is invalid');
-  const sameHead = checkRuns.filter((check) => check?.name === HOLD_CHECK_NAME && check?.head_sha === expected.head_sha);
-  const matching = sameHead.filter((check) => check?.external_id === externalId);
-  if (matching.length > 1) reject('Autonomy Finalizer has duplicate hold checks for the exact head');
-  if (sameHead.length !== matching.length) reject('Autonomy Finalizer has an ambiguous hold check for the exact head');
-  if (matching.length === 0) return null;
-  return validateHoldCheck(matching[0], expected, externalId);
-}
-
-function validateCompletedHoldCheck(check, expected, externalId) {
-  validateHoldCheck(check, expected, externalId);
-  if (check.status !== 'completed' || check.conclusion !== 'success') {
-    reject('Autonomy Finalizer hold check was not released successfully');
-  }
-  return check;
-}
-
 function validateCompleteConnection(connection, name) {
   const value = object(connection, name);
   if (!Array.isArray(value.nodes)) reject(`${name} nodes are invalid`);
@@ -141,7 +98,6 @@ function validateCompleteConnection(connection, name) {
 function validateBranchProtection(proof, defaultBranch) {
   const repository = object(proof, 'branch protection proof');
   const repositoryProfile = Object.freeze({
-    autoMergeAllowed: true,
     mergeCommitAllowed: false,
     rebaseMergeAllowed: false,
     squashMergeAllowed: true,
@@ -241,7 +197,7 @@ function validateBranchProtection(proof, defaultBranch) {
     pattern: rule.pattern,
     contexts: REQUIRED_PROTECTION_CHECKS,
     rulesets: rulesets.totalCount,
-    profile: 'native-squash-v1',
+    profile: 'direct-squash-v1',
   });
 }
 
@@ -394,29 +350,13 @@ function validateGovernance(snapshot, expected, { requireReady = false } = {}) {
     reject('managed pull request has unresolved review discussions');
   }
   if (![null, 'APPROVED'].includes(snapshot.reviewDecision)) reject('managed pull request review decision is blocking');
-  if (snapshot.autoMergeRequest !== null) {
-    if (snapshot.autoMergeRequest?.mergeMethod !== 'SQUASH') {
-      reject('managed pull request auto-merge method is invalid');
-    }
-    const enabledBy = object(snapshot.autoMergeRequest.enabledBy, 'pull request auto-merge actor');
-    if (enabledBy.type !== 'Bot' || enabledBy.login !== expectedGraphQlLogin) {
-      reject('managed pull request auto-merge was not enabled by the Writer App');
-    }
-    if (!Number.isSafeInteger(enabledBy.databaseId) || enabledBy.databaseId <= 0 ||
-        typeof enabledBy.id !== 'string' || enabledBy.id.length === 0) {
-      reject('managed pull request auto-merge actor identity is incomplete');
-    }
-    if (expected.writer_bot && (enabledBy.id !== expected.writer_bot.node_id ||
-        enabledBy.databaseId !== expected.writer_bot.database_id)) {
-      reject('managed pull request auto-merge actor does not match the live Writer Bot');
-    }
+  if (snapshot.autoMergeRequest !== null) reject('managed pull request has a preexisting auto-merge request');
+  if (snapshot.merged !== false || snapshot.mergedAt !== null || snapshot.mergedBy !== null || snapshot.mergeCommit !== null) {
+    reject('managed pull request already has merge outcome state');
   }
   if (snapshot.mergeable !== 'MERGEABLE') reject('managed pull request is conflicting or mergeability is unknown');
   if (requireReady) {
-    // A required pending hold intentionally makes mergeStateStatus BLOCKED. Only
-    // reject an unknown state here; required checks and mergeability are checked
-    // independently immediately before arming.
-    if (snapshot.isDraft !== false || snapshot.mergeStateStatus === 'UNKNOWN') reject('managed pull request is not ready');
+    if (snapshot.isDraft !== false || snapshot.mergeStateStatus !== 'CLEAN') reject('managed pull request is not ready and clean');
   } else if (snapshot.isDraft !== true && snapshot.isDraft !== false) {
     reject('managed pull request draft state is invalid');
   }
@@ -457,6 +397,9 @@ function normalizeGovernancePage(pull) {
   object(pull, 'pull request projection');
   if (!Object.hasOwn(pull, 'reviewDecision')) reject('pull request reviewDecision is missing');
   if (!Object.hasOwn(pull, 'autoMergeRequest')) reject('pull request autoMergeRequest is missing');
+  for (const field of ['merged', 'mergedAt', 'mergedBy', 'mergeCommit']) {
+    if (!Object.hasOwn(pull, field)) reject(`pull request ${field} is missing`);
+  }
 
   const labelsConnection = object(pull.labels, 'pull request labels');
   if (!Array.isArray(labelsConnection.nodes)) reject('pull request label nodes are invalid');
@@ -497,6 +440,31 @@ function normalizeGovernancePage(pull) {
     });
   }
 
+  let mergedBy = null;
+  if (pull.mergedBy !== null) {
+    const actor = object(pull.mergedBy, 'pull request mergedBy');
+    mergedBy = Object.freeze({
+      type: required(actor.__typename, 'pull request mergedBy.__typename'),
+      login: required(actor.login, 'pull request mergedBy.login'),
+      id: required(actor.id, 'pull request mergedBy.id'),
+      databaseId: positiveInteger(actor.databaseId, 'pull request mergedBy.databaseId'),
+    });
+  }
+
+  let mergeCommit = null;
+  if (pull.mergeCommit !== null) {
+    const commit = object(pull.mergeCommit, 'pull request mergeCommit');
+    const parents = validateCompleteConnection(commit.parents, 'pull request mergeCommit parents');
+    mergeCommit = Object.freeze({
+      oid: required(commit.oid, 'pull request mergeCommit oid', SHA),
+      parents: Object.freeze(parents.nodes.map((parent, index) => Object.freeze({
+        oid: required(object(parent, `pull request mergeCommit parents[${index}]`).oid,
+          `pull request mergeCommit parents[${index}].oid`, SHA),
+      }))),
+      parentCount: parents.totalCount,
+    });
+  }
+
   const author = object(pull.author, 'pull request author');
   const core = Object.freeze({
     id: required(pull.id, 'pull request node id'),
@@ -515,6 +483,10 @@ function normalizeGovernancePage(pull) {
     authorDatabaseId: positiveInteger(author.databaseId, 'pull request author.databaseId'),
     mergeable: required(pull.mergeable, 'pull request mergeable'),
     mergeStateStatus: required(pull.mergeStateStatus, 'pull request mergeStateStatus'),
+    merged: boolean(pull.merged, 'pull request merged'),
+    mergedAt: nullableString(pull.mergedAt, 'pull request mergedAt'),
+    mergedBy,
+    mergeCommit,
     reviewDecision: nullableString(pull.reviewDecision, 'pull request reviewDecision'),
     autoMergeRequest,
     labels: Object.freeze(labels),
@@ -540,7 +512,18 @@ async function readGovernanceSnapshot(client, owner, name, number) {
               ... on Bot { id databaseId }
               ... on User { id databaseId }
             }
-            mergeable mergeStateStatus reviewDecision
+            mergeable mergeStateStatus merged mergedAt reviewDecision
+            mergedBy {
+              __typename login
+              ... on Bot { id databaseId }
+              ... on User { id databaseId }
+            }
+            mergeCommit {
+              oid
+              parents(first: 2) {
+                totalCount nodes { oid } pageInfo { hasNextPage endCursor }
+              }
+            }
             autoMergeRequest {
               enabledAt mergeMethod
               enabledBy {
@@ -592,7 +575,6 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
     const data = await boundedGraphql(this, `
       query($owner: String!, $name: String!) {
         repository(owner: $owner, name: $name) {
-          autoMergeAllowed
           mergeCommitAllowed
           rebaseMergeAllowed
           squashMergeAllowed
@@ -645,7 +627,6 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
         }
       }`, { owner, name });
     return Object.freeze({
-      autoMergeAllowed: data?.repository?.autoMergeAllowed,
       mergeCommitAllowed: data?.repository?.mergeCommitAllowed,
       rebaseMergeAllowed: data?.repository?.rebaseMergeAllowed,
       squashMergeAllowed: data?.repository?.squashMergeAllowed,
@@ -663,40 +644,6 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
 
   getUser(login) {
     return this.request('GET', `/users/${encodeURIComponent(required(login, 'GitHub user login'))}`);
-  }
-
-  getCheckRun(checkRunId) {
-    return this.request('GET', `/repos/${this.repository}/check-runs/${positiveInteger(checkRunId, 'check run id')}`);
-  }
-
-  createHoldCheck(headSha, externalId) {
-    return this.request('POST', `/repos/${this.repository}/check-runs`, {
-      body: {
-        name: HOLD_CHECK_NAME,
-        head_sha: required(headSha, 'hold check head SHA', SHA),
-        external_id: required(externalId, 'hold check external id'),
-        status: 'in_progress',
-        output: {
-          title: 'Native auto-merge is not yet armed',
-          summary: 'This exact head remains blocked until the trusted Finalizer confirms native auto-merge.',
-        },
-      },
-    });
-  }
-
-  completeHoldCheck(checkRunId, externalId) {
-    return this.request('PATCH', `/repos/${this.repository}/check-runs/${positiveInteger(checkRunId, 'check run id')}`, {
-      body: {
-        external_id: required(externalId, 'hold check external id'),
-        status: 'completed',
-        conclusion: 'success',
-        completed_at: new Date().toISOString(),
-        output: {
-          title: 'Native auto-merge confirmed',
-          summary: 'The trusted Finalizer confirmed native squash auto-merge for this exact head.',
-        },
-      },
-    });
   }
 
   async getPullGovernance(number) {
@@ -727,24 +674,16 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
     return data?.convertPullRequestToDraft?.pullRequest;
   }
 
-  async enableAutoMerge(pullRequestId, expectedHeadOid) {
+  async mergePullRequest(pullRequestId, expectedHeadOid) {
     const data = await boundedGraphql(this, `
       mutation($id: ID!, $head: GitObjectID!) {
-        enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH, expectedHeadOid: $head }) {
+        mergePullRequest(input: { pullRequestId: $id, mergeMethod: SQUASH, expectedHeadOid: $head }) {
           pullRequest {
-            id headRefOid
-            autoMergeRequest {
-              enabledAt mergeMethod
-              enabledBy {
-                __typename login
-                ... on Bot { id databaseId }
-                ... on User { id databaseId }
-              }
-            }
+            id headRefOid merged mergeCommit { oid }
           }
         }
       }`, { id: pullRequestId, head: expectedHeadOid });
-    return data?.enablePullRequestAutoMerge?.pullRequest;
+    return data?.mergePullRequest?.pullRequest;
   }
 }
 
@@ -845,21 +784,43 @@ export async function evaluateAutonomyFinalizer({
   });
 }
 
-async function restoreDraft({ readClient, writerClient, pullRequestId, pullNumber }) {
+function exactOpenPull(snapshot, expected, pullRequestId) {
+  return snapshot?.id === pullRequestId && snapshot?.number === expected.pull_number && snapshot?.state === 'OPEN' &&
+    snapshot?.merged === false && snapshot?.mergedAt === null && snapshot?.mergedBy === null && snapshot?.mergeCommit === null &&
+    snapshot?.headRefName === expected.branch_name && snapshot?.headRefOid === expected.head_sha &&
+    snapshot?.headRepository === expected.repository && snapshot?.baseRefName === 'main' &&
+    snapshot?.baseRefOid === expected.base_sha &&
+    snapshot?.autoMergeRequest === null;
+}
+
+async function restoreDraft({ readClient, writerClient, pullRequestId, pullNumber, expected, observed }) {
+  if (!exactOpenPull(observed, expected, pullRequestId)) reject('pull request state is ambiguous; Draft rollback was not attempted');
+  let latest;
   try {
-    const observed = await readClient.getPullGovernance(pullNumber);
-    if (observed?.id === pullRequestId && observed?.state === 'OPEN' && observed?.isDraft === true &&
-        observed?.autoMergeRequest === null) return;
-  } catch {
-    // The mutation below is the best remaining recovery attempt after an inconclusive read.
+    latest = await readClient.getPullGovernance(pullNumber);
+  } catch (error) {
+    reject(`Draft rollback precondition read failed: ${error instanceof Error ? error.message : 'read failed'}`);
   }
-  const restored = await writerClient.convertPullToDraft(pullRequestId);
-  if (restored?.id !== pullRequestId || restored?.isDraft !== true) reject('GitHub did not restore the pull request to Draft');
-  const confirmed = await readClient.getPullGovernance(pullNumber);
-  if (confirmed?.id !== pullRequestId || confirmed?.state !== 'OPEN' || confirmed?.isDraft !== true ||
-      confirmed?.autoMergeRequest !== null) {
-    reject('Draft restoration could not be confirmed');
+  if (!exactOpenPull(latest, expected, pullRequestId)) {
+    reject('pull request state drifted before Draft rollback; mutation was not attempted');
   }
+  if (latest.isDraft === true) return;
+  if (latest.isDraft !== false) reject('pull request draft state is ambiguous; Draft rollback was not attempted');
+  let mutationError = null;
+  try {
+    const restored = await writerClient.convertPullToDraft(pullRequestId);
+    if (restored?.id !== pullRequestId || restored?.isDraft !== true || restored?.headRefOid !== expected.head_sha) {
+      mutationError = new AutonomyFinalizerError('GitHub returned an invalid Draft restoration result');
+    }
+  } catch (error) {
+    mutationError = error;
+  }
+  let confirmed;
+  try { confirmed = await readClient.getPullGovernance(pullNumber); } catch (error) {
+    throw mutationError ?? error;
+  }
+  if (exactOpenPull(confirmed, expected, pullRequestId) && confirmed.isDraft === true) return;
+  throw mutationError ?? new AutonomyFinalizerError('Draft restoration could not be independently confirmed');
 }
 
 async function rollbackAndRethrow(error, context) {
@@ -873,95 +834,33 @@ async function rollbackAndRethrow(error, context) {
   throw error;
 }
 
-async function readExactHold(holdClient, expected, externalId) {
-  const checkRuns = await holdClient.listCheckRunsForRef(expected.head_sha);
-  const hold = holdCheckFromRuns(checkRuns, expected, externalId);
-  if (hold === null) return null;
-  const confirmed = await holdClient.getCheckRun(hold.id);
-  return validateHoldCheck(confirmed, expected, externalId);
+function exactMergedOutcome(snapshot, expected, pullRequestId) {
+  const expectedGraphQlLogin = expected.writer_graphql_login ?? expected.writer_login.replace(/\[bot\]$/, '');
+  const merger = snapshot?.mergedBy;
+  const commit = snapshot?.mergeCommit;
+  return snapshot?.id === pullRequestId && snapshot?.number === expected.pull_number && snapshot?.state === 'MERGED' &&
+    snapshot?.merged === true && snapshot?.isDraft === false && typeof snapshot?.mergedAt === 'string' &&
+    snapshot?.headRefName === expected.branch_name && snapshot?.headRefOid === expected.head_sha &&
+    snapshot?.headRepository === expected.repository && snapshot?.baseRefName === 'main' && snapshot?.autoMergeRequest === null &&
+    snapshot?.authorType === 'Bot' && snapshot?.author === expectedGraphQlLogin &&
+    snapshot?.authorId === expected.writer_bot.node_id && snapshot?.authorDatabaseId === expected.writer_bot.database_id &&
+    merger?.type === 'Bot' && merger?.login === expectedGraphQlLogin && merger?.id === expected.writer_bot.node_id &&
+    merger?.databaseId === expected.writer_bot.database_id && commit?.parentCount === 1 && commit?.parents?.length === 1 &&
+    commit.parents[0]?.oid === expected.base_sha && commit?.oid !== expected.base_sha && commit?.oid !== expected.head_sha;
 }
 
-async function acquireHold(holdClient, expected) {
-  const externalId = holdExternalId(expected);
-  let check = await readExactHold(holdClient, expected, externalId);
-  if (check === null) {
-    const created = await holdClient.createHoldCheck(expected.head_sha, externalId);
-    validateHoldCheck(created, expected, externalId, { requirePending: true });
-    check = await readExactHold(holdClient, expected, externalId);
-  }
-  if (check === null) reject('Autonomy Finalizer hold creation could not be confirmed');
-  return Object.freeze({ check, externalId });
-}
-
-async function confirmPendingHold(holdClient, hold, expected) {
-  const check = await readExactHold(holdClient, expected, hold.externalId);
-  if (check === null) reject('Autonomy Finalizer hold check is missing');
-  validateHoldCheck(check, expected, hold.externalId, { requirePending: true });
-  if (check.id !== hold.check.id) reject('Autonomy Finalizer hold check identity drifted');
-  return check;
-}
-
-async function releaseHoldAfterArm({
-  readClient, protectionClient, holdClient, hold, expected, baseline, trigger, trust, config, sleepImpl,
-}) {
-  await confirmPendingHold(holdClient, hold, expected);
-  const final = await evaluateAutonomyFinalizer({
-    client: readClient, protectionClient, trigger, trust, config, checkAttempts: 1, sleepImpl,
-  });
-  if (!final.eligible) reject(`post-arm verification failed: ${final.reason}`);
-  if (final.bound.pull_number !== expected.pull_number || final.bound.head_sha !== expected.head_sha) {
-    reject('final independent governance proof drifted from the exact pull request');
-  }
-  assertGovernanceReleaseStable(baseline, final.governance, expected);
-  validatePendingHoldAggregateState(final.governance);
-  if (!exactAutoMergeArmed(final.governance, expected)) {
-    reject('final independent governance proof did not confirm exact native auto-merge');
-  }
-  const pending = await confirmPendingHold(holdClient, hold, expected);
-  const beforeRelease = await readClient.getPullGovernance(expected.pull_number);
-  assertGovernanceReleaseStable(final.governance, beforeRelease, expected);
-  validatePendingHoldAggregateState(beforeRelease);
-  if (!exactAutoMergeArmed(beforeRelease, expected)) {
-    reject('final release read did not confirm exact native auto-merge');
-  }
-  let mutationError = null;
-  try { await holdClient.completeHoldCheck(pending.id, hold.externalId); } catch (error) { mutationError = error; }
-  const completed = await holdClient.getCheckRun(pending.id);
-  try { return validateCompletedHoldCheck(completed, expected, hold.externalId); } catch (error) {
-    throw mutationError ?? error;
-  }
-}
-
-function exactAutoMergeArmed(governance, expected) {
-  validateGovernance(governance, expected, { requireReady: true });
-  return governance.autoMergeRequest !== null && governance.autoMergeRequest.mergeMethod === 'SQUASH';
-}
-
-function validatePendingHoldAggregateState(governance) {
-  const state = required(object(governance, 'pull request governance').mergeStateStatus, 'pull request mergeStateStatus');
-  if (!['BLOCKED', 'UNSTABLE'].includes(state)) {
-    reject('managed pull request aggregate merge state is incompatible with the pending hold');
-  }
-}
-
-const GOVERNANCE_RELEASE_FIELDS = Object.freeze([
-  'id', 'number', 'state', 'isDraft', 'body', 'headRefName', 'headRefOid',
-  'headRepository', 'baseRefName', 'baseRefOid', 'authorType', 'author',
-  'authorId', 'authorDatabaseId',
-  'mergeable', 'reviewDecision', 'labels', 'reviewThreads',
-]);
-
-function assertGovernanceReleaseStable(before, after, expected) {
-  validateGovernance(after, expected, { requireReady: true });
-  for (const field of GOVERNANCE_RELEASE_FIELDS) {
-    if (JSON.stringify(before?.[field]) !== JSON.stringify(after?.[field])) {
-      reject(`pull request governance drifted after native auto-merge request: ${field}`);
-    }
+async function readOutcomeOrReject({ readClient, pullNumber, mutationError }) {
+  try {
+    return await readClient.getPullGovernance(pullNumber);
+  } catch (readError) {
+    const mutation = mutationError instanceof Error ? mutationError.message : 'merge mutation response was inconclusive';
+    const read = readError instanceof Error ? readError.message : 'independent merge outcome read failed';
+    reject(`${mutation}; independent merge outcome is ambiguous: ${read}`);
   }
 }
 
 export async function finalizeAutonomyPull({
-  readClient, writerClient, protectionClient = writerClient, holdClient = readClient, trigger, trust, config,
+  readClient, writerClient, protectionClient = writerClient, trigger, trust, config,
   writerTrust = config.writer_trust, sleepImpl,
 }) {
   const configuredWriter = object(writerTrust, 'Writer trust configuration');
@@ -993,6 +892,17 @@ export async function finalizeAutonomyPull({
   if (required(configuredWriter.token_app_slug, 'Writer token App slug') !== writerAppSlug) {
     reject('Writer token App does not match the configured App');
   }
+  const appPermissions = validateWriterPermissions(
+    configuredWriter.proof_app_permissions,
+    'Writer proof App permissions',
+  );
+  const installationPermissions = validateWriterPermissions(
+    configuredWriter.proof_installation_permissions,
+    'Writer proof installation permissions',
+  );
+  if (JSON.stringify(appPermissions) !== JSON.stringify(installationPermissions)) {
+    reject('Writer App and installation permissions do not match');
+  }
   const writerIdentity = await proveWriterIdentity(writerClient, Object.freeze({
     app_id: writerAppId,
     installation_id: writerInstallationId,
@@ -1003,13 +913,13 @@ export async function finalizeAutonomyPull({
     repository: trust.repository,
     repository_id: trust.repository_id,
   }));
-  let current = await evaluateAutonomyFinalizer({
+  const initial = await evaluateAutonomyFinalizer({
     client: readClient, protectionClient, trigger, trust, config, sleepImpl,
   });
-  if (!current.eligible) return Object.freeze({ action: 'skipped', ...current });
+  if (!initial.eligible) return Object.freeze({ action: 'skipped', ...initial });
   const expected = Object.freeze({
-    ...current.bound,
-    ...managedIssueBinding(current.policy, config),
+    ...initial.bound,
+    ...managedIssueBinding(initial.policy, config),
     repository: trust.repository,
     repository_id: trust.repository_id,
     base_sha: trust.policy_sha,
@@ -1017,37 +927,12 @@ export async function finalizeAutonomyPull({
     writer_graphql_login: config.writer_login.replace(/\[bot\]$/, ''),
     writer_bot: writerIdentity.bot,
   });
-  const pullRequestId = current.governance.id;
-  const pullNumber = current.bound.pull_number;
-  validateGovernance(current.governance, expected);
-  const hold = await acquireHold(holdClient, expected);
+  const pullRequestId = initial.governance.id;
+  const pullNumber = initial.bound.pull_number;
+  validateGovernance(initial.governance, expected);
+  let transitionedToReady = false;
 
-  if (hold.check.status === 'completed') {
-    if (hold.check.conclusion !== 'success' || !exactAutoMergeArmed(current.governance, expected)) {
-      reject('Autonomy Finalizer hold was released without exact native auto-merge');
-    }
-    const verification = await evaluateAutonomyFinalizer({
-      client: readClient, protectionClient, trigger, trust, config, sleepImpl,
-    });
-    if (!verification.eligible || !exactAutoMergeArmed(verification.governance, expected)) {
-      reject('completed Autonomy Finalizer hold no longer matches exact native auto-merge');
-    }
-    assertGovernanceReleaseStable(current.governance, verification.governance, expected);
-    return Object.freeze({ action: 'already_armed', pull_number: pullNumber, head_sha: current.bound.head_sha });
-  }
-  await confirmPendingHold(holdClient, hold, expected);
-  if (current.governance.autoMergeRequest !== null) {
-    if (!exactAutoMergeArmed(current.governance, expected)) reject('managed pull request auto-merge state is invalid');
-    await releaseHoldAfterArm({
-      readClient, protectionClient, holdClient, hold, expected, baseline: current.governance,
-      trigger, trust, config, sleepImpl,
-    });
-    return Object.freeze({ action: 'already_armed', pull_number: pullNumber, head_sha: current.bound.head_sha });
-  }
-
-  let attemptedReadyTransition = false;
-  if (current.governance.isDraft) {
-    await confirmPendingHold(holdClient, hold, expected);
+  if (initial.governance.isDraft) {
     const beforeReady = await evaluateAutonomyFinalizer({
       client: readClient, protectionClient, trigger, trust, config, checkAttempts: 1, sleepImpl,
     });
@@ -1058,71 +943,114 @@ export async function finalizeAutonomyPull({
     }
     validateGovernance(beforeReady.governance, expected);
     if (beforeReady.governance.id !== pullRequestId || beforeReady.governance.isDraft !== true ||
-        beforeReady.governance.autoMergeRequest !== null ||
-        JSON.stringify(beforeReady.governance) !== JSON.stringify(current.governance)) {
-      reject('pull request drifted after hold acquisition and before the ready-for-review transition');
+        JSON.stringify(beforeReady.governance) !== JSON.stringify(initial.governance)) {
+      reject('pull request drifted before the ready-for-review transition');
     }
-    attemptedReadyTransition = true;
+    let readyError = null;
+    let readyMutationConfirmed = false;
     try {
       const ready = await writerClient.markPullReady(pullRequestId);
-      if (ready?.id !== pullRequestId || ready?.isDraft !== false || ready?.headRefOid !== current.bound.head_sha) {
-        reject('GitHub did not persist the exact ready-for-review transition');
+      if (ready?.id === pullRequestId && ready?.isDraft === false && ready?.headRefOid === expected.head_sha) {
+        readyMutationConfirmed = true;
+      } else {
+        readyError = new AutonomyFinalizerError('GitHub returned an invalid ready-for-review transition result');
       }
     } catch (error) {
-      let observed;
-      try { observed = await readClient.getPullGovernance(pullNumber); } catch { throw error; }
-      validateGovernance(observed, expected);
-      if (observed.autoMergeRequest !== null) throw error;
-      await rollbackAndRethrow(error, { readClient, writerClient, pullRequestId, pullNumber });
+      readyError = error;
     }
+    let observedReady;
+    try { observedReady = await readClient.getPullGovernance(pullNumber); } catch (error) {
+      const mutation = readyError instanceof Error ? readyError.message : 'ready-for-review mutation response was inconclusive';
+      reject(`${mutation}; ready-for-review state is ambiguous: ${error instanceof Error ? error.message : 'read failed'}`);
+    }
+    if (!exactOpenPull(observedReady, expected, pullRequestId) || observedReady.isDraft !== false) {
+      if (exactOpenPull(observedReady, expected, pullRequestId) && observedReady.isDraft === true) {
+        throw readyError ?? new AutonomyFinalizerError('GitHub did not persist the ready-for-review transition');
+      }
+      reject('ready-for-review state is ambiguous; Draft rollback was not attempted');
+    }
+    transitionedToReady = readyMutationConfirmed;
   }
 
+  let beforeMerge;
   try {
-    current = await evaluateAutonomyFinalizer({
-      client: readClient, protectionClient, trigger, trust, config, sleepImpl,
-    });
-    if (!current.eligible) reject('pull request drifted after the ready-for-review transition');
-    validateGovernance(current.governance, expected, { requireReady: true });
-    if (current.governance.autoMergeRequest !== null) {
-      await releaseHoldAfterArm({
-        readClient, protectionClient, holdClient, hold, expected, baseline: current.governance,
-        trigger, trust, config, sleepImpl,
-      });
-      return Object.freeze({ action: 'already_armed', pull_number: pullNumber, head_sha: current.bound.head_sha });
-    }
-    await confirmPendingHold(holdClient, hold, expected);
-    const beforeArm = await readClient.getPullGovernance(pullNumber);
-    validateGovernance(beforeArm, expected, { requireReady: true });
-    if (beforeArm.id !== pullRequestId || beforeArm.autoMergeRequest !== null ||
-        JSON.stringify(beforeArm) !== JSON.stringify(current.governance)) {
-      reject('pull request drifted immediately before the native auto-merge request');
-    }
-    // The aggregate state is only a compatibility signal. Exact governance,
-    // required-check, protection, and hold proofs remain the authority.
-    validatePendingHoldAggregateState(beforeArm);
-    let armError = null;
-    try { await writerClient.enableAutoMerge(pullRequestId, current.bound.head_sha); } catch (error) { armError = error; }
-    let confirmedArm;
-    try { confirmedArm = await readClient.getPullGovernance(pullNumber); } catch (error) { throw armError ?? error; }
-    if (!exactAutoMergeArmed(confirmedArm, expected)) {
-      if (armError) throw armError;
-      reject('GitHub did not persist the exact native auto-merge request');
-    }
-    await releaseHoldAfterArm({
-      readClient, protectionClient, holdClient, hold, expected, baseline: beforeArm,
-      trigger, trust, config, sleepImpl,
+    beforeMerge = await evaluateAutonomyFinalizer({
+      client: readClient, protectionClient, trigger, trust, config, checkAttempts: 1, sleepImpl,
     });
   } catch (error) {
-    if (attemptedReadyTransition) {
+    if (transitionedToReady) {
       let observed;
       try { observed = await readClient.getPullGovernance(pullNumber); } catch { throw error; }
-      validateGovernance(observed, expected);
-      if (observed.autoMergeRequest !== null) throw error;
-      await rollbackAndRethrow(error, { readClient, writerClient, pullRequestId, pullNumber });
+      if (exactOpenPull(observed, expected, pullRequestId)) {
+        await rollbackAndRethrow(error, { readClient, writerClient, pullRequestId, pullNumber, expected, observed });
+      }
     }
     throw error;
   }
-  return Object.freeze({ action: 'armed', pull_number: pullNumber, head_sha: current.bound.head_sha });
+  if (!beforeMerge.eligible) {
+    const error = new AutonomyFinalizerError(`pre-merge verification failed: ${beforeMerge.reason}`);
+    let observed = beforeMerge.governance;
+    if (transitionedToReady && !observed) {
+      try { observed = await readClient.getPullGovernance(pullNumber); } catch { throw error; }
+    }
+    if (transitionedToReady && exactOpenPull(observed, expected, pullRequestId) && observed.isDraft === false) {
+      await rollbackAndRethrow(error, {
+        readClient, writerClient, pullRequestId, pullNumber, expected, observed,
+      });
+    }
+    throw error;
+  }
+  if (beforeMerge.proof_level !== 'full' || beforeMerge.bound.pull_number !== expected.pull_number ||
+      beforeMerge.bound.head_sha !== expected.head_sha || beforeMerge.governance.id !== pullRequestId) {
+    reject('pre-merge full proof drifted from the exact pull request');
+  }
+  try {
+    validateGovernance(beforeMerge.governance, expected, { requireReady: true });
+  } catch (error) {
+    if (transitionedToReady && exactOpenPull(beforeMerge.governance, expected, pullRequestId)) {
+      await rollbackAndRethrow(error, {
+        readClient, writerClient, pullRequestId, pullNumber, expected, observed: beforeMerge.governance,
+      });
+    }
+    throw error;
+  }
+
+  try {
+    const immediatelyBeforeMerge = await readClient.getPullGovernance(pullNumber);
+    validateGovernance(immediatelyBeforeMerge, expected, { requireReady: true });
+    if (JSON.stringify(immediatelyBeforeMerge) !== JSON.stringify(beforeMerge.governance)) {
+      reject('pull request governance drifted immediately before merge mutation');
+    }
+  } catch (error) {
+    if (transitionedToReady) {
+      let observed;
+      try { observed = await readClient.getPullGovernance(pullNumber); } catch { throw error; }
+      if (exactOpenPull(observed, expected, pullRequestId)) {
+        await rollbackAndRethrow(error, {
+          readClient, writerClient, pullRequestId, pullNumber, expected, observed,
+        });
+      }
+    }
+    throw error;
+  }
+
+  let mutationError = null;
+  try { await writerClient.mergePullRequest(pullRequestId, expected.head_sha); } catch (error) { mutationError = error; }
+  const outcome = await readOutcomeOrReject({ readClient, pullNumber, mutationError });
+  if (exactMergedOutcome(outcome, expected, pullRequestId)) {
+    return Object.freeze({
+      action: 'merged', pull_number: pullNumber, head_sha: expected.head_sha,
+      merge_commit_sha: outcome.mergeCommit.oid,
+    });
+  }
+  if (exactOpenPull(outcome, expected, pullRequestId)) {
+    const error = mutationError ?? new AutonomyFinalizerError('GitHub did not persist the exact squash merge');
+    if (!transitionedToReady) throw error;
+    await rollbackAndRethrow(error, {
+      readClient, writerClient, pullRequestId, pullNumber, expected, observed: outcome,
+    });
+  }
+  reject('independent merge outcome is ambiguous; Draft rollback was not attempted');
 }
 
 export async function runAutonomyFinalizer(environment = process.env, dependencies = {}) {
@@ -1167,10 +1095,12 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
           proof_app_slug: required(environment.AERIS_WRITER_PROOF_APP_SLUG, 'AERIS_WRITER_PROOF_APP_SLUG'),
           proof_app_owner_login: required(environment.AERIS_WRITER_PROOF_APP_OWNER_LOGIN, 'AERIS_WRITER_PROOF_APP_OWNER_LOGIN'),
           proof_app_owner_type: required(environment.AERIS_WRITER_PROOF_APP_OWNER_TYPE, 'AERIS_WRITER_PROOF_APP_OWNER_TYPE'),
+          proof_app_permissions: environment.AERIS_WRITER_PROOF_APP_PERMISSIONS,
           installation_id: positiveInteger(environment.AERIS_WRITER_INSTALLATION_ID, 'AERIS_WRITER_INSTALLATION_ID'),
           proof_installation_id: positiveInteger(environment.AERIS_WRITER_PROOF_INSTALLATION_ID, 'AERIS_WRITER_PROOF_INSTALLATION_ID'),
           proof_installation_account_login: required(environment.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN, 'AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN'),
           proof_installation_account_type: required(environment.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE, 'AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE'),
+          proof_installation_permissions: environment.AERIS_WRITER_PROOF_INSTALLATION_PERMISSIONS,
           proof_repository_selection: required(environment.AERIS_WRITER_PROOF_REPOSITORY_SELECTION, 'AERIS_WRITER_PROOF_REPOSITORY_SELECTION'),
           token_installation_id: positiveInteger(environment.AERIS_WRITER_TOKEN_INSTALLATION_ID, 'AERIS_WRITER_TOKEN_INSTALLATION_ID'),
           token_app_slug: required(environment.AERIS_WRITER_TOKEN_APP_SLUG, 'AERIS_WRITER_TOKEN_APP_SLUG'),

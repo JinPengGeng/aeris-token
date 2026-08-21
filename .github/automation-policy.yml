@@ -131,9 +131,9 @@ policy_gate:
 finalizer:
   enabled: false
   repository_variable: AERIS_AUTONOMOUS_MERGE_ENABLED
-  merge_mode: github_native_auto_merge
+  merge_mode: github_direct_merge
   merge_method: squash
-  direct_merge: false
+  direct_merge: true
   require_policy_classification: eligible
 
 audit:
