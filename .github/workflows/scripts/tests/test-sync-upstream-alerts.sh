@@ -26,13 +26,29 @@ test_existing_issue_uses_issue_comments_api_once() {
 set -euo pipefail
 printf '%s\n' "$*" >>"${GH_CALLS}"
 case "$*" in
-  'issue list '*) printf '42\n' ;;
+  'issue list '*)
+    [[ "${GH_TOKEN}" == test-issues-token ]] || {
+      printf 'issue inventory used the wrong token channel\n' >&2
+      exit 1
+    }
+    printf '42\n'
+    ;;
   *'/issues/42/comments?per_page=100'*)
+    [[ "${GH_TOKEN}" == test-issues-token ]] || {
+      printf 'ordinary issue comment lookup used the wrong token channel\n' >&2
+      exit 1
+    }
     if [[ -f "${GH_COMMENT_CREATED}" ]]; then
       printf '%s\n' '<!-- upstream-sync-alert:conflict:deadbeef -->'
     fi
     ;;
-  *'--method POST repos/example/repo/issues/42/comments'*) touch "${GH_COMMENT_CREATED}" ;;
+  *'--method POST repos/example/repo/issues/42/comments'*)
+    [[ "${GH_TOKEN}" == test-issues-token ]] || {
+      printf 'ordinary issue comment write used the wrong token channel\n' >&2
+      exit 1
+    }
+    touch "${GH_COMMENT_CREATED}"
+    ;;
   *) printf 'unexpected gh invocation: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
