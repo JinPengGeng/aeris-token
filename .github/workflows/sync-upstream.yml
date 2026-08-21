@@ -26,6 +26,9 @@ jobs:
       (vars.AERIS_UPSTREAM_SYNC_ENABLED == 'true' || vars.AERIS_UPSTREAM_SYNC_ENABLED == '1')
     runs-on: ubuntu-latest
     environment: writer
+    concurrency:
+      group: aeris-writer-mutation
+      cancel-in-progress: false
     permissions:
       actions: write
       contents: read
@@ -39,8 +42,8 @@ jobs:
       AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
       AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
       # Shell wrappers recheck every later call. These unwrapped actions keep a
-      # conservative ten-minute reserve because Actions cannot wrap other actions.
-      AERIS_AUTONOMY_MIN_REMAINING_SECONDS: 600
+      # conservative one-hour reserve because Actions cannot wrap other actions.
+      AERIS_AUTONOMY_MIN_REMAINING_SECONDS: 3600
     steps:
       - name: Validate autonomy before token mint
         shell: bash

@@ -200,8 +200,8 @@ assert(
   'sync must receive the shared Writer App slug for actor identity migration',
 );
 assert(
-  syncWorkflow.jobs.sync.env.AERIS_AUTONOMY_MIN_REMAINING_SECONDS === 600,
-  'unguarded token actions must reserve a conservative ten-minute autonomy margin',
+  syncWorkflow.jobs.sync.env.AERIS_AUTONOMY_MIN_REMAINING_SECONDS === 3600,
+  'unguarded token actions must stop one hour before the autonomy expiry boundary',
 );
 const tokenStepIndex = syncSteps.indexOf(syncTokenStep);
 const preMintExpiryStep = syncSteps[tokenStepIndex - 1];
