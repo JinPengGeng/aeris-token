@@ -46,6 +46,9 @@ use crate::execution_runtime::attempt_lifecycle::{
     AttemptProviderOutcome, AttemptStageGuard, AttemptTerminalFacts, AttemptTerminalFactsInput,
     ExecutionAttemptLifecycle,
 };
+use crate::execution_runtime::attempt_replay::{
+    AttemptDispatchLifecycleError, AttemptReplayHandle, AttemptReplaySnapshot, ReplayBarrierReason,
+};
 use crate::orchestration::{
     apply_local_stream_failure_effects, apply_local_stream_success_effects,
     release_local_pool_key_lease, release_pool_key_lease_from_report_context,
@@ -238,6 +241,7 @@ impl ResponsesWebSocketTurnOutcome {
 pub(super) struct ResponsesProviderAttempt {
     /// 记账三段（pending / started / terminal）由共享的 transport 中立生命周期负责。
     lifecycle: ExecutionAttemptLifecycle,
+    replay: AttemptReplayHandle,
     started_at: Instant,
     provider_request_started_at_unix_ms: u64,
     provider_request_order_id: String,
@@ -427,9 +431,14 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
         },
     )
     .await;
+    let replay = AttemptReplayHandle::new().map_err(replay_lifecycle_error)?;
+    replay
+        .apply_request_policy("openai_responses_websocket", Some(client_event))
+        .map_err(replay_lifecycle_error)?;
 
     Ok(ResponsesProviderAttempt {
         lifecycle,
+        replay,
         started_at: Instant::now(),
         provider_request_started_at_unix_ms: current_unix_ms(),
         provider_request_order_id: uuid::Uuid::now_v7().to_string(),
@@ -593,6 +602,15 @@ impl ResponsesProviderAttempt {
     /// Starts the per-turn response deadlines only after the corresponding
     /// `response.create` has been accepted by the upstream socket writer.
     pub(super) fn mark_upstream_request_sent(&mut self) {
+        if let Err(error) = self.replay.mark_sent() {
+            tracing::warn!(
+                event_name = "responses_websocket_replay_lifecycle_send_rejected",
+                error = %error,
+                "gateway replay lifecycle rejected a Responses WebSocket physical send"
+            );
+            let _ = self.replay.finish_ambiguous();
+            return;
+        }
         self.upstream_request_sent = true;
         self.started_at = Instant::now();
         self.provider_request_started_at_unix_ms = current_unix_ms();
@@ -712,6 +730,44 @@ impl ResponsesProviderAttempt {
         }
     }
 
+    pub(super) fn mark_client_committed(&mut self) {
+        if let Err(error) = self.replay.mark_client_committed() {
+            tracing::warn!(
+                event_name = "responses_websocket_replay_lifecycle_commit_failed",
+                error = %error,
+                "gateway could not record the Responses WebSocket client commit boundary"
+            );
+            let _ = self.replay.finish_ambiguous();
+        }
+    }
+
+    pub(super) fn close_replay_barrier(&self, reason: ReplayBarrierReason) {
+        let _ = self.replay.close_barrier(reason);
+    }
+
+    pub(super) fn authorize_quota_replay_after_quiescence(
+        &self,
+    ) -> Result<AttemptReplayHandle, AttemptDispatchLifecycleError> {
+        self.replay.authorize_websocket_quota_retry()?;
+        Ok(self.replay.clone())
+    }
+
+    pub(super) fn replay_snapshot(&self) -> Option<AttemptReplaySnapshot> {
+        self.replay.snapshot().ok()
+    }
+
+    pub(super) fn ensure_replay_uncommitted(&self) -> Result<(), AttemptDispatchLifecycleError> {
+        self.replay.ensure_uncommitted()
+    }
+
+    pub(super) fn replay_handle(&self) -> AttemptReplayHandle {
+        self.replay.clone()
+    }
+
+    pub(super) fn replace_replay_handle(&mut self, replay: AttemptReplayHandle) {
+        self.replay = replay;
+    }
+
     pub(super) fn capture_client_frame(&mut self, event: &Value) {
         self.client_capture
             .append(&websocket_event_as_sse_line(event));
@@ -732,7 +788,15 @@ impl ResponsesProviderAttempt {
     /// 之后的四段记账（usage terminal → candidate terminal → provider 效果 →
     /// execution report）由共享的 [`ExecutionAttemptLifecycle::settle`] 负责，
     /// 这里只提供 WS 观察到的终态事实。
-    async fn settle(mut self, state: &AppState, outcome: ResponsesWebSocketTurnOutcome) {
+    async fn settle(
+        mut self,
+        state: &AppState,
+        outcome: ResponsesWebSocketTurnOutcome,
+        preserve_replay_fence: bool,
+    ) {
+        if !preserve_replay_fence {
+            let _ = self.replay.finish_quiesced();
+        }
         let facts = attempt_facts_for_outcome(self.provider_outcome, self.client_delivery, outcome);
         if let Some(reason) = facts.delivery.aborted_reason() {
             let report_context = attach_client_delivery_to_report_context(
@@ -822,6 +886,12 @@ impl ResponsesProviderAttempt {
     }
 }
 
+fn replay_lifecycle_error(error: AttemptDispatchLifecycleError) -> GatewayError {
+    GatewayError::Internal(format!(
+        "Responses WebSocket replay lifecycle rejected operation: {error}"
+    ))
+}
+
 impl ResponsesProviderAttempt {
     /// Finalizes a turn whose owner is already gone, releasing admission first.
     ///
@@ -833,7 +903,16 @@ impl ResponsesProviderAttempt {
         outcome: ResponsesWebSocketTurnOutcome,
     ) {
         self.release_admission().await;
-        self.settle(state, outcome).await;
+        self.settle(state, outcome, false).await;
+    }
+
+    pub(super) async fn finalize_for_replay(
+        mut self,
+        state: &AppState,
+        outcome: ResponsesWebSocketTurnOutcome,
+    ) {
+        self.release_admission().await;
+        self.settle(state, outcome, true).await;
     }
 }
 

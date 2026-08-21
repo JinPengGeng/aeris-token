@@ -43,6 +43,7 @@ use aether_usage_runtime::{
 };
 use base64::Engine as _;
 use serde_json::Value;
+use thiserror::Error;
 use tracing::warn;
 
 use crate::clock::current_unix_ms;

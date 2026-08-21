@@ -103,3 +103,4 @@ tikv-jemalloc-sys = { version = "0.6", optional = true }
 [dev-dependencies]
 aether-test-support.workspace = true
 tracing-subscriber.workspace = true
+trybuild = "1.0"

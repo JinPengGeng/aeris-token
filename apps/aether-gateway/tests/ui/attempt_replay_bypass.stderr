@@ -1,0 +1,58 @@
+error[E0603]: struct `ReplayPolicyApproval` is private
+ --> tests/ui/attempt_replay_bypass.rs:6:62
+  |
+6 |         AttemptDispatchLifecycle, LogicalRequestReplayOwner, ReplayPolicyApproval,
+  |                                                              ^^^^^^^^^^^^^^^^^^^^ private struct
+  |
+note: the struct `ReplayPolicyApproval` is defined here
+ --> tests/ui/../../src/execution_runtime/attempt_replay.rs
+  |
+  | struct ReplayPolicyApproval {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0624]: associated function `new_disabled` is private
+  --> tests/ui/attempt_replay_bypass.rs:10:52
+   |
+10 |         let mut owner = LogicalRequestReplayOwner::new_disabled();
+   |                                                    ^^^^^^^^^^^^ private associated function
+   |
+  ::: tests/ui/../../src/execution_runtime/attempt_replay.rs
+   |
+   |     fn new_disabled() -> Self {
+   |     ------------------------- private associated function defined here
+
+error[E0624]: method `begin_first_attempt` is private
+  --> tests/ui/attempt_replay_bypass.rs:11:34
+   |
+11 |           let (attempt, _) = owner.begin_first_attempt().unwrap();
+   |                                    ^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: tests/ui/../../src/execution_runtime/attempt_replay.rs
+   |
+   | /     fn begin_first_attempt(
+   | |         &mut self,
+   | |     ) -> Result<(AttemptDispatchLifecycle, ReplayBarrierHandle), AttemptDispatchLifecycleError>
+   | |_______________________________________________________________________________________________- private method defined here
+
+error[E0599]: no function or associated item named `default` found for struct `AttemptDispatchLifecycle` in the current scope
+  --> tests/ui/attempt_replay_bypass.rs:13:48
+   |
+13 |         let _fresh = AttemptDispatchLifecycle::default();
+   |                                                ^^^^^^^ function or associated item not found in `AttemptDispatchLifecycle`
+   |
+  ::: tests/ui/../../src/execution_runtime/attempt_replay.rs
+   |
+   | pub(crate) struct AttemptDispatchLifecycle {
+   | ------------------------------------------ function or associated item `default` not found for this struct
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following trait defines an item `default`, perhaps you need to implement it:
+           candidate #1: `Default`
+
+warning: unused import: `http_body_util::BodyExt`
+ --> tests/ui/../../src/execution_runtime/attempt_replay.rs
+  |
+  | use http_body_util::BodyExt;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

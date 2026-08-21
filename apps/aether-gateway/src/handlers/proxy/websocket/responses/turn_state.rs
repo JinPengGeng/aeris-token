@@ -10,6 +10,7 @@ use serde_json::Value;
 use super::control::ResponsesWebSocketTurnControl;
 use super::lifecycle::ActiveProviderAttempt;
 use super::request::response_create_has_previous_response_id;
+use crate::execution_runtime::attempt_replay::ReplayBarrierReason;
 
 /// 客户端一次 `response.create` 对应的 logical turn。
 ///
@@ -188,6 +189,24 @@ impl ResponsesTurnState {
     pub(super) fn record_client_delivery_aborted(&mut self, reason: &'static str) {
         if let Some(attempt) = self.attempt_mut() {
             attempt.record_client_delivery_aborted(reason);
+        }
+    }
+
+    pub(super) fn mark_client_committed(&mut self) {
+        if let Some(attempt) = self.attempt_mut() {
+            attempt.mark_client_committed();
+        }
+        if let Some(logical) = self.logical_mut() {
+            logical.mark_retry_unsafe("client_committed");
+        }
+    }
+
+    pub(super) fn close_replay_barrier(&mut self, reason: ReplayBarrierReason) {
+        if let Some(attempt) = self.attempt() {
+            attempt.close_replay_barrier(reason);
+        }
+        if let Some(logical) = self.logical_mut() {
+            logical.mark_retry_unsafe("replay_barrier_closed");
         }
     }
 }
