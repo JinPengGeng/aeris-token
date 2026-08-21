@@ -109,6 +109,10 @@ assert(
   JSON.stringify(automation.policy_gate.allowlist_paths) === JSON.stringify(['docs/automation-canary/**/*.md']),
   'automatic merge allowlist must remain restricted to canary Markdown',
 );
+assert(automation.finalizer.merge_mode === 'github_direct_merge', 'finalizer must use direct GitHub merge');
+assert(automation.finalizer.merge_method === 'squash', 'finalizer must use squash merge');
+assert(automation.finalizer.direct_merge === true, 'finalizer must not arm native auto-merge');
+assert(automation.finalizer.require_policy_classification === 'eligible', 'finalizer classification gate changed');
 for (const immutablePath of [
   '.github/agents.yml',
   '.github/automation-policy.yml',

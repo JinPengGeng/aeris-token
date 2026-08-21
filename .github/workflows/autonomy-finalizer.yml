@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: autonomy-finalizer-${{ github.event.workflow_run.head_branch }}
+  group: aeris-autonomy-pr-${{ github.event.workflow_run.pull_requests[0].number || format('run-{0}', github.event.workflow_run.id) }}
   cancel-in-progress: false
 
 jobs:
@@ -19,6 +19,7 @@ jobs:
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.pull_requests[0].number != null &&
       startsWith(github.event.workflow_run.head_branch, 'agent/issue-')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -32,6 +33,7 @@ jobs:
       reason: ${{ steps.evaluate.outputs.reason }}
       pull_number: ${{ steps.evaluate.outputs.pull_number }}
       head_sha: ${{ steps.evaluate.outputs.head_sha }}
+      proof_level: ${{ steps.evaluate.outputs.proof_level }}
     steps:
       - name: Check out current trusted policy
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -57,10 +59,11 @@ jobs:
           AERIS_POLICY_SHA: ${{ github.sha }}
           AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_FINALIZER_PROOF_LEVEL: preliminary
         run: node .github/automation/src/autonomy-finalizer.mjs
 
   finalize:
-    name: Request native auto-merge
+    name: Directly merge eligible pull request
     needs: [evaluate]
     if: >-
       needs.evaluate.result == 'success' &&
@@ -106,21 +109,26 @@ jobs:
           AERIS_POLICY_SHA: ${{ github.sha }}
           AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_FINALIZER_PROOF_LEVEL: preliminary
         run: node .github/automation/src/autonomy-finalizer.mjs
 
       - name: Confirm eligibility snapshot is unchanged
         env:
           VERIFIED_PULL_NUMBER: ${{ needs.evaluate.outputs.pull_number }}
           VERIFIED_HEAD_SHA: ${{ needs.evaluate.outputs.head_sha }}
+          VERIFIED_PROOF_LEVEL: ${{ needs.evaluate.outputs.proof_level }}
           CURRENT_ELIGIBLE: ${{ steps.recheck.outputs.eligible }}
           CURRENT_PULL_NUMBER: ${{ steps.recheck.outputs.pull_number }}
           CURRENT_HEAD_SHA: ${{ steps.recheck.outputs.head_sha }}
+          CURRENT_PROOF_LEVEL: ${{ steps.recheck.outputs.proof_level }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "${CURRENT_ELIGIBLE}" == true ]]
           [[ "${CURRENT_PULL_NUMBER}" == "${VERIFIED_PULL_NUMBER}" ]]
           [[ "${CURRENT_HEAD_SHA}" == "${VERIFIED_HEAD_SHA}" ]]
+          [[ "${VERIFIED_PROOF_LEVEL}" == preliminary ]]
+          [[ "${CURRENT_PROOF_LEVEL}" == preliminary ]]
 
       - name: Validate autonomy window before token mint
         shell: bash
@@ -131,6 +139,16 @@ jobs:
           [[ "$(date -u -d "@${expires_epoch}" +%Y-%m-%dT%H:%M:%SZ)" == "${AERIS_AUTONOMY_EXPIRES_AT}" ]]
           (( $(date -u +%s) + AERIS_AUTONOMY_MIN_REMAINING_SECONDS < expires_epoch ))
 
+      - name: Attest Writer App and installation identity
+        id: writer_app_attestation
+        timeout-minutes: 2
+        env:
+          AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
+          AERIS_WRITER_APP_PRIVATE_KEY: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+        run: node .github/automation/src/github-app-attestation.mjs
+
       - name: Mint bounded Writer App token
         id: writer_token
         timeout-minutes: 2
@@ -140,10 +158,11 @@ jobs:
           private-key: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permission-administration: read
           permission-contents: write
           permission-pull-requests: write
 
-      - name: Request exact native auto-merge
+      - name: Directly squash merge exact eligible pull request
         id: finalize
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -156,6 +175,21 @@ jobs:
           AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
           AERIS_WRITER_TOKEN: ${{ steps.writer_token.outputs.token }}
+          AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
+          AERIS_WRITER_PROOF_APP_ID: ${{ steps.writer_app_attestation.outputs.app_id }}
+          AERIS_WRITER_PROOF_APP_SLUG: ${{ steps.writer_app_attestation.outputs.app_slug }}
+          AERIS_WRITER_PROOF_APP_OWNER_LOGIN: ${{ steps.writer_app_attestation.outputs.app_owner_login }}
+          AERIS_WRITER_PROOF_APP_OWNER_TYPE: ${{ steps.writer_app_attestation.outputs.app_owner_type }}
+          AERIS_WRITER_PROOF_APP_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.app_permissions }}
+          AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
+          AERIS_WRITER_PROOF_INSTALLATION_ID: ${{ steps.writer_app_attestation.outputs.installation_id }}
+          AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN: ${{ steps.writer_app_attestation.outputs.installation_account_login }}
+          AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE: ${{ steps.writer_app_attestation.outputs.installation_account_type }}
+          AERIS_WRITER_PROOF_INSTALLATION_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.installation_permissions }}
+          AERIS_WRITER_PROOF_REPOSITORY_SELECTION: ${{ steps.writer_app_attestation.outputs.repository_selection }}
+          AERIS_WRITER_TOKEN_INSTALLATION_ID: ${{ steps.writer_token.outputs.installation-id }}
+          AERIS_WRITER_TOKEN_APP_SLUG: ${{ steps.writer_token.outputs.app-slug }}
+          AERIS_FINALIZER_PROOF_LEVEL: full
           AERIS_FINALIZER_MUTATE: "true"
         run: node .github/automation/src/autonomy-finalizer.mjs
 

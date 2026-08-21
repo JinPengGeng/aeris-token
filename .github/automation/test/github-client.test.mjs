@@ -92,7 +92,7 @@ test('required-check API methods query the exact encoded commit ref', async () =
   const calls = [];
   const api = client(async (url) => {
     calls.push(url);
-    if (url.includes('/check-runs?')) return response({ check_runs: [{ id: 1 }] });
+    if (url.includes('/check-runs?')) return response({ total_count: 1, check_runs: [{ id: 1 }] });
     if (url.includes('/statuses?')) return response([{ id: 2 }]);
     return response(null, 404);
   });
@@ -101,4 +101,12 @@ test('required-check API methods query the exact encoded commit ref', async () =
   assert.deepEqual(await api.listCommitStatuses('head/ref'), [{ id: 2 }]);
   assert.match(calls[0], /commits\/head%2Fref\/check-runs\?filter=all&per_page=100&page=1$/);
   assert.match(calls[1], /commits\/head%2Fref\/statuses\?per_page=100&page=1$/);
+});
+
+test('check-run lookup rejects a malformed REST envelope', async () => {
+  const api = client(async () => response([{ id: 1 }]));
+  await assert.rejects(
+    () => api.listCheckRunsForRef('head'),
+    (error) => error instanceof GitHubApiError && /check-runs response is invalid/.test(error.message),
+  );
 });
