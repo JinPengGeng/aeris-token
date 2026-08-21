@@ -58,6 +58,36 @@ aeris_issues_gh() {
   GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"
 }
 
+aeris_writer_git_push() {
+  local temp_root askpass_dir askpass status=0
+  : "${AERIS_WRITER_TOKEN:?AERIS_WRITER_TOKEN is required for Writer Git publication}"
+  temp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+  askpass_dir="$(mktemp -d "${temp_root%/}/aeris-writer-askpass.XXXXXX")"
+  askpass="${askpass_dir}/askpass.sh"
+  if ! (
+    umask 077
+    cat >"${askpass}" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  *Username*) printf '%s\n' x-access-token ;;
+  *Password*) printf '%s\n' "${AERIS_WRITER_TOKEN:?}" ;;
+  *) exit 1 ;;
+esac
+EOF
+    chmod 700 "${askpass}"
+  ); then
+    rm -f -- "${askpass}"
+    rmdir -- "${askpass_dir}"
+    return 1
+  fi
+
+  GIT_ASKPASS="${askpass}" GIT_ASKPASS_REQUIRE=force GIT_TERMINAL_PROMPT=0 \
+    aeris_git_network -c credential.helper= -c http.https://github.com/.extraheader= "$@" || status=$?
+  rm -f -- "${askpass}" || status=1
+  rmdir -- "${askpass_dir}" || status=1
+  return "${status}"
+}
+
 list_sync_prs() {
   aeris_gh api --paginate --slurp \
     --method GET \
@@ -696,13 +726,13 @@ for attempt in 1 2 3; do
       set_pending_tip "$(jq -r '.number' <<<"${reference_pr}")" "${local_sha}"
     fi
     if [[ -n "${remote_sha}" ]]; then
-      aeris_git_network push \
+      aeris_writer_git_push push \
         --force-with-lease="refs/heads/${SYNC_BRANCH}:${remote_sha}" \
-        origin "${local_sha}:refs/heads/${SYNC_BRANCH}"
+        "https://github.com/${GITHUB_REPOSITORY}.git" "${local_sha}:refs/heads/${SYNC_BRANCH}"
     else
-      aeris_git_network push \
+      aeris_writer_git_push push \
         --force-with-lease="refs/heads/${SYNC_BRANCH}:" \
-        origin "${local_sha}:refs/heads/${SYNC_BRANCH}"
+        "https://github.com/${GITHUB_REPOSITORY}.git" "${local_sha}:refs/heads/${SYNC_BRANCH}"
     fi
     published_sha="${local_sha}"
   fi
