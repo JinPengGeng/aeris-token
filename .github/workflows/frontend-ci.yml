@@ -66,6 +66,8 @@ jobs:
         working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-ensure-required-checks.sh
         working-directory: .github/automation
+      - run: bash ../workflows/scripts/tests/test-sync-upstream-git-auth.sh
+        working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-sync-upstream-identity.sh
         working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-sync-upstream-alerts.sh

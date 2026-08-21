@@ -244,9 +244,35 @@ assert(
 const publishStep = syncSteps.find(
   (step) => step.name === 'Build and publish automation branch',
 );
+const syncValidationStep = syncSteps.find(
+  (step) => step.name === 'Validate checkpoint synchronization',
+);
 assert(
-  publishStep?.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}',
+  syncValidationStep?.run.includes(
+    'bash .github/workflows/scripts/tests/test-sync-upstream-git-auth.sh',
+  ),
+  'sync workflow must exercise the ephemeral Writer Git credential contract before publication',
+);
+assert(
+  publishStep?.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}' &&
+    publishStep.env.AERIS_WRITER_TOKEN === '${{ steps.sync_token.outputs.token }}',
   'sync publication must use the bounded Writer App token',
+);
+assert(
+  checkoutStep.with['persist-credentials'] === false &&
+    syncScript.includes('aeris_writer_git_push() {') &&
+    syncScript.includes(
+      ': "${AERIS_WRITER_TOKEN:?AERIS_WRITER_TOKEN is required for Writer Git publication}"',
+    ) &&
+    syncScript.includes('GIT_ASKPASS="${askpass}" GIT_ASKPASS_REQUIRE=force GIT_TERMINAL_PROMPT=0') &&
+    syncScript.includes(
+      'aeris_git_network -c credential.helper= -c http.https://github.com/.extraheader= "$@"',
+    ) &&
+    syncScript.includes('aeris_writer_git_push push \\\n        --force-with-lease=') &&
+    syncScript.includes('"https://github.com/${GITHUB_REPOSITORY}.git"') &&
+    !syncScript.includes('x-access-token@') &&
+    !syncScript.includes('remote set-url'),
+  'sync Git publication must inject the Writer token only through ephemeral askpass with an exact lease',
 );
 assert(
   publishStep?.env.AERIS_ISSUES_GH_TOKEN === '${{ github.token }}' &&
@@ -400,6 +426,12 @@ assert(
     (step) => step.run === 'bash ../workflows/scripts/tests/test-ensure-required-checks.sh',
   ),
   'required CI must execute the workflow job-token dispatch integration test',
+);
+assert(
+  frontendWorkflow.jobs.automation.steps.some(
+    (step) => step.run === 'bash ../workflows/scripts/tests/test-sync-upstream-git-auth.sh',
+  ),
+  'required CI must execute the ephemeral Writer Git credential integration test',
 );
 assert(
   frontendWorkflow.jobs.automation.steps.some(
