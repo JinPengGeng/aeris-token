@@ -43,6 +43,8 @@ upstream_branch=''
 base_sha=''
 upstream_sha=''
 checkpoint_sha=''
+autonomous_eligible='false'
+policy_verdict=''
 
 output() {
   printf '%s=%s\n' "$1" "$2" >>"${GITHUB_OUTPUT}"
@@ -456,7 +458,7 @@ wait_for_pr_head() {
 }
 
 publish_pr() {
-  local body number pr_url create_error create_output view_data
+  local body merge_behavior number pr_url create_error create_output view_data trusted_view
   require_gate
   fetch_remote_tip
   [[ "${remote_sha}" == "${published_sha}" ]] || {
@@ -464,13 +466,18 @@ publish_pr() {
     return 1
   }
 
+  if [[ "${autonomous_eligible}:${policy_verdict}" == true:eligible ]]; then
+    merge_behavior='This pull request is merged once after protected branch checks pass; no persistent auto-merge is configured.'
+  else
+    merge_behavior='This pull request requires maintainer review and is not directly merged by synchronization automation.'
+  fi
   body="${MANAGED_MARKER}
 <!-- upstream-sync-owned-tip:${published_sha} -->
 <!-- upstream-sync-source:${parent}@${upstream_sha} -->
 Automated synchronization from ${parent}:${upstream_branch} at ${upstream_sha}.
 Checkpoint advanced from ${checkpoint_sha} to ${upstream_sha}.
 
-This pull request is merged once after protected branch checks pass; no persistent auto-merge is configured.
+${merge_behavior}
 Configured fork-owned paths are preserved; upstream workflow changes are reviewed separately."
 
   if [[ -n "${tracked_pr}" ]]; then
@@ -507,7 +514,18 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
   refresh_prs
   [[ "$(jq 'length' <<<"${open_prs}")" -eq 1 &&
      "$(jq -r '.headRefOid' <<<"${open_pr}")" == "${published_sha}" ]] || return 1
+  trusted_view="$(aeris_gh pr view "${pr_url}" --repo "${GITHUB_REPOSITORY}" \
+    --json state,isDraft,headRefOid,headRefName,headRepository,baseRefName,baseRefOid,autoMergeRequest)"
+  jq -e --arg head_sha "${published_sha}" --arg head_branch "${SYNC_BRANCH}" \
+    --arg repository "${GITHUB_REPOSITORY}" --arg base_branch "${BASE_BRANCH}" '
+    type == "object" and .state == "OPEN" and .isDraft == false and
+    .headRefOid == $head_sha and .headRefName == $head_branch and
+    .headRepository.nameWithOwner == $repository and .baseRefName == $base_branch and
+    (.baseRefOid | type == "string" and test("^[0-9a-fA-F]{40}$")) and
+    .autoMergeRequest == null
+  ' <<<"${trusted_view}" >/dev/null || return 1
   output pr_url "${pr_url}"
+  output expected_base_sha "$(jq -r '.baseRefOid' <<<"${trusted_view}")"
 }
 
 parent="$(aeris_gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.full_name // empty')"
@@ -537,6 +555,12 @@ for attempt in 1 2 3; do
   aeris_git_network fetch --no-tags origin "${BASE_BRANCH}"
   aeris_git_network fetch --no-tags upstream "${upstream_branch}"
   base_sha="$(git rev-parse "origin/${BASE_BRANCH}")"
+  [[ "$(git rev-parse HEAD)" == "${base_sha}" ]] || {
+    echo 'Trusted checkout HEAD no longer equals the fetched base SHA.' >&2
+    output state error
+    output has_changes false
+    exit 1
+  }
   upstream_sha="$(git rev-parse "upstream/${upstream_branch}")"
   output upstream_sha "${upstream_sha}"
 
@@ -592,8 +616,18 @@ for attempt in 1 2 3; do
     exit 1
   }
   filtered_paths="$(sed -n 's/^filtered_paths=//p' <<<"${prepare_output}" | tail -n1)"
+  autonomous_eligible="$(sed -n 's/^autonomous_eligible=//p' <<<"${prepare_output}" | tail -n1)"
+  policy_verdict="$(sed -n 's/^policy_verdict=//p' <<<"${prepare_output}" | tail -n1)"
+  [[ "${autonomous_eligible}:${policy_verdict}" == true:eligible ||
+     "${autonomous_eligible}:${policy_verdict}" == false:manual_review ||
+     "${autonomous_eligible}:${policy_verdict}" == false:noop ]] || {
+    echo 'Checkpoint helper did not return a trusted synchronization verdict.' >&2
+    exit 1
+  }
   output checkpoint_sha "${checkpoint_sha}"
   output filtered_paths "${filtered_paths:-0}"
+  output autonomous_eligible "${autonomous_eligible}"
+  output policy_verdict "${policy_verdict}"
   if [[ "${prepare_state}" == noop ]]; then
     close_obsolete_pr
   fi
@@ -616,7 +650,8 @@ for attempt in 1 2 3; do
     -m 'Sync-Upstream-Automation: true' \
     -m "Sync-Upstream-Source: ${parent}@${upstream_sha}" \
     -m "Sync-Upstream-Checkpoint: ${checkpoint_sha}->${upstream_sha}" \
-    -m "Sync-Upstream-Base: ${base_sha}"
+    -m "Sync-Upstream-Base: ${base_sha}" \
+    -m "Sync-Upstream-Policy-Verdict: ${policy_verdict}"
   local_sha="$(git rev-parse HEAD)"
 
   aeris_git_network fetch --no-tags origin "${BASE_BRANCH}"
@@ -656,6 +691,7 @@ for attempt in 1 2 3; do
   output state published
   output has_changes true
   output synced_sha "${published_sha}"
+  output synced_source "${parent}@${upstream_sha}"
   exit 0
 done
 

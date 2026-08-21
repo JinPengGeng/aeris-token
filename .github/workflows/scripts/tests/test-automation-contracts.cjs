@@ -140,12 +140,17 @@ assert(sync.sync.fail_closed === true, 'sync must fail closed');
 assert(sync.matching.default === 'review_required', 'unknown paths must require review');
 assert(
   JSON.stringify(sync.matching.precedence) ===
-    JSON.stringify(['fork_owned', 'review_required', 'generated', 'upstream_owned']),
+    JSON.stringify(['sensitive', 'review_required', 'fork_owned', 'generated', 'upstream_owned']),
   'path ownership precedence changed',
 );
 assert(
-  sync.matching.enforced_fork_owned_subset === 'exact_or_directory_recursive',
-  'runtime fork-owned matcher contract changed',
+  sync.matching.syntax === 'aeris-glob-v1' &&
+    sync.matching.enforced_fork_owned_subset === 'exact_or_directory_recursive',
+  'runtime path matcher contract changed',
+);
+assert(
+  JSON.stringify(sync.sensitive) === JSON.stringify(['.gitmodules', '**/*.pem', '**/*.key', '**/*.p12']),
+  'sensitive path contract changed',
 );
 for (const protectedPath of [
   '.github/upstream-sync-state.json',
@@ -255,12 +260,17 @@ const disarmCallIndex = syncScript.search(/^disarm_tracked_pr$/m);
 const rebuildLoopIndex = syncScript.search(/^for attempt in 1 2 3; do$/m);
 assert(mergeStep, 'sync workflow must expose the direct synchronization merge step');
 assert(
-  mergeStep.if === "steps.sync.outputs.has_changes == 'true'",
+  mergeStep.if.includes("steps.sync.outputs.has_changes == 'true'") &&
+    mergeStep.if.includes("steps.sync.outputs.autonomous_eligible == 'true'") &&
+    mergeStep.if.includes("steps.sync.outputs.policy_verdict == 'eligible'"),
   'direct merge must require a published synchronization change',
 );
 assert(
   mergeStep.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
     mergeStep.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}' &&
+    mergeStep.env.EXPECTED_BASE_SHA === '${{ steps.sync.outputs.expected_base_sha }}' &&
+    mergeStep.env.SYNCED_SOURCE === '${{ steps.sync.outputs.synced_source }}' &&
+    mergeStep.env.SYNC_POLICY_VERDICT === '${{ steps.sync.outputs.policy_verdict }}' &&
     mergeStep.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}',
   'direct merge must bind the published PR URL and exact head SHA',
 );
@@ -319,6 +329,11 @@ assert(
   'comment and PR identity checks must accept the Writer App bot and migrate legacy Actions state',
 );
 assert(
+  syncScript.includes('git rev-parse HEAD') &&
+    syncScript.includes('Trusted checkout HEAD no longer equals the fetched base SHA'),
+  'sync must bind the trusted checkout HEAD to the fetched base before classification or publication',
+);
+assert(
   !/(^|\n)\s*git\s+(fetch|push|ls-remote)\b/.test(syncScript),
   'authenticated Git network operations must not bypass expiry revalidation',
 );
@@ -331,6 +346,7 @@ const checkDispatchStep = syncSteps.find(
       checkDispatchStep?.env.GH_TOKEN === '${{ github.token }}' &&
       checkDispatchStep?.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
       checkDispatchStep?.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}' &&
+      checkDispatchStep?.env.EXPECTED_BASE_SHA === '${{ steps.sync.outputs.expected_base_sha }}' &&
       checkDispatchStep?.['timeout-minutes'] === 35,
     'fallback dispatch and bounded required-check wait must use the exact PR and head',
   );

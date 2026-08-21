@@ -51,8 +51,18 @@ upstream:
   branch: main
 sync:
   state_file: .github/upstream-sync-state.json
+  fail_closed: true
+  autonomous_merge: eligible
 matching:
+  syntax: aeris-glob-v1
   enforced_fork_owned_subset: exact_or_directory_recursive
+  precedence:
+    - sensitive
+    - review_required
+    - fork_owned
+    - generated
+    - upstream_owned
+  default: review_required
 fork_owned:
   - .github/upstream-sync-policy.yml
   - .github/upstream-sync-state.json
@@ -60,6 +70,14 @@ fork_owned:
   - .github/workflows/**
 review_required:
   - .github/**
+sensitive:
+  - .gitmodules
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/*.p12"
+generated: []
+upstream_owned:
+  - "**"
 YAML
 }
 
@@ -73,10 +91,30 @@ upstream:
   branch: main
 sync:
   state_file: .github/upstream-sync-state.json
+  fail_closed: true
+  autonomous_merge: eligible
 matching:
+  syntax: aeris-glob-v1
   enforced_fork_owned_subset: exact_or_directory_recursive
+  precedence:
+    - sensitive
+    - review_required
+    - fork_owned
+    - generated
+    - upstream_owned
+  default: review_required
 fork_owned:
   - ${fork_owned}
+review_required:
+  - .github/**
+sensitive:
+  - .gitmodules
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/*.p12"
+generated: []
+upstream_owned:
+  - "**"
 YAML
 }
 
@@ -159,6 +197,10 @@ test_fork_owned_filter_and_state_advance() {
 
   output="$(prepare "${main}" "${upstream_tip}")"
   assert_eq clean "$(sed -n 's/^state=//p' <<<"${output}")" 'filtered merge state'
+  assert_eq false "$(sed -n 's/^autonomous_eligible=//p' <<<"${output}")" \
+    'review-required backlog autonomous eligibility'
+  assert_eq manual_review "$(sed -n 's/^policy_verdict=//p' <<<"${output}")" \
+    'review-required backlog verdict'
   assert_eq 3 "$(sed -n 's/^filtered_paths=//p' <<<"${output}")" 'filtered path count'
   tree="$(tree_from_output "${output}")"
   assert_eq 'upstream next' "$(git show "${tree}:app.txt")" 'upstream app change'
@@ -177,8 +219,8 @@ test_fork_owned_filter_and_state_advance() {
 
 test_exact_path_and_recursive_directory_filter() {
   local case_name repo root checkpoint upstream_tip main output tree expected_filtered
-  local expected_foo expected_nested
-  for case_name in exact recursive; do
+  local expected_foo expected_nested expected_eligible expected_verdict
+  for case_name in exact recursive policy-manual; do
     repo="${RUN_ROOT}/${case_name}-path-filter"
     new_repo "${repo}"
     cd "${repo}"
@@ -201,16 +243,26 @@ test_exact_path_and_recursive_directory_filter() {
 
     git switch -qc main "${root}"
     write_state "${checkpoint}"
-    if [[ "${case_name}" == exact ]]; then
+    if [[ "${case_name}" == exact || "${case_name}" == policy-manual ]]; then
       write_policy_with_fork_owned 'docs/foo.md'
       expected_filtered=1
       expected_foo='foo v0'
       expected_nested='nested v1'
+      if [[ "${case_name}" == policy-manual ]]; then
+        sed -i 's/autonomous_merge: eligible/autonomous_merge: manual/' .github/upstream-sync-policy.yml
+        expected_eligible=false
+        expected_verdict=manual_review
+      else
+        expected_eligible=true
+        expected_verdict=eligible
+      fi
     else
       write_policy_with_fork_owned 'docs/**'
       expected_filtered=2
       expected_foo='foo v0'
       expected_nested='nested v0'
+      expected_eligible=true
+      expected_verdict=eligible
     fi
     git add .github
     git commit -qm "${case_name} fork-owned policy"
@@ -219,6 +271,10 @@ test_exact_path_and_recursive_directory_filter() {
     output="$(prepare "${main}" "${upstream_tip}")"
     assert_eq clean "$(sed -n 's/^state=//p' <<<"${output}")" \
       "${case_name} path filter state"
+    assert_eq "${expected_eligible}" "$(sed -n 's/^autonomous_eligible=//p' <<<"${output}")" \
+      "${case_name} low-risk eligibility"
+    assert_eq "${expected_verdict}" "$(sed -n 's/^policy_verdict=//p' <<<"${output}")" \
+      "${case_name} low-risk verdict"
     assert_eq "${expected_filtered}" "$(sed -n 's/^filtered_paths=//p' <<<"${output}")" \
       "${case_name} path filter count"
     tree="$(tree_from_output "${output}")"
@@ -366,6 +422,109 @@ test_policy_identity_mismatch() {
     'policy identity mismatch state'
 }
 
+test_sensitive_paths_fail_closed() {
+  local case_name repo checkpoint upstream_tip main output status path
+  for case_name in sensitive; do
+    repo="${RUN_ROOT}/${case_name}-policy"
+    new_repo "${repo}"
+    cd "${repo}"
+
+    printf 'base\n' >app.txt
+    git add app.txt
+    git commit -qm 'checkpoint'
+    checkpoint="$(git rev-parse HEAD)"
+
+    git switch -qc upstream
+    if [[ "${case_name}" == sensitive ]]; then
+      path='crates/core/token.pem'
+    fi
+    mkdir -p "$(dirname "${path}")"
+    printf 'unsafe backlog\n' >"${path}"
+    git add .
+    git commit -qm "${case_name} upstream path"
+    upstream_tip="$(git rev-parse HEAD)"
+
+    git switch -qc main "${checkpoint}"
+    write_state "${checkpoint}"
+    write_policy
+    git add .github
+    git commit -qm "${case_name} policy fixture"
+    main="$(git rev-parse HEAD)"
+
+    set +e
+    output="$(prepare "${main}" "${upstream_tip}" 2>/dev/null)"
+    status=$?
+    set -e
+    assert_eq 3 "${status}" "${case_name} policy exit code"
+    assert_eq error "$(sed -n 's/^state=//p' <<<"${output}")" \
+      "${case_name} policy state"
+  done
+}
+
+test_rejected_aeris_glob_syntax() {
+  local pattern repo checkpoint main output status
+  for pattern in '!docs/**' '/docs/**' 'docs\\**' 'docs/[a-z].md' '' 'docs/'; do
+    repo="${RUN_ROOT}/rejected-pattern-${RANDOM}"
+    new_repo "${repo}"; cd "${repo}"
+    printf 'base\n' >app.txt; git add app.txt; git commit -qm base; checkpoint="$(git rev-parse HEAD)"
+    write_state "${checkpoint}"
+    cat >.github/upstream-sync-policy.yml <<YAML
+version: 1
+upstream:
+  repository: example/Upstream
+  branch: main
+sync:
+  state_file: .github/upstream-sync-state.json
+  fail_closed: true
+  autonomous_merge: eligible
+matching:
+  syntax: aeris-glob-v1
+  enforced_fork_owned_subset: exact_or_directory_recursive
+  precedence:
+    - sensitive
+    - review_required
+    - fork_owned
+    - generated
+    - upstream_owned
+  default: review_required
+fork_owned:
+  - '$pattern'
+review_required:
+  - .github/**
+sensitive:
+  - .gitmodules
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/*.p12"
+generated: []
+upstream_owned:
+  - apps/**
+YAML
+    git add .github; git commit -qm policy; main="$(git rev-parse HEAD)"
+    set +e; output="$(prepare "${main}" "${checkpoint}" 2>/dev/null)"; status=$?; set -e
+    assert_eq 3 "${status}" "rejected syntax ${pattern} exit code"
+    assert_eq error "$(sed -n 's/^state=//p' <<<"${output}")" "rejected syntax ${pattern} state"
+  done
+}
+
+test_unknown_paths_are_manual_review() {
+  local repo="${RUN_ROOT}/unknown-policy" checkpoint upstream_tip main output
+  new_repo "${repo}"
+  cd "${repo}"
+  printf 'base\n' >app.txt; git add app.txt; git commit -qm checkpoint
+  checkpoint="$(git rev-parse HEAD)"
+  git switch -qc upstream
+  printf 'unknown\n' >unclassified.txt; git add .; git commit -qm unknown
+  upstream_tip="$(git rev-parse HEAD)"
+  git switch -qc main "${checkpoint}"; write_state "${checkpoint}"; write_policy
+  sed -i 's#  - "\*\*"#  - apps/**#' .github/upstream-sync-policy.yml
+  git add .github; git commit -qm policy; main="$(git rev-parse HEAD)"
+  output="$(prepare "${main}" "${upstream_tip}")"
+  assert_eq clean "$(sed -n 's/^state=//p' <<<"${output}")" 'unknown path state'
+  assert_eq false "$(sed -n 's/^autonomous_eligible=//p' <<<"${output}")" 'unknown path eligibility'
+  assert_eq manual_review "$(sed -n 's/^policy_verdict=//p' <<<"${output}")" 'unknown path verdict'
+}
+
 test_squash_checkpoint_noop
 test_fork_owned_filter_and_state_advance
 test_exact_path_and_recursive_directory_filter
@@ -373,5 +532,8 @@ test_non_fork_conflict
 test_invalid_state_and_history_rewrite
 test_unsupported_policy_pattern
 test_policy_identity_mismatch
+test_sensitive_paths_fail_closed
+test_unknown_paths_are_manual_review
+test_rejected_aeris_glob_syntax
 
 printf 'PASS prepare checkpoint sync (%s)\n' "${RUN_ROOT}"

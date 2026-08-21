@@ -9,6 +9,9 @@ RUN_ROOT="$(mktemp -d "${RUN_BASE%/}/aeris-automerge.XXXXXX")"
 export AERIS_AUTONOMY_EXPIRES_AT='2099-01-01T00:00:00Z'
 export AERIS_WRITER_APP_SLUG='aeris-writer'
 export BASE_BRANCH='main'
+export SYNC_BRANCH='automation/sync-upstream'
+TEST_BASE_SHA='abcdefabcdefabcdefabcdefabcdefabcdefabcd'
+TEST_SOURCE='upstream/example@1111111111111111111111111111111111111111'
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -39,9 +42,11 @@ new_fake_gh() {
     'if [[ "$1 $2" == "pr merge" && "${FAKE_GH_MERGE_STATUS:-0}" != 0 ]]; then exit "$FAKE_GH_MERGE_STATUS"; fi' \
     'if [[ "$1" == "api" && "$2" == "--method" && "$3" == "PUT" && "${FAKE_GH_API_STATUS:-0}" != 0 ]]; then exit "$FAKE_GH_API_STATUS"; fi' \
     'if [[ "$1" == "api" && "$2" == "--method" && "$3" == "PUT" ]]; then printf "%s\n" "${FAKE_GH_API_RESPONSE:-}"; fi' \
-    'if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then printf "%s\n" "${FAKE_GH_PULL_RESPONSE:-}"; fi' \
-    'if [[ "$1" == "api" && "$2" == repos/*/commits/* && "${FAKE_GH_COMMIT_STATUS:-0}" != 0 ]]; then exit "$FAKE_GH_COMMIT_STATUS"; fi' \
-    'if [[ "$1" == "api" && "$2" == repos/*/commits/* ]]; then printf "%s\n" "${FAKE_GH_COMMIT_RESPONSE:-}"; fi' \
+    'if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then count="$(grep -c "^api repos/.*/pulls/" "$FAKE_GH_LOG")"; if [[ "$count" -eq 1 ]]; then printf "%s\n" "$FAKE_GH_PREFLIGHT_RESPONSE"; else printf "%s\n" "${FAKE_GH_PULL_RESPONSE:-}"; fi; fi' \
+    'if [[ "$1 $2" == "api graphql" ]]; then printf "%s\n" "$FAKE_GH_GOVERNANCE_RESPONSE"; fi' \
+    'if [[ "$1" == "api" && "$2" == repos/*/commits/* && "$2" != "repos/${FAKE_GH_REPOSITORY}/commits/${FAKE_GH_EXPECTED_HEAD}" && "${FAKE_GH_COMMIT_STATUS:-0}" != 0 ]]; then exit "$FAKE_GH_COMMIT_STATUS"; fi' \
+    'if [[ "$1" == "api" && "$2" == "repos/${FAKE_GH_REPOSITORY}/commits/${FAKE_GH_EXPECTED_HEAD}" ]]; then printf "%s\n" "$FAKE_GH_HEAD_COMMIT_RESPONSE"; fi' \
+    'if [[ "$1" == "api" && "$2" == repos/*/commits/* && "$2" != "repos/${FAKE_GH_REPOSITORY}/commits/${FAKE_GH_EXPECTED_HEAD}" ]]; then printf "%s\n" "${FAKE_GH_COMMIT_RESPONSE:-}"; fi' \
     'if [[ "$1 $2 ${3:-}" == "pr view "* ]]; then if [[ "${FAKE_GH_VIEW_RESPONSE+x}" == x ]]; then printf "%s\n" "${FAKE_GH_VIEW_RESPONSE}"; else printf "%s\n" "${FAKE_GH_AUTO_MERGE:-false}"; fi; fi' \
     >"${bin}/gh"
   chmod +x "${bin}/gh"
@@ -68,14 +73,43 @@ EOF
 }
 
 run_helper() {
-  local fake_bin="$1" log="$2"
+  local fake_bin="$1" log="$2" head='' base='' source='' pr_number=0
   shift 2
+  if [[ "$1" == merge && $# -eq 4 ]]; then
+    set -- "$@" "${TEST_BASE_SHA}" "${TEST_SOURCE}" eligible
+  fi
+  if [[ "$1" == merge && $# -eq 7 ]]; then
+    head="$4"
+    base="$5"
+    source="$6"
+    if [[ "$3" =~ /pull/([1-9][0-9]*)/?$ ]]; then pr_number="${BASH_REMATCH[1]}"; else pr_number="$3"; fi
+  fi
+  preflight="${FAKE_GH_PREFLIGHT_RESPONSE:-}"
+  if [[ -z "${preflight}" ]]; then
+    preflight="$(jq -nc --argjson number "${pr_number}" --arg head "${head}" --arg base "${base}" --arg repo "${2:-}" \
+      '{number:$number,state:"open",merged:false,draft:false,head:{sha:$head,ref:"automation/sync-upstream",repo:{full_name:$repo}},base:{ref:"main",sha:$base},auto_merge:null}')"
+  fi
+  head_commit="${FAKE_GH_HEAD_COMMIT_RESPONSE:-}"
+  if [[ -z "${head_commit}" ]]; then
+    message="$(printf 'Sync-Upstream-Automation: true\nSync-Upstream-Source: %s\nSync-Upstream-Base: %s\nSync-Upstream-Policy-Verdict: eligible' "${source}" "${base}")"
+    head_commit="$(jq -nc --arg head "${head}" --arg base "${base}" --arg message "${message}" \
+      '{sha:$head,parents:[{sha:$base}],commit:{message:$message}}')"
+  fi
+  governance="${FAKE_GH_GOVERNANCE_RESPONSE:-}"
+  if [[ -z "${governance}" ]]; then
+    governance="$(jq -nc --argjson number "${pr_number}" --arg head "${head}" --arg base "${base}" --arg repo "${2:-}" \
+      '{data:{repository:{pullRequest:{number:$number,state:"OPEN",isDraft:false,headRefName:"automation/sync-upstream",headRefOid:$head,baseRefName:"main",baseRefOid:$base,headRepository:{nameWithOwner:$repo},autoMergeRequest:null,reviewDecision:null,reviewThreads:{nodes:[],pageInfo:{hasNextPage:false}}}}}}')"
+  fi
   PATH="${fake_bin}:${PATH}" FAKE_GH_LOG="${log}" \
     FAKE_GH_API_STATUS="${FAKE_GH_API_STATUS:-0}" \
     FAKE_GH_API_RESPONSE="${FAKE_GH_API_RESPONSE:-}" \
     FAKE_GH_PULL_RESPONSE="${FAKE_GH_PULL_RESPONSE:-}" \
     FAKE_GH_COMMIT_STATUS="${FAKE_GH_COMMIT_STATUS:-0}" \
     FAKE_GH_COMMIT_RESPONSE="${FAKE_GH_COMMIT_RESPONSE:-}" \
+    FAKE_GH_PREFLIGHT_RESPONSE="${preflight}" \
+    FAKE_GH_HEAD_COMMIT_RESPONSE="${head_commit}" \
+    FAKE_GH_GOVERNANCE_RESPONSE="${governance}" \
+    FAKE_GH_REPOSITORY="${2:-}" FAKE_GH_EXPECTED_HEAD="${head}" \
     "$HELPER" "$@"
 }
 
@@ -88,20 +122,21 @@ test_merge_accepts_number_and_full_sha() {
     FAKE_GH_COMMIT_RESPONSE='{"sha":"fedcba9876543210fedcba9876543210fedcba98","parents":[{"sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd"}]}' \
   output="$(run_helper "${bin}" "${log}" merge owner/repo 42 "${sha}")"
   assert_eq '' "${output}" 'merge should not emit output'
-  assert_eq "api --method PUT repos/owner/repo/pulls/42/merge -f merge_method=squash -f sha=${sha} "$'\n'"api repos/owner/repo/pulls/42 "$'\n'"api repos/owner/repo/commits/fedcba9876543210fedcba9876543210fedcba98 " \
-    "$(<"${log}")" 'merge arguments'
+  [[ "$(grep -c '^api --method PUT ' "${log}")" -eq 1 ]] || fail 'merge mutation count'
+  [[ "$(grep -c '^api repos/owner/repo/pulls/42 ' "${log}")" -eq 2 ]] || fail 'merge PR read count'
+  grep -Fq -- "-f sha=${sha}" "${log}" || fail 'merge head SHA argument'
 }
 
 test_merge_accepts_matching_url() {
   local bin="${RUN_ROOT}/merge-url/bin" log="${RUN_ROOT}/merge-url/gh.log" sha
-  sha='abcdefabcdefabcdefabcdefabcdefabcdefabcd'
+  sha='0123456789abcdef0123456789abcdef01234567'
   new_fake_gh "${bin}"
   FAKE_GH_API_RESPONSE='{"merged":true,"sha":"fedcba9876543210fedcba9876543210fedcba98"}' \
     FAKE_GH_PULL_RESPONSE="{\"number\":7,\"state\":\"closed\",\"merged\":true,\"merged_at\":\"2099-01-01T00:00:00Z\",\"draft\":false,\"head\":{\"sha\":\"${sha}\"},\"base\":{\"ref\":\"main\",\"sha\":\"abcdefabcdefabcdefabcdefabcdefabcdefabcd\"},\"auto_merge\":null,\"merged_by\":{\"login\":\"aeris-writer[bot]\"},\"merge_commit_sha\":\"fedcba9876543210fedcba9876543210fedcba98\"}" \
     FAKE_GH_COMMIT_RESPONSE='{"sha":"fedcba9876543210fedcba9876543210fedcba98","parents":[{"sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd"}]}' \
     run_helper "${bin}" "${log}" merge owner/repo https://github.com/owner/repo/pull/7/ "${sha}"
-  assert_eq "api --method PUT repos/owner/repo/pulls/7/merge -f merge_method=squash -f sha=${sha} "$'\n'"api repos/owner/repo/pulls/7 "$'\n'"api repos/owner/repo/commits/fedcba9876543210fedcba9876543210fedcba98 " \
-    "$(<"${log}")" 'URL merge arguments'
+  [[ "$(grep -c '^api --method PUT ' "${log}")" -eq 1 ]] || fail 'URL merge mutation count'
+  [[ "$(grep -c '^api repos/owner/repo/pulls/7 ' "${log}")" -eq 2 ]] || fail 'URL merge PR read count'
 }
 
 test_merge_rejects_unproven_response() {
@@ -115,8 +150,8 @@ test_merge_rejects_unproven_response() {
   status=$?
   set -e
   assert_status 64 "${status}" 'unproven merge response must fail closed'
-  assert_eq "api --method PUT repos/owner/repo/pulls/42/merge -f merge_method=squash -f sha=${sha} "$'\n'"api repos/owner/repo/pulls/42 " \
-    "$(<"${log}")" 'unproven response must still perform one readback'
+  [[ "$(grep -c '^api --method PUT ' "${log}")" -eq 1 ]] || fail 'unproven response retried mutation'
+  [[ "$(grep -c '^api repos/owner/repo/pulls/42 ' "${log}")" -eq 2 ]] || fail 'unproven response PR reads'
 }
 
 test_merge_accepts_lost_response_when_readback_is_exact() {
@@ -127,7 +162,7 @@ test_merge_accepts_lost_response_when_readback_is_exact() {
     FAKE_GH_PULL_RESPONSE="{\"number\":42,\"state\":\"closed\",\"merged\":true,\"merged_at\":\"2099-01-01T00:00:00Z\",\"draft\":false,\"head\":{\"sha\":\"${sha}\"},\"base\":{\"ref\":\"main\",\"sha\":\"abcdefabcdefabcdefabcdefabcdefabcdefabcd\"},\"auto_merge\":null,\"merged_by\":{\"login\":\"aeris-writer[bot]\"},\"merge_commit_sha\":\"fedcba9876543210fedcba9876543210fedcba98\"}" \
     FAKE_GH_COMMIT_RESPONSE='{"sha":"fedcba9876543210fedcba9876543210fedcba98","parents":[{"sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd"}]}' \
     run_helper "${bin}" "${log}" merge owner/repo 42 "${sha}"
-  [[ "$(grep -c '^api ' "${log}")" -eq 3 ]] || fail 'lost response did not perform one mutation and two readbacks'
+  [[ "$(grep -c '^api ' "${log}")" -eq 6 ]] || fail 'lost response did not perform preflight, one mutation, and readback'
 }
 
 test_merge_failed_mutation_open_readback_fails() {
@@ -141,8 +176,8 @@ test_merge_failed_mutation_open_readback_fails() {
   set -e
   assert_status 64 "${status}" 'failed mutation with open readback must fail closed'
   [[ "$(grep -c '^api --method PUT ' "${log}")" -eq 1 ]] || fail 'failed mutation retried'
-  [[ "$(grep -c '^api repos/owner/repo/pulls/42 ' "${log}")" -eq 1 ]] ||
-    fail 'failed mutation did not perform exactly one pull readback'
+  [[ "$(grep -c '^api repos/owner/repo/pulls/42 ' "${log}")" -eq 2 ]] ||
+    fail 'failed mutation did not perform preflight and one pull readback'
 }
 
 test_merge_commit_readback_failure_fails_closed() {
@@ -158,8 +193,8 @@ test_merge_commit_readback_failure_fails_closed() {
   set -e
   assert_status 64 "${status}" 'failed commit readback must fail closed'
   [[ "$(grep -c '^api --method PUT ' "${log}")" -eq 1 ]] || fail 'commit readback failure retried mutation'
-  [[ "$(grep -c '^api repos/owner/repo/pulls/42 ' "${log}")" -eq 1 ]] ||
-    fail 'commit readback failure did not perform exactly one pull readback'
+  [[ "$(grep -c '^api repos/owner/repo/pulls/42 ' "${log}")" -eq 2 ]] ||
+    fail 'commit readback failure did not perform preflight and one pull readback'
   [[ "$(grep -c '^api repos/owner/repo/commits/fedcba9876543210fedcba9876543210fedcba98 ' "${log}")" -eq 1 ]] ||
     fail 'commit readback failure did not perform exactly one commit readback'
 }
@@ -193,8 +228,58 @@ test_api_failure_with_open_readback_fails_closed() {
   set -e
   assert_status 64 "${status}" 'API failure with open readback must fail closed'
   [[ "$(grep -c '^api --method PUT ' "${log}")" -eq 1 ]] || fail 'API failure retried mutation'
-  [[ "$(grep -c '^api repos/owner/repo/pulls/7 ' "${log}")" -eq 1 ]] ||
-    fail 'API failure did not perform exactly one pull readback'
+  [[ "$(grep -c '^api repos/owner/repo/pulls/7 ' "${log}")" -eq 2 ]] ||
+    fail 'API failure did not perform preflight and one pull readback'
+}
+
+test_merge_preflight_drift_never_mutates() {
+  local bin="${RUN_ROOT}/preflight-drift/bin" log="${RUN_ROOT}/preflight-drift/gh.log" status
+  local sha='0123456789abcdef0123456789abcdef01234567'
+  new_fake_gh "${bin}"
+  set +e
+  FAKE_GH_PREFLIGHT_RESPONSE="{\"number\":42,\"state\":\"open\",\"merged\":false,\"draft\":false,\"head\":{\"sha\":\"${sha}\",\"ref\":\"automation/sync-upstream\",\"repo\":{\"full_name\":\"owner/repo\"}},\"base\":{\"ref\":\"main\",\"sha\":\"2222222222222222222222222222222222222222\"},\"auto_merge\":null}" \
+    run_helper "${bin}" "${log}" merge owner/repo 42 "${sha}" >/dev/null 2>&1
+  status=$?
+  set -e
+  assert_status 64 "${status}" 'base drift must fail closed before mutation'
+  [[ "$(grep -c '^api --method PUT ' "${log}" || true)" -eq 0 ]] || fail 'base drift reached mutation'
+}
+
+test_merge_governance_and_trailer_failures_never_mutate() {
+  local case_name bin log status sha='0123456789abcdef0123456789abcdef01234567'
+  for case_name in unresolved blocking-review bad-trailer; do
+    bin="${RUN_ROOT}/${case_name}/bin"
+    log="${RUN_ROOT}/${case_name}/gh.log"
+    new_fake_gh "${bin}"
+    set +e
+    if [[ "${case_name}" == unresolved ]]; then
+      FAKE_GH_GOVERNANCE_RESPONSE="{\"data\":{\"repository\":{\"pullRequest\":{\"number\":42,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"automation/sync-upstream\",\"headRefOid\":\"${sha}\",\"baseRefName\":\"main\",\"baseRefOid\":\"${TEST_BASE_SHA}\",\"headRepository\":{\"nameWithOwner\":\"owner/repo\"},\"autoMergeRequest\":null,\"reviewDecision\":null,\"reviewThreads\":{\"nodes\":[{\"isResolved\":false}],\"pageInfo\":{\"hasNextPage\":false}}}}}}" \
+        run_helper "${bin}" "${log}" merge owner/repo 42 "${sha}" >/dev/null 2>&1
+    elif [[ "${case_name}" == blocking-review ]]; then
+      FAKE_GH_GOVERNANCE_RESPONSE="{\"data\":{\"repository\":{\"pullRequest\":{\"number\":42,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"automation/sync-upstream\",\"headRefOid\":\"${sha}\",\"baseRefName\":\"main\",\"baseRefOid\":\"${TEST_BASE_SHA}\",\"headRepository\":{\"nameWithOwner\":\"owner/repo\"},\"autoMergeRequest\":null,\"reviewDecision\":\"CHANGES_REQUESTED\",\"reviewThreads\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}}" \
+        run_helper "${bin}" "${log}" merge owner/repo 42 "${sha}" >/dev/null 2>&1
+    else
+      FAKE_GH_HEAD_COMMIT_RESPONSE="{\"sha\":\"${sha}\",\"parents\":[{\"sha\":\"${TEST_BASE_SHA}\"}],\"commit\":{\"message\":\"Sync-Upstream-Automation: true\\nSync-Upstream-Source: attacker/repo@1111111111111111111111111111111111111111\\nSync-Upstream-Base: ${TEST_BASE_SHA}\\nSync-Upstream-Policy-Verdict: eligible\"}}" \
+        run_helper "${bin}" "${log}" merge owner/repo 42 "${sha}" >/dev/null 2>&1
+    fi
+    status=$?
+    set -e
+    assert_status 64 "${status}" "${case_name} must fail closed before mutation"
+    [[ "$(grep -c '^api --method PUT ' "${log}" || true)" -eq 0 ]] || fail "${case_name} reached mutation"
+  done
+}
+
+test_manual_verdict_never_calls_gh() {
+  local bin="${RUN_ROOT}/manual-verdict/bin" log="${RUN_ROOT}/manual-verdict/gh.log" status
+  new_fake_gh "${bin}"
+  set +e
+  run_helper "${bin}" "${log}" merge owner/repo 42 \
+    0123456789abcdef0123456789abcdef01234567 "${TEST_BASE_SHA}" "${TEST_SOURCE}" manual_review \
+    >/dev/null 2>&1
+  status=$?
+  set -e
+  assert_status 64 "${status}" 'manual verdict must reject direct merge'
+  [[ ! -e "${log}" ]] || fail 'manual verdict called gh'
 }
 
 test_legacy_arm_action_is_rejected() {
@@ -289,6 +374,9 @@ test_merge_failed_mutation_open_readback_fails
 test_merge_commit_readback_failure_fails_closed
 test_invalid_input_never_calls_gh
 test_api_failure_with_open_readback_fails_closed
+test_merge_preflight_drift_never_mutates
+test_merge_governance_and_trailer_failures_never_mutate
+test_manual_verdict_never_calls_gh
 test_legacy_arm_action_is_rejected
 test_disarm_when_enabled
 test_disarm_is_noop_when_disabled
