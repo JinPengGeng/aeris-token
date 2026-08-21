@@ -1863,7 +1863,9 @@ fn local_candidate_failure_should_invalidate_affinity(
         }
         LocalFailoverClassification::StopErrorPattern
         | LocalFailoverClassification::StopExecutionError
-        | LocalFailoverClassification::StopCyberPolicy => false,
+        | LocalFailoverClassification::StopCyberPolicy
+        | LocalFailoverClassification::StopFailureOrigin
+        | LocalFailoverClassification::StopReplayPolicy => false,
     }
 }
 
@@ -1882,8 +1884,12 @@ fn local_candidate_failure_should_invalidate_affinity_for_provider(
         return true;
     }
 
-    let disposition =
-        classify_failure_disposition(provider_api_format, classification, status_code);
+    let disposition = classify_failure_disposition(
+        provider_api_format,
+        classification,
+        status_code,
+        provider_failure_origin_for_effect(status_code),
+    );
     !(disposition.retry_action == crate::orchestration::FailureRetryAction::Stop
         && disposition.failure_scope == FailureScope::None)
 }
@@ -1901,10 +1907,23 @@ fn local_candidate_failure_should_apply_key_effects(
     }
 
     matches!(
-        classify_failure_disposition(provider_api_format, classification, status_code)
-            .failure_scope,
+        classify_failure_disposition(
+            provider_api_format,
+            classification,
+            status_code,
+            provider_failure_origin_for_effect(status_code),
+        )
+        .failure_scope,
         FailureScope::Credential
     )
+}
+
+fn provider_failure_origin_for_effect(status_code: u16) -> crate::orchestration::FailureOrigin {
+    if status_code == 401 {
+        crate::orchestration::FailureOrigin::UpstreamCredential
+    } else {
+        crate::orchestration::FailureOrigin::UpstreamProvider
+    }
 }
 
 fn local_candidate_failure_should_record_pool_error(
@@ -3487,12 +3506,12 @@ mod tests {
             LocalFailoverClassification::RetryUpstreamFailure,
             503,
         ));
-        assert!(local_candidate_failure_should_apply_key_effects(
+        assert!(!local_candidate_failure_should_apply_key_effects(
             "claude:messages",
             LocalFailoverClassification::RetryUpstreamFailure,
             401,
         ));
-        assert!(local_candidate_failure_should_apply_key_effects(
+        assert!(!local_candidate_failure_should_apply_key_effects(
             "claude:messages",
             LocalFailoverClassification::RetryUpstreamFailure,
             403,

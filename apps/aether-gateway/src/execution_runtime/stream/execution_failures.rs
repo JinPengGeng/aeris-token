@@ -546,6 +546,7 @@ pub(super) async fn handle_prefetch_provider_private_stream_error(
             &plan.provider_api_format,
             failure_analysis.classification,
             status_code,
+            failure_analysis.failure_origin,
         );
         if let Some(retry_scope) = retry_scope_out {
             *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
@@ -663,6 +664,7 @@ pub(super) async fn handle_prefetch_stream_failure(
             &plan.provider_api_format,
             failure_analysis.classification,
             payload.status_code,
+            failure_analysis.failure_origin,
         );
         if let Some(retry_scope) = retry_scope_out {
             *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);

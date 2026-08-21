@@ -7,6 +7,8 @@ use tracing::debug;
 use crate::provider_transport::GatewayProviderTransportSnapshot;
 use crate::AppState;
 
+use super::classifier::OperationReplayPolicy;
+
 pub(crate) const CYBER_CONTINUE_FAILOVER_CONFIG_KEY: &str = "cyber_continue_failover";
 pub(crate) const RESPONSES_WEBSOCKET_CONFIG_KEY: &str = "responses_websocket";
 
@@ -36,7 +38,7 @@ impl Default for LocalFailoverPolicy {
             success_failover_patterns: Vec::new(),
             error_stop_patterns: Vec::new(),
             stop_cyber_policy_errors: true,
-            retry_client_errors_by_default: true,
+            retry_client_errors_by_default: false,
         }
     }
 }
@@ -45,6 +47,139 @@ impl Default for LocalFailoverPolicy {
 pub(crate) struct LocalFailoverRegexRule {
     pub(crate) pattern: String,
     pub(crate) status_codes: BTreeSet<u16>,
+}
+
+pub(crate) fn operation_replay_policy(
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+) -> OperationReplayPolicy {
+    let request_path = report_context
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("request_path"))
+        .and_then(Value::as_str);
+    let api_operation = report_context
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("api_operation"))
+        .and_then(Value::as_str);
+    let original_request_body = report_context
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("original_request_body"));
+
+    operation_replay_policy_from_parts(
+        plan.method.as_str(),
+        request_path,
+        api_operation,
+        plan.client_api_format.as_str(),
+        plan.provider_api_format.as_str(),
+        plan.body.json_body.as_ref(),
+        original_request_body,
+        plan.body.body_bytes_b64.is_some() || plan.body.body_ref.is_some(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn operation_replay_policy_from_parts(
+    method: &str,
+    request_path: Option<&str>,
+    api_operation: Option<&str>,
+    client_api_format: &str,
+    provider_api_format: &str,
+    provider_body: Option<&Value>,
+    original_request_body: Option<&Value>,
+    has_opaque_body: bool,
+) -> OperationReplayPolicy {
+    let method = method.trim().to_ascii_uppercase();
+    if matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS") {
+        return OperationReplayPolicy::Conservative;
+    }
+
+    if method != "POST"
+        || api_operation.is_some_and(|operation| operation.eq_ignore_ascii_case("compact"))
+        || request_path.is_some_and(path_has_non_replayable_operation)
+        || api_format_may_have_external_side_effects(client_api_format)
+        || api_format_may_have_external_side_effects(provider_api_format)
+        || provider_body.is_some_and(|body| json_has_tool_call_risk(body, 0))
+        || original_request_body.is_some_and(|body| json_has_tool_call_risk(body, 0))
+        || (has_opaque_body && provider_body.is_none() && original_request_body.is_none())
+    {
+        OperationReplayPolicy::NoReplayAfterDispatch
+    } else {
+        OperationReplayPolicy::Conservative
+    }
+}
+
+fn path_has_non_replayable_operation(path: &str) -> bool {
+    let path = path.trim().to_ascii_lowercase();
+    path.split('/').any(|segment| {
+        matches!(
+            segment,
+            "compact"
+                | "files"
+                | "images"
+                | "videos"
+                | "batches"
+                | "cancel"
+                | "delete"
+                | "remix"
+                | "edits"
+        )
+    })
+}
+
+fn api_format_may_have_external_side_effects(api_format: &str) -> bool {
+    matches!(
+        api_format.trim().to_ascii_lowercase().as_str(),
+        "openai:image" | "openai:video" | "gemini:video" | "openai:files"
+    )
+}
+
+fn json_has_tool_call_risk(value: &Value, depth: usize) -> bool {
+    if depth > 32 {
+        return true;
+    }
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if matches!(key.as_str(), "tools" | "tool_calls")
+                    && value.as_array().is_some_and(|values| !values.is_empty())
+                {
+                    return true;
+                }
+                if matches!(key.as_str(), "tool_choice" | "function_call")
+                    && !matches!(value, Value::Null)
+                    && !value
+                        .as_str()
+                        .is_some_and(|choice| choice.eq_ignore_ascii_case("none"))
+                {
+                    return true;
+                }
+                if key == "type"
+                    && value.as_str().is_some_and(|kind| {
+                        matches!(
+                            kind,
+                            "function_call"
+                                | "function_call_output"
+                                | "tool_use"
+                                | "tool_result"
+                                | "computer_call"
+                                | "web_search_call"
+                                | "image_generation_call"
+                        )
+                    })
+                {
+                    return true;
+                }
+                if json_has_tool_call_risk(value, depth + 1) {
+                    return true;
+                }
+            }
+            false
+        }
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_has_tool_call_risk(value, depth + 1)),
+        _ => false,
+    }
 }
 
 pub(crate) async fn resolve_local_failover_policy(
@@ -130,10 +265,10 @@ pub(crate) fn local_failover_policy_from_transport(
             .and_then(|value| value.get("max_transfer_timeout_seconds"))
             .and_then(parse_u64_value)
             .unwrap_or(0),
-        retry_client_errors_by_default:
-            crate::ai_serving::api_format_defaults_to_client_error_failover(
-                &transport.endpoint.api_format,
-            ),
+        retry_client_errors_by_default: rules
+            .and_then(|value| value.get("retry_client_errors_by_default"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         stop_cyber_policy_errors: true,
         stop_status_codes: rules
             .map(|value| {
@@ -213,7 +348,7 @@ pub(crate) fn local_failover_policy_from_report_context(
         retry_client_errors_by_default: object
             .get("retry_client_errors_by_default")
             .and_then(Value::as_bool)
-            .unwrap_or(true),
+            .unwrap_or(false),
     })
 }
 
@@ -426,10 +561,11 @@ mod tests {
 
     use super::{
         append_local_failover_policy_to_value, local_failover_policy_from_report_context,
-        local_failover_policy_from_transport, responses_websocket_adapter,
-        responses_websocket_enabled, LocalFailoverPolicy, LocalFailoverRegexRule,
-        ResponsesWebSocketAdapter,
+        local_failover_policy_from_transport, operation_replay_policy_from_parts,
+        responses_websocket_adapter, responses_websocket_enabled, LocalFailoverPolicy,
+        LocalFailoverRegexRule, ResponsesWebSocketAdapter,
     };
+    use crate::orchestration::OperationReplayPolicy;
     use crate::provider_transport::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
@@ -538,8 +674,88 @@ mod tests {
                     status_codes: [422].into_iter().collect(),
                 }],
                 stop_cyber_policy_errors: true,
-                retry_client_errors_by_default: true,
+                retry_client_errors_by_default: false,
             })
+        );
+    }
+
+    #[test]
+    fn replay_policy_is_strict_for_compact_tools_and_side_effecting_surfaces() {
+        for (path, operation, format, body) in [
+            (
+                Some("/v1/responses/compact"),
+                None,
+                "openai:responses",
+                json!({}),
+            ),
+            (None, Some("compact"), "openai:responses", json!({})),
+            (
+                None,
+                None,
+                "openai:responses",
+                json!({"tools": [{"type": "function", "name": "lookup"}]}),
+            ),
+            (
+                None,
+                None,
+                "openai:responses",
+                json!({"input": [{"type": "function_call_output", "output": "ok"}]}),
+            ),
+            (None, None, "openai:image", json!({"prompt": "draw"})),
+        ] {
+            assert_eq!(
+                operation_replay_policy_from_parts(
+                    "POST",
+                    path,
+                    operation,
+                    format,
+                    format,
+                    Some(&body),
+                    None,
+                    false,
+                ),
+                OperationReplayPolicy::NoReplayAfterDispatch,
+            );
+        }
+    }
+
+    #[test]
+    fn replay_policy_allows_conservative_switch_for_plain_inference_and_reads() {
+        assert_eq!(
+            operation_replay_policy_from_parts(
+                "POST",
+                Some("/v1/responses"),
+                None,
+                "openai:responses",
+                "openai:responses",
+                Some(&json!({"model": "gpt-test", "input": "hello"})),
+                None,
+                false,
+            ),
+            OperationReplayPolicy::Conservative,
+        );
+        assert_eq!(
+            operation_replay_policy_from_parts(
+                "GET",
+                Some("/v1/models"),
+                None,
+                "openai:models",
+                "openai:models",
+                None,
+                None,
+                false,
+            ),
+            OperationReplayPolicy::Conservative,
+        );
+    }
+
+    #[test]
+    fn opaque_post_body_fails_closed_for_replay() {
+        assert_eq!(
+            operation_replay_policy_from_parts(
+                "POST", None, None, "unknown", "unknown", None, None, true,
+            ),
+            OperationReplayPolicy::NoReplayAfterDispatch,
         );
     }
 

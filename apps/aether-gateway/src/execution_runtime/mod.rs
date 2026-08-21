@@ -76,7 +76,9 @@ mod retry_scope_tests {
     use aether_ai_serving::AiAttemptRetryScope;
 
     use super::ai_attempt_retry_scope_from_failure_disposition;
-    use crate::orchestration::{classify_failure_disposition, LocalFailoverClassification};
+    use crate::orchestration::{
+        classify_failure_disposition, FailureOrigin, LocalFailoverClassification,
+    };
 
     #[test]
     fn anthropic_failure_scope_survives_runtime_mapping() {
@@ -85,10 +87,11 @@ mod retry_scope_tests {
                 "claude:messages",
                 LocalFailoverClassification::RetryUpstreamFailure,
                 status_code,
+                FailureOrigin::UpstreamProvider,
             ))
         };
 
-        assert_eq!(retry_scope(429), AiAttemptRetryScope::Credential);
+        assert_eq!(retry_scope(429), AiAttemptRetryScope::Candidate);
         assert_eq!(retry_scope(500), AiAttemptRetryScope::Endpoint);
         assert_eq!(retry_scope(529), AiAttemptRetryScope::Provider);
         assert_eq!(retry_scope(400), AiAttemptRetryScope::Candidate);
@@ -100,6 +103,7 @@ mod retry_scope_tests {
             "openai:chat",
             LocalFailoverClassification::RetryUpstreamFailure,
             429,
+            FailureOrigin::UpstreamProvider,
         );
 
         assert_eq!(

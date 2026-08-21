@@ -112,13 +112,13 @@ use crate::execution_runtime::{
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
     apply_local_execution_effect, build_local_error_flow_metadata, classify_failure_disposition,
-    cyber_continue_failover_enabled, spawn_local_oauth_success_effect,
+    cyber_continue_failover_enabled, operation_replay_policy, spawn_local_oauth_success_effect,
     trace_upstream_response_body, with_error_flow_report_context,
-    with_upstream_response_report_context, FailureDisposition, FailureTokenAction,
-    LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
-    LocalExecutionEffect, LocalExecutionEffectContext, LocalFailoverAnalysis,
-    LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
-    LocalOAuthSuccessEffect, LocalPoolErrorEffect,
+    with_upstream_response_report_context, FailureDisposition, LocalAdaptiveRateLimitEffect,
+    LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
+    LocalExecutionEffectContext, LocalFailoverAnalysis, LocalHealthFailureEffect,
+    LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect,
+    LocalPoolErrorEffect,
 };
 use crate::provider_pool_demand::{
     acquire_provider_pool_in_flight_guard, ProviderPoolInFlightGuard,
@@ -1233,14 +1233,14 @@ async fn execute_in_process_stream_with_oauth_retry(
         .as_ref()
         .map(|failure| failure.status_code)
         .unwrap_or(execution.status_code);
-    let retry_requested =
-        analyzed_prefetched_failure
+    // OAuth refresh has its own strict proof gate. An embedded Anthropic error
+    // is an upstream 200 transport response, so its disposition must not
+    // suppress that gate before it can inspect the parsed error taxonomy.
+    let retry_requested = operation_replay_policy(plan, report_context).allows_candidate_switch()
+        && analyzed_prefetched_failure
             .as_ref()
             .map_or(execution.status_code >= 400, |failure| {
-                matches!(
-                    failure.disposition.token_action,
-                    FailureTokenAction::ForceRefresh
-                )
+                failure.status_code >= 400
             });
     if retry_requested
         && uses_oauth_credential
@@ -1296,6 +1296,7 @@ async fn analyze_prefetched_stream_failure(
         plan.provider_api_format.as_str(),
         analysis.classification,
         failure.status_code,
+        analysis.failure_origin,
     );
     AnalyzedPrefetchedStreamFailure {
         status_code: failure.status_code,
@@ -5820,6 +5821,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 &plan.provider_api_format,
                 failover_analysis.classification,
                 status_code,
+                failover_analysis.failure_origin,
             );
             if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
                 *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
@@ -11457,7 +11459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_anthropic_auth_error_moves_to_the_next_credential() {
+    async fn native_anthropic_auth_error_stops_without_credential_rotation() {
         let upstream_error = concat!(
             "event: error\n",
             "data: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid credential\"}}\n\n",
@@ -11468,18 +11470,18 @@ mod tests {
         )
         .await;
 
-        let AiAttemptExecutionOutcome::Retry {
-            scope,
-            fallback_response: Some(fallback_response),
-        } = outcome
-        else {
-            panic!("precommit authentication error should retry another credential")
+        let AiAttemptExecutionOutcome::Responded(response) = outcome else {
+            panic!("embedded authentication error should stop without failover")
         };
-        assert_eq!(scope, AiAttemptRetryScope::Credential);
-        let fallback_body = to_bytes(fallback_response.into_body(), usize::MAX)
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("fallback response body should read");
-        assert_eq!(fallback_body.as_ref(), upstream_error.as_bytes());
+            .expect("structured error response body should read");
+        let response_body: Value = serde_json::from_slice(&response_body)
+            .expect("embedded Anthropic error should be converted to a structured JSON response");
+        assert_eq!(response_body["type"], "error");
+        assert_eq!(response_body["error"]["type"], "authentication_error");
+        assert_eq!(response_body["error"]["message"], "invalid credential");
     }
 
     #[tokio::test]
