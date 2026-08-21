@@ -8,7 +8,8 @@ import { GitHubClient } from './github-client.mjs';
 const SHA = /^[0-9a-f]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
-const MAXIMUM_ARTIFACT_BYTES = 2 * 1024 * 1024;
+const MAXIMUM_CANDIDATE_ARTIFACT_BYTES = 2 * 1024 * 1024;
+const MAXIMUM_RUNTIME_ARTIFACT_BYTES = 1024 * 1024;
 
 export class AutonomyPublishPreflightError extends Error {
   constructor(message) {
@@ -85,18 +86,36 @@ export async function evaluatePublishPreflight(input, client) {
   const actor = required(run.actor, 'candidate workflow actor', LOGIN);
 
   const artifactPage = await client.getRunArtifacts(runId);
-  if (!Number.isSafeInteger(artifactPage?.total_count) || artifactPage.total_count !== 1 ||
-      !Array.isArray(artifactPage?.artifacts) || artifactPage.artifacts.length !== 1) {
-    reject('candidate workflow must contain exactly one artifact');
+  if (!Number.isSafeInteger(artifactPage?.total_count) || artifactPage.total_count !== 2 ||
+      !Array.isArray(artifactPage?.artifacts) || artifactPage.artifacts.length !== 2) {
+    reject('candidate workflow must contain exactly the runtime and candidate artifacts');
   }
-  const artifact = artifactPage.artifacts[0];
-  const name = required(artifact?.name, 'candidate artifact name');
   const escapedRun = String(runId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const escapedAttempt = String(runAttempt).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = new RegExp(`^agent-candidate-issue-([1-9][0-9]*)-run-${escapedRun}-${escapedAttempt}$`).exec(name);
-  if (!match) reject('candidate artifact name does not bind the workflow run');
+  const candidatePattern = new RegExp(`^agent-candidate-issue-([1-9][0-9]*)-run-${escapedRun}-${escapedAttempt}$`);
+  const runtimeName = `agent-candidate-runtime-${runId}-${runAttempt}`;
+  const namedArtifacts = artifactPage.artifacts.map((artifact) => ({
+    artifact,
+    name: required(artifact?.name, 'artifact name'),
+  }));
+  const runtimeArtifacts = namedArtifacts.filter(({ name }) => name === runtimeName);
+  const candidateArtifacts = namedArtifacts
+    .map(({ artifact, name }) => ({ artifact, name, match: candidatePattern.exec(name) }))
+    .filter(({ match }) => match !== null);
+  if (runtimeArtifacts.length !== 1 || candidateArtifacts.length !== 1) {
+    reject('candidate workflow artifact names do not form the exact bound pair');
+  }
+  const runtimeArtifact = runtimeArtifacts[0].artifact;
+  const { artifact, name, match } = candidateArtifacts[0];
+  const runtimeArtifactId = positiveInteger(runtimeArtifact.id, 'runtime artifact id');
+  const candidateArtifactId = positiveInteger(artifact.id, 'candidate artifact id');
+  if (runtimeArtifactId === candidateArtifactId) reject('candidate workflow artifact identities are not unique');
+  if (runtimeArtifact?.expired !== false || !Number.isSafeInteger(runtimeArtifact?.size_in_bytes) ||
+      runtimeArtifact.size_in_bytes <= 0 || runtimeArtifact.size_in_bytes > MAXIMUM_RUNTIME_ARTIFACT_BYTES) {
+    reject('runtime artifact lifecycle or size is invalid');
+  }
   if (artifact?.expired !== false || !Number.isSafeInteger(artifact?.size_in_bytes) ||
-      artifact.size_in_bytes <= 0 || artifact.size_in_bytes > MAXIMUM_ARTIFACT_BYTES) {
+      artifact.size_in_bytes <= 0 || artifact.size_in_bytes > MAXIMUM_CANDIDATE_ARTIFACT_BYTES) {
     reject('candidate artifact lifecycle or size is invalid');
   }
 
@@ -112,7 +131,7 @@ export async function evaluatePublishPreflight(input, client) {
     ...bound,
     trigger_run_id: String(runId),
     trigger_run_attempt: runAttempt,
-    artifact_id: positiveInteger(artifact.id, 'candidate artifact id'),
+    artifact_id: candidateArtifactId,
     artifact_name: name,
   });
 }
