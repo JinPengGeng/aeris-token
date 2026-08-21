@@ -5,9 +5,13 @@ import test from 'node:test';
 import {
   GitHubAppAttestationClient,
   GitHubAppAttestationError,
+  GitHubInstallationTokenProofClient,
   attestGitHubApp,
   createGitHubAppJwt,
+  proveGitHubInstallationToken,
   runGitHubAppAttestation,
+  runGitHubInstallationTokenProof,
+  validateGitHubInstallationTokenProof,
   validateGitHubAppAttestation,
 } from '../src/github-app-attestation.mjs';
 
@@ -216,4 +220,82 @@ test('attestation CLI derives owner from the repository and rejects missing conf
     );
     assert.equal(calls, 0);
   }
+});
+
+test('read-only installation token proof binds exact repository and REST/GraphQL Bot identity', async () => {
+  const tokenExpected = {
+    repository: 'JinPengGeng/aeris-token', repository_id: 1316750512,
+    app_slug: 'aeris-token-writer', installation_id: expected.installation_id,
+  };
+  const repositories = {
+    total_count: 1,
+    repositories: [{ id: 1316750512, full_name: tokenExpected.repository, owner: { login: 'JinPengGeng' } }],
+  };
+  const bot = { login: 'aeris-token-writer[bot]', type: 'Bot', site_admin: false, id: 319277066, node_id: 'BOT_writer_node' };
+  const graphQlBot = { __typename: 'Bot', login: 'aeris-token-writer', databaseId: 319277066, id: 'BOT_writer_node' };
+  const calls = [];
+  const client = {
+    async getInstallationRepositories() { calls.push('repositories'); return repositories; },
+    async getBot(login) { calls.push(`bot:${login}`); return bot; },
+    async getGraphQlBot(nodeId) { calls.push(`graphql:${nodeId}`); return graphQlBot; },
+  };
+  const result = await proveGitHubInstallationToken({ client, expected: tokenExpected });
+  assert.equal(result.repository, tokenExpected.repository);
+  assert.deepEqual(calls.sort(), ['bot:aeris-token-writer[bot]', 'graphql:BOT_writer_node', 'repositories']);
+  for (const value of [
+    { repositories: { ...repositories, total_count: 2 } },
+    { repositories: { ...repositories, repositories: [{ ...repositories.repositories[0], id: 99 }] } },
+    { bot: { ...bot, type: 'User' } },
+    { graphQlBot: { ...graphQlBot, databaseId: 99 } },
+  ]) {
+    assert.throws(() => validateGitHubInstallationTokenProof({
+      repositories: value.repositories ?? repositories,
+      bot: value.bot ?? bot,
+      graphQlBot: value.graphQlBot ?? graphQlBot,
+      expected: tokenExpected,
+    }), GitHubAppAttestationError);
+  }
+});
+
+test('read-only token proof HTTP client performs only bounded reads plus a GraphQL query', async () => {
+  const calls = [];
+  const client = new GitHubInstallationTokenProofClient({
+    token: 'writer-token',
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (url.endsWith('/installation/repositories?per_page=2&page=1')) {
+        return new Response(JSON.stringify({ total_count: 1, repositories: [{ id: 1316750512, full_name: 'JinPengGeng/aeris-token', owner: { login: 'JinPengGeng' } }] }), { status: 200 });
+      }
+      if (url.endsWith('/users/aeris-token-writer%5Bbot%5D')) {
+        return new Response(JSON.stringify({ login: 'aeris-token-writer[bot]', type: 'Bot', site_admin: false, id: 319277066, node_id: 'BOT_writer_node' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: { node: { __typename: 'Bot', login: 'aeris-token-writer', databaseId: 319277066, id: 'BOT_writer_node' } } }), { status: 200 });
+    },
+  });
+  const result = await proveGitHubInstallationToken({ client, expected: {
+    repository: 'JinPengGeng/aeris-token', repository_id: 1316750512,
+    app_slug: 'aeris-token-writer', installation_id: expected.installation_id,
+  } });
+  assert.equal(result.graphql_login, 'aeris-token-writer');
+  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), [
+    '/installation/repositories', '/users/aeris-token-writer%5Bbot%5D', '/graphql',
+  ]);
+  assert.deepEqual(calls.map(({ options }) => options.method), ['GET', 'GET', 'POST']);
+  assert.match(calls[2].options.body, /query WriterTokenBot/);
+  assert.match(calls[2].options.body, /"variables":\{"id":"BOT_writer_node"\}/);
+  assert.doesNotMatch(calls[2].options.body, /mutation/i);
+});
+
+test('read-only token proof CLI rejects mismatched token metadata before any request', async () => {
+  const environment = {
+    GITHUB_REPOSITORY: 'JinPengGeng/aeris-token', GITHUB_REPOSITORY_ID: '1316750512',
+    AERIS_WRITER_APP_SLUG: 'aeris-token-writer', AERIS_WRITER_INSTALLATION_ID: String(expected.installation_id),
+    AERIS_WRITER_TOKEN: 'writer-token', AERIS_WRITER_TOKEN_APP_SLUG: 'other-writer',
+    AERIS_WRITER_TOKEN_INSTALLATION_ID: String(expected.installation_id),
+  };
+  let calls = 0;
+  await assert.rejects(() => runGitHubInstallationTokenProof(environment, {
+    client: { async getInstallationRepositories() { calls += 1; } },
+  }), GitHubAppAttestationError);
+  assert.equal(calls, 0);
 });

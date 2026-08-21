@@ -78,7 +78,11 @@ test('Finalizer repeats preliminary gates before the sole Writer token mint', ()
   assert.equal(finalize.env.AERIS_WRITER_TOKEN, '${{ steps.writer_token.outputs.token }}');
   assert.equal(finalize.env.AERIS_FINALIZER_PROOF_LEVEL, 'full');
   assert.equal(finalize.env.AERIS_FINALIZER_MUTATE, 'true');
+  assert.equal(finalize.env.AERIS_FINALIZER_RESPONSE_LOSS_CANARY, '${{ vars.AERIS_FINALIZER_RESPONSE_LOSS_CANARY }}');
   assert.doesNotMatch(JSON.stringify(finalize.env), /PRIVATE_KEY/);
+  const summary = steps.find((step) => /Summarize finalization/.test(step.name));
+  assert.equal(summary.env.CANARY_MARKER, '${{ steps.finalize.outputs.canary_marker }}');
+  assert.match(summary.run, /Canary/);
 });
 
 test('Finalizer never checks out the pull request head and pins every action', () => {

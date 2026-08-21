@@ -12,6 +12,7 @@ const REQUIRED_WRITER_PERMISSIONS = Object.freeze({
   pull_requests: 'write',
 });
 const IMPLICIT_WRITER_PERMISSIONS = Object.freeze({ metadata: 'read' });
+const MAXIMUM_PROOF_BYTES = 1024 * 1024;
 
 export class GitHubAppAttestationError extends Error {
   constructor(message, status = null) {
@@ -167,6 +168,88 @@ export class GitHubAppAttestationClient {
   }
 }
 
+export class GitHubInstallationTokenProofClient {
+  constructor({ token, apiUrl = 'https://api.github.com', fetchImpl = globalThis.fetch, timeoutMs = 15_000 }) {
+    this.token = required(token, 'Writer installation token');
+    let parsed;
+    try { parsed = new URL(apiUrl); } catch { reject('GitHub API URL is invalid'); }
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      reject('GitHub API URL must be a credential-free HTTPS URL');
+    }
+    if (typeof fetchImpl !== 'function') reject('GitHub fetch implementation is invalid');
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60_000) {
+      reject('GitHub installation token proof timeout is invalid');
+    }
+    this.apiUrl = parsed.toString().replace(/\/$/, '');
+    this.fetchImpl = fetchImpl;
+    this.timeoutMs = timeoutMs;
+  }
+
+  async request(pathname, { method = 'GET', body } = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await this.fetchImpl(`${this.apiUrl}${pathname}`, {
+        method,
+        headers: {
+          accept: 'application/vnd.github+json',
+          authorization: `Bearer ${this.token}`,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+          'x-github-api-version': '2022-11-28',
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: controller.signal,
+      });
+      if (!response || typeof response.status !== 'number' || typeof response.text !== 'function') {
+        reject('GitHub installation token proof response is invalid');
+      }
+      let text;
+      try { text = await response.text(); } catch { reject('GitHub installation token proof response body failed'); }
+      if (Buffer.byteLength(text, 'utf8') > MAXIMUM_PROOF_BYTES) {
+        reject('GitHub installation token proof response is too large');
+      }
+      let value;
+      try { value = JSON.parse(text); } catch {
+        reject('GitHub installation token proof returned invalid JSON', response.status);
+      }
+      if (!response.ok) reject(`GitHub installation token proof returned HTTP ${response.status}`, response.status);
+      return object(value, 'GitHub installation token proof response');
+    } catch (error) {
+      if (error instanceof GitHubAppAttestationError) throw error;
+      reject('GitHub installation token proof request failed');
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  getInstallationRepositories() {
+    return this.request('/installation/repositories?per_page=2&page=1');
+  }
+
+  getBot(login) {
+    return this.request(`/users/${encodeURIComponent(required(login, 'Writer Bot login'))}`);
+  }
+
+  async getGraphQlBot(nodeId) {
+    const value = await this.request('/graphql', {
+      method: 'POST',
+      body: {
+        query: `query WriterTokenBot($id: ID!) {
+          node(id: $id) {
+            __typename
+            ... on Bot { id databaseId login }
+          }
+        }`,
+        variables: { id: required(nodeId, 'Writer Bot REST node id') },
+      },
+    });
+    if (Array.isArray(value.errors) && value.errors.length > 0) {
+      reject('GitHub installation token GraphQL proof returned errors');
+    }
+    return object(object(value.data, 'GitHub installation token GraphQL data').node, 'Writer GraphQL Bot');
+  }
+}
+
 export function validateGitHubAppAttestation({ app, installation, expected }) {
   const trusted = object(expected, 'Writer App attestation expectation');
   const ownerLogin = required(trusted.owner_login, 'Writer App owner login');
@@ -221,6 +304,63 @@ export async function attestGitHubApp({ client, expected }) {
   return validateGitHubAppAttestation({ app, installation, expected });
 }
 
+export function validateGitHubInstallationTokenProof({ repositories, bot, graphQlBot: graphQlIdentity, expected }) {
+  const trusted = object(expected, 'Writer token proof expectation');
+  const repositoryName = required(trusted.repository, 'Writer repository', REPOSITORY);
+  const repositoryId = positiveInteger(trusted.repository_id, 'Writer repository id');
+  const ownerLogin = repositoryName.split('/')[0];
+  const appSlug = required(trusted.app_slug, 'Writer App slug', APP_SLUG);
+  const installationId = positiveInteger(trusted.installation_id, 'Writer installation id');
+
+  const accessible = object(repositories, 'Writer installation repositories');
+  if (accessible.total_count !== 1 || !Array.isArray(accessible.repositories) || accessible.repositories.length !== 1) {
+    reject('Writer installation token repository scope is not exact');
+  }
+  const repository = object(accessible.repositories[0], 'Writer installation repository');
+  if (positiveInteger(repository.id, 'Writer installation repository id') !== repositoryId ||
+      required(repository.full_name, 'Writer installation repository full_name', REPOSITORY) !== repositoryName ||
+      required(object(repository.owner, 'Writer installation repository owner').login, 'Writer repository owner login') !== ownerLogin) {
+    reject('Writer installation token repository identity is invalid');
+  }
+
+  const restBot = object(bot, 'Writer Bot REST identity');
+  const expectedRestLogin = `${appSlug}[bot]`;
+  if (restBot.type !== 'Bot' || required(restBot.login, 'Writer Bot REST login') !== expectedRestLogin ||
+      restBot.site_admin !== false) {
+    reject('Writer Bot REST identity is invalid');
+  }
+  const databaseId = positiveInteger(restBot.id, 'Writer Bot REST database id');
+  const nodeId = required(restBot.node_id, 'Writer Bot REST node id');
+
+  const graphQlBot = object(graphQlIdentity, 'Writer Bot GraphQL identity');
+  if (graphQlBot.__typename !== 'Bot' || required(graphQlBot.login, 'Writer Bot GraphQL login') !== appSlug ||
+      positiveInteger(graphQlBot.databaseId, 'Writer Bot GraphQL database id') !== databaseId ||
+      required(graphQlBot.id, 'Writer Bot GraphQL node id') !== nodeId) {
+    reject('Writer Bot GraphQL identity is invalid');
+  }
+
+  return Object.freeze({
+    app_slug: appSlug,
+    installation_id: installationId,
+    repository: repositoryName,
+    repository_id: repositoryId,
+    rest_login: expectedRestLogin,
+    graphql_login: appSlug,
+    bot_database_id: databaseId,
+    bot_node_id: nodeId,
+  });
+}
+
+export async function proveGitHubInstallationToken({ client, expected }) {
+  const appSlug = required(object(expected, 'Writer token proof expectation').app_slug, 'Writer App slug', APP_SLUG);
+  const [repositories, bot] = await Promise.all([
+    client.getInstallationRepositories(),
+    client.getBot(`${appSlug}[bot]`),
+  ]);
+  const graphQlBot = await client.getGraphQlBot(required(object(bot, 'Writer Bot REST identity').node_id, 'Writer Bot REST node id'));
+  return validateGitHubInstallationTokenProof({ repositories, bot, graphQlBot, expected });
+}
+
 export async function runGitHubAppAttestation(environment = process.env, dependencies = {}) {
   const repository = required(environment.GITHUB_REPOSITORY, 'GITHUB_REPOSITORY', REPOSITORY);
   const expected = Object.freeze({
@@ -258,6 +398,45 @@ export async function runGitHubAppAttestation(environment = process.env, depende
   return result;
 }
 
+export async function runGitHubInstallationTokenProof(environment = process.env, dependencies = {}) {
+  const repository = required(environment.GITHUB_REPOSITORY, 'GITHUB_REPOSITORY', REPOSITORY);
+  const appSlug = required(environment.AERIS_WRITER_APP_SLUG, 'AERIS_WRITER_APP_SLUG', APP_SLUG);
+  const installationId = positiveInteger(environment.AERIS_WRITER_INSTALLATION_ID, 'AERIS_WRITER_INSTALLATION_ID');
+  if (required(environment.AERIS_WRITER_TOKEN_APP_SLUG, 'AERIS_WRITER_TOKEN_APP_SLUG', APP_SLUG) !== appSlug ||
+      positiveInteger(environment.AERIS_WRITER_TOKEN_INSTALLATION_ID, 'AERIS_WRITER_TOKEN_INSTALLATION_ID') !== installationId) {
+    reject('Writer installation token metadata does not match the configured App installation');
+  }
+  const expected = Object.freeze({
+    repository,
+    repository_id: positiveInteger(environment.GITHUB_REPOSITORY_ID, 'GITHUB_REPOSITORY_ID'),
+    app_slug: appSlug,
+    installation_id: installationId,
+  });
+  const client = dependencies.client ?? new GitHubInstallationTokenProofClient({
+    token: environment.AERIS_WRITER_TOKEN,
+    apiUrl: environment.GITHUB_API_URL,
+    fetchImpl: dependencies.fetchImpl,
+    timeoutMs: dependencies.timeoutMs,
+  });
+  const result = await proveGitHubInstallationToken({ client, expected });
+  if (environment.GITHUB_OUTPUT) {
+    fs.appendFileSync(environment.GITHUB_OUTPUT, [
+      `repository=${result.repository}`,
+      `repository_id=${result.repository_id}`,
+      `app_slug=${result.app_slug}`,
+      `installation_id=${result.installation_id}`,
+      `rest_login=${result.rest_login}`,
+      `graphql_login=${result.graphql_login}`,
+      `bot_database_id=${result.bot_database_id}`,
+      `bot_node_id=${result.bot_node_id}`,
+      '',
+    ].join('\n'));
+  }
+  return result;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  await runGitHubAppAttestation();
+  if (process.argv[2] === undefined) await runGitHubAppAttestation();
+  else if (process.argv[2] === 'prove-token') await runGitHubInstallationTokenProof();
+  else reject('GitHub App attestation command is invalid');
 }
