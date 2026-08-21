@@ -37,7 +37,15 @@ const trust = Object.freeze({
 });
 const writerTrust = Object.freeze({
   app_id: 4667256,
+  proof_app_id: 4667256,
+  proof_app_slug: 'aeris-writer',
+  proof_app_owner_login: 'JinPengGeng',
+  proof_app_owner_type: 'User',
   installation_id: 155342531,
+  proof_installation_id: 155342531,
+  proof_installation_account_login: 'JinPengGeng',
+  proof_installation_account_type: 'User',
+  proof_repository_selection: 'selected',
   token_installation_id: 155342531,
   app_slug: 'aeris-writer',
 });
@@ -73,7 +81,15 @@ function fullEnvironment(overrides = {}) {
   return preliminaryEnvironment({
     AERIS_WRITER_TOKEN: 'writer-token',
     AERIS_WRITER_APP_ID: String(writerTrust.app_id),
+    AERIS_WRITER_PROOF_APP_ID: String(writerTrust.proof_app_id),
+    AERIS_WRITER_PROOF_APP_SLUG: writerTrust.proof_app_slug,
+    AERIS_WRITER_PROOF_APP_OWNER_LOGIN: writerTrust.proof_app_owner_login,
+    AERIS_WRITER_PROOF_APP_OWNER_TYPE: writerTrust.proof_app_owner_type,
     AERIS_WRITER_INSTALLATION_ID: String(writerTrust.installation_id),
+    AERIS_WRITER_PROOF_INSTALLATION_ID: String(writerTrust.proof_installation_id),
+    AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN: writerTrust.proof_installation_account_login,
+    AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE: writerTrust.proof_installation_account_type,
+    AERIS_WRITER_PROOF_REPOSITORY_SELECTION: writerTrust.proof_repository_selection,
     AERIS_WRITER_TOKEN_INSTALLATION_ID: String(writerTrust.token_installation_id),
     AERIS_WRITER_TOKEN_APP_SLUG: writerTrust.app_slug,
     AERIS_FINALIZER_PROOF_LEVEL: 'full',
@@ -81,6 +97,12 @@ function fullEnvironment(overrides = {}) {
     ...overrides,
   });
 }
+
+const apiResponse = (payload, status = 200) =>
+  new Response(payload === null ? null : JSON.stringify(payload), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
 
 function pull() {
   return {
@@ -571,6 +593,46 @@ test('Finalizer requires strict source-bound hold branch protection before eligi
 test('Finalizer binds Writer token scope and trusted action outputs before mutation', async () => {
   const cases = [
     {
+      client: new FakeClient(),
+      writerTrust: { ...writerTrust, app_id: writerTrust.app_id + 1 },
+      error: /Writer App JWT proof does not match the trusted App identity/,
+    },
+    {
+      client: new FakeClient(),
+      writerTrust: { ...writerTrust, proof_app_id: writerTrust.app_id + 1 },
+      error: /Writer App JWT proof does not match the trusted App identity/,
+    },
+    {
+      client: new FakeClient(),
+      writerTrust: { ...writerTrust, proof_app_id: undefined },
+      error: /Writer proof App id must be a positive integer/,
+    },
+    {
+      client: new FakeClient(),
+      writerTrust: { ...writerTrust, proof_app_owner_login: 'other-owner' },
+      error: /does not match the repository owner/,
+    },
+    {
+      client: new FakeClient(),
+      writerTrust: { ...writerTrust, proof_app_owner_type: undefined },
+      error: /Writer proof App owner type is invalid/,
+    },
+    {
+      client: new FakeClient(),
+      writerTrust: { ...writerTrust, proof_installation_id: writerTrust.installation_id + 1 },
+      error: /Writer App JWT proof does not match the trusted installation/,
+    },
+    {
+      client: new FakeClient(),
+      writerTrust: { ...writerTrust, proof_installation_account_login: 'other-owner' },
+      error: /does not match the repository installation/,
+    },
+    {
+      client: new FakeClient(),
+      writerTrust: { ...writerTrust, proof_repository_selection: 'all' },
+      error: /does not match the repository installation/,
+    },
+    {
       client: new FakeClient({ installationRepositories: { total_count: 2, repositories: [] } }),
       writerTrust,
       error: /repository scope is not exact/,
@@ -639,6 +701,40 @@ test('Finalizer binds Writer token scope and trusted action outputs before mutat
     );
     assert.deepEqual(value.client.events, []);
   }
+});
+
+test('Finalizer adopts exact hold checks from the real REST check-runs envelope', async () => {
+  const client = new FakeClient();
+  const calls = [];
+  const api = new AutonomyFinalizerGitHubClient({
+    token: 'actions-token',
+    repository: REPOSITORY,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      const checkRuns = [
+        check('Rust CI / check', 1),
+        check('Frontend CI / check', 2),
+        check('Automation Policy / gate', 3),
+        ...(client.hold === null ? [] : [client.hold]),
+      ];
+      return apiResponse({ total_count: checkRuns.length, check_runs: checkRuns });
+    },
+  });
+  client.listCheckRunsForRef = (ref) => api.listCheckRunsForRef(ref);
+
+  const result = await finalizeAutonomyPull({
+    readClient: client,
+    writerClient: client,
+    trigger,
+    trust,
+    config,
+    sleepImpl: async () => {},
+  });
+
+  assert.equal(result.action, 'armed');
+  assert.equal(client.hold.status, 'completed');
+  assert.ok(calls.length >= 2);
+  assert.ok(calls.every((url) => url.includes(`/commits/${HEAD_SHA}/check-runs?filter=all&per_page=100&page=1`)));
 });
 
 test('Finalizer rejects a User with the Writer App GraphQL login', async () => {

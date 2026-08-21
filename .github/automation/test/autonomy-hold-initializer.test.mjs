@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  AutonomyHoldInitializerError, GITHUB_ACTIONS_APP_ID, GITHUB_ACTIONS_APP_SLUG,
+  AutonomyHoldGitHubClient, AutonomyHoldInitializerError, GITHUB_ACTIONS_APP_ID, GITHUB_ACTIONS_APP_SLUG,
   HOLD_CHECK_NAME, classifyPull, holdExternalId, initializeAutonomyHold,
 } from '../src/autonomy-hold-initializer.mjs';
 
@@ -19,6 +19,11 @@ function check({ status = 'in_progress', conclusion = null, external_id = holdEx
   return { id, name: HOLD_CHECK_NAME, head_sha: SHA, external_id, status, conclusion,
     app: { id: GITHUB_ACTIONS_APP_ID, slug: GITHUB_ACTIONS_APP_SLUG }, pull_requests: [{ number: 7 }] };
 }
+const apiResponse = (payload, status = 200) =>
+  new Response(payload === null ? null : JSON.stringify(payload), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
 class FakeClient {
   constructor({ currentPull = pull(), checks = [], lostCreate = false, driftAfterMutation = false } = {}) {
     this.currentPull = currentPull; this.checks = checks; this.lostCreate = lostCreate; this.driftAfterMutation = driftAfterMutation;
@@ -45,6 +50,28 @@ test('managed Writer Bot creates an exact pending hold', async () => {
   const result = await initializeAutonomyHold({ client, config: CONFIG });
   assert.equal(result.action, 'held'); assert.equal(result.managed, true); assert.equal(client.created, 1);
   assert.deepEqual(client.checks[0], check());
+});
+
+test('initializer adopts an exact hold from the real REST check-runs envelope', async () => {
+  const existing = check();
+  const lifecycle = new FakeClient({ checks: [existing] });
+  const calls = [];
+  const api = new AutonomyHoldGitHubClient({
+    token: 'actions-token',
+    repository: CONFIG.repository,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return apiResponse({ total_count: 1, check_runs: [existing] });
+    },
+  });
+  lifecycle.listChecks = (sha) => api.listChecks(sha);
+
+  const result = await initializeAutonomyHold({ client: lifecycle, config: CONFIG });
+
+  assert.equal(result.action, 'held');
+  assert.equal(lifecycle.created, 0);
+  assert.ok(calls.length >= 2);
+  assert.ok(calls.every((url) => url.includes(`/commits/${SHA}/check-runs?filter=all&per_page=100&page=1`)));
 });
 
 test('same login User is not a Writer App and receives a successful hold', async () => {
@@ -79,6 +106,48 @@ test('fork pull requests receive a successful non-managed hold', async () => {
   assert.equal(result.managed, false);
   assert.equal(result.action, 'released');
   assert.equal(client.checks[0].conclusion, 'success');
+});
+
+test('dispatch targets fail before Check Run mutation when the PR identity is invalid', async (t) => {
+  const cases = [
+    ['missing pull request projection', null, /pull request projection is invalid/],
+    ['missing base projection', pull({ base: null }), /pull request base is invalid/],
+    ['missing base repository projection', pull({ base: { ref: 'main', repo: null } }), /pull request base repository is invalid/],
+    ['missing head projection', pull({ head: null }), /pull request head is invalid/],
+    ['missing user projection', pull({ user: null }), /pull request user is invalid/],
+    ['closed pull request', pull({ state: 'closed' }), /pull request identity is not an open main pull request/],
+    ['non-main base', pull({ base: { ref: 'release', repo: { full_name: CONFIG.repository } } }), /pull request identity is not an open main pull request/],
+    ['foreign base repository', pull({ base: { ref: 'main', repo: { full_name: 'someone/other' } } }), /pull request identity is not an open main pull request/],
+    ['different pull number', pull({ number: CONFIG.pull_number + 1 }), /pull request identity is not an open main pull request/],
+  ];
+  for (const [name, currentPull, error] of cases) {
+    await t.test(name, async () => {
+      const client = new FakeClient({ currentPull });
+      await assert.rejects(
+        () => initializeAutonomyHold({ client, config: CONFIG }),
+        error,
+      );
+      assert.equal(client.created, 0);
+      assert.equal(client.completed, 0);
+    });
+  }
+
+  const configCases = [
+    ['repository id configuration drift', { ...CONFIG, repository_id: CONFIG.repository_id + 1 }],
+    ['repository name configuration drift', { ...CONFIG, repository: 'JinPengGeng/other' }],
+    ['default branch configuration drift', { ...CONFIG, default_branch: 'release' }],
+  ];
+  for (const [name, config] of configCases) {
+    await t.test(name, async () => {
+      const client = new FakeClient();
+      await assert.rejects(
+        () => initializeAutonomyHold({ client, config }),
+        /repository identity or default branch drifted/,
+      );
+      assert.equal(client.created, 0);
+      assert.equal(client.completed, 0);
+    });
+  }
 });
 
 test('ordinary pull requests with no body receive a successful non-managed hold', async () => {

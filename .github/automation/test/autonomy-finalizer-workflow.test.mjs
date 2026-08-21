@@ -24,9 +24,11 @@ test('Finalizer listens to every required workflow to avoid completion-order rac
   assert.match(document.jobs.finalize.if, /AERIS_AUTONOMOUS_MERGE_ENABLED/);
   assert.equal(
     document.concurrency.group,
-    'aeris-autonomy-pr-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch }}',
+    "aeris-autonomy-pr-${{ github.event.workflow_run.pull_requests[0].number || format('run-{0}', github.event.workflow_run.id) }}",
   );
   assert.doesNotMatch(document.concurrency.group, /head_sha/);
+  assert.doesNotMatch(document.concurrency.group, /head_branch/);
+  assert.match(document.jobs.evaluate.if, /pull_requests\[0\]\.number != null/);
 });
 
 test('Finalizer repeats preliminary gates before the sole Writer token mint', () => {
@@ -35,8 +37,9 @@ test('Finalizer repeats preliminary gates before the sole Writer token mint', ()
   const evaluate = document.jobs.evaluate.steps.find((step) => step.id === 'evaluate');
   const steps = document.jobs.finalize.steps;
   const recheck = steps.findIndex((step) => /Recompute gates before token mint/.test(step.name));
+  const proof = steps.findIndex((step) => /Attest Writer App and installation identity/.test(step.name));
   const mint = steps.findIndex((step) => /Mint bounded Writer App token/.test(step.name));
-  assert.ok(recheck >= 0 && recheck < mint);
+  assert.ok(recheck >= 0 && recheck < proof && proof < mint);
   assert.equal(evaluate.env.AERIS_FINALIZER_PROOF_LEVEL, 'preliminary');
   assert.equal(steps[recheck].env.AERIS_FINALIZER_PROOF_LEVEL, 'preliminary');
   assert.equal(document.jobs.evaluate.outputs.proof_level, '${{ steps.evaluate.outputs.proof_level }}');
@@ -52,9 +55,22 @@ test('Finalizer repeats preliminary gates before the sole Writer token mint', ()
     [['checks', 'write']],
   );
   const finalize = steps.find((step) => /Request exact native auto-merge/.test(step.name));
+  assert.equal(steps[proof].env.AERIS_WRITER_APP_ID, '${{ vars.AERIS_WRITER_APP_ID }}');
+  assert.equal(steps[proof].env.AERIS_WRITER_APP_SLUG, '${{ vars.AERIS_WRITER_APP_SLUG }}');
+  assert.equal(steps[proof].env.AERIS_WRITER_INSTALLATION_ID, '${{ vars.AERIS_WRITER_INSTALLATION_ID }}');
+  assert.equal(steps[proof].env.AERIS_WRITER_APP_PRIVATE_KEY, '${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}');
+  assert.equal(steps[proof].run, 'node .github/automation/src/github-app-attestation.mjs');
   assert.equal(steps[mint].with['app-id'], '${{ vars.AERIS_WRITER_APP_ID }}');
   assert.equal(finalize.env.AERIS_WRITER_APP_ID, '${{ vars.AERIS_WRITER_APP_ID }}');
+  assert.equal(finalize.env.AERIS_WRITER_PROOF_APP_ID, '${{ steps.writer_app_attestation.outputs.app_id }}');
+  assert.equal(finalize.env.AERIS_WRITER_PROOF_APP_SLUG, '${{ steps.writer_app_attestation.outputs.app_slug }}');
+  assert.equal(finalize.env.AERIS_WRITER_PROOF_APP_OWNER_LOGIN, '${{ steps.writer_app_attestation.outputs.app_owner_login }}');
+  assert.equal(finalize.env.AERIS_WRITER_PROOF_APP_OWNER_TYPE, '${{ steps.writer_app_attestation.outputs.app_owner_type }}');
   assert.equal(finalize.env.AERIS_WRITER_INSTALLATION_ID, '${{ vars.AERIS_WRITER_INSTALLATION_ID }}');
+  assert.equal(finalize.env.AERIS_WRITER_PROOF_INSTALLATION_ID, '${{ steps.writer_app_attestation.outputs.installation_id }}');
+  assert.equal(finalize.env.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN, '${{ steps.writer_app_attestation.outputs.installation_account_login }}');
+  assert.equal(finalize.env.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE, '${{ steps.writer_app_attestation.outputs.installation_account_type }}');
+  assert.equal(finalize.env.AERIS_WRITER_PROOF_REPOSITORY_SELECTION, '${{ steps.writer_app_attestation.outputs.repository_selection }}');
   assert.equal(finalize.env.AERIS_WRITER_TOKEN_INSTALLATION_ID, '${{ steps.writer_token.outputs.installation-id }}');
   assert.equal(finalize.env.AERIS_WRITER_TOKEN_APP_SLUG, '${{ steps.writer_token.outputs.app-slug }}');
   assert.equal(finalize.env.AERIS_WRITER_TOKEN, '${{ steps.writer_token.outputs.token }}');

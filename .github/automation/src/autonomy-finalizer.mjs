@@ -953,17 +953,36 @@ export async function finalizeAutonomyPull({
   const configuredWriter = object(writerTrust, 'Writer trust configuration');
   const writerAppSlug = required(configuredWriter.app_slug, 'Writer trusted App slug');
   if (`${writerAppSlug}[bot]` !== config.writer_login) reject('Writer trusted App slug does not match policy');
+  const writerAppId = positiveInteger(configuredWriter.app_id, 'Writer trusted App id');
+  if (positiveInteger(configuredWriter.proof_app_id, 'Writer proof App id') !== writerAppId ||
+      required(configuredWriter.proof_app_slug, 'Writer proof App slug') !== writerAppSlug) {
+    reject('Writer App JWT proof does not match the trusted App identity');
+  }
+  const repositoryOwner = trust.repository.split('/')[0];
+  const proofOwnerLogin = required(configuredWriter.proof_app_owner_login, 'Writer proof App owner login');
+  const proofOwnerType = required(configuredWriter.proof_app_owner_type, 'Writer proof App owner type');
+  if (proofOwnerLogin !== repositoryOwner || !['User', 'Organization'].includes(proofOwnerType)) {
+    reject('Writer App JWT proof does not match the repository owner');
+  }
   const writerInstallationId = positiveInteger(configuredWriter.installation_id, 'Writer trusted installation id');
+  if (positiveInteger(configuredWriter.proof_installation_id, 'Writer proof installation id') !== writerInstallationId) {
+    reject('Writer App JWT proof does not match the trusted installation');
+  }
+  if (required(configuredWriter.proof_installation_account_login, 'Writer proof installation account login') !== proofOwnerLogin ||
+      required(configuredWriter.proof_installation_account_type, 'Writer proof installation account type') !== proofOwnerType ||
+      configuredWriter.proof_repository_selection !== 'selected') {
+    reject('Writer App JWT proof does not match the repository installation');
+  }
   if (positiveInteger(configuredWriter.token_installation_id, 'Writer token installation id') !== writerInstallationId) {
     reject('Writer token installation does not match the configured installation');
   }
   const writerIdentity = await proveWriterIdentity(writerClient, Object.freeze({
-    app_id: positiveInteger(configuredWriter.app_id, 'Writer trusted App id'),
+    app_id: writerAppId,
     installation_id: writerInstallationId,
     app_slug: writerAppSlug,
     writer_login: config.writer_login,
     graphql_login: config.writer_login.replace(/\[bot\]$/, ''),
-    owner: trust.repository.split('/')[0],
+    owner: repositoryOwner,
     repository: trust.repository,
     repository_id: trust.repository_id,
   }));
@@ -1122,7 +1141,15 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
         protectionClient: dependencies.protectionClient ?? writerClient,
         writerTrust: Object.freeze({
           app_id: positiveInteger(environment.AERIS_WRITER_APP_ID, 'AERIS_WRITER_APP_ID'),
+          proof_app_id: positiveInteger(environment.AERIS_WRITER_PROOF_APP_ID, 'AERIS_WRITER_PROOF_APP_ID'),
+          proof_app_slug: required(environment.AERIS_WRITER_PROOF_APP_SLUG, 'AERIS_WRITER_PROOF_APP_SLUG'),
+          proof_app_owner_login: required(environment.AERIS_WRITER_PROOF_APP_OWNER_LOGIN, 'AERIS_WRITER_PROOF_APP_OWNER_LOGIN'),
+          proof_app_owner_type: required(environment.AERIS_WRITER_PROOF_APP_OWNER_TYPE, 'AERIS_WRITER_PROOF_APP_OWNER_TYPE'),
           installation_id: positiveInteger(environment.AERIS_WRITER_INSTALLATION_ID, 'AERIS_WRITER_INSTALLATION_ID'),
+          proof_installation_id: positiveInteger(environment.AERIS_WRITER_PROOF_INSTALLATION_ID, 'AERIS_WRITER_PROOF_INSTALLATION_ID'),
+          proof_installation_account_login: required(environment.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN, 'AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN'),
+          proof_installation_account_type: required(environment.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE, 'AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE'),
+          proof_repository_selection: required(environment.AERIS_WRITER_PROOF_REPOSITORY_SELECTION, 'AERIS_WRITER_PROOF_REPOSITORY_SELECTION'),
           token_installation_id: positiveInteger(environment.AERIS_WRITER_TOKEN_INSTALLATION_ID, 'AERIS_WRITER_TOKEN_INSTALLATION_ID'),
           app_slug: required(environment.AERIS_WRITER_TOKEN_APP_SLUG, 'AERIS_WRITER_TOKEN_APP_SLUG'),
         }),
