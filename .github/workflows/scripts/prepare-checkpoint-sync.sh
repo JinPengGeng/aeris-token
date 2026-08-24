@@ -11,6 +11,7 @@ to_node_path() {
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECKPOINT_HELPER="${CHECKPOINT_HELPER:-${SCRIPT_ROOT}/checkpoint-merge.sh}"
+CONFLICT_RUNTIME="${CONFLICT_RUNTIME:-${SCRIPT_ROOT}/../../automation/src/sync-conflict-review.mjs}"
 
 fork_base="${1:?fork base is required}"
 upstream_tip="${2:?upstream tip is required}"
@@ -93,6 +94,61 @@ policy_field() {
       exit
     }
   ' "${policy_yaml}"
+}
+
+policy_nested_field() {
+  local section="$1" subsection="$2" field="$3"
+  awk -v section="${section}" -v subsection="${subsection}" -v field="${field}" '
+    $0 == section ":" { in_section = 1; next }
+    in_section && /^[^[:space:]#]/ { exit }
+    in_section && $0 == "  " subsection ":" { in_subsection = 1; next }
+    in_subsection && /^  [^[:space:]#]/ { exit }
+    in_subsection && $0 ~ "^[[:space:]][[:space:]][[:space:]][[:space:]]" field ":[[:space:]]*" {
+      value = $0
+      sub("^[[:space:]][[:space:]][[:space:]][[:space:]]" field ":[[:space:]]*", "", value)
+      sub(/[[:space:]]+$/, "", value)
+      if (value ~ /^".*"$/ || value ~ /^\047.*\047$/) {
+        value = substr(value, 2, length(value) - 2)
+      }
+      print value
+      exit
+    }
+  ' "${policy_yaml}"
+}
+
+require_ai_resolution_policy() {
+  local enabled profile pre_conflict_verdict allowed_type allowed_mode maximum_files
+  local maximum_bytes_per_file maximum_total_input_bytes resolver_model_variable
+  local reviewer_model_variable distinct_models complete_resolution independent_review
+  local non_conflict_edits sensitive_paths ambiguous_changes
+
+  enabled="$(policy_nested_field conflicts ai_resolution enabled)"
+  profile="$(policy_nested_field conflicts ai_resolution profile)"
+  pre_conflict_verdict="$(policy_nested_field conflicts ai_resolution required_pre_conflict_verdict)"
+  allowed_type="$(policy_nested_field conflicts ai_resolution allowed_type)"
+  allowed_mode="$(policy_nested_field conflicts ai_resolution allowed_mode)"
+  maximum_files="$(policy_nested_field conflicts ai_resolution maximum_files)"
+  maximum_bytes_per_file="$(policy_nested_field conflicts ai_resolution maximum_bytes_per_file)"
+  maximum_total_input_bytes="$(policy_nested_field conflicts ai_resolution maximum_total_input_bytes)"
+  resolver_model_variable="$(policy_nested_field conflicts ai_resolution resolver_model_variable)"
+  reviewer_model_variable="$(policy_nested_field conflicts ai_resolution reviewer_model_variable)"
+  distinct_models="$(policy_nested_field conflicts ai_resolution require_distinct_model_ids)"
+  complete_resolution="$(policy_nested_field conflicts ai_resolution require_complete_resolution)"
+  independent_review="$(policy_nested_field conflicts ai_resolution require_independent_review_pass)"
+  non_conflict_edits="$(policy_nested_field conflicts ai_resolution allow_non_conflict_edits)"
+  sensitive_paths="$(policy_nested_field conflicts ai_resolution allow_sensitive_or_review_required_paths)"
+  ambiguous_changes="$(policy_nested_field conflicts ai_resolution allow_binary_rename_delete_mode_or_case_ambiguity)"
+
+  [[ "${enabled}" == true && "${profile}" == aeris-sync-conflict-v1 &&
+     "${pre_conflict_verdict}" == eligible && "${allowed_type}" == modify_modify_utf8_text &&
+     "${allowed_mode}" == 100644 && "${maximum_files}" == 4 &&
+     "${maximum_bytes_per_file}" == 16384 && "${maximum_total_input_bytes}" == 65536 &&
+     "${resolver_model_variable}" == AERIS_AI_MODEL_CONFLICT_RESOLVER &&
+     "${reviewer_model_variable}" == AERIS_AI_MODEL_CONFLICT_REVIEWER &&
+     "${distinct_models}" == true && "${complete_resolution}" == true &&
+     "${independent_review}" == true && "${non_conflict_edits}" == false &&
+     "${sensitive_paths}" == false && "${ambiguous_changes}" == false ]] ||
+    fail_error 'AI conflict resolution policy is disabled, incomplete, or unsupported by this runtime'
 }
 
 policy_repository="$(policy_field upstream repository)"
@@ -359,14 +415,101 @@ merge_output="$("${CHECKPOINT_HELPER}" \
   "${checkpoint}" "${fork_base}" "${synthetic_commit}")"
 merge_status=$?
 set -e
+conflict_resolved=false
+conflict_bundle_sha=''
+conflict_candidate_sha=''
+conflict_generation_sha=''
+conflict_resolution_sha=''
+conflict_resolved_tree=''
+conflict_resolver_model_sha=''
 if ((merge_status != 0)); then
-  printf '%s\n' "${merge_output}"
-  exit "${merge_status}"
-fi
+  merge_state="$(sed -n 's/^state=//p' <<<"${merge_output}" | tail -n1)"
+  if [[ "${merge_status}:${merge_state}" != 1:conflict ]]; then
+    printf '%s\n' "${merge_output}"
+    exit "${merge_status}"
+  fi
+  if [[ "${policy_result}" != eligible ]]; then
+    printf '%s\n' "${merge_output}"
+    exit 1
+  fi
 
-merged_tree="$(sed -n 's/^tree=//p' <<<"${merge_output}")"
-git rev-parse --verify "${merged_tree}^{tree}" >/dev/null 2>&1 ||
-  fail_error 'checkpoint helper did not return a valid tree'
+  conflict_bundle_path="${AERIS_CONFLICT_BUNDLE_PATH:-}"
+  conflict_candidate_path="${AERIS_CONFLICT_CANDIDATE_PATH:-}"
+  if [[ -n "${conflict_candidate_path}" && -z "${conflict_bundle_path}" ]]; then
+    fail_error 'a conflict candidate requires its exact conflict bundle'
+  fi
+  if [[ -z "${conflict_bundle_path}" ]]; then
+    printf '%s\n' "${merge_output}"
+    exit 1
+  fi
+
+  require_ai_resolution_policy
+
+  conflict_environment=(
+    GITHUB_OUTPUT=
+    GITHUB_REPOSITORY="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required for conflict resolution}"
+    GITHUB_REPOSITORY_ID="${GITHUB_REPOSITORY_ID:?GITHUB_REPOSITORY_ID is required for conflict resolution}"
+    BASE_BRANCH="${BASE_BRANCH:-main}"
+    SYNC_BRANCH="${SYNC_BRANCH:-automation/sync-upstream}"
+    AERIS_CONFLICT_BASE_SHA="${fork_base}"
+    AERIS_CONFLICT_CHECKPOINT_SHA="${checkpoint}"
+    AERIS_CONFLICT_UPSTREAM_REPOSITORY="${expected_repository}"
+    AERIS_CONFLICT_UPSTREAM_REF="${expected_branch}"
+    AERIS_CONFLICT_UPSTREAM_SHA="${upstream_tip}"
+    AERIS_CONFLICT_SYNTHETIC_COMMIT_SHA="${synthetic_commit}"
+    AERIS_CONFLICT_POLICY_PATH="${policy_path}"
+    AERIS_CONFLICT_STATE_PATH="${state_path}"
+    AERIS_SYNC_POLICY_VERDICT="${policy_result}"
+  )
+
+  if [[ -z "${conflict_candidate_path}" ]]; then
+    set +e
+    conflict_output="$(env "${conflict_environment[@]}" \
+      AERIS_CONFLICT_OUTPUT_PATH="${conflict_bundle_path}" \
+      node "${CONFLICT_RUNTIME}" prepare)"
+    conflict_status=$?
+    set -e
+    ((conflict_status == 0)) || fail_error 'trusted conflict bundle generation failed'
+    conflict_bundle_sha="$(sed -n 's/^conflict_bundle_sha=//p' <<<"${conflict_output}" | tail -n1)"
+    conflict_generation_sha="$(sed -n 's/^conflict_generation_sha=//p' <<<"${conflict_output}" | tail -n1)"
+    [[ "${conflict_bundle_sha}" =~ ^[0-9a-f]{64}$ && "${conflict_generation_sha}" =~ ^[0-9a-f]{64}$ ]] ||
+      fail_error 'trusted conflict bundle hashes are invalid'
+    printf 'policy_verdict=eligible\n'
+    printf 'autonomous_eligible=false\n'
+    printf 'conflict_bundle_sha=%s\n' "${conflict_bundle_sha}"
+    printf 'conflict_generation_sha=%s\n' "${conflict_generation_sha}"
+    printf 'state=conflict\n'
+    exit 1
+  fi
+
+  set +e
+  conflict_output="$(env "${conflict_environment[@]}" \
+    AERIS_CONFLICT_BUNDLE_PATH="${conflict_bundle_path}" \
+    AERIS_CONFLICT_CANDIDATE_PATH="${conflict_candidate_path}" \
+    node "${CONFLICT_RUNTIME}" materialize)"
+  conflict_status=$?
+  set -e
+  ((conflict_status == 0)) || fail_error 'conflict resolution candidate failed trusted replay'
+  conflict_bundle_sha="$(sed -n 's/^bundle_sha=//p' <<<"${conflict_output}" | tail -n1)"
+  conflict_candidate_sha="$(sed -n 's/^candidate_sha=//p' <<<"${conflict_output}" | tail -n1)"
+  conflict_generation_sha="$(sed -n 's/^generation_sha=//p' <<<"${conflict_output}" | tail -n1)"
+  conflict_resolution_sha="$(sed -n 's/^resolution_sha=//p' <<<"${conflict_output}" | tail -n1)"
+  conflict_resolved_tree="$(sed -n 's/^resolved_merge_tree_sha=//p' <<<"${conflict_output}" | tail -n1)"
+  conflict_resolver_model_sha="$(sed -n 's/^resolver_model_sha=//p' <<<"${conflict_output}" | tail -n1)"
+  for value in "${conflict_bundle_sha}" "${conflict_candidate_sha}" "${conflict_generation_sha}" \
+    "${conflict_resolution_sha}" "${conflict_resolver_model_sha}"; do
+    [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || fail_error 'trusted conflict resolution hash is invalid'
+  done
+  git rev-parse --verify "${conflict_resolved_tree}^{tree}" >/dev/null 2>&1 ||
+    fail_error 'trusted conflict resolution tree is invalid'
+  merged_tree="${conflict_resolved_tree}"
+  policy_result=conflict_ai_review
+  conflict_resolved=true
+else
+  merged_tree="$(sed -n 's/^tree=//p' <<<"${merge_output}")"
+  git rev-parse --verify "${merged_tree}^{tree}" >/dev/null 2>&1 ||
+    fail_error 'checkpoint helper did not return a valid tree'
+fi
 
 node - "$(to_node_path "${state_json}")" "$(to_node_path "${updated_state}")" "${upstream_tip}" <<'NODE'
 const fs = require('node:fs');
@@ -389,10 +532,19 @@ GIT_INDEX_FILE="${final_index}" git update-index \
 final_tree="$(GIT_INDEX_FILE="${final_index}" git write-tree)"
 
 printf 'policy_verdict=%s\n' "${policy_result}"
-if [[ "${policy_result}" == eligible ]]; then
+if [[ "${policy_result}" == eligible || "${policy_result}" == conflict_ai_review ]]; then
   printf 'autonomous_eligible=true\n'
 else
   printf 'autonomous_eligible=false\n'
+fi
+
+if [[ "${conflict_resolved}" == true ]]; then
+  printf 'conflict_bundle_sha=%s\n' "${conflict_bundle_sha}"
+  printf 'conflict_candidate_sha=%s\n' "${conflict_candidate_sha}"
+  printf 'conflict_generation_sha=%s\n' "${conflict_generation_sha}"
+  printf 'conflict_resolution_sha=%s\n' "${conflict_resolution_sha}"
+  printf 'conflict_resolved_tree=%s\n' "${conflict_resolved_tree}"
+  printf 'conflict_resolver_model_sha=%s\n' "${conflict_resolver_model_sha}"
 fi
 
 printf 'state=clean\n'

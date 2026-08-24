@@ -518,7 +518,8 @@ publish_pr() {
     return 1
   }
 
-  if [[ "${autonomous_eligible}:${policy_verdict}" == true:eligible ]]; then
+  if [[ "${autonomous_eligible}:${policy_verdict}" == true:eligible ||
+        "${autonomous_eligible}:${policy_verdict}" == true:conflict_ai_review ]]; then
     merge_behavior='This pull request is merged once after protected branch checks pass; no persistent auto-merge is configured.'
   else
     merge_behavior='This pull request requires maintainer review and is not directly merged by synchronization automation.'
@@ -577,6 +578,7 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
     .autoMergeRequest == null
   ' <<<"${trusted_view}" >/dev/null || return 1
   output pr_url "${pr_url}"
+  output pr_number "$(jq -r '.number' <<<"${open_pr}")"
   output expected_base_sha "$(jq -r '.baseRefOid' <<<"${trusted_view}")"
 }
 
@@ -638,6 +640,8 @@ for attempt in 1 2 3; do
     alert_key="${upstream_sha:0:12}"
     case "${prepare_status}:${prepare_state}" in
       1:conflict)
+        conflict_bundle_sha="$(sed -n 's/^conflict_bundle_sha=//p' <<<"${prepare_output}" | tail -n1)"
+        conflict_generation_sha="$(sed -n 's/^conflict_generation_sha=//p' <<<"${prepare_output}" | tail -n1)"
         message="Upstream ${upstream_sha} conflicts with base ${base_sha} from checkpoint ${checkpoint_sha:-unknown}. The existing PR and branch were preserved."
         if [[ -n "${tracked_pr}" ]]; then
           pr_comment_once \
@@ -646,7 +650,24 @@ for attempt in 1 2 3; do
             "${message}"
         fi
         report_sync_alert conflict "${alert_key}" "${message}"
-        output state conflict
+        if [[ -n "${AERIS_CONFLICT_CANDIDATE_PATH:-}" ]]; then
+          output state conflict_resolution_rejected
+        elif [[ "${conflict_bundle_sha}" =~ ^[0-9a-f]{64}$ &&
+                "${conflict_generation_sha}" =~ ^[0-9a-f]{64}$ &&
+                -n "${AERIS_CONFLICT_BUNDLE_PATH:-}" ]]; then
+          output state conflict_pending
+          output conflict_pending true
+          output conflict_bundle_sha "${conflict_bundle_sha}"
+          output conflict_generation_sha "${conflict_generation_sha}"
+          output checkpoint_sha "${checkpoint_sha}"
+          output expected_base_sha "${base_sha}"
+          output policy_verdict eligible
+          output autonomous_eligible false
+          output has_changes false
+          exit 0
+        else
+          output state conflict
+        fi
         ;;
       2:history_rewrite)
         message="Checkpoint ${checkpoint_sha:-unknown} is not an ancestor of upstream ${upstream_sha}. Synchronization stopped without changing the branch, PR, or checkpoint."
@@ -671,6 +692,7 @@ for attempt in 1 2 3; do
   autonomous_eligible="$(sed -n 's/^autonomous_eligible=//p' <<<"${prepare_output}" | tail -n1)"
   policy_verdict="$(sed -n 's/^policy_verdict=//p' <<<"${prepare_output}" | tail -n1)"
   [[ "${autonomous_eligible}:${policy_verdict}" == true:eligible ||
+     "${autonomous_eligible}:${policy_verdict}" == true:conflict_ai_review ||
      "${autonomous_eligible}:${policy_verdict}" == false:manual_review ||
      "${autonomous_eligible}:${policy_verdict}" == false:noop ]] || {
     echo 'Checkpoint helper did not return a trusted synchronization verdict.' >&2
@@ -680,6 +702,31 @@ for attempt in 1 2 3; do
   output filtered_paths "${filtered_paths:-0}"
   output autonomous_eligible "${autonomous_eligible}"
   output policy_verdict "${policy_verdict}"
+  conflict_bundle_sha="$(sed -n 's/^conflict_bundle_sha=//p' <<<"${prepare_output}" | tail -n1)"
+  conflict_candidate_sha="$(sed -n 's/^conflict_candidate_sha=//p' <<<"${prepare_output}" | tail -n1)"
+  conflict_generation_sha="$(sed -n 's/^conflict_generation_sha=//p' <<<"${prepare_output}" | tail -n1)"
+  conflict_resolution_sha="$(sed -n 's/^conflict_resolution_sha=//p' <<<"${prepare_output}" | tail -n1)"
+  conflict_resolved_tree="$(sed -n 's/^conflict_resolved_tree=//p' <<<"${prepare_output}" | tail -n1)"
+  conflict_resolver_model_sha="$(sed -n 's/^conflict_resolver_model_sha=//p' <<<"${prepare_output}" | tail -n1)"
+  if [[ "${policy_verdict}" == conflict_ai_review ]]; then
+    for value in "${conflict_bundle_sha}" "${conflict_candidate_sha}" "${conflict_generation_sha}" \
+      "${conflict_resolution_sha}" "${conflict_resolver_model_sha}"; do
+      [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || {
+        echo 'Checkpoint helper returned an invalid conflict-resolution hash.' >&2
+        exit 1
+      }
+    done
+    [[ "${conflict_resolved_tree}" =~ ^[0-9a-f]{40}$ ]] || {
+      echo 'Checkpoint helper returned an invalid resolved merge tree.' >&2
+      exit 1
+    }
+    output conflict_bundle_sha "${conflict_bundle_sha}"
+    output conflict_candidate_sha "${conflict_candidate_sha}"
+    output conflict_generation_sha "${conflict_generation_sha}"
+    output conflict_resolution_sha "${conflict_resolution_sha}"
+    output conflict_resolved_tree "${conflict_resolved_tree}"
+    output conflict_resolver_model_sha "${conflict_resolver_model_sha}"
+  fi
   if [[ "${prepare_state}" == noop ]]; then
     close_obsolete_pr
   fi
@@ -697,13 +744,28 @@ for attempt in 1 2 3; do
 
   git diff --cached --quiet && close_obsolete_pr
 
-  git commit \
-    -m "chore: sync ${parent}@${upstream_sha}" \
-    -m 'Sync-Upstream-Automation: true' \
-    -m "Sync-Upstream-Source: ${parent}@${upstream_sha}" \
-    -m "Sync-Upstream-Checkpoint: ${checkpoint_sha}->${upstream_sha}" \
-    -m "Sync-Upstream-Base: ${base_sha}" \
+  prepared_tree="$(git write-tree)"
+  commit_arguments=(
+    -m "chore: sync ${parent}@${upstream_sha}"
+    -m 'Sync-Upstream-Automation: true'
+    -m "Sync-Upstream-Source: ${parent}@${upstream_sha}"
+    -m "Sync-Upstream-Checkpoint: ${checkpoint_sha}->${upstream_sha}"
+    -m "Sync-Upstream-Base: ${base_sha}"
     -m "Sync-Upstream-Policy-Verdict: ${policy_verdict}"
+  )
+  if [[ "${policy_verdict}" == conflict_ai_review ]]; then
+    commit_arguments+=(
+      -m 'Sync-Upstream-Conflict-Profile: aeris-sync-conflict-v1'
+      -m "Sync-Upstream-Conflict-Generation: ${conflict_generation_sha}"
+      -m "Sync-Upstream-Conflict-Bundle: ${conflict_bundle_sha}"
+      -m "Sync-Upstream-Resolution-Candidate: ${conflict_candidate_sha}"
+      -m "Sync-Upstream-Resolution-SHA: ${conflict_resolution_sha}"
+      -m "Sync-Upstream-Resolved-Merge-Tree: ${conflict_resolved_tree}"
+      -m "Sync-Upstream-Prepared-Tree: ${prepared_tree}"
+      -m "Sync-Upstream-Resolver-Model-SHA: ${conflict_resolver_model_sha}"
+    )
+  fi
+  git commit "${commit_arguments[@]}"
   local_sha="$(git rev-parse HEAD)"
 
   aeris_git_network fetch --no-tags origin "${BASE_BRANCH}"
@@ -743,6 +805,7 @@ for attempt in 1 2 3; do
   output state published
   output has_changes true
   output synced_sha "${published_sha}"
+  output synced_tree "$(git rev-parse "${published_sha}^{tree}")"
   output synced_source "${parent}@${upstream_sha}"
   exit 0
 done

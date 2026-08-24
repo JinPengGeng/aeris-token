@@ -20,7 +20,7 @@
 7. Finalizer 只在两次完整复核之间执行一次 `mergePullRequest(SQUASH, expectedHeadOid)`；不设置 native auto-merge 或任何其他持久合并授权。
 8. 初始无人合并 allowlist 仅覆盖 `docs/automation-canary/**/*.md`。
 9. 上游同步复用同一个 Writer App、固定分支和单一开放 PR。
-10. 冲突、状态漂移、敏感路径、读取不完整和凭据异常全部 fail closed。
+10. 除上游同步中逐个满足 UTF-8、普通文件 `100644`、modify/modify 的文本冲突外，冲突、状态漂移、敏感路径、读取不完整和凭据异常全部 fail closed；该窄例外也必须经过无 GitHub 写凭据 Resolver 的实际候选、不同 model ID 的独立 Reviewer 和受信 verifier 的最终精确绑定。
 11. `release` Environment 仍需人工审批且管理员不可绕过。
 12. 六项 GitHub 现场 PoC、Writer token 完整治理读取 canary、direct-merge 响应不确定回读 canary 和撤销演练均有 run、PR、SHA 和 API 快照证据。
 
@@ -57,6 +57,8 @@ workflow_dispatch / 受信调度器
 ```text
 schedule / workflow_dispatch
   -> checkpoint 三方合并
+  -> 仅 UTF-8 100644 modify/modify：无写凭据 Resolver candidate artifact
+  -> 不同 model ID Reviewer receipt -> verifier final attestation
   -> automation/sync-upstream
   -> 单一 managed PR
   -> bounded required-check success gate
@@ -74,6 +76,9 @@ schedule / workflow_dispatch
 | Publisher write | Writer App token | `contents:write`, `pull_requests:write` | App private key | checks/statuses/actions/issues/admin/release |
 | PR CI | `GITHUB_TOKEN` | `contents:read` | 无 | 特权 environment、持久 runner |
 | Policy | `GITHUB_TOKEN` | contents/PR read | 无 | 模型、候选 checkout、发布自定义 Check API |
+| Conflict Resolver | 无 GitHub 写凭据 | 读取受信 conflict bundle | `agent` Environment 中的模型凭据；无 Writer/release secret | GitHub 写入、token mint、合并 |
+| Conflict Reviewer | 无 GitHub 写凭据 | 读取 Resolver candidate 与冲突上下文 | `agent` Environment 中与 Resolver 不同的 model ID；无 Writer/release secret | 修改 candidate、GitHub 写入、合并 |
+| Conflict verifier | `GITHUB_TOKEN` | 重新读取 artifact 和精确 PR/上游状态 | 无 | LLM 决策、执行 candidate、GitHub 写入 |
 | Finalizer | `GITHUB_TOKEN` + Writer App token | Actions token 读取 CI/PR；Writer 仅 `administration:read`、PR/contents write | App private key | checkout PR、native auto-merge、admin write/bypass |
 | Release | 维护者 | 现有 release 权限 | `release` Environment；人工审批 | 无人工审批发布 |
 
@@ -204,7 +209,7 @@ Finalizer 在 Policy workflow 完成后运行，但只有以下条件全部成�
 3. **Artifact 隔离**：篡改 schema、digest、repo/base/task/path/mode/大小，证明均在 token mint 前失败。
 4. **Policy 来源**：将 Policy 加为 required check 并绑定 GitHub Actions；用其他来源同名状态证明不能满足保护。
 5. **direct merge**：逐一构造 head/base/check/draft/conflict/discussion/治理漂移，以及 `mergePullRequest` 响应丢失，证明不会合并错误 head、不会创建持久授权，且响应不确定时只通过独立回读收敛。canary 必须记录 Writer Bot 的 REST/GraphQL login、database ID、node ID，与 PR author 对照；另验证 Writer installation token 的 `administration:read` 可读取目标分支完整治理 profile，并证明 Actions token preliminary proof 的 protection 读取次数为零。未取得 run、PR、SHA 和 API 回读快照前不得声称已完成。
-6. **同步幂等**：连续三轮验证固定分支、最多一个开放 PR和 no-op；冲突、unknown tip、历史重写、人工关闭全部停止。
+6. **同步幂等与冲突**：连续三轮验证固定分支、最多一个开放 PR和 no-op；仅 UTF-8 `100644` modify/modify 冲突可验证 Resolver candidate、不同 model ID Reviewer receipt、final attestation 与一次 exact-head REST squash/readback。新增/删除、二进制、编码或 mode 不符、artifact/attestation 漂移、unknown tip、历史重写和人工关闭全部停止。
 7. **撤销**：关闭变量、枚举 managed PR、确认 Finalizer 未留下持久授权、suspend App、轮换 key，再验证无新写入。
 8. **Release**：触发 release lane，确认仍等待维护者审批且无 Agent secret。
 
