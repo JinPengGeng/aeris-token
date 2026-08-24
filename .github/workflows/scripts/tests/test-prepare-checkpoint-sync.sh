@@ -78,6 +78,28 @@ sensitive:
 generated: []
 upstream_owned:
   - "**"
+conflicts:
+  overwrite_unknown_tip: false
+  create_or_update_alert: true
+  preserve_existing_branch_and_pr: true
+  require_explicit_adoption_of_resolution: true
+  ai_resolution:
+    enabled: true
+    profile: aeris-sync-conflict-v1
+    required_pre_conflict_verdict: eligible
+    allowed_type: modify_modify_utf8_text
+    allowed_mode: "100644"
+    maximum_files: 4
+    maximum_bytes_per_file: 16384
+    maximum_total_input_bytes: 65536
+    resolver_model_variable: AERIS_AI_MODEL_CONFLICT_RESOLVER
+    reviewer_model_variable: AERIS_AI_MODEL_CONFLICT_REVIEWER
+    require_distinct_model_ids: true
+    require_complete_resolution: true
+    require_independent_review_pass: true
+    allow_non_conflict_edits: false
+    allow_sensitive_or_review_required_paths: false
+    allow_binary_rename_delete_mode_or_case_ambiguity: false
 YAML
 }
 
@@ -115,6 +137,28 @@ sensitive:
 generated: []
 upstream_owned:
   - "**"
+conflicts:
+  overwrite_unknown_tip: false
+  create_or_update_alert: true
+  preserve_existing_branch_and_pr: true
+  require_explicit_adoption_of_resolution: true
+  ai_resolution:
+    enabled: true
+    profile: aeris-sync-conflict-v1
+    required_pre_conflict_verdict: eligible
+    allowed_type: modify_modify_utf8_text
+    allowed_mode: "100644"
+    maximum_files: 4
+    maximum_bytes_per_file: 16384
+    maximum_total_input_bytes: 65536
+    resolver_model_variable: AERIS_AI_MODEL_CONFLICT_RESOLVER
+    reviewer_model_variable: AERIS_AI_MODEL_CONFLICT_REVIEWER
+    require_distinct_model_ids: true
+    require_complete_resolution: true
+    require_independent_review_pass: true
+    allow_non_conflict_edits: false
+    allow_sensitive_or_review_required_paths: false
+    allow_binary_rename_delete_mode_or_case_ambiguity: false
 YAML
 }
 
@@ -316,6 +360,93 @@ test_non_fork_conflict() {
   set -e
   assert_eq 1 "${status}" 'non-fork conflict exit code'
   assert_eq conflict "$(sed -n 's/^state=//p' <<<"${output}")" 'non-fork conflict state'
+}
+
+test_ai_resolution_policy_controls_conflict_bundle() {
+  local repo="${RUN_ROOT}/ai-policy" root checkpoint upstream_tip main output status bundle
+  new_repo "${repo}"
+  cd "${repo}"
+
+  printf 'base\n' >shared.txt
+  git add shared.txt
+  git commit -qm 'base'
+  root="$(git rev-parse HEAD)"
+
+  git switch -qc upstream
+  git commit --allow-empty -qm 'checkpoint'
+  checkpoint="$(git rev-parse HEAD)"
+  printf 'upstream\n' >shared.txt
+  git commit -qam 'upstream conflict'
+  upstream_tip="$(git rev-parse HEAD)"
+
+  git switch -qc main "${root}"
+  printf 'fork\n' >shared.txt
+  write_state "${checkpoint}"
+  write_policy
+  git add .
+  git commit -qm 'fork conflict with AI policy'
+  main="$(git rev-parse HEAD)"
+  bundle="${RUN_ROOT}/ai-policy-artifacts/bundle.json"
+
+  set +e
+  output="$(
+    AERIS_TMP_ROOT="${RUN_ROOT}/tmp" \
+    AERIS_ARTIFACT_ROOT="${RUN_ROOT}" \
+    AERIS_CONFLICT_BUNDLE_PATH="${bundle}" \
+    AERIS_AI_MODEL_CONFLICT_RESOLVER=resolver-model \
+    AERIS_AI_MODEL_CONFLICT_REVIEWER=reviewer-model \
+    GITHUB_REPOSITORY=example/Fork GITHUB_REPOSITORY_ID=1 \
+      "${HELPER}" "${main}" "${upstream_tip}" example/Upstream main 2>/dev/null
+  )"
+  status=$?
+  set -e
+  assert_eq 1 "${status}" 'enabled AI conflict policy exit code'
+  assert_eq conflict "$(sed -n 's/^state=//p' <<<"${output}")" 'enabled AI conflict policy state'
+  [[ -f "${bundle}" ]] || fail 'enabled AI conflict policy did not produce a bundle'
+  assert_eq sync_conflict_bundle "$(node -e "const fs=require('fs');process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],'utf8')).artifact_type)" "${bundle}")" \
+    'enabled AI conflict policy artifact type'
+
+  sed -i 's/    enabled: true/    enabled: false/' .github/upstream-sync-policy.yml
+  git add .github/upstream-sync-policy.yml
+  git commit -qm 'disable AI conflict policy'
+  main="$(git rev-parse HEAD)"
+  rm -f -- "${bundle}"
+  set +e
+  output="$(
+    AERIS_TMP_ROOT="${RUN_ROOT}/tmp" \
+    AERIS_ARTIFACT_ROOT="${RUN_ROOT}" \
+    AERIS_CONFLICT_BUNDLE_PATH="${bundle}" \
+    AERIS_AI_MODEL_CONFLICT_RESOLVER=resolver-model \
+    AERIS_AI_MODEL_CONFLICT_REVIEWER=reviewer-model \
+    GITHUB_REPOSITORY=example/Fork GITHUB_REPOSITORY_ID=1 \
+      "${HELPER}" "${main}" "${upstream_tip}" example/Upstream main 2>/dev/null
+  )"
+  status=$?
+  set -e
+  assert_eq 3 "${status}" 'disabled AI conflict policy exit code'
+  assert_eq error "$(sed -n 's/^state=//p' <<<"${output}")" 'disabled AI conflict policy state'
+  [[ ! -e "${bundle}" ]] || fail 'disabled AI conflict policy produced a bundle'
+
+  sed -i 's/    enabled: false/    enabled: true/' .github/upstream-sync-policy.yml
+  sed -i 's/    maximum_files: 4/    maximum_files: 5/' .github/upstream-sync-policy.yml
+  git add .github/upstream-sync-policy.yml
+  git commit -qm 'widen unsupported AI conflict policy'
+  main="$(git rev-parse HEAD)"
+  set +e
+  output="$(
+    AERIS_TMP_ROOT="${RUN_ROOT}/tmp" \
+    AERIS_ARTIFACT_ROOT="${RUN_ROOT}" \
+    AERIS_CONFLICT_BUNDLE_PATH="${bundle}" \
+    AERIS_AI_MODEL_CONFLICT_RESOLVER=resolver-model \
+    AERIS_AI_MODEL_CONFLICT_REVIEWER=reviewer-model \
+    GITHUB_REPOSITORY=example/Fork GITHUB_REPOSITORY_ID=1 \
+      "${HELPER}" "${main}" "${upstream_tip}" example/Upstream main 2>/dev/null
+  )"
+  status=$?
+  set -e
+  assert_eq 3 "${status}" 'unsupported AI conflict policy limit exit code'
+  assert_eq error "$(sed -n 's/^state=//p' <<<"${output}")" 'unsupported AI conflict policy limit state'
+  [[ ! -e "${bundle}" ]] || fail 'unsupported AI conflict policy limit produced a bundle'
 }
 
 test_invalid_state_and_history_rewrite() {
@@ -529,6 +660,7 @@ test_squash_checkpoint_noop
 test_fork_owned_filter_and_state_advance
 test_exact_path_and_recursive_directory_filter
 test_non_fork_conflict
+test_ai_resolution_policy_controls_conflict_bundle
 test_invalid_state_and_history_rewrite
 test_unsupported_policy_pattern
 test_policy_identity_mismatch

@@ -12,7 +12,7 @@ if (!yamlPath) throw new Error('js-yaml is not installed in an approved workspac
 const yaml = require(yamlPath);
 
 const read = (relativePath) =>
-  fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
+  fs.readFileSync(path.join(repoRoot, relativePath), 'utf8').replace(/\r\n/g, '\n');
 const loadYaml = (relativePath) => yaml.load(read(relativePath));
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
@@ -165,7 +165,33 @@ assert(
 );
 assert(sync.conflicts.overwrite_unknown_tip === false, 'unknown sync tips must not be overwritten');
 assert(sync.conflicts.create_or_update_alert === true, 'sync failures must create alerts');
+assert(
+  sync.conflicts.ai_resolution.enabled === true &&
+    sync.conflicts.ai_resolution.profile === 'aeris-sync-conflict-v1' &&
+    sync.conflicts.ai_resolution.required_pre_conflict_verdict === 'eligible' &&
+    sync.conflicts.ai_resolution.allowed_type === 'modify_modify_utf8_text' &&
+    sync.conflicts.ai_resolution.allowed_mode === '100644' &&
+    sync.conflicts.ai_resolution.maximum_files === 4 &&
+    sync.conflicts.ai_resolution.maximum_bytes_per_file === 16384 &&
+    sync.conflicts.ai_resolution.maximum_total_input_bytes === 65536 &&
+    sync.conflicts.ai_resolution.resolver_model_variable === 'AERIS_AI_MODEL_CONFLICT_RESOLVER' &&
+    sync.conflicts.ai_resolution.reviewer_model_variable === 'AERIS_AI_MODEL_CONFLICT_REVIEWER' &&
+    sync.conflicts.ai_resolution.require_distinct_model_ids === true &&
+    sync.conflicts.ai_resolution.require_complete_resolution === true &&
+    sync.conflicts.ai_resolution.require_independent_review_pass === true &&
+    sync.conflicts.ai_resolution.allow_non_conflict_edits === false &&
+    sync.conflicts.ai_resolution.allow_sensitive_or_review_required_paths === false &&
+    sync.conflicts.ai_resolution.allow_binary_rename_delete_mode_or_case_ambiguity === false,
+  'AI conflict resolution policy must remain narrow, independent, and fail closed',
+);
 const syncSteps = syncWorkflow.jobs.sync.steps;
+assert(
+  syncWorkflow.jobs.sync.env.AERIS_AI_MODEL_CONFLICT_RESOLVER ===
+      '${{ vars.AERIS_AI_MODEL_CONFLICT_RESOLVER || vars.AERIS_AI_MODEL_WRITER }}' &&
+    syncWorkflow.jobs.sync.env.AERIS_AI_MODEL_CONFLICT_REVIEWER ===
+      '${{ vars.AERIS_AI_MODEL_CONFLICT_REVIEWER || vars.AERIS_AI_MODEL_REVIEWER }}',
+  'trusted conflict generation must bind the configured Resolver and Reviewer model IDs',
+);
 assert(syncWorkflow.jobs.sync.environment === 'writer', 'sync must use the shared writer environment');
 assert(
   syncWorkflow.jobs.sync.if.includes("vars.AERIS_WRITER_ENABLED == 'true'") &&
@@ -194,10 +220,142 @@ assert(
 assert(
   syncTokenStep.with['permission-contents'] === 'write' &&
     syncTokenStep.with['permission-pull-requests'] === 'write' &&
+    syncTokenStep.with['permission-administration'] === 'read' &&
     syncTokenStep.with['permission-issues'] === undefined &&
     syncTokenStep.with['permission-checks'] === undefined &&
     syncTokenStep.with['permission-statuses'] === undefined,
   'Writer App token permissions exceed or miss the approved minimum',
+);
+
+const conflictArtifactSuffix = '${{ github.run_id }}-${{ github.run_attempt }}';
+const expectedPermissions = (actual, expected, message) => {
+  assert(
+    JSON.stringify(actual) === JSON.stringify(expected),
+    message,
+  );
+};
+const findStep = (job, name) => job.steps.find((step) => step.name === name);
+const assertTrustedCheckouts = (job, message) => {
+  const checkouts = job.steps.filter((step) => step.uses?.startsWith('actions/checkout@'));
+  assert(
+    checkouts.length > 0 && checkouts.every((step) => step.with?.['persist-credentials'] === false),
+    message,
+  );
+};
+const resolveConflictJob = syncWorkflow.jobs.resolve_conflict;
+const publishConflictJob = syncWorkflow.jobs.publish_conflict;
+const reviewConflictJob = syncWorkflow.jobs.review_conflict;
+const finalizeConflictJob = syncWorkflow.jobs.finalize_conflict;
+assert(
+  resolveConflictJob && publishConflictJob && reviewConflictJob && finalizeConflictJob,
+  'sync conflict workflow must keep all four isolated phases',
+);
+for (const [jobName, job] of Object.entries(syncWorkflow.jobs)) {
+  assert(
+    Object.values(job.env ?? {}).every(
+      (value) => typeof value !== 'string' || !value.includes('${{ runner.'),
+    ),
+    `${jobName} job-level env must not use the unavailable runner context`,
+  );
+}
+expectedPermissions(
+  resolveConflictJob.permissions,
+  { actions: 'read', contents: 'read' },
+  'Resolver job permissions changed',
+);
+expectedPermissions(
+  publishConflictJob.permissions,
+  { actions: 'read', checks: 'read', contents: 'read', issues: 'write', 'pull-requests': 'read' },
+  'conflict Publisher GITHUB_TOKEN permissions changed',
+);
+expectedPermissions(
+  reviewConflictJob.permissions,
+  { actions: 'read', checks: 'read', contents: 'read', 'pull-requests': 'read' },
+  'Reviewer job permissions changed',
+);
+expectedPermissions(
+  finalizeConflictJob.permissions,
+  { actions: 'write', checks: 'read', contents: 'read', 'pull-requests': 'read' },
+  'conflict Finalizer GITHUB_TOKEN permissions changed',
+);
+assert(
+  publishConflictJob.environment === 'writer' &&
+    finalizeConflictJob.environment === 'writer' &&
+    publishConflictJob.concurrency.group === 'aeris-writer-mutation' &&
+    finalizeConflictJob.concurrency.group === 'aeris-writer-mutation' &&
+    publishConflictJob.concurrency['cancel-in-progress'] === false &&
+    finalizeConflictJob.concurrency['cancel-in-progress'] === false,
+  'only serialized Publisher and Finalizer jobs may use the writer Environment',
+);
+assert(
+  resolveConflictJob.environment === 'agent' && reviewConflictJob.environment === 'agent',
+  'Resolver and Reviewer must obtain only the model secret from the agent Environment',
+);
+for (const [job, message] of [
+  [resolveConflictJob, 'Resolver checkout must not persist credentials'],
+  [publishConflictJob, 'conflict Publisher checkout must not persist credentials'],
+  [reviewConflictJob, 'Reviewer checkout must not persist credentials'],
+  [finalizeConflictJob, 'conflict Finalizer checkout must not persist credentials'],
+]) {
+  assertTrustedCheckouts(job, message);
+}
+const resolverStep = findStep(resolveConflictJob, 'Generate credentialless resolution candidate');
+const reviewerStep = findStep(reviewConflictJob, 'Run independent credentialless Reviewer');
+assert(
+  resolverStep?.env.GITHUB_TOKEN === '' && resolverStep.env.GH_TOKEN === '' &&
+    resolverStep.env.AERIS_AI_API_KEY === '${{ secrets.AERIS_AI_API_KEY }}' &&
+    resolverStep.run === 'node .github/automation/src/sync-conflict-review.mjs resolve',
+  'Resolver model step must be credentialless and produce only a candidate artifact',
+);
+assert(
+  reviewerStep?.env.GITHUB_TOKEN === '' && reviewerStep.env.GH_TOKEN === '' &&
+    reviewerStep.env.AERIS_AI_API_KEY === '${{ secrets.AERIS_AI_API_KEY }}' &&
+    reviewerStep.run === 'node .github/automation/src/sync-conflict-review.mjs review',
+  'Reviewer model step must be credentialless and independent from publication',
+);
+const expectedArtifacts = [
+  [syncWorkflow.jobs.sync, 'Upload exact conflict bundle', `sync-conflict-bundle-${conflictArtifactSuffix}`],
+  [resolveConflictJob, 'Download exact conflict bundle', `sync-conflict-bundle-${conflictArtifactSuffix}`],
+  [resolveConflictJob, 'Upload exact resolution candidate', `sync-conflict-candidate-${conflictArtifactSuffix}`],
+  [publishConflictJob, 'Download exact conflict bundle', `sync-conflict-bundle-${conflictArtifactSuffix}`],
+  [publishConflictJob, 'Download exact resolution candidate', `sync-conflict-candidate-${conflictArtifactSuffix}`],
+  [reviewConflictJob, 'Download exact conflict bundle', `sync-conflict-bundle-${conflictArtifactSuffix}`],
+  [reviewConflictJob, 'Download exact resolution candidate', `sync-conflict-candidate-${conflictArtifactSuffix}`],
+  [reviewConflictJob, 'Upload exact independent review', `sync-conflict-review-${conflictArtifactSuffix}`],
+  [finalizeConflictJob, 'Download exact conflict bundle', `sync-conflict-bundle-${conflictArtifactSuffix}`],
+  [finalizeConflictJob, 'Download exact resolution candidate', `sync-conflict-candidate-${conflictArtifactSuffix}`],
+  [finalizeConflictJob, 'Download exact independent review', `sync-conflict-review-${conflictArtifactSuffix}`],
+  [finalizeConflictJob, 'Upload final conflict attestation', `sync-conflict-attestation-${conflictArtifactSuffix}`],
+];
+for (const [job, name, artifactName] of expectedArtifacts) {
+  assert(findStep(job, name)?.with?.name === artifactName, `${name} must select the exact run-attempt artifact`);
+}
+const publishConflictToken = findStep(publishConflictJob, 'Mint bounded Writer App token');
+const finalizeConflictToken = findStep(finalizeConflictJob, 'Mint bounded Writer App token');
+assert(
+  publishConflictToken?.with['permission-contents'] === 'write' &&
+    publishConflictToken.with['permission-pull-requests'] === 'write' &&
+    publishConflictToken.with['permission-checks'] === undefined &&
+    publishConflictToken.with['permission-administration'] === undefined,
+  'conflict Publisher App token must keep its minimal write scope',
+);
+assert(
+  finalizeConflictToken?.with['permission-administration'] === 'read' &&
+    finalizeConflictToken.with['permission-contents'] === 'write' &&
+    finalizeConflictToken.with['permission-pull-requests'] === 'write' &&
+    finalizeConflictToken.with['permission-checks'] === undefined,
+  'conflict Finalizer App token must include only merge and governance proof permissions',
+);
+const conflictMergeStep = findStep(finalizeConflictJob, 'Perform one exact server-side squash');
+assert(
+  conflictMergeStep?.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}' &&
+    conflictMergeStep.env.AERIS_CHECKS_GH_TOKEN === '${{ github.token }}' &&
+    conflictMergeStep.env.SYNCED_SHA === '${{ needs.publish_conflict.outputs.head_sha }}' &&
+    conflictMergeStep.env.EXPECTED_BASE_SHA === '${{ needs.publish_conflict.outputs.base_sha }}' &&
+    conflictMergeStep.env.CONFLICT_ATTESTATION_SHA === '${{ steps.attest.outputs.conflict_attestation_sha }}' &&
+    (conflictMergeStep.run.match(/manage-sync-automerge\.sh/g) || []).length === 1 &&
+    conflictMergeStep.run.includes('conflict_ai_review'),
+  'conflict Finalizer must perform one exact attested merge helper invocation',
 );
 assert(
   syncWorkflow.jobs.sync.env.AERIS_AUTONOMY_EXPIRES_AT ===
@@ -268,7 +426,7 @@ assert(
     syncScript.includes(
       'aeris_git_network -c credential.helper= -c http.https://github.com/.extraheader= "$@"',
     ) &&
-    syncScript.includes('aeris_writer_git_push push \\\n        --force-with-lease=') &&
+    /aeris_writer_git_push push \\\r?\n\s+--force-with-lease=/.test(syncScript) &&
     syncScript.includes('"https://github.com/${GITHUB_REPOSITORY}.git"') &&
     !syncScript.includes('x-access-token@') &&
     !syncScript.includes('remote set-url'),
@@ -302,7 +460,8 @@ assert(
     mergeStep.env.EXPECTED_BASE_SHA === '${{ steps.sync.outputs.expected_base_sha }}' &&
     mergeStep.env.SYNCED_SOURCE === '${{ steps.sync.outputs.synced_source }}' &&
     mergeStep.env.SYNC_POLICY_VERDICT === '${{ steps.sync.outputs.policy_verdict }}' &&
-    mergeStep.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}',
+    mergeStep.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}' &&
+    mergeStep.env.AERIS_CHECKS_GH_TOKEN === '${{ github.token }}',
   'direct merge must bind the published PR URL and exact head SHA',
 );
 assert(
@@ -328,6 +487,11 @@ assert(
     autoMergeScript.includes('commits/${merge_commit_sha}') &&
     autoMergeScript.includes('.sha == $merge_commit_sha') &&
     autoMergeScript.includes('.parents | type == "array" and length == 1') &&
+    autoMergeScript.includes('requiresStrictStatusChecks') &&
+    autoMergeScript.includes('isAdminEnforced') &&
+    autoMergeScript.includes('bypassPullRequestAllowances') &&
+    autoMergeScript.includes('rulesets(first:100,includeParents:true,targets:[BRANCH])') &&
+    autoMergeScript.includes('GH_TOKEN="${AERIS_CHECKS_GH_TOKEN:?AERIS_CHECKS_GH_TOKEN is required}" command gh') &&
     autoMergeScript.includes('set +e') &&
     autoMergeScript.includes('readback_status'),
   'direct merge must use one REST merge and prove the exact post-merge outcome',

@@ -9,7 +9,7 @@
 1. `main` 继续保持 squash-only 和线性历史。
 2. 自动化只通过分支和 Pull Request 修改代码，不直接写入 `main`。
 3. Issue、评论、PR 内容和模型输出均是不可信输入。
-4. 模型负责分析和建议；授权、路径限制和合并由确定性规则决定。
+4. 模型负责分析和建议；授权、路径限制和合并由确定性规则决定。唯一的冲突自动化例外是受限上游同步中逐个满足 UTF-8、普通文件 mode `100644`、两侧均为 modify 的文本冲突：无 GitHub 写凭据的 AI Resolver 只能生成实际候选 artifact，不同 model ID 的独立 AI Reviewer 必须审查该 artifact；trusted deterministic verifier 只有在最终 attestation 精确绑定 artifact 链、当前 head/tree、base、checkpoint、upstream 和 policy 后，才允许 Writer 执行一次 server-side direct squash。任何不满足该范围或任一验证失败的冲突仍 fail closed，并转人工处理。
 5. 唯一的 GitHub 写入身份是最小 Writer App；Policy 是 GitHub Actions 的确定性检查，Finalizer 只在实时复核后调用一次 GitHub GraphQL direct squash merge，不存在独立 Policy 或 Merger App，也不存在 Finalizer 持久 auto-merge 授权。
 6. 所有策略从受保护的 `main@SHA` 读取，不能从当前 PR checkout 读取。
 7. GitHub 事件按可能重复、乱序和重试处理；Actions-only 阶段只提供 best-effort 去重和收敛，不声明 strict exactly-once。
@@ -76,6 +76,8 @@ Fallback 仅适用于连接失败、超时、429 和 5xx。认证失败、权限
 | `planner` | 模型只读 | 拆分任务、验收标准和测试计划 | shell、代码写入 |
 | `reviewer` | 模型只读 | 读取仓库和 PR diff、在 managed comment 中发布 advisory 结论 | Check Run、修改代码、批准、合并 |
 | `candidate` | 隔离生成 | 在临时 runner 生成有界 patch artifact | GitHub 写入、Writer/release secret、候选外 shell |
+| `conflict-resolver` | 模型只读 | 仅从 `agent` Environment 取得模型 secret，为受限上游文本冲突生成完整内容的候选 artifact | GitHub 写入、Writer/release secret、直接合并 |
+| `conflict-reviewer` | 不同 model ID 的模型只读 | 仅从 `agent` Environment 取得模型 secret，审查 Resolver artifact；不得与 Resolver 使用相同 model ID | GitHub 写入、修改候选、批准、合并 |
 | `publisher` | 单 Writer App | 写 `agent/**` 分支、创建或复用 Draft PR | `.github/**`、审批、Checks、直接合并 |
 | `tester` | 确定性 | 触发和读取 CI | 修改源码、合并 |
 | `security` | 模型只读 | 审查敏感路径和依赖元数据 | 修改代码、合并 |
@@ -139,7 +141,7 @@ sensitive > review_required > fork_owned > generated > upstream_owned > default
 
 准备合并树时，先将上游的 fork-owned 路径还原为 `U0` 版本，再执行 `base=U0, ours=M, theirs=filtered(U1)` 的三方合并；这样 fork 在 `M` 中的新增、修改和删除均被保留，fork-owned 冲突也不会阻断其他上游增量。当前执行器只支持 `aeris-glob-v1` 的精确路径、目录末尾 `/**`、单段 `*`/`?` 和无斜线 basename 模式；negation、rooted pattern、backslash、character class、空 pattern、尾 `/` 和其他语法均拒绝，不静默猜测。
 
-默认分类是 `review_required`，用于标识同步后的审查风险，不会让未知路径被误认为 `upstream_owned`。`auth`、`migrations`、`security` 路径只要求人工审查；真正禁止发布的 sensitive 集合仅包括 `.gitmodules` 和私钥/证书扩展名。managed 上游同步是通用 Agent Finalizer 之外的确定性例外：fork-owned 路径先被过滤，候选树必须通过 checkpoint、来源、固定分支和精确 head 验证；review-required 或 unknown verdict 可发布人工 PR，但 `autonomous_eligible=false`，不会 direct merge。上游 workflow drift 仍生成或更新审查 Issue，且不会被同步候选覆盖。非 fork-owned 冲突时，自动化会 disarm 历史遗留的 native auto-merge（若存在），不生成伪解决方案或覆盖未知同步分支；维护者应通过普通 PR 完成人工三方解决，并在同一 PR 中把 `last_integrated_sha` 更新为已实际纳入的上游 SHA。该 PR 合并后，下一轮从新 checkpoint 继续，不再重复旧冲突。
+默认分类是 `review_required`，用于标识同步后的审查风险，不会让未知路径被误认为 `upstream_owned`。`auth`、`migrations`、`security` 路径只要求人工审查；真正禁止发布的 sensitive 集合仅包括 `.gitmodules` 和私钥/证书扩展名。managed 上游同步是通用 Agent Finalizer 之外的确定性例外：fork-owned 路径先被过滤，候选树必须通过 checkpoint、来源、固定分支和精确 head 验证；review-required 或 unknown verdict 可发布人工 PR，但 `autonomous_eligible=false`，不会 direct merge。仅当每个非 fork-owned 冲突均为 UTF-8 `100644` modify/modify 文本时，无 GitHub 写凭据的 AI Resolver 才可产生完整内容的实际 candidate artifact；不同 model ID 的 AI Reviewer 必须独立审查。trusted deterministic verifier 重新物化候选并产生最终 attestation，精确绑定 bundle/candidate/review artifacts、当前 head/tree、base、checkpoint、upstream SHA 与受信 policy；merge helper 还会重新证明严格 required checks、admin-enforced branch protection、零 bypass 和无 active branch ruleset。只有这些绑定与治理条件均成立，Writer 才可执行一次 exact-head REST server-side squash。上游 workflow drift 仍生成或更新审查 Issue，且不会被同步候选覆盖。新增/删除、模式或编码不符、二进制、敏感路径、Reviewer 不独立、artifact/attestation 或任一绑定漂移，均 disarm 历史遗留的 native auto-merge（若存在）并 fail closed；维护者应通过普通 PR 完成人工三方解决，并在同一 PR 中把 `last_integrated_sha` 更新为已实际纳入的上游 SHA。该 PR 合并后，下一轮从新 checkpoint 继续，不再重复旧冲突。
 
 ## 8. 幂等、限流和审计边界
 
@@ -169,7 +171,7 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 3. `label`：维护者添加 `automerge-approved` 后允许 Finalizer 在完整 proof 后执行一次 direct squash merge。
 4. `allowlist`：仅对经过历史验证的低风险范围自动合并。
 
-所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。Finalizer 在 Draft 转 Ready 前和转 Ready 后各运行一次 full proof；proof 同时覆盖 Writer App、installation、单仓 scope、Bot 身份和 `administration:read` 治理读取。第二次 proof 后才调用 `mergePullRequest`，固定 `SQUASH + expectedHeadOid`。mutation 失败不遗留持久授权；响应不确定时停止重试并独立回读合并状态，不能确认即 fail closed。`.github/**`、依赖文件、认证、安全、数据库、发布和其他策略标记路径默认需要人工审查。managed 上游同步 PR 是独立的确定性例外：它使用有界 required-check gate 加一次 exact-head REST squash merge 和严格回读，而不保留 native auto-merge。模型的自报置信度不能改变门禁。
+所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。Finalizer 在 Draft 转 Ready 前和转 Ready 后各运行一次 full proof；proof 同时覆盖 Writer App、installation、单仓 scope、Bot 身份和 `administration:read` 治理读取。第二次 proof 后才调用 `mergePullRequest`，固定 `SQUASH + expectedHeadOid`。mutation 失败不遗留持久授权；响应不确定时停止重试并独立回读合并状态，不能确认即 fail closed。对受限上游冲突，模型自报、评论或未绑定审查结论不能替代 trusted verifier 的 artifact/head/tree/base/checkpoint/upstream/policy attestation。`.github/**`、依赖文件、认证、安全、数据库、发布和其他策略标记路径默认需要人工审查。managed 上游同步 PR 是独立的确定性例外：它使用有界 required-check gate 加一次 exact-head REST squash merge 和严格回读，而不保留 native auto-merge。模型的自报置信度不能改变门禁。
 
 ## 10. 威胁模型
 

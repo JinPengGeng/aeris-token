@@ -4,8 +4,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/github-autonomy.sh"
 
+aeris_checks_gh() {
+  aeris_require_active_autonomy_window || return
+  GH_TOKEN="${AERIS_CHECKS_GH_TOKEN:?AERIS_CHECKS_GH_TOKEN is required}" command gh "$@"
+}
+
 usage() {
-  printf '%s\n' 'usage: manage-sync-automerge.sh merge <owner/repo> <pr-number|pr-url> <head-sha> <base-sha> <source> <eligible|manual_review> | disarm <owner/repo> <pr-number|pr-url>'
+  printf '%s\n' 'usage: manage-sync-automerge.sh merge <owner/repo> <pr-number|pr-url> <head-sha> <base-sha> <source> <eligible|conflict_ai_review> [attestation-path attestation-sha] | disarm <owner/repo> <pr-number|pr-url>'
   exit 64
 }
 
@@ -49,7 +54,7 @@ parse_pr "${PR_VALUE}"
 
 case "${ACTION}" in
   merge)
-    [[ $# -eq 7 ]] || usage
+    [[ $# -eq 7 || $# -eq 9 ]] || usage
     HEAD_SHA="$4"
     BASE_SHA="$5"
     SYNC_SOURCE="$6"
@@ -61,8 +66,32 @@ case "${ACTION}" in
     [[ "${HEAD_SHA}" != "${BASE_SHA}" ]] || fail 'head and base SHA must differ'
     [[ "${SYNC_SOURCE}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*@[0-9A-Fa-f]{40}$ ]] ||
       fail 'source must be owner/repo@sha'
-    [[ "${POLICY_VERDICT}" == eligible ]] ||
-      fail 'only an eligible synchronization verdict permits direct merge'
+    [[ -n "${AERIS_CHECKS_GH_TOKEN:-}" ]] ||
+      fail 'AERIS_CHECKS_GH_TOKEN is required for exact-head check reads'
+    [[ "${POLICY_VERDICT}" == eligible || "${POLICY_VERDICT}" == conflict_ai_review ]] ||
+      fail 'only an eligible or independently reviewed synchronization verdict permits direct merge'
+    if [[ "${POLICY_VERDICT}" == conflict_ai_review ]]; then
+      [[ $# -eq 9 ]] || fail 'AI conflict review requires an exact attestation artifact and hash'
+      ATTESTATION_PATH="$8"
+      ATTESTATION_SHA="$9"
+      [[ "${ATTESTATION_SHA}" =~ ^[0-9a-f]{64}$ ]] || fail 'conflict attestation SHA is invalid'
+      upstream_repository="${SYNC_SOURCE%@*}"
+      upstream_sha="${SYNC_SOURCE#*@}"
+      GITHUB_REPOSITORY="${REPOSITORY}" \
+      AERIS_CONFLICT_PULL_NUMBER="${PR_NUMBER}" \
+      AERIS_CONFLICT_HEAD_SHA="${HEAD_SHA}" \
+      AERIS_CONFLICT_BASE_SHA="${BASE_SHA}" \
+      AERIS_CONFLICT_UPSTREAM_REPOSITORY="${upstream_repository}" \
+      AERIS_CONFLICT_UPSTREAM_SHA="${upstream_sha}" \
+      AERIS_CONFLICT_ATTESTATION_PATH="${ATTESTATION_PATH}" \
+      AERIS_CONFLICT_ATTESTATION_SHA="${ATTESTATION_SHA}" \
+      AERIS_CONFLICT_RUN_ID="${GITHUB_RUN_ID:?GITHUB_RUN_ID is required for conflict review}" \
+      AERIS_CONFLICT_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required for conflict review}" \
+        node "${SCRIPT_DIR}/../../automation/src/sync-conflict-review.mjs" verify-attestation ||
+        fail 'AI conflict review attestation is invalid or stale'
+    else
+      [[ $# -eq 7 ]] || fail 'clean synchronization must not supply a conflict attestation'
+    fi
 
     preflight_pr="$(aeris_gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")"
     jq -e --argjson number "${PR_NUMBER}" --arg head_sha "${HEAD_SHA}" \
@@ -89,15 +118,69 @@ case "${ACTION}" in
     ' <<<"${head_commit}" >/dev/null ||
       fail 'head commit does not prove the trusted synchronization source, base, and verdict'
 
+    checks="$(aeris_checks_gh api "repos/${REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100")"
+    jq -e --arg head_sha "${HEAD_SHA}" --arg actions_prefix "https://github.com/${REPOSITORY}/actions/runs/" '
+      def required_names: ["Automation Policy / gate", "Frontend CI / check", "Rust CI / check"];
+      type == "object" and (.total_count | type) == "number" and .total_count <= 100 and
+      (.check_runs | type) == "array" and .total_count == (.check_runs | length) and
+      ([required_names[] as $name |
+        [.check_runs[] |
+          select(.name == $name and .head_sha == $head_sha and
+                 .app.id == 15368 and .app.slug == "github-actions")] |
+        sort_by(.id // 0) | last
+      ] | all(.[];
+        . != null and (.id | type) == "number" and .id > 0 and
+        (.check_suite.id | type) == "number" and .check_suite.id > 0 and
+        .status == "completed" and .conclusion == "success" and
+        (.details_url | type) == "string" and (.details_url | startswith($actions_prefix))))
+    ' <<<"${checks}" >/dev/null ||
+      fail 'exact-head required checks are missing, duplicated beyond the bounded snapshot, or unsuccessful'
+
     governance="$(aeris_gh api graphql \
-      -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){number state isDraft headRefName headRefOid baseRefName baseRefOid headRepository{nameWithOwner} autoMergeRequest{enabledAt} reviewDecision reviewThreads(first:100){nodes{isResolved} pageInfo{hasNextPage}}}}}' \
+      -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){mergeCommitAllowed rebaseMergeAllowed squashMergeAllowed isArchived isDisabled isLocked branchProtectionRules(first:100){totalCount pageInfo{hasNextPage} nodes{pattern allowsDeletions allowsForcePushes requiresStatusChecks requiresStrictStatusChecks isAdminEnforced requiresConversationResolution requiresLinearHistory bypassPullRequestAllowances(first:100){totalCount pageInfo{hasNextPage}} bypassForcePushAllowances(first:100){totalCount pageInfo{hasNextPage}} requiredStatusChecks{context app{databaseId slug}}}} rulesets(first:100,includeParents:true,targets:[BRANCH]){totalCount pageInfo{hasNextPage} nodes{enforcement target}} pullRequest(number:$number){number state isDraft mergeable mergeStateStatus headRefName headRefOid baseRefName baseRefOid headRepository{nameWithOwner} autoMergeRequest{enabledAt} reviewDecision reviewThreads(first:100){nodes{isResolved} pageInfo{hasNextPage}}}}}' \
       -f owner="${REPOSITORY%%/*}" -f name="${REPOSITORY#*/}" -F number="${PR_NUMBER}")"
     jq -e --argjson number "${PR_NUMBER}" --arg head_sha "${HEAD_SHA}" \
       --arg base_sha "${BASE_SHA}" --arg repository "${REPOSITORY}" \
       --arg head_branch "${SYNC_BRANCH:-automation/sync-upstream}" \
       --arg base_branch "${BASE_BRANCH:-main}" '
+      def complete_zero_allowance:
+        type == "object" and .totalCount == 0 and .pageInfo.hasNextPage == false;
+      .data.repository as $repository_profile |
+      .data.repository.branchProtectionRules.nodes[0] as $rule |
       .data.repository.pullRequest as $pr |
+      $repository_profile.mergeCommitAllowed == false and
+      $repository_profile.rebaseMergeAllowed == false and
+      $repository_profile.squashMergeAllowed == true and
+      $repository_profile.isArchived == false and
+      $repository_profile.isDisabled == false and
+      $repository_profile.isLocked == false and
+      ($repository_profile.branchProtectionRules | type) == "object" and
+      $repository_profile.branchProtectionRules.totalCount == 1 and
+      $repository_profile.branchProtectionRules.pageInfo.hasNextPage == false and
+      ($repository_profile.branchProtectionRules.nodes | type) == "array" and
+      ($repository_profile.branchProtectionRules.nodes | length) == 1 and
+      $rule.pattern == $base_branch and
+      $rule.allowsDeletions == false and $rule.allowsForcePushes == false and
+      $rule.requiresStatusChecks == true and $rule.requiresStrictStatusChecks == true and
+      $rule.isAdminEnforced == true and $rule.requiresConversationResolution == true and
+      $rule.requiresLinearHistory == true and
+      ($rule.bypassPullRequestAllowances | complete_zero_allowance) and
+      ($rule.bypassForcePushAllowances | complete_zero_allowance) and
+      ($rule.requiredStatusChecks | type) == "array" and
+      ($rule.requiredStatusChecks | length) == 3 and
+      ([ $rule.requiredStatusChecks[].context ] | sort) ==
+        (["Automation Policy / gate", "Frontend CI / check", "Rust CI / check"] | sort) and
+      all($rule.requiredStatusChecks[];
+        .app.databaseId == 15368 and .app.slug == "github-actions") and
+      ($repository_profile.rulesets | type) == "object" and
+      $repository_profile.rulesets.pageInfo.hasNextPage == false and
+      ($repository_profile.rulesets.nodes | type) == "array" and
+      $repository_profile.rulesets.totalCount == ($repository_profile.rulesets.nodes | length) and
+      all($repository_profile.rulesets.nodes[];
+        .target == "BRANCH" and
+        (.enforcement == "DISABLED" or .enforcement == "EVALUATE")) and
       $pr.number == $number and $pr.state == "OPEN" and $pr.isDraft == false and
+      $pr.mergeable == "MERGEABLE" and $pr.mergeStateStatus == "CLEAN" and
       $pr.headRefName == $head_branch and $pr.headRefOid == $head_sha and
       $pr.baseRefName == $base_branch and $pr.baseRefOid == $base_sha and
       $pr.headRepository.nameWithOwner == $repository and $pr.autoMergeRequest == null and
@@ -105,7 +188,7 @@ case "${ACTION}" in
       $pr.reviewThreads.pageInfo.hasNextPage == false and
       ($pr.reviewThreads.nodes | type == "array" and all(.[]; .isResolved == true))
     ' <<<"${governance}" >/dev/null ||
-      fail 'pull request governance drifted before merge mutation'
+      fail 'pull request or branch protection governance drifted before merge mutation'
 
     set +e
     merge_response="$(aeris_gh api --method PUT \
