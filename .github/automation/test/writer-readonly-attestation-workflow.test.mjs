@@ -55,16 +55,19 @@ test('Writer attestation mints one explicitly read-only repository token and has
   assert.equal(summary.env.INSTALLATION_PERMISSIONS, '${{ steps.writer_app_attestation.outputs.installation_permissions }}');
   assert.equal(summary.env.REPOSITORY_SELECTION, '${{ steps.writer_app_attestation.outputs.repository_selection }}');
   assert.match(summary.run, /Bot GraphQL identity/);
+  const printfNewline = String.raw`\n`;
+  assert.equal(printfNewline, '\\n');
+  assert.notEqual(printfNewline, '\n');
   const expectedFormats = [
-    ["'- App: `%s` (#%s)\\n'", ['APP_SLUG', 'APP_ID']],
-    ["'- App owner: `%s` (`%s`)\\n'", ['APP_OWNER', 'APP_OWNER_TYPE']],
-    ["'- App permissions: `%s`\\n'", ['APP_PERMISSIONS']],
-    ["'- Installation: `%s`\\n'", ['INSTALLATION_ID']],
-    ["'- Installation permissions: `%s`\\n'", ['INSTALLATION_PERMISSIONS']],
-    ["'- Repository selection: `%s`\\n'", ['REPOSITORY_SELECTION']],
-    ["'- Repository scope: `%s`\\n'", ['REPOSITORY']],
-    ["'- Bot REST identity: `%s` (#%s)\\n'", ['BOT_REST_LOGIN', 'BOT_DATABASE_ID']],
-    ["'- Bot GraphQL identity: `%s` (`%s`)\\n'", ['BOT_GRAPHQL_LOGIN', 'BOT_NODE_ID']],
+    [`'- App: \`%s\` (#%s)${printfNewline}'`, ['APP_SLUG', 'APP_ID']],
+    [`'- App owner: \`%s\` (\`%s\`)${printfNewline}'`, ['APP_OWNER', 'APP_OWNER_TYPE']],
+    [`'- App permissions: \`%s\`${printfNewline}'`, ['APP_PERMISSIONS']],
+    [`'- Installation: \`%s\`${printfNewline}'`, ['INSTALLATION_ID']],
+    [`'- Installation permissions: \`%s\`${printfNewline}'`, ['INSTALLATION_PERMISSIONS']],
+    [`'- Repository selection: \`%s\`${printfNewline}'`, ['REPOSITORY_SELECTION']],
+    [`'- Repository scope: \`%s\`${printfNewline}'`, ['REPOSITORY']],
+    [`'- Bot REST identity: \`%s\` (#%s)${printfNewline}'`, ['BOT_REST_LOGIN', 'BOT_DATABASE_ID']],
+    [`'- Bot GraphQL identity: \`%s\` (\`%s\`)${printfNewline}'`, ['BOT_GRAPHQL_LOGIN', 'BOT_NODE_ID']],
   ];
   for (const [format, variables] of expectedFormats) {
     assert.ok(summary.run.includes(`printf -- ${format}`), `missing printf format: ${format}`);
@@ -83,7 +86,9 @@ test('Writer attestation mints one explicitly read-only repository token and has
 test('Writer attestation summary renders shell metacharacters literally', () => {
   const summary = workflow().jobs.attest.steps.find((step) => /Summarize read-only attestation/.test(step.name));
   if (!gitBash) {
-    assert.match(summary.run, /printf -- '- App: `%s` \(#%s\)\\n'/);
+    const printfBacktick = '`';
+    const appFormat = `printf -- '- App: ${printfBacktick}%s${printfBacktick} (#%s)${String.raw`\n`}'`;
+    assert.ok(summary.run.includes(appFormat));
     assert.doesNotMatch(summary.run, /echo .*\\$\\{/);
     assert.doesNotMatch(summary.run, /`\\$\\{/);
     return;
