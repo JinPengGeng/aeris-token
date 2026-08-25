@@ -28,11 +28,11 @@ test('Policy is a secretless pull_request job sourced from the exact base SHA', 
   assert.equal(checkout.with['persist-credentials'], false);
   const run = document.jobs.gate.steps.find((step) => /Evaluate deterministic policy/.test(step.name));
   assert.match(run.run, /if \[ ! -f \.github\/automation\/src\/run-autonomy-policy\.mjs \]; then/);
-  assert.match(run.run, /AERIS_POLICY_SHA.*e801673d0b910990d4037d21c423070d9b6b1e46/);
   assert.match(run.run, /Automation policy runtime missing/);
-  assert.match(run.run, /Trusted base revision does not contain the policy runtime; evaluation skipped\./);
-  assert.match(run.run, /exit 0/);
+  assert.match(run.run, /exit 1/);
+  assert.doesNotMatch(run.run, /exit 0/);
   assert.match(run.run, /node \.github\/automation\/src\/run-autonomy-policy\.mjs/);
+  assert.equal(run.run.trim().endsWith('node .github/automation/src/run-autonomy-policy.mjs'), true);
   assert.equal(run.env.AERIS_HEAD_SHA, '${{ github.event.pull_request.head.sha }}');
 });
 

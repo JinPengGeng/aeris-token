@@ -22,6 +22,7 @@ const sameMembers = (actual, expected) =>
 
 const agents = loadYaml('.github/agents.yml');
 const automation = loadYaml('.github/automation-policy.yml');
+const automationPolicyWorkflow = loadYaml('.github/workflows/automation-policy.yml');
 const sync = loadYaml('.github/upstream-sync-policy.yml');
 const syncWorkflow = loadYaml('.github/workflows/sync-upstream.yml');
 const frontendWorkflow = loadYaml('.github/workflows/frontend-ci.yml');
@@ -107,6 +108,40 @@ assert(
   'writer policy boundary changed',
 );
 assert(automation.policy_gate.enabled === false, 'policy gate must default off');
+const [policyWorkflowName, policyJobSuffix] = automation.policy_gate.check_name.split(' / ');
+assert(
+  automationPolicyWorkflow.name === policyWorkflowName &&
+    automationPolicyWorkflow.jobs.gate.name === automation.policy_gate.check_name &&
+    automationPolicyWorkflow.jobs.gate.name.endsWith(` / ${policyJobSuffix}`),
+  'policy workflow name and explicit job check context must match the required policy check context',
+);
+assert(
+  JSON.stringify(automationPolicyWorkflow.on.pull_request?.types) ===
+    JSON.stringify(['opened', 'reopened', 'synchronize', 'labeled', 'unlabeled']),
+  'policy workflow must remain event-driven for every policy-relevant pull request event',
+);
+assert(
+  automationPolicyWorkflow.jobs.gate.if === undefined,
+  'policy workflow scheduling must not be disabled by the policy gate or mutation flags',
+);
+const policyGateSteps = automationPolicyWorkflow.jobs.gate.steps;
+const policyEvaluationStep = policyGateSteps.find((step) => step.name === 'Evaluate deterministic policy');
+assert(
+  policyEvaluationStep && policyGateSteps[policyGateSteps.length - 1] === policyEvaluationStep,
+  'policy workflow must end with its deterministic evaluation step',
+);
+assert(
+  policyGateSteps.every((step) => step.if === undefined),
+  'policy workflow steps must not be conditionally skipped for required pull request events',
+);
+assert(
+  typeof policyEvaluationStep?.run === 'string' &&
+    policyEvaluationStep.run.includes('node .github/automation/src/run-autonomy-policy.mjs') &&
+    (policyEvaluationStep.run.match(/node \.github\/automation\/src\/run-autonomy-policy\.mjs/g) ?? []).length === 1 &&
+    policyEvaluationStep.run.includes('exit 1') &&
+    !/\bexit 0\b/.test(policyEvaluationStep.run),
+  'policy workflow must execute the deterministic gate and fail closed when its runtime is unavailable',
+);
 assert(automation.policy_gate.mode === 'canary_allowlist', 'policy gate must remain limited to the canary allowlist');
 assert(
   JSON.stringify(automation.policy_gate.allowlist_paths) === JSON.stringify(['docs/automation-canary/**/*.md']),

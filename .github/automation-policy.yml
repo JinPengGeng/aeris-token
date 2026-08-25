@@ -100,6 +100,9 @@ writer:
   pull_request_target_checkout: false
 
 policy_gate:
+  # This declaration controls whether the policy may authorize automation. The
+  # `Automation Policy / gate` workflow remains always-on because main requires
+  # its check; this flag must not be used to disable workflow scheduling.
   enabled: false
   check_name: Automation Policy / gate
   publisher: github_actions_job
