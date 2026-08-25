@@ -134,6 +134,9 @@ for (const spec of workflowSpecs) {
       assert.ok(jobs[phase], `${spec.path} must define a ${phase} job`);
     }
 
+    assert.equal(jobs.preflight.environment, 'agent', `${spec.path} preflight must load the agent environment`);
+    assert.equal(jobs.analyze.environment, 'agent', `${spec.path} analyze must load the agent environment`);
+
     const preflightPermissions = jobs.preflight.permissions ?? document.permissions;
     assertReadOnlyPermissions(preflightPermissions, `${spec.path} preflight`);
     if (spec.usesWorkflowRun) {
