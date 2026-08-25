@@ -79,8 +79,14 @@ test('Writer attestation mints one explicitly read-only repository token and has
   }
 });
 
-test('Writer attestation summary renders shell metacharacters literally', { skip: !gitBash }, () => {
+test('Writer attestation summary renders shell metacharacters literally', () => {
   const summary = workflow().jobs.attest.steps.find((step) => /Summarize read-only attestation/.test(step.name));
+  if (!gitBash) {
+    assert.match(summary.run, /printf '%s\\n'/);
+    assert.doesNotMatch(summary.run, /echo .*\\$\\{/);
+    assert.doesNotMatch(summary.run, /`\\$\\{/);
+    return;
+  }
   const summaryPath = path.join(testDirectory, `.writer-attestation-summary-${process.pid}-${Date.now()}.md`);
   const summaryPathForBash = summaryPath
     .replace(/^([A-Za-z]):[\\/](.*)$/, (_, drive, rest) => `/${drive.toLowerCase()}/${rest}`)

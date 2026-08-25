@@ -112,6 +112,15 @@ assert(
   automationPolicyWorkflow.jobs.gate.name === automation.policy_gate.check_name,
   'policy workflow job name must match the required policy check context',
 );
+assert(
+  JSON.stringify(automationPolicyWorkflow.on.pull_request?.types) ===
+    JSON.stringify(['opened', 'reopened', 'synchronize', 'labeled', 'unlabeled']),
+  'policy workflow must remain event-driven for every policy-relevant pull request event',
+);
+assert(
+  automationPolicyWorkflow.jobs.gate.if === undefined,
+  'policy workflow scheduling must not be disabled by the policy gate or mutation flags',
+);
 assert(automation.policy_gate.mode === 'canary_allowlist', 'policy gate must remain limited to the canary allowlist');
 assert(
   JSON.stringify(automation.policy_gate.allowlist_paths) === JSON.stringify(['docs/automation-canary/**/*.md']),
