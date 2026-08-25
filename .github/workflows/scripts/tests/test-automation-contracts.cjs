@@ -121,6 +121,24 @@ assert(
   automationPolicyWorkflow.jobs.gate.if === undefined,
   'policy workflow scheduling must not be disabled by the policy gate or mutation flags',
 );
+const policyGateSteps = automationPolicyWorkflow.jobs.gate.steps;
+const policyEvaluationStep = policyGateSteps.find((step) => step.name === 'Evaluate deterministic policy');
+assert(
+  policyEvaluationStep && policyGateSteps[policyGateSteps.length - 1] === policyEvaluationStep,
+  'policy workflow must end with its deterministic evaluation step',
+);
+assert(
+  policyGateSteps.every((step) => step.if === undefined),
+  'policy workflow steps must not be conditionally skipped for required pull request events',
+);
+assert(
+  typeof policyEvaluationStep?.run === 'string' &&
+    policyEvaluationStep.run.includes('node .github/automation/src/run-autonomy-policy.mjs') &&
+    (policyEvaluationStep.run.match(/node \.github\/automation\/src\/run-autonomy-policy\.mjs/g) ?? []).length === 1 &&
+    policyEvaluationStep.run.includes('exit 1') &&
+    !/\bexit 0\b/.test(policyEvaluationStep.run),
+  'policy workflow must execute the deterministic gate and fail closed when its runtime is unavailable',
+);
 assert(automation.policy_gate.mode === 'canary_allowlist', 'policy gate must remain limited to the canary allowlist');
 assert(
   JSON.stringify(automation.policy_gate.allowlist_paths) === JSON.stringify(['docs/automation-canary/**/*.md']),
