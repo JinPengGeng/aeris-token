@@ -26,7 +26,7 @@
 
 1. 禁止直接推送、强制推送和删除分支。
 2. 要求通过 PR 合并并解决全部 review 讨论。当前仓库只有一名维护者时将审批数设为 0；增加协作者后再启用至少一位审批和 CODEOWNERS review。
-3. 要求状态检查 `Rust CI / check`、`Frontend CI / check` 和 `Automation Policy / gate` 成功后才可合并。Policy check 已绑定 `main` 的 GitHub Actions source；Writer、Publisher、Finalizer 和 upstream sync 仍由各自的远端开关控制。
+3. 要求状态检查 `Rust CI / check`、`Frontend CI / check` 和 `Automation Policy / gate` 成功后才可合并。当前远端 `main` 保护配置的现场快照已确认这三项检查均为 strict required contexts，且来源绑定 GitHub Actions；该设置由 GitHub 远端治理执行，不由本文或 workflow 文件单独保证，任何变更都必须重新读取保护配置。Writer、Publisher、Finalizer 和 upstream sync 仍由各自的远端开关控制。
 4. 只允许 Squash merge并在合并后自动删除源分支。增加独立 reviewer 后启用 CODEOWNERS review。
 
 仓库管理员应保留紧急恢复能力，仅用于仓库解锁，并在后续 Issue 中记录原因。
