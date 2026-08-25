@@ -108,9 +108,12 @@ assert(
   'writer policy boundary changed',
 );
 assert(automation.policy_gate.enabled === false, 'policy gate must default off');
+const [policyWorkflowName, policyJobSuffix] = automation.policy_gate.check_name.split(' / ');
 assert(
-  automationPolicyWorkflow.jobs.gate.name === automation.policy_gate.check_name,
-  'policy workflow job name must match the required policy check context',
+  automationPolicyWorkflow.name === policyWorkflowName &&
+    automationPolicyWorkflow.jobs.gate.name === automation.policy_gate.check_name &&
+    automationPolicyWorkflow.jobs.gate.name.endsWith(` / ${policyJobSuffix}`),
+  'policy workflow name and explicit job check context must match the required policy check context',
 );
 assert(
   JSON.stringify(automationPolicyWorkflow.on.pull_request?.types) ===

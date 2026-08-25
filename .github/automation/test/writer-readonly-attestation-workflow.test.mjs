@@ -83,7 +83,11 @@ test('Writer attestation mints one explicitly read-only repository token and has
   }
 });
 
-test('Writer attestation summary renders shell metacharacters literally', { skip: !gitBash }, () => {
+test('Writer attestation summary renders shell metacharacters literally', () => {
+  assert.ok(
+    gitBash,
+    'Bash is required for the shell-rendering regression test; install Git Bash or set AERIS_TEST_BASH',
+  );
   const summary = workflow().jobs.attest.steps.find((step) => /Summarize read-only attestation/.test(step.name));
   const summaryPath = path.join(testDirectory, `.writer-attestation-summary-${process.pid}-${Date.now()}.md`);
   const summaryPathForBash = summaryPath
