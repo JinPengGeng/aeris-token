@@ -22,6 +22,7 @@ const sameMembers = (actual, expected) =>
 
 const agents = loadYaml('.github/agents.yml');
 const automation = loadYaml('.github/automation-policy.yml');
+const automationPolicyWorkflow = loadYaml('.github/workflows/automation-policy.yml');
 const sync = loadYaml('.github/upstream-sync-policy.yml');
 const syncWorkflow = loadYaml('.github/workflows/sync-upstream.yml');
 const frontendWorkflow = loadYaml('.github/workflows/frontend-ci.yml');
@@ -107,6 +108,10 @@ assert(
   'writer policy boundary changed',
 );
 assert(automation.policy_gate.enabled === false, 'policy gate must default off');
+assert(
+  automationPolicyWorkflow.jobs.gate.name === automation.policy_gate.check_name,
+  'policy workflow job name must match the required policy check context',
+);
 assert(automation.policy_gate.mode === 'canary_allowlist', 'policy gate must remain limited to the canary allowlist');
 assert(
   JSON.stringify(automation.policy_gate.allowlist_paths) === JSON.stringify(['docs/automation-canary/**/*.md']),

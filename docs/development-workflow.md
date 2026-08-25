@@ -26,7 +26,7 @@
 
 1. 禁止直接推送、强制推送和删除分支。
 2. 要求通过 PR 合并并解决全部 review 讨论。当前仓库只有一名维护者时将审批数设为 0；增加协作者后再启用至少一位审批和 CODEOWNERS review。
-3. 要求状态检查 `Rust CI / check` 和 `Frontend CI / check` 成功后才可合并。`Automation Policy / gate` 只有在单 Writer PoC 完成、来源绑定验证完毕后才加入 required checks；在此之前不得把它标记为已启用。
+3. 要求状态检查 `Rust CI / check`、`Frontend CI / check` 和 `Automation Policy / gate` 成功后才可合并。Policy check 已绑定 `main` 的 GitHub Actions source；Writer、Publisher、Finalizer 和 upstream sync 仍由各自的远端开关控制。
 4. 只允许 Squash merge并在合并后自动删除源分支。增加独立 reviewer 后启用 CODEOWNERS review。
 
 仓库管理员应保留紧急恢复能力，仅用于仓库解锁，并在后续 Issue 中记录原因。
@@ -55,7 +55,7 @@
 
 Agent 的模型路由、权限隔离、事件幂等、上游同步 checkpoint 和自动合并门禁见 [GitHub 自动化与 Agent 架构](automation-architecture.md)。该架构默认关闭新 Agent；只有对应阶段的 workflow、测试和仓库设置全部完成后才可启用。
 
-仓库中的只读 Agent registry 与开关应分别审计；远端实际启用状态必须以 GitHub Variables、Actions run 和 managed comment 现场证据为准。启用只读阶段不等于授权 Candidate、Publisher、Policy required check 或 Finalizer。单 Writer production flags 和 required Policy 仅在全部 PoC、撤销演练和稳定观察后启用。
+仓库中的只读 Agent registry 与开关应分别审计；远端实际启用状态必须以 GitHub Variables、Actions run 和 managed comment 现场证据为准。启用只读阶段不等于授权 Candidate、Publisher 或 Finalizer；`Automation Policy / gate` 作为 `main` 的 required check 独立运行。单 Writer production flags 仍需在全部 PoC、撤销演练和稳定观察后才可启用。
 
 Scheduler、重试、路由、池、额度或故障转移变更必须说明状态转换、确定性选择规则、依赖失败行为和回滚，并覆盖失败与恢复测试。
 

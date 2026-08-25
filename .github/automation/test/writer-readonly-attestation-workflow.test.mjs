@@ -45,6 +45,8 @@ test('Writer attestation mints one explicitly read-only repository token and has
   assert.equal(summary.env.INSTALLATION_PERMISSIONS, '${{ steps.writer_app_attestation.outputs.installation_permissions }}');
   assert.equal(summary.env.REPOSITORY_SELECTION, '${{ steps.writer_app_attestation.outputs.repository_selection }}');
   assert.match(summary.run, /Bot GraphQL identity/);
+  assert.match(summary.run, /printf '%s\\n' '- App: `%s` \(#%s\)'/);
+  assert.doesNotMatch(summary.run, /`\$\{APP_[A-Z_]+\}`/);
   assert.doesNotMatch(JSON.stringify(summary), /TOKEN|PRIVATE_KEY/);
   for (const step of job.steps) {
     if (step.uses) assert.match(step.uses, /^[^@\s]+@[0-9a-f]{40}$/);
