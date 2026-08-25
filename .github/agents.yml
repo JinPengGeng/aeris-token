@@ -144,14 +144,4 @@ agents:
     triggers: [pull_request_changed, required_checks_completed]
     tools: [repository_read, pull_request_metadata_read]
     effects: [github_actions_job_conclusion]
-    handoff_to: [merger]
-
-  merger:
-    enabled: false
-    phase: 5
-    mode: deterministic
-    model_variable: null
-    triggers: [policy_passed]
-    tools: [pull_request_metadata_read, checks_read, writer_app_auto_merge_request]
-    effects: [mark_ready, enable_native_auto_merge]
     handoff_to: []

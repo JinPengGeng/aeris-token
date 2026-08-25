@@ -43,7 +43,6 @@ const expectedAgents = [
   'tester',
   'security',
   'policy',
-  'merger',
 ];
 assert(
   sameMembers(Object.keys(agents.agents), expectedAgents),
@@ -81,10 +80,14 @@ for (const [name, agent] of Object.entries(agents.agents)) {
     assert(expectedAgents.includes(target), `${name} hands off to an unknown agent`);
   }
 }
-for (const name of ['tester', 'policy', 'merger']) {
+for (const name of ['tester', 'policy']) {
   assert(agents.agents[name].mode === 'deterministic', `${name} must be deterministic`);
   assert(agents.agents[name].model_variable === null, `${name} must not select a model`);
 }
+assert(
+  agents.agents.policy.handoff_to.length === 0,
+  'policy must terminate in the deterministic gate; Finalizer owns direct merge execution',
+);
 assert(
   agents.agents.writer.mode === 'credentialless_candidate' &&
     agents.agents.writer.effects.includes('publish_candidate_artifact') &&
