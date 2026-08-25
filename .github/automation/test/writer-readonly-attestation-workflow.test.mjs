@@ -56,22 +56,23 @@ test('Writer attestation mints one explicitly read-only repository token and has
   assert.equal(summary.env.REPOSITORY_SELECTION, '${{ steps.writer_app_attestation.outputs.repository_selection }}');
   assert.match(summary.run, /Bot GraphQL identity/);
   const expectedFormats = [
-    ["'- App: `%s` (#%s)'", ['APP_SLUG', 'APP_ID']],
-    ["'- App owner: `%s` (`%s`)'", ['APP_OWNER', 'APP_OWNER_TYPE']],
-    ["'- App permissions: `%s`'", ['APP_PERMISSIONS']],
-    ["'- Installation: `%s`'", ['INSTALLATION_ID']],
-    ["'- Installation permissions: `%s`'", ['INSTALLATION_PERMISSIONS']],
-    ["'- Repository selection: `%s`'", ['REPOSITORY_SELECTION']],
-    ["'- Repository scope: `%s`'", ['REPOSITORY']],
-    ["'- Bot REST identity: `%s` (#%s)'", ['BOT_REST_LOGIN', 'BOT_DATABASE_ID']],
-    ["'- Bot GraphQL identity: `%s` (`%s`)'", ['BOT_GRAPHQL_LOGIN', 'BOT_NODE_ID']],
+    ["'- App: `%s` (#%s)\\n'", ['APP_SLUG', 'APP_ID']],
+    ["'- App owner: `%s` (`%s`)\\n'", ['APP_OWNER', 'APP_OWNER_TYPE']],
+    ["'- App permissions: `%s`\\n'", ['APP_PERMISSIONS']],
+    ["'- Installation: `%s`\\n'", ['INSTALLATION_ID']],
+    ["'- Installation permissions: `%s`\\n'", ['INSTALLATION_PERMISSIONS']],
+    ["'- Repository selection: `%s`\\n'", ['REPOSITORY_SELECTION']],
+    ["'- Repository scope: `%s`\\n'", ['REPOSITORY']],
+    ["'- Bot REST identity: `%s` (#%s)\\n'", ['BOT_REST_LOGIN', 'BOT_DATABASE_ID']],
+    ["'- Bot GraphQL identity: `%s` (`%s`)\\n'", ['BOT_GRAPHQL_LOGIN', 'BOT_NODE_ID']],
   ];
   for (const [format, variables] of expectedFormats) {
-    assert.ok(summary.run.includes(`printf '%s\\n' ${format}`), `missing printf format: ${format}`);
+    assert.ok(summary.run.includes(`printf -- ${format}`), `missing printf format: ${format}`);
     for (const variable of variables) {
       assert.match(summary.run, new RegExp(`\\"\\$\\{${variable}\\}\\"`));
     }
   }
+  assert.doesNotMatch(summary.run, /printf '%s\\n'/);
   assert.doesNotMatch(summary.run, /`\$\{APP_[A-Z_]+\}`/);
   assert.doesNotMatch(JSON.stringify(summary), /TOKEN|PRIVATE_KEY/);
   for (const step of job.steps) {
@@ -82,7 +83,7 @@ test('Writer attestation mints one explicitly read-only repository token and has
 test('Writer attestation summary renders shell metacharacters literally', () => {
   const summary = workflow().jobs.attest.steps.find((step) => /Summarize read-only attestation/.test(step.name));
   if (!gitBash) {
-    assert.match(summary.run, /printf '%s\\n'/);
+    assert.match(summary.run, /printf -- '- App: `%s` \(#%s\)\\n'/);
     assert.doesNotMatch(summary.run, /echo .*\\$\\{/);
     assert.doesNotMatch(summary.run, /`\\$\\{/);
     return;
@@ -93,7 +94,7 @@ test('Writer attestation summary renders shell metacharacters literally', () => 
     .replaceAll('\\', '/');
   const values = {
     APP_ID: '4667256',
-    APP_SLUG: 'writer`$(printf injected)`%s',
+    APP_SLUG: 'writer`$(printf injected)`%percent',
     APP_OWNER: 'owner`$(printf injected)`',
     APP_OWNER_TYPE: 'Organization%q',
     APP_PERMISSIONS: 'contents:write`$(printf injected)`',
@@ -118,8 +119,21 @@ test('Writer attestation summary renders shell metacharacters literally', () => 
     assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.status, 0, result.stderr);
     const rendered = fs.readFileSync(summaryPath, 'utf8');
-    for (const value of Object.values(values)) assert.match(rendered, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.match(rendered, /### Writer App read-only attestation/);
+    const expectedLines = [
+      '### Writer App read-only attestation',
+      '',
+      `- App: \`${values.APP_SLUG}\` (#${values.APP_ID})`,
+      `- App owner: \`${values.APP_OWNER}\` (\`${values.APP_OWNER_TYPE}\`)`,
+      `- App permissions: \`${values.APP_PERMISSIONS}\``,
+      `- Installation: \`${values.INSTALLATION_ID}\``,
+      `- Installation permissions: \`${values.INSTALLATION_PERMISSIONS}\``,
+      `- Repository selection: \`${values.REPOSITORY_SELECTION}\``,
+      `- Repository scope: \`${values.REPOSITORY}\``,
+      `- Bot REST identity: \`${values.BOT_REST_LOGIN}\` (#${values.BOT_DATABASE_ID})`,
+      `- Bot GraphQL identity: \`${values.BOT_GRAPHQL_LOGIN}\` (\`${values.BOT_NODE_ID}\`)`,
+    ];
+    assert.equal(rendered, `${expectedLines.join('\n')}\n`);
+    assert.doesNotMatch(rendered, /%s/);
   } finally {
     fs.rmSync(summaryPath, { force: true });
   }
