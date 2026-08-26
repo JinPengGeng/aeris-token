@@ -48,8 +48,10 @@ impl RealtimeSessionAudit {
         let usage_runtime = std::sync::Arc::clone(&state.usage_runtime);
         let usage_data = std::sync::Arc::clone(state.usage_lifecycle_data_state());
         let task = tokio::spawn(async move {
+            // This is a durable terminal submission, not a best-effort direct
+            // write. The runtime owns queue retry and direct fallback.
             usage_runtime
-                .record_terminal_event_direct(usage_data.as_ref(), event)
+                .record_terminal_event(usage_data.as_ref(), event)
                 .await;
         });
         match tokio::time::timeout(REALTIME_AUDIT_WRITE_WAIT, task).await {
@@ -69,13 +71,14 @@ impl RealtimeSessionAudit {
                 request_id,
                 wait_ms = REALTIME_AUDIT_WRITE_WAIT.as_millis() as u64,
                 write_detached = true,
-                "OpenAI Realtime stopped waiting for a slow session audit write"
+                persistence_strategy = "terminal_queue_retry_or_direct_fallback",
+                "OpenAI Realtime detached after terminal audit submission exceeded the socket-close wait"
             ),
         }
     }
 
     fn build_terminal_event(self, terminal: RealtimeSessionTerminal) -> UsageEvent {
-        let usage_available = terminal.usage.responses > 0;
+        let usage_available = terminal.usage.authoritative && terminal.usage.responses > 0;
         let pricing_available = usage_available
             && terminal.usage.input_audio_tokens == 0
             && terminal.usage.output_audio_tokens == 0;
@@ -292,6 +295,7 @@ mod tests {
             Some(&json!({"user_id": "user-1", "api_key_id": "api-key-1"})),
         )
         .build_terminal_event(terminal(RealtimeUsageTotals {
+            authoritative: true,
             responses: 2,
             input_tokens: 120,
             output_tokens: 40,
@@ -359,9 +363,35 @@ mod tests {
     }
 
     #[test]
+    fn non_authoritative_response_done_usage_is_fail_closed() {
+        let event = RealtimeSessionAudit::new(&sample_plan(), None).build_terminal_event(terminal(
+            RealtimeUsageTotals {
+                authoritative: false,
+                responses: 3,
+                input_tokens: 30,
+                output_tokens: 12,
+                total_tokens: 42,
+                cached_input_tokens: 4,
+                input_audio_tokens: 0,
+                output_audio_tokens: 0,
+            },
+        ));
+
+        assert_eq!(event.data.input_tokens, None);
+        assert_eq!(event.data.output_tokens, None);
+        let metadata = event.data.request_metadata.expect("metadata");
+        assert_eq!(metadata[USAGE_AVAILABLE_METADATA_KEY], false);
+        assert_eq!(
+            metadata[REALTIME_SESSION_METADATA_KEY]["usage_state"],
+            "unavailable"
+        );
+    }
+
+    #[test]
     fn text_only_response_done_usage_remains_priceable() {
         let event = RealtimeSessionAudit::new(&sample_plan(), None).build_terminal_event(terminal(
             RealtimeUsageTotals {
+                authoritative: true,
                 responses: 1,
                 input_tokens: 12,
                 output_tokens: 4,
@@ -384,6 +414,7 @@ mod tests {
     #[test]
     fn failed_session_preserves_authoritative_usage_without_becoming_billable() {
         let mut failed = terminal(RealtimeUsageTotals {
+            authoritative: true,
             responses: 1,
             input_tokens: 18,
             output_tokens: 3,

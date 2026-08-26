@@ -3,13 +3,16 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use aether_usage_runtime::build_lifecycle_usage_seed;
 use axum::extract::ws::{Message as AxumWsMessage, WebSocket};
 use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
 use tracing::{info, warn};
 use wreq::ws::message::Message as WreqWsMessage;
 
-use crate::control::execution_plan_balance_capacity_rejection;
+use crate::control::{
+    execution_plan_balance_capacity_rejection, refresh_execution_runtime_auth_context_with_snapshot,
+};
 use crate::handlers::proxy::websocket::ingress::{
     WebSocketConnectionLog, WebSocketConnectionLogSpec, WebSocketRequestContext,
 };
@@ -132,6 +135,35 @@ pub(super) async fn prepare_realtime_websocket(
         ));
     }
 
+    let lifecycle_seed = build_lifecycle_usage_seed(
+        &candidate.admission_plan,
+        candidate.execution.report_context.as_ref(),
+    );
+    if let Err(error) = state
+        .usage_runtime
+        .admit_pending_durable(state.usage_lifecycle_data_state().as_ref(), lifecycle_seed)
+        .await
+    {
+        warn!(
+            target: REALTIME_LOG_TARGET,
+            event_name = "openai_realtime_durable_pending_admission_failed",
+            log_type = "ops",
+            transport = WEBSOCKET_LOG_TRANSPORT,
+            websocket = true,
+            trace_id = %context.trace_id,
+            provider_id = %candidate.provider_id,
+            endpoint_id = %candidate.endpoint_id,
+            key_id = %candidate.key_id,
+            error = %error,
+            "OpenAI Realtime durable pending usage admission failed"
+        );
+        candidate.pool_lease.release().await;
+        return Err(rejection(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Realtime usage admission is unavailable",
+        ));
+    }
+
     let admission = match ResponsesWebSocketTurnAdmission::acquire(
         state,
         &candidate.admission_plan,
@@ -223,7 +255,14 @@ pub(super) async fn run_realtime_websocket(
         &candidate.admission_plan,
         candidate.execution.report_context.as_ref(),
     );
-    let terminal = relay_realtime(&mut client_socket, &mut upstream, &context, &candidate).await;
+    let terminal = relay_realtime(
+        &mut client_socket,
+        &mut upstream,
+        &state,
+        &context,
+        &candidate,
+    )
+    .await;
     close_upstream_socket(&mut upstream, None).await;
     admission.release().await;
     candidate.pool_lease.release().await;
@@ -239,6 +278,7 @@ pub(super) async fn run_realtime_websocket(
 async fn relay_realtime(
     client_socket: &mut WebSocket,
     upstream: &mut wreq::ws::WebSocket,
+    state: &AppState,
     context: &WebSocketRequestContext,
     candidate: &PlannedRealtimeCandidate,
 ) -> RealtimeSessionTerminal {
@@ -248,6 +288,8 @@ async fn relay_realtime(
     tokio::pin!(connection_deadline);
     let mut lease_health = tokio::time::interval(Duration::from_secs(1));
     lease_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut auth_health = tokio::time::interval(Duration::from_secs(1));
+    auth_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let stats = Arc::new(Mutex::new(RelayStats::default()));
     let usage = Arc::new(Mutex::new(RealtimeUsageObserver::default()));
     let relay_control = WebSocketRelayPumpControl::new();
@@ -445,6 +487,25 @@ async fn relay_realtime(
                         break "pool_key_lease_lost";
                     }
                 }
+                _ = auth_health.tick() => {
+                    match realtime_auth_policy_is_current(state, context).await {
+                        Ok(true) => {}
+                        Ok(false) => break "auth_policy_revoked",
+                        Err(error) => {
+                            warn!(
+                                target: REALTIME_LOG_TARGET,
+                                event_name = "openai_realtime_auth_refresh_failed",
+                                log_type = "security",
+                                transport = WEBSOCKET_LOG_TRANSPORT,
+                                websocket = true,
+                                trace_id = %context.trace_id,
+                                error = ?error,
+                                "OpenAI Realtime closed because live authorization could not be refreshed"
+                            );
+                            break "auth_refresh_failed";
+                        }
+                    }
+                }
             }
         };
         relay_control.cancel();
@@ -457,6 +518,20 @@ async fn relay_realtime(
             "Realtime provider ownership was lost",
         )
         .await;
+    } else if matches!(termination, "auth_policy_revoked" | "auth_refresh_failed") {
+        let (code, message) = if termination == "auth_policy_revoked" {
+            (
+                "openai_realtime_auth_revoked",
+                "Realtime authorization is no longer valid",
+            )
+        } else {
+            (
+                "openai_realtime_auth_refresh_failed",
+                "Realtime authorization could not be verified",
+            )
+        };
+        send_realtime_error(client_socket, code, message).await;
+        close_client_socket(client_socket, CLOSE_POLICY_VIOLATION, termination).await;
     }
     let stats = *stats
         .lock()
@@ -509,9 +584,10 @@ fn realtime_terminal_from_relay(
         | "client_read_failed"
         | "client_write_failed"
         | "connection_duration_limit" => (RealtimeSessionDisposition::Cancelled, 499),
-        "pool_key_lease_lost" | "connection_admission_lost" => {
-            (RealtimeSessionDisposition::Failed, 503)
-        }
+        "pool_key_lease_lost"
+        | "connection_admission_lost"
+        | "auth_policy_revoked"
+        | "auth_refresh_failed" => (RealtimeSessionDisposition::Failed, 503),
         "upstream_closed" | "upstream_read_failed" | "upstream_write_failed" => {
             (RealtimeSessionDisposition::Failed, 502)
         }
@@ -529,6 +605,66 @@ fn realtime_terminal_from_relay(
         upstream_bytes: stats.upstream_bytes,
         usage,
     }
+}
+
+async fn realtime_auth_policy_is_current(
+    state: &AppState,
+    context: &WebSocketRequestContext,
+) -> Result<bool, GatewayError> {
+    if state
+        .admin_security_ip_blacklisted(context.client_ip)
+        .await?
+    {
+        return Ok(false);
+    }
+    let Some(original) = context.decision.auth_context.as_ref() else {
+        return Ok(false);
+    };
+    if context
+        .decision
+        .auth_endpoint_signature
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        // A long-lived socket cannot safely rely on the one-time Upgrade
+        // decision when its route has no refreshable auth signature. Treat a
+        // missing signature as unverifiable rather than extending stale
+        // authorization indefinitely.
+        return Ok(false);
+    }
+    let (refreshed, _) = refresh_execution_runtime_auth_context_with_snapshot(
+        state,
+        original.clone(),
+        context.decision.auth_endpoint_signature.as_deref(),
+    )
+    .await?;
+    Ok(realtime_auth_context_is_current(
+        original,
+        &refreshed,
+        context.client_ip,
+    ))
+}
+
+fn realtime_auth_context_is_current(
+    original: &crate::control::GatewayControlAuthContext,
+    refreshed: &crate::control::GatewayControlAuthContext,
+    client_ip: std::net::IpAddr,
+) -> bool {
+    refreshed.access_allowed
+        && refreshed.local_rejection.is_none()
+        && refreshed.user_id == original.user_id
+        && refreshed.api_key_id == original.api_key_id
+        && refreshed.balance_remaining == original.balance_remaining
+        && refreshed.balance_remaining.is_none()
+        && refreshed.ip_rules.as_ref().is_none_or(|rules| {
+            crate::handlers::shared::ip_rules_allow(Some(rules.as_slice()), client_ip)
+        })
+        && refreshed.allowed_models == original.allowed_models
+        && refreshed.ip_rules == original.ip_rules
+        && refreshed.user_rate_limit == original.user_rate_limit
+        && refreshed.api_key_rate_limit == original.api_key_rate_limit
+        && refreshed.api_key_is_standalone == original.api_key_is_standalone
+        && refreshed.admin_bypass_limits == original.admin_bypass_limits
 }
 
 fn realtime_usage_accounting_is_safe(context: &WebSocketRequestContext) -> bool {
@@ -630,7 +766,10 @@ async fn wait_for_connection_permit_loss(permit: Option<&aether_runtime::Admissi
 
 #[cfg(test)]
 mod tests {
-    use super::{client_frame_metadata, upstream_frame_metadata};
+    use super::{
+        client_frame_metadata, realtime_auth_context_is_current, realtime_terminal_from_relay,
+        upstream_frame_metadata, RelayStats,
+    };
     use axum::extract::ws::Message as AxumWsMessage;
     use wreq::ws::message::Message as WreqWsMessage;
 
@@ -648,5 +787,46 @@ mod tests {
             upstream_frame_metadata(&WreqWsMessage::Text("delta".into())),
             (5, false)
         );
+    }
+
+    #[test]
+    fn revoked_auth_is_a_failed_terminal_and_not_a_clean_disconnect() {
+        let terminal = realtime_terminal_from_relay(
+            "auth_policy_revoked",
+            100,
+            RelayStats::default(),
+            Default::default(),
+        );
+        assert_eq!(terminal.status_code, 503);
+        assert_eq!(
+            terminal.disposition,
+            super::super::audit::RealtimeSessionDisposition::Failed
+        );
+    }
+
+    #[test]
+    fn finite_balance_transition_is_not_current_for_realtime_socket() {
+        let original = crate::control::GatewayControlAuthContext {
+            user_id: "user-1".to_string(),
+            api_key_id: "key-1".to_string(),
+            username: None,
+            api_key_name: None,
+            balance_remaining: None,
+            access_allowed: true,
+            user_rate_limit: None,
+            api_key_rate_limit: None,
+            api_key_is_standalone: true,
+            admin_bypass_limits: false,
+            local_rejection: None,
+            allowed_models: None,
+            ip_rules: None,
+        };
+        let mut refreshed = original.clone();
+        refreshed.balance_remaining = Some(0.5);
+        assert!(!realtime_auth_context_is_current(
+            &original,
+            &refreshed,
+            "192.0.2.10".parse().unwrap()
+        ));
     }
 }

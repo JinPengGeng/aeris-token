@@ -2117,17 +2117,25 @@ async fn run_codex_live_api_key_websocket_frontdoor_scenario(dialect: CodexLiveD
         vec![endpoint],
         vec![upstream_key],
     ));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
 
     let state = AppState::new()
         .expect("gateway should build")
         .with_data_state_for_tests(
-            crate::data::GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
-                candidate_repository,
+            crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_request_candidates_and_usage_for_tests(
                 auth_repository,
-            )
-            .attach_provider_catalog_repository_for_tests(provider_catalog_repository)
-            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
-        );
+                candidate_repository,
+                provider_catalog_repository,
+                request_candidate_repository,
+                Arc::clone(&usage_repository),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        )
+        .with_usage_runtime_for_tests(crate::usage::UsageRuntimeConfig {
+            enabled: true,
+            ..crate::usage::UsageRuntimeConfig::default()
+        });
     let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
@@ -2418,15 +2426,23 @@ async fn run_codex_live_api_key_sideband_frontdoor_scenario(dialect: CodexLiveWe
         vec![endpoint],
         vec![upstream_key],
     ));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let state = build_state_with_execution_runtime_override(execution_runtime_url)
         .with_data_state_for_tests(
-            crate::data::GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
-                candidate_repository,
+            crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_request_candidates_and_usage_for_tests(
                 auth_repository,
-            )
-            .attach_provider_catalog_repository_for_tests(provider_catalog_repository)
-            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
-        );
+                candidate_repository,
+                provider_catalog_repository,
+                request_candidate_repository,
+                Arc::clone(&usage_repository),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        )
+        .with_usage_runtime_for_tests(crate::usage::UsageRuntimeConfig {
+            enabled: true,
+            ..crate::usage::UsageRuntimeConfig::default()
+        });
     let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 

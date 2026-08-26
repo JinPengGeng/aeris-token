@@ -246,6 +246,40 @@ pub(crate) async fn prepare_authenticated_ai_websocket(
         .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected);
     }
 
+    // Live and Realtime sessions produce their terminal usage/audit record
+    // only after the socket closes. Do not commit HTTP 101 when accounting is
+    // disabled or has no writer, which would create an unauditable connection.
+    if websocket_requires_usage_runtime(uri.path())
+        && !usage_runtime_admission_is_available(
+            state.usage_runtime.is_enabled(),
+            state.usage_lifecycle_data_state().has_usage_writer(),
+        )
+    {
+        warn!(
+            event_name = "ai_websocket_usage_runtime_admission_rejected",
+            log_type = "security",
+            transport = WEBSOCKET_LOG_TRANSPORT,
+            websocket = true,
+            trace_id = %trace_id,
+            client_ip = %client_ip,
+            path = %uri.path(),
+            user_id = %auth_context.user_id,
+            api_key_id = %auth_context.api_key_id,
+            usage_runtime_enabled = state.usage_runtime.is_enabled(),
+            usage_data_writer_available = state.usage_lifecycle_data_state().has_usage_writer(),
+            status_code = 503u16,
+            termination = "usage_runtime_unavailable",
+            "gateway rejected WebSocket upgrade because usage runtime admission is unavailable"
+        );
+        return build_local_http_error_response(
+            &trace_id,
+            Some(&decision),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "WebSocket service is temporarily unavailable because usage accounting is unavailable",
+        )
+        .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected);
+    }
+
     let request_permit = match state.try_acquire_request_permit().await {
         Ok(permit) => permit,
         Err(error) => {
@@ -295,6 +329,14 @@ pub(crate) async fn prepare_authenticated_ai_websocket(
             request_permit,
         },
     ))
+}
+
+fn usage_runtime_admission_is_available(enabled: bool, writer_available: bool) -> bool {
+    enabled && writer_available
+}
+
+fn websocket_requires_usage_runtime(path: &str) -> bool {
+    path == "/v1/realtime" || path == "/v1/live" || path.starts_with("/v1/live/")
 }
 
 fn websocket_credential_carrier_is_allowed(carrier: Option<GatewayCredentialCarrier>) -> bool {
@@ -535,8 +577,9 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, Uri};
 
     use super::{
-        websocket_credential_carrier_is_allowed, websocket_log_path, websocket_planning_headers,
-        websocket_planning_uri,
+        usage_runtime_admission_is_available, websocket_credential_carrier_is_allowed,
+        websocket_log_path, websocket_planning_headers, websocket_planning_uri,
+        websocket_requires_usage_runtime,
     };
     use crate::control::GatewayCredentialCarrier;
 
@@ -635,6 +678,21 @@ mod tests {
         ] {
             assert!(websocket_credential_carrier_is_allowed(carrier));
         }
+    }
+
+    #[test]
+    fn websocket_usage_runtime_admission_fails_closed() {
+        assert!(!usage_runtime_admission_is_available(false, true));
+        assert!(!usage_runtime_admission_is_available(true, false));
+        assert!(usage_runtime_admission_is_available(true, true));
+    }
+
+    #[test]
+    fn usage_runtime_gate_only_applies_to_live_and_realtime_routes() {
+        assert!(websocket_requires_usage_runtime("/v1/live"));
+        assert!(websocket_requires_usage_runtime("/v1/live/call-id"));
+        assert!(websocket_requires_usage_runtime("/v1/realtime"));
+        assert!(!websocket_requires_usage_runtime("/v1/responses"));
     }
 
     #[test]
