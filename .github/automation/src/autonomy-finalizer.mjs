@@ -9,6 +9,20 @@ import {
   validateWorkspaceCandidateExecutor,
 } from './ai-executor-contract.mjs';
 import { validateWriterPermissions } from './github-app-attestation.mjs';
+import {
+  GOVERNANCE_FENCE_RULESET_NAME,
+  validateGovernanceFence,
+  validateWriterSecretLane,
+} from './governance-fence.mjs';
+import {
+  decodeWriterPublisherAttestationSummary,
+  normalizeWriterPublisherAttestation,
+  parseWriterPublisherTarget,
+  validateWriterPublisherTarget,
+  validateWriterPublisherCheckRun,
+  WRITER_PUBLISHER_CHECK_NAME,
+  WriterPublisherAttestationError,
+} from './autonomy-publisher-attestation.mjs';
 import { policyConfigFromEnvironment } from './run-autonomy-policy.mjs';
 
 const GITHUB_ACTIONS_APP_ID = 15368;
@@ -30,6 +44,7 @@ const WORKFLOW_IDENTITIES = Object.freeze(new Map([
 ]));
 const MAXIMUM_GRAPHQL_BYTES = 4 * 1024 * 1024;
 const MAXIMUM_EXECUTOR_REGISTRY_BYTES = 65_536;
+const MAXIMUM_ACTIVE_RULESETS = 20;
 const EXECUTOR_REGISTRY_PATH = '.github/ai-executors.json';
 const RESPONSE_LOSS_CANARY_FAULT = 'drop_merge_response_after_success';
 const RESPONSE_LOSS_CANARY_MARKER = 'response_loss_after_merge_response';
@@ -39,6 +54,18 @@ const EXECUTOR_TRAILER_FIELDS = Object.freeze({
   'Aeris-Autonomy-Executor-Protocol': 'protocol',
   'Aeris-Autonomy-Executor-Action-SHA': 'action_sha',
   'Aeris-Autonomy-Executor-Tool-Version': 'tool_version',
+});
+const PATCH_TRAILER = 'Aeris-Autonomy-Patch';
+const SHA256 = /^[0-9a-f]{64}$/;
+const CANDIDATE_WORKFLOW = Object.freeze({
+  name: 'Agent candidate',
+  path: '.github/workflows/agent-candidate.yml',
+  event: 'workflow_dispatch',
+});
+const PUBLISHER_WORKFLOW = Object.freeze({
+  name: 'Autonomy Publisher',
+  path: '.github/workflows/autonomy-publisher.yml',
+  event: 'workflow_run',
 });
 
 export class AutonomyFinalizerError extends Error {
@@ -77,6 +104,16 @@ function nonNegativeInteger(value, name) {
 function object(value, name) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) reject(`${name} must be an object`);
   return value;
+}
+
+function exactObjectKeys(value, keys, name) {
+  const candidate = object(value, name);
+  const actual = Object.keys(candidate).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    reject(`${name} has unexpected keys`);
+  }
+  return candidate;
 }
 
 function nullableString(value, name) {
@@ -162,6 +199,22 @@ function candidateExecutorFromCommitMessage(message) {
   }
 }
 
+function candidatePatchDigestFromCommitMessage(message) {
+  if (typeof message !== 'string' || message.length === 0 || message.length > MAXIMUM_EXECUTOR_REGISTRY_BYTES ||
+      /[\u0000-\u0009\u000b-\u001f\u007f]/.test(message)) {
+    reject('candidate commit patch provenance is invalid');
+  }
+  let patch = null;
+  for (const line of message.split('\n')) {
+    if (!line.startsWith(`${PATCH_TRAILER}:`)) continue;
+    const match = new RegExp(`^${PATCH_TRAILER}: ([0-9a-f]{64})$`).exec(line);
+    if (!match || patch !== null) reject('candidate commit patch provenance is invalid');
+    patch = match[1];
+  }
+  if (patch === null || !SHA256.test(patch)) reject('candidate commit patch provenance is incomplete');
+  return patch;
+}
+
 async function assertCandidateExecutorProvenance(client, governance) {
   if (typeof client?.getGitCommit !== 'function' || typeof client?.getRepositoryContent !== 'function') {
     reject('Finalizer client cannot verify candidate executor provenance');
@@ -176,7 +229,7 @@ async function assertCandidateExecutorProvenance(client, governance) {
   if (!candidateExecutorEquals(committed, trusted)) {
     reject('candidate commit executor provenance does not match the trusted base registry');
   }
-  return trusted;
+  return Object.freeze({ executor: trusted, patch_sha256: candidatePatchDigestFromCommitMessage(commit.message) });
 }
 
 export function validateResponseLossCanaryBinding(value, expected) {
@@ -213,6 +266,111 @@ function checkCandidates(checkRuns) {
   }
   for (const values of candidates.values()) values.sort((left, right) => right.id - left.id);
   return candidates;
+}
+
+function writerPublisherIdentity(value, config) {
+  const trusted = object(value, 'Writer publisher attestation trust');
+  const appId = positiveInteger(trusted.app_id, 'Writer publisher App ID');
+  const appSlug = required(trusted.app_slug, 'Writer publisher App slug', /^[a-z0-9][a-z0-9-]{0,99}$/);
+  if (`${appSlug}[bot]` !== config.writer_login) {
+    reject('Writer publisher attestation App does not match policy');
+  }
+  return Object.freeze({ app_id: appId, app_slug: appSlug });
+}
+
+function samePublisherAttestation(left, right) {
+  try {
+    return JSON.stringify(normalizeWriterPublisherAttestation(left)) === JSON.stringify(normalizeWriterPublisherAttestation(right));
+  } catch (error) {
+    if (error instanceof WriterPublisherAttestationError) reject(error.message);
+    throw error;
+  }
+}
+
+function validateAttestationWorkflowRun(run, { run_id: runId, run_attempt: runAttempt }, expected, identity, label) {
+  if (String(run?.id) !== runId || run?.run_attempt !== runAttempt ||
+      run?.name !== identity.name || run?.path !== identity.path || run?.event !== identity.event ||
+      run?.status !== 'completed' || run?.conclusion !== 'success' || run?.head_sha !== expected.base_sha ||
+      run?.repository?.id !== expected.repository_id || run?.repository?.full_name !== expected.repository ||
+      run?.head_repository?.id !== expected.repository_id || run?.head_repository?.full_name !== expected.repository) {
+    reject(`${label} workflow run binding is invalid`);
+  }
+}
+
+function validateCandidateWorkflowRun(run, attestation, expected) {
+  validateAttestationWorkflowRun(run, {
+    run_id: attestation.candidate_run_id,
+    run_attempt: attestation.candidate_run_attempt,
+  }, expected, CANDIDATE_WORKFLOW, 'candidate');
+}
+
+function validatePublisherWorkflowRun(run, attestation, expected) {
+  validateAttestationWorkflowRun(run, {
+    run_id: attestation.publisher_run_id,
+    run_attempt: attestation.publisher_run_attempt,
+  }, expected, PUBLISHER_WORKFLOW, 'Writer publisher');
+}
+
+async function writerPublisherAttestationReady(
+  client, checkRuns, expected, candidateProvenance, writerApp, expectedCheckRunId = null,
+) {
+  if (!Array.isArray(checkRuns) || typeof client?.getCheckRun !== 'function' || typeof client?.getWorkflowRun !== 'function') {
+    reject('Finalizer client cannot verify Writer attestation');
+  }
+  const candidates = checkRuns.filter((check) => check?.name === WRITER_PUBLISHER_CHECK_NAME &&
+    check?.app?.id === writerApp.app_id && check?.app?.slug === writerApp.app_slug);
+  if (candidates.length > 1) reject('managed candidate has ambiguous Writer attestations');
+  if (candidates.length === 0) return Object.freeze({ ready: false, reason: 'writer_attestation_missing' });
+  const listed = candidates[0];
+  if (!Number.isSafeInteger(listed?.id) || listed.id <= 0) reject('Writer attestation check run identity is invalid');
+  if (expectedCheckRunId !== null && listed.id !== expectedCheckRunId) {
+    reject('Writer attestation check run drifted from the Publisher target');
+  }
+  if (listed.status !== 'completed' || listed.conclusion !== 'success') {
+    return Object.freeze({ ready: false, reason: 'writer_attestation_not_successful' });
+  }
+  const check = await client.getCheckRun(listed.id);
+  if (check?.id !== listed.id) reject('Writer attestation check run identity drifted');
+  let attestation;
+  try {
+    attestation = decodeWriterPublisherAttestationSummary(check?.output?.summary);
+    validateWriterPublisherCheckRun(check, { attestation, writer_app: writerApp });
+  } catch (error) {
+    if (error instanceof WriterPublisherAttestationError) reject(error.message);
+    throw error;
+  }
+  const expectedAttestation = {
+    schema_version: 1,
+    repository: expected.repository,
+    repository_id: expected.repository_id,
+    task_id: expected.task_id,
+    issue_number: expected.issue_number,
+    pull_number: expected.pull_number,
+    head_ref: expected.branch_name,
+    head_sha: expected.head_sha,
+    base_ref: `refs/heads/${expected.base_ref}`,
+    base_sha: expected.base_sha,
+    patch_sha256: candidateProvenance.patch_sha256,
+    candidate_run_id: attestation.candidate_run_id,
+    candidate_run_attempt: attestation.candidate_run_attempt,
+    publisher_run_id: attestation.publisher_run_id,
+    publisher_run_attempt: attestation.publisher_run_attempt,
+    executor: candidateProvenance.executor,
+  };
+  if (!samePublisherAttestation(attestation, expectedAttestation)) {
+    reject('Writer publisher attestation does not bind the exact candidate');
+  }
+  if (expectedCheckRunId !== null &&
+      (check?.repository?.id !== expected.repository_id || check?.repository?.full_name !== expected.repository)) {
+    reject('Writer attestation check run repository identity is invalid');
+  }
+  const [candidateRun, publisherRun] = await Promise.all([
+    client.getWorkflowRun(attestation.candidate_run_id),
+    client.getWorkflowRun(attestation.publisher_run_id),
+  ]);
+  validateCandidateWorkflowRun(candidateRun, attestation, expected);
+  validatePublisherWorkflowRun(publisherRun, attestation, expected);
+  return Object.freeze({ ready: true, check_run_id: listed.id });
 }
 
 function validateCompleteConnection(connection, name) {
@@ -318,18 +476,257 @@ function validateBranchProtection(proof, defaultBranch) {
     repository.rulesets,
     'branch rulesets including parents',
   );
+  let activeGovernanceFence = null;
   for (const ruleset of rulesets.nodes) {
     const enforcement = required(ruleset?.enforcement, 'branch ruleset enforcement');
     if (!['ACTIVE', 'DISABLED', 'EVALUATE'].includes(enforcement)) reject('branch ruleset enforcement is unknown');
     if (ruleset?.target !== 'BRANCH') reject('branch ruleset target is invalid');
-    if (enforcement === 'ACTIVE') reject('an active branch ruleset can alter merge governance');
+    if (enforcement !== 'ACTIVE') continue;
+    if (required(ruleset?.name, 'active branch ruleset name') !== GOVERNANCE_FENCE_RULESET_NAME ||
+        activeGovernanceFence !== null) {
+      reject('an unexpected active branch ruleset can alter merge governance');
+    }
+    activeGovernanceFence = ruleset;
   }
   return Object.freeze({
     pattern: rule.pattern,
     contexts: REQUIRED_PROTECTION_CHECKS,
     rulesets: rulesets.totalCount,
+    governance_fence_ruleset_id: activeGovernanceFence === null
+      ? null
+      : positiveInteger(activeGovernanceFence.databaseId, 'active governance fence database id'),
     profile: 'direct-squash-v1',
   });
+}
+
+function normalizedRulesetSummary(value, name) {
+  const ruleset = object(value, name);
+  return Object.freeze({
+    id: positiveInteger(ruleset.id, `${name} id`),
+    name: required(ruleset.name, `${name} name`),
+    target: required(ruleset.target, `${name} target`).toLowerCase(),
+    enforcement: required(ruleset.enforcement, `${name} enforcement`).toLowerCase(),
+  });
+}
+
+function normalizedActiveRuleset(value, summary, name) {
+  const ruleset = object(value, name);
+  const identity = normalizedRulesetSummary(ruleset, name);
+  if (JSON.stringify(identity) !== JSON.stringify(summary)) {
+    reject(`${name} identity drifted from the ruleset inventory`);
+  }
+  const conditions = exactObjectKeys(ruleset.conditions, ['ref_name'], `${name} conditions`);
+  const refName = exactObjectKeys(
+    conditions.ref_name,
+    ['include', 'exclude'],
+    `${name} ref_name condition`,
+  );
+  if (!Array.isArray(refName.include) || !Array.isArray(refName.exclude) ||
+      refName.include.some((entry) => typeof entry !== 'string') ||
+      refName.exclude.some((entry) => typeof entry !== 'string')) {
+    reject(`${name} ref_name condition is invalid`);
+  }
+  if (!Array.isArray(ruleset.rules) || ruleset.rules.length > 32) {
+    reject(`${name} rules are invalid`);
+  }
+  const rules = ruleset.rules.map((rule, index) => {
+    const normalized = exactObjectKeys(rule, ['type'], `${name} rules[${index}]`);
+    return Object.freeze({ type: required(normalized.type, `${name} rules[${index}].type`) });
+  });
+  rules.sort((left, right) => left.type.localeCompare(right.type));
+  if (!Array.isArray(ruleset.bypass_actors) || ruleset.bypass_actors.length > 32) {
+    reject(`${name} bypass actors are invalid`);
+  }
+  const bypassActors = ruleset.bypass_actors.map((actor, index) => {
+    const normalized = exactObjectKeys(
+      actor,
+      ['actor_id', 'actor_type', 'bypass_mode'],
+      `${name} bypass_actors[${index}]`,
+    );
+    return Object.freeze({
+      actor_id: positiveInteger(normalized.actor_id, `${name} bypass actor id`),
+      actor_type: required(normalized.actor_type, `${name} bypass actor type`),
+      bypass_mode: required(normalized.bypass_mode, `${name} bypass mode`),
+    });
+  });
+  bypassActors.sort((left, right) => left.actor_id - right.actor_id ||
+    left.actor_type.localeCompare(right.actor_type) || left.bypass_mode.localeCompare(right.bypass_mode));
+  const include = [...refName.include].sort();
+  const exclude = [...refName.exclude].sort();
+  return Object.freeze({
+    ...summary,
+    conditions: Object.freeze({
+      ref_name: Object.freeze({
+        include: Object.freeze(include),
+        exclude: Object.freeze(exclude),
+      }),
+    }),
+    rules: Object.freeze(rules),
+    bypass_actors: Object.freeze(bypassActors),
+  });
+}
+
+function collaboratorPermission(value, name) {
+  const collaborator = object(value, name);
+  const permissions = object(collaborator.permissions, `${name} permissions`);
+  const levels = [
+    ['admin', 'ADMIN'],
+    ['maintain', 'MAINTAIN'],
+    ['push', 'WRITE'],
+    ['triage', 'TRIAGE'],
+    ['pull', 'READ'],
+  ];
+  for (const [field] of levels) boolean(permissions[field], `${name} permissions.${field}`);
+  const match = levels.find(([field]) => permissions[field] === true);
+  if (!match) reject(`${name} permission is missing`);
+  return match[1];
+}
+
+function normalizedDirectCollaborators(value) {
+  const connection = object(value, 'repository direct collaborator inventory');
+  if (!Array.isArray(connection.items)) reject('repository direct collaborator items are invalid');
+  const items = connection.items.map((entry, index) => {
+    const collaborator = object(entry, `repository direct collaborators[${index}]`);
+    return Object.freeze({
+      login: required(collaborator.login, `repository direct collaborators[${index}].login`),
+      database_id: positiveInteger(collaborator.id, `repository direct collaborators[${index}].id`),
+      type: required(collaborator.type, `repository direct collaborators[${index}].type`),
+      permission: collaboratorPermission(collaborator, `repository direct collaborators[${index}]`),
+    });
+  });
+  items.sort((left, right) => left.database_id - right.database_id || left.login.localeCompare(right.login));
+  return Object.freeze({
+    affiliation: 'direct',
+    items: Object.freeze(items),
+    truncated: boolean(connection.truncated, 'repository direct collaborator pagination status'),
+  });
+}
+
+function normalizedRulesets(value, activeDetails) {
+  const connection = object(value, 'repository ruleset inventory');
+  if (!Array.isArray(connection.items)) reject('repository ruleset items are invalid');
+  const summaries = connection.items.map((entry, index) =>
+    normalizedRulesetSummary(entry, `repository rulesets[${index}]`));
+  const detailById = new Map(activeDetails.map(({ summary, detail }, index) => [
+    summary.id,
+    normalizedActiveRuleset(detail, summary, `active repository rulesets[${index}]`),
+  ]));
+  const items = summaries.map((summary) => summary.enforcement === 'active'
+    ? detailById.get(summary.id)
+    : summary);
+  if (items.some((entry) => entry === undefined) || detailById.size !== activeDetails.length) {
+    reject('active repository ruleset detail inventory is incomplete');
+  }
+  items.sort((left, right) => left.id - right.id);
+  return Object.freeze({
+    includes_parents: true,
+    items: Object.freeze(items),
+    truncated: boolean(connection.truncated, 'repository ruleset pagination status'),
+  });
+}
+
+function normalizedWriterSecretLane({ actionsPermissions, workflowPermissions, environment, branchPolicies }) {
+  const actions = object(actionsPermissions, 'Writer Actions permissions response');
+  const workflow = object(workflowPermissions, 'Writer workflow permissions response');
+  const writerEnvironment = object(environment, 'Writer Environment response');
+  const deploymentPolicy = object(
+    writerEnvironment.deployment_branch_policy,
+    'Writer Environment deployment branch policy',
+  );
+  const policies = object(branchPolicies, 'Writer deployment branch policy response');
+  if (!Array.isArray(policies.items)) reject('Writer deployment branch policy items are invalid');
+  const items = policies.items.map((entry, index) => {
+    const policy = object(entry, `Writer deployment branch policies[${index}]`);
+    return Object.freeze({
+      name: required(policy.name, `Writer deployment branch policies[${index}].name`),
+      type: required(policy.type, `Writer deployment branch policies[${index}].type`),
+    });
+  });
+  items.sort((left, right) => left.type.localeCompare(right.type) || left.name.localeCompare(right.name));
+  return Object.freeze({
+    actions_permissions: Object.freeze({
+      enabled: boolean(actions.enabled, 'Writer Actions enabled'),
+      allowed_actions: required(actions.allowed_actions, 'Writer Actions allowed_actions'),
+      sha_pinning_required: boolean(actions.sha_pinning_required, 'Writer Actions sha_pinning_required'),
+    }),
+    workflow_permissions: Object.freeze({
+      default_workflow_permissions: required(
+        workflow.default_workflow_permissions,
+        'Writer default workflow permissions',
+      ),
+      can_approve_pull_request_reviews: boolean(
+        workflow.can_approve_pull_request_reviews,
+        'Writer workflow review permission',
+      ),
+    }),
+    environment: Object.freeze({
+      name: required(writerEnvironment.name, 'Writer Environment name'),
+      custom_branch_policies: boolean(
+        deploymentPolicy.custom_branch_policies,
+        'Writer Environment custom branch policies',
+      ),
+      protected_branches: boolean(
+        deploymentPolicy.protected_branches,
+        'Writer Environment protected branches',
+      ),
+      can_admins_bypass_secrets_and_variables: boolean(
+        writerEnvironment.can_admins_bypass,
+        'Writer Environment admin bypass',
+      ),
+    }),
+    deployment_branch_policies: Object.freeze({
+      environment_name: 'writer',
+      items: Object.freeze(items),
+      truncated: boolean(policies.truncated, 'Writer deployment branch policy pagination status'),
+    }),
+  });
+}
+
+function validateWriterGovernanceSnapshot(snapshot, { trust, writerTrust, classicProtection }) {
+  if (classicProtection?.profile !== 'direct-squash-v1') {
+    reject('Writer governance proof requires verified classic main protection');
+  }
+  const value = object(snapshot, 'Writer governance snapshot');
+  const expected = Object.freeze({
+    repository: trust.repository,
+    repository_id: trust.repository_id,
+    trusted_owner_login: required(writerTrust.proof_app_owner_login, 'Writer proof App owner login'),
+    trusted_owner_database_id: positiveInteger(
+      writerTrust.proof_app_owner_database_id,
+      'Writer proof App owner database id',
+    ),
+    app_id: positiveInteger(writerTrust.proof_app_id, 'Writer proof App id'),
+    app_slug: required(writerTrust.proof_app_slug, 'Writer proof App slug'),
+  });
+  try {
+    const fence = validateGovernanceFence({
+      ...object(value.governance_fence, 'Writer governance fence snapshot'),
+      classicMainProtectionVerified: true,
+    }, expected);
+    const secretLane = validateWriterSecretLane(
+      object(value.secret_lane, 'Writer secret lane snapshot'),
+      { default_branch: trust.default_branch },
+    );
+    if (classicProtection.governance_fence_ruleset_id !== fence.ruleset_id) {
+      reject('classic and REST governance fence identities do not match');
+    }
+    return Object.freeze({ snapshot: value, fence, secret_lane: secretLane });
+  } catch (error) {
+    if (error instanceof AutonomyFinalizerError) throw error;
+    reject(`Writer governance proof failed: ${error instanceof Error ? error.message : 'validation failed'}`);
+  }
+}
+
+async function proveWriterGovernance(client, context) {
+  if (!client || typeof client.getWriterGovernanceSnapshot !== 'function') {
+    reject('Writer client cannot read the live governance fence');
+  }
+  try {
+    return validateWriterGovernanceSnapshot(await client.getWriterGovernanceSnapshot(), context);
+  } catch (error) {
+    if (error instanceof AutonomyFinalizerError) throw error;
+    reject(`Writer governance snapshot failed: ${error instanceof Error ? error.message : 'read failed'}`);
+  }
 }
 
 function validateWriterIdentity(repositories, expected) {
@@ -442,6 +839,75 @@ function validateWorkflowRun(run, expected) {
   return Object.freeze({ pull_number: pullNumber, head_sha: headSha, workflow_name: run.name });
 }
 
+function publisherTargetFromPath(targetPath) {
+  if (typeof targetPath !== 'string' || targetPath.length === 0 || /[\u0000\r\n]/.test(targetPath)) {
+    reject('Publisher target path is invalid');
+  }
+  const resolved = path.resolve(targetPath);
+  let stat;
+  try { stat = fs.lstatSync(resolved); } catch { reject('Publisher target artifact is unavailable'); }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0 || stat.size > 4096) {
+    reject('Publisher target artifact is invalid');
+  }
+  let value;
+  try { value = fs.readFileSync(resolved); } catch { reject('Publisher target artifact is unavailable'); }
+  if (value.length !== stat.size) reject('Publisher target artifact changed during read');
+  try { return parseWriterPublisherTarget(value); } catch (error) {
+    if (error instanceof WriterPublisherAttestationError) reject(error.message);
+    throw error;
+  }
+}
+
+function validatePublisherTriggerRun(run, trigger, trust) {
+  if (run?.id !== trigger.run_id || run?.run_attempt !== trigger.run_attempt ||
+      run?.name !== PUBLISHER_WORKFLOW.name || run?.path !== PUBLISHER_WORKFLOW.path ||
+      run?.event !== PUBLISHER_WORKFLOW.event || run?.status !== 'completed' || run?.conclusion !== 'success' ||
+      run?.head_branch !== trust.default_branch || run?.head_sha !== trust.policy_sha ||
+      run?.repository?.id !== trust.repository_id || run?.repository?.full_name !== trust.repository ||
+      run?.head_repository?.id !== trust.repository_id || run?.head_repository?.full_name !== trust.repository) {
+    reject('Publisher trigger workflow run binding is invalid');
+  }
+}
+
+async function publisherTriggerBinding(client, trigger, trust, writerTrust, config) {
+  if (typeof client?.getCheckRun !== 'function') reject('Finalizer client cannot verify Publisher target');
+  const run = await client.getWorkflowRun(trigger.run_id);
+  validatePublisherTriggerRun(run, trigger, trust);
+  const target = publisherTargetFromPath(trigger.publisher_target_path);
+  if (target.publisher_run_id !== String(trigger.run_id) || target.publisher_run_attempt !== trigger.run_attempt ||
+      target.repository !== trust.repository || target.repository_id !== trust.repository_id ||
+      target.base_ref !== `refs/heads/${trust.default_branch}` || target.base_sha !== trust.policy_sha) {
+    reject('Publisher target does not bind the source workflow run');
+  }
+  const writerApp = writerPublisherIdentity(writerTrust, config);
+  const check = await client.getCheckRun(target.attestation_check_run_id);
+  if (check?.id !== target.attestation_check_run_id || check?.repository?.id !== trust.repository_id ||
+      check?.repository?.full_name !== trust.repository) {
+    reject('Publisher target attestation check run identity is invalid');
+  }
+  let attestation;
+  try {
+    attestation = decodeWriterPublisherAttestationSummary(check?.output?.summary);
+    validateWriterPublisherCheckRun(check, { attestation, writer_app: writerApp });
+    validateWriterPublisherTarget(target, { attestation, attestation_check_run_id: check.id });
+  } catch (error) {
+    if (error instanceof WriterPublisherAttestationError) reject(error.message);
+    throw error;
+  }
+  if (attestation.publisher_run_id !== String(trigger.run_id) || attestation.publisher_run_attempt !== trigger.run_attempt ||
+      attestation.repository !== trust.repository || attestation.repository_id !== trust.repository_id ||
+      attestation.base_ref !== `refs/heads/${trust.default_branch}` || attestation.base_sha !== trust.policy_sha ||
+      attestation.pull_number !== target.pull_number || attestation.head_sha !== target.head_sha) {
+    reject('Publisher attestation does not bind the source workflow run');
+  }
+  return Object.freeze({
+    pull_number: attestation.pull_number,
+    head_sha: attestation.head_sha,
+    workflow_name: PUBLISHER_WORKFLOW.name,
+    attestation_check_run_id: check.id,
+  });
+}
+
 function managedIssueBinding(policy, config) {
   const branchPrefix = required(config?.branch_prefix, 'managed branch prefix');
   const branchName = required(policy?.snapshot?.source?.branch, 'managed branch name');
@@ -454,9 +920,33 @@ function managedIssueBinding(policy, config) {
   });
 }
 
+function normalizePullLifecycleEvents(events) {
+  if (!Array.isArray(events)) reject('pull request lifecycle event projection is invalid');
+  const lifecycle = [];
+  const ids = new Set();
+  for (const [index, event] of events.entries()) {
+    if (!event || typeof event !== 'object' || Array.isArray(event)) {
+      reject(`pull request lifecycle event ${index} is invalid`);
+    }
+    if (!['closed', 'reopened'].includes(event.event)) continue;
+    const id = Number.isSafeInteger(event.id) && event.id > 0
+      ? String(event.id)
+      : typeof event.id === 'string' && /^[1-9][0-9]*$/.test(event.id)
+        ? event.id
+        : null;
+    if (id === null || ids.has(id)) reject('pull request lifecycle event identity is invalid');
+    ids.add(id);
+    lifecycle.push(Object.freeze({ id, event: event.event }));
+  }
+  lifecycle.sort((left, right) => left.id.localeCompare(right.id) || left.event.localeCompare(right.event));
+  return Object.freeze(lifecycle);
+}
+
 function validateGovernance(snapshot, expected, { requireReady = false } = {}) {
   if (!snapshot || typeof snapshot !== 'object') reject('pull request governance projection is invalid');
   if (snapshot.number !== expected.pull_number || snapshot.state !== 'OPEN') reject('pull request is no longer open');
+  const lifecycle = normalizePullLifecycleEvents(snapshot.lifecycle);
+  if (lifecycle.length !== 0) reject('managed pull request is tombstoned by close or reopen history');
   if (snapshot.headRefOid !== expected.head_sha || snapshot.headRefName !== expected.branch_name ||
       snapshot.headRepository !== expected.repository) reject('managed pull request head identity drifted');
   if (snapshot.baseRefName !== 'main' || snapshot.baseRefOid !== expected.base_sha) reject('managed pull request base drifted');
@@ -709,6 +1199,10 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
     return this.request('GET', `/repos/${this.repository}/check-suites/${positiveInteger(suiteId, 'check suite id')}`);
   }
 
+  getCheckRun(checkRunId) {
+    return this.request('GET', `/repos/${this.repository}/check-runs/${positiveInteger(checkRunId, 'check run ID')}`);
+  }
+
   async getBranchProtection() {
     const [owner, name] = this.repository.split('/');
     const data = await boundedGraphql(this, `
@@ -777,6 +1271,70 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
     });
   }
 
+  async readWriterGovernanceSnapshotOnce() {
+    const [
+      repository,
+      directCollaborators,
+      rulesets,
+      actionsPermissions,
+      workflowPermissions,
+      environment,
+      branchPolicies,
+    ] = await Promise.all([
+      this.getRepository(),
+      this.listDirectCollaborators(),
+      this.listRepositoryRulesetsIncludingParents(),
+      this.getActionsPermissions(),
+      this.getDefaultWorkflowPermissions(),
+      this.getWriterEnvironment(),
+      this.listWriterDeploymentBranchPolicies(),
+    ]);
+    if (directCollaborators?.truncated === true) {
+      reject('repository direct collaborator pagination is incomplete');
+    }
+    if (rulesets?.truncated === true) reject('repository ruleset pagination is incomplete');
+    if (branchPolicies?.truncated === true) {
+      reject('Writer deployment branch policy pagination is incomplete');
+    }
+    if (!Array.isArray(rulesets?.items)) reject('repository ruleset items are invalid');
+    const active = rulesets.items
+      .map((entry, index) => normalizedRulesetSummary(entry, `repository rulesets[${index}]`))
+      .filter((entry) => entry.enforcement === 'active');
+    if (active.length > MAXIMUM_ACTIVE_RULESETS) {
+      reject('active repository ruleset inventory exceeds the governance proof limit');
+    }
+    const activeDetails = await Promise.all(active.map(async (summary) => Object.freeze({
+      summary,
+      detail: await this.getRepositoryRuleset(summary.id),
+    })));
+    const repo = object(repository, 'Writer governance repository response');
+    return Object.freeze({
+      governance_fence: Object.freeze({
+        repository: Object.freeze({
+          id: positiveInteger(repo.id, 'Writer governance repository id'),
+          full_name: required(repo.full_name, 'Writer governance repository full_name', REPOSITORY),
+        }),
+        direct_collaborators: normalizedDirectCollaborators(directCollaborators),
+        rulesets: normalizedRulesets(rulesets, activeDetails),
+      }),
+      secret_lane: normalizedWriterSecretLane({
+        actionsPermissions,
+        workflowPermissions,
+        environment,
+        branchPolicies,
+      }),
+    });
+  }
+
+  async getWriterGovernanceSnapshot() {
+    const initial = await this.readWriterGovernanceSnapshotOnce();
+    const confirmed = await this.readWriterGovernanceSnapshotOnce();
+    if (JSON.stringify(initial) !== JSON.stringify(confirmed)) {
+      reject('Writer governance drifted between complete reads');
+    }
+    return confirmed;
+  }
+
   getInstallationRepositories() {
     return this.request('GET', '/installation/repositories?per_page=100&page=1');
   }
@@ -787,8 +1345,12 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
 
   async getPullGovernance(number) {
     const [owner, name] = this.repository.split('/');
-    const initial = await readGovernanceSnapshot(this, owner, name, number);
-    const confirmed = await readGovernanceSnapshot(this, owner, name, number);
+    const read = async () => Object.freeze({
+      ...await readGovernanceSnapshot(this, owner, name, number),
+      lifecycle: normalizePullLifecycleEvents(await this.listPullTimelineEvents(number)),
+    });
+    const initial = await read();
+    const confirmed = await read();
     if (JSON.stringify(initial) !== JSON.stringify(confirmed)) reject('pull request governance drifted between complete reads');
     return confirmed;
   }
@@ -827,11 +1389,15 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
 }
 
 async function evaluateAutonomyFinalizerGates({
-  client, protectionClient, trigger, trust, config, proofLevel,
+  client, protectionClient, trigger, trust, config, writerTrust = config.writer_trust, proofLevel,
   checkAttempts = 3, sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
-  const run = await client.getWorkflowRun(trigger.run_id);
-  const bound = validateWorkflowRun(run, { ...trigger, repository: trust.repository, repository_id: trust.repository_id });
+  const bound = trigger.source === 'publisher'
+    ? await publisherTriggerBinding(client, trigger, trust, writerTrust, config)
+    : validateWorkflowRun(
+      await client.getWorkflowRun(trigger.run_id),
+      { ...trigger, repository: trust.repository, repository_id: trust.repository_id },
+    );
   const policy = await evaluateAutonomyPolicy({ client, trigger: bound, trust, config });
   if (policy.decision.classification !== 'eligible') {
     return Object.freeze({
@@ -846,26 +1412,32 @@ async function evaluateAutonomyFinalizerGates({
     ? validateBranchProtection(await protectionClient.getBranchProtection(), trust.default_branch)
     : null;
   const issue = managedIssueBinding(policy, config);
+  const writerApp = writerPublisherIdentity(writerTrust, config);
   const expected = Object.freeze({
     ...bound,
     ...issue,
     repository: trust.repository,
     repository_id: trust.repository_id,
+    base_ref: trust.default_branch,
     base_sha: trust.policy_sha,
     writer_login: config.writer_login,
   });
   let governance;
   let checks;
   let readiness;
+  let attestationReadiness;
   for (let attempt = 1; attempt <= checkAttempts; attempt += 1) {
     [governance, checks] = await Promise.all([
       client.getPullGovernance(bound.pull_number),
       client.listCheckRunsForRef(bound.head_sha),
     ]);
     validateGovernance(governance, expected);
-    await assertCandidateExecutorProvenance(client, governance);
+    const candidateProvenance = await assertCandidateExecutorProvenance(client, governance);
     readiness = await requiredChecksReady(client, checks, expected);
-    if (readiness.ready) {
+    attestationReadiness = await writerPublisherAttestationReady(
+      client, checks, expected, candidateProvenance, writerApp, bound.attestation_check_run_id ?? null,
+    );
+    if (readiness.ready && attestationReadiness.ready) {
       return Object.freeze({
         eligible: true,
         reason: null,
@@ -874,6 +1446,7 @@ async function evaluateAutonomyFinalizerGates({
         policy,
         governance,
         checks: readiness,
+        attestation: attestationReadiness,
         protection,
       });
     }
@@ -881,7 +1454,9 @@ async function evaluateAutonomyFinalizerGates({
   }
   return Object.freeze({
     eligible: false,
-    reason: `required_checks_not_successful:${readiness.unsuccessful.join(',')}`,
+    reason: readiness.ready
+      ? attestationReadiness.reason
+      : `required_checks_not_successful:${readiness.unsuccessful.join(',')}`,
     proof_level: proofLevel,
     bound,
     policy,
@@ -890,7 +1465,7 @@ async function evaluateAutonomyFinalizerGates({
 }
 
 export async function evaluateAutonomyFinalizerPreliminary({
-  client, trigger, trust, config,
+  client, trigger, trust, config, writerTrust = config.writer_trust,
   checkAttempts = 3, sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   return evaluateAutonomyFinalizerGates({
@@ -898,7 +1473,7 @@ export async function evaluateAutonomyFinalizerPreliminary({
     protectionClient: null,
     trigger,
     trust,
-    config,
+    config, writerTrust,
     proofLevel: 'preliminary',
     checkAttempts,
     sleepImpl,
@@ -906,7 +1481,7 @@ export async function evaluateAutonomyFinalizerPreliminary({
 }
 
 export async function evaluateAutonomyFinalizer({
-  client, protectionClient = client, trigger, trust, config,
+  client, protectionClient = client, trigger, trust, config, writerTrust = config.writer_trust,
   checkAttempts = 3, sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   if (!protectionClient || typeof protectionClient.getBranchProtection !== 'function') {
@@ -917,7 +1492,7 @@ export async function evaluateAutonomyFinalizer({
     protectionClient,
     trigger,
     trust,
-    config,
+    config, writerTrust,
     proofLevel: 'full',
     checkAttempts,
     sleepImpl,
@@ -925,6 +1500,11 @@ export async function evaluateAutonomyFinalizer({
 }
 
 function exactOpenPull(snapshot, expected, pullRequestId) {
+  try {
+    if (normalizePullLifecycleEvents(snapshot?.lifecycle).length !== 0) return false;
+  } catch {
+    return false;
+  }
   return snapshot?.id === pullRequestId && snapshot?.number === expected.pull_number && snapshot?.state === 'OPEN' &&
     snapshot?.merged === false && snapshot?.mergedAt === null && snapshot?.mergedBy === null && snapshot?.mergeCommit === null &&
     snapshot?.headRefName === expected.branch_name && snapshot?.headRefOid === expected.head_sha &&
@@ -975,6 +1555,11 @@ async function rollbackAndRethrow(error, context) {
 }
 
 function exactMergedOutcome(snapshot, expected, pullRequestId) {
+  let lifecycle;
+  try { lifecycle = normalizePullLifecycleEvents(snapshot?.lifecycle); } catch { return false; }
+  // A successful GitHub merge records one terminal `closed` timeline event. Any
+  // prior close/reopen history adds further lifecycle evidence and is ambiguous.
+  if (lifecycle.length !== 1 || lifecycle[0].event !== 'closed') return false;
   const expectedGraphQlLogin = expected.writer_graphql_login ?? expected.writer_login.replace(/\[bot\]$/, '');
   const merger = snapshot?.mergedBy;
   const commit = snapshot?.mergeCommit;
@@ -1014,6 +1599,8 @@ export async function finalizeAutonomyPull({
   const repositoryOwner = trust.repository.split('/')[0];
   const proofOwnerLogin = required(configuredWriter.proof_app_owner_login, 'Writer proof App owner login');
   const proofOwnerType = required(configuredWriter.proof_app_owner_type, 'Writer proof App owner type');
+  required(configuredWriter.proof_app_node_id, 'Writer proof App node id');
+  positiveInteger(configuredWriter.proof_app_owner_database_id, 'Writer proof App owner database id');
   if (proofOwnerLogin !== repositoryOwner || !['User', 'Organization'].includes(proofOwnerType)) {
     reject('Writer App JWT proof does not match the repository owner');
   }
@@ -1054,7 +1641,7 @@ export async function finalizeAutonomyPull({
     repository_id: trust.repository_id,
   }));
   const initial = await evaluateAutonomyFinalizer({
-    client: readClient, protectionClient, trigger, trust, config, sleepImpl,
+    client: readClient, protectionClient, trigger, trust, config, writerTrust: configuredWriter, sleepImpl,
   });
   if (!initial.eligible) return Object.freeze({ action: 'skipped', ...initial });
   const expected = Object.freeze({
@@ -1071,12 +1658,17 @@ export async function finalizeAutonomyPull({
   const pullNumber = initial.bound.pull_number;
   validateGovernance(initial.governance, expected);
   if (initial.proof_level !== 'full') reject('response-loss canary requires a full eligibility proof');
+  const initialWriterGovernance = await proveWriterGovernance(writerClient, {
+    trust,
+    writerTrust: configuredWriter,
+    classicProtection: initial.protection,
+  });
   const responseLossCanary = validateResponseLossCanaryBinding(responseLossCanaryBinding, expected);
   let transitionedToReady = false;
 
   if (initial.governance.isDraft) {
     const beforeReady = await evaluateAutonomyFinalizer({
-      client: readClient, protectionClient, trigger, trust, config, checkAttempts: 1, sleepImpl,
+      client: readClient, protectionClient, trigger, trust, config, writerTrust: configuredWriter, checkAttempts: 1, sleepImpl,
     });
     if (!beforeReady.eligible) reject(`pre-ready verification failed: ${beforeReady.reason}`);
     if (beforeReady.proof_level !== 'full' || beforeReady.bound.pull_number !== expected.pull_number ||
@@ -1117,7 +1709,7 @@ export async function finalizeAutonomyPull({
   let beforeMerge;
   try {
     beforeMerge = await evaluateAutonomyFinalizer({
-      client: readClient, protectionClient, trigger, trust, config, checkAttempts: 1, sleepImpl,
+      client: readClient, protectionClient, trigger, trust, config, writerTrust: configuredWriter, checkAttempts: 1, sleepImpl,
     });
   } catch (error) {
     if (transitionedToReady) {
@@ -1163,6 +1755,14 @@ export async function finalizeAutonomyPull({
     if (JSON.stringify(immediatelyBeforeMerge) !== JSON.stringify(beforeMerge.governance)) {
       reject('pull request governance drifted immediately before merge mutation');
     }
+    const immediateWriterGovernance = await proveWriterGovernance(writerClient, {
+      trust,
+      writerTrust: configuredWriter,
+      classicProtection: beforeMerge.protection,
+    });
+    if (JSON.stringify(immediateWriterGovernance.snapshot) !== JSON.stringify(initialWriterGovernance.snapshot)) {
+      reject('Writer governance drifted before merge mutation');
+    }
   } catch (error) {
     if (transitionedToReady) {
       let observed;
@@ -1178,6 +1778,8 @@ export async function finalizeAutonomyPull({
 
   let mutationError = null;
   try {
+    // GitHub can CAS only expectedHeadOid here. Governance metadata can still
+    // change after the final complete read, so that platform TOCTOU remains.
     await writerClient.mergePullRequest(pullRequestId, expected.head_sha);
     if (responseLossCanary) {
       console.log(`AERIS_FINALIZER_CANARY=${RESPONSE_LOSS_CANARY_MARKER}`);
@@ -1206,9 +1808,17 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
   const config = policyConfigFromEnvironment(environment);
   const repository = required(environment.GITHUB_REPOSITORY, 'GITHUB_REPOSITORY', REPOSITORY);
   if (config.repository !== repository) reject('finalizer repository configuration drifted');
+  const triggerSource = environment.AERIS_FINALIZER_TRIGGER_SOURCE ?? 'required_check';
+  if (!['required_check', 'publisher'].includes(triggerSource)) {
+    reject('AERIS_FINALIZER_TRIGGER_SOURCE is invalid');
+  }
   const trigger = Object.freeze({
+    source: triggerSource,
     run_id: positiveInteger(environment.AERIS_TRIGGER_RUN_ID, 'AERIS_TRIGGER_RUN_ID'),
     run_attempt: positiveInteger(environment.AERIS_TRIGGER_RUN_ATTEMPT, 'AERIS_TRIGGER_RUN_ATTEMPT'),
+    ...(triggerSource === 'publisher'
+      ? { publisher_target_path: required(environment.AERIS_PUBLISHER_TARGET_PATH, 'AERIS_PUBLISHER_TARGET_PATH') }
+      : {}),
   });
   const trust = Object.freeze({
     repository,
@@ -1226,6 +1836,33 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
   if (mutate !== (proofLevel === 'full')) {
     reject('Finalizer mutation mode requires full proof and preliminary proof must be read-only');
   }
+  const writerAttestationTrust = Object.freeze({
+    app_id: environment.AERIS_WRITER_APP_ID,
+    app_slug: environment.AERIS_WRITER_APP_SLUG,
+  });
+  const writerTrust = mutate
+    ? Object.freeze({
+        ...writerAttestationTrust,
+        proof_app_id: positiveInteger(environment.AERIS_WRITER_PROOF_APP_ID, 'AERIS_WRITER_PROOF_APP_ID'),
+        proof_app_slug: required(environment.AERIS_WRITER_PROOF_APP_SLUG, 'AERIS_WRITER_PROOF_APP_SLUG'),
+        proof_app_node_id: required(environment.AERIS_WRITER_PROOF_APP_NODE_ID, 'AERIS_WRITER_PROOF_APP_NODE_ID'),
+        proof_app_owner_login: required(environment.AERIS_WRITER_PROOF_APP_OWNER_LOGIN, 'AERIS_WRITER_PROOF_APP_OWNER_LOGIN'),
+        proof_app_owner_database_id: positiveInteger(
+          environment.AERIS_WRITER_PROOF_APP_OWNER_DATABASE_ID,
+          'AERIS_WRITER_PROOF_APP_OWNER_DATABASE_ID',
+        ),
+        proof_app_owner_type: required(environment.AERIS_WRITER_PROOF_APP_OWNER_TYPE, 'AERIS_WRITER_PROOF_APP_OWNER_TYPE'),
+        proof_app_permissions: environment.AERIS_WRITER_PROOF_APP_PERMISSIONS,
+        installation_id: positiveInteger(environment.AERIS_WRITER_INSTALLATION_ID, 'AERIS_WRITER_INSTALLATION_ID'),
+        proof_installation_id: positiveInteger(environment.AERIS_WRITER_PROOF_INSTALLATION_ID, 'AERIS_WRITER_PROOF_INSTALLATION_ID'),
+        proof_installation_account_login: required(environment.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN, 'AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN'),
+        proof_installation_account_type: required(environment.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE, 'AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE'),
+        proof_installation_permissions: environment.AERIS_WRITER_PROOF_INSTALLATION_PERMISSIONS,
+        proof_repository_selection: required(environment.AERIS_WRITER_PROOF_REPOSITORY_SELECTION, 'AERIS_WRITER_PROOF_REPOSITORY_SELECTION'),
+        token_installation_id: positiveInteger(environment.AERIS_WRITER_TOKEN_INSTALLATION_ID, 'AERIS_WRITER_TOKEN_INSTALLATION_ID'),
+        token_app_slug: required(environment.AERIS_WRITER_TOKEN_APP_SLUG, 'AERIS_WRITER_TOKEN_APP_SLUG'),
+      })
+    : writerAttestationTrust;
   const writerClient = mutate
     ? dependencies.writerClient ?? new AutonomyFinalizerGitHubClient({
         token: required(environment.AERIS_WRITER_TOKEN, 'AERIS_WRITER_TOKEN'),
@@ -1238,29 +1875,13 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
         readClient,
         writerClient,
         protectionClient: dependencies.protectionClient ?? writerClient,
-        writerTrust: Object.freeze({
-          app_id: positiveInteger(environment.AERIS_WRITER_APP_ID, 'AERIS_WRITER_APP_ID'),
-          proof_app_id: positiveInteger(environment.AERIS_WRITER_PROOF_APP_ID, 'AERIS_WRITER_PROOF_APP_ID'),
-          proof_app_slug: required(environment.AERIS_WRITER_PROOF_APP_SLUG, 'AERIS_WRITER_PROOF_APP_SLUG'),
-          proof_app_owner_login: required(environment.AERIS_WRITER_PROOF_APP_OWNER_LOGIN, 'AERIS_WRITER_PROOF_APP_OWNER_LOGIN'),
-          proof_app_owner_type: required(environment.AERIS_WRITER_PROOF_APP_OWNER_TYPE, 'AERIS_WRITER_PROOF_APP_OWNER_TYPE'),
-          proof_app_permissions: environment.AERIS_WRITER_PROOF_APP_PERMISSIONS,
-          installation_id: positiveInteger(environment.AERIS_WRITER_INSTALLATION_ID, 'AERIS_WRITER_INSTALLATION_ID'),
-          proof_installation_id: positiveInteger(environment.AERIS_WRITER_PROOF_INSTALLATION_ID, 'AERIS_WRITER_PROOF_INSTALLATION_ID'),
-          proof_installation_account_login: required(environment.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN, 'AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_LOGIN'),
-          proof_installation_account_type: required(environment.AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE, 'AERIS_WRITER_PROOF_INSTALLATION_ACCOUNT_TYPE'),
-          proof_installation_permissions: environment.AERIS_WRITER_PROOF_INSTALLATION_PERMISSIONS,
-          proof_repository_selection: required(environment.AERIS_WRITER_PROOF_REPOSITORY_SELECTION, 'AERIS_WRITER_PROOF_REPOSITORY_SELECTION'),
-          token_installation_id: positiveInteger(environment.AERIS_WRITER_TOKEN_INSTALLATION_ID, 'AERIS_WRITER_TOKEN_INSTALLATION_ID'),
-          token_app_slug: required(environment.AERIS_WRITER_TOKEN_APP_SLUG, 'AERIS_WRITER_TOKEN_APP_SLUG'),
-          app_slug: required(environment.AERIS_WRITER_APP_SLUG, 'AERIS_WRITER_APP_SLUG'),
-        }),
+        writerTrust,
         trigger, trust, config,
         responseLossCanaryBinding: environment.AERIS_FINALIZER_RESPONSE_LOSS_CANARY,
         sleepImpl: dependencies.sleepImpl,
       })
     : await evaluateAutonomyFinalizerPreliminary({
-        client: readClient, trigger, trust, config, sleepImpl: dependencies.sleepImpl,
+        client: readClient, trigger, trust, config, writerTrust, sleepImpl: dependencies.sleepImpl,
       });
   if (environment.GITHUB_OUTPUT) {
     const eligible = mutate ? result.action !== 'skipped' : result.eligible;

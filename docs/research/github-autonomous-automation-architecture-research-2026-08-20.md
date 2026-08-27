@@ -235,6 +235,8 @@ Webhook、Actions rerun、网络重试和 runner 中断都会造成重复执行�
 
 ### 5.2 B：一个 Writer App
 
+> 实施修订（2026-08-27）：下列原始最小权限结论不再适用于当前实现。由于普通协作者可更新未受保护的 `agent/**` 分支，Publisher 需要同一 Writer App 的 `checks:write` 创建精确 head publication attestation；Finalizer 以 App 身份和 canonical payload 验证该证明。`docs/single-writer-autonomy-implementation.md` 是现行权限与上线规范。
+
 职责：
 
 - 仅安装到目标仓库。

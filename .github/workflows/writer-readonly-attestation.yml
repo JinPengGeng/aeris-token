@@ -31,8 +31,10 @@ jobs:
       - name: Attest live Writer App and installation
         id: writer_app_attestation
         env:
+          AERIS_WRITER_APP_OWNER_DATABASE_ID: ${{ vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}
           AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_APP_NODE_ID: ${{ vars.AERIS_WRITER_APP_NODE_ID }}
           AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
           AERIS_WRITER_APP_PRIVATE_KEY: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
         run: node .github/automation/src/github-app-attestation.mjs
@@ -64,7 +66,9 @@ jobs:
         env:
           APP_ID: ${{ steps.writer_app_attestation.outputs.app_id }}
           APP_SLUG: ${{ steps.writer_app_attestation.outputs.app_slug }}
+          APP_NODE_ID: ${{ steps.writer_app_attestation.outputs.app_node_id }}
           APP_OWNER: ${{ steps.writer_app_attestation.outputs.app_owner_login }}
+          APP_OWNER_DATABASE_ID: ${{ steps.writer_app_attestation.outputs.app_owner_database_id }}
           APP_OWNER_TYPE: ${{ steps.writer_app_attestation.outputs.app_owner_type }}
           APP_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.app_permissions }}
           INSTALLATION_ID: ${{ steps.writer_app_attestation.outputs.installation_id }}
@@ -81,7 +85,8 @@ jobs:
             echo "### Writer App read-only attestation"
             echo
             printf -- '- App: `%s` (#%s)\n' "${APP_SLUG}" "${APP_ID}"
-            printf -- '- App owner: `%s` (`%s`)\n' "${APP_OWNER}" "${APP_OWNER_TYPE}"
+            printf -- '- App node ID: `%s`\n' "${APP_NODE_ID}"
+            printf -- '- App owner: `%s` (#%s; `%s`)\n' "${APP_OWNER}" "${APP_OWNER_DATABASE_ID}" "${APP_OWNER_TYPE}"
             printf -- '- App permissions: `%s`\n' "${APP_PERMISSIONS}"
             printf -- '- Installation: `%s`\n' "${INSTALLATION_ID}"
             printf -- '- Installation permissions: `%s`\n' "${INSTALLATION_PERMISSIONS}"

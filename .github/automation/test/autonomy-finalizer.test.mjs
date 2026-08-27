@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import {
@@ -10,6 +13,11 @@ import {
   runAutonomyFinalizer,
   validateResponseLossCanaryBinding,
 } from '../src/autonomy-finalizer.mjs';
+import {
+  createWriterPublisherCheckRun,
+  createWriterPublisherTarget,
+  serializeWriterPublisherTarget,
+} from '../src/autonomy-publisher-attestation.mjs';
 
 const REPOSITORY = 'JinPengGeng/aeris-token';
 const REPOSITORY_ID = 1316750512;
@@ -22,6 +30,8 @@ const CANARY_TREE = 'f'.repeat(40);
 const MERGE_SHA = '9'.repeat(40);
 const ISSUE_NUMBER = 123;
 const PULL_NUMBER = 17;
+const CANDIDATE_RUN_ID = 456;
+const PUBLISHER_RUN_ID = 457;
 const WRITER_BOT = Object.freeze({
   login: 'aeris-writer[bot]',
   graphqlLogin: 'aeris-writer',
@@ -41,14 +51,16 @@ const writerTrust = Object.freeze({
   app_id: 4667256,
   proof_app_id: 4667256,
   proof_app_slug: 'aeris-writer',
+  proof_app_node_id: 'APP_writer_node',
   proof_app_owner_login: 'JinPengGeng',
+  proof_app_owner_database_id: 1234567,
   proof_app_owner_type: 'User',
-  proof_app_permissions: { administration: 'read', contents: 'write', metadata: 'read', pull_requests: 'write' },
+  proof_app_permissions: { administration: 'read', checks: 'write', contents: 'write', metadata: 'read', pull_requests: 'write' },
   installation_id: 155342531,
   proof_installation_id: 155342531,
   proof_installation_account_login: 'JinPengGeng',
   proof_installation_account_type: 'User',
-  proof_installation_permissions: { administration: 'read', contents: 'write', metadata: 'read', pull_requests: 'write' },
+  proof_installation_permissions: { administration: 'read', checks: 'write', contents: 'write', metadata: 'read', pull_requests: 'write' },
   proof_repository_selection: 'selected',
   token_installation_id: 155342531,
   token_app_slug: 'aeris-writer',
@@ -107,6 +119,7 @@ function candidateCommitMessage(executor = CANDIDATE_EXECUTOR) {
     `Aeris-Autonomy-Executor-Protocol: ${executor.protocol}`,
     `Aeris-Autonomy-Executor-Action-SHA: ${executor.action_sha}`,
     `Aeris-Autonomy-Executor-Tool-Version: ${executor.tool_version}`,
+    `Aeris-Autonomy-Patch: ${'c'.repeat(64)}`,
   ].join('\n');
 }
 
@@ -121,6 +134,7 @@ function preliminaryEnvironment(overrides = {}) {
     AERIS_POLICY_REF: 'main',
     AERIS_POLICY_SHA: BASE_SHA,
     AERIS_WRITER_ENABLED: 'true',
+    AERIS_WRITER_APP_ID: String(writerTrust.app_id),
     AERIS_WRITER_APP_SLUG: writerTrust.app_slug,
     AERIS_FINALIZER_PROOF_LEVEL: 'preliminary',
     ...overrides,
@@ -133,7 +147,9 @@ function fullEnvironment(overrides = {}) {
     AERIS_WRITER_APP_ID: String(writerTrust.app_id),
     AERIS_WRITER_PROOF_APP_ID: String(writerTrust.proof_app_id),
     AERIS_WRITER_PROOF_APP_SLUG: writerTrust.proof_app_slug,
+    AERIS_WRITER_PROOF_APP_NODE_ID: writerTrust.proof_app_node_id,
     AERIS_WRITER_PROOF_APP_OWNER_LOGIN: writerTrust.proof_app_owner_login,
+    AERIS_WRITER_PROOF_APP_OWNER_DATABASE_ID: String(writerTrust.proof_app_owner_database_id),
     AERIS_WRITER_PROOF_APP_OWNER_TYPE: writerTrust.proof_app_owner_type,
     AERIS_WRITER_PROOF_APP_PERMISSIONS: JSON.stringify(writerTrust.proof_app_permissions),
     AERIS_WRITER_INSTALLATION_ID: String(writerTrust.installation_id),
@@ -170,7 +186,7 @@ function governance(overrides = {}) {
     authorId: WRITER_BOT.nodeId, authorDatabaseId: WRITER_BOT.databaseId,
     mergeable: 'MERGEABLE', mergeStateStatus: 'DRAFT', reviewDecision: null,
     merged: false, mergedAt: null, mergedBy: null, mergeCommit: null,
-    autoMergeRequest: null, labels: [], reviewThreads: [],
+    autoMergeRequest: null, labels: [], reviewThreads: [], lifecycle: [],
     ...overrides,
   };
 }
@@ -184,6 +200,7 @@ function mergedGovernance(overrides = {}) {
       id: WRITER_BOT.nodeId, databaseId: WRITER_BOT.databaseId,
     },
     mergeCommit: { oid: MERGE_SHA, parentCount: 1, parents: [{ oid: BASE_SHA }] },
+    lifecycle: [{ id: 91, event: 'closed' }],
     ...overrides,
   });
 }
@@ -242,8 +259,59 @@ function protection(overrides = {}) {
     isDisabled: false,
     isLocked: false,
     branchProtectionRules: completeConnection([protectionRule(overrides)]),
-    rulesets: completeConnection(),
+    rulesets: completeConnection([{
+      id: 'RRS_fence', databaseId: 101, name: 'agent-head-fence-v1',
+      enforcement: 'ACTIVE', target: 'BRANCH',
+    }]),
   };
+}
+
+function writerGovernanceSnapshot() {
+  return {
+    governance_fence: {
+      repository: { id: REPOSITORY_ID, full_name: REPOSITORY },
+      direct_collaborators: {
+        affiliation: 'direct', truncated: false,
+        items: [{
+          login: writerTrust.proof_app_owner_login,
+          database_id: writerTrust.proof_app_owner_database_id,
+          type: 'User', permission: 'ADMIN',
+        }],
+      },
+      rulesets: {
+        includes_parents: true, truncated: false,
+        items: [{
+          id: 101, name: 'agent-head-fence-v1', target: 'branch', enforcement: 'active',
+          conditions: { ref_name: { include: ['refs/heads/agent/**'], exclude: [] } },
+          rules: [
+            { type: 'creation' }, { type: 'deletion' },
+            { type: 'non_fast_forward' }, { type: 'update' },
+          ],
+          bypass_actors: [{ actor_id: writerTrust.app_id, actor_type: 'Integration', bypass_mode: 'always' }],
+        }],
+      },
+    },
+    secret_lane: {
+      actions_permissions: { enabled: true, allowed_actions: 'selected', sha_pinning_required: true },
+      workflow_permissions: {
+        default_workflow_permissions: 'read', can_approve_pull_request_reviews: false,
+      },
+      environment: {
+        name: 'writer', custom_branch_policies: true, protected_branches: false,
+        can_admins_bypass_secrets_and_variables: false,
+      },
+      deployment_branch_policies: {
+        environment_name: 'writer', truncated: false,
+        items: [{ name: 'main', type: 'branch' }],
+      },
+    },
+  };
+}
+
+function copiedWriterGovernanceSnapshot(mutator = () => {}) {
+  const value = structuredClone(writerGovernanceSnapshot());
+  mutator(value);
+  return value;
 }
 
 const CHECK_IDENTITIES = Object.freeze(new Map([
@@ -277,6 +345,92 @@ function workflowRun(name, overrides = {}) {
   };
 }
 
+function writerPublicationAttestation(overrides = {}) {
+  const source = overrides.attestation ?? {};
+  const attestation = {
+    schema_version: 1,
+    repository: REPOSITORY,
+    repository_id: REPOSITORY_ID,
+    task_id: `issue:${ISSUE_NUMBER}`,
+    issue_number: ISSUE_NUMBER,
+    pull_number: PULL_NUMBER,
+    head_ref: `agent/issue-${ISSUE_NUMBER}`,
+    head_sha: HEAD_SHA,
+    base_ref: 'refs/heads/main',
+    base_sha: BASE_SHA,
+    patch_sha256: 'c'.repeat(64),
+    candidate_run_id: String(CANDIDATE_RUN_ID),
+    candidate_run_attempt: 1,
+    publisher_run_id: String(PUBLISHER_RUN_ID),
+    publisher_run_attempt: 1,
+    executor: { ...CANDIDATE_EXECUTOR, ...(source.executor ?? {}) },
+    ...source,
+  };
+  const body = createWriterPublisherCheckRun(attestation);
+  return {
+    id: 4,
+    ...body,
+    app: { id: writerTrust.app_id, slug: writerTrust.app_slug },
+    repository: { id: REPOSITORY_ID, full_name: REPOSITORY },
+    ...(overrides.check ?? {}),
+  };
+}
+
+function publicationWorkflowRun({ id, name, path, event, overrides = {} }) {
+  return {
+    id,
+    run_attempt: 1,
+    event,
+    status: 'completed',
+    conclusion: 'success',
+    name,
+    path,
+    head_sha: BASE_SHA,
+    head_branch: 'main',
+    repository: { id: REPOSITORY_ID, full_name: REPOSITORY },
+    head_repository: { id: REPOSITORY_ID, full_name: REPOSITORY },
+    pull_requests: [],
+    ...overrides,
+  };
+}
+
+function publisherTriggerTarget(attestation = {}) {
+  const source = {
+    schema_version: 1,
+    repository: REPOSITORY,
+    repository_id: REPOSITORY_ID,
+    task_id: `issue:${ISSUE_NUMBER}`,
+    issue_number: ISSUE_NUMBER,
+    pull_number: PULL_NUMBER,
+    head_ref: `agent/issue-${ISSUE_NUMBER}`,
+    head_sha: HEAD_SHA,
+    base_ref: 'refs/heads/main',
+    base_sha: BASE_SHA,
+    patch_sha256: 'c'.repeat(64),
+    candidate_run_id: String(CANDIDATE_RUN_ID),
+    candidate_run_attempt: 1,
+    publisher_run_id: String(PUBLISHER_RUN_ID),
+    publisher_run_attempt: 1,
+    executor: CANDIDATE_EXECUTOR,
+    ...attestation,
+  };
+  const check = writerPublicationAttestation({ attestation: source });
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-publisher-target-'));
+  const targetPath = path.join(directory, 'publisher-target.json');
+  fs.writeFileSync(targetPath, serializeWriterPublisherTarget(createWriterPublisherTarget(source, check.id)));
+  return {
+    check,
+    source,
+    targetPath,
+    trigger: { source: 'publisher', run_id: PUBLISHER_RUN_ID, run_attempt: 1, publisher_target_path: targetPath },
+    cleanup: () => fs.rmSync(directory, { recursive: true, force: true }),
+  };
+}
+
+async function evaluatePublisher(client, binding, overrides = {}) {
+  return evaluateAutonomyFinalizer({ client, trigger: binding.trigger, trust, config, checkAttempts: 1, ...overrides });
+}
+
 class FakeClient {
   constructor(overrides = {}) {
     this.overrides = overrides;
@@ -284,19 +438,40 @@ class FakeClient {
     this.protectionReads = 0;
     this.checkReads = 0;
     this.labelReads = 0;
+    this.writerGovernanceReads = 0;
     this.executorRegistryReads = [];
     this.draftRestores = 0;
     this.ready = overrides.initialReady ?? false;
     this.merged = false;
     this.events = [];
+    this.writerAttestation = overrides.writerAttestation === null
+      ? null
+      : overrides.writerAttestation ?? writerPublicationAttestation();
   }
 
   async getWorkflowRun(runId) {
-    const overridden = this.overrides.runs?.get(runId);
+    const numericRunId = Number(runId);
+    const overridden = this.overrides.runs?.get(runId) ?? this.overrides.runs?.get(numericRunId);
     if (overridden) return overridden;
+    if (numericRunId === CANDIDATE_RUN_ID) {
+      return publicationWorkflowRun({
+        id: CANDIDATE_RUN_ID,
+        name: 'Agent candidate',
+        path: '.github/workflows/agent-candidate.yml',
+        event: 'workflow_dispatch',
+      });
+    }
+    if (numericRunId === PUBLISHER_RUN_ID) {
+      return publicationWorkflowRun({
+        id: PUBLISHER_RUN_ID,
+        name: 'Autonomy Publisher',
+        path: '.github/workflows/autonomy-publisher.yml',
+        event: 'workflow_run',
+      });
+    }
     for (const name of CHECK_IDENTITIES.keys()) {
-      if (CHECK_IDENTITIES.get(name).run_id === runId) {
-        return workflowRun(name, runId === trigger.run_id ? this.overrides.run : {});
+      if (CHECK_IDENTITIES.get(name).run_id === numericRunId) {
+        return workflowRun(name, numericRunId === trigger.run_id ? this.overrides.run : {});
       }
     }
     throw new Error(`unexpected workflow run ${runId}`);
@@ -307,6 +482,10 @@ class FakeClient {
       id: suiteId, head_sha: HEAD_SHA, app: { id: 15368, slug: 'github-actions' },
       pull_requests: [{ number: PULL_NUMBER }],
     };
+  }
+  async getCheckRun(checkRunId) {
+    if (this.writerAttestation?.id === checkRunId) return this.writerAttestation;
+    throw new Error(`unexpected check run ${checkRunId}`);
   }
 
   async getRepository() { return { id: REPOSITORY_ID, full_name: REPOSITORY, default_branch: 'main' }; }
@@ -328,6 +507,13 @@ class FakeClient {
       ? this.overrides.protection(this.protectionReads, this)
       : this.overrides.protection;
     return value ?? protection();
+  }
+  async getWriterGovernanceSnapshot() {
+    this.writerGovernanceReads += 1;
+    const value = typeof this.overrides.writerGovernance === 'function'
+      ? this.overrides.writerGovernance(this.writerGovernanceReads, this)
+      : this.overrides.writerGovernance;
+    return value ?? writerGovernanceSnapshot();
   }
   async getPull() { return pull(); }
   async getGitRef() { return { object: { sha: BASE_SHA } }; }
@@ -384,9 +570,10 @@ class FakeClient {
     const value = typeof this.overrides.checks === 'function'
       ? this.overrides.checks(this.checkReads, this)
       : this.overrides.checks;
-    return value ?? [
+    const checks = value ?? [
       check('Rust CI / check', 1), check('Frontend CI / check', 2), check('Automation Policy / gate', 3),
     ];
+    return this.overrides.withoutWriterAttestation ? checks : [...checks, this.writerAttestation];
   }
   async markPullReady(id) {
     this.events.push('ready');
@@ -449,6 +636,92 @@ test('Finalizer revalidates candidate executor provenance from the exact base be
       ref: BASE_SHA,
     })),
   );
+});
+
+test('a Writer-authored head with copied trailers and green required checks cannot reach Writer mutation without attestation', async () => {
+  const client = new FakeClient({ writerAttestation: null });
+  const result = await finalize(client);
+  assert.equal(result.action, 'skipped');
+  assert.equal(result.reason, 'writer_attestation_missing');
+  assert.deepEqual(client.events, []);
+});
+
+test('a closed or reopened Writer pull is permanently tombstoned before every Writer mutation', async (t) => {
+  for (const lifecycle of [
+    [{ id: 71, event: 'closed' }],
+    [{ id: 71, event: 'closed' }, { id: 72, event: 'reopened' }],
+  ]) {
+    await t.test(lifecycle.at(-1).event, async () => {
+      const client = new FakeClient({ governance: { lifecycle } });
+      await assert.rejects(() => finalize(client), /tombstoned by close or reopen history/);
+      assert.deepEqual(client.events, []);
+    });
+  }
+});
+
+test('a lifecycle tombstone after Ready does not grant Draft rollback authority', async () => {
+  const client = new FakeClient({
+    governance: (read) => read >= 3 ? { lifecycle: [{ id: 71, event: 'closed' }] } : {},
+  });
+  await assert.rejects(() => finalize(client), AutonomyFinalizerError);
+  assert.deepEqual(client.events, ['ready']);
+});
+
+test('merge outcome accepts only the Writer terminal close and rejects lifecycle history injected after the final stable read', async (t) => {
+  await t.test('one terminal close produced by the Writer merge is accepted', async () => {
+    const client = new FakeClient();
+    const result = await finalize(client);
+    assert.equal(result.action, 'merged');
+    assert.deepEqual(client.events, ['ready', 'merge']);
+  });
+
+  await t.test('close/reopen history appearing between final stable read and outcome readback is fail closed', async () => {
+    const client = new FakeClient({
+      governance: (_read, current) => current.merged
+        ? { lifecycle: [{ id: 91, event: 'closed' }, { id: 92, event: 'reopened' }, { id: 93, event: 'closed' }] }
+        : {},
+    });
+    await assert.rejects(() => finalize(client), /independent merge outcome is ambiguous/);
+    assert.deepEqual(client.events, ['ready', 'merge']);
+  });
+});
+
+test('Writer attestation requires one exact Writer App binding before mutation', async (t) => {
+  const requiredChecks = [
+    check('Rust CI / check', 1), check('Frontend CI / check', 2), check('Automation Policy / gate', 3),
+  ];
+  const cases = [
+    ['wrong App is ignored', new FakeClient({
+      writerAttestation: writerPublicationAttestation({ check: { app: { id: 999, slug: 'other-app' } } }),
+    }), 'skipped'],
+    ['wrong base payload', new FakeClient({
+      writerAttestation: writerPublicationAttestation({ attestation: { base_sha: 'd'.repeat(40) } }),
+    }), 'rejected'],
+    ['duplicate Writer App proof', new FakeClient({
+      checks: [...requiredChecks, writerPublicationAttestation({ check: { id: 5 } })],
+      writerAttestation: writerPublicationAttestation(),
+    }), 'rejected'],
+    ['source workflow head mismatch', new FakeClient({
+      runs: new Map([[CANDIDATE_RUN_ID, publicationWorkflowRun({
+        id: CANDIDATE_RUN_ID,
+        name: 'Agent candidate',
+        path: '.github/workflows/agent-candidate.yml',
+        event: 'workflow_dispatch',
+        overrides: { head_sha: HEAD_SHA },
+      })]]),
+    }), 'rejected'],
+  ];
+  for (const [name, client, outcome] of cases) {
+    await t.test(name, async () => {
+      if (outcome === 'skipped') {
+        const result = await finalize(client);
+        assert.equal(result.action, 'skipped');
+      } else {
+        await assert.rejects(() => finalize(client), AutonomyFinalizerError);
+      }
+      assert.deepEqual(client.events, []);
+    });
+  }
 });
 
 test('candidate executor provenance fails closed before Writer mutation', async (t) => {
@@ -528,6 +801,7 @@ test('conflict, unresolved discussion, manual label, and blocking review fail cl
 test('preliminary proof is read-only and cannot enter mutation mode', async () => {
   const client = new FakeClient();
   client.getBranchProtection = async () => { throw new Error('must not read protection'); };
+  client.getWriterGovernanceSnapshot = async () => { throw new Error('must not read Writer governance'); };
   const result = await evaluateAutonomyFinalizerPreliminary({ client, trigger, trust, config, checkAttempts: 1 });
   assert.equal(result.eligible, true);
   assert.equal(result.proof_level, 'preliminary');
@@ -535,6 +809,110 @@ test('preliminary proof is read-only and cannot enter mutation mode', async () =
     () => runAutonomyFinalizer(preliminaryEnvironment({ AERIS_FINALIZER_MUTATE: 'true' }), { readClient: client }),
     /mutation mode requires full proof/,
   );
+});
+
+test('Publisher completion re-evaluates an exact Writer target only after all source-bound checks are green', async () => {
+  const binding = publisherTriggerTarget();
+  try {
+    const incomplete = new FakeClient({
+      writerAttestation: binding.check,
+      checks: [check('Rust CI / check', 1), check('Frontend CI / check', 2)],
+    });
+    const blocked = await evaluatePublisher(incomplete, binding);
+    assert.equal(blocked.eligible, false);
+    assert.match(blocked.reason, /Automation Policy \/ gate/);
+    assert.deepEqual(incomplete.events, []);
+
+    const eligible = await evaluatePublisher(new FakeClient({ writerAttestation: binding.check }), binding);
+    assert.equal(eligible.eligible, true);
+    assert.equal(eligible.bound.pull_number, PULL_NUMBER);
+    assert.equal(eligible.bound.head_sha, HEAD_SHA);
+  } finally {
+    binding.cleanup();
+  }
+});
+
+test('required-check and Publisher completion ordering both stay fail-closed until the missing proof arrives', async () => {
+  const requiredFirst = new FakeClient({ writerAttestation: writerPublicationAttestation({ check: { status: 'in_progress', conclusion: null } }) });
+  const waitingPublisher = await evaluateAutonomyFinalizer({ client: requiredFirst, trigger, trust, config, checkAttempts: 1 });
+  assert.equal(waitingPublisher.eligible, false);
+  assert.equal(waitingPublisher.reason, 'writer_attestation_not_successful');
+  assert.deepEqual(requiredFirst.events, []);
+
+  const binding = publisherTriggerTarget();
+  try {
+    let complete = false;
+    const publisherFirst = new FakeClient({
+      writerAttestation: binding.check,
+      checks: () => complete
+        ? [check('Rust CI / check', 1), check('Frontend CI / check', 2), check('Automation Policy / gate', 3)]
+        : [check('Rust CI / check', 1), check('Frontend CI / check', 2)],
+    });
+    assert.equal((await evaluatePublisher(publisherFirst, binding)).eligible, false);
+    complete = true;
+    assert.equal((await evaluatePublisher(publisherFirst, binding)).eligible, true);
+    assert.deepEqual(publisherFirst.events, []);
+  } finally {
+    binding.cleanup();
+  }
+});
+
+test('Publisher completion rejects source, target, and attestation drift before any Writer mutation', async () => {
+  const sourceDrifts = [
+    { name: 'name', value: { name: 'other' } },
+    { name: 'path', value: { path: '.github/workflows/other.yml' } },
+    { name: 'event', value: { event: 'pull_request' } },
+    { name: 'status', value: { status: 'in_progress' } },
+    { name: 'branch', value: { head_branch: 'agent/issue-123' } },
+    { name: 'head', value: { head_sha: HEAD_SHA } },
+    { name: 'repository', value: { repository: { id: 1, full_name: REPOSITORY } } },
+    { name: 'attempt', value: { run_attempt: 2 } },
+  ];
+  for (const drift of sourceDrifts) {
+    const binding = publisherTriggerTarget();
+    try {
+      const client = new FakeClient({ writerAttestation: binding.check, runs: new Map([[PUBLISHER_RUN_ID,
+        publicationWorkflowRun({ id: PUBLISHER_RUN_ID, name: 'Autonomy Publisher', path: '.github/workflows/autonomy-publisher.yml', event: 'workflow_run', overrides: drift.value }),
+      ]]) });
+      await assert.rejects(() => evaluatePublisher(client, binding), /./, drift.name);
+      assert.deepEqual(client.events, []);
+    } finally { binding.cleanup(); }
+  }
+
+  const invalidTarget = ['missing', 'noncanonical', 'oversize'];
+  for (const kind of invalidTarget) {
+    const binding = publisherTriggerTarget();
+    try {
+      if (kind === 'missing') fs.rmSync(binding.targetPath);
+      if (kind === 'noncanonical') fs.appendFileSync(binding.targetPath, ' ');
+      if (kind === 'oversize') fs.writeFileSync(binding.targetPath, 'x'.repeat(4097));
+      const client = new FakeClient({ writerAttestation: binding.check });
+      await assert.rejects(() => evaluatePublisher(client, binding), /./, kind);
+      assert.deepEqual(client.events, []);
+    } finally { binding.cleanup(); }
+  }
+
+  for (const attestation of [
+    { pull_number: PULL_NUMBER + 1 }, { head_sha: 'e'.repeat(40) }, { base_sha: 'f'.repeat(40) },
+    { patch_sha256: 'd'.repeat(64) }, { candidate_run_attempt: 2 }, { publisher_run_attempt: 2 },
+  ]) {
+    const binding = publisherTriggerTarget(attestation);
+    try {
+      const client = new FakeClient({ writerAttestation: binding.check });
+      await assert.rejects(() => evaluatePublisher(client, binding), /./);
+      assert.deepEqual(client.events, []);
+    } finally { binding.cleanup(); }
+  }
+
+  const binding = publisherTriggerTarget();
+  try {
+    const duplicate = writerPublicationAttestation();
+    const client = new FakeClient({ writerAttestation: binding.check, checks: [
+      check('Rust CI / check', 1), check('Frontend CI / check', 2), check('Automation Policy / gate', 3), duplicate,
+    ] });
+    await assert.rejects(() => evaluatePublisher(client, binding), /ambiguous Writer attestations/);
+    assert.deepEqual(client.events, []);
+  } finally { binding.cleanup(); }
 });
 
 test('full proof requires exactly three source-bound business contexts and squash-only merges', async () => {
@@ -565,7 +943,9 @@ test('full proof requires exactly three source-bound business contexts and squas
 test('Writer App JWT, installation scope, and live Bot identity are proven before mutation', async () => {
   const cases = [
     { writerTrust: { ...writerTrust, proof_app_id: writerTrust.app_id + 1 }, error: /JWT proof/ },
+    { writerTrust: { ...writerTrust, proof_app_node_id: '' }, error: /App node id/ },
     { writerTrust: { ...writerTrust, proof_app_owner_login: 'other' }, error: /repository owner/ },
+    { writerTrust: { ...writerTrust, proof_app_owner_database_id: 0 }, error: /owner database id/ },
     { writerTrust: { ...writerTrust, proof_app_permissions: { administration: 'write', contents: 'write', metadata: 'read', pull_requests: 'write' } }, error: /permissions/ },
     { writerTrust: { ...writerTrust, proof_installation_permissions: { administration: 'read', contents: 'write', metadata: 'read', pull_requests: 'read' } }, error: /permissions/ },
     { writerTrust: { ...writerTrust, proof_installation_permissions: undefined }, error: /permissions/ },
@@ -585,6 +965,127 @@ test('Writer App JWT, installation scope, and live Bot identity are proven befor
   assert.deepEqual(human.events, []);
 });
 
+test('Writer governance proof rejects owner, rule, Environment, Actions, and pagination drift before mutation', async (t) => {
+  const cases = [
+    ['owner identity', (value) => { value.governance_fence.direct_collaborators.items[0].database_id += 1; }],
+    ['ruleset bypass', (value) => { value.governance_fence.rulesets.items[0].bypass_actors[0].actor_id += 1; }],
+    ['Environment policy', (value) => { value.secret_lane.environment.custom_branch_policies = false; }],
+    ['Actions permissions', (value) => { value.secret_lane.actions_permissions.sha_pinning_required = false; }],
+    ['collaborator pagination', (value) => { value.governance_fence.direct_collaborators.truncated = true; }],
+    ['ruleset pagination', (value) => { value.governance_fence.rulesets.truncated = true; }],
+    ['Environment branch pagination', (value) => { value.secret_lane.deployment_branch_policies.truncated = true; }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const client = new FakeClient({ writerGovernance: copiedWriterGovernanceSnapshot(mutate) });
+      await assert.rejects(() => finalize(client), /governance|ruleset|collaborator|Environment|Actions|pagination/i);
+      assert.deepEqual(client.events, []);
+    });
+  }
+});
+
+test('Writer governance proof requires GraphQL and REST to identify the same active fence', async (t) => {
+  const cases = [
+    ['missing GraphQL fence', { ...protection(), rulesets: completeConnection() }],
+    ['different GraphQL fence id', {
+      ...protection(),
+      rulesets: completeConnection([{
+        id: 'RRS_other_fence', databaseId: 202, name: 'agent-head-fence-v1',
+        enforcement: 'ACTIVE', target: 'BRANCH',
+      }]),
+    }],
+  ];
+  for (const [name, value] of cases) {
+    await t.test(name, async () => {
+      const client = new FakeClient({ protection: value });
+      await assert.rejects(() => finalize(client), /classic and REST governance fence identities do not match/);
+      assert.deepEqual(client.events, []);
+    });
+  }
+});
+
+test('Writer governance must remain identical from the first full proof through the final pre-merge proof', async () => {
+  const client = new FakeClient({
+    writerGovernance: (read) => copiedWriterGovernanceSnapshot((value) => {
+      value.governance_fence.rulesets.items.push({
+        id: 202,
+        name: read === 1 ? 'inactive-observer-a' : 'inactive-observer-b',
+        target: 'branch',
+        enforcement: 'evaluate',
+      });
+    }),
+  });
+  await assert.rejects(() => finalize(client), /Writer governance drifted before merge mutation/);
+  assert.deepEqual(client.events, ['ready', 'draft_rollback']);
+  assert.equal(client.writerGovernanceReads, 2);
+});
+
+test('concrete Writer governance reader normalizes every bounded REST proof into the validator schema', async () => {
+  const api = new AutonomyFinalizerGitHubClient({
+    token: 'writer-token', repository: REPOSITORY,
+    fetchImpl: async () => { throw new Error('unexpected network access'); },
+  });
+  let detailReads = 0;
+  api.getRepository = async () => ({ id: REPOSITORY_ID, full_name: REPOSITORY });
+  api.listDirectCollaborators = async () => ({
+    truncated: false,
+    items: [{
+      login: writerTrust.proof_app_owner_login,
+      id: writerTrust.proof_app_owner_database_id,
+      type: 'User',
+      permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+    }],
+  });
+  api.listRepositoryRulesetsIncludingParents = async () => ({
+    truncated: false,
+    items: [{ id: 101, name: 'agent-head-fence-v1', target: 'branch', enforcement: 'active' }],
+  });
+  api.getRepositoryRuleset = async () => {
+    detailReads += 1;
+    return {
+      id: 101, name: 'agent-head-fence-v1', target: 'branch', enforcement: 'active',
+      conditions: { ref_name: { include: ['refs/heads/agent/**'], exclude: [] } },
+      rules: [
+        { type: 'creation' }, { type: 'update' },
+        { type: 'deletion' }, { type: 'non_fast_forward' },
+      ],
+      bypass_actors: [{ actor_id: writerTrust.app_id, actor_type: 'Integration', bypass_mode: 'always' }],
+    };
+  };
+  api.getActionsPermissions = async () => ({
+    enabled: true, allowed_actions: 'selected', sha_pinning_required: true,
+  });
+  api.getDefaultWorkflowPermissions = async () => ({
+    default_workflow_permissions: 'read', can_approve_pull_request_reviews: false,
+  });
+  api.getWriterEnvironment = async () => ({
+    name: 'writer', can_admins_bypass: false,
+    deployment_branch_policy: { custom_branch_policies: true, protected_branches: false },
+  });
+  api.listWriterDeploymentBranchPolicies = async () => ({
+    truncated: false, items: [{ id: 1, name: 'main', type: 'branch' }],
+  });
+
+  assert.deepEqual(await api.getWriterGovernanceSnapshot(), writerGovernanceSnapshot());
+  assert.equal(detailReads, 2);
+});
+
+test('concrete Writer governance reader requires two identical complete snapshots', async () => {
+  const api = new AutonomyFinalizerGitHubClient({
+    token: 'writer-token', repository: REPOSITORY,
+    fetchImpl: async () => { throw new Error('unexpected network access'); },
+  });
+  let reads = 0;
+  api.readWriterGovernanceSnapshotOnce = async () => {
+    reads += 1;
+    return copiedWriterGovernanceSnapshot((value) => {
+      if (reads === 2) value.governance_fence.rulesets.items[0].name = 'drifted-fence';
+    });
+  };
+  await assert.rejects(() => api.getWriterGovernanceSnapshot(), /drifted between complete reads/);
+  assert.equal(reads, 2);
+});
+
 test('Finalizer makes one exact-head squash merge after fresh pre-ready and pre-merge proofs', async () => {
   const client = new FakeClient();
   const result = await finalize(client);
@@ -594,6 +1095,7 @@ test('Finalizer makes one exact-head squash merge after fresh pre-ready and pre-
   assert.deepEqual(client.mergeArguments, { id: 'PR_node', head: HEAD_SHA });
   assert.deepEqual(client.events, ['ready', 'merge']);
   assert.equal(client.protectionReads, 3);
+  assert.equal(client.writerGovernanceReads, 2);
   assert.ok(client.governanceReads >= 5);
   assert.equal(client.draftRestores, 0);
 });
@@ -604,6 +1106,7 @@ test('already-ready pull skips the ready mutation but still receives a fresh ful
   assert.equal(result.action, 'merged');
   assert.deepEqual(client.events, ['merge']);
   assert.equal(client.protectionReads, 2);
+  assert.equal(client.writerGovernanceReads, 2);
 });
 
 test('lost merge response counts as success only after independent exact outcome proof', async () => {
@@ -928,16 +1431,25 @@ function graphqlMergedPull(overrides = {}) {
   });
 }
 
-function graphqlClient(pulls) {
+function graphqlClient(pulls, timelines = [[]]) {
   let index = 0;
+  let timelineIndex = 0;
   return new AutonomyFinalizerGitHubClient({
     token: 'test-token', repository: REPOSITORY,
-    fetchImpl: async () => ({
-      ok: true, status: 200,
-      text: async () => JSON.stringify({
-        data: { repository: { pullRequest: pulls[Math.min(index++, pulls.length - 1)] } },
-      }),
-    }),
+    fetchImpl: async (url) => {
+      if (String(url).includes(`/issues/${PULL_NUMBER}/timeline?`)) {
+        return {
+          ok: true, status: 200,
+          text: async () => JSON.stringify(timelines[Math.min(timelineIndex++, timelines.length - 1)]),
+        };
+      }
+      return {
+        ok: true, status: 200,
+        text: async () => JSON.stringify({
+          data: { repository: { pullRequest: pulls[Math.min(index++, pulls.length - 1)] } },
+        }),
+      };
+    },
   });
 }
 
@@ -973,6 +1485,20 @@ test('GraphQL governance rejects drift between complete reads', async () => {
       nodes: [{ name: 'changed' }], pageInfo: { hasNextPage: false },
     } })]).getPullGovernance(PULL_NUMBER),
     /drifted between complete reads/,
+  );
+});
+
+test('GraphQL governance preserves a complete lifecycle tombstone and rejects lifecycle drift', async () => {
+  const lifecycle = [{ id: 71, event: 'closed' }, { id: 72, event: 'reopened' }];
+  const snapshot = await graphqlClient([graphqlPull(), graphqlPull()], [lifecycle, lifecycle]).getPullGovernance(PULL_NUMBER);
+  assert.deepEqual(snapshot.lifecycle, [{ id: '71', event: 'closed' }, { id: '72', event: 'reopened' }]);
+  await assert.rejects(
+    () => graphqlClient([graphqlPull(), graphqlPull()], [[], lifecycle]).getPullGovernance(PULL_NUMBER),
+    /governance drifted between complete reads/,
+  );
+  await assert.rejects(
+    () => graphqlClient([graphqlPull()], [[{ event: 'closed' }]]).getPullGovernance(PULL_NUMBER),
+    /lifecycle event identity is invalid/,
   );
 });
 

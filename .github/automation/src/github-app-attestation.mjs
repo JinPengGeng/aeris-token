@@ -8,6 +8,7 @@ const APP_SLUG = /^[a-z0-9][a-z0-9-]{0,99}$/;
 const ACCOUNT_TYPES = new Set(['User', 'Organization']);
 const REQUIRED_WRITER_PERMISSIONS = Object.freeze({
   administration: 'read',
+  checks: 'write',
   contents: 'write',
   pull_requests: 'write',
 });
@@ -253,16 +254,20 @@ export class GitHubInstallationTokenProofClient {
 export function validateGitHubAppAttestation({ app, installation, expected }) {
   const trusted = object(expected, 'Writer App attestation expectation');
   const ownerLogin = required(trusted.owner_login, 'Writer App owner login');
+  const ownerDatabaseId = positiveInteger(trusted.owner_database_id, 'Writer App owner database id');
   const appId = positiveInteger(trusted.app_id, 'Writer App id');
   const appSlug = required(trusted.app_slug, 'Writer App slug', APP_SLUG);
+  const appNodeId = required(trusted.app_node_id, 'Writer App node id');
   const installationId = positiveInteger(trusted.installation_id, 'Writer installation id');
 
   const liveApp = object(app, 'authenticated Writer App');
   const appOwner = account(liveApp.owner, 'authenticated Writer App owner');
+  const appOwnerDatabaseId = positiveInteger(liveApp.owner.id, 'authenticated Writer App owner database id');
   const appPermissions = writerPermissions(liveApp.permissions, 'authenticated Writer App permissions');
   if (positiveInteger(liveApp.id, 'authenticated Writer App id') !== appId ||
       required(liveApp.slug, 'authenticated Writer App slug', APP_SLUG) !== appSlug ||
-      appOwner.login !== ownerLogin) {
+      required(liveApp.node_id, 'authenticated Writer App node id') !== appNodeId ||
+      appOwner.login !== ownerLogin || appOwnerDatabaseId !== ownerDatabaseId) {
     reject('authenticated Writer App identity does not match configuration');
   }
 
@@ -283,7 +288,9 @@ export function validateGitHubAppAttestation({ app, installation, expected }) {
   return Object.freeze({
     app_id: appId,
     app_slug: appSlug,
+    app_node_id: appNodeId,
     app_owner_login: appOwner.login,
+    app_owner_database_id: appOwnerDatabaseId,
     app_owner_type: appOwner.type,
     installation_id: installationId,
     installation_account_login: installationAccount.login,
@@ -365,8 +372,10 @@ export async function runGitHubAppAttestation(environment = process.env, depende
   const repository = required(environment.GITHUB_REPOSITORY, 'GITHUB_REPOSITORY', REPOSITORY);
   const expected = Object.freeze({
     owner_login: repository.split('/')[0],
+    owner_database_id: positiveInteger(environment.AERIS_WRITER_APP_OWNER_DATABASE_ID, 'AERIS_WRITER_APP_OWNER_DATABASE_ID'),
     app_id: positiveInteger(environment.AERIS_WRITER_APP_ID, 'AERIS_WRITER_APP_ID'),
     app_slug: required(environment.AERIS_WRITER_APP_SLUG, 'AERIS_WRITER_APP_SLUG', APP_SLUG),
+    app_node_id: required(environment.AERIS_WRITER_APP_NODE_ID, 'AERIS_WRITER_APP_NODE_ID'),
     installation_id: positiveInteger(environment.AERIS_WRITER_INSTALLATION_ID, 'AERIS_WRITER_INSTALLATION_ID'),
   });
   const client = dependencies.client ?? new GitHubAppAttestationClient({
@@ -384,7 +393,9 @@ export async function runGitHubAppAttestation(environment = process.env, depende
     fs.appendFileSync(environment.GITHUB_OUTPUT, [
       `app_id=${result.app_id}`,
       `app_slug=${result.app_slug}`,
+      `app_node_id=${result.app_node_id}`,
       `app_owner_login=${result.app_owner_login}`,
+      `app_owner_database_id=${result.app_owner_database_id}`,
       `app_owner_type=${result.app_owner_type}`,
       `app_permissions=${JSON.stringify(result.app_permissions)}`,
       `installation_id=${result.installation_id}`,

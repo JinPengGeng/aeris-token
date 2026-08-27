@@ -2,7 +2,7 @@ name: Autonomy Finalizer
 
 on:
   workflow_run:
-    workflows: [Automation Policy, Rust CI, Frontend CI]
+    workflows: [Automation Policy, Rust CI, Frontend CI, Autonomy Publisher]
     types: [completed]
 
 permissions:
@@ -16,17 +16,23 @@ jobs:
   evaluate:
     name: Recompute merge eligibility
     if: >-
-      github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
-      github.event.workflow_run.pull_requests[0].number != null &&
-      startsWith(github.event.workflow_run.head_branch, 'agent/issue-')
+      ((github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.pull_requests[0].number != null &&
+        startsWith(github.event.workflow_run.head_branch, 'agent/issue-')) ||
+       (github.event.workflow_run.name == 'Autonomy Publisher' &&
+        github.event.workflow_run.path == '.github/workflows/autonomy-publisher.yml' &&
+        github.event.workflow_run.event == 'workflow_run' &&
+        github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+        github.event.workflow_run.head_sha == github.sha))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       actions: read
       checks: read
       contents: read
+      issues: read
       pull-requests: read
     outputs:
       eligible: ${{ steps.evaluate.outputs.eligible }}
@@ -47,17 +53,29 @@ jobs:
         with:
           node-version: 22
 
+      - name: Download Publisher target
+        if: github.event.workflow_run.name == 'Autonomy Publisher'
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: aeris-publisher-target-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: .aeris-publisher-target
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
       - name: Recompute all deterministic gates
         id: evaluate
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_FINALIZER_TRIGGER_SOURCE: ${{ github.event.workflow_run.name == 'Autonomy Publisher' && 'publisher' || 'required_check' }}
+          AERIS_PUBLISHER_TARGET_PATH: .aeris-publisher-target/publisher-target.json
           AERIS_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
           AERIS_TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           AERIS_POLICY_REF: ${{ github.event.repository.default_branch }}
           AERIS_POLICY_SHA: ${{ github.sha }}
           AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
+          AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
           AERIS_FINALIZER_PROOF_LEVEL: preliminary
         run: node .github/automation/src/autonomy-finalizer.mjs
@@ -80,6 +98,7 @@ jobs:
       actions: read
       checks: read
       contents: read
+      issues: read
       pull-requests: read
     env:
       AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
@@ -97,17 +116,29 @@ jobs:
         with:
           node-version: 22
 
+      - name: Download Publisher target
+        if: github.event.workflow_run.name == 'Autonomy Publisher'
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: aeris-publisher-target-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: .aeris-publisher-target
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
       - name: Recompute gates before token mint
         id: recheck
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_FINALIZER_TRIGGER_SOURCE: ${{ github.event.workflow_run.name == 'Autonomy Publisher' && 'publisher' || 'required_check' }}
+          AERIS_PUBLISHER_TARGET_PATH: .aeris-publisher-target/publisher-target.json
           AERIS_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
           AERIS_TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           AERIS_POLICY_REF: ${{ github.event.repository.default_branch }}
           AERIS_POLICY_SHA: ${{ github.sha }}
           AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
+          AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
           AERIS_FINALIZER_PROOF_LEVEL: preliminary
         run: node .github/automation/src/autonomy-finalizer.mjs
@@ -143,8 +174,10 @@ jobs:
         id: writer_app_attestation
         timeout-minutes: 2
         env:
+          AERIS_WRITER_APP_OWNER_DATABASE_ID: ${{ vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}
           AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_APP_NODE_ID: ${{ vars.AERIS_WRITER_APP_NODE_ID }}
           AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
           AERIS_WRITER_APP_PRIVATE_KEY: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
         run: node .github/automation/src/github-app-attestation.mjs
@@ -167,6 +200,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_FINALIZER_TRIGGER_SOURCE: ${{ github.event.workflow_run.name == 'Autonomy Publisher' && 'publisher' || 'required_check' }}
+          AERIS_PUBLISHER_TARGET_PATH: .aeris-publisher-target/publisher-target.json
           AERIS_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
           AERIS_TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -178,7 +213,9 @@ jobs:
           AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
           AERIS_WRITER_PROOF_APP_ID: ${{ steps.writer_app_attestation.outputs.app_id }}
           AERIS_WRITER_PROOF_APP_SLUG: ${{ steps.writer_app_attestation.outputs.app_slug }}
+          AERIS_WRITER_PROOF_APP_NODE_ID: ${{ steps.writer_app_attestation.outputs.app_node_id }}
           AERIS_WRITER_PROOF_APP_OWNER_LOGIN: ${{ steps.writer_app_attestation.outputs.app_owner_login }}
+          AERIS_WRITER_PROOF_APP_OWNER_DATABASE_ID: ${{ steps.writer_app_attestation.outputs.app_owner_database_id }}
           AERIS_WRITER_PROOF_APP_OWNER_TYPE: ${{ steps.writer_app_attestation.outputs.app_owner_type }}
           AERIS_WRITER_PROOF_APP_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.app_permissions }}
           AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
