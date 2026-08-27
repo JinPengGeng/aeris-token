@@ -26,11 +26,50 @@ const automationPolicyWorkflow = loadYaml('.github/workflows/automation-policy.y
 const sync = loadYaml('.github/upstream-sync-policy.yml');
 const syncWorkflow = loadYaml('.github/workflows/sync-upstream.yml');
 const frontendWorkflow = loadYaml('.github/workflows/frontend-ci.yml');
+const rustWorkflow = loadYaml('.github/workflows/rust-ci.yml');
 const syncScript = read('.github/workflows/scripts/sync-upstream.sh');
 const autoMergeScript = read('.github/workflows/scripts/manage-sync-automerge.sh');
 const autonomyScript = read('.github/workflows/scripts/github-autonomy.sh');
 const checkDispatchScript = read('.github/workflows/scripts/ensure-required-checks.sh');
 const state = JSON.parse(read('.github/upstream-sync-state.json'));
+
+for (const [name, workflow, context] of [
+  ['frontend', frontendWorkflow, 'Frontend CI / check'],
+  ['rust', rustWorkflow, 'Rust CI / check'],
+]) {
+  const check = workflow.jobs.check;
+  const publisher = workflow.jobs.publish_dispatch_status;
+  assert(check, `${name} CI must retain its required check job`);
+  assert(
+    check.permissions?.statuses === undefined,
+    `${name} CI required check must not receive statuses: write on pull requests`,
+  );
+  assert(publisher, `${name} CI must publish workflow_dispatch statuses in a separate job`);
+  assert(
+    publisher.permissions?.statuses === 'write',
+    `${name} CI dispatch publisher must receive statuses: write`,
+  );
+  const statusWriters = Object.entries(workflow.jobs)
+    .filter(([, job]) => job.permissions?.statuses === 'write')
+    .map(([jobName]) => jobName);
+  assert(
+    sameMembers(statusWriters, ['publish_dispatch_status']),
+    `${name} CI must grant statuses: write only to its dispatch publisher`,
+  );
+  assert(
+    String(publisher.if).includes("github.event_name == 'workflow_dispatch'"),
+    `${name} CI status publisher must run only for workflow_dispatch`,
+  );
+  assert(publisher.needs === 'check', `${name} CI status publisher must wait for the required check`);
+  const publishStep = publisher.steps.find((step) => step.name.startsWith('Publish '));
+  assert(publishStep, `${name} CI dispatch publisher must contain a status publish step`);
+  assert(
+    publishStep.run.includes('CHECK_RESULT') &&
+      publishStep.run.includes('result=failure') &&
+      publishStep.run.includes(`-f context=\"${context}\"`),
+    `${name} CI dispatch publisher must report the check conclusion for ${context}`,
+  );
+}
 
 for (const contract of [agents, automation, sync]) {
   assert(contract.version === 1, 'all automation contracts must use version 1');
