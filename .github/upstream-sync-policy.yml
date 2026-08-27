@@ -87,7 +87,7 @@ conflicts:
   require_explicit_resolution_adoption: true
   ai_resolution:
     enabled: true
-    profile: aeris-sync-conflict-v1
+    profile: aeris-sync-conflict-v2
     required_pre_conflict_verdict: eligible
     allowed_type: modify_modify_utf8_text
     allowed_mode: "100644"

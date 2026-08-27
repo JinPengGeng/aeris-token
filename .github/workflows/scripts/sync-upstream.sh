@@ -755,7 +755,7 @@ for attempt in 1 2 3; do
   )
   if [[ "${policy_verdict}" == conflict_ai_review ]]; then
     commit_arguments+=(
-      -m 'Sync-Upstream-Conflict-Profile: aeris-sync-conflict-v1'
+      -m 'Sync-Upstream-Conflict-Profile: aeris-sync-conflict-v2'
       -m "Sync-Upstream-Conflict-Generation: ${conflict_generation_sha}"
       -m "Sync-Upstream-Conflict-Bundle: ${conflict_bundle_sha}"
       -m "Sync-Upstream-Resolution-Candidate: ${conflict_candidate_sha}"

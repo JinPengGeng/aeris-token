@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
 
-export const SYNC_CONFLICT_SCHEMA_VERSION = 1;
-export const SYNC_CONFLICT_PROFILE = 'aeris-sync-conflict-v1';
+import { validateExecutorIdentity } from './ai-executor-contract.mjs';
+
+export const SYNC_CONFLICT_SCHEMA_VERSION = 2;
+export const SYNC_CONFLICT_PROFILE = 'aeris-sync-conflict-v2';
 export const MAX_CONFLICT_FILES = 4;
 export const MAX_CONFLICT_FILE_BYTES = 16_384;
 export const MAX_CONFLICT_INPUT_BYTES = 65_536;
@@ -184,6 +186,7 @@ export function conflictGeneration(bundle) {
     conflict_tree_sha: bundle.merge.conflict_tree_sha,
     manifest_sha: bundle.merge.manifest_sha,
     model_candidates_sha: bundle.model_candidates_sha,
+    executors: bundle.executors,
     resolver_prompt_sha: bundle.prompts.resolver_sha,
     reviewer_prompt_sha: bundle.prompts.reviewer_sha,
   });
@@ -193,10 +196,10 @@ export function validateConflictBundle(value) {
   exactKeys(value, [
     'schema_version', 'artifact_type', 'profile', 'repository', 'repository_id',
     'base_ref', 'sync_ref', 'base_sha', 'checkpoint_sha', 'upstream', 'policy',
-    'merge', 'prompts', 'model_candidates', 'model_candidates_sha', 'conflicts',
+    'merge', 'prompts', 'model_candidates', 'model_candidates_sha', 'executors', 'conflicts',
     'generation_sha',
   ], 'conflict bundle');
-  if (value.schema_version !== 1 || value.artifact_type !== 'sync_conflict_bundle' || value.profile !== SYNC_CONFLICT_PROFILE) {
+  if (value.schema_version !== SYNC_CONFLICT_SCHEMA_VERSION || value.artifact_type !== 'sync_conflict_bundle' || value.profile !== SYNC_CONFLICT_PROFILE) {
     reject('conflict bundle version, type, or profile is invalid');
   }
   exactKeys(value.upstream, ['repository', 'ref', 'sha'], 'conflict bundle upstream');
@@ -204,9 +207,14 @@ export function validateConflictBundle(value) {
   exactKeys(value.merge, ['synthetic_commit_sha', 'conflict_tree_sha', 'manifest_sha'], 'conflict bundle merge');
   exactKeys(value.prompts, ['resolver_sha', 'reviewer_sha'], 'conflict bundle prompts');
   const models = validateModelCandidates(value.model_candidates);
+  exactKeys(value.executors, ['resolver', 'reviewer'], 'conflict executors');
+  const executors = Object.freeze({
+    resolver: validateExecutorIdentity(value.executors.resolver, 'resolver executor'),
+    reviewer: validateExecutorIdentity(value.executors.reviewer, 'reviewer executor'),
+  });
   const conflicts = validateConflicts(value.conflicts);
   const result = {
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_bundle',
     profile: SYNC_CONFLICT_PROFILE,
     repository: string(value.repository, 'conflict repository', { pattern: REPOSITORY, maximum: 256 }),
@@ -238,6 +246,7 @@ export function validateConflictBundle(value) {
     }),
     model_candidates: models,
     model_candidates_sha: hash(value.model_candidates_sha, 'model candidates hash'),
+    executors,
     conflicts,
     generation_sha: hash(value.generation_sha, 'conflict generation hash'),
   };
@@ -280,23 +289,26 @@ export function validateConflictCandidate(value, bundleValue) {
   const bundle = validateConflictBundle(bundleValue);
   exactKeys(value, [
     'schema_version', 'artifact_type', 'profile', 'bundle_sha', 'generation_sha',
-    'model', 'run', 'output', 'resolution_sha',
+    'model', 'executor', 'run', 'output', 'resolution_sha',
   ], 'conflict candidate');
-  if (value.schema_version !== 1 || value.artifact_type !== 'sync_conflict_candidate' || value.profile !== SYNC_CONFLICT_PROFILE) {
+  if (value.schema_version !== SYNC_CONFLICT_SCHEMA_VERSION || value.artifact_type !== 'sync_conflict_candidate' || value.profile !== SYNC_CONFLICT_PROFILE) {
     reject('conflict candidate version, type, or profile is invalid');
   }
   const model = validateModel(value.model, 'resolver model');
+  const executor = validateExecutorIdentity(value.executor, 'resolver executor');
   if (!bundle.model_candidates.resolver.some((candidate) => candidate.alias === model.alias && candidate.id === model.id)) {
     reject('resolver model is not allowed by the exact conflict generation');
   }
+  if (canonicalJson(executor) !== canonicalJson(bundle.executors.resolver)) reject('resolver executor is not allowed by the exact conflict generation');
   const output = validateResolverOutput(value.output, bundle);
   const result = Object.freeze({
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_candidate',
     profile: SYNC_CONFLICT_PROFILE,
     bundle_sha: hash(value.bundle_sha, 'candidate bundle hash'),
     generation_sha: hash(value.generation_sha, 'candidate generation hash'),
     model,
+    executor,
     run: validateRun(value.run, 'resolver run'),
     output,
     resolution_sha: hash(value.resolution_sha, 'resolution hash'),
@@ -309,7 +321,7 @@ export function validateConflictCandidate(value, bundleValue) {
 
 export function reviewGeneration(input) {
   return Object.freeze({
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     profile: SYNC_CONFLICT_PROFILE,
     repository_id: input.repository_id,
     pull_number: input.pull_number,
@@ -322,6 +334,7 @@ export function reviewGeneration(input) {
     resolution_sha: input.resolution_sha,
     resolved_merge_tree_sha: input.resolved_merge_tree_sha,
     reviewer_candidates_sha: artifactSha(input.reviewer_candidates),
+    reviewer_executor: input.reviewer_executor,
     reviewer_prompt_sha: input.reviewer_prompt_sha,
   });
 }
@@ -333,18 +346,18 @@ export function validateReviewInput(value, bundleValue, candidateValue) {
     'schema_version', 'artifact_type', 'profile', 'repository', 'repository_id',
     'pull_number', 'head_sha', 'head_tree_sha', 'base_sha', 'bundle_sha',
     'candidate_sha', 'conflict_generation_sha', 'resolution_sha',
-    'resolved_merge_tree_sha', 'resolver_model', 'reviewer_candidates',
+    'resolved_merge_tree_sha', 'resolver_model', 'resolver_executor', 'reviewer_candidates', 'reviewer_executor',
     'reviewer_prompt_sha', 'conflicts', 'resolutions', 'input_sha',
     'review_generation_sha',
   ], 'conflict review input');
-  if (value.schema_version !== 1 || value.artifact_type !== 'sync_conflict_review_input' || value.profile !== SYNC_CONFLICT_PROFILE) {
+  if (value.schema_version !== SYNC_CONFLICT_SCHEMA_VERSION || value.artifact_type !== 'sync_conflict_review_input' || value.profile !== SYNC_CONFLICT_PROFILE) {
     reject('conflict review input version, type, or profile is invalid');
   }
   const reviewerCandidates = validateModelList(value.reviewer_candidates, 'review input reviewer candidates');
   const conflicts = validateConflicts(value.conflicts);
   const resolutions = value.resolutions.map(validateResolution);
   const result = {
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_review_input',
     profile: SYNC_CONFLICT_PROFILE,
     repository: string(value.repository, 'review repository', { pattern: REPOSITORY, maximum: 256 }),
@@ -359,7 +372,9 @@ export function validateReviewInput(value, bundleValue, candidateValue) {
     resolution_sha: hash(value.resolution_sha, 'review resolution hash'),
     resolved_merge_tree_sha: sha(value.resolved_merge_tree_sha, 'review resolved merge tree SHA'),
     resolver_model: validateModel(value.resolver_model, 'review resolver model'),
+    resolver_executor: validateExecutorIdentity(value.resolver_executor, 'review resolver executor'),
     reviewer_candidates: reviewerCandidates,
+    reviewer_executor: validateExecutorIdentity(value.reviewer_executor, 'review reviewer executor'),
     reviewer_prompt_sha: hash(value.reviewer_prompt_sha, 'reviewer prompt hash'),
     conflicts,
     resolutions: Object.freeze(resolutions),
@@ -374,7 +389,9 @@ export function validateReviewInput(value, bundleValue, candidateValue) {
     reject('review conflict generation or resolution binding is invalid');
   }
   if (canonicalJson(result.resolver_model) !== canonicalJson(candidate.model)) reject('review resolver model binding is invalid');
+  if (canonicalJson(result.resolver_executor) !== canonicalJson(candidate.executor)) reject('review resolver executor binding is invalid');
   if (canonicalJson(result.reviewer_candidates) !== canonicalJson(bundle.model_candidates.reviewer)) reject('reviewer candidates drifted');
+  if (canonicalJson(result.reviewer_executor) !== canonicalJson(bundle.executors.reviewer)) reject('reviewer executor drifted');
   if (result.reviewer_candidates.some((model) => model.id === result.resolver_model.id)) reject('reviewer model must be independent from the resolver model');
   if (canonicalJson(conflicts) !== canonicalJson(bundle.conflicts) || canonicalJson(resolutions) !== canonicalJson(candidate.output.resolutions)) {
     reject('review input coverage is not exact');
@@ -407,25 +424,28 @@ export function validateReviewReceipt(value, inputValue, bundleValue, candidateV
   const input = validateReviewInput(inputValue, bundleValue, candidateValue);
   exactKeys(value, [
     'schema_version', 'artifact_type', 'profile', 'review_generation_sha',
-    'input_sha', 'model', 'run', 'output', 'output_sha', 'coverage',
+    'input_sha', 'model', 'executor', 'run', 'output', 'output_sha', 'coverage',
   ], 'conflict review receipt');
-  if (value.schema_version !== 1 || value.artifact_type !== 'sync_conflict_review' || value.profile !== SYNC_CONFLICT_PROFILE) {
+  if (value.schema_version !== SYNC_CONFLICT_SCHEMA_VERSION || value.artifact_type !== 'sync_conflict_review' || value.profile !== SYNC_CONFLICT_PROFILE) {
     reject('conflict review receipt version, type, or profile is invalid');
   }
   exactKeys(value.coverage, ['complete', 'conflict_count', 'input_bytes'], 'review coverage');
   const model = validateModel(value.model, 'reviewer model');
+  const executor = validateExecutorIdentity(value.executor, 'reviewer executor');
   if (!input.reviewer_candidates.some((candidate) => candidate.alias === model.alias && candidate.id === model.id)) {
     reject('reviewer model is not allowed by the exact review generation');
   }
   if (model.id === input.resolver_model.id) reject('reviewer used the resolver model');
+  if (canonicalJson(executor) !== canonicalJson(input.reviewer_executor)) reject('reviewer executor is not allowed by the exact review generation');
   const output = validateReviewerOutput(value.output);
   const result = Object.freeze({
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_review',
     profile: SYNC_CONFLICT_PROFILE,
     review_generation_sha: hash(value.review_generation_sha, 'receipt review generation hash'),
     input_sha: hash(value.input_sha, 'receipt input hash'),
     model,
+    executor,
     run: validateRun(value.run, 'reviewer run'),
     output,
     output_sha: hash(value.output_sha, 'review output hash'),
@@ -452,14 +472,14 @@ export function validateFinalAttestation(value) {
     'upstream_repository', 'upstream_ref', 'upstream_sha', 'policy_sha',
     'policy_blob_sha', 'bundle_sha', 'candidate_sha', 'review_input_sha',
     'review_receipt_sha', 'conflict_generation_sha', 'review_generation_sha',
-    'resolution_sha', 'resolved_merge_tree_sha', 'resolver_model', 'reviewer_model',
+    'resolution_sha', 'resolved_merge_tree_sha', 'resolver_model', 'resolver_executor', 'reviewer_model', 'reviewer_executor',
     'verifier_run', 'decision',
   ], 'conflict final attestation');
-  if (value.schema_version !== 1 || value.artifact_type !== 'sync_conflict_attestation' || value.profile !== SYNC_CONFLICT_PROFILE || value.decision !== 'approved') {
+  if (value.schema_version !== SYNC_CONFLICT_SCHEMA_VERSION || value.artifact_type !== 'sync_conflict_attestation' || value.profile !== SYNC_CONFLICT_PROFILE || value.decision !== 'approved') {
     reject('conflict final attestation identity or decision is invalid');
   }
   return Object.freeze({
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_attestation',
     profile: SYNC_CONFLICT_PROFILE,
     repository: string(value.repository, 'attestation repository', { pattern: REPOSITORY, maximum: 256 }),
@@ -483,7 +503,9 @@ export function validateFinalAttestation(value) {
     resolution_sha: hash(value.resolution_sha, 'attestation resolution hash'),
     resolved_merge_tree_sha: sha(value.resolved_merge_tree_sha, 'attestation resolved merge tree SHA'),
     resolver_model: validateModel(value.resolver_model, 'attestation resolver model'),
+    resolver_executor: validateExecutorIdentity(value.resolver_executor, 'attestation resolver executor'),
     reviewer_model: validateModel(value.reviewer_model, 'attestation reviewer model'),
+    reviewer_executor: validateExecutorIdentity(value.reviewer_executor, 'attestation reviewer executor'),
     verifier_run: validateRun(value.verifier_run, 'verifier run'),
     decision: 'approved',
   });

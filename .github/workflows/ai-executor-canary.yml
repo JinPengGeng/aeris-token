@@ -1,0 +1,78 @@
+name: AI executor read-only canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Contract tests or one protected live provider probe
+        required: true
+        default: contract
+        type: choice
+        options: [contract, live]
+      executor:
+        description: Trusted adapter to probe in live mode
+        required: true
+        default: openai-chat-v1
+        type: choice
+        options: [openai-chat-v1, openai-responses-v1]
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Validate executor contracts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/automation/package-lock.json
+      - name: Install trusted automation runtime
+        working-directory: .github/automation
+        run: npm ci --ignore-scripts
+      - name: Exercise executor protocol conformance without credentials
+        working-directory: .github/automation
+        run: node --test test/ai-executor-contract.test.mjs test/openai-responses-executor.test.mjs test/ai-executor-canary.test.mjs
+
+  live:
+    name: Probe selected trusted adapter
+    if: inputs.mode == 'live'
+    runs-on: ubuntu-latest
+    environment: agent
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/automation/package-lock.json
+      - name: Install trusted automation runtime
+        working-directory: .github/automation
+        run: npm ci --ignore-scripts
+      - name: Run bounded credential-free GitHub adapter probe
+        working-directory: .github/automation
+        env:
+          AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
+          AERIS_AI_API_KEY: ${{ secrets.AERIS_AI_API_KEY }}
+          AERIS_AI_MODEL: ${{ vars.AERIS_AI_MODEL }}
+          AERIS_AI_EXECUTOR_ID: ${{ inputs.executor }}
+        run: node src/ai-executor-canary.mjs

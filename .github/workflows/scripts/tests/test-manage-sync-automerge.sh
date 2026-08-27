@@ -344,6 +344,20 @@ test_conflict_verdict_requires_attestation_before_gh() {
   [[ ! -e "${log}" ]] || fail 'missing conflict attestation called gh'
 }
 
+test_conflict_verdict_requires_full_artifact_chain_before_gh() {
+  local bin="${RUN_ROOT}/conflict-no-artifacts/bin" log="${RUN_ROOT}/conflict-no-artifacts/gh.log" status
+  new_fake_gh "${bin}"
+  set +e
+  run_helper "${bin}" "${log}" merge owner/repo 42 \
+    0123456789abcdef0123456789abcdef01234567 "${TEST_BASE_SHA}" "${TEST_SOURCE}" conflict_ai_review \
+    "${RUN_ROOT}/attestation.json" 0000000000000000000000000000000000000000000000000000000000000000 \
+    >/dev/null 2>&1
+  status=$?
+  set -e
+  assert_status 64 "${status}" 'AI conflict verdict without all artifact paths and hashes must fail closed'
+  [[ ! -e "${log}" ]] || fail 'missing conflict artifact chain called gh'
+}
+
 test_unsuccessful_exact_head_check_never_mutates() {
   local bin="${RUN_ROOT}/failed-check/bin" log="${RUN_ROOT}/failed-check/gh.log" status
   local sha='0123456789abcdef0123456789abcdef01234567'
@@ -482,6 +496,7 @@ test_merge_preflight_drift_never_mutates
 test_merge_governance_and_trailer_failures_never_mutate
 test_manual_verdict_never_calls_gh
 test_conflict_verdict_requires_attestation_before_gh
+test_conflict_verdict_requires_full_artifact_chain_before_gh
 test_unsuccessful_exact_head_check_never_mutates
 test_branch_protection_drift_never_mutates
 test_legacy_arm_action_is_rejected

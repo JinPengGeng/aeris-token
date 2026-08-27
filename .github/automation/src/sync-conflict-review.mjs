@@ -5,9 +5,15 @@ import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 import { GitHubClient } from './github-client.mjs';
-import { OpenAICompatibleClient } from './openai-client.mjs';
+import { createAiExecutorFromIdentity } from './ai-executor-factory.mjs';
+import {
+  executorForRoute,
+  validateExecutorIdentity,
+  validateExecutorRegistry,
+} from './ai-executor-contract.mjs';
 import {
   SYNC_CONFLICT_PROFILE,
+  SYNC_CONFLICT_SCHEMA_VERSION,
   artifactSha,
   canonicalJson,
   conflictGeneration,
@@ -54,6 +60,19 @@ export const REVIEWER_PROMPT_SHA = sha256(REVIEWER_PROMPT);
 
 function fail(message) {
   throw new Error(message);
+}
+
+function requireCompletionExecutor(completion, expectedExecutor, role) {
+  let actualExecutor;
+  try {
+    actualExecutor = validateExecutorIdentity(completion?.executor, `${role} completion executor`);
+  } catch {
+    fail(`${role} completion did not provide a valid executor identity`);
+  }
+  if (canonicalJson(actualExecutor) !== canonicalJson(expectedExecutor)) {
+    fail(`${role} completion executor identity does not match the trusted generation`);
+  }
+  return actualExecutor;
 }
 
 function required(value, name, pattern = null) {
@@ -181,6 +200,18 @@ function configuredModels(environment) {
   });
 }
 
+function executorsAtBase(baseSha) {
+  const entry = treeEntry(baseSha, '.github/ai-executors.json');
+  if (entry.mode !== '100644' || entry.type !== 'blob') fail('executor registry must be a regular non-executable file');
+  let registry;
+  try { registry = JSON.parse(utf8Blob(entry.sha, 'executor registry')); } catch { fail('executor registry is invalid JSON'); }
+  const normalized = validateExecutorRegistry(registry);
+  return Object.freeze({
+    resolver: executorForRoute(normalized, 'sync_conflict_resolver'),
+    reviewer: executorForRoute(normalized, 'sync_conflict_reviewer'),
+  });
+}
+
 function artifactRoot(environment) {
   return path.resolve(environment.AERIS_ARTIFACT_ROOT || environment.RUNNER_TEMP || os.tmpdir());
 }
@@ -284,13 +315,14 @@ export function buildConflictBundle({ environment = process.env } = {}) {
     };
   });
   const modelCandidates = configuredModels(environment);
+  const executors = executorsAtBase(context.baseSha);
   const policyBlob = treeEntry(context.baseSha, context.policyPath);
   const stateBlob = treeEntry(context.baseSha, context.statePath);
   if (policyBlob.mode !== '100644' || policyBlob.type !== 'blob' || stateBlob.mode !== '100644' || stateBlob.type !== 'blob') {
     fail('sync policy and state must be regular non-executable files');
   }
   const bundle = {
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_bundle',
     profile: SYNC_CONFLICT_PROFILE,
     repository: context.repository,
@@ -315,6 +347,7 @@ export function buildConflictBundle({ environment = process.env } = {}) {
     prompts: { resolver_sha: RESOLVER_PROMPT_SHA, reviewer_sha: REVIEWER_PROMPT_SHA },
     model_candidates: modelCandidates,
     model_candidates_sha: artifactSha(modelCandidates),
+    executors,
     conflicts,
     generation_sha: '',
   };
@@ -322,8 +355,9 @@ export function buildConflictBundle({ environment = process.env } = {}) {
   return validateConflictBundle(bundle);
 }
 
-function openAiClient(environment, timeoutMs = 300_000) {
-  return new OpenAICompatibleClient({
+function aiExecutor(environment, identity, timeoutMs = 300_000) {
+  return createAiExecutorFromIdentity({
+    identity,
     baseUrl: required(environment.AERIS_AI_BASE_URL, 'AERIS_AI_BASE_URL'),
     apiKey: required(environment.AERIS_AI_API_KEY, 'AERIS_AI_API_KEY'),
     retryableStatuses: [408, 429, 500, 502, 503, 504],
@@ -390,7 +424,8 @@ function parseModelJson(content, name) {
 export async function resolveConflict({ bundle, environment = process.env, client = null } = {}) {
   const normalizedBundle = validateConflictBundle(bundle);
   if (normalizedBundle.prompts.resolver_sha !== RESOLVER_PROMPT_SHA) fail('resolver prompt hash drifted');
-  const completion = await (client ?? openAiClient(environment)).complete({
+  const expectedExecutor = normalizedBundle.executors.resolver;
+  const completion = await (client ?? aiExecutor(environment, expectedExecutor)).complete({
     candidates: normalizedBundle.model_candidates.resolver,
     messages: [
       { role: 'system', content: RESOLVER_PROMPT },
@@ -399,14 +434,16 @@ export async function resolveConflict({ bundle, environment = process.env, clien
     maxTokens: positive(environment.AERIS_CONFLICT_MAX_OUTPUT_TOKENS || 32768, 'resolver maximum output tokens'),
     responseFormat: resolverResponseFormat,
   });
+  const completionExecutor = requireCompletionExecutor(completion, expectedExecutor, 'resolver');
   const output = validateResolverOutput(parseModelJson(completion.content, 'resolver'), normalizedBundle);
   return validateConflictCandidate({
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_candidate',
     profile: SYNC_CONFLICT_PROFILE,
     bundle_sha: artifactSha(normalizedBundle),
     generation_sha: normalizedBundle.generation_sha,
     model: completion.model,
+    executor: completionExecutor,
     run: { id: positive(environment.GITHUB_RUN_ID, 'GITHUB_RUN_ID'), attempt: positive(environment.GITHUB_RUN_ATTEMPT, 'GITHUB_RUN_ATTEMPT') },
     output,
     resolution_sha: artifactSha(output.resolutions),
@@ -564,7 +601,7 @@ export async function collectReviewInput({ bundle, candidate, environment = proc
     resolved_merge_tree_sha: materialization.resolved_merge_tree_sha,
   };
   const input = {
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_review_input',
     profile: SYNC_CONFLICT_PROFILE,
     repository: normalizedBundle.repository,
@@ -579,7 +616,9 @@ export async function collectReviewInput({ bundle, candidate, environment = proc
     resolution_sha: normalizedCandidate.resolution_sha,
     resolved_merge_tree_sha: materialization.resolved_merge_tree_sha,
     resolver_model: normalizedCandidate.model,
+    resolver_executor: normalizedCandidate.executor,
     reviewer_candidates: normalizedBundle.model_candidates.reviewer,
+    reviewer_executor: normalizedBundle.executors.reviewer,
     reviewer_prompt_sha: normalizedBundle.prompts.reviewer_sha,
     conflicts: normalizedBundle.conflicts,
     resolutions: normalizedCandidate.output.resolutions,
@@ -593,7 +632,8 @@ export async function collectReviewInput({ bundle, candidate, environment = proc
 export async function reviewConflict({ input, bundle, candidate, environment = process.env, client = null } = {}) {
   const normalizedInput = validateReviewInput(input, bundle, candidate);
   if (normalizedInput.reviewer_prompt_sha !== REVIEWER_PROMPT_SHA) fail('reviewer prompt hash drifted');
-  const completion = await (client ?? openAiClient(environment)).complete({
+  const expectedExecutor = normalizedInput.reviewer_executor;
+  const completion = await (client ?? aiExecutor(environment, expectedExecutor)).complete({
     candidates: normalizedInput.reviewer_candidates,
     messages: [
       { role: 'system', content: REVIEWER_PROMPT },
@@ -602,14 +642,16 @@ export async function reviewConflict({ input, bundle, candidate, environment = p
     maxTokens: positive(environment.AERIS_CONFLICT_REVIEW_MAX_OUTPUT_TOKENS || 8000, 'reviewer maximum output tokens'),
     responseFormat: reviewerResponseFormat,
   });
+  const completionExecutor = requireCompletionExecutor(completion, expectedExecutor, 'reviewer');
   const output = validateReviewerOutput(parseModelJson(completion.content, 'reviewer'));
   const receipt = {
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_review',
     profile: SYNC_CONFLICT_PROFILE,
     review_generation_sha: normalizedInput.review_generation_sha,
     input_sha: normalizedInput.input_sha,
     model: completion.model,
+    executor: completionExecutor,
     run: { id: positive(environment.GITHUB_RUN_ID, 'GITHUB_RUN_ID'), attempt: positive(environment.GITHUB_RUN_ATTEMPT, 'GITHUB_RUN_ATTEMPT') },
     output,
     output_sha: artifactSha(output),
@@ -644,39 +686,76 @@ export async function finalizeConflictReview({ bundle, candidate, input, receipt
     baseRef: normalizedBundle.base_ref,
     requireMergeable: true,
   });
+  return buildFinalAttestation({
+    bundle: normalizedBundle,
+    candidate: normalizedCandidate,
+    input: normalizedInput,
+    receipt: normalizedReceipt,
+    run,
+  });
+}
+
+function buildFinalAttestation({ bundle, candidate, input, receipt, run }) {
   return validateFinalAttestation({
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_attestation',
     profile: SYNC_CONFLICT_PROFILE,
-    repository: normalizedBundle.repository,
-    repository_id: normalizedBundle.repository_id,
-    pull_number: normalizedInput.pull_number,
-    head_sha: normalizedInput.head_sha,
-    head_tree_sha: normalizedInput.head_tree_sha,
-    base_sha: normalizedInput.base_sha,
-    checkpoint_sha: normalizedBundle.checkpoint_sha,
-    upstream_repository: normalizedBundle.upstream.repository,
-    upstream_ref: normalizedBundle.upstream.ref,
-    upstream_sha: normalizedBundle.upstream.sha,
-    policy_sha: normalizedBundle.policy.workflow_sha,
-    policy_blob_sha: normalizedBundle.policy.policy_blob_sha,
-    bundle_sha: artifactSha(normalizedBundle),
-    candidate_sha: artifactSha(normalizedCandidate),
-    review_input_sha: artifactSha(normalizedInput),
-    review_receipt_sha: artifactSha(normalizedReceipt),
-    conflict_generation_sha: normalizedBundle.generation_sha,
-    review_generation_sha: normalizedInput.review_generation_sha,
-    resolution_sha: normalizedCandidate.resolution_sha,
-    resolved_merge_tree_sha: normalizedInput.resolved_merge_tree_sha,
-    resolver_model: normalizedCandidate.model,
-    reviewer_model: normalizedReceipt.model,
+    repository: bundle.repository,
+    repository_id: bundle.repository_id,
+    pull_number: input.pull_number,
+    head_sha: input.head_sha,
+    head_tree_sha: input.head_tree_sha,
+    base_sha: input.base_sha,
+    checkpoint_sha: bundle.checkpoint_sha,
+    upstream_repository: bundle.upstream.repository,
+    upstream_ref: bundle.upstream.ref,
+    upstream_sha: bundle.upstream.sha,
+    policy_sha: bundle.policy.workflow_sha,
+    policy_blob_sha: bundle.policy.policy_blob_sha,
+    bundle_sha: artifactSha(bundle),
+    candidate_sha: artifactSha(candidate),
+    review_input_sha: artifactSha(input),
+    review_receipt_sha: artifactSha(receipt),
+    conflict_generation_sha: bundle.generation_sha,
+    review_generation_sha: input.review_generation_sha,
+    resolution_sha: candidate.resolution_sha,
+    resolved_merge_tree_sha: input.resolved_merge_tree_sha,
+    resolver_model: candidate.model,
+    resolver_executor: candidate.executor,
+    reviewer_model: receipt.model,
+    reviewer_executor: receipt.executor,
     verifier_run: run,
     decision: 'approved',
   });
 }
 
-export function verifyAttestationBinding(attestationValue, expected) {
+export function verifyAttestationBinding(attestationValue, expected, artifacts) {
   const attestation = validateFinalAttestation(attestationValue);
+  const bundle = validateConflictBundle(artifacts?.bundle);
+  const candidate = validateConflictCandidate(artifacts?.candidate, bundle);
+  const input = validateReviewInput(artifacts?.input, bundle, candidate);
+  const receipt = validateReviewReceipt(artifacts?.receipt, input, bundle, candidate);
+  const artifactBindings = {
+    bundle: [artifactSha(bundle), exactHash(expected.bundleSha, 'expected conflict bundle hash')],
+    candidate: [artifactSha(candidate), exactHash(expected.candidateSha, 'expected conflict candidate hash')],
+    'review input': [artifactSha(input), exactHash(expected.reviewInputSha, 'expected conflict review input hash')],
+    'review receipt': [artifactSha(receipt), exactHash(expected.reviewReceiptSha, 'expected conflict review receipt hash')],
+  };
+  for (const [name, [actual, trusted]] of Object.entries(artifactBindings)) {
+    if (actual !== trusted) fail(`${name} does not match the trusted cross-job artifact hash`);
+  }
+  const verifierRun = {
+    id: positive(expected.runId, 'expected verifier run ID'),
+    attempt: positive(expected.runAttempt, 'expected verifier run attempt'),
+  };
+  if (candidate.run.id !== verifierRun.id || candidate.run.attempt !== verifierRun.attempt ||
+      receipt.run.id !== verifierRun.id || receipt.run.attempt !== verifierRun.attempt) {
+    fail('resolver, reviewer, and verifier must belong to the exact workflow run and attempt');
+  }
+  const exactAttestation = buildFinalAttestation({ bundle, candidate, input, receipt, run: verifierRun });
+  if (canonicalJson(attestation) !== canonicalJson(exactAttestation)) {
+    fail('conflict attestation does not exactly match the verified artifact chain');
+  }
   const fields = {
     repository: expected.repository,
     pull_number: positive(expected.pullNumber, 'expected pull number'),
@@ -688,16 +767,8 @@ export function verifyAttestationBinding(attestationValue, expected) {
   for (const [key, value] of Object.entries(fields)) {
     if (attestation[key] !== value) fail(`conflict attestation ${key} does not match the merge request`);
   }
-  if (expected.attestationSha && artifactSha(attestation) !== exactHash(expected.attestationSha, 'expected attestation hash')) {
+  if (artifactSha(attestation) !== exactHash(expected.attestationSha, 'expected attestation hash')) {
     fail('conflict attestation hash does not match');
-  }
-  const verifierRun = {
-    id: positive(expected.runId, 'expected verifier run ID'),
-    attempt: positive(expected.runAttempt, 'expected verifier run attempt'),
-  };
-  if (attestation.verifier_run.id !== verifierRun.id ||
-      attestation.verifier_run.attempt !== verifierRun.attempt) {
-    fail('conflict attestation does not belong to the exact workflow run and attempt');
   }
   return attestation;
 }
@@ -756,6 +827,10 @@ async function runCli(commandName, environment) {
     }
     case 'verify-attestation': {
       const attestation = readCanonicalFile(environment.AERIS_CONFLICT_ATTESTATION_PATH, environment, 'conflict attestation');
+      const bundle = readCanonicalFile(environment.AERIS_CONFLICT_BUNDLE_PATH, environment, 'conflict bundle');
+      const candidate = readCanonicalFile(environment.AERIS_CONFLICT_CANDIDATE_PATH, environment, 'conflict candidate');
+      const input = readCanonicalFile(environment.AERIS_CONFLICT_REVIEW_INPUT_PATH, environment, 'conflict review input');
+      const receipt = readCanonicalFile(environment.AERIS_CONFLICT_REVIEW_RECEIPT_PATH, environment, 'conflict review receipt');
       return verifyAttestationBinding(attestation, {
         repository: environment.GITHUB_REPOSITORY,
         pullNumber: environment.AERIS_CONFLICT_PULL_NUMBER,
@@ -764,9 +839,13 @@ async function runCli(commandName, environment) {
         upstreamRepository: environment.AERIS_CONFLICT_UPSTREAM_REPOSITORY,
         upstreamSha: environment.AERIS_CONFLICT_UPSTREAM_SHA,
         attestationSha: environment.AERIS_CONFLICT_ATTESTATION_SHA,
+        bundleSha: environment.AERIS_CONFLICT_BUNDLE_SHA,
+        candidateSha: environment.AERIS_CONFLICT_CANDIDATE_SHA,
+        reviewInputSha: environment.AERIS_CONFLICT_REVIEW_INPUT_SHA,
+        reviewReceiptSha: environment.AERIS_CONFLICT_REVIEW_RECEIPT_SHA,
         runId: environment.AERIS_CONFLICT_RUN_ID,
         runAttempt: environment.AERIS_CONFLICT_RUN_ATTEMPT,
-      });
+      }, { bundle, candidate, input, receipt });
     }
     default:
       fail('usage: sync-conflict-review.mjs <prepare|resolve|materialize|collect-review|review|finalize|verify-attestation>');

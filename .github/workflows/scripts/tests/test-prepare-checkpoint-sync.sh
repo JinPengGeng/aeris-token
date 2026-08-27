@@ -85,7 +85,7 @@ conflicts:
   require_explicit_adoption_of_resolution: true
   ai_resolution:
     enabled: true
-    profile: aeris-sync-conflict-v1
+    profile: aeris-sync-conflict-v2
     required_pre_conflict_verdict: eligible
     allowed_type: modify_modify_utf8_text
     allowed_mode: "100644"
@@ -144,7 +144,7 @@ conflicts:
   require_explicit_adoption_of_resolution: true
   ai_resolution:
     enabled: true
-    profile: aeris-sync-conflict-v1
+    profile: aeris-sync-conflict-v2
     required_pre_conflict_verdict: eligible
     allowed_type: modify_modify_utf8_text
     allowed_mode: "100644"
@@ -160,6 +160,24 @@ conflicts:
     allow_sensitive_or_review_required_paths: false
     allow_binary_rename_delete_mode_or_case_ambiguity: false
 YAML
+}
+
+write_executor_registry() {
+  mkdir -p .github
+  cat >.github/ai-executors.json <<'JSON'
+{
+  "schema_version": 1,
+  "executors": [
+    { "id": "openai-chat-v1", "protocol": "openai-chat-completions-v1" },
+    { "id": "openai-responses-v1", "protocol": "openai-responses-v1" }
+  ],
+  "routes": {
+    "agent_analysis": "openai-chat-v1",
+    "sync_conflict_resolver": "openai-chat-v1",
+    "sync_conflict_reviewer": "openai-chat-v1"
+  }
+}
+JSON
 }
 
 prepare() {
@@ -368,7 +386,8 @@ test_ai_resolution_policy_controls_conflict_bundle() {
   cd "${repo}"
 
   printf 'base\n' >shared.txt
-  git add shared.txt
+  write_executor_registry
+  git add shared.txt .github/ai-executors.json
   git commit -qm 'base'
   root="$(git rev-parse HEAD)"
 
