@@ -2466,6 +2466,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_candidate_watchdog_timeout_applies_health_feedback_exactly_once() {
+        // The outer candidate watchdog and the inner stream first-byte timer
+        // share plan.timeouts.first_byte_ms. With equal values the outer timer
+        // starts first and wins; the dropped inner execution must not emit a
+        // second health feedback.
+        let provider = aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider::new(
+            "prov-1".to_string(),
+            "openai".to_string(),
+            Some("https://example.com".to_string()),
+            "custom".to_string(),
+        )
+        .expect("provider should build");
+        let endpoint = aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint::new(
+            "ep-1".to_string(),
+            "prov-1".to_string(),
+            "openai:chat".to_string(),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://example.com/v1/chat/completions".to_string(),
+            None,
+            None,
+            Some(2),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build");
+        let key =
+            aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey::new(
+                "key-1".to_string(),
+                "prov-1".to_string(),
+                "prod".to_string(),
+                "api_key".to_string(),
+                None,
+                true,
+            )
+            .expect("key should build")
+            .with_transport_fields(
+                Some(json!(["openai:chat"])),
+                aether_crypto::encrypt_python_fernet_plaintext(
+                    aether_crypto::DEVELOPMENT_ENCRYPTION_KEY,
+                    "sk-test",
+                )
+                .expect("api key should encrypt"),
+                None,
+                None,
+                Some(json!({"openai:chat": 1})),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("key transport should build");
+        let catalog = Arc::new(
+            aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository::seed(
+                vec![provider],
+                vec![endpoint],
+                vec![key],
+            ),
+        );
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(catalog)
+                    .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY),
+            );
+
+        // Upstream accepts the connection but never responds, so both the
+        // outer watchdog and the inner first-byte timer expire.
+        let app = axum::Router::new().fallback(axum::routing::any(|| async {
+            std::future::pending::<http::StatusCode>().await
+        }));
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock server should run");
+        });
+
+        let mut plan = test_plan(Some(ExecutionTimeouts {
+            first_byte_ms: Some(80),
+            ..ExecutionTimeouts::default()
+        }));
+        plan.request_id = "req-watchdog-single-health-feedback".to_string();
+        plan.provider_id = "prov-1".to_string();
+        plan.endpoint_id = "ep-1".to_string();
+        plan.key_id = "key-1".to_string();
+        plan.url = format!("http://{addr}/v1/chat/completions");
+        plan.client_api_format = "openai:chat".to_string();
+        let attempt = TransferTestAttempt {
+            label: "watchdog-single-health-feedback",
+            plan,
+            report_context: json!({
+                "candidate_index": 0,
+                "retry_index": 0,
+            }),
+        };
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        );
+        let transfer_tracker = ProviderTransferTracker::default();
+        let port = StreamAttemptLoopPort {
+            state: &state,
+            trace_id: "trace-watchdog-single-health-feedback",
+            decision: &decision,
+            plan_kind: "openai_chat_stream",
+            transfer_tracker: &transfer_tracker,
+        };
+
+        let outcome = tokio::time::timeout(Duration::from_secs(15), port.execute_attempt(&attempt))
+            .await
+            .expect("stream attempt should not hang")
+            .expect("stream attempt should complete");
+        assert!(matches!(
+            outcome,
+            AiAttemptExecutionOutcome::Retry {
+                scope: AiAttemptRetryScope::Candidate,
+                ..
+            }
+        ));
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&attempt.plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(
+            stored_key
+                .health_by_format
+                .as_ref()
+                .and_then(|value| value.get("openai:chat"))
+                .and_then(|value| value.get("consecutive_failures"))
+                .and_then(serde_json::Value::as_u64),
+            Some(1),
+            "equal inner/outer first-byte timeouts must produce exactly one health feedback"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn stream_candidate_watchdog_does_not_cancel_started_terminalization() {
         let writer = Arc::new(TestRequestCandidateWriter::default());
         let plan = test_plan(Some(ExecutionTimeouts {
