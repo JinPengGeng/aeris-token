@@ -32,10 +32,11 @@ use crate::executor::{
 use crate::handlers::shared::provider_pool::release_admin_provider_pool_key_lease;
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    local_execution_candidate_metadata_from_report_context,
-    local_failover_policy_from_report_context, resolve_local_failover_policy,
-    resolve_local_transport_failover_analysis_for_attempt, LocalFailoverDecision,
-    LocalFailoverPolicy,
+    apply_local_execution_effect, local_execution_candidate_metadata_from_report_context,
+    local_failover_policy_from_report_context, resolve_local_failover_analysis_for_attempt,
+    resolve_local_failover_policy, resolve_local_transport_failover_analysis_for_attempt,
+    LocalExecutionEffect, LocalExecutionEffectContext, LocalFailoverDecision, LocalFailoverPolicy,
+    LocalHealthFailureEffect,
 };
 use crate::privacy::RedactionExecutionCandidateId;
 use crate::request_candidate_runtime::{
@@ -1034,7 +1035,6 @@ where
             self.plan_kind,
             plan,
             watchdog_report_context,
-            stop_on_transport_errors,
             move || async move {
                 execute_execution_runtime_stream_with_retry_scope(
                     &execution_state,
@@ -1051,20 +1051,55 @@ where
         .await?;
         let mut execution = match execution {
             StreamCandidateWatchdogOutcome::TransportTimeout => {
-                AiAttemptExecutionOutcome::Responded(
-                    build_transport_error_stop_response(
-                        self.state,
-                        plan,
-                        watchdog_report_context,
-                        self.trace_id,
-                        self.decision,
-                        http::StatusCode::GATEWAY_TIMEOUT.as_u16(),
-                        "local_stream_candidate_watchdog_timeout",
-                        stream_candidate_watchdog_timeout_message(),
-                        watchdog_started_at.elapsed().as_millis() as u64,
-                    )
-                    .await?,
+                // A first-byte watchdog timeout is an upstream transport failure:
+                // project it into key health/circuit breaking and pool cooldown,
+                // just like a 5xx returned by the upstream. AttemptFailure is
+                // deliberately not emitted so cache-affinity is preserved.
+                let analysis = resolve_local_failover_analysis_for_attempt(
+                    self.state,
+                    plan,
+                    watchdog_report_context,
+                    http::StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                    None,
                 )
+                .await;
+                let effect_context = LocalExecutionEffectContext {
+                    plan,
+                    report_context: watchdog_report_context,
+                };
+                apply_local_execution_effect(
+                    self.state,
+                    effect_context,
+                    LocalExecutionEffect::PoolStreamTimeout,
+                )
+                .await;
+                apply_local_execution_effect(
+                    self.state,
+                    effect_context,
+                    LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+                        status_code: http::StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        classification: analysis.classification,
+                    }),
+                )
+                .await;
+                if stop_on_transport_errors {
+                    AiAttemptExecutionOutcome::Responded(
+                        build_transport_error_stop_response(
+                            self.state,
+                            plan,
+                            watchdog_report_context,
+                            self.trace_id,
+                            self.decision,
+                            http::StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                            "local_stream_candidate_watchdog_timeout",
+                            stream_candidate_watchdog_timeout_message(),
+                            watchdog_started_at.elapsed().as_millis() as u64,
+                        )
+                        .await?,
+                    )
+                } else {
+                    AiAttemptExecutionOutcome::retry(AiAttemptRetryScope::Candidate)
+                }
             }
             StreamCandidateWatchdogOutcome::Executed(execution) => execution,
         };
@@ -1344,7 +1379,6 @@ async fn execute_stream_candidate_with_watchdog<Fut>(
     plan_kind: &str,
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
-    stop_on_transport_errors: bool,
     execute: impl FnOnce() -> Fut,
 ) -> Result<StreamCandidateWatchdogOutcome, GatewayError>
 where
@@ -1387,6 +1421,10 @@ where
             if watchdog_progress.terminal_started() {
                 Some(execution.await)
             } else {
+                // The watchdog records the timeout below. Claim terminal ownership
+                // before the execution future is dropped so its cancellation guard
+                // cannot overwrite the failure as a client disconnect.
+                watchdog_progress.claim_timeout_terminal();
                 None
             }
         }
@@ -1433,13 +1471,9 @@ where
                 timeout_ms,
                 "gateway local stream candidate watchdog timed out"
             );
-            if stop_on_transport_errors {
-                Ok(StreamCandidateWatchdogOutcome::TransportTimeout)
-            } else {
-                Ok(StreamCandidateWatchdogOutcome::Executed(
-                    AiAttemptExecutionOutcome::retry(AiAttemptRetryScope::Candidate),
-                ))
-            }
+            // The retry/stop decision lives at the call site, which also projects
+            // the timeout into key health and pool feedback.
+            Ok(StreamCandidateWatchdogOutcome::TransportTimeout)
         }
     };
     observe_gateway_stage_ms(
@@ -2345,7 +2379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_candidate_watchdog_marks_failed_candidate_and_continues() {
+    async fn stream_candidate_watchdog_marks_failed_candidate_and_times_out() {
         let writer = Arc::new(TestRequestCandidateWriter::default());
         let plan = test_plan(Some(ExecutionTimeouts {
             first_byte_ms: Some(25),
@@ -2361,7 +2395,6 @@ mod tests {
                 "claude_cli_stream",
                 &plan,
                 Some(&report_context),
-                false,
                 || {
                     std::future::pending::<
                         Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError>,
@@ -2373,14 +2406,11 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(40)).await;
         let result = task.await.expect("watchdog task should join");
+        // The watchdog always reports TransportTimeout; the retry/stop decision
+        // and the key/pool health effects live at the candidate loop call site.
         assert!(matches!(
             result,
-            Ok(StreamCandidateWatchdogOutcome::Executed(
-                AiAttemptExecutionOutcome::Retry {
-                    scope: AiAttemptRetryScope::Candidate,
-                    fallback_response: None,
-                }
-            ))
+            Ok(StreamCandidateWatchdogOutcome::TransportTimeout)
         ));
 
         let records = writer.records.lock().await;
@@ -2400,7 +2430,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_candidate_watchdog_can_stop_on_transport_error() {
+    async fn stream_candidate_watchdog_returns_transport_timeout() {
         let writer = Arc::new(TestRequestCandidateWriter::default());
         let plan = test_plan(Some(ExecutionTimeouts {
             first_byte_ms: Some(5),
@@ -2414,7 +2444,6 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
-            true,
             || {
                 std::future::pending::<
                     Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError>,
@@ -2451,7 +2480,6 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
-            true,
             || async {
                 mark_stream_candidate_watchdog_terminal_started();
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2483,7 +2511,6 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
-            true,
             || async {
                 Err(GatewayError::UpstreamUnavailable {
                     trace_id: "trace_execution_error".to_string(),
@@ -2522,7 +2549,6 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
-            false,
             || async {
                 panic!("execute future should not run while upstream execution gate is saturated")
             },
@@ -2569,7 +2595,6 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
-            false,
             || async {
                 Err(GatewayError::AdmissionTimeout {
                     trace_id: "trace_target_admission".to_string(),

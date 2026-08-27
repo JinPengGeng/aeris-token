@@ -4755,7 +4755,7 @@ WHERE request_id = ?
 UPDATE request_candidates
 SET status = 'failed',
     finished_at = ?,
-    error_message = '请求超时（服务器可能已重启）'
+    error_message = '请求超时未完成（可能因客户端断开或实例重启）'
 WHERE request_id = ?
   AND status IN ('pending', 'streaming')
 "#,
