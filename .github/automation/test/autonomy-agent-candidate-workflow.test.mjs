@@ -10,6 +10,7 @@ const yaml = require('js-yaml');
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(testDirectory, '..', '..', '..');
 const workflowPath = path.join(repoRoot, '.github', 'workflows', 'agent-candidate.yml');
+const executorDescriptorPath = path.join(repoRoot, '.github', 'ai-executors.json');
 const promptPath = path.join(repoRoot, '.github', 'codex', 'candidate-prompt.md');
 const schemaPath = path.join(repoRoot, '.github', 'codex', 'schemas', 'result.schema.json');
 const trustedUrlPattern = '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[-A-Za-z0-9._~:/?#@!$&*+,;=%]*)?$';
@@ -19,6 +20,11 @@ const trustedModel = new RegExp(trustedModelPattern);
 
 function workflow() {
   return yaml.load(fs.readFileSync(workflowPath, 'utf8'));
+}
+
+function executorDescriptor(id) {
+  return JSON.parse(fs.readFileSync(executorDescriptorPath, 'utf8')).executors
+    .find((executor) => executor.id === id);
 }
 
 function allUses(value, results = []) {
@@ -67,6 +73,16 @@ test('candidate workflow exposes the model secret only to the agent Environment 
   for (const action of allUses(document.jobs)) assert.match(action, /^[^@\s]+@[0-9a-f]{40}$/);
 });
 
+test('candidate workflow Codex Action provenance matches its executor descriptor', () => {
+  const candidate = workflow().jobs.candidate;
+  const codexAction = candidate.steps.find((step) => step.uses?.startsWith('openai/codex-action@'));
+  const executor = executorDescriptor('codex-action-v1');
+  assert.ok(codexAction);
+  assert.ok(executor);
+  assert.equal(codexAction.uses, `openai/codex-action@${executor.action_sha}`);
+  assert.equal(codexAction.with['codex-version'], executor.tool_version);
+});
+
 test('candidate workflow parses and strictly validates trusted model routing without exposing a secret', () => {
   const candidate = workflow().jobs.candidate;
   const routingValidation = candidate.steps.find((step) => step.name === 'Validate trusted model routing');
@@ -91,6 +107,7 @@ test('candidate workflow emits only a short-lived patch and manifest after deter
     .flatMap((job) => job.steps ?? [])
     .filter((step) => /^actions\/upload-artifact@/.test(step.uses ?? ''));
   const runtimeUpload = document.jobs.runtime.steps.find((step) => /Upload trusted candidate runtime/.test(step.name));
+  const runtimeStage = document.jobs.runtime.steps.find((step) => /Stage trusted candidate runtime/.test(step.name));
   const nodePath = candidate.steps.find((step) => /Capture trusted Node/.test(step.name));
   const reset = candidate.steps.find((step) => /Reset post-Agent scratch/.test(step.name));
   const runtimeDownload = candidate.steps.find((step) => /Download trusted candidate runtime/.test(step.name));
@@ -112,13 +129,19 @@ test('candidate workflow emits only a short-lived patch and manifest after deter
   );
   assert.equal(runtimeUpload.with.name, 'agent-candidate-runtime-${{ github.run_id }}-${{ github.run_attempt }}');
   assert.equal(runtimeUpload.with['retention-days'], 1);
-  assert.match(runtimeUpload.with.path, /autonomy-safe-git\.mjs/);
+  assert.equal(runtimeUpload.with.path, '${{ runner.temp }}/aeris-candidate-runtime/*');
+  assert.match(runtimeStage.run, /autonomy-safe-git\.mjs/);
+  assert.match(runtimeStage.run, /ai-executor-contract\.mjs/);
+  assert.match(runtimeStage.run, /ai-executors\.json/);
+  assert.match(runtimeStage.run, /install -m 0444/);
   assert.match(reset.run, /rm -rf --/);
   assert.match(runtimeDownload.uses, /^actions\/download-artifact@[0-9a-f]{40}$/);
   assert.equal(extract.env.AERIS_NODE_BINARY, '${{ steps.trusted-node.outputs.binary }}');
   assert.match(extract.run, /\/usr\/bin\/env -i/);
   assert.match(extract.run, /\$\{runtime\}\/autonomy-agent-candidate-runner\.mjs/);
   assert.match(extract.run, /autonomy-safe-git\.mjs/);
+  assert.match(extract.run, /ai-executor-contract\.mjs/);
+  assert.match(extract.run, /ai-executors\.json/);
   assert.doesNotMatch(extract.run, /node \.github\/automation/);
   const upload = candidate.steps.find((step) => /Upload candidate artifact/.test(step.name));
   assert.equal(upload.with.name, 'agent-candidate-issue-${{ needs.preflight.outputs.issue_number }}-run-${{ github.run_id }}-${{ github.run_attempt }}');

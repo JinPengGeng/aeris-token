@@ -7,6 +7,14 @@ import test from 'node:test';
 
 import { buildCandidateArtifact, CandidateExtractionError } from '../src/autonomy-extract.mjs';
 
+const candidateExecutor = Object.freeze({
+  id: 'codex-action-v1',
+  protocol: 'aeris-workspace-candidate-v1',
+  kind: 'workspace_candidate',
+  action_sha: '52fe01ec70a42f454c9d2ebd47598f9fd6893d56',
+  tool_version: '0.148.0',
+});
+
 function command(root, args) {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 }
@@ -32,6 +40,7 @@ function metadata(root, overrides = {}) {
     base_sha: command(root, ['rev-parse', 'HEAD']),
     trigger_run_id: '9001',
     trigger_run_attempt: 1,
+    executor: candidateExecutor,
     ...overrides,
   };
 }
@@ -63,6 +72,8 @@ test('extracts tracked and untracked text changes into a verified artifact', () 
 
   assert.deepEqual(result.paths, ['README.md', 'docs/automation-canary/new.md']);
   assert.equal(result.manifest.created_at, '2026-08-20T00:00:00.000Z');
+  assert.equal(result.manifest.schema_version, 2);
+  assert.deepEqual(result.manifest.executor, candidateExecutor);
   assert.equal(fs.existsSync(result.patchPath), true);
   assert.equal(fs.existsSync(result.manifestPath), true);
 });
@@ -76,6 +87,19 @@ test('rejects an unchanged workspace', () => {
       metadata: metadata(root),
     }),
     (error) => error instanceof CandidateExtractionError && /no candidate changes/.test(error.message),
+  );
+});
+
+test('rejects an executor descriptor that is not a trusted workspace candidate', () => {
+  const root = repository();
+  fs.appendFileSync(path.join(root, 'README.md'), 'candidate\n');
+  assert.throws(
+    () => buildCandidateArtifact({
+      repositoryRoot: root,
+      outputDirectory: path.join(root, '.candidate-output'),
+      metadata: metadata(root, { executor: { id: 'openai-chat-v1', protocol: 'openai-chat-completions-v1', kind: 'completion' } }),
+    }),
+    (error) => error instanceof CandidateExtractionError && /candidate executor/.test(error.message),
   );
 });
 

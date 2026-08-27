@@ -13,7 +13,7 @@
 
 1. Agent job 不持有 GitHub 写凭据、Writer App 私钥或 release secret。
 2. Publisher 不执行候选代码，只验证并应用有界 patch。
-3. Writer App 仅安装到本仓库，仅有 `administration:read`、`contents:write` 和 `pull_requests:write`；没有任何 Administration 写权限或 bypass。
+3. Writer App 仅安装到本仓库，仅有 `administration:read`、`checks:write`、`contents:write` 和 `pull_requests:write`；`checks:write` 仅由 Publisher 使用以创建精确 head 的发布证明。Writer 对 `main` 没有 bypass；唯一允许的 ref bypass 只能是下表定义的 `agent/**` fence 中同一 Writer App 的 `Integration` actor，且没有任何 Administration 写权限。
 4. PR CI 使用 `pull_request`、只读 token、无 secrets。
 5. `Automation Policy / gate` 来自 GitHub Actions，并由 `main` 的受信策略代码计算。
 6. `main` 严格要求 Rust、Frontend 和 Policy 三个检查，且来源绑定 GitHub Actions；不新增 Finalizer hold context。
@@ -23,6 +23,21 @@
 10. 除上游同步中逐个满足 UTF-8、普通文件 `100644`、modify/modify 的文本冲突外，冲突、状态漂移、敏感路径、读取不完整和凭据异常全部 fail closed；该窄例外也必须经过无 GitHub 写凭据 Resolver 的实际候选、不同 model ID 的独立 Reviewer 和受信 verifier 的最终精确绑定。
 11. `release` Environment 仍需人工审批且管理员不可绕过。
 12. 六项 GitHub 现场 PoC、Writer token 完整治理读取 canary、direct-merge 响应不确定回读 canary 和撤销演练均有 run、PR、SHA 和 API 快照证据。
+
+### 1.1 远端治理验收 Profile
+
+以下是生产启用前必须由 Writer installation token 双读并精确匹配的远端配置，而不是对当前远端状态的声明。任何 API 404、未知字段、分页未穷尽、额外 active ruleset 或快照漂移均 fail closed。
+
+| 面 | 精确验收条件 |
+|---|---|
+| `main` | 保持经典严格保护，三个 required checks 仍为 Rust、Frontend、Policy 且来源为 GitHub Actions；不向 Writer 或其他 actor 增加 `main` bypass。 |
+| `agent/**` | 仅一个 active repository ruleset，名称 `agent-head-fence-v1`、target `branch`、include 恰为 `refs/heads/agent/**`、exclude 为空；rules 恰为 `creation`、`update`、`deletion`、`non_fast_forward`。 |
+| `agent/**` bypass | 上述 ruleset 的 bypass actors 恰有一个：当前 JWT attestation 证明的 Writer App `app_id` 对应的 `Integration` actor，`bypass_mode=always`。App slug、node ID、owner database ID、installation ID 和单仓 scope 由 JWT `/app` 与 installation-token proof 交叉绑定；不得存在用户、团队、deploy key、其他 App 或额外 bypass。 |
+| 受信控制面 | direct collaborators 完整清单恰为一个受信 owner（login 与 database ID 固定，权限 `ADMIN`）。所有会写 managed PR metadata 的 Actions workflow 都是 default branch 上受信代码，使用统一 `aeris-writer-mutation` 串行化；owner 和已安装 App 属于受信控制面，不能被当作不可信并发对手。 |
+| Actions | Actions enabled、只允许 selected actions、强制 SHA pin；默认 workflow token 为 read，且不能批准 PR review。Agent/PR CI 不引用 `writer`、`release` 或其他特权 deployment Environment；Agent 仅可引用无人工审批、只含模型凭据的 `agent` Environment。 |
+| `writer` secret lane | `writer` Environment 必须启用 custom deployment branch policy、关闭 `protected_branches` 和管理员 secret bypass；其完整 policy inventory 恰有一条 `branch` policy，名称为 default branch `main`。这一步必须先于创建 `agent/**` ruleset，防止受保护的 agent branch 扩大 Writer secret lane。 |
+
+该 profile 只能保护 ref 与已观察到的治理状态。GitHub `mergePullRequest` 只有 `expectedHeadOid`，不能原子 CAS label、review、Draft、base 或 closed/reopened metadata；最终双读之后发生的受信控制面变更仍是平台残余，不能声称被客户端代码消除。
 
 ## 2. 非目标
 
@@ -42,6 +57,7 @@ workflow_dispatch / 受信调度器
   -> Publisher pre-token verifier（main 上的受信代码）
   -> 短期 Writer App installation token
   -> agent/issue-<number> + Draft PR
+  -> Writer App exact-head publication attestation Check Run
   -> pull_request CI（无 secrets）
   -> Automation Policy / gate（base 受信代码；不执行 PR 内容）
   -> Finalizer preliminary proof（Actions token；不读取 branch protection）
@@ -73,7 +89,7 @@ schedule / workflow_dispatch
 | Preflight | `GITHUB_TOKEN` | contents/issues/PR read | 无 | 写入、执行候选代码 |
 | Codex Agent | 无 GitHub 写凭据 | `contents:read`（只读 token） | `agent` Environment 的模型 key；无人工审批 | GitHub 写入、Writer/release secret |
 | Publisher verify | `GITHUB_TOKEN` | `contents:read`, issues/PR read | 无 | 执行 artifact 或候选脚本 |
-| Publisher write | Writer App token | `contents:write`, `pull_requests:write` | App private key | checks/statuses/actions/issues/admin/release |
+| Publisher write | Writer App token | `checks:write`, `contents:write`, `pull_requests:write` | App private key | statuses/actions/issues/admin/release；除精确发布证明外的 Check Run 写入 |
 | PR CI | `GITHUB_TOKEN` | `contents:read` | 无 | 特权 environment、持久 runner |
 | Policy | `GITHUB_TOKEN` | contents/PR read | 无 | 模型、候选 checkout、发布自定义 Check API |
 | Conflict Resolver | 无 GitHub 写凭据 | 读取受信 conflict bundle | `agent` Environment 中的模型凭据；无 Writer/release secret | GitHub 写入、token mint、合并 |
@@ -139,7 +155,7 @@ Manifest 使用精确字段集合：
 
 ```text
 disabled -> preflight -> artifact_verified -> token_minted
-  -> branch_created|branch_updated -> pr_created|pr_reused -> draft_waiting
+  -> branch_created|branch_updated -> pr_created|pr_reused -> writer_attested -> draft_waiting
 ```
 
 硬规则：
@@ -149,10 +165,11 @@ disabled -> preflight -> artifact_verified -> token_minted
 3. 分支固定为 `agent/issue-<number>`，每 Issue 最多一个开放 managed PR。
 4. 新分支只允许从 manifest base 创建。
 5. 已有分支只允许 exact old-SHA `force-with-lease`，且必须关联开放、同仓、同 base、Writer author 的 managed PR。
-6. 存在人工关闭的同分支 PR 时默认 tombstone；仅 owner 的显式 `resume_closed` dispatch 可恢复。
+6. 任一 managed PR 的 GitHub timeline 出现 `closed` 或 `reopened` 事件即为永久 tombstone；Publisher 在既有 PR 的任何 Writer mutation 前，以及 attestation 签发前，均双读并比较完整 lifecycle 投影，漂移也停止。当前不提供 `resume_closed` 通道，恢复须人工创建新的 Issue 形成新的 managed branch，或以后通过独立审查的 lifecycle protocol，不能重开旧 PR 复用 attestation。
 7. Publisher 不更新或伪造 CI、review、approval、Policy check。
-8. PR 初始为 Draft，body 记录 issue、base、artifact digest 和 run URL。
-9. 任一步骤状态不完整、分页截断、GitHub 409/422 或并发漂移均停止，不做猜测性补偿。
+8. PR 初始为 Draft，body 记录 issue、base、artifact digest 和 run URL；Publisher 完成 branch/PR/base 全部精确回读后，Writer App 必须为该 head 创建唯一、completed/success 的 publication attestation Check Run。
+9. attestation payload 必须 canonical 绑定 repo/ID、PR、head ref/SHA、base ref/SHA、task/issue、patch digest、candidate run、Publisher run 和 candidate executor；重试只可回读或由同一 Writer App 更新该唯一证明，不能接受同名其他 App 的证明。
+10. 任一步骤状态不完整、分页截断、GitHub 409/422 或并发漂移均停止，不做猜测性补偿。
 
 ## 8. Policy 分类
 
@@ -186,11 +203,12 @@ Finalizer 在 Policy workflow 完成后运行，但只有以下条件全部成�
 2. PR 仍开放，head/base SHA 与触发快照一致。
 3. head repo 为本仓库、branch 为 `agent/issue-*`；受管同步走独立确定性流程。
 4. PR author 的 GraphQL `Bot` login、database ID 和 node ID 均与 Writer token 实时读取的 REST Bot 身份一致。
-5. Policy 对当前 diff 重新计算为 `eligible`。
-6. 当前 head 上的 Policy check 为 GitHub Actions expected source 且成功。
-7. branch protection 的 review、deployment、push、lock、signature、linear-history、admin、bypass、conversation、ruleset 和三个 required checks 均与受审计 profile 精确一致。
-8. 无冲突、无阻塞 review、无未解决讨论、无 manual-only 标签。
-9. Writer App、installation、单仓 scope、Bot 身份和 `administration:read` 治理读取逐项成立，且授权有效期仍有效。
+5. 当前 PR 的完整 GitHub timeline 没有 `closed` 或 `reopened` 事件，且当前 head 存在唯一 Writer App publication attestation Check Run；其 App ID/slug、head、成功状态和 canonical payload 均与当前 PR、base、commit trailers、可信 executor registry 和 Candidate/Publisher workflow run 精确一致。
+6. Policy 对当前 diff 重新计算为 `eligible`。
+7. 当前 head 上的 Policy check 为 GitHub Actions expected source 且成功。
+8. `main` 经典保护、review、deployment、push、lock、signature、linear-history、admin、conversation 和三个 required checks，以及 `agent/**` fence、唯一 App bypass、Actions 默认权限和 `writer` Environment custom `main`-only policy，均与第 1.1 节受审计 profile 精确一致。
+9. 无冲突、无阻塞 review、无未解决讨论、无 manual-only 标签。
+10. Writer App、installation、单仓 scope、Bot 身份和 `administration:read` 治理读取逐项成立，且授权有效期仍有效。
 
 安全时序固定如下：
 
@@ -208,7 +226,7 @@ Finalizer 在 Policy workflow 完成后运行，但只有以下条件全部成�
 2. **身份与权限**：验证受管分支/PR 成功，`main`、workflow、checks、statuses、admin 和 release 写入失败；记录其他未保护分支的真实残余能力。
 3. **Artifact 隔离**：篡改 schema、digest、repo/base/task/path/mode/大小，证明均在 token mint 前失败。
 4. **Policy 来源**：将 Policy 加为 required check 并绑定 GitHub Actions；用其他来源同名状态证明不能满足保护。
-5. **direct merge**：逐一构造 head/base/check/draft/conflict/discussion/治理漂移，以及 `mergePullRequest` 响应丢失，证明不会合并错误 head、不会创建持久授权，且响应不确定时只通过独立回读收敛。canary 必须记录 Writer Bot 的 REST/GraphQL login、database ID、node ID，与 PR author 对照；另验证 Writer installation token 的 `administration:read` 可读取目标分支完整治理 profile，并证明 Actions token preliminary proof 的 protection 读取次数为零。未取得 run、PR、SHA 和 API 回读快照前不得声称已完成。
+5. **direct merge**：逐一构造 head/base/check/draft/conflict/discussion/治理漂移，以及 `mergePullRequest` 响应丢失，证明不会合并错误 head、不会创建持久授权，且响应不确定时只通过独立回读收敛。必须额外以 Writer author、正确 trailers 和三项绿灯为前提，模拟普通协作者替换 `agent/issue-*` head，证明缺少或错绑 Writer publication attestation 时任何 Writer mutation 都不会发生。canary 必须记录 Writer Bot 的 REST/GraphQL login、database ID、node ID，与 PR author 对照；另验证 Writer installation token 的 `administration:read` 双读第 1.1 节的完整 ruleset/detail、direct collaborators、Actions 设置、workflow defaults、`writer` Environment 和 custom deployment branch policy，并证明 Actions token preliminary proof 的治理 API 读取次数为零。未取得 run、PR、SHA 和 API 回读快照前不得声称已完成。
 6. **同步幂等与冲突**：连续三轮验证固定分支、最多一个开放 PR和 no-op；仅 UTF-8 `100644` modify/modify 冲突可验证 Resolver candidate、不同 model ID Reviewer receipt、final attestation 与一次 exact-head REST squash/readback。新增/删除、二进制、编码或 mode 不符、artifact/attestation 漂移、unknown tip、历史重写和人工关闭全部停止。
 7. **撤销**：关闭变量、枚举 managed PR、确认 Finalizer 未留下持久授权、suspend App、轮换 key，再验证无新写入。
 8. **Release**：触发 release lane，确认仍等待维护者审批且无 Agent secret。
@@ -217,7 +235,7 @@ PoC 使用 disposable issue、`docs/automation-canary/` 和 Draft PR。当前 Dr
 
 上线前必须记录每次 canary 的 `main` base SHA、PR base/head SHA、三个 required contexts 快照和 GraphQL/REST 读取时间。若 `main` 推进、PR base 更新或 required context/source 漂移，当前 run 标记为 stale 并停止，必须以新 base SHA 重跑，不能沿用旧 Policy/proof 结论。以下远端能力是上线阻断条件：
 
-- Writer App 已授予且仅授予 `administration:read`，Finalizer mint 的单仓 installation token 实测可以读取当前仓库 GraphQL `branchProtectionRules`/rulesets，并看到完整治理 profile、三项 strict required status checks 及 GitHub Actions source；权限不足、权限超出或读取不完整时 fail closed。无密钥 preliminary proof 不得作为完整授权证明。
+- 当前 Writer App 仅有 `administration:read`、`contents:write` 和 `pull_requests:write`；合入本方案后必须新增 `checks:write` 并接受 installation 权限更新。完成后，Publisher mint 的单仓 token 必须实测只能创建其自身的精确 head publication attestation，Finalizer mint 的单仓 token 必须实测双读当前仓库完整治理 profile：经典 `main` 保护、repository ruleset summary/detail、direct collaborators、Actions 设置、workflow defaults、`writer` Environment 及其唯一 custom `main` deployment branch policy。权限不足、权限超出或读取不完整时 fail closed。无密钥 preliminary proof 不得作为完整授权证明。
 
 已存在的 native auto-merge、错误 `head_sha` 或其他 PR 身份/治理投影漂移均不可接纳或手工补写为成功。Finalizer 必须报告冲突并保持 PR 未合并；远端响应丢失时不得根据失败响应猜测状态，必须独立回读；无法确认则保持 fail closed。
 
@@ -228,14 +246,15 @@ PoC 使用 disposable issue、`docs/automation-canary/` 和 Draft PR。当前 Dr
 1. 合入 disabled 代码和测试。
 2. Policy shadow 运行并核对分类。
 3. 创建并仅安装一个 Writer App。
-4. 配置 `agent` Environment（无人工审批，仅模型凭据）和 `writer` Environment（App ID/私钥），并记录远端设置快照；`release` Environment 继续人工审批。
-5. 将同一 Writer App 的 Repository permissions 增加为 `Administration: read-only`，接受 installation 的权限更新，并以 API 回读确认没有 Administration 写权限或额外仓库范围；随后运行 Draft canary，仍不执行 direct merge。
-6. 完成并保留 Writer token branch-protection/ruleset 完整读取 canary 与 direct-merge 不确定响应回读 canary 的 run、PR、SHA、API 回读快照，并证明 preliminary proof 未调用保护规则 API；任一失败均不得继续修改保护规则。
-7. PoC 通过后将 Policy 加为 required check，并绑定 GitHub Actions source。
-8. 回读 `main` 保护配置，确认只有 Rust、Frontend、Policy 三项 strict required checks 且来源绑定 GitHub Actions；不得加入 Finalizer hold context。
-9. 仅对 canary allowlist 启用 Finalizer 并完成一次 direct squash merge canary。
-10. 迁移 Sync 使用同一 Writer App；同步分支/PR 写入与一次 exact-head REST squash merge 用 Writer token，冲突和 state/policy drift 的 Issue/comment 告警用 `GITHUB_TOKEN`。Sync 只在本轮有界 required-check gate 成功后发起一次 `PUT /pulls/{number}/merge`（`merge_method=squash`、精确 `sha`）；无论 mutation 响应如何都只独立回读一次，无法证明 Writer bot 对同一 head/base 产生单 parent squash commit 且 `auto_merge=null` 时 fail closed，保留开放 managed PR 供后续同步复用，不设置 native auto-merge。
-11. 观察稳定窗口后删除旧 policy/merger/sync Environment、变量和废弃 PR。
+4. 配置 `agent` Environment（无人工审批，仅模型凭据）和 `writer` Environment（App ID/私钥）；先将 `writer` 设为 custom deployment branch policy、唯一 `main` branch、`protected_branches=false`、管理员不可绕过 secret，再记录 API 快照。`release` Environment 继续人工审批。
+5. 创建并激活第 1.1 节精确的 `agent-head-fence-v1` ruleset；它是唯一 active ruleset，且仅由同一 Writer App 的唯一 `Integration` actor 以 `always` bypass。不得先将 `agent/**` 变成 protected branch 再配置 Writer Environment。
+6. 将同一 Writer App 的 Repository permissions 配置为 `Administration: read-only`、`Checks: read and write`、`Contents: read and write`、`Pull requests: read and write`，接受 installation 的权限更新，并以 API 回读确认没有 Administration 写权限、没有额外仓库范围，且仅 Publisher token 请求 `checks:write`；随后运行 Draft canary，仍不执行 direct merge。
+7. 完成并保留 Writer token 第 1.1 节完整治理双读 canary 与 direct-merge 不确定响应回读 canary 的 run、PR、SHA、API 回读快照，并证明 preliminary proof 未调用治理 API；任一失败均不得继续修改保护规则。
+8. PoC 通过后将 Policy 加为 required check，并绑定 GitHub Actions source。
+9. 回读 `main` 保护配置，确认只有 Rust、Frontend、Policy 三项 strict required checks 且来源绑定 GitHub Actions；不得加入 Finalizer hold context。
+10. 仅对 canary allowlist 启用 Finalizer 并完成一次 direct squash merge canary。
+11. 迁移 Sync 使用同一 Writer App；同步分支/PR 写入与一次 exact-head REST squash merge 用 Writer token，冲突和 state/policy drift 的 Issue/comment 告警用 `GITHUB_TOKEN`。Sync 只在本轮有界 required-check gate 成功后发起一次 `PUT /pulls/{number}/merge`（`merge_method=squash`、精确 `sha`）；无论 mutation 响应如何都只独立回读一次，无法证明 Writer bot 对同一 head/base 产生单 parent squash commit 且 `auto_merge=null` 时 fail closed，保留开放 managed PR 供后续同步复用，不设置 native auto-merge。
+12. 观察稳定窗口后删除旧 policy/merger/sync Environment、变量和废弃 PR。
 
 ### PR #72 的安全复用
 
@@ -245,7 +264,7 @@ PoC 使用 disposable issue、`docs/automation-canary/` 和 Draft PR。当前 Dr
 
 1. 立即关闭 Agent、Writer、Finalizer 和 upstream sync 开关，阻止新的 token mint、分支/PR 写入和 direct merge。
 2. 完整分页枚举所有 managed PR，确认 Finalizer 没有留下 native auto-merge；必要时关闭开放 PR，但不得删除固定分支留下不可审计状态。
-3. 回读 branch protection/ruleset，确认 Rust、Frontend、Policy 三项门禁与来源绑定未被弱化；不通过一次性删除全部保护来恢复服务。
+3. 回读 branch protection/ruleset，确认 Rust、Frontend、Policy 三项门禁与来源绑定未被弱化；先停止 Writer token mint 和 `agent/**` 写入，再决定是否停用 `agent-head-fence-v1`，不通过一次性删除全部保护来恢复服务。
 4. 通过人工受保护 PR revert/remove Finalizer workflow；不保留或恢复 hold initializer。
 5. 如需彻底停用，suspend/uninstall Writer App 并轮换私钥；记录 installation 404/列表快照。
 6. 临时恢复人工上游同步，并保留回滚前后的配置、PR、SHA 和 API 证据。
@@ -317,11 +336,11 @@ GitHub API 故障，以及没有服务端 required lease check 时 pre-disarm �
 ## 14. Writer 现场证明与 response-loss canary 运维
 
 在启用 Writer mutation 前，从 default branch 手工运行
-`.github/workflows/writer-readonly-attestation.yml`。该 workflow 没有输入，只进入受保护的 `writer`
+`.github/workflows/writer-readonly-attestation.yml`。该 workflow 没有输入，只进入 custom `main`-only 的 `writer`
 Environment；workflow `GITHUB_TOKEN` 仅有 `contents: read`，临时 installation token 也显式缩窄为
 `administration: read`、`contents: read`、`pull-requests: read`。运行必须证明 App/installation 的
 ID、slug、owner、未暂停、`repository_selection=selected`、精确 Writer 权限、仅当前一个仓库可访问，
-以及 REST/GraphQL Bot 身份一致；它不执行 Git、PR、Issue 或其他写 mutation。
+以及 REST/GraphQL Bot 身份一致、第 1.1 节 `writer` secret lane API snapshot；它不执行 Git、PR、Issue 或其他写 mutation。
 
 Finalizer response-loss live canary 仅通过 repository variable
 `AERIS_FINALIZER_RESPONSE_LOSS_CANARY` 配置，值必须是无额外字段的单行 JSON：

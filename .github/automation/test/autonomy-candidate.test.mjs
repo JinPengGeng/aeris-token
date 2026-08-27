@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import {
+  CANDIDATE_SCHEMA_VERSION,
   CandidateValidationError,
   MAX_CANDIDATE_FILE_TEXT_BYTES,
   MAX_CANDIDATE_PATCH_BYTES,
@@ -10,6 +11,14 @@ import {
   validateCandidateArtifact,
   validateCandidateManifest,
 } from '../src/autonomy-candidate.mjs';
+
+const candidateExecutor = Object.freeze({
+  id: 'codex-action-v1',
+  protocol: 'aeris-workspace-candidate-v1',
+  kind: 'workspace_candidate',
+  action_sha: '52fe01ec70a42f454c9d2ebd47598f9fd6893d56',
+  tool_version: '0.148.0',
+});
 
 const expected = Object.freeze({
   repository: 'JinPengGeng/aeris-token',
@@ -20,6 +29,7 @@ const expected = Object.freeze({
   base_sha: 'a'.repeat(40),
   trigger_run_id: '456',
   trigger_run_attempt: 1,
+  executor: candidateExecutor,
 });
 
 function patch(path = 'docs/automation-canary/example.md', body = '+new content') {
@@ -29,7 +39,7 @@ function patch(path = 'docs/automation-canary/example.md', body = '+new content'
 function manifest(sourcePatch, overrides = {}) {
   const bytes = Buffer.byteLength(sourcePatch, 'utf8');
   return {
-    schema_version: 1,
+    schema_version: CANDIDATE_SCHEMA_VERSION,
     ...expected,
     patch_sha256: createHash('sha256').update(sourcePatch).digest('hex'),
     patch_bytes: bytes,
@@ -55,11 +65,18 @@ test('candidate artifact validates a bounded ordinary patch and returns frozen n
 test('manifest requires exact schema keys, valid fields, and the trusted execution snapshot', () => {
   const sourcePatch = patch();
   assertRejected(() => validateCandidateManifest({ ...manifest(sourcePatch), unexpected: true }, expected), 'unexpected keys');
-  assertRejected(() => validateCandidateManifest(manifest(sourcePatch, { schema_version: 2 }), expected), 'schema_version');
+  assertRejected(() => validateCandidateManifest(manifest(sourcePatch, { schema_version: 1 }), expected), 'schema_version');
   assertRejected(() => validateCandidateManifest(manifest(sourcePatch, { task_id: 'issue:124' }), expected), 'task_id');
   assertRejected(() => validateCandidateManifest(manifest(sourcePatch, { base_sha: 'A'.repeat(40) }), expected), 'base_sha');
   assertRejected(() => validateCandidateManifest(manifest(sourcePatch, { created_at: '2026-08-20T12:34:56+08:00' }), expected), 'created_at');
   assertRejected(() => validateCandidateManifest(manifest(sourcePatch), { ...expected, trigger_run_attempt: 2 }), 'trigger_run_attempt');
+  assertRejected(() => validateCandidateManifest(manifest(sourcePatch), {
+    ...expected,
+    executor: { ...candidateExecutor, tool_version: '0.148.1' },
+  }), 'executor');
+  assertRejected(() => validateCandidateManifest(manifest(sourcePatch, {
+    executor: { ...candidateExecutor, kind: 'completion' },
+  }), expected), 'executor');
 });
 
 test('artifact verifies patch byte length and SHA-256 digest', () => {

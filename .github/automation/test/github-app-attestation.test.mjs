@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import {
@@ -17,8 +20,10 @@ import {
 
 const expected = Object.freeze({
   owner_login: 'JinPengGeng',
+  owner_database_id: 11525733,
   app_id: 4667256,
   app_slug: 'aeris-token-writer',
+  app_node_id: 'MDExOkludGVncmF0aW9uNDY2NzI1Ng==',
   installation_id: 155342531,
 });
 
@@ -26,8 +31,9 @@ function app(overrides = {}) {
   return {
     id: expected.app_id,
     slug: expected.app_slug,
-    owner: { login: expected.owner_login, type: 'User' },
-    permissions: { administration: 'read', contents: 'write', pull_requests: 'write', metadata: 'read' },
+    node_id: expected.app_node_id,
+    owner: { id: expected.owner_database_id, login: expected.owner_login, type: 'User' },
+    permissions: { administration: 'read', checks: 'write', contents: 'write', pull_requests: 'write', metadata: 'read' },
     ...overrides,
   };
 }
@@ -40,7 +46,7 @@ function installation(overrides = {}) {
     account: { login: expected.owner_login, type: 'User' },
     repository_selection: 'selected',
     suspended_at: null,
-    permissions: { administration: 'read', contents: 'write', pull_requests: 'write', metadata: 'read' },
+    permissions: { administration: 'read', checks: 'write', contents: 'write', pull_requests: 'write', metadata: 'read' },
     ...overrides,
   };
 }
@@ -82,14 +88,16 @@ test('App JWT attestation binds App, owner, selected installation, and account i
   assert.deepEqual(result, {
     app_id: expected.app_id,
     app_slug: expected.app_slug,
+    app_node_id: expected.app_node_id,
     app_owner_login: expected.owner_login,
+    app_owner_database_id: expected.owner_database_id,
     app_owner_type: 'User',
     installation_id: expected.installation_id,
     installation_account_login: expected.owner_login,
     installation_account_type: 'User',
     repository_selection: 'selected',
-    app_permissions: { administration: 'read', contents: 'write', metadata: 'read', pull_requests: 'write' },
-    installation_permissions: { administration: 'read', contents: 'write', metadata: 'read', pull_requests: 'write' },
+    app_permissions: { administration: 'read', checks: 'write', contents: 'write', metadata: 'read', pull_requests: 'write' },
+    installation_permissions: { administration: 'read', checks: 'write', contents: 'write', metadata: 'read', pull_requests: 'write' },
   });
   assert.deepEqual(calls, ['app', `installation:${expected.installation_id}`]);
   assert.equal(Object.isFrozen(result), true);
@@ -100,7 +108,11 @@ test('App JWT attestation fails closed on wrong or missing live identity fields'
     [app({ id: expected.app_id + 1 }), installation()],
     [app({ id: undefined }), installation()],
     [app({ slug: 'other-writer' }), installation()],
+    [app({ node_id: 'MDExOkludGVncmF0aW9uOTk=' }), installation()],
+    [app({ node_id: '' }), installation()],
     [app({ owner: { login: 'other-owner', type: 'User' } }), installation()],
+    [app({ owner: { id: expected.owner_database_id + 1, login: expected.owner_login, type: 'User' } }), installation()],
+    [app({ owner: { id: 0, login: expected.owner_login, type: 'User' } }), installation()],
     [app({ owner: null }), installation()],
     [app(), installation({ id: expected.installation_id + 1 })],
     [app(), installation({ app_id: expected.app_id + 1 })],
@@ -111,12 +123,14 @@ test('App JWT attestation fails closed on wrong or missing live identity fields'
     [app(), installation({ suspended_at: '2026-08-21T00:00:00Z' })],
     [app({ permissions: undefined }), installation()],
     [app({ permissions: { administration: 'read', contents: 'write' } }), installation()],
+    [app({ permissions: { administration: 'read', checks: 'read', contents: 'write', pull_requests: 'write' } }), installation()],
     [app({ permissions: { administration: 'read', contents: false, pull_requests: 'write' } }), installation()],
     [app({ permissions: { administration: 'write', contents: 'write', pull_requests: 'write' } }), installation()],
     [app({ permissions: { administration: 'read', contents: 'write', pull_requests: 'write', metadata: 'write' } }), installation()],
     [app({ permissions: { administration: 'read', contents: 'write', pull_requests: 'write', issues: 'read' } }), installation()],
     [app(), installation({ permissions: undefined })],
     [app(), installation({ permissions: { administration: 'read', contents: 'write' } })],
+    [app(), installation({ permissions: { administration: 'read', checks: 'read', contents: 'write', pull_requests: 'write' } })],
     [app(), installation({ permissions: { administration: 'read', contents: 'write', pull_requests: null } })],
     [app(), installation({ permissions: { administration: 'write', contents: 'write', pull_requests: 'write' } })],
     [app(), installation({ permissions: { administration: 'read', contents: 'write', pull_requests: 'write', metadata: 'write' } })],
@@ -197,8 +211,10 @@ test('attestation timeout remains active while reading the response body', async
 test('attestation CLI derives owner from the repository and rejects missing configuration before HTTP', async () => {
   const environment = {
     GITHUB_REPOSITORY: 'JinPengGeng/aeris-token',
+    AERIS_WRITER_APP_OWNER_DATABASE_ID: String(expected.owner_database_id),
     AERIS_WRITER_APP_ID: String(expected.app_id),
     AERIS_WRITER_APP_SLUG: expected.app_slug,
+    AERIS_WRITER_APP_NODE_ID: expected.app_node_id,
     AERIS_WRITER_INSTALLATION_ID: String(expected.installation_id),
   };
   let calls = 0;
@@ -212,7 +228,17 @@ test('attestation CLI derives owner from the repository and rejects missing conf
   assert.equal(result.app_owner_login, expected.owner_login);
   assert.equal(calls, 2);
 
-  for (const key of ['GITHUB_REPOSITORY', 'AERIS_WRITER_APP_ID', 'AERIS_WRITER_APP_SLUG', 'AERIS_WRITER_INSTALLATION_ID']) {
+  const outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-app-attestation-'));
+  const outputPath = path.join(outputDirectory, 'github-output');
+  try {
+    await runGitHubAppAttestation({ ...environment, GITHUB_OUTPUT: outputPath }, dependencies);
+    assert.match(fs.readFileSync(outputPath, 'utf8'), new RegExp(`^app_node_id=${expected.app_node_id}$`, 'm'));
+    assert.match(fs.readFileSync(outputPath, 'utf8'), new RegExp(`^app_owner_database_id=${expected.owner_database_id}$`, 'm'));
+  } finally {
+    fs.rmSync(outputDirectory, { force: true, recursive: true });
+  }
+
+  for (const key of ['GITHUB_REPOSITORY', 'AERIS_WRITER_APP_OWNER_DATABASE_ID', 'AERIS_WRITER_APP_ID', 'AERIS_WRITER_APP_SLUG', 'AERIS_WRITER_APP_NODE_ID', 'AERIS_WRITER_INSTALLATION_ID']) {
     calls = 0;
     await assert.rejects(
       () => runGitHubAppAttestation({ ...environment, [key]: '' }, dependencies),

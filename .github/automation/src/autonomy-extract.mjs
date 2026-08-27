@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 
-import { validateCandidateArtifact } from './autonomy-candidate.mjs';
+import { CANDIDATE_SCHEMA_VERSION, validateCandidateArtifact } from './autonomy-candidate.mjs';
+import { validateWorkspaceCandidateExecutor } from './ai-executor-contract.mjs';
 import { createSafeGitContext, SafeGitError } from './autonomy-safe-git.mjs';
 
 export class CandidateExtractionError extends Error {
@@ -32,6 +32,14 @@ function positiveInteger(value, name) {
   return parsed;
 }
 
+function candidateExecutor(value, name) {
+  try {
+    return validateWorkspaceCandidateExecutor(value, name);
+  } catch {
+    reject(`${name} is invalid`);
+  }
+}
+
 function normalizeMetadata(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) reject('candidate metadata is invalid');
   const repository = requiredString(value.repository, 'repository', /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
@@ -50,6 +58,7 @@ function normalizeMetadata(value) {
     base_sha: baseSha,
     trigger_run_id: triggerRunId,
     trigger_run_attempt: triggerRunAttempt,
+    executor: candidateExecutor(value.executor, 'candidate executor'),
   });
 }
 
@@ -100,7 +109,7 @@ export function buildCandidateArtifact({
 
   const createdAt = now.toISOString();
   const manifest = {
-    schema_version: 1,
+    schema_version: CANDIDATE_SCHEMA_VERSION,
     ...normalized,
     patch_sha256: createHash('sha256').update(patch).digest('hex'),
     patch_bytes: patch.length,
@@ -114,35 +123,4 @@ export function buildCandidateArtifact({
   fs.writeFileSync(patchPath, patch, { mode: 0o600 });
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   return Object.freeze({ patchPath, manifestPath, ...verified });
-}
-
-function environmentMetadata(environment) {
-  return {
-    repository: environment.GITHUB_REPOSITORY,
-    repository_id: environment.GITHUB_REPOSITORY_ID,
-    issue_number: environment.AERIS_ISSUE_NUMBER,
-    base_ref: environment.AERIS_BASE_REF,
-    base_sha: environment.AERIS_BASE_SHA,
-    trigger_run_id: environment.GITHUB_RUN_ID,
-    trigger_run_attempt: environment.GITHUB_RUN_ATTEMPT,
-  };
-}
-
-export function runCandidateExtraction(environment = process.env) {
-  const result = buildCandidateArtifact({
-    repositoryRoot: environment.GITHUB_WORKSPACE,
-    outputDirectory: environment.AERIS_CANDIDATE_OUTPUT,
-    metadata: environmentMetadata(environment),
-  });
-  if (environment.GITHUB_OUTPUT) {
-    fs.appendFileSync(
-      environment.GITHUB_OUTPUT,
-      `patch_sha256=${result.manifest.patch_sha256}\npatch_bytes=${result.manifest.patch_bytes}\npath_count=${result.paths.length}\n`,
-    );
-  }
-  return result;
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  runCandidateExtraction();
 }

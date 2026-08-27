@@ -51,6 +51,11 @@ test('Writer attestation mints one explicitly read-only repository token and has
   assert.match(serialized, /github-app-attestation\.mjs prove-token/);
   assert.doesNotMatch(serialized, /\bgh\s+(pr|issue|api)|git\s+(push|commit)|mergePullRequest|markPullRequestReady|convertPullRequestToDraft/);
   const summary = job.steps.find((step) => /Summarize read-only attestation/.test(step.name));
+  const appAttestation = job.steps.find((step) => step.id === 'writer_app_attestation');
+  assert.equal(appAttestation.env.AERIS_WRITER_APP_OWNER_DATABASE_ID, '${{ vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}');
+  assert.equal(appAttestation.env.AERIS_WRITER_APP_NODE_ID, '${{ vars.AERIS_WRITER_APP_NODE_ID }}');
+  assert.equal(summary.env.APP_NODE_ID, '${{ steps.writer_app_attestation.outputs.app_node_id }}');
+  assert.equal(summary.env.APP_OWNER_DATABASE_ID, '${{ steps.writer_app_attestation.outputs.app_owner_database_id }}');
   assert.equal(summary.env.APP_PERMISSIONS, '${{ steps.writer_app_attestation.outputs.app_permissions }}');
   assert.equal(summary.env.INSTALLATION_PERMISSIONS, '${{ steps.writer_app_attestation.outputs.installation_permissions }}');
   assert.equal(summary.env.REPOSITORY_SELECTION, '${{ steps.writer_app_attestation.outputs.repository_selection }}');
@@ -60,7 +65,8 @@ test('Writer attestation mints one explicitly read-only repository token and has
   assert.notEqual(printfNewline, '\n');
   const expectedFormats = [
     [`'- App: \`%s\` (#%s)${printfNewline}'`, ['APP_SLUG', 'APP_ID']],
-    [`'- App owner: \`%s\` (\`%s\`)${printfNewline}'`, ['APP_OWNER', 'APP_OWNER_TYPE']],
+    [`'- App node ID: \`%s\`${printfNewline}'`, ['APP_NODE_ID']],
+    [`'- App owner: \`%s\` (#%s; \`%s\`)${printfNewline}'`, ['APP_OWNER', 'APP_OWNER_DATABASE_ID', 'APP_OWNER_TYPE']],
     [`'- App permissions: \`%s\`${printfNewline}'`, ['APP_PERMISSIONS']],
     [`'- Installation: \`%s\`${printfNewline}'`, ['INSTALLATION_ID']],
     [`'- Installation permissions: \`%s\`${printfNewline}'`, ['INSTALLATION_PERMISSIONS']],
@@ -96,7 +102,9 @@ test('Writer attestation summary renders shell metacharacters literally', () => 
   const values = {
     APP_ID: '4667256',
     APP_SLUG: 'writer`$(printf injected)`%percent',
+    APP_NODE_ID: 'MDExOkludGVncmF0aW9uNDY2NzI1Ng==`$(printf injected)`',
     APP_OWNER: 'owner`$(printf injected)`',
+    APP_OWNER_DATABASE_ID: '11525733`$(printf injected)`',
     APP_OWNER_TYPE: 'Organization%q',
     APP_PERMISSIONS: 'contents:write`$(printf injected)`',
     INSTALLATION_ID: '155342531`$(printf injected)`',
@@ -124,7 +132,8 @@ test('Writer attestation summary renders shell metacharacters literally', () => 
       '### Writer App read-only attestation',
       '',
       `- App: \`${values.APP_SLUG}\` (#${values.APP_ID})`,
-      `- App owner: \`${values.APP_OWNER}\` (\`${values.APP_OWNER_TYPE}\`)`,
+      `- App node ID: \`${values.APP_NODE_ID}\``,
+      `- App owner: \`${values.APP_OWNER}\` (#${values.APP_OWNER_DATABASE_ID}; \`${values.APP_OWNER_TYPE}\`)`,
       `- App permissions: \`${values.APP_PERMISSIONS}\``,
       `- Installation: \`${values.INSTALLATION_ID}\``,
       `- Installation permissions: \`${values.INSTALLATION_PERMISSIONS}\``,

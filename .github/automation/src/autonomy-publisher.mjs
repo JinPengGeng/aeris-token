@@ -4,7 +4,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { executorDescriptorForRoute, validateExecutorRegistry } from './ai-executor-contract.mjs';
 import { validateCandidateArtifact } from './autonomy-candidate.mjs';
+import {
+  createWriterPublisherTarget,
+  createWriterPublisherCheckRun,
+  decodeWriterPublisherAttestationSummary,
+  normalizeWriterPublisherAttestation,
+  serializeWriterPublisherTarget,
+  updateWriterPublisherCheckRun,
+  validateWriterPublisherCheckRun,
+  WRITER_PUBLISHER_CHECK_NAME,
+  WriterPublisherAttestationError,
+} from './autonomy-publisher-attestation.mjs';
 import { GitHubApiError, GitHubClient } from './github-client.mjs';
 
 const MANAGED_MARKER = '<!-- aeris-autonomy-managed -->';
@@ -15,6 +27,8 @@ const DEFAULT_GIT_TIMEOUT_MS = 30_000;
 const DEFAULT_REST_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
 const MAXIMUM_RESPONSE_BYTES = 4 * 1024 * 1024;
+const MAXIMUM_EXECUTOR_REGISTRY_BYTES = 65_536;
+const EXECUTOR_REGISTRY_PATH = '.github/ai-executors.json';
 
 export class AutonomyPublisherError extends Error {
   constructor(message) {
@@ -113,6 +127,15 @@ function stagedPaths(repositoryRoot, options) {
   return output.toString('utf8').split('\0').filter(Boolean);
 }
 
+function executorProvenance(executor) {
+  return [
+    `Aeris-Autonomy-Executor-ID: ${executor.id}`,
+    `Aeris-Autonomy-Executor-Protocol: ${executor.protocol}`,
+    `Aeris-Autonomy-Executor-Action-SHA: ${executor.action_sha}`,
+    `Aeris-Autonomy-Executor-Tool-Version: ${executor.tool_version}`,
+  ].join('\n');
+}
+
 export class LocalGitPublisher {
   constructor({ repositoryRoot, token, repository, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS, execFileImpl = execFileSync }) {
     this.repositoryRoot = path.resolve(repositoryRoot);
@@ -137,6 +160,34 @@ export class LocalGitPublisher {
     if (dirty) reject('publisher checkout is not clean before applying the candidate');
   }
 
+  trustedCandidateExecutorAtBase(baseSha) {
+    this.verifyBase(baseSha);
+    const tree = this.command(['ls-tree', '-z', baseSha, '--', EXECUTOR_REGISTRY_PATH], {
+      encoding: 'buffer',
+    });
+    const treeText = tree.toString('utf8');
+    if (!Buffer.from(treeText, 'utf8').equals(tree)) reject('trusted candidate executor registry is not UTF-8');
+    const entry = /^100644 blob ([0-9a-f]{40})\t\.github\/ai-executors\.json\0$/.exec(treeText);
+    if (!entry) reject('trusted candidate executor registry is missing or not a regular blob');
+    const blob = this.command(['cat-file', 'blob', entry[1]], { encoding: 'buffer' });
+    if (blob.length === 0 || blob.length > MAXIMUM_EXECUTOR_REGISTRY_BYTES) {
+      reject('trusted candidate executor registry size is invalid');
+    }
+    const text = blob.toString('utf8');
+    if (!Buffer.from(text, 'utf8').equals(blob)) reject('trusted candidate executor registry is not UTF-8');
+    let registry;
+    try {
+      registry = JSON.parse(text);
+    } catch {
+      reject('trusted candidate executor registry is invalid JSON');
+    }
+    try {
+      return executorDescriptorForRoute(validateExecutorRegistry(registry), 'candidate');
+    } catch {
+      reject('trusted candidate executor registry is invalid');
+    }
+  }
+
   prepareCommit({ patchPath, verified }) {
     this.verifyBase(verified.manifest.base_sha);
     this.command(['apply', '--check', '--index', '--whitespace=error-all', '--', patchPath]);
@@ -158,6 +209,7 @@ export class LocalGitPublisher {
       `Aeris-Autonomy-Patch: ${manifest.patch_sha256}`,
       `Aeris-Autonomy-Base: ${manifest.base_sha}`,
       `Aeris-Autonomy-Run: ${manifest.trigger_run_id}/${manifest.trigger_run_attempt}`,
+      executorProvenance(manifest.executor),
     ].join('\n');
     this.command([
       '-c', 'user.name=aeris-autonomy[bot]',
@@ -199,6 +251,26 @@ export class LocalGitPublisher {
       fs.rmSync(askpassDirectory, { recursive: true, force: true });
     }
   }
+}
+
+function bindExpectedCandidateExecutor({ expected, repositoryRoot, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS, execFileImpl = execFileSync }) {
+  const verifier = new LocalGitPublisher({
+    repositoryRoot,
+    token: null,
+    repository: expected.repository,
+    gitTimeoutMs,
+    execFileImpl,
+  });
+  const executor = verifier.trustedCandidateExecutorAtBase(expected.base_sha);
+  return Object.freeze({
+    expected: Object.freeze({ ...expected, executor }),
+    verifier,
+  });
+}
+
+export function trustedCandidateExecutorForBase({ repositoryRoot, baseSha, repository, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS, execFileImpl = execFileSync }) {
+  const verifier = new LocalGitPublisher({ repositoryRoot, token: null, repository, gitTimeoutMs, execFileImpl });
+  return verifier.trustedCandidateExecutorAtBase(required(baseSha, 'baseSha', SHA));
 }
 
 export class WriterGitHubClient extends GitHubClient {
@@ -259,6 +331,23 @@ export class WriterGitHubClient extends GitHubClient {
     }
   }
 
+  getCommit(sha) {
+    if (!SHA.test(sha)) reject('commit SHA is invalid');
+    return this.request('GET', `/repos/${this.repository}/git/commits/${sha}`);
+  }
+
+  getCheckRun(checkRunId) {
+    return this.request('GET', `/repos/${this.repository}/check-runs/${positiveInteger(checkRunId, 'check run ID')}`);
+  }
+
+  createCheckRun(body) {
+    return this.request('POST', `/repos/${this.repository}/check-runs`, { body });
+  }
+
+  updateCheckRun(checkRunId, body) {
+    return this.request('PATCH', `/repos/${this.repository}/check-runs/${positiveInteger(checkRunId, 'check run ID')}`, { body });
+  }
+
   async listBranchPulls(owner, branch) {
     const result = await this.list(
       `/repos/${this.repository}/pulls?state=all&sort=created&direction=asc&head=${encodeURIComponent(`${owner}:${branch}`)}`,
@@ -281,10 +370,15 @@ function managedBody(manifest, runUrl) {
   return `${MANAGED_MARKER}
 <!-- aeris-autonomy-task:${manifest.task_id} -->
 <!-- aeris-autonomy-patch:${manifest.patch_sha256} -->
+<!-- aeris-autonomy-executor-id:${manifest.executor.id} -->
+<!-- aeris-autonomy-executor-protocol:${manifest.executor.protocol} -->
+<!-- aeris-autonomy-executor-action-sha:${manifest.executor.action_sha} -->
+<!-- aeris-autonomy-executor-tool-version:${manifest.executor.tool_version} -->
 Candidate generated for #${manifest.issue_number} from base \`${manifest.base_sha}\`.
 
 - Agent run: ${runUrl}
 - Artifact digest: \`${manifest.patch_sha256}\`
+- Candidate executor: \`${manifest.executor.id}\` (\`${manifest.executor.protocol}\`)
 
 This pull request remains draft until deterministic Policy marks it eligible.`;
 }
@@ -349,7 +443,156 @@ function validatePublishedPull(pull, { repository, branch, baseBranch, writerLog
   }
 }
 
-export async function publishCandidate({ artifact, expected, client, gitPublisher, writerLogin, runUrl }) {
+function validatePublishedCommit(commit, { sha, tree, manifest }) {
+  if (commit?.sha !== sha || commit?.tree?.sha !== tree || typeof commit?.message !== 'string') {
+    reject('GitHub did not persist the exact managed candidate commit');
+  }
+  if (!commit.message.includes(executorProvenance(manifest.executor))) {
+    reject('GitHub did not persist candidate executor provenance');
+  }
+}
+
+function normalizePullLifecycleEvents(events) {
+  if (!Array.isArray(events)) reject('Publisher pull request lifecycle event projection is invalid');
+  const lifecycle = [];
+  const ids = new Set();
+  for (const [index, event] of events.entries()) {
+    if (!event || typeof event !== 'object' || Array.isArray(event)) {
+      reject(`Publisher pull request lifecycle event ${index} is invalid`);
+    }
+    if (!['closed', 'reopened'].includes(event.event)) continue;
+    const id = Number.isSafeInteger(event.id) && event.id > 0
+      ? String(event.id)
+      : typeof event.id === 'string' && /^[1-9][0-9]*$/.test(event.id)
+        ? event.id
+        : null;
+    if (id === null || ids.has(id)) reject('Publisher pull request lifecycle event identity is invalid');
+    ids.add(id);
+    lifecycle.push(Object.freeze({ id, event: event.event }));
+  }
+  lifecycle.sort((left, right) => left.id.localeCompare(right.id) || left.event.localeCompare(right.event));
+  return Object.freeze(lifecycle);
+}
+
+async function verifyPullLifecycle(client, pullNumber) {
+  if (typeof client?.listPullTimelineEvents !== 'function') {
+    reject('Publisher client cannot verify pull request lifecycle');
+  }
+  const read = async () => normalizePullLifecycleEvents(await client.listPullTimelineEvents(pullNumber));
+  const initial = await read();
+  const confirmed = await read();
+  if (JSON.stringify(initial) !== JSON.stringify(confirmed)) {
+    reject('managed pull request lifecycle drifted between complete reads');
+  }
+  if (confirmed.length !== 0) reject('managed pull request is tombstoned by close or reopen history');
+}
+
+function writerAppIdentity(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      !Number.isSafeInteger(value.app_id) || value.app_id <= 0 ||
+      typeof value.app_slug !== 'string' || !/^[a-z0-9][a-z0-9-]{0,99}$/.test(value.app_slug)) {
+    reject('Writer App identity is invalid');
+  }
+  return Object.freeze({ app_id: value.app_id, app_slug: value.app_slug });
+}
+
+function publisherRunIdentity(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      typeof value.run_id !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(value.run_id) ||
+      !Number.isSafeInteger(value.run_attempt) || value.run_attempt <= 0) {
+    reject('Publisher workflow run identity is invalid');
+  }
+  return Object.freeze({ run_id: value.run_id, run_attempt: value.run_attempt });
+}
+
+function samePublicationBinding(left, right) {
+  const stable = [
+    'repository', 'repository_id', 'task_id', 'issue_number', 'pull_number', 'head_ref', 'head_sha',
+    'base_ref', 'base_sha', 'patch_sha256',
+  ];
+  return stable.every((field) => left[field] === right[field]) &&
+    JSON.stringify(left.executor) === JSON.stringify(right.executor);
+}
+
+async function attestPublishedCandidate({ client, commit, expected, manifest, branch, pullNumber, writerApp, publisherRun }) {
+  if (typeof client?.listCheckRunsForRef !== 'function' || typeof client?.getCheckRun !== 'function' ||
+      typeof client?.createCheckRun !== 'function' || typeof client?.updateCheckRun !== 'function') {
+    reject('Publisher client cannot create Writer attestation');
+  }
+  const app = writerAppIdentity(writerApp);
+  const run = publisherRunIdentity(publisherRun);
+  const attestation = normalizeWriterPublisherAttestation({
+    schema_version: 1,
+    repository: expected.repository,
+    repository_id: expected.repository_id,
+    task_id: expected.task_id,
+    issue_number: expected.issue_number,
+    pull_number: pullNumber,
+    head_ref: branch,
+    head_sha: commit.sha,
+    base_ref: expected.base_ref,
+    base_sha: expected.base_sha,
+    patch_sha256: manifest.patch_sha256,
+    candidate_run_id: expected.trigger_run_id,
+    candidate_run_attempt: expected.trigger_run_attempt,
+    publisher_run_id: run.run_id,
+    publisher_run_attempt: run.run_attempt,
+    executor: manifest.executor,
+  });
+  const validate = (check) => {
+    try {
+      return validateWriterPublisherCheckRun(check, { attestation, writer_app: app });
+    } catch (error) {
+      if (error instanceof WriterPublisherAttestationError) reject(error.message);
+      throw error;
+    }
+  };
+  const find = async () => {
+    const checks = await client.listCheckRunsForRef(commit.sha);
+    if (!Array.isArray(checks)) reject('Publisher check run projection is invalid');
+    const candidates = checks.filter((check) => check?.name === WRITER_PUBLISHER_CHECK_NAME &&
+      check?.app?.id === app.app_id && check?.app?.slug === app.app_slug);
+    if (candidates.length > 1) reject('managed candidate has ambiguous Writer attestations');
+    if (candidates.length === 0) return null;
+    return client.getCheckRun(positiveInteger(candidates[0]?.id, 'Writer attestation check run ID'));
+  };
+  const existing = await find();
+  if (existing !== null) {
+    try {
+      return validate(existing);
+    } catch (error) {
+      if (!(error instanceof AutonomyPublisherError)) throw error;
+      let previous;
+      try {
+        previous = decodeWriterPublisherAttestationSummary(existing?.output?.summary);
+        validateWriterPublisherCheckRun(existing, { attestation: previous, writer_app: app });
+      } catch {
+        throw error;
+      }
+      if (!samePublicationBinding(previous, attestation)) throw error;
+      try {
+        await client.updateCheckRun(existing.id, updateWriterPublisherCheckRun(attestation));
+      } catch (updateError) {
+        const recovered = await find();
+        if (recovered === null) throw updateError;
+        return validate(recovered);
+      }
+      return validate(await client.getCheckRun(existing.id));
+    }
+  }
+  let created;
+  try {
+    created = await client.createCheckRun(createWriterPublisherCheckRun(attestation));
+  } catch (error) {
+    const recovered = await find();
+    if (recovered === null) throw error;
+    return validate(recovered);
+  }
+  const createdId = positiveInteger(created?.id, 'created Writer attestation check run ID');
+  return validate(await client.getCheckRun(createdId));
+}
+
+export async function publishCandidate({ artifact, expected, client, gitPublisher, writerLogin, runUrl, writerApp, publisherRun }) {
   const repository = expected.repository;
   const [owner] = repository.split('/');
   const branch = `agent/issue-${expected.issue_number}`;
@@ -369,7 +612,10 @@ export async function publishCandidate({ artifact, expected, client, gitPublishe
   if (pulls.some((pull) => pull.state === 'closed')) {
     reject('managed branch is tombstoned by a closed pull request');
   }
-  if (open.length === 1) validateManagedPull(open[0], { repository, branch, baseBranch, writerLogin, taskId: expected.task_id });
+  if (open.length === 1) {
+    validateManagedPull(open[0], { repository, branch, baseBranch, writerLogin, taskId: expected.task_id });
+    await verifyPullLifecycle(client, open[0].number);
+  }
 
   const remoteSha = branchSha(branchRef, branch, { allowMissing: true });
   if (open.length === 1 && open[0].head.sha !== remoteSha) reject('managed branch and pull request heads disagree');
@@ -377,16 +623,23 @@ export async function publishCandidate({ artifact, expected, client, gitPublishe
     reject('unowned managed branch already exists');
   }
   if (remoteSha !== commit.sha) {
+    if (open.length === 1) await verifyPullLifecycle(client, open[0].number);
     gitPublisher.push(branch, remoteSha);
     const pushedSha = branchSha(await client.getBranch(branch), branch);
     if (pushedSha !== commit.sha) reject('GitHub did not persist the exact managed branch SHA');
   }
+  validatePublishedCommit(await client.getCommit(commit.sha), {
+    sha: commit.sha,
+    tree: commit.tree,
+    manifest: verified.manifest,
+  });
 
   const body = managedBody(verified.manifest, runUrl);
   const title = `chore(autonomy): implement #${expected.issue_number}`;
   assertExpectedBase(await client.getBranch(baseBranch), baseBranch, expected.base_sha);
   let mutation;
   if (open.length === 1) {
+    await verifyPullLifecycle(client, open[0].number);
     mutation = await client.updatePull(open[0].number, { title, body });
   } else {
     mutation = await client.createPull({
@@ -398,7 +651,12 @@ export async function publishCandidate({ artifact, expected, client, gitPublishe
     });
   }
   const pullNumber = positiveInteger(mutation?.number, 'published pull request number');
-  const pull = await client.getPull(pullNumber);
+  // This is the final remote-state read before the Writer App attests the publication.
+  const [pull, confirmedBase, confirmedBranch] = await Promise.all([
+    client.getPull(pullNumber),
+    client.getBranch(baseBranch),
+    client.getBranch(branch),
+  ]);
   validatePublishedPull(pull, {
     repository,
     branch,
@@ -409,35 +667,48 @@ export async function publishCandidate({ artifact, expected, client, gitPublishe
     title,
     body,
   });
-  const [confirmedBase, confirmedBranch] = await Promise.all([
-    client.getBranch(baseBranch),
-    client.getBranch(branch),
-  ]);
   assertExpectedBase(confirmedBase, baseBranch, expected.base_sha);
   const confirmedSha = branchSha(confirmedBranch, branch);
   if (confirmedSha !== commit.sha || pull.head.sha !== confirmedSha) {
     reject('managed branch and pull request heads disagree after publication');
   }
+  await verifyPullLifecycle(client, pullNumber);
+  const attestation = await attestPublishedCandidate({
+    client,
+    commit,
+    expected,
+    manifest: verified.manifest,
+    branch,
+    pullNumber,
+    writerApp,
+    publisherRun,
+  });
   return Object.freeze({
     branch,
     head_sha: commit.sha,
     pull_number: pullNumber,
     pull_url: pull.html_url,
     action: open.length === 1 ? 'updated' : 'created',
+    attestation_check_run_id: attestation.id,
+    publisher_target: createWriterPublisherTarget(attestation.attestation, attestation.id),
   });
 }
 
+function writePublisherTarget(targetPath, target) {
+  if (typeof targetPath !== 'string' || !path.isAbsolute(targetPath) || path.basename(targetPath) !== 'publisher-target.json') {
+    reject('AERIS_PUBLISHER_TARGET_PATH is invalid');
+  }
+  const resolved = path.resolve(targetPath);
+  fs.mkdirSync(path.dirname(resolved), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(resolved, serializeWriterPublisherTarget(target), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+}
+
 export function verifyCandidateForPublication({ manifestPath, patchPath, expected, repositoryRoot, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS }) {
-  const artifact = readArtifact(manifestPath, patchPath, expected);
-  const verifier = new LocalGitPublisher({
-    repositoryRoot,
-    token: null,
-    repository: expected.repository,
-    gitTimeoutMs,
-  });
-  verifier.verifyBase(expected.base_sha);
+  const bound = bindExpectedCandidateExecutor({ expected, repositoryRoot, gitTimeoutMs });
+  const artifact = readArtifact(manifestPath, patchPath, bound.expected);
+  const verifier = bound.verifier;
   verifier.command(['apply', '--check', '--index', '--whitespace=error-all', '--', patchPath]);
-  return artifact;
+  return Object.freeze({ ...artifact, expected: bound.expected });
 }
 
 export async function runAutonomyPublisher(environment = process.env) {
@@ -450,13 +721,20 @@ export async function runAutonomyPublisher(environment = process.env) {
     'AERIS_PUBLISHER_GIT_TIMEOUT_MS',
     DEFAULT_GIT_TIMEOUT_MS,
   );
-  const artifact = readArtifact(manifestPath, patchPath, expected);
+  const verifiedArtifact = verifyCandidateForPublication({ manifestPath, patchPath, expected, repositoryRoot, gitTimeoutMs });
   if (environment.AERIS_VERIFY_ONLY === 'true') {
-    verifyCandidateForPublication({ manifestPath, patchPath, expected, repositoryRoot, gitTimeoutMs });
-    return Object.freeze({ verified: true, digest: artifact.verified.manifest.patch_sha256 });
+    return Object.freeze({ verified: true, digest: verifiedArtifact.verified.manifest.patch_sha256 });
   }
   const token = required(environment.AERIS_WRITER_TOKEN, 'AERIS_WRITER_TOKEN');
   const slug = required(environment.AERIS_WRITER_APP_SLUG, 'AERIS_WRITER_APP_SLUG', /^[a-z0-9][a-z0-9-]{0,99}$/);
+  const writerApp = Object.freeze({
+    app_id: positiveInteger(environment.AERIS_WRITER_APP_ID, 'AERIS_WRITER_APP_ID'),
+    app_slug: slug,
+  });
+  const publisherRun = Object.freeze({
+    run_id: required(environment.AERIS_PUBLISHER_RUN_ID, 'AERIS_PUBLISHER_RUN_ID', /^(?:0|[1-9][0-9]*)$/),
+    run_attempt: positiveInteger(environment.AERIS_PUBLISHER_RUN_ATTEMPT, 'AERIS_PUBLISHER_RUN_ATTEMPT'),
+  });
   const writerLogin = `${slug}[bot]`;
   const client = new WriterGitHubClient({
     token,
@@ -475,15 +753,18 @@ export async function runAutonomyPublisher(environment = process.env) {
     gitTimeoutMs,
   });
   const result = await publishCandidate({
-    artifact: { ...artifact, patchPath },
-    expected,
+    artifact: { ...verifiedArtifact, patchPath },
+    expected: verifiedArtifact.expected,
     client,
     gitPublisher,
     writerLogin,
     runUrl: required(environment.AERIS_RUN_URL, 'AERIS_RUN_URL', /^https:\/\/github\.com\//),
+    writerApp,
+    publisherRun,
   });
+  writePublisherTarget(required(environment.AERIS_PUBLISHER_TARGET_PATH, 'AERIS_PUBLISHER_TARGET_PATH'), result.publisher_target);
   if (environment.GITHUB_OUTPUT) {
-    fs.appendFileSync(environment.GITHUB_OUTPUT, `pull_number=${result.pull_number}\npull_url=${result.pull_url}\nhead_sha=${result.head_sha}\naction=${result.action}\n`);
+    fs.appendFileSync(environment.GITHUB_OUTPUT, `pull_number=${result.pull_number}\npull_url=${result.pull_url}\nhead_sha=${result.head_sha}\naction=${result.action}\nattestation_check_run_id=${result.attestation_check_run_id}\n`);
   }
   return result;
 }

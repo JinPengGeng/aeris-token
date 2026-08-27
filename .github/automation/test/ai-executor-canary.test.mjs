@@ -15,13 +15,21 @@ function fixture(t) {
   fs.writeFileSync(path.join(root, '.github', 'ai-executors.json'), JSON.stringify({
     schema_version: 1,
     executors: [
-      chatIdentity,
-      { id: 'openai-responses-v1', protocol: 'openai-responses-v1' },
+      { ...chatIdentity, kind: 'completion' },
+      { id: 'openai-responses-v1', kind: 'completion', protocol: 'openai-responses-v1' },
+      {
+        id: 'codex-action-v1',
+        kind: 'workspace_candidate',
+        protocol: 'aeris-workspace-candidate-v1',
+        action_sha: '52fe01ec70a42f454c9d2ebd47598f9fd6893d56',
+        tool_version: '0.148.0',
+      },
     ],
     routes: {
       agent_analysis: 'openai-chat-v1',
       sync_conflict_resolver: 'openai-chat-v1',
       sync_conflict_reviewer: 'openai-chat-v1',
+      candidate: 'codex-action-v1',
     },
   }));
   return root;
@@ -52,7 +60,7 @@ test('live canary reads the executor from environment and returns only trusted l
       usage: providerUsage,
     }),
   });
-  assert.deepEqual(result, { executor: chatIdentity, model: 'canary-model' });
+  assert.deepEqual(result, { executor: { ...chatIdentity, kind: 'completion' }, model: 'canary-model' });
   assert.equal(JSON.stringify(result).includes('provider-controlled'), false);
   assert.equal(JSON.stringify(result).includes('provider-model'), false);
 });

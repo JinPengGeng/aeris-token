@@ -321,6 +321,46 @@ assert(
   'Writer App token permissions exceed or miss the approved minimum',
 );
 
+const publisherWorkflow = loadYaml('.github/workflows/autonomy-publisher.yml');
+const publisherTokenStep = publisherWorkflow.jobs.publish.steps.find((step) => step.name === 'Mint bounded Writer App token');
+assert(
+  publisherTokenStep?.with['permission-checks'] === 'write' &&
+    publisherTokenStep.with['permission-contents'] === 'write' &&
+    publisherTokenStep.with['permission-pull-requests'] === 'write' &&
+    publisherTokenStep.with['permission-administration'] === undefined,
+  'candidate Publisher App token must be the only Writer token that requests checks: write',
+);
+
+const finalizerWorkflow = loadYaml('.github/workflows/autonomy-finalizer.yml');
+const finalizerTokenStep = finalizerWorkflow.jobs.finalize.steps.find((step) => step.name === 'Mint bounded Writer App token');
+assert(
+  finalizerTokenStep?.with['permission-checks'] === undefined &&
+    finalizerTokenStep.with['permission-administration'] === 'read' &&
+    finalizerTokenStep.with['permission-contents'] === 'write' &&
+    finalizerTokenStep.with['permission-pull-requests'] === 'write',
+  'candidate Finalizer App token must not request checks: write',
+);
+const finalizerAttestationStep = finalizerWorkflow.jobs.finalize.steps.find(
+  (step) => step.name === 'Attest Writer App and installation identity',
+);
+const finalizerMergeStep = finalizerWorkflow.jobs.finalize.steps.find(
+  (step) => step.name === 'Directly squash merge exact eligible pull request',
+);
+assert(
+  finalizerAttestationStep?.env.AERIS_WRITER_APP_NODE_ID === '${{ vars.AERIS_WRITER_APP_NODE_ID }}' &&
+    finalizerAttestationStep.env.AERIS_WRITER_APP_OWNER_DATABASE_ID ===
+      '${{ vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}' &&
+    finalizerMergeStep?.env.AERIS_WRITER_PROOF_APP_ID ===
+      '${{ steps.writer_app_attestation.outputs.app_id }}' &&
+    finalizerMergeStep.env.AERIS_WRITER_PROOF_APP_SLUG ===
+      '${{ steps.writer_app_attestation.outputs.app_slug }}' &&
+    finalizerMergeStep.env.AERIS_WRITER_PROOF_APP_NODE_ID ===
+      '${{ steps.writer_app_attestation.outputs.app_node_id }}' &&
+    finalizerMergeStep.env.AERIS_WRITER_PROOF_APP_OWNER_DATABASE_ID ===
+      '${{ steps.writer_app_attestation.outputs.app_owner_database_id }}',
+  'candidate Finalizer must bind live Writer App and owner identity into full proof',
+);
+
 const conflictArtifactSuffix = '${{ github.run_id }}-${{ github.run_attempt }}';
 const expectedPermissions = (actual, expected, message) => {
   assert(

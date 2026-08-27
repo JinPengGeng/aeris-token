@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
-export const CANDIDATE_SCHEMA_VERSION = 1;
+import { validateWorkspaceCandidateExecutor } from './ai-executor-contract.mjs';
+
+export const CANDIDATE_SCHEMA_VERSION = 2;
 export const MAX_CANDIDATE_PATCH_BYTES = 1024 * 1024;
 export const MAX_CANDIDATE_FILES = 100;
 export const MAX_CANDIDATE_FILE_TEXT_BYTES = 256 * 1024;
@@ -15,6 +17,7 @@ const MANIFEST_KEYS = Object.freeze([
   'base_sha',
   'trigger_run_id',
   'trigger_run_attempt',
+  'executor',
   'patch_sha256',
   'patch_bytes',
   'created_at',
@@ -28,6 +31,7 @@ const EXPECTED_KEYS = Object.freeze([
   'base_sha',
   'trigger_run_id',
   'trigger_run_attempt',
+  'executor',
 ]);
 const SHA256 = /^[0-9a-f]{64}$/;
 const COMMIT_SHA = /^[0-9a-f]{40}$/;
@@ -81,6 +85,14 @@ function deepFreeze(value) {
     Object.freeze(value);
   }
   return value;
+}
+
+function candidateExecutor(value, name) {
+  try {
+    return validateWorkspaceCandidateExecutor(value, name);
+  } catch {
+    reject(`${name} is invalid`);
+  }
 }
 
 function toPatchBuffer(patch) {
@@ -188,6 +200,7 @@ export function validateCandidateManifest(manifest, expected) {
     base_sha: string(manifest.base_sha, 'base_sha', 40, COMMIT_SHA),
     trigger_run_id: string(manifest.trigger_run_id, 'trigger_run_id', 32, RUN_ID),
     trigger_run_attempt: positiveInteger(manifest.trigger_run_attempt, 'trigger_run_attempt'),
+    executor: candidateExecutor(manifest.executor, 'candidate executor'),
     patch_sha256: string(manifest.patch_sha256, 'patch_sha256', 64, SHA256),
     patch_bytes: positiveInteger(manifest.patch_bytes, 'patch_bytes'),
     created_at: string(manifest.created_at, 'created_at', 64, UTC_TIMESTAMP),
@@ -195,7 +208,13 @@ export function validateCandidateManifest(manifest, expected) {
   requireCondition(Number.isFinite(Date.parse(normalized.created_at)), 'created_at is invalid');
   requireCondition(normalized.task_id === `issue:${normalized.issue_number}`, 'task_id and issue_number disagree');
   requireCondition(normalized.base_ref.startsWith('refs/heads/'), 'base_ref is invalid');
-  for (const key of EXPECTED_KEYS) requireCondition(normalized[key] === expected[key], `candidate ${key} does not match expected`);
+  const expectedExecutor = candidateExecutor(expected.executor, 'candidate expectation executor');
+  for (const key of EXPECTED_KEYS) {
+    const matches = key === 'executor'
+      ? JSON.stringify(normalized.executor) === JSON.stringify(expectedExecutor)
+      : normalized[key] === expected[key];
+    requireCondition(matches, `candidate ${key} does not match expected`);
+  }
   return deepFreeze(normalized);
 }
 
