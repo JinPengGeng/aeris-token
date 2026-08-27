@@ -8,6 +8,7 @@ import test from 'node:test';
 import {
   AutonomyPublisherError,
   LocalGitPublisher,
+  trustedCandidateExecutorForBase,
   WriterGitHubClient,
   publishCandidate,
 } from '../src/autonomy-publisher.mjs';
@@ -18,6 +19,13 @@ const baseSha = 'a'.repeat(40);
 const commitSha = 'b'.repeat(40);
 const branch = 'agent/issue-123';
 const taskId = 'issue:123';
+const candidateExecutor = Object.freeze({
+  id: 'codex-action-v1',
+  protocol: 'aeris-workspace-candidate-v1',
+  kind: 'workspace_candidate',
+  action_sha: '52fe01ec70a42f454c9d2ebd47598f9fd6893d56',
+  tool_version: '0.148.0',
+});
 
 const expected = Object.freeze({
   repository,
@@ -28,11 +36,12 @@ const expected = Object.freeze({
   base_sha: baseSha,
   trigger_run_id: '456',
   trigger_run_attempt: 1,
+  executor: candidateExecutor,
 });
 
 const manifest = Object.freeze({
   ...expected,
-  schema_version: 1,
+  schema_version: 2,
   patch_sha256: 'c'.repeat(64),
   patch_bytes: 100,
   created_at: '2026-08-20T00:00:00.000Z',
@@ -75,7 +84,30 @@ function pull({
   };
 }
 
-function harness({ initialSha = null, pulls = [], pushedSha = commitSha, persisted = {}, baseShas = [baseSha] } = {}) {
+function commitMessage(sourceManifest = manifest) {
+  return [
+    `chore(autonomy): update issue #${sourceManifest.issue_number}`,
+    '',
+    'Aeris-Autonomy-Managed: true',
+    `Aeris-Autonomy-Task: ${sourceManifest.task_id}`,
+    `Aeris-Autonomy-Patch: ${sourceManifest.patch_sha256}`,
+    `Aeris-Autonomy-Base: ${sourceManifest.base_sha}`,
+    `Aeris-Autonomy-Run: ${sourceManifest.trigger_run_id}/${sourceManifest.trigger_run_attempt}`,
+    `Aeris-Autonomy-Executor-ID: ${sourceManifest.executor.id}`,
+    `Aeris-Autonomy-Executor-Protocol: ${sourceManifest.executor.protocol}`,
+    `Aeris-Autonomy-Executor-Action-SHA: ${sourceManifest.executor.action_sha}`,
+    `Aeris-Autonomy-Executor-Tool-Version: ${sourceManifest.executor.tool_version}`,
+  ].join('\n');
+}
+
+function harness({
+  initialSha = null,
+  pulls = [],
+  pushedSha = commitSha,
+  persisted = {},
+  persistedCommit = {},
+  baseShas = [baseSha],
+} = {}) {
   const calls = [];
   let mutationBody = null;
   let branchReads = 0;
@@ -114,6 +146,15 @@ function harness({ initialSha = null, pulls = [], pushedSha = commitSha, persist
         body: mutationBody?.body,
         ...persisted,
       });
+    },
+    async getCommit(sha) {
+      calls.push(['getCommit', sha]);
+      return {
+        sha,
+        tree: { sha: 'd'.repeat(40) },
+        message: commitMessage(),
+        ...persistedCommit,
+      };
     },
   };
   const gitPublisher = {
@@ -157,6 +198,9 @@ test('new publication uses an exact nonexistence lease and confirms branch and P
   assert.equal(create.base, 'main');
   assert.equal(create.draft, true);
   assert.match(create.body, /aeris-autonomy-patch:c{64}/);
+  assert.match(create.body, /aeris-autonomy-executor-id:codex-action-v1/);
+  assert.match(create.body, /aeris-autonomy-executor-action-sha:52fe01ec70a42f454c9d2ebd47598f9fd6893d56/);
+  assert.ok(calls.some((entry) => entry[0] === 'getCommit' && entry[1] === commitSha));
   assert.equal(calls.filter((entry) => entry[0] === 'getBranch').length, 3);
   assert.equal(calls.filter((entry) => entry[0] === 'getBase').length, 3);
 });
@@ -259,6 +303,23 @@ test('post-write verification checks PR head, base, draft, author, repository, a
   for (const [name, persisted] of cases) {
     await t.test(name, async () => {
       await assert.rejects(() => publish({ persisted }), AutonomyPublisherError);
+    });
+  }
+});
+
+test('remote commit provenance must bind the exact trusted Candidate executor before a PR mutation', async (t) => {
+  for (const [name, persistedCommit] of [
+    ['commit SHA', { sha: 'e'.repeat(40) }],
+    ['tree SHA', { tree: { sha: 'e'.repeat(40) } }],
+    ['executor trailer', { message: commitMessage().replace('codex-action-v1', 'untrusted-action-v1') }],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = harness({ persistedCommit });
+      await assert.rejects(
+        () => publishCandidate({ artifact, expected, client: fixture.client, gitPublisher: fixture.gitPublisher, writerLogin, runUrl: 'https://github.com/run' }),
+        /exact managed candidate commit|executor provenance/,
+      );
+      assert.equal(fixture.calls.some((entry) => ['createPull', 'updatePull'].includes(entry[0])), false);
     });
   }
 });
@@ -382,6 +443,67 @@ test('Writer REST timeout covers response-body reads, not only connection setup'
   await assert.rejects(() => client.getBranch(branch), /GitHub API request timed out/);
 });
 
+function executorRegistry(toolVersion = candidateExecutor.tool_version) {
+  return JSON.stringify({
+    schema_version: 1,
+    executors: [
+      { id: 'openai-chat-v1', kind: 'completion', protocol: 'openai-chat-completions-v1' },
+      { id: 'openai-responses-v1', kind: 'completion', protocol: 'openai-responses-v1' },
+      { ...candidateExecutor, tool_version: toolVersion },
+    ],
+    routes: {
+      agent_analysis: 'openai-chat-v1',
+      sync_conflict_resolver: 'openai-chat-v1',
+      sync_conflict_reviewer: 'openai-chat-v1',
+      candidate: 'codex-action-v1',
+    },
+  });
+}
+
+function registryRepository(registry) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-publisher-registry-'));
+  git(root, ['init', '--initial-branch=main']);
+  git(root, ['config', 'user.name', 'test']);
+  git(root, ['config', 'user.email', 'test@example.com']);
+  fs.mkdirSync(path.join(root, '.github'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.github', 'ai-executors.json'), registry);
+  git(root, ['add', '.github/ai-executors.json']);
+  git(root, ['commit', '-m', 'registry']);
+  return root;
+}
+
+test('Publisher binds Candidate executor provenance from the exact clean base checkout', () => {
+  const root = registryRepository(executorRegistry());
+  try {
+    const base = git(root, ['rev-parse', 'HEAD']).trim();
+    fs.writeFileSync(path.join(root, '.github', 'ai-executors.json'), executorRegistry('0.148.1'));
+    git(root, ['add', '.github/ai-executors.json']);
+    git(root, ['commit', '-m', 'later registry']);
+    const later = git(root, ['rev-parse', 'HEAD']).trim();
+    git(root, ['checkout', '--detach', base]);
+    assert.deepEqual(trustedCandidateExecutorForBase({ repositoryRoot: root, baseSha: base, repository }), candidateExecutor);
+    assert.throws(
+      () => trustedCandidateExecutorForBase({ repositoryRoot: root, baseSha: later, repository }),
+      /checkout does not match candidate base SHA/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Publisher rejects an invalid Candidate executor registry at the bound base', () => {
+  const root = registryRepository('{"schema_version":1,"executors":[],"routes":{}}');
+  try {
+    const base = git(root, ['rev-parse', 'HEAD']).trim();
+    assert.throws(
+      () => trustedCandidateExecutorForBase({ repositoryRoot: root, baseSha: base, repository }),
+      /trusted candidate executor registry is invalid/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function git(root, args, options = {}) {
   return execFileSync('git', args, { cwd: root, encoding: options.encoding ?? 'utf8' });
 }
@@ -423,6 +545,7 @@ test('prepareCommit applies data without executing candidate files or repository
     assert.equal(fs.existsSync(path.join(root, 'candidate-ran')), false);
     assert.equal(fs.existsSync(path.join(root, 'hook-ran')), false);
     assert.equal(fs.existsSync(candidatePath), true);
+    assert.match(git(root, ['log', '-1', '--format=%B']), /Aeris-Autonomy-Executor-ID: codex-action-v1/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

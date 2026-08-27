@@ -78,15 +78,28 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Stage trusted candidate runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime="${RUNNER_TEMP}/aeris-candidate-runtime"
+          rm -rf -- "${runtime}"
+          install -d -m 0700 "${runtime}"
+          for source in \
+            .github/automation/src/autonomy-agent-candidate-runner.mjs \
+            .github/automation/src/autonomy-candidate.mjs \
+            .github/automation/src/autonomy-extract.mjs \
+            .github/automation/src/autonomy-safe-git.mjs \
+            .github/automation/src/ai-executor-contract.mjs \
+            .github/ai-executors.json; do
+            install -m 0444 "${source}" "${runtime}/$(basename "${source}")"
+          done
+
       - name: Upload trusted candidate runtime
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: agent-candidate-runtime-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            .github/automation/src/autonomy-agent-candidate-runner.mjs
-            .github/automation/src/autonomy-candidate.mjs
-            .github/automation/src/autonomy-extract.mjs
-            .github/automation/src/autonomy-safe-git.mjs
+          path: ${{ runner.temp }}/aeris-candidate-runtime/*
           if-no-files-found: error
           retention-days: 1
 
@@ -190,7 +203,9 @@ jobs:
             autonomy-agent-candidate-runner.mjs \
             autonomy-candidate.mjs \
             autonomy-extract.mjs \
-            autonomy-safe-git.mjs | sort)"
+            autonomy-safe-git.mjs \
+            ai-executor-contract.mjs \
+            ai-executors.json | sort)"
           actual="$(find "${runtime}" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
           [[ "${actual}" == "${expected}" ]]
           while IFS= read -r file; do

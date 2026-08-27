@@ -1,10 +1,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { executorDescriptorForRoute, validateExecutorRegistry } from './ai-executor-contract.mjs';
 import { buildCandidateArtifact } from './autonomy-extract.mjs';
 import { createSafeGitContext, SafeGitError } from './autonomy-safe-git.mjs';
+
+const MAXIMUM_EXECUTOR_REGISTRY_BYTES = 65_536;
 
 export class AgentCandidateRunnerError extends Error {
   constructor(message) {
@@ -22,6 +25,48 @@ function required(value, name) {
     reject(`${name} is invalid`);
   }
   return value;
+}
+
+function sealedRegistryPath() {
+  const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const direct = path.join(moduleDirectory, 'ai-executors.json');
+  try {
+    const stat = fs.lstatSync(direct);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAXIMUM_EXECUTOR_REGISTRY_BYTES) {
+      reject('trusted candidate executor registry is invalid');
+    }
+    return direct;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  const isSourceTreeRuntime = path.basename(moduleDirectory) === 'src' && path.basename(path.dirname(moduleDirectory)) === 'automation';
+  if (!isSourceTreeRuntime) reject('trusted candidate executor registry is unavailable');
+  const sourceRegistry = path.resolve(moduleDirectory, '..', '..', 'ai-executors.json');
+  try {
+    const stat = fs.lstatSync(sourceRegistry);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAXIMUM_EXECUTOR_REGISTRY_BYTES) {
+      reject('trusted candidate executor registry is invalid');
+    }
+    return sourceRegistry;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  reject('trusted candidate executor registry is unavailable');
+}
+
+export function sealedCandidateExecutor() {
+  let registry;
+  try {
+    registry = JSON.parse(fs.readFileSync(sealedRegistryPath(), 'utf8'));
+  } catch (error) {
+    if (error instanceof AgentCandidateRunnerError) throw error;
+    reject('trusted candidate executor registry is invalid');
+  }
+  try {
+    return executorDescriptorForRoute(validateExecutorRegistry(registry), 'candidate');
+  } catch {
+    reject('trusted candidate executor registry is invalid');
+  }
 }
 
 // Validate against HEAD in an isolated index so the Agent's unstaged changes
@@ -58,6 +103,7 @@ export function runAgentCandidateRunner(environment = process.env) {
       base_sha: environment.AERIS_BASE_SHA,
       trigger_run_id: environment.GITHUB_RUN_ID,
       trigger_run_attempt: environment.GITHUB_RUN_ATTEMPT,
+      executor: sealedCandidateExecutor(),
     },
     temporaryDirectory: environment.RUNNER_TEMP || os.tmpdir(),
   });

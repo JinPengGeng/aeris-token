@@ -64,6 +64,51 @@ const configValue = {
 };
 Object.defineProperty(configValue, 'writer_trust', { value: writerTrust, enumerable: false });
 const config = Object.freeze(configValue);
+const CANDIDATE_EXECUTOR = Object.freeze({
+  id: 'codex-action-v1',
+  protocol: 'aeris-workspace-candidate-v1',
+  kind: 'workspace_candidate',
+  action_sha: '1'.repeat(40),
+  tool_version: '0.148.0',
+});
+
+function candidateExecutorRegistry() {
+  return {
+    schema_version: 1,
+    executors: [
+      { id: 'openai-chat-v1', kind: 'completion', protocol: 'openai-chat-completions-v1' },
+      { id: 'openai-responses-v1', kind: 'completion', protocol: 'openai-responses-v1' },
+      CANDIDATE_EXECUTOR,
+    ],
+    routes: {
+      agent_analysis: 'openai-chat-v1',
+      sync_conflict_resolver: 'openai-chat-v1',
+      sync_conflict_reviewer: 'openai-chat-v1',
+      candidate: CANDIDATE_EXECUTOR.id,
+    },
+  };
+}
+
+function candidateExecutorRegistryFile(registry = candidateExecutorRegistry()) {
+  const content = Buffer.from(JSON.stringify(registry), 'utf8');
+  return {
+    type: 'file',
+    encoding: 'base64',
+    size: content.length,
+    content: content.toString('base64'),
+  };
+}
+
+function candidateCommitMessage(executor = CANDIDATE_EXECUTOR) {
+  return [
+    'chore(autonomy): update issue #123',
+    '',
+    `Aeris-Autonomy-Executor-ID: ${executor.id}`,
+    `Aeris-Autonomy-Executor-Protocol: ${executor.protocol}`,
+    `Aeris-Autonomy-Executor-Action-SHA: ${executor.action_sha}`,
+    `Aeris-Autonomy-Executor-Tool-Version: ${executor.tool_version}`,
+  ].join('\n');
+}
 
 function preliminaryEnvironment(overrides = {}) {
   return {
@@ -239,6 +284,7 @@ class FakeClient {
     this.protectionReads = 0;
     this.checkReads = 0;
     this.labelReads = 0;
+    this.executorRegistryReads = [];
     this.draftRestores = 0;
     this.ready = overrides.initialReady ?? false;
     this.merged = false;
@@ -295,7 +341,23 @@ class FakeClient {
       : this.overrides.policyLabels;
     return value ?? [];
   }
-  async getGitCommit(sha) { return { sha, tree: { sha: sha === HEAD_SHA ? HEAD_TREE : BASE_TREE } }; }
+  async getGitCommit(sha) {
+    const value = typeof this.overrides.gitCommit === 'function'
+      ? this.overrides.gitCommit(sha, this)
+      : this.overrides.gitCommit;
+    return value ?? {
+      sha,
+      tree: { sha: sha === HEAD_SHA ? HEAD_TREE : BASE_TREE },
+      message: sha === HEAD_SHA ? candidateCommitMessage() : 'trusted base',
+    };
+  }
+  async getRepositoryContent(filePath, ref) {
+    this.executorRegistryReads.push({ filePath, ref });
+    const value = typeof this.overrides.executorRegistryFile === 'function'
+      ? this.overrides.executorRegistryFile(filePath, ref, this)
+      : this.overrides.executorRegistryFile;
+    return value ?? candidateExecutorRegistryFile();
+  }
   async getGitTree(sha) {
     return new Map([
       [HEAD_TREE, { sha, truncated: false, tree: [{ path: 'docs', mode: '040000', type: 'tree', sha: DOCS_TREE }] }],
@@ -372,6 +434,62 @@ test('eligible Writer canary requires all three source-bound successful checks',
     });
     assert.equal(blocked.eligible, false);
     assert.match(blocked.reason, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+});
+
+test('Finalizer revalidates candidate executor provenance from the exact base before every Writer transition', async () => {
+  const client = new FakeClient();
+  const result = await finalize(client);
+  assert.equal(result.action, 'merged');
+  assert.ok(client.executorRegistryReads.length >= 3);
+  assert.deepEqual(
+    client.executorRegistryReads,
+    client.executorRegistryReads.map(() => ({
+      filePath: '.github/ai-executors.json',
+      ref: BASE_SHA,
+    })),
+  );
+});
+
+test('candidate executor provenance fails closed before Writer mutation', async (t) => {
+  const commitFor = (message) => (sha) => ({
+    sha,
+    tree: { sha: sha === HEAD_SHA ? HEAD_TREE : BASE_TREE },
+    message: sha === HEAD_SHA ? message : 'trusted base',
+  });
+  const mismatched = (field, value) => candidateCommitMessage({ ...CANDIDATE_EXECUTOR, [field]: value });
+  const cases = [
+    ['missing trailers', { gitCommit: commitFor('chore(autonomy): update issue #123') }],
+    ['duplicate trailer', { gitCommit: commitFor(`${candidateCommitMessage()}\nAeris-Autonomy-Executor-ID: ${CANDIDATE_EXECUTOR.id}`) }],
+    ['invalid trailer', { gitCommit: commitFor(candidateCommitMessage({ ...CANDIDATE_EXECUTOR, id: 'not valid' })) }],
+    ['id mismatch', { gitCommit: commitFor(mismatched('id', 'other-action-v1')) }],
+    ['protocol mismatch', { gitCommit: commitFor(mismatched('protocol', 'other-workspace-candidate-v1')) }],
+    ['action SHA mismatch', { gitCommit: commitFor(mismatched('action_sha', '2'.repeat(40))) }],
+    ['tool version mismatch', { gitCommit: commitFor(mismatched('tool_version', '0.149.0')) }],
+    ['wrong commit identity', (() => {
+      let headReads = 0;
+      return { gitCommit: (sha) => {
+        if (sha === HEAD_SHA) headReads += 1;
+        return {
+          sha: sha === HEAD_SHA && headReads > 1 ? '2'.repeat(40) : sha,
+          tree: { sha: sha === HEAD_SHA ? HEAD_TREE : BASE_TREE },
+          message: candidateCommitMessage(),
+        };
+      } };
+    })()],
+    ['non-file registry response', { executorRegistryFile: { type: 'dir', encoding: 'base64', size: 1, content: 'eA==' } }],
+    ['invalid Base64 registry response', { executorRegistryFile: { type: 'file', encoding: 'base64', size: 1, content: '%' } }],
+    ['invalid candidate route', { executorRegistryFile: candidateExecutorRegistryFile({
+      ...candidateExecutorRegistry(),
+      routes: { ...candidateExecutorRegistry().routes, candidate: 'openai-chat-v1' },
+    }) }],
+  ];
+  for (const [name, overrides] of cases) {
+    await t.test(name, async () => {
+      const client = new FakeClient(overrides);
+      await assert.rejects(() => finalize(client), AutonomyFinalizerError);
+      assert.deepEqual(client.events, []);
+    });
   }
 });
 
@@ -866,6 +984,27 @@ test('GraphQL governance rejects review-thread pagination duplicates', async () 
     nodes: [{ id: 'thread', isResolved: true }], pageInfo: { hasNextPage: false, endCursor: 'next' },
   } });
   await assert.rejects(() => graphqlClient([first, second]).getPullGovernance(PULL_NUMBER), /contains duplicates/);
+});
+
+test('Finalizer reads the candidate executor registry from the exact immutable base SHA', async () => {
+  let request;
+  const client = new AutonomyFinalizerGitHubClient({
+    token: 'read-token', repository: REPOSITORY,
+    fetchImpl: async (url, options) => {
+      request = { url, options };
+      return { ok: true, status: 200, text: async () => JSON.stringify(candidateExecutorRegistryFile()) };
+    },
+  });
+  await client.getRepositoryContent('.github/ai-executors.json', BASE_SHA);
+  assert.equal(
+    request.url,
+    `https://api.github.com/repos/${REPOSITORY}/contents/.github/ai-executors.json?ref=${BASE_SHA}`,
+  );
+  assert.equal(request.options.method, 'GET');
+  assert.throws(
+    () => client.getRepositoryContent('.github/automation/src/engine.mjs', BASE_SHA),
+    AutonomyFinalizerError,
+  );
 });
 
 test('mergePullRequest hard-codes SQUASH and binds expectedHeadOid', async () => {

@@ -4,8 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { AgentCandidateRunnerError, validatePatchApplies } from '../src/autonomy-agent-candidate-runner.mjs';
+import {
+  AgentCandidateRunnerError,
+  sealedCandidateExecutor,
+  validatePatchApplies,
+} from '../src/autonomy-agent-candidate-runner.mjs';
 
 function git(root, args) {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
@@ -21,6 +26,36 @@ function repository() {
   git(root, ['commit', '-m', 'base']);
   return root;
 }
+
+test('sealed runtime resolves the workspace executor descriptor from the trusted registry', () => {
+  assert.deepEqual(sealedCandidateExecutor(), {
+    id: 'codex-action-v1',
+    protocol: 'aeris-workspace-candidate-v1',
+    kind: 'workspace_candidate',
+    action_sha: '52fe01ec70a42f454c9d2ebd47598f9fd6893d56',
+    tool_version: '0.148.0',
+  });
+});
+
+test('sealed runtime rejects a missing flat registry instead of falling back outside the artifact', async (t) => {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-sealed-runtime-'));
+  t.after(() => fs.rmSync(runtime, { recursive: true, force: true }));
+  const sourceDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
+  for (const file of [
+    'autonomy-agent-candidate-runner.mjs',
+    'autonomy-candidate.mjs',
+    'autonomy-extract.mjs',
+    'autonomy-safe-git.mjs',
+    'ai-executor-contract.mjs',
+  ]) {
+    fs.copyFileSync(path.join(sourceDirectory, file), path.join(runtime, file));
+  }
+  const module = await import(`${pathToFileURL(path.join(runtime, 'autonomy-agent-candidate-runner.mjs')).href}?test=missing-registry`);
+  assert.throws(
+    () => module.sealedCandidateExecutor(),
+    (error) => error instanceof module.AgentCandidateRunnerError && /registry is unavailable/.test(error.message),
+  );
+});
 
 test('validates a patch against HEAD with an isolated index', () => {
   const root = repository();

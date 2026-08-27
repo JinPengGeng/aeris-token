@@ -3,6 +3,11 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { AutonomyPolicyGitHubClient, evaluateAutonomyPolicy } from './autonomy-policy-runtime.mjs';
+import {
+  executorDescriptorForRoute,
+  validateExecutorRegistry,
+  validateWorkspaceCandidateExecutor,
+} from './ai-executor-contract.mjs';
 import { validateWriterPermissions } from './github-app-attestation.mjs';
 import { policyConfigFromEnvironment } from './run-autonomy-policy.mjs';
 
@@ -24,8 +29,17 @@ const WORKFLOW_IDENTITIES = Object.freeze(new Map([
   ['Frontend CI', '.github/workflows/frontend-ci.yml'],
 ]));
 const MAXIMUM_GRAPHQL_BYTES = 4 * 1024 * 1024;
+const MAXIMUM_EXECUTOR_REGISTRY_BYTES = 65_536;
+const EXECUTOR_REGISTRY_PATH = '.github/ai-executors.json';
 const RESPONSE_LOSS_CANARY_FAULT = 'drop_merge_response_after_success';
 const RESPONSE_LOSS_CANARY_MARKER = 'response_loss_after_merge_response';
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const EXECUTOR_TRAILER_FIELDS = Object.freeze({
+  'Aeris-Autonomy-Executor-ID': 'id',
+  'Aeris-Autonomy-Executor-Protocol': 'protocol',
+  'Aeris-Autonomy-Executor-Action-SHA': 'action_sha',
+  'Aeris-Autonomy-Executor-Tool-Version': 'tool_version',
+});
 
 export class AutonomyFinalizerError extends Error {
   constructor(message) {
@@ -73,6 +87,96 @@ function nullableString(value, name) {
 function multilineString(value, name) {
   if (typeof value !== 'string' || value.length === 0 || /[\u0000\u007f]/.test(value)) reject(`${name} is invalid`);
   return value;
+}
+
+function candidateExecutorEquals(left, right) {
+  return left.id === right.id && left.protocol === right.protocol && left.kind === right.kind &&
+    left.action_sha === right.action_sha && left.tool_version === right.tool_version;
+}
+
+function decodeTrustedRegistryFile(value) {
+  const file = object(value, 'trusted candidate executor registry response');
+  if (file.type !== 'file' || file.encoding !== 'base64' ||
+      !Number.isSafeInteger(file.size) || file.size <= 0 || file.size > MAXIMUM_EXECUTOR_REGISTRY_BYTES ||
+      typeof file.content !== 'string' || file.content.length === 0 ||
+      file.content.length > MAXIMUM_EXECUTOR_REGISTRY_BYTES * 2 || file.content.includes('\r') ||
+      /[^A-Za-z0-9+/=\n]/.test(file.content)) {
+    reject('trusted candidate executor registry response is invalid');
+  }
+  const compact = file.content.replaceAll('\n', '');
+  if (!BASE64.test(compact)) reject('trusted candidate executor registry response is invalid');
+  const bytes = Buffer.from(compact, 'base64');
+  if (bytes.length !== file.size || bytes.length === 0 || bytes.length > MAXIMUM_EXECUTOR_REGISTRY_BYTES ||
+      bytes.toString('base64') !== compact) {
+    reject('trusted candidate executor registry response is invalid');
+  }
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes)) reject('trusted candidate executor registry is not UTF-8');
+  return text;
+}
+
+function candidateExecutorFromRegistryFile(value) {
+  let registry;
+  try {
+    registry = JSON.parse(decodeTrustedRegistryFile(value));
+  } catch (error) {
+    if (error instanceof AutonomyFinalizerError) throw error;
+    reject('trusted candidate executor registry is invalid');
+  }
+  try {
+    return executorDescriptorForRoute(validateExecutorRegistry(registry), 'candidate');
+  } catch {
+    reject('trusted candidate executor registry is invalid');
+  }
+}
+
+function candidateExecutorFromCommitMessage(message) {
+  if (typeof message !== 'string' || message.length === 0 || message.length > MAXIMUM_EXECUTOR_REGISTRY_BYTES ||
+      /[\u0000-\u0009\u000b-\u001f\u007f]/.test(message)) {
+    reject('candidate commit executor provenance is invalid');
+  }
+  const values = Object.create(null);
+  for (const line of message.split('\n')) {
+    if (!line.startsWith('Aeris-Autonomy-Executor-')) continue;
+    const match = /^(Aeris-Autonomy-Executor-(?:ID|Protocol|Action-SHA|Tool-Version)): (.+)$/.exec(line);
+    if (!match || !Object.hasOwn(EXECUTOR_TRAILER_FIELDS, match[1])) {
+      reject('candidate commit executor provenance is invalid');
+    }
+    const field = EXECUTOR_TRAILER_FIELDS[match[1]];
+    if (Object.hasOwn(values, field)) reject('candidate commit executor provenance has duplicate trailers');
+    values[field] = match[2];
+  }
+  for (const field of Object.values(EXECUTOR_TRAILER_FIELDS)) {
+    if (!Object.hasOwn(values, field)) reject('candidate commit executor provenance is incomplete');
+  }
+  try {
+    return validateWorkspaceCandidateExecutor({
+      id: values.id,
+      protocol: values.protocol,
+      kind: 'workspace_candidate',
+      action_sha: values.action_sha,
+      tool_version: values.tool_version,
+    }, 'candidate commit executor');
+  } catch {
+    reject('candidate commit executor provenance is invalid');
+  }
+}
+
+async function assertCandidateExecutorProvenance(client, governance) {
+  if (typeof client?.getGitCommit !== 'function' || typeof client?.getRepositoryContent !== 'function') {
+    reject('Finalizer client cannot verify candidate executor provenance');
+  }
+  const [commit, registryFile] = await Promise.all([
+    client.getGitCommit(governance.headRefOid),
+    client.getRepositoryContent(EXECUTOR_REGISTRY_PATH, governance.baseRefOid),
+  ]);
+  if (commit?.sha !== governance.headRefOid) reject('candidate commit identity drifted during provenance verification');
+  const committed = candidateExecutorFromCommitMessage(commit.message);
+  const trusted = candidateExecutorFromRegistryFile(registryFile);
+  if (!candidateExecutorEquals(committed, trusted)) {
+    reject('candidate commit executor provenance does not match the trusted base registry');
+  }
+  return trusted;
 }
 
 export function validateResponseLossCanaryBinding(value, expected) {
@@ -589,6 +693,14 @@ async function readGovernanceSnapshot(client, owner, name, number) {
 }
 
 export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
+  getRepositoryContent(filePath, ref) {
+    if (filePath !== EXECUTOR_REGISTRY_PATH) reject('Finalizer requested an untrusted repository file');
+    return this.request(
+      'GET',
+      `/repos/${this.repository}/contents/${EXECUTOR_REGISTRY_PATH}?ref=${encodeURIComponent(required(ref, 'trusted registry base SHA', SHA))}`,
+    );
+  }
+
   getWorkflowRun(runId) {
     return this.request('GET', `/repos/${this.repository}/actions/runs/${runId}`);
   }
@@ -751,6 +863,7 @@ async function evaluateAutonomyFinalizerGates({
       client.listCheckRunsForRef(bound.head_sha),
     ]);
     validateGovernance(governance, expected);
+    await assertCandidateExecutorProvenance(client, governance);
     readiness = await requiredChecksReady(client, checks, expected);
     if (readiness.ready) {
       return Object.freeze({
