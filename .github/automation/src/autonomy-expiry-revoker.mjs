@@ -9,6 +9,9 @@ const SYNC_BRANCH = 'automation/sync-upstream';
 const SYNC_MARKER = '<!-- upstream-sync-managed -->';
 const LEGACY_SYNC_REST_WRITERS = new Set(['github-actions[bot]', 'app/github-actions']);
 const LEGACY_SYNC_GRAPHQL_WRITERS = new Set(['github-actions']);
+const REVOCATION_ACTIONS = new Set(['not_due', 'dry_run', 'already_uninstalled', 'uninstalled']);
+const MAX_LATE_INSTALLATION_REVOCATION_PASSES = 3;
+const LATE_INSTALLATION_API_HEADROOM_MILLISECONDS = 60_000;
 
 export class AutonomyExpiryError extends Error {
   constructor(message, status = null) {
@@ -106,20 +109,20 @@ export class RevokerClient {
   }
 
   getApp() { return this.request('GET', '/app'); }
-  async listInstallations(maximumPages = 10) {
+  async listInstallations(maximumPages = 10, { signal } = {}) {
     const installations = [];
     for (let page = 1; page <= maximumPages; page += 1) {
-      const batch = await this.request('GET', `/app/installations?per_page=100&page=${page}`);
+      const batch = await this.request('GET', `/app/installations?per_page=100&page=${page}`, { signal });
       if (!Array.isArray(batch)) fail('App installations response is invalid');
       installations.push(...batch);
       if (batch.length < 100) return installations;
     }
     fail('App installations pagination exceeds the safety limit');
   }
-  getInstallation(id) { return this.request('GET', `/app/installations/${positiveInteger(id, 'installation id')}`); }
-  async getInstallationOrMissing(id) {
+  getInstallation(id, { signal } = {}) { return this.request('GET', `/app/installations/${positiveInteger(id, 'installation id')}`, { signal }); }
+  async getInstallationOrMissing(id, { signal } = {}) {
     try {
-      return await this.getInstallation(id);
+      return await this.getInstallation(id, { signal });
     } catch (error) {
       if (error instanceof AutonomyExpiryError && error.status === 404) return null;
       throw error;
@@ -152,10 +155,10 @@ export class RevokerClient {
     const data = await this.graphql('mutation($id:ID!){ disablePullRequestAutoMerge(input:{pullRequestId:$id}){ pullRequest{id autoMergeRequest{enabledAt mergeMethod}} } }', { id }, { signal });
     return data?.disablePullRequestAutoMerge?.pullRequest;
   }
-  deleteInstallation(id) { return this.request('DELETE', `/app/installations/${positiveInteger(id, 'installation id')}`); }
-  async deleteInstallationOrMissing(id) {
+  deleteInstallation(id, { signal } = {}) { return this.request('DELETE', `/app/installations/${positiveInteger(id, 'installation id')}`, { signal }); }
+  async deleteInstallationOrMissing(id, { signal } = {}) {
     try {
-      await this.deleteInstallation(id);
+      await this.deleteInstallation(id, { signal });
       return true;
     } catch (error) {
       if (error instanceof AutonomyExpiryError && error.status === 404) return false;
@@ -282,6 +285,39 @@ async function withAbortBudget(operation, milliseconds, message) {
   }
 }
 
+function lateRevocationDeadline(clock, budgetMilliseconds) {
+  const now = clock();
+  if (!Number.isSafeInteger(now)) fail('late revocation clock is invalid');
+  const deadline = now + budgetMilliseconds;
+  if (!Number.isSafeInteger(deadline)) fail('late revocation deadline is invalid');
+  return deadline;
+}
+
+function lateRevocationRemainingBudget(deadline, clock, message) {
+  const now = clock();
+  if (!Number.isSafeInteger(now)) fail('late revocation clock is invalid');
+  const remaining = deadline - now;
+  if (!Number.isSafeInteger(remaining) || remaining <= 0) throw new AutonomyExpiryError(message);
+  return remaining;
+}
+
+function lateCleanupBudget(deadline, clock) {
+  const remaining = lateRevocationRemainingBudget(deadline, clock, 'late revocation budget exhausted');
+  const cleanupBudget = remaining - LATE_INSTALLATION_API_HEADROOM_MILLISECONDS;
+  if (!Number.isSafeInteger(cleanupBudget) || cleanupBudget <= 0) {
+    throw new AutonomyExpiryError('late revocation cleanup budget exhausted');
+  }
+  return cleanupBudget;
+}
+
+function lateRevocationIncomplete(errors, error) {
+  const terminalError = error instanceof Error ? error : new AutonomyExpiryError(error);
+  return new AggregateError(
+    [...errors, terminalError],
+    'Writer App revocation or managed pull request cleanup is incomplete',
+  );
+}
+
 async function disarmManagedPulls(client, config, { maximumPasses = 4, settle = wait, signal } = {}) {
   const observed = new Map();
   let previousSignature = null;
@@ -311,9 +347,9 @@ async function disarmManagedPulls(client, config, { maximumPasses = 4, settle = 
   fail('managed pull request inventory did not converge');
 }
 
-async function resolveTargetInstallation(appClient, config) {
+async function resolveTargetInstallation(appClient, config, { signal } = {}) {
   if (config.installationId) {
-    const configured = await appClient.getInstallationOrMissing(config.installationId);
+    const configured = await appClient.getInstallationOrMissing(config.installationId, { signal });
     if (configured) {
       try {
         validateInstallationIdentity(configured, config);
@@ -323,7 +359,10 @@ async function resolveTargetInstallation(appClient, config) {
       }
     }
   }
-  const matches = targetInstallations(await appClient.listInstallations(), config);
+  // A configured installation can legitimately be absent after an earlier
+  // successful revocation. Re-inventory the target before declaring success so
+  // a same-App reinstallation cannot evade the revoke path.
+  const matches = targetInstallations(await appClient.listInstallations(10, { signal }), config);
   if (matches.length > 1) fail('Writer App installation could not be uniquely discovered');
   if (matches.length === 0) return { config: Object.freeze({ ...config, installationId: null }), installation: null };
   const installationId = positiveInteger(matches[0].id, 'installation id');
@@ -341,6 +380,7 @@ export async function revokeAutonomy({
   settle = wait,
   preCleanupBudgetMilliseconds = 60_000,
   postCleanupBudgetMilliseconds = 180_000,
+  clock = Date.now,
 }) {
   const window = evaluateRevocationWindow({ expiresAt: config.expiresAt, nowMs, safetyWindowSeconds, force });
   if (!window.due && !dryRun) return Object.freeze({ action: 'not_due', window, managedPulls: 0, pullNumbers: [] });
@@ -364,12 +404,71 @@ export async function revokeAutonomy({
   }
 
   if (!installation) {
-    const candidates = await withAbortBudget(
-      (signal) => disarmManagedPulls(governanceClient, runtimeConfig, { settle, signal }),
-      postCleanupBudgetMilliseconds,
-      'post-uninstall cleanup budget exhausted',
-    );
-    return Object.freeze({ action: 'already_uninstalled', window, managedPulls: candidates.length, pullNumbers: candidates.map((x) => x.number) });
+    const observed = new Map();
+    let recheckConfig = runtimeConfig;
+    let installationReappeared = false;
+    let deletionCount = 0;
+    const recoverableErrors = [];
+    const deadline = lateRevocationDeadline(clock, postCleanupBudgetMilliseconds);
+    for (;;) {
+      let cleanupError = null;
+      try {
+        const candidates = await withAbortBudget(
+          (signal) => disarmManagedPulls(governanceClient, recheckConfig, { settle, signal }),
+          lateCleanupBudget(deadline, clock),
+          'post-uninstall cleanup budget exhausted',
+        );
+        for (const candidate of candidates) observed.set(candidate.number, candidate);
+      } catch (error) {
+        // Cleanup failure is not authority proof. Continue with a fresh
+        // installation inventory so a concurrent reinstallation is still
+        // revoked before this run can finish.
+        cleanupError = error;
+        recoverableErrors.push(error);
+      }
+
+      // A prior uninstall can make a configured ID return 404. Do not report
+      // success from that snapshot until cleanup has completed and the target
+      // App installation inventory has been read again.
+      let rechecked;
+      try {
+        rechecked = await withAbortBudget(
+          (signal) => resolveTargetInstallation(appClient, recheckConfig, { signal }),
+          lateRevocationRemainingBudget(deadline, clock, 'late revocation inventory budget exhausted'),
+          'late revocation inventory budget exhausted',
+        );
+      } catch (error) {
+        throw lateRevocationIncomplete(recoverableErrors, error);
+      }
+      recheckConfig = rechecked.config;
+      if (!rechecked.installation) {
+        if (cleanupError) throw lateRevocationIncomplete(recoverableErrors, 'late revocation cleanup did not complete');
+        const pulls = [...observed.values()].sort((left, right) => left.number - right.number);
+        return Object.freeze({
+          action: installationReappeared ? 'uninstalled' : 'already_uninstalled',
+          window,
+          managedPulls: pulls.length,
+          pullNumbers: pulls.map((candidate) => candidate.number),
+        });
+      }
+
+      installationReappeared = true;
+      if (deletionCount >= MAX_LATE_INSTALLATION_REVOCATION_PASSES) {
+        throw lateRevocationIncomplete(recoverableErrors, 'Writer App installation did not converge to an uninstalled state');
+      }
+      deletionCount += 1;
+      try {
+        await withAbortBudget(
+          (signal) => appClient.deleteInstallationOrMissing(recheckConfig.installationId, { signal }),
+          lateRevocationRemainingBudget(deadline, clock, 'late revocation uninstall budget exhausted'),
+          'late revocation uninstall budget exhausted',
+        );
+      } catch (error) {
+        // The next cleanup and fresh inventory determine whether the DELETE
+        // reached GitHub; a response failure alone is not proof of authority.
+        recoverableErrors.push(error);
+      }
+    }
   }
 
   let beforeUninstall = [];
@@ -453,9 +552,27 @@ function envConfig(environment) {
   };
 }
 
+export function formatManagedPullNumbers(pullNumbers) {
+  if (!Array.isArray(pullNumbers)) fail('managed pull request output is invalid');
+  const numbers = pullNumbers.map((number) => positiveInteger(number, 'managed pull request number'));
+  if (new Set(numbers).size !== numbers.length) fail('managed pull request output contains duplicates');
+  return numbers.sort((left, right) => left - right).join(',');
+}
+
 function publishOutputs(environment, result) {
+  if (!result || typeof result !== 'object' || !REVOCATION_ACTIONS.has(result.action)) {
+    fail('revocation output action is invalid');
+  }
+  if (!Number.isSafeInteger(result.managedPulls) || result.managedPulls < 0 ||
+      !Array.isArray(result.pullNumbers) || result.managedPulls !== result.pullNumbers.length) {
+    fail('managed pull request output is invalid');
+  }
+  const pullNumbers = formatManagedPullNumbers(result.pullNumbers);
   if (environment.GITHUB_OUTPUT) {
-    fs.appendFileSync(environment.GITHUB_OUTPUT, `action=${result.action}\nmanaged_pulls=${result.managedPulls}\n`);
+    fs.appendFileSync(
+      environment.GITHUB_OUTPUT,
+      `action=${result.action}\nmanaged_pulls=${result.managedPulls}\nmanaged_pull_numbers=${pullNumbers}\n`,
+    );
   }
   return result;
 }

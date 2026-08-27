@@ -79,11 +79,13 @@ jobs:
         env:
           ACTION: ${{ steps.revoke.outputs.action }}
           MANAGED_PULLS: ${{ steps.revoke.outputs.managed_pulls }}
+          MANAGED_PULL_NUMBERS: ${{ steps.revoke.outputs.managed_pull_numbers }}
         run: |
           {
             echo '### Autonomy expiry revoker'
             echo
             echo "- Action: \`${ACTION:-failed}\`"
             echo "- Managed PRs observed: \`${MANAGED_PULLS:-unknown}\`"
+            echo "- Managed PR numbers: \`${MANAGED_PULL_NUMBERS:-unknown}\`"
             echo '- The Writer secret and repository variables remain; GITHUB_TOKEN cannot delete them.'
           } >> "$GITHUB_STEP_SUMMARY"
