@@ -223,6 +223,18 @@ impl GatewayDataState {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_request_candidate_repository<T>(mut self, repository: Arc<T>) -> Self
+    where
+        T: RequestCandidateRepository + 'static,
+    {
+        let request_candidate_reader: Arc<dyn RequestCandidateReadRepository> = repository.clone();
+        let request_candidate_writer: Arc<dyn RequestCandidateWriteRepository> = repository;
+        self.request_candidate_reader = Some(request_candidate_reader);
+        self.request_candidate_writer = Some(request_candidate_writer);
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_settlement_writer_for_tests(
         mut self,
         repository: Arc<dyn SettlementWriteRepository>,

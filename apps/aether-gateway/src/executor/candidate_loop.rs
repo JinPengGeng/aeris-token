@@ -1685,7 +1685,7 @@ mod tests {
 
     use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
     use aether_data_contracts::repository::candidates::{
-        RequestCandidateStatus, UpsertRequestCandidateRecord,
+        RequestCandidateReadRepository, RequestCandidateStatus, UpsertRequestCandidateRecord,
     };
     use async_trait::async_trait;
     use serde_json::json;
@@ -2531,11 +2531,15 @@ mod tests {
                 vec![key],
             ),
         );
+        let request_candidates = Arc::new(
+            aether_data::repository::candidates::InMemoryRequestCandidateRepository::default(),
+        );
         let state = AppState::new()
             .expect("gateway state should build")
             .with_data_state_for_tests(
                 crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(catalog)
-                    .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY),
+                    .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY)
+                    .with_request_candidate_repository(request_candidates.clone()),
             );
 
         // Upstream accepts the connection but never responds, so both the
@@ -2606,6 +2610,10 @@ mod tests {
             .into_iter()
             .next()
             .expect("stored key should exist");
+        let candidates = request_candidates
+            .list_by_request_id("req-watchdog-single-health-feedback")
+            .await
+            .expect("request candidates should read");
         assert_eq!(
             stored_key
                 .health_by_format
@@ -2614,7 +2622,7 @@ mod tests {
                 .and_then(|value| value.get("consecutive_failures"))
                 .and_then(serde_json::Value::as_u64),
             Some(1),
-            "equal inner/outer first-byte timeouts must produce exactly one health feedback"
+            "equal inner/outer first-byte timeouts must produce exactly one health feedback; candidates: {candidates:?}"
         );
         server.abort();
     }
