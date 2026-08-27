@@ -48,6 +48,10 @@ for (const [name, workflow, context] of [
     JSON.stringify(check.permissions) === JSON.stringify({ contents: 'read' }),
     `${name} CI required check must explicitly receive only contents: read`,
   );
+  assert(
+    String(check.if).trim() === '${{ always() }}',
+    `${name} CI required check must run after failed or skipped prerequisites`,
+  );
   assert(publisher, `${name} CI must publish workflow_dispatch statuses in a separate job`);
   assert(
     JSON.stringify(publisher.permissions) ===
