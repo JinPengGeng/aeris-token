@@ -395,6 +395,7 @@ for (const [job, message] of [
 }
 const resolverStep = findStep(resolveConflictJob, 'Generate credentialless resolution candidate');
 const reviewerStep = findStep(reviewConflictJob, 'Run independent credentialless Reviewer');
+const collectReviewStep = findStep(reviewConflictJob, 'Collect exact published review input');
 assert(
   resolverStep?.env.GITHUB_TOKEN === '' && resolverStep.env.GH_TOKEN === '' &&
     resolverStep.env.AERIS_AI_API_KEY === '${{ secrets.AERIS_AI_API_KEY }}' &&
@@ -406,6 +407,12 @@ assert(
     reviewerStep.env.AERIS_AI_API_KEY === '${{ secrets.AERIS_AI_API_KEY }}' &&
     reviewerStep.run === 'node .github/automation/src/sync-conflict-review.mjs review',
   'Reviewer model step must be credentialless and independent from publication',
+);
+assert(
+  collectReviewStep?.id === 'collect' &&
+    reviewConflictJob.outputs.input_sha === '${{ steps.collect.outputs.conflict_review_input_sha }}' &&
+    reviewConflictJob.outputs.receipt_sha === '${{ steps.review.outputs.conflict_review_receipt_sha }}',
+  'Reviewer must expose exact input and receipt hashes to the Finalizer',
 );
 const expectedArtifacts = [
   [syncWorkflow.jobs.sync, 'Upload exact conflict bundle', `sync-conflict-bundle-${conflictArtifactSuffix}`],
@@ -447,6 +454,14 @@ assert(
     conflictMergeStep.env.SYNCED_SHA === '${{ needs.publish_conflict.outputs.head_sha }}' &&
     conflictMergeStep.env.EXPECTED_BASE_SHA === '${{ needs.publish_conflict.outputs.base_sha }}' &&
     conflictMergeStep.env.CONFLICT_ATTESTATION_SHA === '${{ steps.attest.outputs.conflict_attestation_sha }}' &&
+    conflictMergeStep.env.AERIS_CONFLICT_BUNDLE_PATH === '${{ runner.temp }}/aeris-sync-conflict/bundle.json' &&
+    conflictMergeStep.env.AERIS_CONFLICT_CANDIDATE_PATH === '${{ runner.temp }}/aeris-sync-resolution/candidate.json' &&
+    conflictMergeStep.env.AERIS_CONFLICT_REVIEW_INPUT_PATH === '${{ runner.temp }}/aeris-sync-review/input.json' &&
+    conflictMergeStep.env.AERIS_CONFLICT_REVIEW_RECEIPT_PATH === '${{ runner.temp }}/aeris-sync-review/receipt.json' &&
+    conflictMergeStep.env.AERIS_CONFLICT_BUNDLE_SHA === '${{ needs.publish_conflict.outputs.bundle_sha }}' &&
+    conflictMergeStep.env.AERIS_CONFLICT_CANDIDATE_SHA === '${{ needs.publish_conflict.outputs.candidate_sha }}' &&
+    conflictMergeStep.env.AERIS_CONFLICT_REVIEW_INPUT_SHA === '${{ needs.review_conflict.outputs.input_sha }}' &&
+    conflictMergeStep.env.AERIS_CONFLICT_REVIEW_RECEIPT_SHA === '${{ needs.review_conflict.outputs.receipt_sha }}' &&
     (conflictMergeStep.run.match(/manage-sync-automerge\.sh/g) || []).length === 1 &&
     conflictMergeStep.run.includes('conflict_ai_review'),
   'conflict Finalizer must perform one exact attested merge helper invocation',

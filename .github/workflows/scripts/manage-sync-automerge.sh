@@ -75,6 +75,14 @@ case "${ACTION}" in
       ATTESTATION_PATH="$8"
       ATTESTATION_SHA="$9"
       [[ "${ATTESTATION_SHA}" =~ ^[0-9a-f]{64}$ ]] || fail 'conflict attestation SHA is invalid'
+      [[ -n "${AERIS_CONFLICT_BUNDLE_PATH:-}" ]] || fail 'AI conflict review requires the exact conflict bundle path'
+      [[ -n "${AERIS_CONFLICT_CANDIDATE_PATH:-}" ]] || fail 'AI conflict review requires the exact conflict candidate path'
+      [[ -n "${AERIS_CONFLICT_REVIEW_INPUT_PATH:-}" ]] || fail 'AI conflict review requires the exact review input path'
+      [[ -n "${AERIS_CONFLICT_REVIEW_RECEIPT_PATH:-}" ]] || fail 'AI conflict review requires the exact review receipt path'
+      [[ "${AERIS_CONFLICT_BUNDLE_SHA:-}" =~ ^[0-9a-f]{64}$ ]] || fail 'trusted conflict bundle SHA is invalid'
+      [[ "${AERIS_CONFLICT_CANDIDATE_SHA:-}" =~ ^[0-9a-f]{64}$ ]] || fail 'trusted conflict candidate SHA is invalid'
+      [[ "${AERIS_CONFLICT_REVIEW_INPUT_SHA:-}" =~ ^[0-9a-f]{64}$ ]] || fail 'trusted conflict review input SHA is invalid'
+      [[ "${AERIS_CONFLICT_REVIEW_RECEIPT_SHA:-}" =~ ^[0-9a-f]{64}$ ]] || fail 'trusted conflict review receipt SHA is invalid'
       upstream_repository="${SYNC_SOURCE%@*}"
       upstream_sha="${SYNC_SOURCE#*@}"
       GITHUB_REPOSITORY="${REPOSITORY}" \
@@ -85,6 +93,14 @@ case "${ACTION}" in
       AERIS_CONFLICT_UPSTREAM_SHA="${upstream_sha}" \
       AERIS_CONFLICT_ATTESTATION_PATH="${ATTESTATION_PATH}" \
       AERIS_CONFLICT_ATTESTATION_SHA="${ATTESTATION_SHA}" \
+      AERIS_CONFLICT_BUNDLE_PATH="${AERIS_CONFLICT_BUNDLE_PATH}" \
+      AERIS_CONFLICT_CANDIDATE_PATH="${AERIS_CONFLICT_CANDIDATE_PATH}" \
+      AERIS_CONFLICT_REVIEW_INPUT_PATH="${AERIS_CONFLICT_REVIEW_INPUT_PATH}" \
+      AERIS_CONFLICT_REVIEW_RECEIPT_PATH="${AERIS_CONFLICT_REVIEW_RECEIPT_PATH}" \
+      AERIS_CONFLICT_BUNDLE_SHA="${AERIS_CONFLICT_BUNDLE_SHA}" \
+      AERIS_CONFLICT_CANDIDATE_SHA="${AERIS_CONFLICT_CANDIDATE_SHA}" \
+      AERIS_CONFLICT_REVIEW_INPUT_SHA="${AERIS_CONFLICT_REVIEW_INPUT_SHA}" \
+      AERIS_CONFLICT_REVIEW_RECEIPT_SHA="${AERIS_CONFLICT_REVIEW_RECEIPT_SHA}" \
       AERIS_CONFLICT_RUN_ID="${GITHUB_RUN_ID:?GITHUB_RUN_ID is required for conflict review}" \
       AERIS_CONFLICT_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required for conflict review}" \
         node "${SCRIPT_DIR}/../../automation/src/sync-conflict-review.mjs" verify-attestation ||

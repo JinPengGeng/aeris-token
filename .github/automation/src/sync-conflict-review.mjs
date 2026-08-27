@@ -686,41 +686,76 @@ export async function finalizeConflictReview({ bundle, candidate, input, receipt
     baseRef: normalizedBundle.base_ref,
     requireMergeable: true,
   });
+  return buildFinalAttestation({
+    bundle: normalizedBundle,
+    candidate: normalizedCandidate,
+    input: normalizedInput,
+    receipt: normalizedReceipt,
+    run,
+  });
+}
+
+function buildFinalAttestation({ bundle, candidate, input, receipt, run }) {
   return validateFinalAttestation({
     schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_attestation',
     profile: SYNC_CONFLICT_PROFILE,
-    repository: normalizedBundle.repository,
-    repository_id: normalizedBundle.repository_id,
-    pull_number: normalizedInput.pull_number,
-    head_sha: normalizedInput.head_sha,
-    head_tree_sha: normalizedInput.head_tree_sha,
-    base_sha: normalizedInput.base_sha,
-    checkpoint_sha: normalizedBundle.checkpoint_sha,
-    upstream_repository: normalizedBundle.upstream.repository,
-    upstream_ref: normalizedBundle.upstream.ref,
-    upstream_sha: normalizedBundle.upstream.sha,
-    policy_sha: normalizedBundle.policy.workflow_sha,
-    policy_blob_sha: normalizedBundle.policy.policy_blob_sha,
-    bundle_sha: artifactSha(normalizedBundle),
-    candidate_sha: artifactSha(normalizedCandidate),
-    review_input_sha: artifactSha(normalizedInput),
-    review_receipt_sha: artifactSha(normalizedReceipt),
-    conflict_generation_sha: normalizedBundle.generation_sha,
-    review_generation_sha: normalizedInput.review_generation_sha,
-    resolution_sha: normalizedCandidate.resolution_sha,
-    resolved_merge_tree_sha: normalizedInput.resolved_merge_tree_sha,
-    resolver_model: normalizedCandidate.model,
-    resolver_executor: normalizedCandidate.executor,
-    reviewer_model: normalizedReceipt.model,
-    reviewer_executor: normalizedReceipt.executor,
+    repository: bundle.repository,
+    repository_id: bundle.repository_id,
+    pull_number: input.pull_number,
+    head_sha: input.head_sha,
+    head_tree_sha: input.head_tree_sha,
+    base_sha: input.base_sha,
+    checkpoint_sha: bundle.checkpoint_sha,
+    upstream_repository: bundle.upstream.repository,
+    upstream_ref: bundle.upstream.ref,
+    upstream_sha: bundle.upstream.sha,
+    policy_sha: bundle.policy.workflow_sha,
+    policy_blob_sha: bundle.policy.policy_blob_sha,
+    bundle_sha: artifactSha(bundle),
+    candidate_sha: artifactSha(candidate),
+    review_input_sha: artifactSha(input),
+    review_receipt_sha: artifactSha(receipt),
+    conflict_generation_sha: bundle.generation_sha,
+    review_generation_sha: input.review_generation_sha,
+    resolution_sha: candidate.resolution_sha,
+    resolved_merge_tree_sha: input.resolved_merge_tree_sha,
+    resolver_model: candidate.model,
+    resolver_executor: candidate.executor,
+    reviewer_model: receipt.model,
+    reviewer_executor: receipt.executor,
     verifier_run: run,
     decision: 'approved',
   });
 }
 
-export function verifyAttestationBinding(attestationValue, expected) {
+export function verifyAttestationBinding(attestationValue, expected, artifacts) {
   const attestation = validateFinalAttestation(attestationValue);
+  const bundle = validateConflictBundle(artifacts?.bundle);
+  const candidate = validateConflictCandidate(artifacts?.candidate, bundle);
+  const input = validateReviewInput(artifacts?.input, bundle, candidate);
+  const receipt = validateReviewReceipt(artifacts?.receipt, input, bundle, candidate);
+  const artifactBindings = {
+    bundle: [artifactSha(bundle), exactHash(expected.bundleSha, 'expected conflict bundle hash')],
+    candidate: [artifactSha(candidate), exactHash(expected.candidateSha, 'expected conflict candidate hash')],
+    'review input': [artifactSha(input), exactHash(expected.reviewInputSha, 'expected conflict review input hash')],
+    'review receipt': [artifactSha(receipt), exactHash(expected.reviewReceiptSha, 'expected conflict review receipt hash')],
+  };
+  for (const [name, [actual, trusted]] of Object.entries(artifactBindings)) {
+    if (actual !== trusted) fail(`${name} does not match the trusted cross-job artifact hash`);
+  }
+  const verifierRun = {
+    id: positive(expected.runId, 'expected verifier run ID'),
+    attempt: positive(expected.runAttempt, 'expected verifier run attempt'),
+  };
+  if (candidate.run.id !== verifierRun.id || candidate.run.attempt !== verifierRun.attempt ||
+      receipt.run.id !== verifierRun.id || receipt.run.attempt !== verifierRun.attempt) {
+    fail('resolver, reviewer, and verifier must belong to the exact workflow run and attempt');
+  }
+  const exactAttestation = buildFinalAttestation({ bundle, candidate, input, receipt, run: verifierRun });
+  if (canonicalJson(attestation) !== canonicalJson(exactAttestation)) {
+    fail('conflict attestation does not exactly match the verified artifact chain');
+  }
   const fields = {
     repository: expected.repository,
     pull_number: positive(expected.pullNumber, 'expected pull number'),
@@ -732,16 +767,8 @@ export function verifyAttestationBinding(attestationValue, expected) {
   for (const [key, value] of Object.entries(fields)) {
     if (attestation[key] !== value) fail(`conflict attestation ${key} does not match the merge request`);
   }
-  if (expected.attestationSha && artifactSha(attestation) !== exactHash(expected.attestationSha, 'expected attestation hash')) {
+  if (artifactSha(attestation) !== exactHash(expected.attestationSha, 'expected attestation hash')) {
     fail('conflict attestation hash does not match');
-  }
-  const verifierRun = {
-    id: positive(expected.runId, 'expected verifier run ID'),
-    attempt: positive(expected.runAttempt, 'expected verifier run attempt'),
-  };
-  if (attestation.verifier_run.id !== verifierRun.id ||
-      attestation.verifier_run.attempt !== verifierRun.attempt) {
-    fail('conflict attestation does not belong to the exact workflow run and attempt');
   }
   return attestation;
 }
@@ -800,6 +827,10 @@ async function runCli(commandName, environment) {
     }
     case 'verify-attestation': {
       const attestation = readCanonicalFile(environment.AERIS_CONFLICT_ATTESTATION_PATH, environment, 'conflict attestation');
+      const bundle = readCanonicalFile(environment.AERIS_CONFLICT_BUNDLE_PATH, environment, 'conflict bundle');
+      const candidate = readCanonicalFile(environment.AERIS_CONFLICT_CANDIDATE_PATH, environment, 'conflict candidate');
+      const input = readCanonicalFile(environment.AERIS_CONFLICT_REVIEW_INPUT_PATH, environment, 'conflict review input');
+      const receipt = readCanonicalFile(environment.AERIS_CONFLICT_REVIEW_RECEIPT_PATH, environment, 'conflict review receipt');
       return verifyAttestationBinding(attestation, {
         repository: environment.GITHUB_REPOSITORY,
         pullNumber: environment.AERIS_CONFLICT_PULL_NUMBER,
@@ -808,9 +839,13 @@ async function runCli(commandName, environment) {
         upstreamRepository: environment.AERIS_CONFLICT_UPSTREAM_REPOSITORY,
         upstreamSha: environment.AERIS_CONFLICT_UPSTREAM_SHA,
         attestationSha: environment.AERIS_CONFLICT_ATTESTATION_SHA,
+        bundleSha: environment.AERIS_CONFLICT_BUNDLE_SHA,
+        candidateSha: environment.AERIS_CONFLICT_CANDIDATE_SHA,
+        reviewInputSha: environment.AERIS_CONFLICT_REVIEW_INPUT_SHA,
+        reviewReceiptSha: environment.AERIS_CONFLICT_REVIEW_RECEIPT_SHA,
         runId: environment.AERIS_CONFLICT_RUN_ID,
         runAttempt: environment.AERIS_CONFLICT_RUN_ATTEMPT,
-      });
+      }, { bundle, candidate, input, receipt });
     }
     default:
       fail('usage: sync-conflict-review.mjs <prepare|resolve|materialize|collect-review|review|finalize|verify-attestation>');

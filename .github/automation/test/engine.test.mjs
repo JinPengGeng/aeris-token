@@ -11,7 +11,13 @@ import {
   runPublishPhase,
   runReservationPhase,
 } from '../src/engine.mjs';
-import { validateReservationArtifact } from '../src/phase-contract.mjs';
+import {
+  ARTIFACT_SCHEMA_VERSION,
+  validateAnalysisArtifact,
+  validatePreflightArtifact,
+  validatePublicationArtifact,
+  validateReservationArtifact,
+} from '../src/phase-contract.mjs';
 import {
   decodeMetadata,
   MANAGED_MARKER,
@@ -1248,9 +1254,13 @@ test('the four phases exchange fingerprint-only artifacts and wire the connect t
     event: issueEvent,
   });
   assert.equal(preflight.state, 'ready');
+  assert.equal(preflight.schema_version, ARTIFACT_SCHEMA_VERSION);
+  assert.equal(validatePreflightArtifact(preflight).state, 'ready');
   assert.equal(preflight.input, null);
   const reservation = await runReservationPhase({ ...common, artifact: preflight });
   assert.equal(reservation.state, 'reserved');
+  assert.equal(reservation.schema_version, ARTIFACT_SCHEMA_VERSION);
+  assert.equal(validateReservationArtifact(reservation).state, 'reserved');
   assert.equal(typeof reservation.reservation.lease_token, 'string');
   let clientOptions;
   const analysis = await runAnalysisPhase({
@@ -1262,12 +1272,16 @@ test('the four phases exchange fingerprint-only artifacts and wire the connect t
     },
   });
   assert.equal(analysis.state, 'completed');
+  assert.equal(analysis.schema_version, ARTIFACT_SCHEMA_VERSION);
+  assert.equal(validateAnalysisArtifact(analysis).state, 'completed');
   assert.equal(clientOptions.connectTimeoutMs, 120_000);
   assert.equal(clientOptions.timeoutMs, 120_000);
   assert.equal(clientOptions.deadlineAtMs, Date.parse('2026-08-11T01:10:00Z'));
   assert.equal(analysis.reservation.preflight.input, null);
   const publication = await runPublishPhase({ ...common, artifact: analysis });
   assert.equal(publication.state, 'published');
+  assert.equal(publication.schema_version, ARTIFACT_SCHEMA_VERSION);
+  assert.equal(validatePublicationArtifact(publication).state, 'published');
 });
 
 test('analysis does not call the model after cancellation wins the lease fence', async () => {

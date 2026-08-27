@@ -374,6 +374,7 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
+      input_sha: ${{ steps.collect.outputs.conflict_review_input_sha }}
       receipt_sha: ${{ steps.review.outputs.conflict_review_receipt_sha }}
     steps:
       - name: Check out exact trusted base
@@ -435,6 +436,7 @@ jobs:
           [[ "$(sed -n 's/^tree=//p' <<<"${output}" | tail -n1)" == "${EXPECTED_HEAD_TREE}" ]]
 
       - name: Collect exact published review input
+        id: collect
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AERIS_CONFLICT_BUNDLE_PATH: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
@@ -607,6 +609,14 @@ jobs:
           SYNCED_SOURCE: ${{ needs.publish_conflict.outputs.source }}
           CONFLICT_ATTESTATION_PATH: ${{ runner.temp }}/aeris-sync-attestation/attestation.json
           CONFLICT_ATTESTATION_SHA: ${{ steps.attest.outputs.conflict_attestation_sha }}
+          AERIS_CONFLICT_BUNDLE_PATH: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
+          AERIS_CONFLICT_CANDIDATE_PATH: ${{ runner.temp }}/aeris-sync-resolution/candidate.json
+          AERIS_CONFLICT_REVIEW_INPUT_PATH: ${{ runner.temp }}/aeris-sync-review/input.json
+          AERIS_CONFLICT_REVIEW_RECEIPT_PATH: ${{ runner.temp }}/aeris-sync-review/receipt.json
+          AERIS_CONFLICT_BUNDLE_SHA: ${{ needs.publish_conflict.outputs.bundle_sha }}
+          AERIS_CONFLICT_CANDIDATE_SHA: ${{ needs.publish_conflict.outputs.candidate_sha }}
+          AERIS_CONFLICT_REVIEW_INPUT_SHA: ${{ needs.review_conflict.outputs.input_sha }}
+          AERIS_CONFLICT_REVIEW_RECEIPT_SHA: ${{ needs.review_conflict.outputs.receipt_sha }}
         shell: bash
         run: |
           bash .github/workflows/scripts/manage-sync-automerge.sh \

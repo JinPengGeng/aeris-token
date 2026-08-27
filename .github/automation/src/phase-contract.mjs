@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export const ARTIFACT_SCHEMA_VERSION = 1;
+import { validateExecutorIdentity } from './ai-executor-contract.mjs';
+
+export const ARTIFACT_SCHEMA_VERSION = 2;
 export const MAX_ARTIFACT_BYTES = 1024 * 1024;
 
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -276,13 +278,7 @@ function validateModel(value) {
   return {
     alias: boundedString(value.alias, 'analysis model alias', 128, { pattern: SAFE_IDENTIFIER }),
     id: boundedString(value.id, 'analysis model id', 256, { pattern: SAFE_IDENTIFIER }),
-    executor: (() => {
-      exactKeys(value.executor, ['id', 'protocol'], 'analysis executor');
-      return {
-        id: boundedString(value.executor.id, 'analysis executor id', 128, { pattern: SAFE_IDENTIFIER }),
-        protocol: boundedString(value.executor.protocol, 'analysis executor protocol', 128, { pattern: SAFE_IDENTIFIER }),
-      };
-    })(),
+    executor: validateExecutorIdentity(value.executor, 'analysis executor'),
     duration_ms: nullableInteger(value.duration_ms, 'analysis model duration_ms'),
     usage,
   };

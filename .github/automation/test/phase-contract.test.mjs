@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  ARTIFACT_SCHEMA_VERSION,
   MAX_ARTIFACT_BYTES,
   readArtifact,
   readJsonFile,
@@ -38,7 +39,7 @@ function context(overrides = {}) {
 
 function preflight(overrides = {}) {
   return {
-    schema_version: 1,
+    schema_version: ARTIFACT_SCHEMA_VERSION,
     artifact_type: 'preflight',
     state: 'ready',
     decision: { action: 'analyze', reason: 'issue_opened' },
@@ -50,7 +51,7 @@ function preflight(overrides = {}) {
 
 function reservation(overrides = {}) {
   return {
-    schema_version: 1,
+    schema_version: ARTIFACT_SCHEMA_VERSION,
     artifact_type: 'reservation',
     state: 'reserved',
     preflight: preflight(),
@@ -68,7 +69,7 @@ function reservation(overrides = {}) {
 
 function analysis(overrides = {}) {
   return {
-    schema_version: 1,
+    schema_version: ARTIFACT_SCHEMA_VERSION,
     artifact_type: 'analysis',
     state: 'completed',
     reservation: reservation(),
@@ -124,9 +125,42 @@ test('terminal preflight cannot carry model input or an analysis decision', () =
   );
 });
 
-test('contracts reject unknown keys, wrong versions, and malformed hashes', () => {
+test('phase artifact v2 accepts canonical executor identity and rejects every v1 envelope', () => {
+  assert.equal(ARTIFACT_SCHEMA_VERSION, 2);
+  assert.equal(validateAnalysisArtifact(analysis()).schema_version, 2);
+  for (const artifact of [
+    { ...preflight(), schema_version: 1 },
+    { ...reservation(), schema_version: 1 },
+    { ...analysis(), schema_version: 1 },
+    {
+      schema_version: 1,
+      artifact_type: 'publication',
+      state: 'published',
+      analysis: analysis(),
+      result: { state: 'published', reason: null, comment_id: 91 },
+    },
+  ]) {
+    assert.throws(() => validatePhaseArtifact(artifact), /schema_version must be 2/);
+  }
+});
+
+test('analysis executor identity rejects noncanonical forms and extra fields', () => {
+  for (const executor of [
+    { id: 'OpenAI-chat-v1', protocol: 'openai-chat-completions-v1' },
+    { id: 'openai_chat_v1', protocol: 'openai-chat-completions-v1' },
+    { id: 'openai-chat-v1', protocol: 'OpenAI-chat-completions-v1' },
+    { id: 'openai-chat-v1', protocol: 'openai-chat-completions-v1', extra: true },
+  ]) {
+    assert.throws(
+      () => validateAnalysisArtifact({ ...analysis(), model: { ...analysis().model, executor } }),
+      /AI executor contract/,
+    );
+  }
+});
+
+test('contracts reject unknown keys, future versions, and malformed hashes', () => {
   assert.throws(() => validatePhaseArtifact({ ...preflight(), surprise: true }), /unexpected keys/);
-  assert.throws(() => validatePreflightArtifact({ ...preflight(), schema_version: 2 }), /schema_version/);
+  assert.throws(() => validatePreflightArtifact({ ...preflight(), schema_version: 3 }), /schema_version/);
   assert.throws(
     () => validatePreflightArtifact({ ...preflight(), context: context({ input_sha: 'not-a-hash' }) }),
     /input_sha format/,
@@ -193,7 +227,7 @@ test('terminal artifacts pass through without model output', () => {
 test('publication rejects an unknown terminal state', () => {
   assert.throws(
     () => validatePhaseArtifact({
-      schema_version: 1,
+      schema_version: ARTIFACT_SCHEMA_VERSION,
       artifact_type: 'publication',
       state: 'invented_state',
       analysis: analysis(),
