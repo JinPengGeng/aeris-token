@@ -261,7 +261,7 @@ assert(sync.conflicts.overwrite_unknown_tip === false, 'unknown sync tips must n
 assert(sync.conflicts.create_or_update_alert === true, 'sync failures must create alerts');
 assert(
   sync.conflicts.ai_resolution.enabled === true &&
-    sync.conflicts.ai_resolution.profile === 'aeris-sync-conflict-v1' &&
+    sync.conflicts.ai_resolution.profile === 'aeris-sync-conflict-v2' &&
     sync.conflicts.ai_resolution.required_pre_conflict_verdict === 'eligible' &&
     sync.conflicts.ai_resolution.allowed_type === 'modify_modify_utf8_text' &&
     sync.conflicts.ai_resolution.allowed_mode === '100644' &&

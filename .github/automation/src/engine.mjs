@@ -6,6 +6,7 @@ import {
   resolveModelCandidates,
   shouldUseStructuredOutput,
 } from './config.mjs';
+import { validateExecutorIdentity } from './ai-executor-contract.mjs';
 import { GitHubClient } from './github-client.mjs';
 import { buildIssueInput, buildPullInput, inputFingerprint, sourceKey } from './input.mjs';
 import {
@@ -31,6 +32,23 @@ const LEDGER_LIMIT = 32;
 
 function audit(event) {
   console.log(JSON.stringify(event));
+}
+
+function requireCompletionExecutor(completion, expectedExecutor) {
+  let actualExecutor;
+  try {
+    actualExecutor = validateExecutorIdentity(completion?.executor, 'completion executor');
+  } catch {
+    throw Object.assign(new Error('AI completion did not provide a valid executor identity'), {
+      code: 'executor_identity_mismatch',
+    });
+  }
+  if (actualExecutor.id !== expectedExecutor.id || actualExecutor.protocol !== expectedExecutor.protocol) {
+    throw Object.assign(new Error('AI executor identity does not match the trusted route'), {
+      code: 'executor_identity_mismatch',
+    });
+  }
+  return actualExecutor;
 }
 
 function safeModelDiagnostic(error) {
@@ -598,6 +616,7 @@ export async function runAnalysisPhase({
     };
   }
   let completion = null;
+  let completionExecutor = null;
   try {
     if (!enabledByKillSwitch(loaded.policy, environment)) throw new Error('agent kill switch is off');
     let modelInput = artifact.preflight.input;
@@ -650,11 +669,7 @@ export async function runAnalysisPhase({
       maxTokens: agents.runtime.limits.maximum_output_tokens,
       responseFormat: useStructuredOutput ? responseFormatForAgent(context.agent) : undefined,
     });
-    if (completion?.executor && (
-      completion.executor.id !== expectedExecutor.id || completion.executor.protocol !== expectedExecutor.protocol
-    )) {
-      throw Object.assign(new Error('AI executor identity does not match the trusted route'), { code: 'executor_identity_mismatch' });
-    }
+    completionExecutor = requireCompletionExecutor(completion, expectedExecutor);
     const repositoryLabels = context.kind === 'issue' ? modelInput.available_labels : [];
     const output = validateAgentOutput(context.agent, parseModelJson(completion.content), repositoryLabels);
     if (containsSensitiveModelOutput(output, environment.AERIS_AI_API_KEY)) {
@@ -668,8 +683,8 @@ export async function runAnalysisPhase({
       agent: context.agent,
       model_alias: completion.model.alias,
       model_id: completion.model.id,
-      executor_id: expectedExecutor.id,
-      executor_protocol: expectedExecutor.protocol,
+      executor_id: completionExecutor.id,
+      executor_protocol: completionExecutor.protocol,
       duration_ms: completion.durationMs,
       usage: usageSummary(completion.usage),
     });
@@ -679,7 +694,7 @@ export async function runAnalysisPhase({
       state: 'completed',
       reservation: artifact,
       output,
-      model: { alias: completion.model.alias, id: completion.model.id, executor: expectedExecutor, duration_ms: completion.durationMs ?? null, usage: usageSummary(completion.usage) },
+      model: { alias: completion.model.alias, id: completion.model.id, executor: completionExecutor, duration_ms: completion.durationMs ?? null, usage: usageSummary(completion.usage) },
       failure: null,
     };
   } catch (error) {
@@ -695,8 +710,8 @@ export async function runAnalysisPhase({
         typeof completion?.content === 'string' ? byteLength(completion.content) : null,
       model_alias: completion?.model?.alias ?? null,
       model_id: completion?.model?.id ?? null,
-      executor_id: completion?.executor?.id ?? null,
-      executor_protocol: completion?.executor?.protocol ?? null,
+      executor_id: completionExecutor?.id ?? null,
+      executor_protocol: completionExecutor?.protocol ?? null,
       duration_ms: completion?.durationMs ?? null,
       usage: usageSummary(completion?.usage),
     });

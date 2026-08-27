@@ -43,7 +43,7 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Exercise executor protocol conformance without credentials
         working-directory: .github/automation
-        run: node --test test/ai-executor-contract.test.mjs test/openai-responses-executor.test.mjs
+        run: node --test test/ai-executor-contract.test.mjs test/openai-responses-executor.test.mjs test/ai-executor-canary.test.mjs
 
   live:
     name: Probe selected trusted adapter
@@ -74,4 +74,5 @@ jobs:
           AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
           AERIS_AI_API_KEY: ${{ secrets.AERIS_AI_API_KEY }}
           AERIS_AI_MODEL: ${{ vars.AERIS_AI_MODEL }}
-        run: node src/ai-executor-canary.mjs '${{ inputs.executor }}'
+          AERIS_AI_EXECUTOR_ID: ${{ inputs.executor }}
+        run: node src/ai-executor-canary.mjs

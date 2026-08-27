@@ -23,6 +23,10 @@ import { validateAgentOutput } from '../src/schemas.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..', '..');
 const policySha = 'a'.repeat(40);
+const TRUSTED_AGENT_EXECUTOR = Object.freeze({
+  id: 'openai-chat-v1',
+  protocol: 'openai-chat-completions-v1',
+});
 
 function enabledContracts(...names) {
   const contracts = structuredClone(loadContracts(repoRoot));
@@ -174,6 +178,7 @@ function triageCompletion(onComplete = null) {
             next_agent: 'planner',
           }),
           model: { alias: 'default', id: 'test-model' },
+          executor: TRUSTED_AGENT_EXECUTOR,
           durationMs: 12,
           usage: { total_tokens: 20 },
         };
@@ -301,6 +306,7 @@ test('planner canary sends its strict response format to the AI client', async (
               next_agent: null,
             }),
             model: { alias: 'default', id: 'gpt-5.6-sol' },
+            executor: TRUSTED_AGENT_EXECUTOR,
             durationMs: 12,
             usage: { total_tokens: 20 },
           };
@@ -568,6 +574,7 @@ test('workflow_run reviewer reads patches and publishes advisory output', async 
               next_agent: null,
             }),
             model: { alias: 'default', id: 'test-model' },
+            executor: TRUSTED_AGENT_EXECUTOR,
             durationMs: 10,
             usage: null,
           };
@@ -687,6 +694,7 @@ test('a later workflow_run event can proceed after required checks transition to
             next_agent: null,
           }),
           model: { alias: 'default', id: 'test-model' },
+          executor: TRUSTED_AGENT_EXECUTOR,
           durationMs: 1,
           usage: null,
         };
@@ -768,6 +776,7 @@ test('required-check regression before analysis defers without consuming the del
             next_agent: null,
           }),
           model: { alias: 'default', id: 'test-model' },
+          executor: TRUSTED_AGENT_EXECUTOR,
           durationMs: 1,
           usage: null,
         };
@@ -882,7 +891,7 @@ test('analysis check deferrals release only their own reservation from the hourl
             schema_version: 1, agent: 'reviewer', summary: 'Checks recovered.',
             verdict: 'ready_for_human_review', findings: [], test_recommendations: [], next_agent: null,
           }),
-          model: { alias: 'default', id: 'test-model' }, durationMs: 1, usage: null,
+          model: { alias: 'default', id: 'test-model' }, executor: TRUSTED_AGENT_EXECUTOR, durationMs: 1, usage: null,
         };
       },
     }),
@@ -926,6 +935,7 @@ test('required-check regression after analysis blocks publication', async () => 
             next_agent: null,
           }),
           model: { alias: 'default', id: 'test-model' },
+          executor: TRUSTED_AGENT_EXECUTOR,
           durationMs: 1,
           usage: null,
         };
@@ -993,7 +1003,7 @@ test('an expired running lease is recovered with a new reservation and completed
 test('model and schema failures replace the reservation with failed metadata', async () => {
   for (const [completion, expectedCode] of [
     [() => { throw Object.assign(new Error('connection lost'), { code: 'connect_error' }); }, 'connect_error'],
-    [() => ({ content: '{not json}', model: { alias: 'default', id: 'test-model' }, durationMs: 1, usage: null }), 'invalid_model_output'],
+    [() => ({ content: '{not json}', model: { alias: 'default', id: 'test-model' }, executor: TRUSTED_AGENT_EXECUTOR, durationMs: 1, usage: null }), 'invalid_model_output'],
     [() => { throw Object.assign(new Error('truncated'), { code: 'output_truncated' }); }, 'output_truncated'],
   ]) {
     const github = new FakeGitHub();
@@ -1020,6 +1030,57 @@ test('model and schema failures replace the reservation with failed metadata', a
       assert.equal(modelEvents[0].model_id, 'test-model');
       assert.equal(JSON.stringify(modelEvents[0]).includes('{not json}'), false);
     }
+  }
+});
+
+test('analysis rejects missing, mismatched, or non-exact completion executor identities', async () => {
+  const cases = [
+    ['missing', undefined],
+    ['mismatched', { id: 'openai-responses-v1', protocol: 'openai-responses-v1' }],
+    ['non-exact', { ...TRUSTED_AGENT_EXECUTOR, untrusted: true }],
+  ];
+  for (const [name, executor] of cases) {
+    const github = new FakeGitHub();
+    const modelEvents = [];
+    const common = {
+      environment: environment(), repoRoot, contracts: enabledContracts('triage'), policySha, github,
+    };
+    const preflight = await runPreflightPhase({
+      ...common, kind: 'issue', eventName: 'issues', event: issueEvent,
+    });
+    const reservation = await runReservationPhase({ ...common, artifact: preflight });
+    const analysis = await runAnalysisPhase({
+      ...common,
+      artifact: reservation,
+      aiClientFactory: () => ({ async complete() {
+        const completion = {
+          content: JSON.stringify({
+            schema_version: 1,
+            agent: 'triage',
+            summary: 'Confirmed request failure.',
+            risk: 'medium',
+            proposed_labels: ['type:bug'],
+            missing_information: [],
+            recommended_action: 'Collect the response status.',
+            next_agent: null,
+          }),
+          model: { alias: 'default', id: 'test-model' },
+          durationMs: 1,
+          usage: null,
+        };
+        if (executor !== undefined) completion.executor = executor;
+        return completion;
+      } }),
+      auditEvent: (event) => modelEvents.push(event),
+    });
+    assert.equal(analysis.state, 'failed', name);
+    assert.deepEqual(analysis.failure, { code: 'executor_identity_mismatch' }, name);
+    assert.equal(analysis.model, null, name);
+    assert.equal(analysis.output, null, name);
+    assert.equal(modelEvents.length, 1, name);
+    assert.equal(modelEvents[0].code, 'executor_identity_mismatch', name);
+    assert.equal(modelEvents[0].executor_id, null, name);
+    assert.equal(modelEvents[0].executor_protocol, null, name);
   }
 });
 
@@ -1108,6 +1169,7 @@ test('sensitive model output is rejected before it reaches an artifact or commen
             next_agent: null,
           }),
           model: { alias: 'default', id: 'test-model' },
+          executor: TRUSTED_AGENT_EXECUTOR,
           durationMs: 1,
           usage: null,
         };
@@ -1547,7 +1609,7 @@ test('publish rejects each mutable pull input component changed after analysis',
       aiClientFactory: () => ({ async complete() {
         return {
           content: JSON.stringify({ schema_version: 1, agent: 'reviewer', summary: 'Reviewed.', verdict: 'ready_for_human_review', findings: [], test_recommendations: [], next_agent: null }),
-          model: { alias: 'default', id: 'test-model' }, durationMs: 1, usage: null,
+          model: { alias: 'default', id: 'test-model' }, executor: TRUSTED_AGENT_EXECUTOR, durationMs: 1, usage: null,
         };
       } }),
     });

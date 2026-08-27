@@ -139,7 +139,7 @@ require_ai_resolution_policy() {
   sensitive_paths="$(policy_nested_field conflicts ai_resolution allow_sensitive_or_review_required_paths)"
   ambiguous_changes="$(policy_nested_field conflicts ai_resolution allow_binary_rename_delete_mode_or_case_ambiguity)"
 
-  [[ "${enabled}" == true && "${profile}" == aeris-sync-conflict-v1 &&
+  [[ "${enabled}" == true && "${profile}" == aeris-sync-conflict-v2 &&
      "${pre_conflict_verdict}" == eligible && "${allowed_type}" == modify_modify_utf8_text &&
      "${allowed_mode}" == 100644 && "${maximum_files}" == 4 &&
      "${maximum_bytes_per_file}" == 16384 && "${maximum_total_input_bytes}" == 65536 &&

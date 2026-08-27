@@ -6,9 +6,14 @@ import { spawnSync } from 'node:child_process';
 
 import { GitHubClient } from './github-client.mjs';
 import { createAiExecutorFromIdentity } from './ai-executor-factory.mjs';
-import { executorForRoute, validateExecutorRegistry } from './ai-executor-contract.mjs';
+import {
+  executorForRoute,
+  validateExecutorIdentity,
+  validateExecutorRegistry,
+} from './ai-executor-contract.mjs';
 import {
   SYNC_CONFLICT_PROFILE,
+  SYNC_CONFLICT_SCHEMA_VERSION,
   artifactSha,
   canonicalJson,
   conflictGeneration,
@@ -55,6 +60,19 @@ export const REVIEWER_PROMPT_SHA = sha256(REVIEWER_PROMPT);
 
 function fail(message) {
   throw new Error(message);
+}
+
+function requireCompletionExecutor(completion, expectedExecutor, role) {
+  let actualExecutor;
+  try {
+    actualExecutor = validateExecutorIdentity(completion?.executor, `${role} completion executor`);
+  } catch {
+    fail(`${role} completion did not provide a valid executor identity`);
+  }
+  if (canonicalJson(actualExecutor) !== canonicalJson(expectedExecutor)) {
+    fail(`${role} completion executor identity does not match the trusted generation`);
+  }
+  return actualExecutor;
 }
 
 function required(value, name, pattern = null) {
@@ -304,7 +322,7 @@ export function buildConflictBundle({ environment = process.env } = {}) {
     fail('sync policy and state must be regular non-executable files');
   }
   const bundle = {
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_bundle',
     profile: SYNC_CONFLICT_PROFILE,
     repository: context.repository,
@@ -416,18 +434,16 @@ export async function resolveConflict({ bundle, environment = process.env, clien
     maxTokens: positive(environment.AERIS_CONFLICT_MAX_OUTPUT_TOKENS || 32768, 'resolver maximum output tokens'),
     responseFormat: resolverResponseFormat,
   });
-  if (completion?.executor && canonicalJson(completion.executor) !== canonicalJson(expectedExecutor)) {
-    fail('resolver completion executor identity does not match the trusted generation');
-  }
+  const completionExecutor = requireCompletionExecutor(completion, expectedExecutor, 'resolver');
   const output = validateResolverOutput(parseModelJson(completion.content, 'resolver'), normalizedBundle);
   return validateConflictCandidate({
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_candidate',
     profile: SYNC_CONFLICT_PROFILE,
     bundle_sha: artifactSha(normalizedBundle),
     generation_sha: normalizedBundle.generation_sha,
     model: completion.model,
-    executor: expectedExecutor,
+    executor: completionExecutor,
     run: { id: positive(environment.GITHUB_RUN_ID, 'GITHUB_RUN_ID'), attempt: positive(environment.GITHUB_RUN_ATTEMPT, 'GITHUB_RUN_ATTEMPT') },
     output,
     resolution_sha: artifactSha(output.resolutions),
@@ -585,7 +601,7 @@ export async function collectReviewInput({ bundle, candidate, environment = proc
     resolved_merge_tree_sha: materialization.resolved_merge_tree_sha,
   };
   const input = {
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_review_input',
     profile: SYNC_CONFLICT_PROFILE,
     repository: normalizedBundle.repository,
@@ -626,18 +642,16 @@ export async function reviewConflict({ input, bundle, candidate, environment = p
     maxTokens: positive(environment.AERIS_CONFLICT_REVIEW_MAX_OUTPUT_TOKENS || 8000, 'reviewer maximum output tokens'),
     responseFormat: reviewerResponseFormat,
   });
-  if (completion?.executor && canonicalJson(completion.executor) !== canonicalJson(expectedExecutor)) {
-    fail('reviewer completion executor identity does not match the trusted generation');
-  }
+  const completionExecutor = requireCompletionExecutor(completion, expectedExecutor, 'reviewer');
   const output = validateReviewerOutput(parseModelJson(completion.content, 'reviewer'));
   const receipt = {
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_review',
     profile: SYNC_CONFLICT_PROFILE,
     review_generation_sha: normalizedInput.review_generation_sha,
     input_sha: normalizedInput.input_sha,
     model: completion.model,
-    executor: expectedExecutor,
+    executor: completionExecutor,
     run: { id: positive(environment.GITHUB_RUN_ID, 'GITHUB_RUN_ID'), attempt: positive(environment.GITHUB_RUN_ATTEMPT, 'GITHUB_RUN_ATTEMPT') },
     output,
     output_sha: artifactSha(output),
@@ -673,7 +687,7 @@ export async function finalizeConflictReview({ bundle, candidate, input, receipt
     requireMergeable: true,
   });
   return validateFinalAttestation({
-    schema_version: 1,
+    schema_version: SYNC_CONFLICT_SCHEMA_VERSION,
     artifact_type: 'sync_conflict_attestation',
     profile: SYNC_CONFLICT_PROFILE,
     repository: normalizedBundle.repository,
