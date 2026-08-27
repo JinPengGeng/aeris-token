@@ -39,6 +39,9 @@ test('revoker limits GITHUB_TOKEN writes to post-uninstall PR cleanup and pins a
   const revoke = job.steps.find((step) => /Revoke expired Writer authority/.test(step.name));
   assert.match(revoke.env.AERIS_WRITER_APP_PRIVATE_KEY, /secrets\.AERIS_WRITER_APP_PRIVATE_KEY/);
   assert.equal(revoke.env.AERIS_REVOCATION_TOKEN, '${{ github.token }}');
+  const summary = job.steps.find((step) => /Summarize revocation/.test(step.name));
+  assert.equal(summary.env.MANAGED_PULL_NUMBERS, '${{ steps.revoke.outputs.managed_pull_numbers }}');
+  assert.match(summary.run, /Managed PR numbers/);
   assert.equal(document.permissions.contents, 'read');
   assert.equal(document.permissions['pull-requests'], 'write');
 });

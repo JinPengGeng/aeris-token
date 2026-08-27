@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
-import { main, revokeAutonomy } from '../src/autonomy-expiry-revoker.mjs';
+import { formatManagedPullNumbers, main, revokeAutonomy } from '../src/autonomy-expiry-revoker.mjs';
 
 const config = Object.freeze({
   repository: 'JinPengGeng/aeris-token', repositoryId: 123, owner: 'JinPengGeng',
@@ -89,6 +92,13 @@ class FakeClient {
 
 const noWait = async () => {};
 
+test('managed PR output is a canonical safe comma list', () => {
+  assert.equal(formatManagedPullNumbers([42, 7]), '7,42');
+  assert.equal(formatManagedPullNumbers([]), '');
+  assert.throws(() => formatManagedPullNumbers([7, 7]), /duplicates/);
+  assert.throws(() => formatManagedPullNumbers([7, '8']), /positive integer/);
+});
+
 test('all Writer-owned PRs are disarmed before and after uninstall', async () => {
   const client = new FakeClient([managedPull(41), managedPull(42)]);
   const result = await revokeAutonomy({
@@ -115,6 +125,125 @@ test('post-uninstall cleanup catches a last-moment rearm and newly created Write
   assert.deepEqual(result.pullNumbers, [53, 54]);
   assert.deepEqual(client.disableCalls, [53, 53, 54]);
   assert.equal(client.armed.size, 0);
+});
+
+test('an installation recreated during already-uninstalled cleanup is revoked before success', async () => {
+  const client = new FakeClient([managedPull(55)]);
+  client.deleted = true;
+  let reinstalledDuringCleanup = false;
+  const listOpenPulls = client.listOpenPulls.bind(client);
+  client.listOpenPulls = async () => {
+    if (!reinstalledDuringCleanup) {
+      reinstalledDuringCleanup = true;
+      client.deleted = false;
+    }
+    return listOpenPulls();
+  };
+  const result = await revokeAutonomy({
+    appClient: client, governanceClient: client, config, force: true, settle: noWait,
+  });
+  assert.equal(result.action, 'uninstalled');
+  assert.equal(reinstalledDuringCleanup, true);
+  assert.equal(client.deleted, true);
+  assert.equal(client.deleteCalls, 1);
+  assert.deepEqual(result.pullNumbers, [55]);
+  assert.deepEqual(client.disableCalls, [55]);
+  assert.ok(client.inventoryReads >= 8);
+});
+
+test('late installation is deleted even when its first cleanup fails', async () => {
+  const client = new FakeClient([]);
+  client.deleted = true;
+  let firstCleanup = true;
+  const listOpenPulls = client.listOpenPulls.bind(client);
+  client.listOpenPulls = async () => {
+    if (firstCleanup) {
+      firstCleanup = false;
+      client.deleted = false;
+      throw new Error('temporary late cleanup failure');
+    }
+    return listOpenPulls();
+  };
+  const result = await revokeAutonomy({
+    appClient: client, governanceClient: client, config, force: true, settle: noWait,
+  });
+  assert.equal(result.action, 'uninstalled');
+  assert.equal(client.deleteCalls, 1);
+  assert.equal(client.deleted, true);
+  assert.ok(client.inventoryReads >= 4);
+});
+
+test('late revocation shares one cleanup deadline and reserves API headroom', async () => {
+  const client = new FakeClient([]);
+  client.deleted = true;
+  let now = 0;
+  let reinstalled = false;
+  const listOpenPulls = client.listOpenPulls.bind(client);
+  client.listOpenPulls = async () => {
+    now += 20_000;
+    if (!reinstalled) {
+      reinstalled = true;
+      client.deleted = false;
+    }
+    return listOpenPulls();
+  };
+  await assert.rejects(
+    () => revokeAutonomy({
+      appClient: client,
+      governanceClient: client,
+      config,
+      force: true,
+      settle: noWait,
+      postCleanupBudgetMilliseconds: 90_000,
+      clock: () => now,
+    }),
+    /cleanup is incomplete/,
+  );
+  assert.equal(client.deleteCalls, 1);
+  assert.equal(client.deleted, true);
+});
+
+test('three late reinstallations receive cleanup and fresh inventory after each deletion', async () => {
+  const client = new FakeClient([]);
+  client.deleted = true;
+  let listCalls = 0;
+  let cleanupRounds = 0;
+  const listOpenPulls = client.listOpenPulls.bind(client);
+  client.listOpenPulls = async () => {
+    if (listCalls % 4 === 0) {
+      cleanupRounds += 1;
+      if (cleanupRounds <= 3) client.deleted = false;
+    }
+    listCalls += 1;
+    return listOpenPulls();
+  };
+  const result = await revokeAutonomy({
+    appClient: client, governanceClient: client, config, force: true, settle: noWait,
+  });
+  assert.equal(result.action, 'uninstalled');
+  assert.equal(client.deleteCalls, 3);
+  assert.equal(client.deleted, true);
+  assert.equal(cleanupRounds, 4);
+  assert.ok(client.inventoryReads >= 16);
+});
+
+test('a fourth late reinstallation after three deletions fails closed', async () => {
+  const client = new FakeClient([]);
+  client.deleted = true;
+  let listCalls = 0;
+  const listOpenPulls = client.listOpenPulls.bind(client);
+  client.listOpenPulls = async () => {
+    if (listCalls % 4 === 0) client.deleted = false;
+    listCalls += 1;
+    return listOpenPulls();
+  };
+  await assert.rejects(
+    () => revokeAutonomy({
+      appClient: client, governanceClient: client, config, force: true, settle: noWait,
+    }),
+    /cleanup is incomplete/,
+  );
+  assert.equal(client.deleteCalls, 3);
 });
 
 test('external marker and branch spoofing cannot block uninstall', async () => {
@@ -335,8 +464,13 @@ function environment(privateKey) {
 test('main uses the native cleanup token and repeated cron runs are idempotent', async () => {
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const env = environment(privateKey);
+  env.AERIS_FORCE = 'false';
+  const outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-revoker-output-'));
+  const outputPath = path.join(outputDirectory, 'github-output');
+  env.GITHUB_OUTPUT = outputPath;
   let deleted = false;
   let deleteCalls = 0;
+  let missingConfiguredInstallationReads = 0;
   const fetchImpl = async (url, options) => {
     const parsed = new URL(url);
     const path = parsed.pathname + parsed.search;
@@ -348,7 +482,11 @@ test('main uses the native cleanup token and repeated cron runs are idempotent',
       return response(200, deleted ? [] : [installationIdentity()]);
     }
     if (path === `/app/installations/${config.installationId}` && options.method === 'GET') {
-      return deleted ? response(404, { message: 'Not Found' }) : response(200, installationIdentity());
+      if (deleted) {
+        missingConfiguredInstallationReads += 1;
+        return response(404, { message: 'Not Found' });
+      }
+      return response(200, installationIdentity());
     }
     if (path === `/repos/${config.repository}`) return response(200, { id: config.repositoryId, full_name: config.repository });
     if (path.startsWith(`/repos/${config.repository}/pulls?`)) return response(200, []);
@@ -359,11 +497,67 @@ test('main uses the native cleanup token and repeated cron runs are idempotent',
     }
     throw new Error(`unexpected request ${options.method} ${path}`);
   };
-  const first = await main(env, { nowMs: Date.parse(config.expiresAt), fetchImpl, settle: noWait });
-  const second = await main(env, { nowMs: Date.parse(config.expiresAt), fetchImpl, settle: noWait });
-  assert.equal(first.action, 'uninstalled');
-  assert.equal(second.action, 'already_uninstalled');
-  assert.equal(deleteCalls, 1);
+  try {
+    const first = await main(env, { nowMs: Date.parse(config.expiresAt), fetchImpl, settle: noWait });
+    const missingReadsAfterFirstRun = missingConfiguredInstallationReads;
+    const second = await main(env, { nowMs: Date.parse(config.expiresAt), fetchImpl, settle: noWait });
+    assert.equal(first.action, 'uninstalled');
+    assert.equal(second.action, 'already_uninstalled');
+    assert.equal(deleteCalls, 1);
+    assert.ok(missingConfiguredInstallationReads > missingReadsAfterFirstRun);
+    assert.deepEqual(fs.readFileSync(outputPath, 'utf8').trimEnd().split('\n'), [
+      'action=uninstalled',
+      'managed_pulls=0',
+      'managed_pull_numbers=',
+      'action=already_uninstalled',
+      'managed_pulls=0',
+      'managed_pull_numbers=',
+    ]);
+  } finally {
+    fs.rmSync(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('dry run performs only read-side identity and inventory checks', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const env = environment(privateKey);
+  const outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-revoker-dry-run-'));
+  const outputPath = path.join(outputDirectory, 'github-output');
+  env.AERIS_DRY_RUN = 'true';
+  env.AERIS_FORCE = 'false';
+  env.GITHUB_OUTPUT = outputPath;
+  const requests = [];
+  const pulls = [managedPull(42), managedPull(7)];
+  const fetchImpl = async (url, options) => {
+    const parsed = new URL(url);
+    const request = { method: options.method, path: parsed.pathname + parsed.search, body: options.body };
+    requests.push(request);
+    assert.equal(options.method, 'GET');
+    assert.equal(options.body, undefined);
+    if (request.path === '/app') return response(200, appIdentity);
+    if (request.path === `/app/installations/${config.installationId}`) return response(200, installationIdentity());
+    if (request.path === `/repos/${config.repository}`) return response(200, { id: config.repositoryId, full_name: config.repository });
+    if (request.path.startsWith(`/repos/${config.repository}/pulls?`)) return response(200, pulls);
+    throw new Error(`unexpected dry-run request ${request.method} ${request.path}`);
+  };
+  try {
+    const result = await main(env, {
+      nowMs: Date.parse(config.expiresAt) - 3_600_000,
+      fetchImpl,
+      settle: noWait,
+    });
+    assert.equal(result.action, 'dry_run');
+    assert.deepEqual(result.pullNumbers, [42, 7]);
+    assert.equal(requests.some((request) => request.method !== 'GET'), false);
+    assert.equal(requests.some((request) => /access_tokens|graphql/.test(request.path)), false);
+    assert.deepEqual(fs.readFileSync(outputPath, 'utf8').trimEnd().split('\n'), [
+      'action=dry_run',
+      'managed_pulls=2',
+      'managed_pull_numbers=7,42',
+    ]);
+  } finally {
+    fs.rmSync(outputDirectory, { recursive: true, force: true });
+  }
 });
 
 test('force refuses to race enabled production mutation lanes', async () => {
