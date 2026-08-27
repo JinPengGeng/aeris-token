@@ -51,6 +51,18 @@ function repositoryFixture() {
   git(repo, ['config', 'user.email', 'test@example.invalid']);
   write(repo, 'shared.txt', 'base\n');
   write(repo, '.github/upstream-sync-policy.yml', 'version: 1\n');
+  write(repo, '.github/ai-executors.json', `${JSON.stringify({
+    schema_version: 1,
+    executors: [
+      { id: 'openai-chat-v1', protocol: 'openai-chat-completions-v1' },
+      { id: 'openai-responses-v1', protocol: 'openai-responses-v1' },
+    ],
+    routes: {
+      agent_analysis: 'openai-chat-v1',
+      sync_conflict_resolver: 'openai-chat-v1',
+      sync_conflict_reviewer: 'openai-chat-v1',
+    },
+  })}\n`);
   write(repo, '.github/upstream-sync-state.json', `${JSON.stringify({ last_integrated_sha: '0'.repeat(40) })}\n`);
   const checkpoint = commit(repo, 'checkpoint');
   write(repo, '.github/upstream-sync-state.json', `${JSON.stringify({ last_integrated_sha: checkpoint })}\n`);
@@ -210,6 +222,8 @@ test('conflict bundle, resolver, independent reviewer, and final attestation bin
   const attestation = await finalizeConflictReview({ bundle, candidate, input, receipt, environment: publishedEnvironment });
   assert.equal(attestation.decision, 'approved');
   assert.equal(attestation.head_sha, headSha);
+  assert.deepEqual(attestation.resolver_executor, { id: 'openai-chat-v1', protocol: 'openai-chat-completions-v1' });
+  assert.deepEqual(attestation.reviewer_executor, { id: 'openai-chat-v1', protocol: 'openai-chat-completions-v1' });
   assert.notEqual(attestation.resolver_model.id, attestation.reviewer_model.id);
   const staleReceipt = structuredClone(receipt);
   staleReceipt.run.attempt += 1;
@@ -266,6 +280,9 @@ test('contracts reject shared resolver/reviewer models, stale candidates, marker
   staleCandidate.output.resolutions[0].content = '<<<<<<< ours\n';
   staleCandidate.resolution_sha = artifactSha(staleCandidate.output.resolutions);
   assert.throws(() => validateConflictCandidate(staleCandidate, bundle), /conflict markers/);
+  const untrustedExecutor = structuredClone(candidate);
+  untrustedExecutor.executor = { id: 'openai-responses-v1', protocol: 'openai-responses-v1' };
+  assert.throws(() => validateConflictCandidate(untrustedExecutor, bundle), /resolver executor is not allowed/);
 
   const materialization = materializeConflict({ bundle, candidate, environment: fixture.environment });
   const headTree = updateStateTree(fixture.repo, materialization.resolved_merge_tree_sha, bundle.policy.state_path, bundle.upstream.sha);

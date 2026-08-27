@@ -73,7 +73,11 @@ function analysis(overrides = {}) {
     state: 'completed',
     reservation: reservation(),
     output: { schema_version: 1, agent: 'triage', summary: 'bounded result' },
-    model: { alias: 'default', id: 'model-1', duration_ms: 20, usage: { total_tokens: 4 } },
+    model: {
+      alias: 'default', id: 'model-1',
+      executor: { id: 'openai-chat-v1', protocol: 'openai-chat-completions-v1' },
+      duration_ms: 20, usage: { total_tokens: 4 },
+    },
     failure: null,
     ...overrides,
   };

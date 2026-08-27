@@ -270,12 +270,19 @@ export function validateReservationArtifact(value) {
 
 function validateModel(value) {
   if (value === null) return null;
-  exactKeys(value, ['alias', 'id', 'duration_ms', 'usage'], 'analysis model');
+  exactKeys(value, ['alias', 'id', 'executor', 'duration_ms', 'usage'], 'analysis model');
   const usage = value.usage === null ? null : boundedJsonValue(value.usage, 'analysis model usage', 4096);
   requireCondition(usage === null || isObject(usage), 'analysis model usage must be an object or null');
   return {
     alias: boundedString(value.alias, 'analysis model alias', 128, { pattern: SAFE_IDENTIFIER }),
     id: boundedString(value.id, 'analysis model id', 256, { pattern: SAFE_IDENTIFIER }),
+    executor: (() => {
+      exactKeys(value.executor, ['id', 'protocol'], 'analysis executor');
+      return {
+        id: boundedString(value.executor.id, 'analysis executor id', 128, { pattern: SAFE_IDENTIFIER }),
+        protocol: boundedString(value.executor.protocol, 'analysis executor protocol', 128, { pattern: SAFE_IDENTIFIER }),
+      };
+    })(),
     duration_ms: nullableInteger(value.duration_ms, 'analysis model duration_ms'),
     usage,
   };

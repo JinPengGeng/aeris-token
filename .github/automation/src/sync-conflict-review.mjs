@@ -5,7 +5,8 @@ import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 import { GitHubClient } from './github-client.mjs';
-import { OpenAICompatibleClient } from './openai-client.mjs';
+import { createAiExecutorFromIdentity } from './ai-executor-factory.mjs';
+import { executorForRoute, validateExecutorRegistry } from './ai-executor-contract.mjs';
 import {
   SYNC_CONFLICT_PROFILE,
   artifactSha,
@@ -181,6 +182,18 @@ function configuredModels(environment) {
   });
 }
 
+function executorsAtBase(baseSha) {
+  const entry = treeEntry(baseSha, '.github/ai-executors.json');
+  if (entry.mode !== '100644' || entry.type !== 'blob') fail('executor registry must be a regular non-executable file');
+  let registry;
+  try { registry = JSON.parse(utf8Blob(entry.sha, 'executor registry')); } catch { fail('executor registry is invalid JSON'); }
+  const normalized = validateExecutorRegistry(registry);
+  return Object.freeze({
+    resolver: executorForRoute(normalized, 'sync_conflict_resolver'),
+    reviewer: executorForRoute(normalized, 'sync_conflict_reviewer'),
+  });
+}
+
 function artifactRoot(environment) {
   return path.resolve(environment.AERIS_ARTIFACT_ROOT || environment.RUNNER_TEMP || os.tmpdir());
 }
@@ -284,6 +297,7 @@ export function buildConflictBundle({ environment = process.env } = {}) {
     };
   });
   const modelCandidates = configuredModels(environment);
+  const executors = executorsAtBase(context.baseSha);
   const policyBlob = treeEntry(context.baseSha, context.policyPath);
   const stateBlob = treeEntry(context.baseSha, context.statePath);
   if (policyBlob.mode !== '100644' || policyBlob.type !== 'blob' || stateBlob.mode !== '100644' || stateBlob.type !== 'blob') {
@@ -315,6 +329,7 @@ export function buildConflictBundle({ environment = process.env } = {}) {
     prompts: { resolver_sha: RESOLVER_PROMPT_SHA, reviewer_sha: REVIEWER_PROMPT_SHA },
     model_candidates: modelCandidates,
     model_candidates_sha: artifactSha(modelCandidates),
+    executors,
     conflicts,
     generation_sha: '',
   };
@@ -322,8 +337,9 @@ export function buildConflictBundle({ environment = process.env } = {}) {
   return validateConflictBundle(bundle);
 }
 
-function openAiClient(environment, timeoutMs = 300_000) {
-  return new OpenAICompatibleClient({
+function aiExecutor(environment, identity, timeoutMs = 300_000) {
+  return createAiExecutorFromIdentity({
+    identity,
     baseUrl: required(environment.AERIS_AI_BASE_URL, 'AERIS_AI_BASE_URL'),
     apiKey: required(environment.AERIS_AI_API_KEY, 'AERIS_AI_API_KEY'),
     retryableStatuses: [408, 429, 500, 502, 503, 504],
@@ -390,7 +406,8 @@ function parseModelJson(content, name) {
 export async function resolveConflict({ bundle, environment = process.env, client = null } = {}) {
   const normalizedBundle = validateConflictBundle(bundle);
   if (normalizedBundle.prompts.resolver_sha !== RESOLVER_PROMPT_SHA) fail('resolver prompt hash drifted');
-  const completion = await (client ?? openAiClient(environment)).complete({
+  const expectedExecutor = normalizedBundle.executors.resolver;
+  const completion = await (client ?? aiExecutor(environment, expectedExecutor)).complete({
     candidates: normalizedBundle.model_candidates.resolver,
     messages: [
       { role: 'system', content: RESOLVER_PROMPT },
@@ -399,6 +416,9 @@ export async function resolveConflict({ bundle, environment = process.env, clien
     maxTokens: positive(environment.AERIS_CONFLICT_MAX_OUTPUT_TOKENS || 32768, 'resolver maximum output tokens'),
     responseFormat: resolverResponseFormat,
   });
+  if (completion?.executor && canonicalJson(completion.executor) !== canonicalJson(expectedExecutor)) {
+    fail('resolver completion executor identity does not match the trusted generation');
+  }
   const output = validateResolverOutput(parseModelJson(completion.content, 'resolver'), normalizedBundle);
   return validateConflictCandidate({
     schema_version: 1,
@@ -407,6 +427,7 @@ export async function resolveConflict({ bundle, environment = process.env, clien
     bundle_sha: artifactSha(normalizedBundle),
     generation_sha: normalizedBundle.generation_sha,
     model: completion.model,
+    executor: expectedExecutor,
     run: { id: positive(environment.GITHUB_RUN_ID, 'GITHUB_RUN_ID'), attempt: positive(environment.GITHUB_RUN_ATTEMPT, 'GITHUB_RUN_ATTEMPT') },
     output,
     resolution_sha: artifactSha(output.resolutions),
@@ -579,7 +600,9 @@ export async function collectReviewInput({ bundle, candidate, environment = proc
     resolution_sha: normalizedCandidate.resolution_sha,
     resolved_merge_tree_sha: materialization.resolved_merge_tree_sha,
     resolver_model: normalizedCandidate.model,
+    resolver_executor: normalizedCandidate.executor,
     reviewer_candidates: normalizedBundle.model_candidates.reviewer,
+    reviewer_executor: normalizedBundle.executors.reviewer,
     reviewer_prompt_sha: normalizedBundle.prompts.reviewer_sha,
     conflicts: normalizedBundle.conflicts,
     resolutions: normalizedCandidate.output.resolutions,
@@ -593,7 +616,8 @@ export async function collectReviewInput({ bundle, candidate, environment = proc
 export async function reviewConflict({ input, bundle, candidate, environment = process.env, client = null } = {}) {
   const normalizedInput = validateReviewInput(input, bundle, candidate);
   if (normalizedInput.reviewer_prompt_sha !== REVIEWER_PROMPT_SHA) fail('reviewer prompt hash drifted');
-  const completion = await (client ?? openAiClient(environment)).complete({
+  const expectedExecutor = normalizedInput.reviewer_executor;
+  const completion = await (client ?? aiExecutor(environment, expectedExecutor)).complete({
     candidates: normalizedInput.reviewer_candidates,
     messages: [
       { role: 'system', content: REVIEWER_PROMPT },
@@ -602,6 +626,9 @@ export async function reviewConflict({ input, bundle, candidate, environment = p
     maxTokens: positive(environment.AERIS_CONFLICT_REVIEW_MAX_OUTPUT_TOKENS || 8000, 'reviewer maximum output tokens'),
     responseFormat: reviewerResponseFormat,
   });
+  if (completion?.executor && canonicalJson(completion.executor) !== canonicalJson(expectedExecutor)) {
+    fail('reviewer completion executor identity does not match the trusted generation');
+  }
   const output = validateReviewerOutput(parseModelJson(completion.content, 'reviewer'));
   const receipt = {
     schema_version: 1,
@@ -610,6 +637,7 @@ export async function reviewConflict({ input, bundle, candidate, environment = p
     review_generation_sha: normalizedInput.review_generation_sha,
     input_sha: normalizedInput.input_sha,
     model: completion.model,
+    executor: expectedExecutor,
     run: { id: positive(environment.GITHUB_RUN_ID, 'GITHUB_RUN_ID'), attempt: positive(environment.GITHUB_RUN_ATTEMPT, 'GITHUB_RUN_ATTEMPT') },
     output,
     output_sha: artifactSha(output),
@@ -669,7 +697,9 @@ export async function finalizeConflictReview({ bundle, candidate, input, receipt
     resolution_sha: normalizedCandidate.resolution_sha,
     resolved_merge_tree_sha: normalizedInput.resolved_merge_tree_sha,
     resolver_model: normalizedCandidate.model,
+    resolver_executor: normalizedCandidate.executor,
     reviewer_model: normalizedReceipt.model,
+    reviewer_executor: normalizedReceipt.executor,
     verifier_run: run,
     decision: 'approved',
   });

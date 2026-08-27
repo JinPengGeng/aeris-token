@@ -16,7 +16,8 @@ import {
   renderAnalysisComment,
   renderStatusComment,
 } from './managed-comment.mjs';
-import { byteLength, OpenAICompatibleClient } from './openai-client.mjs';
+import { trustedExecutorForRoute, createAiExecutor } from './ai-executor-factory.mjs';
+import { byteLength } from './openai-client.mjs';
 import { buildMessages, responseFormatForAgent } from './prompts.mjs';
 import { evaluateRequiredChecks } from './required-checks.mjs';
 import { routeIssueInvocation, routePullInvocation } from './router.mjs';
@@ -557,7 +558,7 @@ export async function runAnalysisPhase({
   contracts = null,
   policySha = null,
   github = null,
-  aiClientFactory = (options) => new OpenAICompatibleClient(options),
+  aiClientFactory = (options) => createAiExecutor({ ...options, repoRoot, route: 'agent_analysis' }),
   clock = () => new Date(),
   auditEvent = audit,
 }) {
@@ -630,6 +631,7 @@ export async function runAnalysisPhase({
       });
     }
     const deadlineAtMs = analysisDeadlineAtMs(modelCallMetadata.lease_expires_at, modelCallTime);
+    const expectedExecutor = trustedExecutorForRoute({ repoRoot, route: 'agent_analysis' });
     const ai = aiClientFactory({
       baseUrl: environment.AERIS_AI_BASE_URL,
       apiKey: environment.AERIS_AI_API_KEY,
@@ -648,6 +650,11 @@ export async function runAnalysisPhase({
       maxTokens: agents.runtime.limits.maximum_output_tokens,
       responseFormat: useStructuredOutput ? responseFormatForAgent(context.agent) : undefined,
     });
+    if (completion?.executor && (
+      completion.executor.id !== expectedExecutor.id || completion.executor.protocol !== expectedExecutor.protocol
+    )) {
+      throw Object.assign(new Error('AI executor identity does not match the trusted route'), { code: 'executor_identity_mismatch' });
+    }
     const repositoryLabels = context.kind === 'issue' ? modelInput.available_labels : [];
     const output = validateAgentOutput(context.agent, parseModelJson(completion.content), repositoryLabels);
     if (containsSensitiveModelOutput(output, environment.AERIS_AI_API_KEY)) {
@@ -661,6 +668,8 @@ export async function runAnalysisPhase({
       agent: context.agent,
       model_alias: completion.model.alias,
       model_id: completion.model.id,
+      executor_id: expectedExecutor.id,
+      executor_protocol: expectedExecutor.protocol,
       duration_ms: completion.durationMs,
       usage: usageSummary(completion.usage),
     });
@@ -670,7 +679,7 @@ export async function runAnalysisPhase({
       state: 'completed',
       reservation: artifact,
       output,
-      model: { alias: completion.model.alias, id: completion.model.id, duration_ms: completion.durationMs ?? null, usage: usageSummary(completion.usage) },
+      model: { alias: completion.model.alias, id: completion.model.id, executor: expectedExecutor, duration_ms: completion.durationMs ?? null, usage: usageSummary(completion.usage) },
       failure: null,
     };
   } catch (error) {
@@ -686,6 +695,8 @@ export async function runAnalysisPhase({
         typeof completion?.content === 'string' ? byteLength(completion.content) : null,
       model_alias: completion?.model?.alias ?? null,
       model_id: completion?.model?.id ?? null,
+      executor_id: completion?.executor?.id ?? null,
+      executor_protocol: completion?.executor?.protocol ?? null,
       duration_ms: completion?.durationMs ?? null,
       usage: usageSummary(completion?.usage),
     });
