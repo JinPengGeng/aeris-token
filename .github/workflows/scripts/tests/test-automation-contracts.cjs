@@ -41,14 +41,27 @@ for (const [name, workflow, context] of [
   const publisher = workflow.jobs.publish_dispatch_status;
   assert(check, `${name} CI must retain its required check job`);
   assert(
-    check.permissions?.statuses === undefined,
-    `${name} CI required check must not receive statuses: write on pull requests`,
+    JSON.stringify(workflow.permissions) === JSON.stringify({ contents: 'read' }),
+    `${name} CI must define a workflow-wide read-only permission boundary`,
+  );
+  assert(
+    JSON.stringify(check.permissions) === JSON.stringify({ contents: 'read' }),
+    `${name} CI required check must explicitly receive only contents: read`,
   );
   assert(publisher, `${name} CI must publish workflow_dispatch statuses in a separate job`);
   assert(
-    publisher.permissions?.statuses === 'write',
-    `${name} CI dispatch publisher must receive statuses: write`,
+    JSON.stringify(publisher.permissions) ===
+      JSON.stringify({ contents: 'read', statuses: 'write' }),
+    `${name} CI dispatch publisher must explicitly receive only contents: read and statuses: write`,
   );
+  for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    if (jobName === 'publish_dispatch_status') continue;
+    const effectivePermissions = job.permissions ?? workflow.permissions;
+    assert(
+      JSON.stringify(effectivePermissions) === JSON.stringify({ contents: 'read' }),
+      `${name} CI job ${jobName} must have effective contents: read-only permissions`,
+    );
+  }
   const statusWriters = Object.entries(workflow.jobs)
     .filter(([, job]) => job.permissions?.statuses === 'write')
     .map(([jobName]) => jobName);

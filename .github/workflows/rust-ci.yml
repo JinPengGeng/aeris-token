@@ -687,6 +687,8 @@ jobs:
   check:
     name: Rust CI / check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs:
       - fmt
       - clippy

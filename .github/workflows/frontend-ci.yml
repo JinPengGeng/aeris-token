@@ -121,6 +121,8 @@ jobs:
   check:
     name: Frontend CI / check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs:
       - lint
       - type_check
