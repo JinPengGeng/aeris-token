@@ -12,6 +12,16 @@ trusted_source:
     - .github/upstream-sync-state.json
     - .github/CODEOWNERS
     - .github/workflows/**
+    - CODEOWNERS
+    - Cargo.toml
+    - Cargo.lock
+    - "**/Cargo.toml"
+    - "**/Cargo.lock"
+    - frontend/package.json
+    - frontend/package-lock.json
+    - Dockerfile*
+    - docker-compose*.yml
+    - deploy.sh
 
 kill_switch:
   repository_variable: AERIS_AGENTS_ENABLED
@@ -79,7 +89,8 @@ prompt_security:
 
 writer:
   enabled: false
-  branch_prefix: agent/
+  implementation: credentialless_candidate_single_writer_app
+  branch_prefix: agent/issue-
   draft_pull_requests_only: true
   maximum_open_pull_requests_per_issue: 1
   forbidden_paths:
@@ -89,11 +100,13 @@ writer:
   pull_request_target_checkout: false
 
 policy_gate:
+  # This declaration controls whether the policy may authorize automation. The
+  # `Automation Policy / gate` workflow remains always-on because main requires
+  # its check; this flag must not be used to disable workflow scheduling.
   enabled: false
   check_name: Automation Policy / gate
-  mode: shadow
-  allowed_modes: [shadow, human, label, allowlist]
-  human_enable_label: automerge-approved
+  publisher: github_actions_job
+  mode: canary_allowlist
   require_exact_head_sha: true
   require_base_up_to_date: true
   require_conversation_resolution: true
@@ -115,7 +128,16 @@ policy_gate:
     - "**/auth/**"
     - "**/migrations/**"
     - "**/security/**"
-  allowlist_paths: []
+  allowlist_paths:
+    - docs/automation-canary/**/*.md
+
+finalizer:
+  enabled: false
+  repository_variable: AERIS_AUTONOMOUS_MERGE_ENABLED
+  merge_mode: github_direct_merge
+  merge_method: squash
+  direct_merge: true
+  require_policy_classification: eligible
 
 audit:
   durable: false

@@ -1,0 +1,91 @@
+name: Autonomy Expiry Revoker
+
+on:
+  # Writer token minting stops one hour before expiry. The revoker starts
+  # 45 minutes before expiry, leaving a quiet period for in-flight jobs.
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Run the revocation path immediately (break-glass)
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: Inspect and report managed PRs without changing GitHub
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: autonomy-expiry-revoker
+  cancel-in-progress: false
+
+jobs:
+  revoke:
+    name: Revoke expired autonomy
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: writer
+    concurrency:
+      group: aeris-writer-mutation
+      cancel-in-progress: false
+    env:
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+      GITHUB_API_URL: https://api.github.com
+      AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
+      AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+      AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
+      AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
+      AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
+      AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
+      AERIS_UPSTREAM_SYNC_ENABLED: ${{ vars.AERIS_UPSTREAM_SYNC_ENABLED }}
+      AERIS_AUTONOMOUS_MERGE_ENABLED: ${{ vars.AERIS_AUTONOMOUS_MERGE_ENABLED }}
+      AERIS_FORCE: ${{ inputs.force || 'false' }}
+      AERIS_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      AERIS_EXPIRY_SAFETY_WINDOW_SECONDS: '2700'
+      AERIS_PRE_UNINSTALL_CLEANUP_BUDGET_SECONDS: '60'
+      AERIS_POST_UNINSTALL_CLEANUP_BUDGET_SECONDS: '180'
+    steps:
+      - name: Check out trusted revoker
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Revoke expired Writer authority
+        id: revoke
+        env:
+          AERIS_WRITER_APP_PRIVATE_KEY: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+          AERIS_REVOCATION_TOKEN: ${{ github.token }}
+        run: node .github/automation/src/autonomy-expiry-revoker.mjs
+
+      - name: Summarize revocation
+        if: always()
+        env:
+          ACTION: ${{ steps.revoke.outputs.action }}
+          MANAGED_PULLS: ${{ steps.revoke.outputs.managed_pulls }}
+          MANAGED_PULL_NUMBERS: ${{ steps.revoke.outputs.managed_pull_numbers }}
+        run: |
+          {
+            echo '### Autonomy expiry revoker'
+            echo
+            echo "- Action: \`${ACTION:-failed}\`"
+            echo "- Managed PRs observed: \`${MANAGED_PULLS:-unknown}\`"
+            echo "- Managed PR numbers: \`${MANAGED_PULL_NUMBERS:-unknown}\`"
+            echo '- The Writer secret and repository variables remain; GITHUB_TOKEN cannot delete them.'
+          } >> "$GITHUB_STEP_SUMMARY"

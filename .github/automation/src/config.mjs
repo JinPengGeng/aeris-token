@@ -125,7 +125,6 @@ export function validateContracts(agents, policy) {
     'tester',
     'security',
     'policy',
-    'merger',
   ]);
   const knownAgents = new Set(Object.keys(agents.agents ?? {}));
   requireCondition(
@@ -155,10 +154,14 @@ export function validateContracts(agents, policy) {
   for (const [name, agent] of Object.entries(agents.agents)) {
     validateAgent(name, agent, allowedModelVariables, knownAgents);
   }
-  for (const name of ['tester', 'policy', 'merger']) {
+  for (const name of ['tester', 'policy']) {
     requireCondition(agents.agents[name].mode === 'deterministic', `${name} must be deterministic`);
     requireCondition(agents.agents[name].model_variable === null, `${name} must not select a model`);
   }
+  requireCondition(
+    agents.agents.policy.handoff_to.length === 0,
+    'policy must terminate in the deterministic gate; Finalizer owns direct merge execution',
+  );
   requireCondition(
     !agents.agents.reviewer.handoff_to.includes('writer'),
     'reviewer must not authorize writer',

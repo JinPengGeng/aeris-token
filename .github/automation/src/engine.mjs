@@ -6,6 +6,7 @@ import {
   resolveModelCandidates,
   shouldUseStructuredOutput,
 } from './config.mjs';
+import { validateExecutorIdentity } from './ai-executor-contract.mjs';
 import { GitHubClient } from './github-client.mjs';
 import { buildIssueInput, buildPullInput, inputFingerprint, sourceKey } from './input.mjs';
 import {
@@ -16,13 +17,15 @@ import {
   renderAnalysisComment,
   renderStatusComment,
 } from './managed-comment.mjs';
-import { byteLength, OpenAICompatibleClient } from './openai-client.mjs';
+import { trustedExecutorForRoute, createAiExecutor } from './ai-executor-factory.mjs';
+import { byteLength } from './openai-client.mjs';
+import { ARTIFACT_SCHEMA_VERSION } from './phase-contract.mjs';
 import { buildMessages, responseFormatForAgent } from './prompts.mjs';
 import { evaluateRequiredChecks } from './required-checks.mjs';
 import { routeIssueInvocation, routePullInvocation } from './router.mjs';
 import { parseModelJson, validateAgentOutput } from './schemas.mjs';
 
-const SCHEMA_VERSION = 1;
+const MANAGED_METADATA_SCHEMA_VERSION = 1;
 const LEASE_MS = 15 * 60 * 1000;
 const ANALYSIS_LEASE_HEADROOM_MS = 3 * 60 * 1000;
 const MAXIMUM_ANALYSIS_TIMEOUT_MS = 10 * 60 * 1000;
@@ -30,6 +33,23 @@ const LEDGER_LIMIT = 32;
 
 function audit(event) {
   console.log(JSON.stringify(event));
+}
+
+function requireCompletionExecutor(completion, expectedExecutor) {
+  let actualExecutor;
+  try {
+    actualExecutor = validateExecutorIdentity(completion?.executor, 'completion executor');
+  } catch {
+    throw Object.assign(new Error('AI completion did not provide a valid executor identity'), {
+      code: 'executor_identity_mismatch',
+    });
+  }
+  if (actualExecutor.id !== expectedExecutor.id || actualExecutor.protocol !== expectedExecutor.protocol) {
+    throw Object.assign(new Error('AI executor identity does not match the trusted route'), {
+      code: 'executor_identity_mismatch',
+    });
+  }
+  return actualExecutor;
 }
 
 function safeModelDiagnostic(error) {
@@ -99,7 +119,7 @@ function artifactResult(state, reason = null, commentId = null) {
 
 function terminalPreflight(decision, context) {
   return {
-    schema_version: SCHEMA_VERSION,
+    schema_version: ARTIFACT_SCHEMA_VERSION,
     artifact_type: 'preflight',
     state: 'terminal',
     decision,
@@ -181,7 +201,7 @@ function releaseReservationRun(metadata, context, leaseToken) {
 
 function commonMetadata(context, decision, prior, recentModelRuns) {
   return {
-    schema_version: SCHEMA_VERSION,
+    schema_version: MANAGED_METADATA_SCHEMA_VERSION,
     source_key: context.source_key,
     object_id: context.object_id,
     object_generation: context.object_generation,
@@ -395,7 +415,7 @@ export async function runPreflightPhase({
     );
   }
   return {
-    schema_version: SCHEMA_VERSION,
+    schema_version: ARTIFACT_SCHEMA_VERSION,
     artifact_type: 'preflight',
     state: 'ready',
     decision,
@@ -418,7 +438,7 @@ export async function runReservationPhase({
     const context = artifact.context;
     if (!['status', 'cancel'].includes(artifact.decision.action)) {
       return {
-        schema_version: SCHEMA_VERSION,
+        schema_version: ARTIFACT_SCHEMA_VERSION,
         artifact_type: 'reservation',
         state: 'terminal',
         preflight: artifact,
@@ -462,7 +482,7 @@ export async function runReservationPhase({
     const body = renderStatusComment(metadata.result, metadata, policy.limits.maximum_comment_characters, managed?.body);
     const published = await updateManaged({ client, number: context.number, expected: managed, body });
     return {
-      schema_version: SCHEMA_VERSION,
+      schema_version: ARTIFACT_SCHEMA_VERSION,
       artifact_type: 'reservation',
       state: 'terminal',
       preflight: artifact,
@@ -475,7 +495,7 @@ export async function runReservationPhase({
   const { agents, policy } = loaded;
   if ((policySha ?? policyShaAt(repoRoot)) !== artifact.context.policy_sha) {
     return {
-      schema_version: SCHEMA_VERSION,
+      schema_version: ARTIFACT_SCHEMA_VERSION,
       artifact_type: 'reservation',
       state: 'terminal',
       preflight: artifact,
@@ -497,11 +517,11 @@ export async function runReservationPhase({
   const runs = recentRuns(prior, now);
   if (!terminal && runs.length >= policy.limits.maximum_runs_per_object_per_hour) terminal = artifactResult('rate_limited', 'object_hourly_limit');
   if (terminal) {
-    return { schema_version: SCHEMA_VERSION, artifact_type: 'reservation', state: 'terminal', preflight: artifact, reservation: null, result: terminal };
+    return { schema_version: ARTIFACT_SCHEMA_VERSION, artifact_type: 'reservation', state: 'terminal', preflight: artifact, reservation: null, result: terminal };
   }
   const freshness = await rebuildAndCompare(context, client, agents);
   if (freshness.stale) {
-    return { schema_version: SCHEMA_VERSION, artifact_type: 'reservation', state: 'terminal', preflight: artifact, reservation: null, result: artifactResult('stale', freshness.reason) };
+    return { schema_version: ARTIFACT_SCHEMA_VERSION, artifact_type: 'reservation', state: 'terminal', preflight: artifact, reservation: null, result: artifactResult('stale', freshness.reason) };
   }
   const leaseToken = randomToken();
   const reservedRuns = [...runs, {
@@ -521,7 +541,7 @@ export async function runReservationPhase({
   const body = renderStatusComment('running', metadata, policy.limits.maximum_comment_characters, managed?.body);
   const published = await updateManaged({ client, number: context.number, expected: managed, body });
   if (published.state !== 'published') {
-    return { schema_version: SCHEMA_VERSION, artifact_type: 'reservation', state: 'terminal', preflight: artifact, reservation: null, result: artifactResult(published.state, published.reason) };
+    return { schema_version: ARTIFACT_SCHEMA_VERSION, artifact_type: 'reservation', state: 'terminal', preflight: artifact, reservation: null, result: artifactResult(published.state, published.reason) };
   }
   const winner = findManagedComment(await client.listIssueComments(context.number));
   const winnerMetadata = decodeMetadata(winner?.body);
@@ -532,10 +552,10 @@ export async function runReservationPhase({
     winnerMetadata?.cancel_epoch !== metadata.cancel_epoch ||
     !metadataMatches(winnerMetadata, identity)
   ) {
-    return { schema_version: SCHEMA_VERSION, artifact_type: 'reservation', state: 'terminal', preflight: artifact, reservation: null, result: artifactResult('in_progress', 'reservation_lost') };
+    return { schema_version: ARTIFACT_SCHEMA_VERSION, artifact_type: 'reservation', state: 'terminal', preflight: artifact, reservation: null, result: artifactResult('in_progress', 'reservation_lost') };
   }
   return {
-    schema_version: SCHEMA_VERSION,
+    schema_version: ARTIFACT_SCHEMA_VERSION,
     artifact_type: 'reservation',
     state: 'reserved',
     preflight: artifact,
@@ -557,12 +577,12 @@ export async function runAnalysisPhase({
   contracts = null,
   policySha = null,
   github = null,
-  aiClientFactory = (options) => new OpenAICompatibleClient(options),
+  aiClientFactory = (options) => createAiExecutor({ ...options, repoRoot, route: 'agent_analysis' }),
   clock = () => new Date(),
   auditEvent = audit,
 }) {
   if (artifact.state === 'terminal') {
-    return { schema_version: SCHEMA_VERSION, artifact_type: 'analysis', state: 'terminal', reservation: artifact, output: null, model: null, failure: null };
+    return { schema_version: ARTIFACT_SCHEMA_VERSION, artifact_type: 'analysis', state: 'terminal', reservation: artifact, output: null, model: null, failure: null };
   }
   const loaded = contracts ?? loadContracts(repoRoot);
   const { agents, policy } = loaded;
@@ -570,7 +590,7 @@ export async function runAnalysisPhase({
   const agent = agents.agents[context.agent];
   if ((policySha ?? policyShaAt(repoRoot)) !== context.policy_sha) {
     return {
-      schema_version: SCHEMA_VERSION,
+      schema_version: ARTIFACT_SCHEMA_VERSION,
       artifact_type: 'analysis',
       state: 'failed',
       reservation: artifact,
@@ -587,7 +607,7 @@ export async function runAnalysisPhase({
   const stillOwnsLease = ownsLease(currentMetadata, reservation, context, initialFenceTime);
   if (!stillOwnsLease) {
     return {
-      schema_version: SCHEMA_VERSION,
+      schema_version: ARTIFACT_SCHEMA_VERSION,
       artifact_type: 'analysis',
       state: 'failed',
       reservation: artifact,
@@ -597,6 +617,7 @@ export async function runAnalysisPhase({
     };
   }
   let completion = null;
+  let completionExecutor = null;
   try {
     if (!enabledByKillSwitch(loaded.policy, environment)) throw new Error('agent kill switch is off');
     let modelInput = artifact.preflight.input;
@@ -630,6 +651,7 @@ export async function runAnalysisPhase({
       });
     }
     const deadlineAtMs = analysisDeadlineAtMs(modelCallMetadata.lease_expires_at, modelCallTime);
+    const expectedExecutor = trustedExecutorForRoute({ repoRoot, route: 'agent_analysis' });
     const ai = aiClientFactory({
       baseUrl: environment.AERIS_AI_BASE_URL,
       apiKey: environment.AERIS_AI_API_KEY,
@@ -648,6 +670,7 @@ export async function runAnalysisPhase({
       maxTokens: agents.runtime.limits.maximum_output_tokens,
       responseFormat: useStructuredOutput ? responseFormatForAgent(context.agent) : undefined,
     });
+    completionExecutor = requireCompletionExecutor(completion, expectedExecutor);
     const repositoryLabels = context.kind === 'issue' ? modelInput.available_labels : [];
     const output = validateAgentOutput(context.agent, parseModelJson(completion.content), repositoryLabels);
     if (containsSensitiveModelOutput(output, environment.AERIS_AI_API_KEY)) {
@@ -661,16 +684,18 @@ export async function runAnalysisPhase({
       agent: context.agent,
       model_alias: completion.model.alias,
       model_id: completion.model.id,
+      executor_id: completionExecutor.id,
+      executor_protocol: completionExecutor.protocol,
       duration_ms: completion.durationMs,
       usage: usageSummary(completion.usage),
     });
     return {
-      schema_version: SCHEMA_VERSION,
+      schema_version: ARTIFACT_SCHEMA_VERSION,
       artifact_type: 'analysis',
       state: 'completed',
       reservation: artifact,
       output,
-      model: { alias: completion.model.alias, id: completion.model.id, duration_ms: completion.durationMs ?? null, usage: usageSummary(completion.usage) },
+      model: { alias: completion.model.alias, id: completion.model.id, executor: completionExecutor, duration_ms: completion.durationMs ?? null, usage: usageSummary(completion.usage) },
       failure: null,
     };
   } catch (error) {
@@ -686,11 +711,13 @@ export async function runAnalysisPhase({
         typeof completion?.content === 'string' ? byteLength(completion.content) : null,
       model_alias: completion?.model?.alias ?? null,
       model_id: completion?.model?.id ?? null,
+      executor_id: completionExecutor?.id ?? null,
+      executor_protocol: completionExecutor?.protocol ?? null,
       duration_ms: completion?.durationMs ?? null,
       usage: usageSummary(completion?.usage),
     });
     return {
-      schema_version: SCHEMA_VERSION,
+      schema_version: ARTIFACT_SCHEMA_VERSION,
       artifact_type: 'analysis',
       state: 'failed',
       reservation: artifact,
@@ -711,7 +738,7 @@ export async function runPublishPhase({
   clock = () => new Date(),
 }) {
   if (artifact.state === 'terminal') {
-    return { schema_version: SCHEMA_VERSION, artifact_type: 'publication', state: artifact.reservation.result.state, analysis: artifact, result: artifact.reservation.result };
+    return { schema_version: ARTIFACT_SCHEMA_VERSION, artifact_type: 'publication', state: artifact.reservation.result.state, analysis: artifact, result: artifact.reservation.result };
   }
   const loaded = contracts ?? loadContracts(repoRoot);
   const { agents, policy } = loaded;
@@ -748,7 +775,7 @@ export async function runPublishPhase({
       await updateManaged({ client, number: context.number, expected: managed, body });
     }
     return {
-      schema_version: SCHEMA_VERSION,
+      schema_version: ARTIFACT_SCHEMA_VERSION,
       artifact_type: 'publication',
       state: 'stale',
       analysis: artifact,
@@ -757,7 +784,7 @@ export async function runPublishPhase({
   }
   if (!ownsLease) {
     const state = metadata?.result === 'cancelled' || metadata?.cancel_epoch !== reservation.reservation.cancel_epoch ? 'cancelled' : 'stale';
-    return { schema_version: SCHEMA_VERSION, artifact_type: 'publication', state, analysis: artifact, result: artifactResult(state, state === 'cancelled' ? 'cancelled_after_reservation' : 'lease_fence_changed') };
+    return { schema_version: ARTIFACT_SCHEMA_VERSION, artifact_type: 'publication', state, analysis: artifact, result: artifactResult(state, state === 'cancelled' ? 'cancelled_after_reservation' : 'lease_fence_changed') };
   }
   const deferForChecks =
     artifact.failure?.code === 'required_checks_not_successful' ||
@@ -785,7 +812,7 @@ export async function runPublishPhase({
     const reason = published.reason ?? 'required_checks_not_successful';
     audit({ event: 'aeris_agent_run', state, reason, agent: context.agent, kind: context.kind, number: context.number });
     return {
-      schema_version: SCHEMA_VERSION,
+      schema_version: ARTIFACT_SCHEMA_VERSION,
       artifact_type: 'publication',
       state,
       analysis: artifact,
@@ -815,7 +842,7 @@ export async function runPublishPhase({
   const state = published.state === 'published' ? (isStale ? 'stale' : 'published') : published.state;
   const reason = published.reason ?? (isStale ? staleReason : artifact.state === 'failed' ? artifact.failure.code : null);
   audit({ event: 'aeris_agent_run', state, reason, agent: context.agent, kind: context.kind, number: context.number });
-  return { schema_version: SCHEMA_VERSION, artifact_type: 'publication', state, analysis: artifact, result: artifactResult(state, reason, published.commentId ?? null) };
+  return { schema_version: ARTIFACT_SCHEMA_VERSION, artifact_type: 'publication', state, analysis: artifact, result: artifactResult(state, reason, published.commentId ?? null) };
 }
 
 export async function runAutomation(options) {
