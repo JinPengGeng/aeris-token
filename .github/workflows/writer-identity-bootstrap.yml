@@ -25,6 +25,9 @@ jobs:
       vars.AERIS_WRITER_ENABLED == 'false' &&
       vars.AERIS_UPSTREAM_SYNC_ENABLED == 'false' &&
       vars.AERIS_AUTONOMOUS_MERGE_ENABLED == 'false'
+    outputs:
+      app_node_id: ${{ steps.bootstrap.outputs.app_node_id }}
+      app_owner_database_id: ${{ steps.bootstrap.outputs.app_owner_database_id }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: writer
@@ -82,8 +85,14 @@ jobs:
     name: Run Writer read-only attestation
     needs: [bootstrap]
     uses: ./.github/workflows/writer-readonly-attestation.yml
+    with:
+      bound_writer_app_node_id: ${{ needs.bootstrap.outputs.app_node_id }}
+      bound_writer_app_owner_database_id: ${{ needs.bootstrap.outputs.app_owner_database_id }}
 
   governance_canary:
     name: Run Writer governance canary
     needs: [bootstrap, readonly_attestation]
     uses: ./.github/workflows/writer-governance-canary.yml
+    with:
+      bound_writer_app_node_id: ${{ needs.bootstrap.outputs.app_node_id }}
+      bound_writer_app_owner_database_id: ${{ needs.bootstrap.outputs.app_owner_database_id }}
