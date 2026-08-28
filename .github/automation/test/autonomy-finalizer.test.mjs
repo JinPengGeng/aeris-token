@@ -1020,7 +1020,7 @@ test('Writer governance must remain identical from the first full proof through 
   assert.equal(client.writerGovernanceReads, 2);
 });
 
-test('concrete Writer governance reader accepts the live update-rule shape and rejects drift', async () => {
+test('concrete Writer governance reader validates live update rules and redacts invalid bypass shapes', async () => {
   const api = new AutonomyFinalizerGitHubClient({
     token: 'writer-token', repository: REPOSITORY,
     fetchImpl: async () => { throw new Error('unexpected network access'); },
@@ -1048,14 +1048,20 @@ test('concrete Writer governance reader accepts the live update-rule shape and r
     { type: 'deletion' }, { type: 'non_fast_forward' },
   ];
   let rules = structuredClone(liveRules);
+  let bypassActors = [{
+    actor_id: writerTrust.app_id,
+    actor_type: 'Integration',
+    bypass_mode: 'always',
+  }];
   api.getRepositoryRuleset = async () => {
     detailReads += 1;
-    return {
+    const detail = {
       id: 101, name: 'agent-head-fence-v1', target: 'branch', enforcement: 'active',
       conditions: { ref_name: { include: ['refs/heads/agent/**'], exclude: [] } },
       rules: structuredClone(rules),
-      bypass_actors: [{ actor_id: writerTrust.app_id, actor_type: 'Integration', bypass_mode: 'always' }],
     };
+    if (bypassActors !== undefined) detail.bypass_actors = structuredClone(bypassActors);
+    return detail;
   };
   api.getActionsPermissions = async () => ({
     enabled: true, allowed_actions: 'selected', sha_pinning_required: true,
@@ -1082,6 +1088,21 @@ test('concrete Writer governance reader accepts the live update-rule shape and r
     rules = structuredClone(liveRules);
     mutate(rules);
     await assert.rejects(() => api.getWriterGovernanceSnapshot(), AutonomyFinalizerError);
+  }
+  for (const [shape, value, message] of [
+    ['missing', undefined, /bypass actors are invalid \(shape=missing\)/],
+    ['null', null, /bypass actors are invalid \(shape=null\)/],
+    ['object', { opaque: 'must-not-log' }, /bypass actors are invalid \(shape=non-array:object\)/],
+    ['oversized array', Array.from({ length: 33 }, () => ({ opaque: 'must-not-log' })), /bypass actors are invalid \(shape=array:length=33\)/],
+  ]) {
+    rules = structuredClone(liveRules);
+    bypassActors = value;
+    await assert.rejects(() => api.getWriterGovernanceSnapshot(), (error) => {
+      assert.ok(error instanceof AutonomyFinalizerError, `${shape} must remain fail-closed`);
+      assert.match(error.message, message);
+      assert.doesNotMatch(error.message, /must-not-log/);
+      return true;
+    });
   }
 });
 
