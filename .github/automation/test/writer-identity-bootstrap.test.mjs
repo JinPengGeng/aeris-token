@@ -531,13 +531,13 @@ test('control token is bound to the exact owner and rejects classic OAuth scopes
       status: 200,
       headers: {
         'x-oauth-scopes': '',
-        'github-authentication-token-expiration': '2026-08-27 11:00:00 UTC',
+        'github-authentication-token-expiration': '2026-09-03 10:00:00 UTC',
       },
     }),
   });
   const authenticated = await client.getAuthenticatedUser(nowMs);
   assert.equal(authenticated.user.login, 'JinPengGeng');
-  assert.equal(authenticated.token_expiration, '2026-08-27T11:00:00.000Z');
+  assert.equal(authenticated.token_expiration, '2026-09-03T10:00:00.000Z');
 
   const noExpirationHeader = new WriterIdentityBootstrapControlClient({
     token: 'bootstrap-token',
@@ -551,7 +551,7 @@ test('control token is bound to the exact owner and rejects classic OAuth scopes
       status: 200,
       headers: {
         'x-oauth-scopes': '',
-        'github-authentication-token-expiration': '2026-08-29 10:00:01 UTC',
+        'github-authentication-token-expiration': '2026-09-03 10:00:01 UTC',
       },
     }),
   });
