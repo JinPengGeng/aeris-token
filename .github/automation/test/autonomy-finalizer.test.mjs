@@ -1106,6 +1106,9 @@ test('concrete Writer governance reader uses a pinned owner baseline when bypass
   currentUserCanBypass = 'always';
   assert.deepEqual(await api.getWriterGovernanceSnapshot(writerTrust), writerGovernanceSnapshot());
 
+  updatedAt = '2026-08-27T10:48:17.800Z';
+  assert.deepEqual(await api.getWriterGovernanceSnapshot(writerTrust), writerGovernanceSnapshot());
+
   for (const [name, mutate, message] of [
     ['null', () => { bypassActors = null; }, /bypass actors are invalid \(shape=null\)/],
     ['object', () => { bypassActors = { opaque: 'must-not-log' }; }, /bypass actors are invalid \(shape=non-array:object\)/],
