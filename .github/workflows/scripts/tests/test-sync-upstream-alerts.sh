@@ -26,26 +26,43 @@ test_existing_issue_uses_issue_comments_api_once() {
 set -euo pipefail
 printf '%s\n' "$*" >>"${GH_CALLS}"
 case "$*" in
-  'issue list '*) printf '42\n' ;;
+  'issue list '*)
+    [[ "${GH_TOKEN}" == test-issues-token ]] || {
+      printf 'issue inventory used the wrong token channel\n' >&2
+      exit 1
+    }
+    printf '42\n'
+    ;;
   *'/issues/42/comments?per_page=100'*)
+    [[ "${GH_TOKEN}" == test-issues-token ]] || {
+      printf 'ordinary issue comment lookup used the wrong token channel\n' >&2
+      exit 1
+    }
     if [[ -f "${GH_COMMENT_CREATED}" ]]; then
       printf '%s\n' '<!-- upstream-sync-alert:conflict:deadbeef -->'
     fi
     ;;
-  *'--method POST repos/example/repo/issues/42/comments'*) touch "${GH_COMMENT_CREATED}" ;;
+  *'--method POST repos/example/repo/issues/42/comments'*)
+    [[ "${GH_TOKEN}" == test-issues-token ]] || {
+      printf 'ordinary issue comment write used the wrong token channel\n' >&2
+      exit 1
+    }
+    touch "${GH_COMMENT_CREATED}"
+    ;;
   *) printf 'unexpected gh invocation: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
   chmod +x "${fake_bin}/gh"
 
   harness="${RUN_ROOT}/alert-harness.sh"
-  sed '/^parent="$(gh api "repos\/\${GITHUB_REPOSITORY}"/,$d' "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
+  cp "${SCRIPT_ROOT}/github-autonomy.sh" "${RUN_ROOT}/github-autonomy.sh"
+  sed '/^parent="$(aeris_gh api "repos\/\${GITHUB_REPOSITORY}"/,$d' "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
   printf '%s\n' 'report_sync_alert conflict deadbeef "conflict detected"' >>"${harness}"
 
-  PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_COMMENT_CREATED="${RUN_ROOT}/comment-created" GITHUB_OUTPUT="${RUN_ROOT}/output" GITHUB_REPOSITORY=example/repo \
-    BOT_LOGIN=github-actions[bot] bash "${harness}"
-  PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_COMMENT_CREATED="${RUN_ROOT}/comment-created" GITHUB_OUTPUT="${RUN_ROOT}/output" GITHUB_REPOSITORY=example/repo \
-    BOT_LOGIN=github-actions[bot] bash "${harness}"
+  PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_COMMENT_CREATED="${RUN_ROOT}/comment-created" GITHUB_OUTPUT="${RUN_ROOT}/output" GITHUB_REPOSITORY=example/repo AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z \
+    AERIS_ISSUES_GH_TOKEN=test-issues-token AERIS_WRITER_APP_SLUG=aeris-writer bash "${harness}"
+  PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_COMMENT_CREATED="${RUN_ROOT}/comment-created" GITHUB_OUTPUT="${RUN_ROOT}/output" GITHUB_REPOSITORY=example/repo AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z \
+    AERIS_ISSUES_GH_TOKEN=test-issues-token AERIS_WRITER_APP_SLUG=aeris-writer bash "${harness}"
 
   assert_eq 1 "$(grep -c -- '--method POST repos/example/repo/issues/42/comments' "${calls}")" \
     'existing normal issue must receive one API comment'

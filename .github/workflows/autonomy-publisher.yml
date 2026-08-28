@@ -1,0 +1,240 @@
+name: Autonomy Publisher
+
+on:
+  workflow_run:
+    workflows: [Agent candidate]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autonomy-publisher-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify candidate artifact
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      repository: ${{ steps.bind.outputs.repository }}
+      repository_id: ${{ steps.bind.outputs.repository_id }}
+      issue_number: ${{ steps.bind.outputs.issue_number }}
+      base_ref: ${{ steps.bind.outputs.base_ref }}
+      base_sha: ${{ steps.bind.outputs.base_sha }}
+      trigger_run_id: ${{ steps.bind.outputs.trigger_run_id }}
+      trigger_run_attempt: ${{ steps.bind.outputs.trigger_run_attempt }}
+      artifact_name: ${{ steps.bind.outputs.artifact_name }}
+    steps:
+      - name: Check out candidate's trusted base
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Bind trusted run, artifact, Issue, and base
+        id: bind
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          AERIS_TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: node .github/automation/src/autonomy-publish-preflight.mjs
+
+      - name: Download bound candidate artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: ${{ steps.bind.outputs.artifact_name }}
+          path: ${{ runner.temp }}/aeris-candidate
+          run-id: ${{ steps.bind.outputs.trigger_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify candidate before any Writer secret is reachable
+        env:
+          GITHUB_REPOSITORY_ID: ${{ steps.bind.outputs.repository_id }}
+          AERIS_ISSUE_NUMBER: ${{ steps.bind.outputs.issue_number }}
+          AERIS_BASE_REF: ${{ steps.bind.outputs.base_ref }}
+          AERIS_BASE_SHA: ${{ steps.bind.outputs.base_sha }}
+          AERIS_TRIGGER_RUN_ID: ${{ steps.bind.outputs.trigger_run_id }}
+          AERIS_TRIGGER_RUN_ATTEMPT: ${{ steps.bind.outputs.trigger_run_attempt }}
+          AERIS_CANDIDATE_MANIFEST: ${{ runner.temp }}/aeris-candidate/candidate-manifest.json
+          AERIS_CANDIDATE_PATCH: ${{ runner.temp }}/aeris-candidate/candidate.patch
+          AERIS_VERIFY_ONLY: "true"
+        run: node .github/automation/src/autonomy-publisher.mjs
+
+  publish:
+    name: Publish managed Draft PR
+    needs: [verify]
+    if: >-
+      needs.verify.result == 'success' &&
+      (vars.AERIS_WRITER_ENABLED == 'true' || vars.AERIS_WRITER_ENABLED == '1')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: writer
+    concurrency:
+      group: aeris-writer-mutation
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+    env:
+      AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
+      AERIS_AUTONOMY_MIN_REMAINING_SECONDS: 3600
+    steps:
+      - name: Check out bound trusted base
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.verify.outputs.base_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Rebind all trusted state before token mint
+        id: rebind
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          AERIS_TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: node .github/automation/src/autonomy-publish-preflight.mjs
+
+      - name: Confirm verification snapshot is unchanged
+        env:
+          VERIFIED_REPOSITORY: ${{ needs.verify.outputs.repository }}
+          VERIFIED_REPOSITORY_ID: ${{ needs.verify.outputs.repository_id }}
+          VERIFIED_ISSUE_NUMBER: ${{ needs.verify.outputs.issue_number }}
+          VERIFIED_BASE_REF: ${{ needs.verify.outputs.base_ref }}
+          VERIFIED_BASE_SHA: ${{ needs.verify.outputs.base_sha }}
+          VERIFIED_RUN_ID: ${{ needs.verify.outputs.trigger_run_id }}
+          VERIFIED_RUN_ATTEMPT: ${{ needs.verify.outputs.trigger_run_attempt }}
+          VERIFIED_ARTIFACT_NAME: ${{ needs.verify.outputs.artifact_name }}
+          CURRENT_REPOSITORY: ${{ steps.rebind.outputs.repository }}
+          CURRENT_REPOSITORY_ID: ${{ steps.rebind.outputs.repository_id }}
+          CURRENT_ISSUE_NUMBER: ${{ steps.rebind.outputs.issue_number }}
+          CURRENT_BASE_REF: ${{ steps.rebind.outputs.base_ref }}
+          CURRENT_BASE_SHA: ${{ steps.rebind.outputs.base_sha }}
+          CURRENT_RUN_ID: ${{ steps.rebind.outputs.trigger_run_id }}
+          CURRENT_RUN_ATTEMPT: ${{ steps.rebind.outputs.trigger_run_attempt }}
+          CURRENT_ARTIFACT_NAME: ${{ steps.rebind.outputs.artifact_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${CURRENT_REPOSITORY}" == "${VERIFIED_REPOSITORY}" ]]
+          [[ "${CURRENT_REPOSITORY_ID}" == "${VERIFIED_REPOSITORY_ID}" ]]
+          [[ "${CURRENT_ISSUE_NUMBER}" == "${VERIFIED_ISSUE_NUMBER}" ]]
+          [[ "${CURRENT_BASE_REF}" == "${VERIFIED_BASE_REF}" ]]
+          [[ "${CURRENT_BASE_SHA}" == "${VERIFIED_BASE_SHA}" ]]
+          [[ "${CURRENT_RUN_ID}" == "${VERIFIED_RUN_ID}" ]]
+          [[ "${CURRENT_RUN_ATTEMPT}" == "${VERIFIED_RUN_ATTEMPT}" ]]
+          [[ "${CURRENT_ARTIFACT_NAME}" == "${VERIFIED_ARTIFACT_NAME}" ]]
+
+      - name: Download rebound candidate artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: ${{ steps.rebind.outputs.artifact_name }}
+          path: ${{ runner.temp }}/aeris-candidate
+          run-id: ${{ steps.rebind.outputs.trigger_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify rebound candidate before token mint
+        env:
+          GITHUB_REPOSITORY_ID: ${{ steps.rebind.outputs.repository_id }}
+          AERIS_ISSUE_NUMBER: ${{ steps.rebind.outputs.issue_number }}
+          AERIS_BASE_REF: ${{ steps.rebind.outputs.base_ref }}
+          AERIS_BASE_SHA: ${{ steps.rebind.outputs.base_sha }}
+          AERIS_TRIGGER_RUN_ID: ${{ steps.rebind.outputs.trigger_run_id }}
+          AERIS_TRIGGER_RUN_ATTEMPT: ${{ steps.rebind.outputs.trigger_run_attempt }}
+          AERIS_CANDIDATE_MANIFEST: ${{ runner.temp }}/aeris-candidate/candidate-manifest.json
+          AERIS_CANDIDATE_PATCH: ${{ runner.temp }}/aeris-candidate/candidate.patch
+          AERIS_VERIFY_ONLY: "true"
+        run: node .github/automation/src/autonomy-publisher.mjs
+
+      - name: Validate autonomy window before token mint
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${AERIS_AUTONOMY_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+          expires_epoch="$(date -u -d "${AERIS_AUTONOMY_EXPIRES_AT}" +%s)"
+          [[ "$(date -u -d "@${expires_epoch}" +%Y-%m-%dT%H:%M:%SZ)" == "${AERIS_AUTONOMY_EXPIRES_AT}" ]]
+          (( $(date -u +%s) + AERIS_AUTONOMY_MIN_REMAINING_SECONDS < expires_epoch ))
+
+      - name: Mint bounded Writer App token
+        id: writer_token
+        timeout-minutes: 2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AERIS_WRITER_APP_ID }}
+          private-key: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-checks: write
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Publish exact managed Draft PR
+        id: publish
+        env:
+          GITHUB_REPOSITORY_ID: ${{ steps.rebind.outputs.repository_id }}
+          AERIS_ISSUE_NUMBER: ${{ steps.rebind.outputs.issue_number }}
+          AERIS_BASE_REF: ${{ steps.rebind.outputs.base_ref }}
+          AERIS_BASE_SHA: ${{ steps.rebind.outputs.base_sha }}
+          AERIS_TRIGGER_RUN_ID: ${{ steps.rebind.outputs.trigger_run_id }}
+          AERIS_TRIGGER_RUN_ATTEMPT: ${{ steps.rebind.outputs.trigger_run_attempt }}
+          AERIS_CANDIDATE_MANIFEST: ${{ runner.temp }}/aeris-candidate/candidate-manifest.json
+          AERIS_CANDIDATE_PATCH: ${{ runner.temp }}/aeris-candidate/candidate.patch
+          AERIS_WRITER_TOKEN: ${{ steps.writer_token.outputs.token }}
+          AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_PUBLISHER_RUN_ID: ${{ github.run_id }}
+          AERIS_PUBLISHER_RUN_ATTEMPT: ${{ github.run_attempt }}
+          AERIS_PUBLISHER_TARGET_PATH: ${{ runner.temp }}/aeris-publisher-target/publisher-target.json
+          AERIS_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ steps.rebind.outputs.trigger_run_id }}/attempts/${{ steps.rebind.outputs.trigger_run_attempt }}
+        run: node .github/automation/src/autonomy-publisher.mjs
+
+      - name: Upload finalizer target
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: aeris-publisher-target-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-publisher-target/publisher-target.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+      - name: Summarize publication
+        env:
+          PULL_URL: ${{ steps.publish.outputs.pull_url }}
+          HEAD_SHA: ${{ steps.publish.outputs.head_sha }}
+          ACTION: ${{ steps.publish.outputs.action }}
+          ATTESTATION_CHECK_RUN_ID: ${{ steps.publish.outputs.attestation_check_run_id }}
+        shell: bash
+        run: |
+          {
+            echo "### Autonomy Publisher"
+            echo
+            echo "- Pull request: ${PULL_URL}"
+            echo "- Head SHA: \`${HEAD_SHA}\`"
+            echo "- Action: \`${ACTION}\`"
+            echo "- Writer attestation check: \`${ATTESTATION_CHECK_RUN_ID}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"

@@ -77,6 +77,83 @@ export class GitHubClient {
     return result.items;
   }
 
+  async listPullTimelineEvents(pullNumber) {
+    if (!Number.isSafeInteger(pullNumber) || pullNumber < 1) {
+      throw new GitHubApiError('Pull number is invalid');
+    }
+    const result = await this.list(
+      `/repos/${this.repository}/issues/${pullNumber}/timeline`,
+      10,
+    );
+    if (result.truncated) {
+      throw new GitHubApiError('Pull has too many timeline events for safe lifecycle evaluation');
+    }
+    return result.items;
+  }
+
+  async listDirectCollaborators() {
+    return this.list(
+      `/repos/${this.repository}/collaborators?affiliation=direct`,
+      10,
+    );
+  }
+
+  async listRepositoryRulesetsIncludingParents() {
+    return this.list(
+      `/repos/${this.repository}/rulesets?includes_parents=true`,
+      10,
+    );
+  }
+
+  getRepositoryRuleset(rulesetId) {
+    if (!Number.isSafeInteger(rulesetId) || rulesetId < 1) {
+      throw new GitHubApiError('Repository ruleset id is invalid');
+    }
+    return this.request('GET', `/repos/${this.repository}/rulesets/${rulesetId}`);
+  }
+
+  getActionsPermissions() {
+    return this.request('GET', `/repos/${this.repository}/actions/permissions`);
+  }
+
+  getDefaultWorkflowPermissions() {
+    return this.request('GET', `/repos/${this.repository}/actions/permissions/workflow`);
+  }
+
+  getWriterEnvironment() {
+    return this.request('GET', `/repos/${this.repository}/environments/writer`);
+  }
+
+  async listWriterDeploymentBranchPolicies() {
+    const items = [];
+    let expectedTotal = null;
+    for (let page = 1; page <= 10; page += 1) {
+      const value = await this.request(
+        'GET',
+        `/repos/${this.repository}/environments/writer/deployment-branch-policies?per_page=100&page=${page}`,
+      );
+      if (!value || !Number.isSafeInteger(value.total_count) || value.total_count < 0 ||
+          !Array.isArray(value.branch_policies) || value.branch_policies.length > 100) {
+        throw new GitHubApiError('Writer deployment branch policy response is invalid');
+      }
+      if (expectedTotal === null) expectedTotal = value.total_count;
+      if (value.total_count !== expectedTotal) {
+        throw new GitHubApiError('Writer deployment branch policy total drifted during pagination');
+      }
+      items.push(...value.branch_policies);
+      if (items.length > expectedTotal) {
+        throw new GitHubApiError('Writer deployment branch policy response exceeds total_count');
+      }
+      if (value.branch_policies.length < 100) {
+        if (items.length !== expectedTotal) {
+          throw new GitHubApiError('Writer deployment branch policy pagination is incomplete');
+        }
+        return { items, truncated: false };
+      }
+    }
+    return { items, truncated: true };
+  }
+
   async listRepositoryLabels() {
     const result = await this.list(`/repos/${this.repository}/labels`, 10);
     if (result.truncated) throw new GitHubApiError('Repository has too many labels for safe validation');

@@ -2,8 +2,18 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Every authenticated GitHub operation rechecks the time-bounded authorization.
+source "${SCRIPT_DIR}/github-autonomy.sh"
+
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
+: "${AERIS_ISSUES_GH_TOKEN:?AERIS_ISSUES_GH_TOKEN is required}"
+: "${AERIS_WRITER_APP_SLUG:?AERIS_WRITER_APP_SLUG is required}"
+[[ "${AERIS_WRITER_APP_SLUG}" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]] || {
+  echo 'AERIS_WRITER_APP_SLUG must be a lowercase GitHub App slug.' >&2
+  exit 78
+}
 
 BASE_BRANCH="${BASE_BRANCH:-main}"
 SYNC_BRANCH="${SYNC_BRANCH:-automation/sync-upstream}"
@@ -16,7 +26,8 @@ AUTOMERGE_HELPER="${AUTOMERGE_HELPER:-${SCRIPT_ROOT}/manage-sync-automerge.sh}"
 
 MANAGED_MARKER='<!-- upstream-sync-managed -->'
 AUTO_CLOSED_MARKER='<!-- upstream-sync-auto-closed -->'
-BOT_LOGIN='github-actions[bot]'
+WRITER_APP_BOT_LOGIN="${AERIS_WRITER_APP_SLUG}[bot]"
+LEGACY_BOT_LOGIN='github-actions[bot]'
 BOT_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
 
 repo_owner="${GITHUB_REPOSITORY%%/*}"
@@ -32,13 +43,53 @@ upstream_branch=''
 base_sha=''
 upstream_sha=''
 checkpoint_sha=''
+autonomous_eligible='false'
+policy_verdict=''
 
 output() {
   printf '%s=%s\n' "$1" "$2" >>"${GITHUB_OUTPUT}"
 }
 
+# Writer App credentials are restricted to branch, PR, and pending-tip comment
+# publication. Issue inventory and ordinary issue comments use the workflow
+# token through this isolated channel.
+aeris_issues_gh() {
+  aeris_require_active_autonomy_window || return
+  GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"
+}
+
+aeris_writer_git_push() {
+  local temp_root askpass_dir askpass status=0
+  : "${AERIS_WRITER_TOKEN:?AERIS_WRITER_TOKEN is required for Writer Git publication}"
+  temp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+  askpass_dir="$(mktemp -d "${temp_root%/}/aeris-writer-askpass.XXXXXX")"
+  askpass="${askpass_dir}/askpass.sh"
+  if ! (
+    umask 077
+    cat >"${askpass}" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  *Username*) printf '%s\n' x-access-token ;;
+  *Password*) printf '%s\n' "${AERIS_WRITER_TOKEN:?}" ;;
+  *) exit 1 ;;
+esac
+EOF
+    chmod 700 "${askpass}"
+  ); then
+    rm -f -- "${askpass}"
+    rmdir -- "${askpass_dir}"
+    return 1
+  fi
+
+  GIT_ASKPASS="${askpass}" GIT_ASKPASS_REQUIRE=force GIT_TERMINAL_PROMPT=0 \
+    aeris_git_network -c credential.helper= -c http.https://github.com/.extraheader= "$@" || status=$?
+  rm -f -- "${askpass}" || status=1
+  rmdir -- "${askpass_dir}" || status=1
+  return "${status}"
+}
+
 list_sync_prs() {
-  gh api --paginate --slurp \
+  aeris_gh api --paginate --slurp \
     --method GET \
     "repos/${GITHUB_REPOSITORY}/pulls" \
     -f state=all \
@@ -82,18 +133,28 @@ refresh_prs() {
   fi
 }
 
-pr_bot_comments() {
-  gh api --paginate \
+issue_bot_comments() {
+  aeris_issues_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/$1/comments?per_page=100" \
-    --jq ".[] | select(.user.login == \"${BOT_LOGIN}\") | .body"
+    --jq ".[] | select(.user.login == \"${WRITER_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") | .body"
+}
+
+pr_bot_comments() {
+  aeris_gh api --paginate \
+    "repos/${GITHUB_REPOSITORY}/issues/$1/comments?per_page=100" \
+    --jq ".[] | select(.user.login == \"${WRITER_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") | .body"
+}
+
+is_sync_automation_login() {
+  [[ "$1" == "${WRITER_APP_BOT_LOGIN}" || "$1" == "${LEGACY_BOT_LOGIN}" || "$1" == app/github-actions ]]
 }
 
 issue_comment_once() {
   local number="$1" key="$2" message="$3" marker comments
   marker="<!-- upstream-sync-${key} -->"
-  comments="$(pr_bot_comments "${number}")"
+  comments="$(issue_bot_comments "${number}")"
   if [[ "${comments}" != *"${marker}"* ]]; then
-    gh api --method POST \
+    aeris_issues_gh api --method POST \
       "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" \
       -f body="${marker}
 ${message}" >/dev/null
@@ -101,7 +162,15 @@ ${message}" >/dev/null
 }
 
 pr_comment_once() {
-  issue_comment_once "$@"
+  local number="$1" key="$2" message="$3" marker comments
+  marker="<!-- upstream-sync-${key} -->"
+  comments="$(pr_bot_comments "${number}")"
+  if [[ "${comments}" != *"${marker}"* ]]; then
+    aeris_gh api --method POST \
+      "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" \
+      -f body="${marker}
+${message}" >/dev/null
+  fi
 }
 
 # Authenticate the planned SHA before push so an interrupted publication can
@@ -110,29 +179,36 @@ set_pending_tip() {
   local number="$1" sha="$2" comment_id body
   body="<!-- upstream-sync-pending-tip:${sha} -->
 Prepared automation branch tip ${sha}."
-  comment_id="$(gh api --paginate \
+  comment_id="$(aeris_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/${number}/comments?per_page=100" \
-    --jq ".[] | select(.user.login == \"${BOT_LOGIN}\" and (.body | startswith(\"<!-- upstream-sync-pending-tip:\"))) | .id" |
+    --jq ".[] | select((.user.login == \"${WRITER_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") and (.body | startswith(\"<!-- upstream-sync-pending-tip:\"))) | .id" |
     tail -n1)"
   if [[ -n "${comment_id}" ]]; then
-    gh api \
+    # GitHub authorizes a PR comment mutation with pull_requests:write even
+    # when the REST route is under /issues. Use the bounded Writer App token;
+    # the workflow token intentionally has only pull-requests:read.
+    aeris_gh api \
       --method PATCH \
       "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
       -f body="${body}" >/dev/null
   else
-    gh pr comment --repo "${GITHUB_REPOSITORY}" "${number}" --body "${body}" >/dev/null
+    # Keep this on the REST issue-comments endpoint so the mutation is
+    # idempotent and does not rely on the GraphQL CLI fallback.
+    aeris_gh api --method POST \
+      "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" \
+      -f body="${body}" >/dev/null
   fi
 }
 
 latest_close_actor() {
-  gh api --paginate \
+  aeris_issues_gh api --paginate \
     "repos/${GITHUB_REPOSITORY}/issues/$1/events?per_page=100" \
     --jq '.[] | select(.event == "closed") | .actor.login' | tail -n1
 }
 
 pr_was_auto_closed() {
   local number="$1"
-  [[ "$(latest_close_actor "${number}" || true)" == "${BOT_LOGIN}" ]] || return 1
+  is_sync_automation_login "$(latest_close_actor "${number}" || true)" || return 1
   [[ "$(pr_bot_comments "${number}" || true)" == *"${AUTO_CLOSED_MARKER}"* ]]
 }
 
@@ -159,7 +235,7 @@ pr_is_managed() {
   local body author
   body="$(jq -r '.body // ""' <<<"$1")"
   author="$(jq -r '.author // ""' <<<"$1")"
-  [[ "${author}" == "${BOT_LOGIN}" || "${author}" == app/github-actions ]] || return 1
+  is_sync_automation_login "${author}" || return 1
   [[ "${body}" == *"${MANAGED_MARKER}"* ||
      "${body}" == *'Automated synchronization from '* ]]
 }
@@ -220,9 +296,9 @@ is_legacy_tip() {
 }
 
 fetch_remote_tip() {
-  remote_sha="$(git ls-remote --heads origin "refs/heads/${SYNC_BRANCH}" | awk '{print $1}')"
+  remote_sha="$(aeris_git_network ls-remote --heads origin "refs/heads/${SYNC_BRANCH}" | awk '{print $1}')"
   if [[ -n "${remote_sha}" ]]; then
-    git fetch --no-tags origin \
+    aeris_git_network fetch --no-tags origin \
       "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
   fi
 }
@@ -271,7 +347,7 @@ pause_or_resume() {
     return 20
   fi
   for attempt in 1 2; do
-    if gh pr reopen --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null 2>&1; then
+    if aeris_gh pr reopen --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null 2>&1; then
       refresh_prs
       [[ -n "${open_pr}" && "$(jq -r '.number' <<<"${open_pr}")" == "${number}" ]] || return 1
       tracked_pr="${open_pr}"
@@ -356,7 +432,7 @@ report_workflow_drift() {
   [[ -n "${changed}" ]] || return 0
 
   title="[sync-upstream] Review upstream workflow tree ${current_tree:0:12}"
-  existing="$(gh issue list \
+  existing="$(aeris_issues_gh issue list \
     --repo "${GITHUB_REPOSITORY}" \
     --state all \
     --limit 100 \
@@ -364,7 +440,7 @@ report_workflow_drift() {
     --json title \
     --jq ".[] | select(.title == \"${title}\") | .title" | head -n1)"
   if [[ -z "${existing}" ]]; then
-    gh issue create \
+    aeris_issues_gh issue create \
       --repo "${GITHUB_REPOSITORY}" \
       --title "${title}" \
       --body "<!-- upstream-sync-workflow-tree:${current_tree} -->
@@ -379,7 +455,7 @@ report_sync_alert() {
   local kind="$1" key="$2" message="$3" title existing number marker
   title="[sync-upstream] ${kind}: ${key}"
   marker="<!-- upstream-sync-alert:${kind}:${key} -->"
-  existing="$(gh issue list \
+  existing="$(aeris_issues_gh issue list \
     --repo "${GITHUB_REPOSITORY}" \
     --state open \
     --limit 100 \
@@ -387,7 +463,7 @@ report_sync_alert() {
     --json number,title,body \
     --jq ".[] | select(.title == \"${title}\" and ((.body // \"\") | contains(\"${marker}\"))) | .number" | head -n1)"
   if [[ -z "${existing}" ]]; then
-    gh issue create \
+    aeris_issues_gh issue create \
       --repo "${GITHUB_REPOSITORY}" \
       --title "${title}" \
       --body "${marker}
@@ -411,7 +487,7 @@ close_obsolete_pr() {
     }
     assert_remote_owned "${base_sha}"
     pr_comment_once "${number}" auto-closed 'Closed automatically because the base branch already contains the applicable upstream content.'
-    gh pr close --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null
+    aeris_gh pr close --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null
   fi
   output state noop
   output has_changes false
@@ -421,7 +497,7 @@ close_obsolete_pr() {
 wait_for_pr_head() {
   local pr="$1" expected_sha="$2" attempt view_data
   for attempt in 1 2 3 4 5 6; do
-    if view_data="$(gh pr view --repo "${GITHUB_REPOSITORY}" "${pr}" --json state,headRefOid)" &&
+    if view_data="$(aeris_gh pr view --repo "${GITHUB_REPOSITORY}" "${pr}" --json state,headRefOid)" &&
        [[ "$(jq -r '.state' <<<"${view_data}")" == OPEN &&
           "$(jq -r '.headRefOid' <<<"${view_data}")" == "${expected_sha}" ]]; then
       printf '%s\n' "${view_data}"
@@ -434,7 +510,7 @@ wait_for_pr_head() {
 }
 
 publish_pr() {
-  local body number pr_url create_error create_output view_data
+  local body merge_behavior number pr_url create_error create_output view_data trusted_view
   require_gate
   fetch_remote_tip
   [[ "${remote_sha}" == "${published_sha}" ]] || {
@@ -442,13 +518,19 @@ publish_pr() {
     return 1
   }
 
+  if [[ "${autonomous_eligible}:${policy_verdict}" == true:eligible ||
+        "${autonomous_eligible}:${policy_verdict}" == true:conflict_ai_review ]]; then
+    merge_behavior='This pull request is merged once after protected branch checks pass; no persistent auto-merge is configured.'
+  else
+    merge_behavior='This pull request requires maintainer review and is not directly merged by synchronization automation.'
+  fi
   body="${MANAGED_MARKER}
 <!-- upstream-sync-owned-tip:${published_sha} -->
 <!-- upstream-sync-source:${parent}@${upstream_sha} -->
 Automated synchronization from ${parent}:${upstream_branch} at ${upstream_sha}.
 Checkpoint advanced from ${checkpoint_sha} to ${upstream_sha}.
 
-This pull request is configured for native auto-merge after protected branch checks pass.
+${merge_behavior}
 Configured fork-owned paths are preserved; upstream workflow changes are reviewed separately."
 
   if [[ -n "${tracked_pr}" ]]; then
@@ -457,7 +539,7 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
     view_data="$(wait_for_pr_head "${number}" "${published_sha}")" || return 1
   else
     create_error="$(mktemp)"
-    if create_output="$(gh pr create \
+    if create_output="$(aeris_gh pr create \
       --repo "${GITHUB_REPOSITORY}" \
       --base "${BASE_BRANCH}" \
       --head "${SYNC_BRANCH}" \
@@ -477,7 +559,7 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
     view_data="$(wait_for_pr_head "${pr_url}" "${published_sha}")" || return 1
   fi
 
-  gh pr edit \
+  aeris_gh pr edit \
     --repo "${GITHUB_REPOSITORY}" \
     "${pr_url}" \
     --title 'chore: sync upstream' \
@@ -485,15 +567,27 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
   refresh_prs
   [[ "$(jq 'length' <<<"${open_prs}")" -eq 1 &&
      "$(jq -r '.headRefOid' <<<"${open_pr}")" == "${published_sha}" ]] || return 1
+  trusted_view="$(aeris_gh pr view "${pr_url}" --repo "${GITHUB_REPOSITORY}" \
+    --json state,isDraft,headRefOid,headRefName,headRepository,baseRefName,baseRefOid,autoMergeRequest)"
+  jq -e --arg head_sha "${published_sha}" --arg head_branch "${SYNC_BRANCH}" \
+    --arg repository "${GITHUB_REPOSITORY}" --arg base_branch "${BASE_BRANCH}" '
+    type == "object" and .state == "OPEN" and .isDraft == false and
+    .headRefOid == $head_sha and .headRefName == $head_branch and
+    .headRepository.nameWithOwner == $repository and .baseRefName == $base_branch and
+    (.baseRefOid | type == "string" and test("^[0-9a-fA-F]{40}$")) and
+    .autoMergeRequest == null
+  ' <<<"${trusted_view}" >/dev/null || return 1
   output pr_url "${pr_url}"
+  output pr_number "$(jq -r '.number' <<<"${open_pr}")"
+  output expected_base_sha "$(jq -r '.baseRefOid' <<<"${trusted_view}")"
 }
 
-parent="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.full_name // empty')"
+parent="$(aeris_gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.full_name // empty')"
 [[ -n "${parent}" ]] || {
   echo "${GITHUB_REPOSITORY} is not a fork." >&2
   exit 1
 }
-upstream_branch="$(gh api "repos/${parent}" --jq '.default_branch')"
+upstream_branch="$(aeris_gh api "repos/${parent}" --jq '.default_branch')"
 output parent "${parent}"
 output upstream_branch "${upstream_branch}"
 
@@ -512,9 +606,15 @@ fi
 disarm_tracked_pr
 
 for attempt in 1 2 3; do
-  git fetch --no-tags origin "${BASE_BRANCH}"
-  git fetch --no-tags upstream "${upstream_branch}"
+  aeris_git_network fetch --no-tags origin "${BASE_BRANCH}"
+  aeris_git_network fetch --no-tags upstream "${upstream_branch}"
   base_sha="$(git rev-parse "origin/${BASE_BRANCH}")"
+  [[ "$(git rev-parse HEAD)" == "${base_sha}" ]] || {
+    echo 'Trusted checkout HEAD no longer equals the fetched base SHA.' >&2
+    output state error
+    output has_changes false
+    exit 1
+  }
   upstream_sha="$(git rev-parse "upstream/${upstream_branch}")"
   output upstream_sha "${upstream_sha}"
 
@@ -540,6 +640,8 @@ for attempt in 1 2 3; do
     alert_key="${upstream_sha:0:12}"
     case "${prepare_status}:${prepare_state}" in
       1:conflict)
+        conflict_bundle_sha="$(sed -n 's/^conflict_bundle_sha=//p' <<<"${prepare_output}" | tail -n1)"
+        conflict_generation_sha="$(sed -n 's/^conflict_generation_sha=//p' <<<"${prepare_output}" | tail -n1)"
         message="Upstream ${upstream_sha} conflicts with base ${base_sha} from checkpoint ${checkpoint_sha:-unknown}. The existing PR and branch were preserved."
         if [[ -n "${tracked_pr}" ]]; then
           pr_comment_once \
@@ -548,7 +650,24 @@ for attempt in 1 2 3; do
             "${message}"
         fi
         report_sync_alert conflict "${alert_key}" "${message}"
-        output state conflict
+        if [[ -n "${AERIS_CONFLICT_CANDIDATE_PATH:-}" ]]; then
+          output state conflict_resolution_rejected
+        elif [[ "${conflict_bundle_sha}" =~ ^[0-9a-f]{64}$ &&
+                "${conflict_generation_sha}" =~ ^[0-9a-f]{64}$ &&
+                -n "${AERIS_CONFLICT_BUNDLE_PATH:-}" ]]; then
+          output state conflict_pending
+          output conflict_pending true
+          output conflict_bundle_sha "${conflict_bundle_sha}"
+          output conflict_generation_sha "${conflict_generation_sha}"
+          output checkpoint_sha "${checkpoint_sha}"
+          output expected_base_sha "${base_sha}"
+          output policy_verdict eligible
+          output autonomous_eligible false
+          output has_changes false
+          exit 0
+        else
+          output state conflict
+        fi
         ;;
       2:history_rewrite)
         message="Checkpoint ${checkpoint_sha:-unknown} is not an ancestor of upstream ${upstream_sha}. Synchronization stopped without changing the branch, PR, or checkpoint."
@@ -570,8 +689,44 @@ for attempt in 1 2 3; do
     exit 1
   }
   filtered_paths="$(sed -n 's/^filtered_paths=//p' <<<"${prepare_output}" | tail -n1)"
+  autonomous_eligible="$(sed -n 's/^autonomous_eligible=//p' <<<"${prepare_output}" | tail -n1)"
+  policy_verdict="$(sed -n 's/^policy_verdict=//p' <<<"${prepare_output}" | tail -n1)"
+  [[ "${autonomous_eligible}:${policy_verdict}" == true:eligible ||
+     "${autonomous_eligible}:${policy_verdict}" == true:conflict_ai_review ||
+     "${autonomous_eligible}:${policy_verdict}" == false:manual_review ||
+     "${autonomous_eligible}:${policy_verdict}" == false:noop ]] || {
+    echo 'Checkpoint helper did not return a trusted synchronization verdict.' >&2
+    exit 1
+  }
   output checkpoint_sha "${checkpoint_sha}"
   output filtered_paths "${filtered_paths:-0}"
+  output autonomous_eligible "${autonomous_eligible}"
+  output policy_verdict "${policy_verdict}"
+  conflict_bundle_sha="$(sed -n 's/^conflict_bundle_sha=//p' <<<"${prepare_output}" | tail -n1)"
+  conflict_candidate_sha="$(sed -n 's/^conflict_candidate_sha=//p' <<<"${prepare_output}" | tail -n1)"
+  conflict_generation_sha="$(sed -n 's/^conflict_generation_sha=//p' <<<"${prepare_output}" | tail -n1)"
+  conflict_resolution_sha="$(sed -n 's/^conflict_resolution_sha=//p' <<<"${prepare_output}" | tail -n1)"
+  conflict_resolved_tree="$(sed -n 's/^conflict_resolved_tree=//p' <<<"${prepare_output}" | tail -n1)"
+  conflict_resolver_model_sha="$(sed -n 's/^conflict_resolver_model_sha=//p' <<<"${prepare_output}" | tail -n1)"
+  if [[ "${policy_verdict}" == conflict_ai_review ]]; then
+    for value in "${conflict_bundle_sha}" "${conflict_candidate_sha}" "${conflict_generation_sha}" \
+      "${conflict_resolution_sha}" "${conflict_resolver_model_sha}"; do
+      [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || {
+        echo 'Checkpoint helper returned an invalid conflict-resolution hash.' >&2
+        exit 1
+      }
+    done
+    [[ "${conflict_resolved_tree}" =~ ^[0-9a-f]{40}$ ]] || {
+      echo 'Checkpoint helper returned an invalid resolved merge tree.' >&2
+      exit 1
+    }
+    output conflict_bundle_sha "${conflict_bundle_sha}"
+    output conflict_candidate_sha "${conflict_candidate_sha}"
+    output conflict_generation_sha "${conflict_generation_sha}"
+    output conflict_resolution_sha "${conflict_resolution_sha}"
+    output conflict_resolved_tree "${conflict_resolved_tree}"
+    output conflict_resolver_model_sha "${conflict_resolver_model_sha}"
+  fi
   if [[ "${prepare_state}" == noop ]]; then
     close_obsolete_pr
   fi
@@ -589,16 +744,32 @@ for attempt in 1 2 3; do
 
   git diff --cached --quiet && close_obsolete_pr
 
-  git commit \
-    -m "chore: sync ${parent}@${upstream_sha}" \
-    -m 'Sync-Upstream-Automation: true' \
-    -m "Sync-Upstream-Source: ${parent}@${upstream_sha}" \
-    -m "Sync-Upstream-Checkpoint: ${checkpoint_sha}->${upstream_sha}" \
+  prepared_tree="$(git write-tree)"
+  commit_arguments=(
+    -m "chore: sync ${parent}@${upstream_sha}"
+    -m 'Sync-Upstream-Automation: true'
+    -m "Sync-Upstream-Source: ${parent}@${upstream_sha}"
+    -m "Sync-Upstream-Checkpoint: ${checkpoint_sha}->${upstream_sha}"
     -m "Sync-Upstream-Base: ${base_sha}"
+    -m "Sync-Upstream-Policy-Verdict: ${policy_verdict}"
+  )
+  if [[ "${policy_verdict}" == conflict_ai_review ]]; then
+    commit_arguments+=(
+      -m 'Sync-Upstream-Conflict-Profile: aeris-sync-conflict-v2'
+      -m "Sync-Upstream-Conflict-Generation: ${conflict_generation_sha}"
+      -m "Sync-Upstream-Conflict-Bundle: ${conflict_bundle_sha}"
+      -m "Sync-Upstream-Resolution-Candidate: ${conflict_candidate_sha}"
+      -m "Sync-Upstream-Resolution-SHA: ${conflict_resolution_sha}"
+      -m "Sync-Upstream-Resolved-Merge-Tree: ${conflict_resolved_tree}"
+      -m "Sync-Upstream-Prepared-Tree: ${prepared_tree}"
+      -m "Sync-Upstream-Resolver-Model-SHA: ${conflict_resolver_model_sha}"
+    )
+  fi
+  git commit "${commit_arguments[@]}"
   local_sha="$(git rev-parse HEAD)"
 
-  git fetch --no-tags origin "${BASE_BRANCH}"
-  git fetch --no-tags upstream "${upstream_branch}"
+  aeris_git_network fetch --no-tags origin "${BASE_BRANCH}"
+  aeris_git_network fetch --no-tags upstream "${upstream_branch}"
   if [[ "${base_sha}" != "$(git rev-parse "origin/${BASE_BRANCH}")" ||
         "${upstream_sha}" != "$(git rev-parse "upstream/${upstream_branch}")" ]]; then
     continue
@@ -617,13 +788,13 @@ for attempt in 1 2 3; do
       set_pending_tip "$(jq -r '.number' <<<"${reference_pr}")" "${local_sha}"
     fi
     if [[ -n "${remote_sha}" ]]; then
-      git push \
+      aeris_writer_git_push push \
         --force-with-lease="refs/heads/${SYNC_BRANCH}:${remote_sha}" \
-        origin "${local_sha}:refs/heads/${SYNC_BRANCH}"
+        "https://github.com/${GITHUB_REPOSITORY}.git" "${local_sha}:refs/heads/${SYNC_BRANCH}"
     else
-      git push \
+      aeris_writer_git_push push \
         --force-with-lease="refs/heads/${SYNC_BRANCH}:" \
-        origin "${local_sha}:refs/heads/${SYNC_BRANCH}"
+        "https://github.com/${GITHUB_REPOSITORY}.git" "${local_sha}:refs/heads/${SYNC_BRANCH}"
     fi
     published_sha="${local_sha}"
   fi
@@ -634,6 +805,8 @@ for attempt in 1 2 3; do
   output state published
   output has_changes true
   output synced_sha "${published_sha}"
+  output synced_tree "$(git rev-parse "${published_sha}^{tree}")"
+  output synced_source "${parent}@${upstream_sha}"
   exit 0
 done
 
