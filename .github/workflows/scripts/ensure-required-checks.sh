@@ -144,10 +144,9 @@ wait_for_required_checks() {
         echo 'error: an exact-head required check completed unsuccessfully' >&2
         exit 1
         ;;
-      pending) ;;
-      *)
-        echo 'error: required check response was incomplete or malformed' >&2
-        exit 78
+      pending|invalid)
+        # GitHub can briefly expose partial check metadata while a suite is
+        # finalizing. Keep the existing bounded wait rather than fail early.
         ;;
     esac
     ((attempt == wait_attempts)) || sleep "${wait_seconds}"

@@ -37,18 +37,25 @@ if [[ "${1:-}" == api && "${2:-}" == *'/check-runs?per_page=100' ]]; then
   mode="${FAKE_CHECK_MODE:-success}"
   rust_status='completed'
   rust_conclusion='"success"'
+  rust_suite_id=501
   policy_entry=',{"id":1003,"name":"Automation Policy / gate","head_sha":"'"${SYNCED_SHA}"'","status":"completed","conclusion":"success","details_url":"https://github.com/'"${GITHUB_REPOSITORY}"'/actions/runs/103/job/1003","check_suite":{"id":503},"app":{"id":15368,"slug":"github-actions"}}'
   total=3
   case "${mode}" in
     success) ;;
     pending) rust_status='in_progress'; rust_conclusion='null' ;;
     failure) rust_conclusion='"failure"' ;;
+    transient-invalid)
+      if [[ ! -e "${FAKE_CHECK_COUNTER:?FAKE_CHECK_COUNTER is required}" ]]; then
+        : >"${FAKE_CHECK_COUNTER}"
+        rust_suite_id=null
+      fi
+      ;;
     missing-policy) policy_entry=''; total=2 ;;
     malformed) printf 'not-json\n'; exit 0 ;;
     *) exit 43 ;;
   esac
-  printf '{"total_count":%s,"check_runs":[{"id":1001,"name":"Rust CI / check","head_sha":"%s","status":"%s","conclusion":%s,"details_url":"https://github.com/%s/actions/runs/101/job/1001","check_suite":{"id":501},"app":{"id":15368,"slug":"github-actions"}},{"id":1002,"name":"Frontend CI / check","head_sha":"%s","status":"completed","conclusion":"success","details_url":"https://github.com/%s/actions/runs/102/job/1002","check_suite":{"id":502},"app":{"id":15368,"slug":"github-actions"}}%s]}\n' \
-    "${total}" "${SYNCED_SHA}" "${rust_status}" "${rust_conclusion}" "${GITHUB_REPOSITORY}" \
+  printf '{"total_count":%s,"check_runs":[{"id":1001,"name":"Rust CI / check","head_sha":"%s","status":"%s","conclusion":%s,"details_url":"https://github.com/%s/actions/runs/101/job/1001","check_suite":{"id":%s},"app":{"id":15368,"slug":"github-actions"}},{"id":1002,"name":"Frontend CI / check","head_sha":"%s","status":"completed","conclusion":"success","details_url":"https://github.com/%s/actions/runs/102/job/1002","check_suite":{"id":502},"app":{"id":15368,"slug":"github-actions"}}%s]}\n' \
+    "${total}" "${SYNCED_SHA}" "${rust_status}" "${rust_conclusion}" "${GITHUB_REPOSITORY}" "${rust_suite_id}" \
     "${SYNCED_SHA}" "${GITHUB_REPOSITORY}" "${policy_entry}"
   exit 0
 fi
@@ -100,6 +107,13 @@ if env "${common_env[@]}" GH_TOKEN=expected-job-token \
   bash "${SCRIPT_ROOT}/ensure-required-checks.sh" >/dev/null 2>&1; then
   fail 'required-check wait accepted a drifted pull request base'
 fi
+
+transient_counter="${RUN_ROOT}/transient-invalid-count"
+env "${common_env[@]}" GH_TOKEN=expected-job-token \
+  FAKE_CHECK_MODE=transient-invalid FAKE_CHECK_COUNTER="${transient_counter}" \
+  bash "${SCRIPT_ROOT}/ensure-required-checks.sh" >/dev/null
+[[ -e "${transient_counter}" ]] ||
+  fail 'transient incomplete check response was not observed'
 
 set +e
 env "${common_env[@]}" GH_TOKEN=expected-job-token FAKE_CHECK_MODE=pending \
