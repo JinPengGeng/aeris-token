@@ -25,15 +25,28 @@ function workflow() {
   return yaml.load(fs.readFileSync(workflowPath, 'utf8'));
 }
 
-test('Writer attestation is a default-branch-only manual workflow without inputs', () => {
+test('Writer attestation is a default-branch-only manual and inputless reusable workflow', () => {
   const document = workflow();
   assert.deepEqual(document.on.workflow_dispatch, null);
-  assert.deepEqual(Object.keys(document.on), ['workflow_dispatch']);
+  assert.deepEqual(document.on.workflow_call, null);
+  assert.deepEqual(Object.keys(document.on), ['workflow_dispatch', 'workflow_call']);
+  assert.match(document.jobs.attest.if, /github\.repository == 'JinPengGeng\/aeris-token'/);
+  assert.match(document.jobs.attest.if, /github\.actor == 'JinPengGeng'/);
+  assert.match(document.jobs.attest.if, /github\.event\.repository\.default_branch == 'main'/);
   assert.match(document.jobs.attest.if, /github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/);
   assert.equal(document.jobs.attest.environment, 'writer');
   assert.equal(document.permissions.contents, 'read');
   assert.deepEqual(document.jobs.attest.permissions, { contents: 'read' });
   assert.deepEqual(Object.entries(document.jobs.attest.permissions).filter(([, value]) => value === 'write'), []);
+  for (const flag of [
+    'AERIS_AGENTS_ENABLED',
+    'AERIS_CANDIDATE_AGENTS_ENABLED',
+    'AERIS_WRITER_ENABLED',
+    'AERIS_UPSTREAM_SYNC_ENABLED',
+    'AERIS_AUTONOMOUS_MERGE_ENABLED',
+  ]) {
+    assert.match(document.jobs.attest.if, new RegExp(`vars\\.${flag} == 'false'`));
+  }
 });
 
 test('Writer attestation mints one explicitly read-only repository token and has no mutation command', () => {

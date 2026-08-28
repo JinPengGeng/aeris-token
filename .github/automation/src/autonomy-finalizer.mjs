@@ -384,7 +384,7 @@ function validateCompleteConnection(connection, name) {
   return value;
 }
 
-function validateBranchProtection(proof, defaultBranch) {
+export function validateBranchProtection(proof, defaultBranch) {
   const repository = object(proof, 'branch protection proof');
   const repositoryProfile = Object.freeze({
     mergeCommitAllowed: false,
@@ -530,8 +530,23 @@ function normalizedActiveRuleset(value, summary, name) {
     reject(`${name} rules are invalid`);
   }
   const rules = ruleset.rules.map((rule, index) => {
-    const normalized = exactObjectKeys(rule, ['type'], `${name} rules[${index}]`);
-    return Object.freeze({ type: required(normalized.type, `${name} rules[${index}].type`) });
+    const ruleName = `${name} rules[${index}]`;
+    const candidate = object(rule, ruleName);
+    const type = required(candidate.type, `${ruleName}.type`);
+    if (type === 'update') {
+      const normalized = exactObjectKeys(candidate, ['type', 'parameters'], ruleName);
+      const parameters = exactObjectKeys(
+        normalized.parameters,
+        ['update_allows_fetch_and_merge'],
+        `${ruleName}.parameters`,
+      );
+      if (parameters.update_allows_fetch_and_merge !== false) {
+        reject(`${ruleName}.parameters.update_allows_fetch_and_merge must be false`);
+      }
+    } else {
+      exactObjectKeys(candidate, ['type'], ruleName);
+    }
+    return Object.freeze({ type });
   });
   rules.sort((left, right) => left.type.localeCompare(right.type));
   if (!Array.isArray(ruleset.bypass_actors) || ruleset.bypass_actors.length > 32) {
@@ -682,7 +697,7 @@ function normalizedWriterSecretLane({ actionsPermissions, workflowPermissions, e
   });
 }
 
-function validateWriterGovernanceSnapshot(snapshot, { trust, writerTrust, classicProtection }) {
+export function validateWriterGovernanceSnapshot(snapshot, { trust, writerTrust, classicProtection }) {
   if (classicProtection?.profile !== 'direct-squash-v1') {
     reject('Writer governance proof requires verified classic main protection');
   }
@@ -707,7 +722,9 @@ function validateWriterGovernanceSnapshot(snapshot, { trust, writerTrust, classi
       object(value.secret_lane, 'Writer secret lane snapshot'),
       { default_branch: trust.default_branch },
     );
-    if (classicProtection.governance_fence_ruleset_id !== fence.ruleset_id) {
+    if (!Number.isSafeInteger(classicProtection.governance_fence_ruleset_id) ||
+        classicProtection.governance_fence_ruleset_id <= 0 ||
+        classicProtection.governance_fence_ruleset_id !== fence.ruleset_id) {
       reject('classic and REST governance fence identities do not match');
     }
     return Object.freeze({ snapshot: value, fence, secret_lane: secretLane });

@@ -173,6 +173,8 @@ managed comment 的“读取后更新”不是 GitHub 提供的原子 compare-an
 
 所有模式都必须绑定精确 head SHA、最新 base、必需 CI 和讨论解决状态。Finalizer 在 Draft 转 Ready 前和转 Ready 后各运行一次 full proof；proof 同时覆盖 Writer App、installation、单仓 scope、Bot 身份和 `administration:read` 治理读取。第二次 proof 后才调用 `mergePullRequest`，固定 `SQUASH + expectedHeadOid`。mutation 失败不遗留持久授权；响应不确定时停止重试并独立回读合并状态，不能确认即 fail closed。对受限上游冲突，模型自报、评论或未绑定审查结论不能替代 trusted verifier 的 artifact/head/tree/base/checkpoint/upstream/policy attestation。`.github/**`、依赖文件、认证、安全、数据库、发布和其他策略标记路径默认需要人工审查。managed 上游同步 PR 是独立的确定性例外：它使用有界 required-check gate 加一次 exact-head REST squash merge 和严格回读，而不保留 native auto-merge。模型的自报置信度不能改变门禁。
 
+上线现场以默认关闭的 `.github/workflows/writer-governance-canary.yml` 独立证明该治理读取能力。它只能从 default branch 手工启动、无输入、进入 `writer` Environment，并要求 Agent、candidate Agent、Writer、upstream sync 与 autonomous merge 五个生产开关均严格为 `false`；installation token 只有 `administration:read`、`contents:read`、`pull-requests:read`。canary 复用 Finalizer 的同一 reader/validator 连续完成两次 classic main protection + governance fence + Writer secret lane 完整读取，漂移即失败，step summary 只输出非敏感 digest、ruleset ID 和闭合摘要。
+
 ## 10. 威胁模型
 
 首批实现必须覆盖：

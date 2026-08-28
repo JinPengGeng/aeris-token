@@ -1,4 +1,4 @@
-name: Writer App read-only attestation
+name: Writer governance full-proof canary
 
 on:
   workflow_dispatch:
@@ -8,13 +8,14 @@ permissions:
   contents: read
 
 jobs:
-  attest:
-    name: Prove Writer App and bounded read-only token
+  prove:
+    name: Double-read Writer governance and classic protection
     if: >-
       github.repository == 'JinPengGeng/aeris-token' &&
       github.actor == 'JinPengGeng' &&
       github.event.repository.default_branch == 'main' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      vars.AERIS_WRITER_GOVERNANCE_CANARY_ENABLED == 'true' &&
       vars.AERIS_AGENTS_ENABLED == 'false' &&
       vars.AERIS_CANDIDATE_AGENTS_ENABLED == 'false' &&
       vars.AERIS_WRITER_ENABLED == 'false' &&
@@ -72,36 +73,29 @@ jobs:
           AERIS_WRITER_TOKEN_APP_SLUG: ${{ steps.writer_token.outputs.app-slug }}
         run: node .github/automation/src/github-app-attestation.mjs prove-token
 
-      - name: Summarize read-only attestation
+      - name: Double-read and validate full governance snapshot
+        id: governance
         env:
-          APP_ID: ${{ steps.writer_app_attestation.outputs.app_id }}
-          APP_SLUG: ${{ steps.writer_app_attestation.outputs.app_slug }}
-          APP_NODE_ID: ${{ steps.writer_app_attestation.outputs.app_node_id }}
-          APP_OWNER: ${{ steps.writer_app_attestation.outputs.app_owner_login }}
-          APP_OWNER_DATABASE_ID: ${{ steps.writer_app_attestation.outputs.app_owner_database_id }}
-          APP_OWNER_TYPE: ${{ steps.writer_app_attestation.outputs.app_owner_type }}
-          APP_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.app_permissions }}
-          INSTALLATION_ID: ${{ steps.writer_app_attestation.outputs.installation_id }}
-          INSTALLATION_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.installation_permissions }}
-          REPOSITORY_SELECTION: ${{ steps.writer_app_attestation.outputs.repository_selection }}
-          REPOSITORY: ${{ steps.writer_token_proof.outputs.repository }}
-          BOT_REST_LOGIN: ${{ steps.writer_token_proof.outputs.rest_login }}
-          BOT_GRAPHQL_LOGIN: ${{ steps.writer_token_proof.outputs.graphql_login }}
-          BOT_DATABASE_ID: ${{ steps.writer_token_proof.outputs.bot_database_id }}
-          BOT_NODE_ID: ${{ steps.writer_token_proof.outputs.bot_node_id }}
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AERIS_WRITER_APP_ID: ${{ steps.writer_app_attestation.outputs.app_id }}
+          AERIS_WRITER_APP_SLUG: ${{ steps.writer_app_attestation.outputs.app_slug }}
+          AERIS_WRITER_APP_OWNER_LOGIN: ${{ steps.writer_app_attestation.outputs.app_owner_login }}
+          AERIS_WRITER_APP_OWNER_DATABASE_ID: ${{ steps.writer_app_attestation.outputs.app_owner_database_id }}
+          AERIS_WRITER_TOKEN: ${{ steps.writer_token.outputs.token }}
+        run: node .github/automation/src/writer-governance-canary.mjs
+
+      - name: Summarize governance proof
+        env:
+          SNAPSHOT_SHA256: ${{ steps.governance.outputs.snapshot_sha256 }}
+          RULESET_ID: ${{ steps.governance.outputs.ruleset_id }}
+          SNAPSHOT_SUMMARY: ${{ steps.governance.outputs.snapshot_summary }}
         shell: bash
         run: |
           {
-            echo "### Writer App read-only attestation"
+            echo "### Writer governance full-proof canary"
             echo
-            printf -- '- App: `%s` (#%s)\n' "${APP_SLUG}" "${APP_ID}"
-            printf -- '- App node ID: `%s`\n' "${APP_NODE_ID}"
-            printf -- '- App owner: `%s` (#%s; `%s`)\n' "${APP_OWNER}" "${APP_OWNER_DATABASE_ID}" "${APP_OWNER_TYPE}"
-            printf -- '- App permissions: `%s`\n' "${APP_PERMISSIONS}"
-            printf -- '- Installation: `%s`\n' "${INSTALLATION_ID}"
-            printf -- '- Installation permissions: `%s`\n' "${INSTALLATION_PERMISSIONS}"
-            printf -- '- Repository selection: `%s`\n' "${REPOSITORY_SELECTION}"
-            printf -- '- Repository scope: `%s`\n' "${REPOSITORY}"
-            printf -- '- Bot REST identity: `%s` (#%s)\n' "${BOT_REST_LOGIN}" "${BOT_DATABASE_ID}"
-            printf -- '- Bot GraphQL identity: `%s` (`%s`)\n' "${BOT_GRAPHQL_LOGIN}" "${BOT_NODE_ID}"
+            printf -- '- Snapshot SHA-256: `%s`\n' "${SNAPSHOT_SHA256}"
+            printf -- '- Governance fence ruleset ID: `%s`\n' "${RULESET_ID}"
+            printf -- '- Snapshot summary: `%s`\n' "${SNAPSHOT_SUMMARY}"
           } >>"${GITHUB_STEP_SUMMARY}"

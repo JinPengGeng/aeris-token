@@ -1020,7 +1020,7 @@ test('Writer governance must remain identical from the first full proof through 
   assert.equal(client.writerGovernanceReads, 2);
 });
 
-test('concrete Writer governance reader normalizes every bounded REST proof into the validator schema', async () => {
+test('concrete Writer governance reader accepts the live update-rule shape and rejects drift', async () => {
   const api = new AutonomyFinalizerGitHubClient({
     token: 'writer-token', repository: REPOSITORY,
     fetchImpl: async () => { throw new Error('unexpected network access'); },
@@ -1040,15 +1040,20 @@ test('concrete Writer governance reader normalizes every bounded REST proof into
     truncated: false,
     items: [{ id: 101, name: 'agent-head-fence-v1', target: 'branch', enforcement: 'active' }],
   });
+  const liveRules = [
+    { type: 'creation' }, {
+      type: 'update',
+      parameters: { update_allows_fetch_and_merge: false },
+    },
+    { type: 'deletion' }, { type: 'non_fast_forward' },
+  ];
+  let rules = structuredClone(liveRules);
   api.getRepositoryRuleset = async () => {
     detailReads += 1;
     return {
       id: 101, name: 'agent-head-fence-v1', target: 'branch', enforcement: 'active',
       conditions: { ref_name: { include: ['refs/heads/agent/**'], exclude: [] } },
-      rules: [
-        { type: 'creation' }, { type: 'update' },
-        { type: 'deletion' }, { type: 'non_fast_forward' },
-      ],
+      rules: structuredClone(rules),
       bypass_actors: [{ actor_id: writerTrust.app_id, actor_type: 'Integration', bypass_mode: 'always' }],
     };
   };
@@ -1068,6 +1073,16 @@ test('concrete Writer governance reader normalizes every bounded REST proof into
 
   assert.deepEqual(await api.getWriterGovernanceSnapshot(), writerGovernanceSnapshot());
   assert.equal(detailReads, 2);
+  for (const mutate of [
+    (value) => { delete value[1].parameters; },
+    (value) => { value[1].parameters.update_allows_fetch_and_merge = true; },
+    (value) => { value[1].parameters.unexpected = false; },
+    (value) => { value[0].parameters = { update_allows_fetch_and_merge: false }; },
+  ]) {
+    rules = structuredClone(liveRules);
+    mutate(rules);
+    await assert.rejects(() => api.getWriterGovernanceSnapshot(), AutonomyFinalizerError);
+  }
 });
 
 test('concrete Writer governance reader requires two identical complete snapshots', async () => {
