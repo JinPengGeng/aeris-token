@@ -92,6 +92,10 @@ function timestamp(value, name) {
   return normalized;
 }
 
+function sameTimestamp(left, leftName, right, rightName) {
+  return Date.parse(timestamp(left, leftName)) === Date.parse(timestamp(right, rightName));
+}
+
 function positiveInteger(value, name) {
   const parsed = typeof value === 'string' && /^[1-9][0-9]*$/.test(value) ? Number(value) : value;
   if (!Number.isSafeInteger(parsed) || parsed <= 0) reject(`${name} must be a positive integer`);
@@ -547,7 +551,12 @@ function normalizedActiveRuleset(value, summary, name, baseline) {
   if (summary.id !== baseline.ruleset_id) {
     reject(`${name} does not match the pinned Writer governance fence`);
   }
-  if (timestamp(ruleset.updated_at, `${name} updated_at`) !== baseline.updated_at) {
+  if (!sameTimestamp(
+    ruleset.updated_at,
+    `${name} updated_at`,
+    baseline.updated_at,
+    'pinned Writer governance fence updated_at',
+  )) {
     reject(`${name} updated_at does not match the pinned Writer governance fence`);
   }
   if (required(ruleset.current_user_can_bypass, `${name} current user bypass`) !== 'always') {
