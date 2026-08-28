@@ -107,7 +107,8 @@ impl StreamingStandardFormatMatrix {
         let client_api_format = client_api_format_for_context(report_context);
 
         self.provider = ProviderStreamParser::for_api_format(provider_api_format.as_str());
-        self.client = ClientStreamEmitter::for_api_format(client_api_format.as_str());
+        self.client =
+            ClientStreamEmitter::for_api_format(client_api_format.as_str(), report_context);
     }
 
     fn emit_frames(
@@ -418,6 +419,7 @@ impl ProviderStreamParser {
             FormatId::ClaudeMessages => Self::Claude(ClaudeProviderState::default()),
             FormatId::GeminiGenerateContent => Self::Gemini(GeminiProviderState::default()),
             FormatId::OpenAiEmbedding
+            | FormatId::OpenAiRealtime
             | FormatId::OpenAiSearch
             | FormatId::OpenAiRerank
             | FormatId::GeminiEmbedding
@@ -425,7 +427,8 @@ impl ProviderStreamParser {
             | FormatId::JinaEmbedding
             | FormatId::JinaRerank
             | FormatId::DoubaoEmbedding
-            | FormatId::AliyunMultimodalEmbedding => return None,
+            | FormatId::AliyunMultimodalEmbedding
+            | FormatId::CodexLive => return None,
         })
     }
 
@@ -528,15 +531,18 @@ fn standardized_usage_from_canonical(usage: CanonicalUsage) -> StandardizedUsage
 }
 
 impl ClientStreamEmitter {
-    fn for_api_format(client_api_format: &str) -> Option<Self> {
+    fn for_api_format(client_api_format: &str, report_context: &Value) -> Option<Self> {
         Some(match FormatId::parse(client_api_format)? {
             FormatId::OpenAiChat => Self::OpenAIChat(OpenAIChatClientEmitter::default()),
             FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => {
-                Self::OpenAIResponses(Box::default())
+                Self::OpenAIResponses(Box::new(OpenAIResponsesClientEmitter::with_report_context(
+                    report_context,
+                )))
             }
             FormatId::ClaudeMessages => Self::Claude(ClaudeClientEmitter::default()),
             FormatId::GeminiGenerateContent => Self::Gemini(GeminiClientEmitter::default()),
             FormatId::OpenAiEmbedding
+            | FormatId::OpenAiRealtime
             | FormatId::OpenAiSearch
             | FormatId::OpenAiRerank
             | FormatId::GeminiEmbedding
@@ -544,7 +550,8 @@ impl ClientStreamEmitter {
             | FormatId::JinaEmbedding
             | FormatId::JinaRerank
             | FormatId::DoubaoEmbedding
-            | FormatId::AliyunMultimodalEmbedding => return None,
+            | FormatId::AliyunMultimodalEmbedding
+            | FormatId::CodexLive => return None,
         })
     }
 
@@ -660,13 +667,15 @@ fn parse_provider_error(
             parse_gemini_error(payload)
         }
         FormatId::OpenAiEmbedding
+        | FormatId::OpenAiRealtime
         | FormatId::OpenAiSearch
         | FormatId::OpenAiRerank
         | FormatId::GeminiEmbedding
         | FormatId::JinaEmbedding
         | FormatId::JinaRerank
         | FormatId::DoubaoEmbedding
-        | FormatId::AliyunMultimodalEmbedding => None,
+        | FormatId::AliyunMultimodalEmbedding
+        | FormatId::CodexLive => None,
     }
 }
 
@@ -746,7 +755,9 @@ fn parse_gemini_error(payload: &Value) -> Option<(String, Option<String>, LocalC
 #[cfg(test)]
 mod tests {
     use super::{StreamingStandardFormatMatrix, StreamingStandardTerminalObserver};
-    use crate::formats::{context::FormatContext, registry::convert_request};
+    use crate::formats::{
+        context::FormatContext, openai::namespace::NamespaceToolAliases, registry::convert_request,
+    };
     use serde_json::{json, Value};
 
     fn report_context(provider_api_format: &str, client_api_format: &str) -> Value {
@@ -949,6 +960,151 @@ mod tests {
             continuation["messages"][2]["tool_call_id"],
             "call_history_stream_test_1"
         );
+    }
+
+    #[test]
+    fn streamed_chat_namespace_tool_call_restores_responses_identity() {
+        let report_context = json!({
+            "provider_api_format": "openai:chat",
+            "client_api_format": "openai:responses",
+            "mapped_model": "qwen",
+            "needs_conversion": true,
+            "original_request_body": {
+                "model": "qwen",
+                "input": [{"role": "user", "content": "write the report"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "vulnerability_report",
+                        "parameters": {"type": "object", "properties": {}}
+                    },
+                    {
+                        "type": "namespace",
+                        "name": "mcp__vulnerability_report",
+                        "description": "reporting tools",
+                        "tools": [{
+                            "type": "function",
+                            "name": "vulnerability_report",
+                            "description": "write the confirmed report",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"report_path": {"type": "string"}},
+                                "required": ["report_path"]
+                            },
+                            "strict": true
+                        }]
+                    }
+                ]
+            }
+        });
+        let aliases = NamespaceToolAliases::from_report_context(&report_context);
+        let chat_name = aliases
+            .chat_name("mcp__vulnerability_report", "vulnerability_report")
+            .expect("namespace child should have a Chat alias")
+            .to_string();
+        assert_ne!(chat_name, "vulnerability_report");
+
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = Vec::new();
+        output.extend(
+            matrix
+                .transform_line(
+                    &report_context,
+                    data_line(json!({
+                        "id": "chatcmpl_namespace_stream_1",
+                        "model": "qwen",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "id": "call_namespace_stream_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": chat_name,
+                                        "arguments": "{\"report_path\":"
+                                    }
+                                }]
+                            },
+                            "finish_reason": Value::Null
+                        }]
+                    })),
+                )
+                .expect("tool start should convert"),
+        );
+        output.extend(
+            matrix
+                .transform_line(
+                    &report_context,
+                    data_line(json!({
+                        "id": "chatcmpl_namespace_stream_1",
+                        "model": "qwen",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "function": {"arguments": "\"reports/sql-001.md\"}"}
+                                }]
+                            },
+                            "finish_reason": Value::Null
+                        }]
+                    })),
+                )
+                .expect("tool arguments should convert"),
+        );
+        output.extend(
+            matrix
+                .transform_line(
+                    &report_context,
+                    data_line(json!({
+                        "id": "chatcmpl_namespace_stream_1",
+                        "model": "qwen",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 4,
+                            "total_tokens": 14
+                        }
+                    })),
+                )
+                .expect("tool finish should convert"),
+        );
+
+        let events = json_data_events(&output);
+        let added = events
+            .iter()
+            .find(|event| event["type"] == "response.output_item.added")
+            .expect("function-call item should start");
+        assert_eq!(added["item"]["name"], "vulnerability_report");
+        assert_eq!(added["item"]["namespace"], "mcp__vulnerability_report");
+        let done = events
+            .iter()
+            .find(|event| event["type"] == "response.output_item.done")
+            .expect("function-call item should complete");
+        assert_eq!(done["item"]["name"], "vulnerability_report");
+        assert_eq!(done["item"]["namespace"], "mcp__vulnerability_report");
+        let completed = events
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .expect("response should complete");
+        let function_call = completed["response"]["output"]
+            .as_array()
+            .expect("response output")
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .expect("completed function call");
+        assert_eq!(function_call["name"], "vulnerability_report");
+        assert_eq!(function_call["namespace"], "mcp__vulnerability_report");
+
+        let persisted = matrix
+            .take_response_history_record()
+            .expect("completed stream should expose response history");
+        assert!(persisted.payload.contains("mcp__vulnerability_report"));
     }
 
     #[test]

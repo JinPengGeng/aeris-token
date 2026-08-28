@@ -1,0 +1,176 @@
+name: Writer identity bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: writer-identity-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    name: Discover and bind fixed Writer App identity
+    if: >-
+      github.repository == 'JinPengGeng/aeris-token' &&
+      github.actor == 'JinPengGeng' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      github.event.repository.default_branch == 'main' &&
+      vars.AERIS_WRITER_IDENTITY_BOOTSTRAP_ENABLED == 'true' &&
+      vars.AERIS_WRITER_GOVERNANCE_CANARY_ENABLED == 'true' &&
+      vars.AERIS_AGENTS_ENABLED == 'false' &&
+      vars.AERIS_CANDIDATE_AGENTS_ENABLED == 'false' &&
+      vars.AERIS_WRITER_ENABLED == 'false' &&
+      vars.AERIS_UPSTREAM_SYNC_ENABLED == 'false' &&
+      vars.AERIS_AUTONOMOUS_MERGE_ENABLED == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: writer
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Double-read, bind, and disable
+        id: bootstrap
+        env:
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AERIS_WRITER_IDENTITY_BOOTSTRAP_ENABLED: ${{ vars.AERIS_WRITER_IDENTITY_BOOTSTRAP_ENABLED }}
+          AERIS_WRITER_GOVERNANCE_CANARY_ENABLED: ${{ vars.AERIS_WRITER_GOVERNANCE_CANARY_ENABLED }}
+          AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
+          AERIS_CANDIDATE_AGENTS_ENABLED: ${{ vars.AERIS_CANDIDATE_AGENTS_ENABLED }}
+          AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
+          AERIS_UPSTREAM_SYNC_ENABLED: ${{ vars.AERIS_UPSTREAM_SYNC_ENABLED }}
+          AERIS_AUTONOMOUS_MERGE_ENABLED: ${{ vars.AERIS_AUTONOMOUS_MERGE_ENABLED }}
+          AERIS_WRITER_APP_PRIVATE_KEY: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+          AERIS_IDENTITY_BOOTSTRAP_TOKEN: ${{ secrets.AERIS_IDENTITY_BOOTSTRAP_TOKEN }}
+        run: node .github/automation/src/writer-identity-bootstrap.mjs
+
+      - name: Summarize non-sensitive identity proof
+        env:
+          APP_NODE_ID: ${{ steps.bootstrap.outputs.app_node_id }}
+          APP_OWNER_DATABASE_ID: ${{ steps.bootstrap.outputs.app_owner_database_id }}
+          SNAPSHOT_SHA256: ${{ steps.bootstrap.outputs.snapshot_sha256 }}
+          SNAPSHOT_SUMMARY: ${{ steps.bootstrap.outputs.snapshot_summary }}
+        shell: bash
+        run: |
+          {
+            echo "### Writer identity bootstrap"
+            echo
+            printf -- '- App node ID: `%s`\n' "${APP_NODE_ID}"
+            printf -- '- App owner database ID: `%s`\n' "${APP_OWNER_DATABASE_ID}"
+            printf -- '- Snapshot SHA-256: `%s`\n' "${SNAPSHOT_SHA256}"
+            printf -- '- Snapshot summary: `%s`\n' "${SNAPSHOT_SUMMARY}"
+            echo '- Bootstrap flag was set to `false` before inline read-only and governance proofs begin.'
+            echo '- Retain the temporary control credential until the unified post-validation cleanup.'
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Attest bound Writer App and installation
+        id: writer_app_attestation
+        env:
+          AERIS_WRITER_APP_OWNER_DATABASE_ID: ${{ steps.bootstrap.outputs.app_owner_database_id }}
+          AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_APP_NODE_ID: ${{ steps.bootstrap.outputs.app_node_id }}
+          AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
+          AERIS_WRITER_APP_PRIVATE_KEY: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+        run: node .github/automation/src/github-app-attestation.mjs
+
+      - name: Mint explicitly read-only Writer token
+        id: writer_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AERIS_WRITER_APP_ID }}
+          private-key: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+
+      - name: Prove exact repository and Bot identity with bounded token
+        id: writer_token_proof
+        env:
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
+          AERIS_WRITER_TOKEN: ${{ steps.writer_token.outputs.token }}
+          AERIS_WRITER_TOKEN_INSTALLATION_ID: ${{ steps.writer_token.outputs.installation-id }}
+          AERIS_WRITER_TOKEN_APP_SLUG: ${{ steps.writer_token.outputs.app-slug }}
+        run: node .github/automation/src/github-app-attestation.mjs prove-token
+
+      - name: Summarize read-only attestation
+        env:
+          APP_ID: ${{ steps.writer_app_attestation.outputs.app_id }}
+          APP_SLUG: ${{ steps.writer_app_attestation.outputs.app_slug }}
+          APP_NODE_ID: ${{ steps.writer_app_attestation.outputs.app_node_id }}
+          APP_OWNER: ${{ steps.writer_app_attestation.outputs.app_owner_login }}
+          APP_OWNER_DATABASE_ID: ${{ steps.writer_app_attestation.outputs.app_owner_database_id }}
+          APP_OWNER_TYPE: ${{ steps.writer_app_attestation.outputs.app_owner_type }}
+          APP_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.app_permissions }}
+          INSTALLATION_ID: ${{ steps.writer_app_attestation.outputs.installation_id }}
+          INSTALLATION_PERMISSIONS: ${{ steps.writer_app_attestation.outputs.installation_permissions }}
+          REPOSITORY_SELECTION: ${{ steps.writer_app_attestation.outputs.repository_selection }}
+          REPOSITORY: ${{ steps.writer_token_proof.outputs.repository }}
+          BOT_REST_LOGIN: ${{ steps.writer_token_proof.outputs.rest_login }}
+          BOT_GRAPHQL_LOGIN: ${{ steps.writer_token_proof.outputs.graphql_login }}
+          BOT_DATABASE_ID: ${{ steps.writer_token_proof.outputs.bot_database_id }}
+          BOT_NODE_ID: ${{ steps.writer_token_proof.outputs.bot_node_id }}
+        shell: bash
+        run: |
+          {
+            echo "### Writer App read-only attestation"
+            echo
+            printf -- '- App: `%s` (#%s)\n' "${APP_SLUG}" "${APP_ID}"
+            printf -- '- App node ID: `%s`\n' "${APP_NODE_ID}"
+            printf -- '- App owner: `%s` (#%s; `%s`)\n' "${APP_OWNER}" "${APP_OWNER_DATABASE_ID}" "${APP_OWNER_TYPE}"
+            printf -- '- App permissions: `%s`\n' "${APP_PERMISSIONS}"
+            printf -- '- Installation: `%s`\n' "${INSTALLATION_ID}"
+            printf -- '- Installation permissions: `%s`\n' "${INSTALLATION_PERMISSIONS}"
+            printf -- '- Repository selection: `%s`\n' "${REPOSITORY_SELECTION}"
+            printf -- '- Repository scope: `%s`\n' "${REPOSITORY}"
+            printf -- '- Bot REST identity: `%s` (#%s)\n' "${BOT_REST_LOGIN}" "${BOT_DATABASE_ID}"
+            printf -- '- Bot GraphQL identity: `%s` (`%s`)\n' "${BOT_GRAPHQL_LOGIN}" "${BOT_NODE_ID}"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Double-read and validate full governance snapshot
+        id: governance
+        env:
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AERIS_WRITER_APP_ID: ${{ steps.writer_app_attestation.outputs.app_id }}
+          AERIS_WRITER_APP_SLUG: ${{ steps.writer_app_attestation.outputs.app_slug }}
+          AERIS_WRITER_APP_OWNER_LOGIN: ${{ steps.writer_app_attestation.outputs.app_owner_login }}
+          AERIS_WRITER_APP_OWNER_DATABASE_ID: ${{ steps.writer_app_attestation.outputs.app_owner_database_id }}
+          AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID: ${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID }}
+          AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT: ${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT }}
+          AERIS_WRITER_TOKEN: ${{ steps.writer_token.outputs.token }}
+        run: node .github/automation/src/writer-governance-canary.mjs
+
+      - name: Summarize governance proof
+        env:
+          SNAPSHOT_SHA256: ${{ steps.governance.outputs.snapshot_sha256 }}
+          RULESET_ID: ${{ steps.governance.outputs.ruleset_id }}
+          SNAPSHOT_SUMMARY: ${{ steps.governance.outputs.snapshot_summary }}
+        shell: bash
+        run: |
+          {
+            echo "### Writer governance full-proof canary"
+            echo
+            printf -- '- Snapshot SHA-256: `%s`\n' "${SNAPSHOT_SHA256}"
+            printf -- '- Governance fence ruleset ID: `%s`\n' "${RULESET_ID}"
+            printf -- '- Snapshot summary: `%s`\n' "${SNAPSHOT_SUMMARY}"
+          } >>"${GITHUB_STEP_SUMMARY}"
