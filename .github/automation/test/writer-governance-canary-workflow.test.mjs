@@ -15,17 +15,9 @@ function workflow() {
   return yaml.load(fs.readFileSync(workflowPath, 'utf8'));
 }
 
-test('governance canary is manually callable with internal bound-identity inputs, default-disabled, and default-branch-only', () => {
+test('governance canary is manually callable, default-disabled, and default-branch-only', () => {
   const document = workflow();
-  assert.deepEqual(document.on, {
-    workflow_dispatch: null,
-    workflow_call: {
-      inputs: {
-        bound_writer_app_node_id: { required: false, type: 'string' },
-        bound_writer_app_owner_database_id: { required: false, type: 'string' },
-      },
-    },
-  });
+  assert.deepEqual(document.on, { workflow_dispatch: null });
   const job = document.jobs.prove;
   assert.match(job.if, /github\.repository == 'JinPengGeng\/aeris-token'/);
   assert.match(job.if, /github\.actor == 'JinPengGeng'/);
@@ -75,11 +67,11 @@ test('governance canary binds attested owner and emits only closed non-secret pr
   const governance = steps.find((step) => step.id === 'governance');
   assert.equal(
     app.env.AERIS_WRITER_APP_NODE_ID,
-    '${{ inputs.bound_writer_app_node_id || vars.AERIS_WRITER_APP_NODE_ID }}',
+    '${{ vars.AERIS_WRITER_APP_NODE_ID }}',
   );
   assert.equal(
     app.env.AERIS_WRITER_APP_OWNER_DATABASE_ID,
-    '${{ inputs.bound_writer_app_owner_database_id || vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}',
+    '${{ vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}',
   );
   assert.equal(governance.env.AERIS_WRITER_APP_ID, '${{ steps.writer_app_attestation.outputs.app_id }}');
   assert.equal(governance.env.AERIS_WRITER_APP_SLUG, '${{ steps.writer_app_attestation.outputs.app_slug }}');

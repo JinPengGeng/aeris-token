@@ -40,21 +40,25 @@ test('identity bootstrap is no-input manual, fixed-owner, default-branch-only, a
   }
 });
 
-test('identity bootstrap keeps GITHUB_TOKEN read-only and confines both secrets to one audited step', () => {
+test('identity bootstrap keeps GITHUB_TOKEN read-only and confines the temporary control token to its bootstrap step', () => {
   const document = workflow();
   const job = document.jobs.bootstrap;
   assert.deepEqual(document.permissions, { contents: 'read' });
   assert.deepEqual(job.permissions, { contents: 'read' });
   assert.deepEqual(Object.entries(job.permissions).filter(([, value]) => value === 'write'), []);
 
-  const secretSteps = job.steps.filter((step) => /secrets\./.test(JSON.stringify(step)));
-  assert.equal(secretSteps.length, 1);
-  const bootstrap = secretSteps[0];
+  const bootstrap = job.steps.find((step) => step.id === 'bootstrap');
   assert.equal(bootstrap.id, 'bootstrap');
   assert.equal(bootstrap.env.AERIS_WRITER_APP_PRIVATE_KEY, '${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}');
   assert.equal(bootstrap.env.AERIS_IDENTITY_BOOTSTRAP_TOKEN, '${{ secrets.AERIS_IDENTITY_BOOTSTRAP_TOKEN }}');
   assert.equal(bootstrap.run, 'node .github/automation/src/writer-identity-bootstrap.mjs');
-  assert.doesNotMatch(JSON.stringify(job), /permissions:\s*write|actions\/create-github-app-token/);
+  const controlTokenSteps = job.steps.filter(
+    (step) => step.env?.AERIS_IDENTITY_BOOTSTRAP_TOKEN === '${{ secrets.AERIS_IDENTITY_BOOTSTRAP_TOKEN }}',
+  );
+  assert.deepEqual(controlTokenSteps.map((step) => step.id), ['bootstrap']);
+  const privateKeySteps = job.steps.filter((step) => /AERIS_WRITER_APP_PRIVATE_KEY|private-key/.test(JSON.stringify(step)));
+  assert.deepEqual(privateKeySteps.map((step) => step.id), ['bootstrap', 'writer_app_attestation', 'writer_token']);
+  assert.doesNotMatch(JSON.stringify(job), /permissions:\s*write/);
 });
 
 test('identity bootstrap passes every closed-state guard to the CLI and emits only non-sensitive outputs', () => {
@@ -85,29 +89,38 @@ test('identity bootstrap pins every external action to an immutable commit', () 
   }
 });
 
-test('identity bootstrap passes freshly bound identity outputs to local reusable proofs without forwarding its control token', () => {
+test('identity bootstrap runs both proofs inline with its newly bound identity and one bounded read-only token', () => {
   const { jobs } = workflow();
-  assert.deepEqual(jobs.bootstrap.outputs, {
-    app_node_id: '${{ steps.bootstrap.outputs.app_node_id }}',
-    app_owner_database_id: '${{ steps.bootstrap.outputs.app_owner_database_id }}',
-  });
-  assert.equal(jobs.bootstrap.steps.some((step) => step.id === 'caller_sha'), false);
-  assert.equal(jobs.readonly_attestation.uses, './.github/workflows/writer-readonly-attestation.yml');
-  assert.deepEqual(jobs.readonly_attestation.needs, ['bootstrap']);
-  assert.equal(jobs.readonly_attestation.if, undefined);
-  assert.deepEqual(jobs.readonly_attestation.with, {
-    bound_writer_app_node_id: '${{ needs.bootstrap.outputs.app_node_id }}',
-    bound_writer_app_owner_database_id: '${{ needs.bootstrap.outputs.app_owner_database_id }}',
-  });
-  assert.equal(jobs.governance_canary.uses, './.github/workflows/writer-governance-canary.yml');
-  assert.deepEqual(jobs.governance_canary.needs, ['bootstrap', 'readonly_attestation']);
-  assert.equal(jobs.governance_canary.if, undefined);
-  assert.deepEqual(jobs.governance_canary.with, {
-    bound_writer_app_node_id: '${{ needs.bootstrap.outputs.app_node_id }}',
-    bound_writer_app_owner_database_id: '${{ needs.bootstrap.outputs.app_owner_database_id }}',
-  });
-  for (const reusable of [jobs.readonly_attestation, jobs.governance_canary]) {
-    assert.doesNotMatch(JSON.stringify(reusable), /secrets|AERIS_IDENTITY_BOOTSTRAP_TOKEN|@main|workflow_dispatch/);
-  }
+  assert.deepEqual(Object.keys(jobs), ['bootstrap']);
+  const steps = jobs.bootstrap.steps;
+  const app = steps.find((step) => step.id === 'writer_app_attestation');
+  const token = steps.find((step) => step.id === 'writer_token');
+  const tokenProof = steps.find((step) => step.id === 'writer_token_proof');
+  const governance = steps.find((step) => step.id === 'governance');
+  assert.equal(app.env.AERIS_WRITER_APP_NODE_ID, '${{ steps.bootstrap.outputs.app_node_id }}');
+  assert.equal(
+    app.env.AERIS_WRITER_APP_OWNER_DATABASE_ID,
+    '${{ steps.bootstrap.outputs.app_owner_database_id }}',
+  );
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(token.with).filter(([key]) => key.startsWith('permission-'))),
+    {
+      'permission-administration': 'read',
+      'permission-contents': 'read',
+      'permission-pull-requests': 'read',
+    },
+  );
+  assert.equal(tokenProof.env.AERIS_WRITER_TOKEN, '${{ steps.writer_token.outputs.token }}');
+  assert.equal(governance.env.AERIS_WRITER_TOKEN, '${{ steps.writer_token.outputs.token }}');
+  assert.equal(governance.env.AERIS_WRITER_APP_ID, '${{ steps.writer_app_attestation.outputs.app_id }}');
+  assert.equal(
+    governance.env.AERIS_WRITER_APP_OWNER_DATABASE_ID,
+    '${{ steps.writer_app_attestation.outputs.app_owner_database_id }}',
+  );
+  assert.ok(steps.findIndex((step) => step.id === 'bootstrap') < steps.findIndex((step) => step.id === 'writer_app_attestation'));
+  assert.ok(steps.findIndex((step) => step.id === 'writer_token_proof') < steps.findIndex((step) => step.id === 'governance'));
+  const proofSteps = steps.filter((step) => step.id !== 'bootstrap');
+  assert.equal(proofSteps.some((step) => step.env?.AERIS_IDENTITY_BOOTSTRAP_TOKEN !== undefined), false);
+  assert.doesNotMatch(JSON.stringify(jobs), /\.\/\.github\/workflows\/writer-(readonly-attestation|governance-canary)\.yml/);
   assert.doesNotMatch(JSON.stringify(jobs), /actions\/workflows\/[^\s]*\/dispatches|gh api .*dispatch/);
 });

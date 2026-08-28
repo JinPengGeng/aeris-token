@@ -44,7 +44,7 @@ After proof, the CLI performs only this ordered control sequence. Each numbered 
 3. Set `AERIS_WRITER_IDENTITY_BOOTSTRAP_ENABLED=false`.
 4. Complete the final guarded readback of both identity variables and the disabled bootstrap state.
 
-After that job succeeds, the same bootstrap workflow run passes its freshly bound non-secret identity outputs to the local reusable `writer-readonly-attestation.yml` and then `writer-governance-canary.yml`. This avoids the workflow-run variable snapshot taken before bootstrap wrote the identity variables. GitHub resolves local reusable workflows from the caller's immutable workflow revision, so bootstrap never uses the REST workflow-dispatch API or a moving branch ref. The called jobs do not receive the bootstrap control token. The normal read-only attestation repeats the exact one-repository Writer-token proof; the governance canary independently proves the full governance fence.
+After that job succeeds, the same `bootstrap` job attests the freshly bound non-secret identity, mints one explicitly read-only Writer token, proves its exact repository and Bot identity, and then validates the full governance fence. Keeping these proof steps in the existing `writer` Environment job avoids both the workflow-run variable snapshot taken before bootstrap wrote the identity variables and Environment-secret propagation to a reusable-workflow caller. The temporary bootstrap control token is not exposed to any proof step. The standalone read-only attestation and governance-canary workflows remain available for separate manual diagnostics.
 
 The summary contains only the two discovered IDs, normalized non-sensitive identity/control facts, and SHA-256 digests. It never contains either token, the JWT, authorization headers, the private key, or raw responses.
 
@@ -55,9 +55,9 @@ The summary contains only the two discovered IDs, normalized non-sensitive ident
 3. Confirm every production switch listed above is exactly `false`.
 4. Set `AERIS_WRITER_GOVERNANCE_CANARY_ENABLED=true`, then set `AERIS_WRITER_IDENTITY_BOOTSTRAP_ENABLED=true`.
 5. Manually dispatch **Writer identity bootstrap** from `main` as `JinPengGeng`.
-6. Confirm the bootstrap run succeeded, the summary names repository ID `1316750512` and the trusted `main` SHA, the bootstrap flag now reads `false`, and its two local reusable proof jobs succeeded rather than skipped. If the control-token expiration header is reported unavailable, use the operator record from step 1 as the expiry evidence; do not infer an API-verified expiry.
+6. Confirm the bootstrap run succeeded, its summaries name repository ID `1316750512` and the trusted `main` SHA, the bootstrap flag now reads `false`, and the inline read-only and governance proofs succeeded. If the control-token expiration header is reported unavailable, use the operator record from step 1 as the expiry evidence; do not infer an API-verified expiry.
 7. Immediately delete the `AERIS_IDENTITY_BOOTSTRAP_TOKEN` Environment secret and revoke/delete the short-lived token at its issuer.
 8. Set `AERIS_WRITER_GOVERNANCE_CANARY_ENABLED=false` and verify it by API/UI readback.
-9. Preserve the bootstrap run URL, the two called-job links, and all non-sensitive step summaries as rollout evidence.
+9. Preserve the bootstrap run URL and all non-sensitive step summaries as rollout evidence.
 
 If the run fails after one identity variable was written or after disabling its flag, no later action is attempted. Do not broaden App permissions or leave the temporary credential installed. Delete/revoke the temporary token, inspect the non-sensitive failure reason, restore all seven switches to the required closed/bootstrap state, verify `main` intentionally points to the workflow commit, and start a new explicitly enabled bootstrap attempt. A partial identity-variable write is inert while all production switches remain `false`, but it must be reviewed and overwritten by the next successful guarded run.

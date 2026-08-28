@@ -25,16 +25,9 @@ function workflow() {
   return yaml.load(fs.readFileSync(workflowPath, 'utf8'));
 }
 
-test('Writer attestation is a default-branch-only manual workflow with internal bound-identity inputs', () => {
+test('Writer attestation is a default-branch-only manual workflow', () => {
   const document = workflow();
-  assert.deepEqual(document.on.workflow_dispatch, null);
-  assert.deepEqual(document.on.workflow_call, {
-    inputs: {
-      bound_writer_app_node_id: { required: false, type: 'string' },
-      bound_writer_app_owner_database_id: { required: false, type: 'string' },
-    },
-  });
-  assert.deepEqual(Object.keys(document.on), ['workflow_dispatch', 'workflow_call']);
+  assert.deepEqual(document.on, { workflow_dispatch: null });
   assert.match(document.jobs.attest.if, /github\.repository == 'JinPengGeng\/aeris-token'/);
   assert.match(document.jobs.attest.if, /github\.actor == 'JinPengGeng'/);
   assert.match(document.jobs.attest.if, /github\.event\.repository\.default_branch == 'main'/);
@@ -72,11 +65,11 @@ test('Writer attestation mints one explicitly read-only repository token and has
   const appAttestation = job.steps.find((step) => step.id === 'writer_app_attestation');
   assert.equal(
     appAttestation.env.AERIS_WRITER_APP_OWNER_DATABASE_ID,
-    '${{ inputs.bound_writer_app_owner_database_id || vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}',
+    '${{ vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}',
   );
   assert.equal(
     appAttestation.env.AERIS_WRITER_APP_NODE_ID,
-    '${{ inputs.bound_writer_app_node_id || vars.AERIS_WRITER_APP_NODE_ID }}',
+    '${{ vars.AERIS_WRITER_APP_NODE_ID }}',
   );
   assert.equal(summary.env.APP_NODE_ID, '${{ steps.writer_app_attestation.outputs.app_node_id }}');
   assert.equal(summary.env.APP_OWNER_DATABASE_ID, '${{ steps.writer_app_attestation.outputs.app_owner_database_id }}');
