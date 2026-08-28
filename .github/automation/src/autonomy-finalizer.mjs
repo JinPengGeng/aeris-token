@@ -509,6 +509,13 @@ function normalizedRulesetSummary(value, name) {
   });
 }
 
+function redactedFieldShape(value, present) {
+  if (!present) return 'missing';
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return `array:length=${value.length}`;
+  return `non-array:${typeof value}`;
+}
+
 function normalizedActiveRuleset(value, summary, name) {
   const ruleset = object(value, name);
   const identity = normalizedRulesetSummary(ruleset, name);
@@ -550,7 +557,12 @@ function normalizedActiveRuleset(value, summary, name) {
   });
   rules.sort((left, right) => left.type.localeCompare(right.type));
   if (!Array.isArray(ruleset.bypass_actors) || ruleset.bypass_actors.length > 32) {
-    reject(`${name} bypass actors are invalid`);
+    reject(
+      `${name} bypass actors are invalid (shape=${redactedFieldShape(
+        ruleset.bypass_actors,
+        Object.hasOwn(ruleset, 'bypass_actors'),
+      )})`,
+    );
   }
   const bypassActors = ruleset.bypass_actors.map((actor, index) => {
     const normalized = exactObjectKeys(
