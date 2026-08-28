@@ -30,6 +30,7 @@ const GITHUB_ACTIONS_APP_SLUG = 'github-actions';
 const MANAGED_MARKER = '<!-- aeris-autonomy-managed -->';
 const SHA = /^[0-9a-f]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const RFC3339_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const REQUIRED_CHECKS = Object.freeze(new Map([
   ['Rust CI / check', Object.freeze({ workflow_name: 'Rust CI', workflow_path: '.github/workflows/rust-ci.yml' })],
   ['Frontend CI / check', Object.freeze({ workflow_name: 'Frontend CI', workflow_path: '.github/workflows/frontend-ci.yml' })],
@@ -83,6 +84,12 @@ function required(value, name, pattern = null) {
   if (typeof value !== 'string' || value.length === 0 || /[\u0000-\u001f\u007f]/.test(value)) reject(`${name} is invalid`);
   if (pattern && !pattern.test(value)) reject(`${name} format is invalid`);
   return value;
+}
+
+function timestamp(value, name) {
+  const normalized = required(value, name, RFC3339_TIMESTAMP);
+  if (!Number.isFinite(Date.parse(normalized))) reject(`${name} is invalid`);
+  return normalized;
 }
 
 function positiveInteger(value, name) {
@@ -516,11 +523,35 @@ function redactedFieldShape(value, present) {
   return `non-array:${typeof value}`;
 }
 
-function normalizedActiveRuleset(value, summary, name) {
+function writerGovernanceBaseline(value) {
+  const trust = object(value, 'Writer governance trust');
+  return Object.freeze({
+    app_id: positiveInteger(trust.proof_app_id, 'Writer governance proof App id'),
+    ruleset_id: positiveInteger(
+      trust.governance_fence_ruleset_id,
+      'Writer governance fence ruleset id',
+    ),
+    updated_at: timestamp(
+      trust.governance_fence_updated_at,
+      'Writer governance fence updated_at',
+    ),
+  });
+}
+
+function normalizedActiveRuleset(value, summary, name, baseline) {
   const ruleset = object(value, name);
   const identity = normalizedRulesetSummary(ruleset, name);
   if (JSON.stringify(identity) !== JSON.stringify(summary)) {
     reject(`${name} identity drifted from the ruleset inventory`);
+  }
+  if (summary.id !== baseline.ruleset_id) {
+    reject(`${name} does not match the pinned Writer governance fence`);
+  }
+  if (timestamp(ruleset.updated_at, `${name} updated_at`) !== baseline.updated_at) {
+    reject(`${name} updated_at does not match the pinned Writer governance fence`);
+  }
+  if (required(ruleset.current_user_can_bypass, `${name} current user bypass`) !== 'always') {
+    reject(`${name} current user cannot always bypass the pinned Writer governance fence`);
   }
   const conditions = exactObjectKeys(ruleset.conditions, ['ref_name'], `${name} conditions`);
   const refName = exactObjectKeys(
@@ -556,26 +587,36 @@ function normalizedActiveRuleset(value, summary, name) {
     return Object.freeze({ type });
   });
   rules.sort((left, right) => left.type.localeCompare(right.type));
-  if (!Array.isArray(ruleset.bypass_actors) || ruleset.bypass_actors.length > 32) {
+  const bypassPresent = Object.hasOwn(ruleset, 'bypass_actors');
+  let bypassActors;
+  if (!bypassPresent) {
+    // GitHub redacts this field from App tokens without ruleset-write authority.
+    bypassActors = [Object.freeze({
+      actor_id: baseline.app_id,
+      actor_type: 'Integration',
+      bypass_mode: 'always',
+    })];
+  } else if (!Array.isArray(ruleset.bypass_actors) || ruleset.bypass_actors.length > 32) {
     reject(
       `${name} bypass actors are invalid (shape=${redactedFieldShape(
         ruleset.bypass_actors,
-        Object.hasOwn(ruleset, 'bypass_actors'),
+        bypassPresent,
       )})`,
     );
-  }
-  const bypassActors = ruleset.bypass_actors.map((actor, index) => {
-    const normalized = exactObjectKeys(
-      actor,
-      ['actor_id', 'actor_type', 'bypass_mode'],
-      `${name} bypass_actors[${index}]`,
-    );
-    return Object.freeze({
-      actor_id: positiveInteger(normalized.actor_id, `${name} bypass actor id`),
-      actor_type: required(normalized.actor_type, `${name} bypass actor type`),
-      bypass_mode: required(normalized.bypass_mode, `${name} bypass mode`),
+  } else {
+    bypassActors = ruleset.bypass_actors.map((actor, index) => {
+      const normalized = exactObjectKeys(
+        actor,
+        ['actor_id', 'actor_type', 'bypass_mode'],
+        `${name} bypass_actors[${index}]`,
+      );
+      return Object.freeze({
+        actor_id: positiveInteger(normalized.actor_id, `${name} bypass actor id`),
+        actor_type: required(normalized.actor_type, `${name} bypass actor type`),
+        bypass_mode: required(normalized.bypass_mode, `${name} bypass mode`),
+      });
     });
-  });
+  }
   bypassActors.sort((left, right) => left.actor_id - right.actor_id ||
     left.actor_type.localeCompare(right.actor_type) || left.bypass_mode.localeCompare(right.bypass_mode));
   const include = [...refName.include].sort();
@@ -629,14 +670,14 @@ function normalizedDirectCollaborators(value) {
   });
 }
 
-function normalizedRulesets(value, activeDetails) {
+function normalizedRulesets(value, activeDetails, baseline) {
   const connection = object(value, 'repository ruleset inventory');
   if (!Array.isArray(connection.items)) reject('repository ruleset items are invalid');
   const summaries = connection.items.map((entry, index) =>
     normalizedRulesetSummary(entry, `repository rulesets[${index}]`));
   const detailById = new Map(activeDetails.map(({ summary, detail }, index) => [
     summary.id,
-    normalizedActiveRuleset(detail, summary, `active repository rulesets[${index}]`),
+    normalizedActiveRuleset(detail, summary, `active repository rulesets[${index}]`, baseline),
   ]));
   const items = summaries.map((summary) => summary.enforcement === 'active'
     ? detailById.get(summary.id)
@@ -714,6 +755,7 @@ export function validateWriterGovernanceSnapshot(snapshot, { trust, writerTrust,
     reject('Writer governance proof requires verified classic main protection');
   }
   const value = object(snapshot, 'Writer governance snapshot');
+  writerGovernanceBaseline(writerTrust);
   const expected = Object.freeze({
     repository: trust.repository,
     repository_id: trust.repository_id,
@@ -751,7 +793,10 @@ async function proveWriterGovernance(client, context) {
     reject('Writer client cannot read the live governance fence');
   }
   try {
-    return validateWriterGovernanceSnapshot(await client.getWriterGovernanceSnapshot(), context);
+    return validateWriterGovernanceSnapshot(
+      await client.getWriterGovernanceSnapshot(context.writerTrust),
+      context,
+    );
   } catch (error) {
     if (error instanceof AutonomyFinalizerError) throw error;
     reject(`Writer governance snapshot failed: ${error instanceof Error ? error.message : 'read failed'}`);
@@ -1300,7 +1345,8 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
     });
   }
 
-  async readWriterGovernanceSnapshotOnce() {
+  async readWriterGovernanceSnapshotOnce(writerTrust) {
+    const baseline = writerGovernanceBaseline(writerTrust);
     const [
       repository,
       directCollaborators,
@@ -1344,7 +1390,7 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
           full_name: required(repo.full_name, 'Writer governance repository full_name', REPOSITORY),
         }),
         direct_collaborators: normalizedDirectCollaborators(directCollaborators),
-        rulesets: normalizedRulesets(rulesets, activeDetails),
+        rulesets: normalizedRulesets(rulesets, activeDetails, baseline),
       }),
       secret_lane: normalizedWriterSecretLane({
         actionsPermissions,
@@ -1355,9 +1401,9 @@ export class AutonomyFinalizerGitHubClient extends AutonomyPolicyGitHubClient {
     });
   }
 
-  async getWriterGovernanceSnapshot() {
-    const initial = await this.readWriterGovernanceSnapshotOnce();
-    const confirmed = await this.readWriterGovernanceSnapshotOnce();
+  async getWriterGovernanceSnapshot(writerTrust) {
+    const initial = await this.readWriterGovernanceSnapshotOnce(writerTrust);
+    const confirmed = await this.readWriterGovernanceSnapshotOnce(writerTrust);
     if (JSON.stringify(initial) !== JSON.stringify(confirmed)) {
       reject('Writer governance drifted between complete reads');
     }
@@ -1890,6 +1936,14 @@ export async function runAutonomyFinalizer(environment = process.env, dependenci
         proof_repository_selection: required(environment.AERIS_WRITER_PROOF_REPOSITORY_SELECTION, 'AERIS_WRITER_PROOF_REPOSITORY_SELECTION'),
         token_installation_id: positiveInteger(environment.AERIS_WRITER_TOKEN_INSTALLATION_ID, 'AERIS_WRITER_TOKEN_INSTALLATION_ID'),
         token_app_slug: required(environment.AERIS_WRITER_TOKEN_APP_SLUG, 'AERIS_WRITER_TOKEN_APP_SLUG'),
+        governance_fence_ruleset_id: positiveInteger(
+          environment.AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID,
+          'AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID',
+        ),
+        governance_fence_updated_at: timestamp(
+          environment.AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT,
+          'AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT',
+        ),
       })
     : writerAttestationTrust;
   const writerClient = mutate

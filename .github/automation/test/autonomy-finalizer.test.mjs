@@ -65,6 +65,8 @@ const writerTrust = Object.freeze({
   token_installation_id: 155342531,
   token_app_slug: 'aeris-writer',
   app_slug: 'aeris-writer',
+  governance_fence_ruleset_id: 101,
+  governance_fence_updated_at: '2026-08-27T18:48:17.800+08:00',
 });
 const configValue = {
   repository: REPOSITORY,
@@ -160,6 +162,8 @@ function fullEnvironment(overrides = {}) {
     AERIS_WRITER_PROOF_REPOSITORY_SELECTION: writerTrust.proof_repository_selection,
     AERIS_WRITER_TOKEN_INSTALLATION_ID: String(writerTrust.token_installation_id),
     AERIS_WRITER_TOKEN_APP_SLUG: writerTrust.app_slug,
+    AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID: String(writerTrust.governance_fence_ruleset_id),
+    AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT: writerTrust.governance_fence_updated_at,
     AERIS_FINALIZER_PROOF_LEVEL: 'full',
     AERIS_FINALIZER_MUTATE: 'true',
     ...overrides,
@@ -1020,7 +1024,7 @@ test('Writer governance must remain identical from the first full proof through 
   assert.equal(client.writerGovernanceReads, 2);
 });
 
-test('concrete Writer governance reader validates live update rules and redacts invalid bypass shapes', async () => {
+test('concrete Writer governance reader uses a pinned owner baseline when bypass actors are redacted', async () => {
   const api = new AutonomyFinalizerGitHubClient({
     token: 'writer-token', repository: REPOSITORY,
     fetchImpl: async () => { throw new Error('unexpected network access'); },
@@ -1053,12 +1057,16 @@ test('concrete Writer governance reader validates live update rules and redacts 
     actor_type: 'Integration',
     bypass_mode: 'always',
   }];
+  let updatedAt = writerTrust.governance_fence_updated_at;
+  let currentUserCanBypass = 'always';
   api.getRepositoryRuleset = async () => {
     detailReads += 1;
     const detail = {
       id: 101, name: 'agent-head-fence-v1', target: 'branch', enforcement: 'active',
       conditions: { ref_name: { include: ['refs/heads/agent/**'], exclude: [] } },
       rules: structuredClone(rules),
+      updated_at: updatedAt,
+      current_user_can_bypass: currentUserCanBypass,
     };
     if (bypassActors !== undefined) detail.bypass_actors = structuredClone(bypassActors);
     return detail;
@@ -1077,7 +1085,7 @@ test('concrete Writer governance reader validates live update rules and redacts 
     truncated: false, items: [{ id: 1, name: 'main', type: 'branch' }],
   });
 
-  assert.deepEqual(await api.getWriterGovernanceSnapshot(), writerGovernanceSnapshot());
+  assert.deepEqual(await api.getWriterGovernanceSnapshot(writerTrust), writerGovernanceSnapshot());
   assert.equal(detailReads, 2);
   for (const mutate of [
     (value) => { delete value[1].parameters; },
@@ -1086,19 +1094,32 @@ test('concrete Writer governance reader validates live update rules and redacts 
     (value) => { value[0].parameters = { update_allows_fetch_and_merge: false }; },
   ]) {
     rules = structuredClone(liveRules);
+    bypassActors = [{ actor_id: writerTrust.app_id, actor_type: 'Integration', bypass_mode: 'always' }];
+    updatedAt = writerTrust.governance_fence_updated_at;
+    currentUserCanBypass = 'always';
     mutate(rules);
-    await assert.rejects(() => api.getWriterGovernanceSnapshot(), AutonomyFinalizerError);
+    await assert.rejects(() => api.getWriterGovernanceSnapshot(writerTrust), AutonomyFinalizerError);
   }
-  for (const [shape, value, message] of [
-    ['missing', undefined, /bypass actors are invalid \(shape=missing\)/],
-    ['null', null, /bypass actors are invalid \(shape=null\)/],
-    ['object', { opaque: 'must-not-log' }, /bypass actors are invalid \(shape=non-array:object\)/],
-    ['oversized array', Array.from({ length: 33 }, () => ({ opaque: 'must-not-log' })), /bypass actors are invalid \(shape=array:length=33\)/],
+  rules = structuredClone(liveRules);
+  bypassActors = undefined;
+  updatedAt = writerTrust.governance_fence_updated_at;
+  currentUserCanBypass = 'always';
+  assert.deepEqual(await api.getWriterGovernanceSnapshot(writerTrust), writerGovernanceSnapshot());
+
+  for (const [name, mutate, message] of [
+    ['null', () => { bypassActors = null; }, /bypass actors are invalid \(shape=null\)/],
+    ['object', () => { bypassActors = { opaque: 'must-not-log' }; }, /bypass actors are invalid \(shape=non-array:object\)/],
+    ['oversized array', () => { bypassActors = Array.from({ length: 33 }, () => ({ opaque: 'must-not-log' })); }, /bypass actors are invalid \(shape=array:length=33\)/],
+    ['updated_at drift', () => { updatedAt = '2026-08-27T18:48:18.800+08:00'; }, /updated_at does not match/],
+    ['bypass capability drift', () => { currentUserCanBypass = 'pull_requests_only'; }, /cannot always bypass/],
   ]) {
     rules = structuredClone(liveRules);
-    bypassActors = value;
-    await assert.rejects(() => api.getWriterGovernanceSnapshot(), (error) => {
-      assert.ok(error instanceof AutonomyFinalizerError, `${shape} must remain fail-closed`);
+    bypassActors = undefined;
+    updatedAt = writerTrust.governance_fence_updated_at;
+    currentUserCanBypass = 'always';
+    mutate();
+    await assert.rejects(() => api.getWriterGovernanceSnapshot(writerTrust), (error) => {
+      assert.ok(error instanceof AutonomyFinalizerError, `${name} must remain fail-closed`);
       assert.match(error.message, message);
       assert.doesNotMatch(error.message, /must-not-log/);
       return true;
@@ -1118,7 +1139,7 @@ test('concrete Writer governance reader requires two identical complete snapshot
       if (reads === 2) value.governance_fence.rulesets.items[0].name = 'drifted-fence';
     });
   };
-  await assert.rejects(() => api.getWriterGovernanceSnapshot(), /drifted between complete reads/);
+  await assert.rejects(() => api.getWriterGovernanceSnapshot(writerTrust), /drifted between complete reads/);
   assert.equal(reads, 2);
 });
 

@@ -18,6 +18,13 @@ The workflow is default-off. It requires all of the following repository variabl
 
 The canary flag must already be enabled so the subsequent governance-proof job cannot silently skip. Bootstrap never enables it or any production switch.
 
+Before running the workflow, an owner must read the complete selected `agent-head-fence-v1` ruleset and set these non-secret repository variables to the exact returned values:
+
+- `AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID`
+- `AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT`
+
+The values pin the owner-audited fence for Writer-token reads. GitHub may omit `bypass_actors` from a token without ruleset-write authority, so the inline governance proof accepts that one omission only when these values, `current_user_can_bypass=always`, and the attested Writer App's unique `Integration/always` bypass all agree. Re-read and update both variables deliberately after any fence change.
+
 The `writer` Environment must temporarily contain `AERIS_IDENTITY_BOOTSTRAP_TOKEN`. Use a short-lived fine-grained owner token limited to this repository, with only repository **Actions variables: read and write** permission (plus GitHub's implicit metadata read). The token exists solely because the read-only `GITHUB_TOKEN` and the minimally privileged Writer App cannot update repository variables. Never grant the Writer App additional permissions for bootstrap.
 
 GitHub does not expose a complete API inventory of every repository selected on a fine-grained personal access token. The workflow therefore cannot independently prove that this control token has no access to another repository. Repository-only selection, the named permission, and the shortest GitHub-supported expiry are mandatory operator gates. The CLI does prove `/user` is exactly `JinPengGeng` (`databaseId=36217715`, `type=User`), rejects a non-empty `X-OAuth-Scopes` header (and therefore classic/OAuth-scoped tokens when GitHub returns that header), and proves the token can read repository ID `1316750512`. GitHub may omit `X-OAuth-Scopes` for a fine-grained token, so a missing header is accepted and the fixed user and target-repository checks remain mandatory. When GitHub returns `GitHub-Authentication-Token-Expiration`, the CLI requires a future expiry no more than seven days away and records it in the non-sensitive summary. GitHub may omit that header; absence is reported as unverified and is not treated as proof of a short expiry.
@@ -53,11 +60,12 @@ The summary contains only the two discovered IDs, normalized non-sensitive ident
 1. Create the short-lived fine-grained token described above. In the GitHub UI, explicitly select only `JinPengGeng/aeris-token`, grant only Actions variables read/write, and select GitHub's shortest available expiry (currently seven days). Preserve a screenshot or approval record of those three operator-gated settings because the API cannot fully enumerate them.
 2. Add it as the `writer` Environment secret `AERIS_IDENTITY_BOOTSTRAP_TOKEN`.
 3. Confirm every production switch listed above is exactly `false`.
-4. Set `AERIS_WRITER_GOVERNANCE_CANARY_ENABLED=true`, then set `AERIS_WRITER_IDENTITY_BOOTSTRAP_ENABLED=true`.
-5. Manually dispatch **Writer identity bootstrap** from `main` as `JinPengGeng`.
-6. Confirm the bootstrap run succeeded, its summaries name repository ID `1316750512` and the trusted `main` SHA, the bootstrap flag now reads `false`, and the inline read-only and governance proofs succeeded. If the control-token expiration header is reported unavailable, use the operator record from step 1 as the expiry evidence; do not infer an API-verified expiry.
-7. After the planned verification sequence is complete, delete the `AERIS_IDENTITY_BOOTSTRAP_TOKEN` Environment secret and revoke/delete the short-lived token at its issuer.
-8. Set `AERIS_WRITER_GOVERNANCE_CANARY_ENABLED=false` and verify it by API/UI readback.
-9. Preserve the bootstrap run URL and all non-sensitive step summaries as rollout evidence.
+4. As the owner, read the complete active `agent-head-fence-v1` ruleset and set the two fence variables above to its exact ID and `updated_at` value.
+5. Set `AERIS_WRITER_GOVERNANCE_CANARY_ENABLED=true`, then set `AERIS_WRITER_IDENTITY_BOOTSTRAP_ENABLED=true`.
+6. Manually dispatch **Writer identity bootstrap** from `main` as `JinPengGeng`.
+7. Confirm the bootstrap run succeeded, its summaries name repository ID `1316750512` and the trusted `main` SHA, the bootstrap flag now reads `false`, and the inline read-only and governance proofs succeeded. If the control-token expiration header is reported unavailable, use the operator record from step 1 as the expiry evidence; do not infer an API-verified expiry.
+8. After the planned verification sequence is complete, delete the `AERIS_IDENTITY_BOOTSTRAP_TOKEN` Environment secret and revoke/delete the short-lived token at its issuer.
+9. Set `AERIS_WRITER_GOVERNANCE_CANARY_ENABLED=false` and verify it by API/UI readback.
+10. Preserve the bootstrap run URL and all non-sensitive step summaries as rollout evidence.
 
 If the run fails after one identity variable was written or after disabling its flag, no later action is attempted. Do not broaden App permissions. Inspect the non-sensitive failure reason, restore all seven switches to the required closed/bootstrap state, verify `main` intentionally points to the workflow commit, and start a new explicitly enabled bootstrap attempt. Retain the temporary credential only for the active planned verification sequence, then delete/revoke it during final cleanup. A partial identity-variable write is inert while all production switches remain `false`, but it must be reviewed and overwritten by the next successful guarded run.
