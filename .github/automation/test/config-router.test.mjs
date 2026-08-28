@@ -30,7 +30,15 @@ const contracts = loadContracts(repoRoot);
 const policy = contracts.policy;
 
 test('trusted contracts load with only enabled agents declared', () => {
-  assert.equal(Object.keys(contracts.agents.agents).length, 8);
+  assert.deepEqual(Object.keys(contracts.agents.agents), [
+    'triage',
+    'planner',
+    'reviewer',
+    'writer',
+    'tester',
+    'security',
+    'policy',
+  ]);
   const enabled = Object.entries(contracts.agents.agents)
     .filter(([, agent]) => agent.enabled)
     .map(([name]) => name);

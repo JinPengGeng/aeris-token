@@ -22,31 +22,41 @@ jobs:
     if: >-
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       (vars.AERIS_AGENTS_ENABLED == 'true' || vars.AERIS_AGENTS_ENABLED == '1') &&
-      (vars.AERIS_SYNC_APP_ENABLED == 'true' || vars.AERIS_SYNC_APP_ENABLED == '1')
+      (vars.AERIS_WRITER_ENABLED == 'true' || vars.AERIS_WRITER_ENABLED == '1') &&
+      (vars.AERIS_UPSTREAM_SYNC_ENABLED == 'true' || vars.AERIS_UPSTREAM_SYNC_ENABLED == '1')
     runs-on: ubuntu-latest
-    environment: sync
+    environment: writer
+    outputs:
+      conflict_pending: ${{ steps.sync.outputs.conflict_pending }}
+      conflict_bundle_sha: ${{ steps.sync.outputs.conflict_bundle_sha }}
+      conflict_generation_sha: ${{ steps.sync.outputs.conflict_generation_sha }}
+    concurrency:
+      group: aeris-writer-mutation
+      cancel-in-progress: false
     permissions:
       actions: write
       checks: read
       contents: read
+      issues: write
       pull-requests: read
-      statuses: read
     env:
       GH_REPO: ${{ github.repository }}
       BASE_BRANCH: main
       SYNC_BRANCH: automation/sync-upstream
       RESUME: ${{ inputs.resume || 'false' }}
       AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
-      AERIS_SYNC_APP_SLUG: ${{ vars.AERIS_SYNC_APP_SLUG }}
+      AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+      AERIS_AI_MODEL_CONFLICT_RESOLVER: ${{ vars.AERIS_AI_MODEL_CONFLICT_RESOLVER || vars.AERIS_AI_MODEL_WRITER }}
+      AERIS_AI_MODEL_CONFLICT_REVIEWER: ${{ vars.AERIS_AI_MODEL_CONFLICT_REVIEWER || vars.AERIS_AI_MODEL_REVIEWER }}
       # Shell wrappers recheck every later call. These unwrapped actions keep a
-      # conservative ten-minute reserve because Actions cannot wrap other actions.
-      AERIS_AUTONOMY_MIN_REMAINING_SECONDS: 600
+      # conservative one-hour reserve because Actions cannot wrap other actions.
+      AERIS_AUTONOMY_MIN_REMAINING_SECONDS: 3600
     steps:
       - name: Validate autonomy before token mint
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${AERIS_SYNC_APP_SLUG}" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]]
+          [[ "${AERIS_WRITER_APP_SLUG}" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]]
           [[ "${AERIS_AUTONOMY_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
           expires_epoch="$(date -u -d "${AERIS_AUTONOMY_EXPIRES_AT}" +%s)"
           round_trip="$(date -u -d "@${expires_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
@@ -54,20 +64,18 @@ jobs:
           now_epoch="$(date -u +%s)"
           (( now_epoch + AERIS_AUTONOMY_MIN_REMAINING_SECONDS < expires_epoch ))
 
-      - name: Mint bounded Sync App token
+      - name: Mint bounded Writer App token
         id: sync_token
         timeout-minutes: 2
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ vars.AERIS_SYNC_APP_ID }}
-          private-key: ${{ secrets.AERIS_SYNC_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.AERIS_WRITER_APP_ID }}
+          private-key: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permission-administration: read
           permission-contents: write
           permission-pull-requests: write
-          permission-issues: write
-          permission-checks: read
-          permission-statuses: read
 
       - name: Validate autonomy before checkout
         shell: bash
@@ -87,6 +95,7 @@ jobs:
           ref: main
           fetch-depth: 0
           token: ${{ steps.sync_token.outputs.token }}
+          persist-credentials: false
 
       - name: Validate checkpoint synchronization
         shell: bash
@@ -101,7 +110,9 @@ jobs:
           bash .github/workflows/scripts/tests/test-github-autonomy.sh
           bash .github/workflows/scripts/tests/test-ensure-required-checks.sh
           bash .github/workflows/scripts/tests/test-manage-sync-automerge.sh
+          bash .github/workflows/scripts/tests/test-sync-upstream-git-auth.sh
           bash .github/workflows/scripts/tests/test-sync-upstream-identity.sh
+          bash .github/workflows/scripts/tests/test-sync-upstream-alerts.sh
           AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
             bash .github/workflows/scripts/tests/test-checkpoint-merge.sh
           AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
@@ -111,27 +122,50 @@ jobs:
         id: sync
         env:
           GH_TOKEN: ${{ steps.sync_token.outputs.token }}
+          AERIS_WRITER_TOKEN: ${{ steps.sync_token.outputs.token }}
+          AERIS_ISSUES_GH_TOKEN: ${{ github.token }}
+          AERIS_CONFLICT_BUNDLE_PATH: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
         shell: bash
         run: bash .github/workflows/scripts/sync-upstream.sh
 
+      - name: Upload exact conflict bundle
+        if: steps.sync.outputs.conflict_pending == 'true'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: sync-conflict-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Ensure required checks are dispatched
         if: steps.sync.outputs.has_changes == 'true'
+        timeout-minutes: 35
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ steps.sync.outputs.pr_url }}
           SYNCED_SHA: ${{ steps.sync.outputs.synced_sha }}
+          EXPECTED_BASE_SHA: ${{ steps.sync.outputs.expected_base_sha }}
         shell: bash
         run: bash .github/workflows/scripts/ensure-required-checks.sh
 
-      - name: Enable native auto-merge
-        if: steps.sync.outputs.has_changes == 'true'
+      - name: Merge synchronization PR
+        if: >-
+          steps.sync.outputs.has_changes == 'true' &&
+          steps.sync.outputs.autonomous_eligible == 'true' &&
+          steps.sync.outputs.policy_verdict == 'eligible'
         env:
           GH_TOKEN: ${{ steps.sync_token.outputs.token }}
+          AERIS_CHECKS_GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ steps.sync.outputs.pr_url }}
           SYNCED_SHA: ${{ steps.sync.outputs.synced_sha }}
+          EXPECTED_BASE_SHA: ${{ steps.sync.outputs.expected_base_sha }}
+          SYNCED_SOURCE: ${{ steps.sync.outputs.synced_source }}
+          SYNC_POLICY_VERDICT: ${{ steps.sync.outputs.policy_verdict }}
         shell: bash
         run: |
           bash .github/workflows/scripts/manage-sync-automerge.sh \
-            arm "${GITHUB_REPOSITORY}" "${PR_URL}" "${SYNCED_SHA}"
+            merge "${GITHUB_REPOSITORY}" "${PR_URL}" "${SYNCED_SHA}" \
+            "${EXPECTED_BASE_SHA}" "${SYNCED_SOURCE}" "${SYNC_POLICY_VERDICT}"
 
       - name: Write summary
         if: always()
@@ -143,6 +177,7 @@ jobs:
           CHECKPOINT_SHA: ${{ steps.sync.outputs.checkpoint_sha }}
           FILTERED_PATHS: ${{ steps.sync.outputs.filtered_paths }}
           PR_URL: ${{ steps.sync.outputs.pr_url }}
+          POLICY_VERDICT: ${{ steps.sync.outputs.policy_verdict }}
         shell: bash
         run: |
           {
@@ -153,7 +188,446 @@ jobs:
             echo "- State: \`${STATE:-failed}\`"
             echo "- Changes found: \`${HAS_CHANGES:-unknown}\`"
             echo "- Fork-owned paths filtered: \`${FILTERED_PATHS:-0}\`"
+            echo "- Autonomous policy verdict: \`${POLICY_VERDICT:-unknown}\`"
             if [[ -n "${PR_URL}" ]]; then
               echo "- Pull request: ${PR_URL}"
             fi
           } >>"${GITHUB_STEP_SUMMARY}"
+
+  resolve_conflict:
+    name: Resolve bounded sync conflict
+    needs: [sync]
+    if: needs.sync.outputs.conflict_pending == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: agent
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      candidate_sha: ${{ steps.resolve.outputs.conflict_candidate_sha }}
+      resolution_sha: ${{ steps.resolve.outputs.conflict_resolution_sha }}
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Download exact conflict bundle
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: sync-conflict-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-sync-conflict
+
+      - name: Generate credentialless resolution candidate
+        id: resolve
+        env:
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
+          AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
+          AERIS_AI_API_KEY: ${{ secrets.AERIS_AI_API_KEY }}
+          AERIS_CONFLICT_BUNDLE_PATH: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
+          AERIS_CONFLICT_OUTPUT_PATH: ${{ runner.temp }}/aeris-sync-resolution/candidate.json
+        run: node .github/automation/src/sync-conflict-review.mjs resolve
+
+      - name: Upload exact resolution candidate
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: sync-conflict-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-sync-resolution/candidate.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish_conflict:
+    name: Publish resolved sync candidate
+    needs: [sync, resolve_conflict]
+    if: >-
+      needs.sync.outputs.conflict_pending == 'true' &&
+      needs.resolve_conflict.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: writer
+    concurrency:
+      group: aeris-writer-mutation
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      issues: write
+      pull-requests: read
+    outputs:
+      pr_url: ${{ steps.publish.outputs.pr_url }}
+      pr_number: ${{ steps.publish.outputs.pr_number }}
+      head_sha: ${{ steps.publish.outputs.synced_sha }}
+      head_tree_sha: ${{ steps.publish.outputs.synced_tree }}
+      base_sha: ${{ steps.publish.outputs.expected_base_sha }}
+      source: ${{ steps.publish.outputs.synced_source }}
+      parent: ${{ steps.publish.outputs.parent }}
+      upstream_branch: ${{ steps.publish.outputs.upstream_branch }}
+      checkpoint_sha: ${{ steps.publish.outputs.checkpoint_sha }}
+      bundle_sha: ${{ steps.publish.outputs.conflict_bundle_sha }}
+      candidate_sha: ${{ steps.publish.outputs.conflict_candidate_sha }}
+      generation_sha: ${{ steps.publish.outputs.conflict_generation_sha }}
+      resolution_sha: ${{ steps.publish.outputs.conflict_resolution_sha }}
+      resolved_tree: ${{ steps.publish.outputs.conflict_resolved_tree }}
+    env:
+      GH_REPO: ${{ github.repository }}
+      BASE_BRANCH: main
+      SYNC_BRANCH: automation/sync-upstream
+      RESUME: ${{ inputs.resume || 'false' }}
+      AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
+      AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+      AERIS_AUTONOMY_MIN_REMAINING_SECONDS: 3600
+    steps:
+      - name: Validate autonomy before token mint
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${AERIS_WRITER_APP_SLUG}" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]]
+          [[ "${AERIS_AUTONOMY_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+          expires_epoch="$(date -u -d "${AERIS_AUTONOMY_EXPIRES_AT}" +%s)"
+          [[ "$(date -u -d "@${expires_epoch}" +%Y-%m-%dT%H:%M:%SZ)" == "${AERIS_AUTONOMY_EXPIRES_AT}" ]]
+          (( $(date -u +%s) + AERIS_AUTONOMY_MIN_REMAINING_SECONDS < expires_epoch ))
+
+      - name: Mint bounded Writer App token
+        id: sync_token
+        timeout-minutes: 2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AERIS_WRITER_APP_ID }}
+          private-key: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Check out exact trusted base
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.sync_token.outputs.token }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Download exact conflict bundle
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: sync-conflict-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-sync-conflict
+
+      - name: Download exact resolution candidate
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: sync-conflict-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-sync-resolution
+
+      - name: Replay and publish exact resolved tree
+        id: publish
+        env:
+          GH_TOKEN: ${{ steps.sync_token.outputs.token }}
+          AERIS_WRITER_TOKEN: ${{ steps.sync_token.outputs.token }}
+          AERIS_ISSUES_GH_TOKEN: ${{ github.token }}
+          AERIS_CONFLICT_BUNDLE_PATH: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
+          AERIS_CONFLICT_CANDIDATE_PATH: ${{ runner.temp }}/aeris-sync-resolution/candidate.json
+        shell: bash
+        run: bash .github/workflows/scripts/sync-upstream.sh
+
+      - name: Require a published conflict-review candidate
+        env:
+          STATE: ${{ steps.publish.outputs.state }}
+          HAS_CHANGES: ${{ steps.publish.outputs.has_changes }}
+          POLICY_VERDICT: ${{ steps.publish.outputs.policy_verdict }}
+          BUNDLE_SHA: ${{ steps.publish.outputs.conflict_bundle_sha }}
+          EXPECTED_BUNDLE_SHA: ${{ needs.sync.outputs.conflict_bundle_sha }}
+          CANDIDATE_SHA: ${{ steps.publish.outputs.conflict_candidate_sha }}
+          EXPECTED_CANDIDATE_SHA: ${{ needs.resolve_conflict.outputs.candidate_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${STATE}:${HAS_CHANGES}:${POLICY_VERDICT}" == published:true:conflict_ai_review ]]
+          [[ "${BUNDLE_SHA}" == "${EXPECTED_BUNDLE_SHA}" ]]
+          [[ "${CANDIDATE_SHA}" == "${EXPECTED_CANDIDATE_SHA}" ]]
+
+  review_conflict:
+    name: Independently review resolved sync candidate
+    needs: [resolve_conflict, publish_conflict]
+    if: needs.publish_conflict.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: agent
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      input_sha: ${{ steps.collect.outputs.conflict_review_input_sha }}
+      receipt_sha: ${{ steps.review.outputs.conflict_review_receipt_sha }}
+    steps:
+      - name: Check out exact trusted base
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.publish_conflict.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Download exact conflict bundle
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: sync-conflict-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-sync-conflict
+
+      - name: Download exact resolution candidate
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: sync-conflict-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-sync-resolution
+
+      - name: Fetch exact published and upstream commits
+        env:
+          HEAD_SHA: ${{ needs.publish_conflict.outputs.head_sha }}
+          UPSTREAM_REPOSITORY: ${{ needs.publish_conflict.outputs.parent }}
+          UPSTREAM_SHA: ${{ needs.publish_conflict.outputs.source }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream_sha="${UPSTREAM_SHA#*@}"
+          git fetch --no-tags origin "${HEAD_SHA}"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream "${upstream_sha}"
+          git rev-parse --verify "${HEAD_SHA}^{commit}" >/dev/null
+          git rev-parse --verify "${upstream_sha}^{commit}" >/dev/null
+
+      - name: Recreate trusted synthetic conflict commit
+        env:
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          BASE_SHA: ${{ needs.publish_conflict.outputs.base_sha }}
+          UPSTREAM_REPOSITORY: ${{ needs.publish_conflict.outputs.parent }}
+          UPSTREAM_BRANCH: ${{ needs.publish_conflict.outputs.upstream_branch }}
+          UPSTREAM_SOURCE: ${{ needs.publish_conflict.outputs.source }}
+          EXPECTED_HEAD_TREE: ${{ needs.publish_conflict.outputs.head_tree_sha }}
+          AERIS_CONFLICT_BUNDLE_PATH: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
+          AERIS_CONFLICT_CANDIDATE_PATH: ${{ runner.temp }}/aeris-sync-resolution/candidate.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$(bash .github/workflows/scripts/prepare-checkpoint-sync.sh \
+            "${BASE_SHA}" "${UPSTREAM_SOURCE#*@}" "${UPSTREAM_REPOSITORY}" "${UPSTREAM_BRANCH}")"
+          [[ "$(sed -n 's/^state=//p' <<<"${output}" | tail -n1)" == clean ]]
+          [[ "$(sed -n 's/^policy_verdict=//p' <<<"${output}" | tail -n1)" == conflict_ai_review ]]
+          [[ "$(sed -n 's/^tree=//p' <<<"${output}" | tail -n1)" == "${EXPECTED_HEAD_TREE}" ]]
+
+      - name: Collect exact published review input
+        id: collect
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AERIS_CONFLICT_BUNDLE_PATH: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
+          AERIS_CONFLICT_CANDIDATE_PATH: ${{ runner.temp }}/aeris-sync-resolution/candidate.json
+          AERIS_CONFLICT_OUTPUT_PATH: ${{ runner.temp }}/aeris-sync-review/input.json
+          AERIS_CONFLICT_PULL_NUMBER: ${{ needs.publish_conflict.outputs.pr_number }}
+          AERIS_CONFLICT_HEAD_SHA: ${{ needs.publish_conflict.outputs.head_sha }}
+          AERIS_CONFLICT_HEAD_TREE_SHA: ${{ needs.publish_conflict.outputs.head_tree_sha }}
+        run: node .github/automation/src/sync-conflict-review.mjs collect-review
+
+      - name: Run independent credentialless Reviewer
+        id: review
+        env:
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
+          AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
+          AERIS_AI_API_KEY: ${{ secrets.AERIS_AI_API_KEY }}
+          AERIS_CONFLICT_BUNDLE_PATH: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
+          AERIS_CONFLICT_CANDIDATE_PATH: ${{ runner.temp }}/aeris-sync-resolution/candidate.json
+          AERIS_CONFLICT_REVIEW_INPUT_PATH: ${{ runner.temp }}/aeris-sync-review/input.json
+          AERIS_CONFLICT_OUTPUT_PATH: ${{ runner.temp }}/aeris-sync-review/receipt.json
+        run: node .github/automation/src/sync-conflict-review.mjs review
+
+      - name: Upload exact independent review
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: sync-conflict-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/aeris-sync-review/input.json
+            ${{ runner.temp }}/aeris-sync-review/receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+  finalize_conflict:
+    name: Verify and merge AI-reviewed sync conflict
+    needs: [publish_conflict, review_conflict]
+    if: needs.review_conflict.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: writer
+    concurrency:
+      group: aeris-writer-mutation
+      cancel-in-progress: false
+    permissions:
+      actions: write
+      checks: read
+      contents: read
+      pull-requests: read
+    env:
+      BASE_BRANCH: main
+      SYNC_BRANCH: automation/sync-upstream
+      AERIS_AUTONOMY_EXPIRES_AT: ${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}
+      AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+      AERIS_AUTONOMY_MIN_REMAINING_SECONDS: 3600
+    steps:
+      - name: Check out exact trusted base
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.publish_conflict.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Download exact conflict bundle
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: sync-conflict-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-sync-conflict
+
+      - name: Download exact resolution candidate
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: sync-conflict-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-sync-resolution
+
+      - name: Download exact independent review
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: sync-conflict-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-sync-review
+
+      - name: Fetch exact published and upstream commits
+        env:
+          HEAD_SHA: ${{ needs.publish_conflict.outputs.head_sha }}
+          UPSTREAM_REPOSITORY: ${{ needs.publish_conflict.outputs.parent }}
+          UPSTREAM_SOURCE: ${{ needs.publish_conflict.outputs.source }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream_sha="${UPSTREAM_SOURCE#*@}"
+          git fetch --no-tags origin "${HEAD_SHA}"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream "${upstream_sha}"
+
+      - name: Recreate trusted synthetic conflict commit
+        env:
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          BASE_SHA: ${{ needs.publish_conflict.outputs.base_sha }}
+          UPSTREAM_REPOSITORY: ${{ needs.publish_conflict.outputs.parent }}
+          UPSTREAM_BRANCH: ${{ needs.publish_conflict.outputs.upstream_branch }}
+          UPSTREAM_SOURCE: ${{ needs.publish_conflict.outputs.source }}
+          EXPECTED_HEAD_TREE: ${{ needs.publish_conflict.outputs.head_tree_sha }}
+          AERIS_CONFLICT_BUNDLE_PATH: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
+          AERIS_CONFLICT_CANDIDATE_PATH: ${{ runner.temp }}/aeris-sync-resolution/candidate.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$(bash .github/workflows/scripts/prepare-checkpoint-sync.sh \
+            "${BASE_SHA}" "${UPSTREAM_SOURCE#*@}" "${UPSTREAM_REPOSITORY}" "${UPSTREAM_BRANCH}")"
+          [[ "$(sed -n 's/^tree=//p' <<<"${output}" | tail -n1)" == "${EXPECTED_HEAD_TREE}" ]]
+
+      - name: Ensure exact-head required checks passed
+        timeout-minutes: 35
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ needs.publish_conflict.outputs.pr_url }}
+          SYNCED_SHA: ${{ needs.publish_conflict.outputs.head_sha }}
+          EXPECTED_BASE_SHA: ${{ needs.publish_conflict.outputs.base_sha }}
+        shell: bash
+        run: bash .github/workflows/scripts/ensure-required-checks.sh
+
+      - name: Produce final exact-bound conflict attestation
+        id: attest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AERIS_CONFLICT_BUNDLE_PATH: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
+          AERIS_CONFLICT_CANDIDATE_PATH: ${{ runner.temp }}/aeris-sync-resolution/candidate.json
+          AERIS_CONFLICT_REVIEW_INPUT_PATH: ${{ runner.temp }}/aeris-sync-review/input.json
+          AERIS_CONFLICT_REVIEW_RECEIPT_PATH: ${{ runner.temp }}/aeris-sync-review/receipt.json
+          AERIS_CONFLICT_OUTPUT_PATH: ${{ runner.temp }}/aeris-sync-attestation/attestation.json
+          AERIS_CONFLICT_PULL_NUMBER: ${{ needs.publish_conflict.outputs.pr_number }}
+          AERIS_CONFLICT_HEAD_SHA: ${{ needs.publish_conflict.outputs.head_sha }}
+          AERIS_CONFLICT_HEAD_TREE_SHA: ${{ needs.publish_conflict.outputs.head_tree_sha }}
+        run: node .github/automation/src/sync-conflict-review.mjs finalize
+
+      - name: Validate autonomy before token mint
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${AERIS_WRITER_APP_SLUG}" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]]
+          [[ "${AERIS_AUTONOMY_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+          expires_epoch="$(date -u -d "${AERIS_AUTONOMY_EXPIRES_AT}" +%s)"
+          [[ "$(date -u -d "@${expires_epoch}" +%Y-%m-%dT%H:%M:%SZ)" == "${AERIS_AUTONOMY_EXPIRES_AT}" ]]
+          (( $(date -u +%s) + AERIS_AUTONOMY_MIN_REMAINING_SECONDS < expires_epoch ))
+
+      - name: Mint bounded Writer App token
+        id: sync_token
+        timeout-minutes: 2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AERIS_WRITER_APP_ID }}
+          private-key: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Perform one exact server-side squash
+        env:
+          GH_TOKEN: ${{ steps.sync_token.outputs.token }}
+          AERIS_CHECKS_GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ needs.publish_conflict.outputs.pr_url }}
+          SYNCED_SHA: ${{ needs.publish_conflict.outputs.head_sha }}
+          EXPECTED_BASE_SHA: ${{ needs.publish_conflict.outputs.base_sha }}
+          SYNCED_SOURCE: ${{ needs.publish_conflict.outputs.source }}
+          CONFLICT_ATTESTATION_PATH: ${{ runner.temp }}/aeris-sync-attestation/attestation.json
+          CONFLICT_ATTESTATION_SHA: ${{ steps.attest.outputs.conflict_attestation_sha }}
+          AERIS_CONFLICT_BUNDLE_PATH: ${{ runner.temp }}/aeris-sync-conflict/bundle.json
+          AERIS_CONFLICT_CANDIDATE_PATH: ${{ runner.temp }}/aeris-sync-resolution/candidate.json
+          AERIS_CONFLICT_REVIEW_INPUT_PATH: ${{ runner.temp }}/aeris-sync-review/input.json
+          AERIS_CONFLICT_REVIEW_RECEIPT_PATH: ${{ runner.temp }}/aeris-sync-review/receipt.json
+          AERIS_CONFLICT_BUNDLE_SHA: ${{ needs.publish_conflict.outputs.bundle_sha }}
+          AERIS_CONFLICT_CANDIDATE_SHA: ${{ needs.publish_conflict.outputs.candidate_sha }}
+          AERIS_CONFLICT_REVIEW_INPUT_SHA: ${{ needs.review_conflict.outputs.input_sha }}
+          AERIS_CONFLICT_REVIEW_RECEIPT_SHA: ${{ needs.review_conflict.outputs.receipt_sha }}
+        shell: bash
+        run: |
+          bash .github/workflows/scripts/manage-sync-automerge.sh \
+            merge "${GITHUB_REPOSITORY}" "${PR_URL}" "${SYNCED_SHA}" \
+            "${EXPECTED_BASE_SHA}" "${SYNCED_SOURCE}" conflict_ai_review \
+            "${CONFLICT_ATTESTATION_PATH}" "${CONFLICT_ATTESTATION_SHA}"
+
+      - name: Upload final conflict attestation
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: sync-conflict-attestation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aeris-sync-attestation/attestation.json
+          if-no-files-found: error
+          retention-days: 30

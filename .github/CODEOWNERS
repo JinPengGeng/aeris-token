@@ -1,8 +1,6 @@
 # Ownership protects the default branch; repository administrators must retain
 # write access for these review requests to be actionable.
 
-* @JinPengGeng
-
 # Runtime and API behavior
 /apps/aether-gateway/ @JinPengGeng
 /crates/ @JinPengGeng
@@ -13,7 +11,14 @@
 /docker-compose*.yml @JinPengGeng
 /Dockerfile* @JinPengGeng
 
-# Frontend and developer workflow
+# Frontend and protected control plane
 /frontend/ @JinPengGeng
 /.github/ @JinPengGeng
-/docs/ @JinPengGeng
+/CODEOWNERS @JinPengGeng
+/Cargo.toml @JinPengGeng
+/Cargo.lock @JinPengGeng
+/**/Cargo.toml @JinPengGeng
+/**/Cargo.lock @JinPengGeng
+/frontend/package.json @JinPengGeng
+/frontend/package-lock.json @JinPengGeng
+/release.toml @JinPengGeng

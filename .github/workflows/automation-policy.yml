@@ -1,0 +1,50 @@
+name: Automation Policy
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  # Label delivery is event-driven and can lag; serialize each PR so an older run cannot finish after a newer run.
+  group: automation-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Automation Policy / gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out trusted policy revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Evaluate deterministic policy
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_PULL_NUMBER: ${{ github.event.pull_request.number }}
+          AERIS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AERIS_POLICY_REF: ${{ github.event.pull_request.base.ref }}
+          AERIS_POLICY_SHA: ${{ github.event.pull_request.base.sha }}
+          AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+        run: |
+          if [ ! -f .github/automation/src/run-autonomy-policy.mjs ]; then
+            echo "::error title=Automation policy runtime missing::Trusted base revision does not contain the policy runtime."
+            exit 1
+          fi
+          node .github/automation/src/run-autonomy-policy.mjs
