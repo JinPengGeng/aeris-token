@@ -85,16 +85,27 @@ test('identity bootstrap pins every external action to an immutable commit', () 
   }
 });
 
-test('identity bootstrap calls local reusable proofs at the bound caller SHA without forwarding its control token', () => {
+test('identity bootstrap passes freshly bound identity outputs to local reusable proofs without forwarding its control token', () => {
   const { jobs } = workflow();
-  assert.equal(jobs.bootstrap.outputs, undefined);
+  assert.deepEqual(jobs.bootstrap.outputs, {
+    app_node_id: '${{ steps.bootstrap.outputs.app_node_id }}',
+    app_owner_database_id: '${{ steps.bootstrap.outputs.app_owner_database_id }}',
+  });
   assert.equal(jobs.bootstrap.steps.some((step) => step.id === 'caller_sha'), false);
   assert.equal(jobs.readonly_attestation.uses, './.github/workflows/writer-readonly-attestation.yml');
   assert.deepEqual(jobs.readonly_attestation.needs, ['bootstrap']);
   assert.equal(jobs.readonly_attestation.if, undefined);
+  assert.deepEqual(jobs.readonly_attestation.with, {
+    bound_writer_app_node_id: '${{ needs.bootstrap.outputs.app_node_id }}',
+    bound_writer_app_owner_database_id: '${{ needs.bootstrap.outputs.app_owner_database_id }}',
+  });
   assert.equal(jobs.governance_canary.uses, './.github/workflows/writer-governance-canary.yml');
   assert.deepEqual(jobs.governance_canary.needs, ['bootstrap', 'readonly_attestation']);
   assert.equal(jobs.governance_canary.if, undefined);
+  assert.deepEqual(jobs.governance_canary.with, {
+    bound_writer_app_node_id: '${{ needs.bootstrap.outputs.app_node_id }}',
+    bound_writer_app_owner_database_id: '${{ needs.bootstrap.outputs.app_owner_database_id }}',
+  });
   for (const reusable of [jobs.readonly_attestation, jobs.governance_canary]) {
     assert.doesNotMatch(JSON.stringify(reusable), /secrets|AERIS_IDENTITY_BOOTSTRAP_TOKEN|@main|workflow_dispatch/);
   }

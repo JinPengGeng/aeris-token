@@ -3,6 +3,13 @@ name: Writer App read-only attestation
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      bound_writer_app_node_id:
+        required: false
+        type: string
+      bound_writer_app_owner_database_id:
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -41,10 +48,10 @@ jobs:
       - name: Attest live Writer App and installation
         id: writer_app_attestation
         env:
-          AERIS_WRITER_APP_OWNER_DATABASE_ID: ${{ vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}
+          AERIS_WRITER_APP_OWNER_DATABASE_ID: ${{ inputs.bound_writer_app_owner_database_id || vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}
           AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
-          AERIS_WRITER_APP_NODE_ID: ${{ vars.AERIS_WRITER_APP_NODE_ID }}
+          AERIS_WRITER_APP_NODE_ID: ${{ inputs.bound_writer_app_node_id || vars.AERIS_WRITER_APP_NODE_ID }}
           AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
           AERIS_WRITER_APP_PRIVATE_KEY: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
         run: node .github/automation/src/github-app-attestation.mjs

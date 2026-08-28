@@ -44,7 +44,7 @@ After proof, the CLI performs only this ordered control sequence. Each numbered 
 3. Set `AERIS_WRITER_IDENTITY_BOOTSTRAP_ENABLED=false`.
 4. Complete the final guarded readback of both identity variables and the disabled bootstrap state.
 
-After that job succeeds, the same bootstrap workflow run calls the local reusable `writer-readonly-attestation.yml` and then `writer-governance-canary.yml`. GitHub resolves local reusable workflows from the caller's immutable workflow revision, so bootstrap never uses the REST workflow-dispatch API or a moving branch ref. The called jobs do not receive the bootstrap control token. The normal read-only attestation repeats the exact one-repository Writer-token proof; the governance canary independently proves the full governance fence.
+After that job succeeds, the same bootstrap workflow run passes its freshly bound non-secret identity outputs to the local reusable `writer-readonly-attestation.yml` and then `writer-governance-canary.yml`. This avoids the workflow-run variable snapshot taken before bootstrap wrote the identity variables. GitHub resolves local reusable workflows from the caller's immutable workflow revision, so bootstrap never uses the REST workflow-dispatch API or a moving branch ref. The called jobs do not receive the bootstrap control token. The normal read-only attestation repeats the exact one-repository Writer-token proof; the governance canary independently proves the full governance fence.
 
 The summary contains only the two discovered IDs, normalized non-sensitive identity/control facts, and SHA-256 digests. It never contains either token, the JWT, authorization headers, the private key, or raw responses.
 
