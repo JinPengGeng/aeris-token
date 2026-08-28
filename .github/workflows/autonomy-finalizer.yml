@@ -226,6 +226,8 @@ jobs:
           AERIS_WRITER_PROOF_REPOSITORY_SELECTION: ${{ steps.writer_app_attestation.outputs.repository_selection }}
           AERIS_WRITER_TOKEN_INSTALLATION_ID: ${{ steps.writer_token.outputs.installation-id }}
           AERIS_WRITER_TOKEN_APP_SLUG: ${{ steps.writer_token.outputs.app-slug }}
+          AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID: ${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID }}
+          AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT: ${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT }}
           AERIS_FINALIZER_RESPONSE_LOSS_CANARY: ${{ vars.AERIS_FINALIZER_RESPONSE_LOSS_CANARY }}
           AERIS_FINALIZER_PROOF_LEVEL: full
           AERIS_FINALIZER_MUTATE: "true"

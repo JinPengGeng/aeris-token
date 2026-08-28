@@ -83,6 +83,14 @@ test('governance canary binds attested owner and emits only closed non-secret pr
     governance.env.AERIS_WRITER_APP_OWNER_DATABASE_ID,
     '${{ steps.writer_app_attestation.outputs.app_owner_database_id }}',
   );
+  assert.equal(
+    governance.env.AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID,
+    '${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID }}',
+  );
+  assert.equal(
+    governance.env.AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT,
+    '${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT }}',
+  );
   const summary = steps.find((step) => /Summarize governance proof/.test(step.name));
   assert.deepEqual(Object.keys(summary.env).sort(), ['RULESET_ID', 'SNAPSHOT_SHA256', 'SNAPSHOT_SUMMARY']);
   assert.match(summary.run, /Snapshot SHA-256/);

@@ -125,6 +125,8 @@ const writerTrust = Object.freeze({
   proof_app_slug: 'aeris-token-writer',
   proof_app_owner_login: 'JinPengGeng',
   proof_app_owner_database_id: OWNER_ID,
+  governance_fence_ruleset_id: 101,
+  governance_fence_updated_at: '2026-08-27T18:48:17.800+08:00',
 });
 
 class FakeClient {
@@ -153,6 +155,8 @@ function environment(outputPath) {
     AERIS_WRITER_APP_SLUG: writerTrust.proof_app_slug,
     AERIS_WRITER_APP_OWNER_LOGIN: writerTrust.proof_app_owner_login,
     AERIS_WRITER_APP_OWNER_DATABASE_ID: String(OWNER_ID),
+    AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID: String(writerTrust.governance_fence_ruleset_id),
+    AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT: writerTrust.governance_fence_updated_at,
     AERIS_WRITER_TOKEN: 'not-written-to-output',
     GITHUB_OUTPUT: outputPath,
   };

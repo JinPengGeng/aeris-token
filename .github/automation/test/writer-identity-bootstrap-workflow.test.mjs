@@ -78,7 +78,7 @@ test('identity bootstrap passes every closed-state guard to the CLI and emits on
   const summary = job.steps.find((step) => /Summarize non-sensitive identity proof/.test(step.name));
   assert.ok(summary);
   assert.match(summary.run, /Bootstrap flag was set to `false`/);
-  assert.match(summary.run, /Remove the temporary `AERIS_IDENTITY_BOOTSTRAP_TOKEN`/);
+  assert.match(summary.run, /unified post-validation cleanup/);
   assert.doesNotMatch(JSON.stringify(summary.env), /TOKEN|PRIVATE_KEY|RAW|RESPONSE|HEADER/i);
   assert.doesNotMatch(summary.run, /\$\{AERIS_IDENTITY_BOOTSTRAP_TOKEN\}|\$\{AERIS_WRITER_APP_PRIVATE_KEY\}/);
 });
@@ -116,6 +116,14 @@ test('identity bootstrap runs both proofs inline with its newly bound identity a
   assert.equal(
     governance.env.AERIS_WRITER_APP_OWNER_DATABASE_ID,
     '${{ steps.writer_app_attestation.outputs.app_owner_database_id }}',
+  );
+  assert.equal(
+    governance.env.AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID,
+    '${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID }}',
+  );
+  assert.equal(
+    governance.env.AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT,
+    '${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT }}',
   );
   assert.ok(steps.findIndex((step) => step.id === 'bootstrap') < steps.findIndex((step) => step.id === 'writer_app_attestation'));
   assert.ok(steps.findIndex((step) => step.id === 'writer_token_proof') < steps.findIndex((step) => step.id === 'governance'));

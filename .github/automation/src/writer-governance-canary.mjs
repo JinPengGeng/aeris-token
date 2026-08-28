@@ -10,6 +10,7 @@ import {
 } from './autonomy-finalizer.mjs';
 
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const RFC3339_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 
 export class WriterGovernanceCanaryError extends Error {
   constructor(message) {
@@ -36,6 +37,12 @@ function positiveInteger(value, name) {
   return parsed;
 }
 
+function timestamp(value, name) {
+  const normalized = required(value, name, RFC3339_TIMESTAMP);
+  if (!Number.isFinite(Date.parse(normalized))) reject(`${name} is invalid`);
+  return normalized;
+}
+
 function exactSnapshot(value) {
   return JSON.stringify(value);
 }
@@ -47,7 +54,7 @@ async function readValidatedSnapshot(client, context) {
   }
   const [classicProof, writerSnapshot] = await Promise.all([
     client.getBranchProtection(),
-    client.readWriterGovernanceSnapshotOnce(),
+    client.readWriterGovernanceSnapshotOnce(context.writerTrust),
   ]);
   const classic = validateBranchProtection(classicProof, context.trust.default_branch);
   const writer = validateWriterGovernanceSnapshot(writerSnapshot, {
@@ -71,7 +78,7 @@ export async function proveWriterGovernanceCanary(client, context) {
   return confirmed;
 }
 
-function publicSummary(proof, trust) {
+function publicSummary(proof, trust, writerTrust) {
   const snapshotJson = exactSnapshot(proof);
   return Object.freeze({
     schema_version: 1,
@@ -87,6 +94,7 @@ function publicSummary(proof, trust) {
     trusted_owner_database_id: proof.fence.trusted_owner_database_id,
     writer_app_id: proof.fence.app_id,
     writer_app_slug: proof.fence.app_slug,
+    governance_fence_updated_at: writerTrust.governance_fence_updated_at,
     secret_lane_profile: proof.secret_lane.profile,
     writer_environment: proof.secret_lane.environment,
     snapshot_sha256: crypto.createHash('sha256').update(snapshotJson, 'utf8').digest('hex'),
@@ -111,6 +119,14 @@ export async function runWriterGovernanceCanary(environment = process.env, depen
       environment.AERIS_WRITER_APP_OWNER_DATABASE_ID,
       'AERIS_WRITER_APP_OWNER_DATABASE_ID',
     ),
+    governance_fence_ruleset_id: positiveInteger(
+      environment.AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID,
+      'AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID',
+    ),
+    governance_fence_updated_at: timestamp(
+      environment.AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT,
+      'AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT',
+    ),
   });
   const client = dependencies.client ?? new AutonomyFinalizerGitHubClient({
     token: required(environment.AERIS_WRITER_TOKEN, 'AERIS_WRITER_TOKEN'),
@@ -118,7 +134,7 @@ export async function runWriterGovernanceCanary(environment = process.env, depen
     apiUrl: environment.GITHUB_API_URL,
   });
   const proof = await proveWriterGovernanceCanary(client, { trust, writerTrust });
-  const result = publicSummary(proof, trust);
+  const result = publicSummary(proof, trust, writerTrust);
   if (environment.GITHUB_OUTPUT) {
     fs.appendFileSync(environment.GITHUB_OUTPUT, [
       `snapshot_sha256=${result.snapshot_sha256}`,

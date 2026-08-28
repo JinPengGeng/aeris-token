@@ -95,6 +95,8 @@ test('Finalizer repeats preliminary gates before the sole Writer token mint', ()
   assert.equal(finalize.env.AERIS_WRITER_PROOF_REPOSITORY_SELECTION, '${{ steps.writer_app_attestation.outputs.repository_selection }}');
   assert.equal(finalize.env.AERIS_WRITER_TOKEN_INSTALLATION_ID, '${{ steps.writer_token.outputs.installation-id }}');
   assert.equal(finalize.env.AERIS_WRITER_TOKEN_APP_SLUG, '${{ steps.writer_token.outputs.app-slug }}');
+  assert.equal(finalize.env.AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID, '${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID }}');
+  assert.equal(finalize.env.AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT, '${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT }}');
   assert.equal(finalize.env.AERIS_WRITER_TOKEN, '${{ steps.writer_token.outputs.token }}');
   assert.equal(finalize.env.AERIS_FINALIZER_PROOF_LEVEL, 'full');
   assert.equal(finalize.env.AERIS_FINALIZER_MUTATE, 'true');
