@@ -38,7 +38,7 @@ const NODE_ID = /^[A-Za-z0-9_+=/-]{8,256}$/;
 const COMMIT_SHA = /^[0-9a-f]{40}$/;
 const MAXIMUM_RESPONSE_BYTES = 1024 * 1024;
 const MAXIMUM_INSTALLATION_TOKEN_LIFETIME_MS = 65 * 60 * 1000;
-const MAXIMUM_CONTROL_TOKEN_REMAINING_LIFETIME_MS = 24 * 60 * 60 * 1000;
+const MAXIMUM_CONTROL_TOKEN_REMAINING_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 
 export class WriterIdentityBootstrapError extends Error {
   constructor(message, status = null) {
