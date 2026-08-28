@@ -557,7 +557,13 @@ test('control token is bound to the exact owner and rejects classic OAuth scopes
   });
   await assert.rejects(() => longLived.getAuthenticatedUser(nowMs), WriterIdentityBootstrapError);
 
-  for (const headers of [{ 'x-oauth-scopes': 'repo, workflow' }, {}]) {
+  const noScopesHeader = new WriterIdentityBootstrapControlClient({
+    token: 'bootstrap-token',
+    fetchImpl: async () => new Response('{}', { status: 200, headers: {} }),
+  });
+  assert.equal((await noScopesHeader.getAuthenticatedUser(nowMs)).token_expiration, null);
+
+  for (const headers of [{ 'x-oauth-scopes': 'repo, workflow' }]) {
     const unsafe = new WriterIdentityBootstrapControlClient({
       token: 'bootstrap-token',
       fetchImpl: async () => new Response('{}', { status: 200, headers }),

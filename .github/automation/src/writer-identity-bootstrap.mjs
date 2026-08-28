@@ -341,8 +341,8 @@ export class WriterIdentityBootstrapControlClient {
 
   async getAuthenticatedUser(nowMs) {
     const { value, headers } = await this.request('GET', '/user', { includeHeaders: true });
-    const oauthScopes = responseHeader(headers, 'x-oauth-scopes', true);
-    if (oauthScopes !== '') {
+    const oauthScopes = responseHeader(headers, 'x-oauth-scopes');
+    if (oauthScopes !== null && oauthScopes !== '') {
       reject('identity bootstrap control token exposes classic OAuth scopes');
     }
     const expirationHeader = responseHeader(headers, 'github-authentication-token-expiration');
