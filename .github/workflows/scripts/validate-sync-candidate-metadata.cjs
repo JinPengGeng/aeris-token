@@ -24,14 +24,15 @@ function exactMatches(text, expression, label) {
 
 const [prPath, messagePath, expectedRepository, expectedBaseBranch, expectedHeadBranch,
   expectedHead, syncAppSlug, expectedAuthorId, expectedAuthorType,
-  commitAuthor, commitCommitter, parentCount, actualParent] =
+  commitAuthor, commitCommitter, parentCount, actualParent, secondParent] =
   process.argv.slice(2);
 
-if (process.argv.length !== 15) fail('unexpected argument count');
+if (process.argv.length !== 16) fail('unexpected argument count');
 if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(expectedRepository)) {
   fail('expected repository is invalid');
 }
-for (const [label, value] of [['expected head', expectedHead], ['actual parent', actualParent]]) {
+for (const [label, value] of [['expected head', expectedHead], ['actual parent', actualParent],
+  ['second parent', secondParent]]) {
   if (!/^[0-9a-f]{40}$/.test(value)) fail(`${label} is not a full lowercase SHA`);
 }
 if (!/^[a-z0-9][a-z0-9-]{0,99}$/.test(syncAppSlug)) fail('Writer App slug is invalid');
@@ -129,15 +130,16 @@ const checkpointMatch = trailers.Checkpoint.match(/^([0-9a-f]{40})->([0-9a-f]{40
 if (!checkpointMatch) fail('checkpoint trailer is invalid');
 if (!/^[0-9a-f]{40}$/.test(trailers.Base)) fail('base trailer is invalid');
 if (trailers.Source !== bodySource) fail('PR source marker conflicts with the commit trailer');
-if (trailers.Base !== pr.base.sha || trailers.Base !== actualParent || parentCount !== '1') {
-  fail('candidate must have exactly one parent equal to its advertised PR base');
+const [sourceRepository, upstreamTip] = sourceMatch.slice(1);
+if (trailers.Base !== pr.base.sha || trailers.Base !== actualParent || parentCount !== '2' ||
+    secondParent !== upstreamTip) {
+  fail('candidate must have exactly two parents: the advertised PR base and upstream tip');
 }
 if (commitAuthor !== '41898282+github-actions[bot]@users.noreply.github.com' ||
     commitCommitter !== commitAuthor) {
   fail('candidate commit author or committer is untrusted');
 }
 
-const [sourceRepository, upstreamTip] = sourceMatch.slice(1);
 const [checkpoint, checkpointTip] = checkpointMatch.slice(1);
 if (checkpointTip !== upstreamTip) fail('source and checkpoint trailers disagree on U1');
 const subject = message.split(/\r?\n/, 1)[0];

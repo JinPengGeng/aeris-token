@@ -69,6 +69,8 @@ case "${ACTION}" in
     [[ "${HEAD_SHA}" != "${BASE_SHA}" ]] || fail 'head and base SHA must differ'
     [[ "${SYNC_SOURCE}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*@[0-9A-Fa-f]{40}$ ]] ||
       fail 'source must be owner/repo@sha'
+    upstream_repository="${SYNC_SOURCE%@*}"
+    upstream_sha="${SYNC_SOURCE#*@}"
     [[ -n "${AERIS_CHECKS_GH_TOKEN:-}" ]] ||
       fail 'AERIS_CHECKS_GH_TOKEN is required for exact-head check reads'
     [[ "${POLICY_VERDICT}" == eligible || "${POLICY_VERDICT}" == conflict_ai_review ]] ||
@@ -86,8 +88,6 @@ case "${ACTION}" in
       [[ "${AERIS_CONFLICT_CANDIDATE_SHA:-}" =~ ^[0-9a-f]{64}$ ]] || fail 'trusted conflict candidate SHA is invalid'
       [[ "${AERIS_CONFLICT_REVIEW_INPUT_SHA:-}" =~ ^[0-9a-f]{64}$ ]] || fail 'trusted conflict review input SHA is invalid'
       [[ "${AERIS_CONFLICT_REVIEW_RECEIPT_SHA:-}" =~ ^[0-9a-f]{64}$ ]] || fail 'trusted conflict review receipt SHA is invalid'
-      upstream_repository="${SYNC_SOURCE%@*}"
-      upstream_sha="${SYNC_SOURCE#*@}"
       GITHUB_REPOSITORY="${REPOSITORY}" \
       AERIS_CONFLICT_PULL_NUMBER="${PR_NUMBER}" \
       AERIS_CONFLICT_HEAD_SHA="${HEAD_SHA}" \
@@ -126,16 +126,17 @@ case "${ACTION}" in
 
     head_commit="$(aeris_gh api "repos/${REPOSITORY}/commits/${HEAD_SHA}")"
     jq -e --arg head_sha "${HEAD_SHA}" --arg base_sha "${BASE_SHA}" \
+      --arg upstream_sha "${upstream_sha}" \
       --arg source "${SYNC_SOURCE}" --arg verdict "${POLICY_VERDICT}" '
       type == "object" and .sha == $head_sha and
-      (.parents | type == "array" and length == 1 and .[0].sha == $base_sha) and
+      (.parents | type == "array" and length == 2 and .[0].sha == $base_sha and .[1].sha == $upstream_sha) and
       (.commit.message | type == "string") and
       ([.commit.message | split("\n")[] | select(. == "Sync-Upstream-Automation: true")] | length == 1) and
       ([.commit.message | split("\n")[] | select(. == ("Sync-Upstream-Source: " + $source))] | length == 1) and
       ([.commit.message | split("\n")[] | select(. == ("Sync-Upstream-Base: " + $base_sha))] | length == 1) and
       ([.commit.message | split("\n")[] | select(. == ("Sync-Upstream-Policy-Verdict: " + $verdict))] | length == 1)
     ' <<<"${head_commit}" >/dev/null ||
-      fail 'head commit does not prove the trusted synchronization source, base, and verdict'
+      fail 'head commit does not prove the trusted synchronization source, base, verdict, and upstream parent'
 
     checks="$(aeris_checks_gh api "repos/${REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100")"
     jq -e --arg head_sha "${HEAD_SHA}" --arg actions_prefix "https://github.com/${REPOSITORY}/actions/runs/" '

@@ -119,7 +119,8 @@ test('connect timeout can switch to fallback while the total timeout remains ava
   assert.equal(calls.length, 3);
 });
 
-test('shared total timeout includes model discovery', async () => {
+test('shared total timeout includes model discovery', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   const calls = [];
   const stalledModels = (_url, init) =>
     new Promise((resolve, reject) => {
@@ -135,14 +136,18 @@ test('shared total timeout includes model discovery', async () => {
     });
   const api = client([stalledModels], calls, { timeoutMs: 200, deadlineAtMs: Date.now() + 20 });
 
-  await assert.rejects(
-    () => api.complete({ candidates, messages: [] }),
+  const completion = api.complete({ candidates, messages: [] });
+  const assertion = assert.rejects(
+    completion,
     (error) => error instanceof AiRequestError && error.code === 'timeout' && !error.retryable,
   );
+  t.mock.timers.tick(20);
+  await assertion;
   assert.equal(calls.length, 1);
 });
 
-test('shared total timeout prevents another fallback request after the deadline', async () => {
+test('shared total timeout prevents another fallback request after the deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   const calls = [];
   const stalledCompletion = (_url, init) =>
     new Promise((resolve, reject) => {
@@ -166,10 +171,16 @@ test('shared total timeout prevents another fallback request after the deadline'
     { timeoutMs: 200, deadlineAtMs: Date.now() + 20 },
   );
 
-  await assert.rejects(
-    () => api.complete({ candidates, messages: [] }),
+  const completion = api.complete({ candidates, messages: [] });
+  const assertion = assert.rejects(
+    completion,
     (error) => error instanceof AiRequestError && error.code === 'timeout' && !error.retryable,
   );
+  // Model discovery resolves without timers; wait until the first completion
+  // request is in flight so only its deadline timers remain pending.
+  while (calls.length < 2) await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(20);
+  await assertion;
   assert.equal(calls.length, 2);
 });
 

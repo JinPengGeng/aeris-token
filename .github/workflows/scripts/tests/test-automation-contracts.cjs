@@ -681,6 +681,13 @@ assert(
   'candidate verification must regenerate the exact tree without trusting paginated metadata',
 );
 assert(
+  verifyCandidateScript.includes('second_parent="${parents[2]:-') &&
+    verifyCandidateScript.includes('"${parent_count}" "${actual_parent}" "${second_parent}"') &&
+    verifyCandidateMetadata.includes("parentCount !== '2'") &&
+    verifyCandidateMetadata.includes('secondParent !== upstreamTip'),
+  'candidate verification must require the advertised upstream tip as the second parent',
+);
+assert(
   syncScript.includes('aeris_bounded_fetch_ref') &&
     verifyCandidateScript.includes('aeris_bounded_fetch_ref') &&
     syncScript.includes('AERIS_BOUNDED_FETCH_CREDENTIALLESS=true') &&
@@ -740,6 +747,14 @@ assert(
     verifyCandidateScript.includes('AERIS_VERIFY_BEFORE_FINAL_FENCE_HOOK') &&
     verifyCandidateScript.includes("fail 'upstream branch drifted during verification'"),
   'producer and verifier must re-fence exact refs immediately before successful completion',
+);
+assert(
+  syncScript.includes('git commit-tree "${prepared_tree}"') &&
+    syncScript.includes('-p "${base_sha}"') &&
+    syncScript.includes('-p "${upstream_sha}"') &&
+    syncScript.includes('git reset --hard "${local_sha}"') &&
+    !syncScript.includes('git commit "${commit_arguments[@]}"'),
+  'sync commits must be dual-parent commit-tree snapshots linked to the exact upstream tip',
 );
 assert(
   producerBoundIndex >= 0 &&
@@ -819,6 +834,12 @@ assert(
     autoMergeScript.includes('.base.sha == $base_sha') &&
     autoMergeScript.includes("fail 'pull request drifted before merge mutation'"),
   'direct merge must revalidate the exact managed PR snapshot before mutation',
+);
+assert(
+  autoMergeScript.includes(
+    '.parents | type == "array" and length == 2 and .[0].sha == $base_sha and .[1].sha == $upstream_sha',
+  ),
+  'direct merge must require the exact dual-parent sync commit shape',
 );
 assert(
   disarmCallIndex >= 0 && rebuildLoopIndex >= 0 && disarmCallIndex < rebuildLoopIndex,

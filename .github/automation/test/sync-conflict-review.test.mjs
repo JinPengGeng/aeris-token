@@ -149,7 +149,7 @@ function createPublishedHead(repo, bundle, candidate, materialization, headTree)
     `Sync-Upstream-Prepared-Tree: ${headTree}`,
     `Sync-Upstream-Resolver-Model-SHA: ${artifactSha(candidate.model)}`,
   ];
-  const argumentsList = ['commit-tree', headTree, '-p', bundle.base_sha];
+  const argumentsList = ['commit-tree', headTree, '-p', bundle.base_sha, '-p', bundle.upstream.sha];
   for (const message of messages) argumentsList.push('-m', message);
   return git(repo, argumentsList, {
     env: {

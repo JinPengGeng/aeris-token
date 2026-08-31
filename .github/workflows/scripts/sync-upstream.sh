@@ -423,7 +423,7 @@ latest_manual_pause_pr() {
 
 is_automation_commit() {
   local sha="$1" current_base="$2"
-  local subject body author committer source automation base_trailer actual_parent
+  local subject body author committer source automation base_trailer actual_parent parent_count
   subject="$(bounded_tree_git show -s --format=%s "${sha}")"
   body="$(bounded_tree_git show -s --format=%B "${sha}")"
   author="$(bounded_tree_git show -s --format=%ae "${sha}")"
@@ -431,13 +431,19 @@ is_automation_commit() {
   source="$(sed -n 's/^Sync-Upstream-Source: //p' <<<"${body}" | tail -n1)"
   automation="$(sed -n 's/^Sync-Upstream-Automation: //p' <<<"${body}" | tail -n1)"
   base_trailer="$(sed -n 's/^Sync-Upstream-Base: //p' <<<"${body}" | tail -n1)"
-  [[ "$(bounded_tree_git rev-list --parents -n1 "${sha}" | wc -w)" -eq 2 ]] || return 1
+  # Historical synchronization commits have exactly one parent; current ones
+  # additionally link the advertised upstream tip as their second parent.
+  parent_count="$(bounded_tree_git rev-list --parents -n1 "${sha}" | wc -w)"
+  [[ "${parent_count}" -eq 2 || "${parent_count}" -eq 3 ]] || return 1
   actual_parent="$(bounded_tree_git rev-parse "${sha}^")"
   [[ "${author}" == "${BOT_EMAIL}" && "${committer}" == "${BOT_EMAIL}" ]] || return 1
   [[ "${automation}" == true && "${source}" == "${parent}@"* ]] || return 1
   [[ "${source##*@}" =~ ^[0-9a-f]{40}$ ]] || return 1
   [[ "${subject}" == "chore: sync ${source}" ]] || return 1
   [[ "${base_trailer}" == "${actual_parent}" ]] || return 1
+  if [[ "${parent_count}" -eq 3 ]]; then
+    [[ "$(bounded_tree_git rev-parse "${sha}^2")" == "${source##*@}" ]] || return 1
+  fi
   bounded_tree_git merge-base --is-ancestor "${actual_parent}" "${current_base}"
 }
 
@@ -1192,8 +1198,19 @@ for attempt in 1 2 3; do
       -m "Sync-Upstream-Resolver-Model-SHA: ${conflict_resolver_model_sha}"
     )
   fi
-  aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git commit "${commit_arguments[@]}"
-  local_sha="$(bounded_tree_git rev-parse HEAD)"
+  # Link the exact upstream tip as a second parent so synchronization history
+  # stays connected to upstream ancestry. commit-tree leaves HEAD, the index,
+  # and the working tree untouched, so re-point the branch explicitly.
+  local_sha="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
+    git commit-tree "${prepared_tree}" \
+      -p "${base_sha}" \
+      -p "${upstream_sha}" \
+      "${commit_arguments[@]}")"
+  [[ "${local_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+    echo 'Synchronization commit creation did not return an exact commit SHA.' >&2
+    exit 1
+  }
+  aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git reset --hard "${local_sha}"
 
   fetch_source_refs
   if [[ "${base_sha}" != "${fetched_base_sha}" ||

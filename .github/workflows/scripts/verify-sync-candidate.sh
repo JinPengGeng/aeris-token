@@ -225,12 +225,13 @@ parent_line="$(bounded_tree_git rev-list --parents -n1 "${head_sha}")"
 read -r -a parents <<<"${parent_line}"
 parent_count="$((${#parents[@]} - 1))"
 actual_parent="${parents[1]:-0000000000000000000000000000000000000000}"
+second_parent="${parents[2]:-0000000000000000000000000000000000000000}"
 
 node "${METADATA_HELPER}" \
   "${pr_initial}" "${message_file}" "${REPOSITORY}" "${base_ref}" "${head_ref}" \
   "${EXPECTED_HEAD}" "${AERIS_WRITER_APP_SLUG}" "${trusted_author_id}" "${trusted_author_type}" \
   "${commit_author}" "${commit_committer}" \
-  "${parent_count}" "${actual_parent}" >"${metadata_file}" || fail 'managed metadata validation failed'
+  "${parent_count}" "${actual_parent}" "${second_parent}" >"${metadata_file}" || fail 'managed metadata validation failed'
 
 mapfile -t candidate_coordinates < <(node - "$(to_node_path "${metadata_file}")" <<'NODE'
 const fs = require('node:fs');
