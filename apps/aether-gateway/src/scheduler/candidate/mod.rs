@@ -63,6 +63,7 @@ pub(crate) async fn list_selectable_candidates(
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
+    ranking_seed: u64,
     enable_model_directives: bool,
 ) -> Result<Vec<SchedulerMinimalCandidateSelectionCandidate>, GatewayError> {
     collect_selectable_candidates(
@@ -75,6 +76,7 @@ pub(crate) async fn list_selectable_candidates(
         auth_snapshot,
         client_session_affinity,
         now_unix_secs,
+        ranking_seed,
         enable_model_directives,
     )
     .await
@@ -97,6 +99,7 @@ pub(crate) async fn list_selectable_candidates_with_skip_reasons(
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
+    ranking_seed: u64,
     enable_model_directives: bool,
 ) -> Result<
     (
@@ -115,6 +118,7 @@ pub(crate) async fn list_selectable_candidates_with_skip_reasons(
         auth_snapshot,
         client_session_affinity,
         now_unix_secs,
+        ranking_seed,
         enable_model_directives,
         None,
     )
@@ -131,6 +135,7 @@ pub(crate) async fn list_selectable_candidates_with_skip_reasons_for_request_ope
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
+    ranking_seed: u64,
     enable_model_directives: bool,
     request_operation: Option<&str>,
 ) -> Result<
@@ -150,6 +155,7 @@ pub(crate) async fn list_selectable_candidates_with_skip_reasons_for_request_ope
         auth_snapshot,
         client_session_affinity,
         now_unix_secs,
+        ranking_seed,
         enable_model_directives,
         request_operation,
     )
@@ -166,6 +172,7 @@ pub(crate) async fn list_selectable_enumerated_candidates_with_skip_reasons(
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
+    ranking_seed: u64,
 ) -> Result<
     (
         Vec<SchedulerMinimalCandidateSelectionCandidate>,
@@ -188,6 +195,7 @@ pub(crate) async fn list_selectable_enumerated_candidates_with_skip_reasons(
         auth_snapshot,
         client_session_affinity,
         now_unix_secs,
+        ranking_seed,
         ordering_config,
         priority_affinity_key,
     )
@@ -203,6 +211,7 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
+    ranking_seed: u64,
 ) -> Result<Vec<SchedulerMinimalCandidateSelectionCandidate>, GatewayError> {
     Ok(
         list_selectable_candidates_for_required_capability_without_requested_model_with_auth_limit_signal(
@@ -214,6 +223,7 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
             auth_snapshot,
             client_session_affinity,
             now_unix_secs,
+            ranking_seed,
         )
         .await?
         .0,
@@ -229,6 +239,7 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
+    ranking_seed: u64,
 ) -> Result<(Vec<SchedulerMinimalCandidateSelectionCandidate>, bool), GatewayError> {
     let normalized_api_format = normalize_api_format(candidate_api_format);
     if normalized_api_format.is_empty() {
@@ -272,6 +283,7 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
             auth_snapshot,
             client_session_affinity,
             now_unix_secs,
+            ranking_seed,
             false,
             None,
         )

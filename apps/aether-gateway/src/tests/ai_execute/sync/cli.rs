@@ -1178,7 +1178,10 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
                 *execution_runtime_hits_inner
                     .lock()
                     .expect("mutex should lock") += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                // Hold the only concurrency slot long enough for the second
+                // request to enter the bounded wait, but release it inside the
+                // 150ms wait budget so the waiter proceeds once the slot frees.
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
                 Json(json!({
                     "request_id": "trace-openai-cli-local-timeout-123",
                     "status_code": 200,

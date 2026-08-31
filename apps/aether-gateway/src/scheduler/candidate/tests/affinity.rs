@@ -49,6 +49,7 @@ async fn select_candidate(
         auth_snapshot,
         client_session_affinity,
         now_unix_secs,
+        now_unix_secs,
         false,
     )
     .await

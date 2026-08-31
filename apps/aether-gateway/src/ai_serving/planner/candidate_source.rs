@@ -27,7 +27,7 @@ use crate::cache::{
     record_candidate_row_page_cache_miss, record_candidate_row_page_cache_none, CacheLoadObserver,
     CandidatePageCacheKey, CandidatePageSnapshot, CandidateRowPageCacheKey,
 };
-use crate::clock::request_distribution_seed;
+use crate::clock::{current_unix_secs, request_distribution_seed};
 use crate::data::candidate_selection::{
     read_api_format_rows_fallback_page, read_requested_model_rows_fast_path_page,
     requested_model_candidate_names, MinimalCandidateSelectionRowSource,
@@ -171,6 +171,7 @@ impl AiCandidatePreselectionPort for GatewayLocalCandidatePreselectionPort<'_> {
                     .is_none()
                     .then_some(self.client_session_affinity)
                     .flatten(),
+                current_unix_secs(),
                 self.ranking_seed,
                 false,
                 self.request_operation,
@@ -1322,6 +1323,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                     .is_none()
                     .then_some(self.client_session_affinity.as_ref())
                     .flatten(),
+                current_unix_secs(),
                 self.scheduling_snapshot.ranking_seed(),
             )
             .await?;
@@ -2940,6 +2942,138 @@ mod tests {
                 .map(|candidate| candidate.candidate.provider_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["provider-codex", "provider-custom"]
+        );
+    }
+
+    fn open_circuit_test_app(next_probe_at_unix_secs: u64) -> AppState {
+        let open_row = standard_candidate_row("provider-open", "openai:chat", 0);
+        let healthy_row = standard_candidate_row("provider-healthy", "openai:chat", 1);
+        let candidate_repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([
+                open_row.clone(),
+                healthy_row.clone(),
+            ]));
+        let (open_provider, open_endpoint, open_key) =
+            provider_catalog_for_standard_row(&open_row, false);
+        let open_key = open_key.with_health_fields(
+            None,
+            Some(serde_json::json!({
+                "openai:chat": {
+                    "open": true,
+                    "next_probe_at_unix_secs": next_probe_at_unix_secs,
+                }
+            })),
+        );
+        let (healthy_provider, healthy_endpoint, healthy_key) =
+            provider_catalog_for_standard_row(&healthy_row, false);
+        let provider_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![open_provider, healthy_provider],
+            vec![open_endpoint, healthy_endpoint],
+            vec![open_key, healthy_key],
+        ));
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                provider_repository,
+                candidate_repository,
+            )
+            .with_encryption_key_for_tests("development-key");
+        AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(data_state)
+    }
+
+    #[tokio::test]
+    async fn first_screen_preselection_skips_open_key_until_probe_is_due() {
+        let app = open_circuit_test_app(crate::clock::current_unix_secs() + 3600);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+
+        let outcome = preselect_local_execution_candidates_with_serving(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "openai:chat",
+            "gpt-5",
+            None,
+            false,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            false,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+        )
+        .await
+        .expect("preselection should succeed");
+
+        assert_eq!(
+            outcome
+                .candidates
+                .iter()
+                .map(|candidate| candidate.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-healthy"]
+        );
+        assert!(
+            outcome.skipped_candidates.iter().any(|skipped| {
+                skipped.candidate.provider_id == "provider-open"
+                    && skipped.skip_reason == "key_circuit_open"
+            }),
+            "open key inside cooldown should be skipped as key_circuit_open: {:?}",
+            outcome
+                .skipped_candidates
+                .iter()
+                .map(|skipped| (skipped.candidate.provider_id.as_str(), skipped.skip_reason,))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn paged_preselection_skips_open_key_until_probe_is_due() {
+        let app = open_circuit_test_app(crate::clock::current_unix_secs() + 3600);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+        let mut cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "openai:chat",
+            "gpt-5",
+            None,
+            false,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            false,
+            None,
+        )
+        .await;
+
+        let mut selected_provider_ids = Vec::new();
+        let mut skipped_reasons = Vec::new();
+        while let Some(page) = cursor.next_page().await.expect("page should load") {
+            selected_provider_ids.extend(
+                page.candidates
+                    .iter()
+                    .map(|candidate| candidate.provider_id.clone()),
+            );
+            skipped_reasons.extend(
+                page.skipped_candidates
+                    .iter()
+                    .map(|skipped| (skipped.candidate.provider_id.clone(), skipped.skip_reason)),
+            );
+        }
+
+        assert_eq!(selected_provider_ids, vec!["provider-healthy".to_string()]);
+        assert!(
+            skipped_reasons.iter().any(|(provider_id, skip_reason)| {
+                provider_id == "provider-open" && *skip_reason == "key_circuit_open"
+            }),
+            "open key inside cooldown should be skipped as key_circuit_open: {skipped_reasons:?}"
         );
     }
 }

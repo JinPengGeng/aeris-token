@@ -20,6 +20,7 @@ impl<'a> PlannerAppState<'a> {
         auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
         client_session_affinity: Option<&ClientSessionAffinity>,
         now_unix_secs: u64,
+        ranking_seed: u64,
         enable_model_directives: bool,
     ) -> Result<Vec<SchedulerMinimalCandidateSelectionCandidate>, GatewayError> {
         crate::scheduler::candidate::list_selectable_candidates(
@@ -32,6 +33,7 @@ impl<'a> PlannerAppState<'a> {
             auth_snapshot,
             client_session_affinity,
             now_unix_secs,
+            ranking_seed,
             enable_model_directives,
         )
         .await
@@ -46,6 +48,7 @@ impl<'a> PlannerAppState<'a> {
         auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
         client_session_affinity: Option<&ClientSessionAffinity>,
         now_unix_secs: u64,
+        ranking_seed: u64,
         enable_model_directives: bool,
     ) -> Result<
         (
@@ -62,6 +65,7 @@ impl<'a> PlannerAppState<'a> {
             auth_snapshot,
             client_session_affinity,
             now_unix_secs,
+            ranking_seed,
             enable_model_directives,
             None,
         )
@@ -77,6 +81,7 @@ impl<'a> PlannerAppState<'a> {
         auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
         client_session_affinity: Option<&ClientSessionAffinity>,
         now_unix_secs: u64,
+        ranking_seed: u64,
         enable_model_directives: bool,
         request_operation: Option<&str>,
     ) -> Result<
@@ -101,6 +106,7 @@ impl<'a> PlannerAppState<'a> {
                 auth_snapshot,
                 client_session_affinity,
                 attempt_now_unix_secs,
+                ranking_seed,
                 enable_model_directives,
                 request_operation,
             )
@@ -132,6 +138,7 @@ impl<'a> PlannerAppState<'a> {
         auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
         client_session_affinity: Option<&ClientSessionAffinity>,
         now_unix_secs: u64,
+        ranking_seed: u64,
     ) -> Result<
         (
             Vec<SchedulerMinimalCandidateSelectionCandidate>,
@@ -148,6 +155,7 @@ impl<'a> PlannerAppState<'a> {
             auth_snapshot,
             client_session_affinity,
             now_unix_secs,
+            ranking_seed,
         )
         .await
     }
@@ -160,6 +168,7 @@ impl<'a> PlannerAppState<'a> {
         auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
         client_session_affinity: Option<&ClientSessionAffinity>,
         now_unix_secs: u64,
+        ranking_seed: u64,
     ) -> Result<Vec<SchedulerMinimalCandidateSelectionCandidate>, GatewayError> {
         let wait_timeout = Duration::from_millis(API_KEY_CONCURRENCY_WAIT_TIMEOUT_MS);
         let wait_interval = Duration::from_millis(API_KEY_CONCURRENCY_WAIT_POLL_INTERVAL_MS.max(1));
@@ -176,6 +185,7 @@ impl<'a> PlannerAppState<'a> {
                 auth_snapshot,
                 client_session_affinity,
                 attempt_now_unix_secs,
+                ranking_seed,
             )
             .await?;
 
