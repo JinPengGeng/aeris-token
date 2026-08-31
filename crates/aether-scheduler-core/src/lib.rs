@@ -1,11 +1,14 @@
 mod affinity;
 mod auth;
 mod candidate;
+mod emergency_chain;
 mod health;
 mod model;
 mod provider;
 mod ranking;
 mod request_candidate;
+mod send_admission;
+mod snapshot;
 
 pub use affinity::{
     build_scheduler_affinity_cache_key_for_api_key_id,
@@ -27,6 +30,22 @@ pub use candidate::{
     requested_capability_priority_for_candidate, CandidateRuntimeSelectabilityInput,
     EnumerateMinimalCandidateSelectionInput, SchedulerMinimalCandidateSelectionCandidate,
     SchedulerPriorityMode,
+};
+pub use emergency_chain::{
+    emergency_chain_candidate_order, evaluate_emergency_chain_gate,
+    AuthenticatedEmergencyChainPrincipal, EmergencyChainAttemptPermit,
+    EmergencyChainCandidateMatch, EmergencyChainCandidateOrderError, EmergencyChainGateDecision,
+    EmergencyChainGateError, EmergencyChainGateRequest, EmergencyChainGrant,
+    EmergencyChainGrantBuildError, EmergencyChainGrantId, EmergencyChainHash,
+    EmergencyChainLedgerAuthority, EmergencyChainLedgerError, EmergencyChainOperation,
+    EmergencyChainPermitError, EmergencyChainPrincipal, EmergencyChainRequestFingerprint,
+    EmergencyChainRequestScope, EmergencyChainRevokeError, EmergencyChainRevokeOutcome,
+    EmergencyChainSafeSkipError, EmergencyChainSafeSkipProof, EmergencyChainSessionNonce,
+    EmergencyChainSessionProgress, EmergencyChainTargetIdentity, EmergencyChainUseRequest,
+    GatewayEmergencyChainAuthority, IssueEmergencyChainGrant, LiveEmergencyChainRequestContext,
+    ServerEmergencyChainGrantActivation, ServerEmergencyChainInstant,
+    ServerNormalRoutingActivation, ServerSelectedEmergencyChainOperation,
+    TrustedEmergencyChainContext, MAX_EMERGENCY_CHAIN_GRANT_TTL_SECS,
 };
 pub use health::{
     aggregate_provider_key_health_score, any_provider_key_circuit_open_at,
@@ -65,3 +84,10 @@ pub use request_candidate::{
     SchedulerExecutionRequestCandidateSeed, SchedulerRequestCandidateReportContext,
     SchedulerRequestCandidateStatusUpdate, SchedulerResolvedReportRequestCandidateSlot,
 };
+pub use send_admission::{
+    request_send_admission, AdmittedSend, AuthorizedPhysicalSend, SendAdmissionBinding,
+    SendAdmissionBudgetEffect, SendAdmissionDecision, SendAdmissionDispatchError,
+    SendAdmissionEvidenceError, SendAdmissionIdentity, SendAdmissionRetryScope, SendAdmissionSkip,
+    SendAdmissionSkipReason, SendAdmissionStop, SendAdmissionStopReason, SendAuthorityRevision,
+};
+pub use snapshot::{SchedulerPageId, SchedulerRequestSnapshot};

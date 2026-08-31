@@ -25,15 +25,26 @@ function workflow() {
   return yaml.load(fs.readFileSync(workflowPath, 'utf8'));
 }
 
-test('Writer attestation is a default-branch-only manual workflow without inputs', () => {
+test('Writer attestation is a default-branch-only manual workflow', () => {
   const document = workflow();
-  assert.deepEqual(document.on.workflow_dispatch, null);
-  assert.deepEqual(Object.keys(document.on), ['workflow_dispatch']);
+  assert.deepEqual(document.on, { workflow_dispatch: null });
+  assert.match(document.jobs.attest.if, /github\.repository == 'JinPengGeng\/aeris-token'/);
+  assert.match(document.jobs.attest.if, /github\.actor == 'JinPengGeng'/);
+  assert.match(document.jobs.attest.if, /github\.event\.repository\.default_branch == 'main'/);
   assert.match(document.jobs.attest.if, /github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/);
   assert.equal(document.jobs.attest.environment, 'writer');
   assert.equal(document.permissions.contents, 'read');
   assert.deepEqual(document.jobs.attest.permissions, { contents: 'read' });
   assert.deepEqual(Object.entries(document.jobs.attest.permissions).filter(([, value]) => value === 'write'), []);
+  for (const flag of [
+    'AERIS_AGENTS_ENABLED',
+    'AERIS_CANDIDATE_AGENTS_ENABLED',
+    'AERIS_WRITER_ENABLED',
+    'AERIS_UPSTREAM_SYNC_ENABLED',
+    'AERIS_AUTONOMOUS_MERGE_ENABLED',
+  ]) {
+    assert.match(document.jobs.attest.if, new RegExp(`vars\\.${flag} == 'false'`));
+  }
 });
 
 test('Writer attestation mints one explicitly read-only repository token and has no mutation command', () => {
@@ -52,8 +63,14 @@ test('Writer attestation mints one explicitly read-only repository token and has
   assert.doesNotMatch(serialized, /\bgh\s+(pr|issue|api)|git\s+(push|commit)|mergePullRequest|markPullRequestReady|convertPullRequestToDraft/);
   const summary = job.steps.find((step) => /Summarize read-only attestation/.test(step.name));
   const appAttestation = job.steps.find((step) => step.id === 'writer_app_attestation');
-  assert.equal(appAttestation.env.AERIS_WRITER_APP_OWNER_DATABASE_ID, '${{ vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}');
-  assert.equal(appAttestation.env.AERIS_WRITER_APP_NODE_ID, '${{ vars.AERIS_WRITER_APP_NODE_ID }}');
+  assert.equal(
+    appAttestation.env.AERIS_WRITER_APP_OWNER_DATABASE_ID,
+    '${{ vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}',
+  );
+  assert.equal(
+    appAttestation.env.AERIS_WRITER_APP_NODE_ID,
+    '${{ vars.AERIS_WRITER_APP_NODE_ID }}',
+  );
   assert.equal(summary.env.APP_NODE_ID, '${{ steps.writer_app_attestation.outputs.app_node_id }}');
   assert.equal(summary.env.APP_OWNER_DATABASE_ID, '${{ steps.writer_app_attestation.outputs.app_owner_database_id }}');
   assert.equal(summary.env.APP_PERMISSIONS, '${{ steps.writer_app_attestation.outputs.app_permissions }}');

@@ -280,11 +280,18 @@ PoC 使用 disposable issue、`docs/automation-canary/` 和 Draft PR。当前 Dr
 - `.github/workflows/agent-candidate.yml`
 - `.github/workflows/automation-policy.yml`
 - `.github/workflows/autonomy-finalizer.yml`
+- `.github/workflows/writer-governance-canary.yml`
+- `.github/workflows/writer-identity-bootstrap.yml`
 - `.github/automation/src/autonomy-*.mjs`
+- `.github/automation/src/writer-governance-canary.mjs`
+- `.github/automation/src/writer-identity-bootstrap.mjs`
 - `.github/automation/test/autonomy-*.test.mjs`
+- `.github/automation/test/writer-governance-canary*.test.mjs`
+- `.github/automation/test/writer-identity-bootstrap*.test.mjs`
 - `.github/codex/prompts/implement.md`
 - `.github/codex/schemas/result.schema.json`
 - `docs/single-writer-autonomy-runbook.md`
+- `docs/writer-identity-bootstrap.md`
 
 计划修改：
 
@@ -335,12 +342,49 @@ GitHub API 故障，以及没有服务端 required lease check 时 pre-disarm �
 
 ## 14. Writer 现场证明与 response-loss canary 运维
 
-在启用 Writer mutation 前，从 default branch 手工运行
+在首次缺少 `AERIS_WRITER_APP_NODE_ID` 或 `AERIS_WRITER_APP_OWNER_DATABASE_ID` 时，先按
+`docs/writer-identity-bootstrap.md` 在 `writer` Environment 配置短期、单仓且仅有 Actions/Variables
+写权限的 `AERIS_IDENTITY_BOOTSTRAP_TOKEN`。保持全部五个生产开关严格为 `false`，临时设置
+`AERIS_WRITER_GOVERNANCE_CANARY_ENABLED=true` 与
+`AERIS_WRITER_IDENTITY_BOOTSTRAP_ENABLED=true`，再从 default branch 以固定 owner 手工运行无输入的
+`.github/workflows/writer-identity-bootstrap.yml`。它的 `GITHUB_TOKEN` 仍只有 `contents: read`；App JWT
+连续双读 `/app` 与 installation，再 mint 仅有 `contents:read` 的短时 installation token（不按 repo 缩窄，以免
+掩盖过宽安装范围），连续两轮完整分页读取 repository inventory，精确证明实际仅可访问 repo ID `1316750512`。
+control token 还必须通过 `/user` 绑定固定 owner、空 `X-OAuth-Scopes`、目标 repo ID 回读；GitHub 无法完整枚举
+fine-grained PAT 的全部 repo 选择，因此单仓/权限/短期到期仍是有留证的 operator gate。若 GitHub 返回 token
+expiry header，剩余有效期不得超过七天；缺少该 header 仅能记录为 operator evidence，不能当作 API 证明。运行前由
+owner 读取唯一 active `agent-head-fence-v1` ruleset 的完整详情，将其 ID 和原样 `updated_at` 分别固定为 repository
+variables `AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID` 与 `AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT`。这两个值不含
+Secret，但任何 ruleset 变更后必须由 owner 重新核对、更新，并重跑治理 canary。
+每次变量写前后都 canonical-double-read 五个生产开关、bootstrap/canary flag 和 `main` head；head 必须等于本次
+worker 的 `GITHUB_SHA`。关闭 bootstrap flag 前及成功返回前还必须双读两个身份变量，任何漂移后不再写入。全部证明
+通过后才写入上述两个身份变量并关闭 bootstrap flag；同一 `bootstrap` job 随后按顺序执行受限 read-only attestation
+与 governance proof，不以可变 `main` ref REST dispatch，也不把 bootstrap control token 传入 proof step。该 workflow
+不会开启任何生产开关；临时 Environment secret 与短期 token 保留到统一验证完成后的 cleanup 阶段再一起删除和撤销。
+
+身份变量已由该 bootstrap 绑定后，在启用 Writer mutation 前，从 default branch 手工运行
 `.github/workflows/writer-readonly-attestation.yml`。该 workflow 没有输入，只进入 custom `main`-only 的 `writer`
 Environment；workflow `GITHUB_TOKEN` 仅有 `contents: read`，临时 installation token 也显式缩窄为
 `administration: read`、`contents: read`、`pull-requests: read`。运行必须证明 App/installation 的
 ID、slug、owner、未暂停、`repository_selection=selected`、精确 Writer 权限、仅当前一个仓库可访问，
-以及 REST/GraphQL Bot 身份一致、第 1.1 节 `writer` secret lane API snapshot；它不执行 Git、PR、Issue 或其他写 mutation。
+以及 REST/GraphQL Bot 身份一致；它不执行 Git、PR、Issue 或其他写 mutation。
+
+随后保持 `AERIS_AGENTS_ENABLED`、`AERIS_CANDIDATE_AGENTS_ENABLED`、`AERIS_WRITER_ENABLED`、
+`AERIS_UPSTREAM_SYNC_ENABLED` 和 `AERIS_AUTONOMOUS_MERGE_ENABLED` 均严格为 `false`，临时设置 repository variable
+`AERIS_WRITER_GOVERNANCE_CANARY_ENABLED=true`，从 default branch 手工运行无输入的
+`.github/workflows/writer-governance-canary.yml`。该 workflow 默认关闭，同样只进入 `writer` Environment，
+且临时 installation token 仍严格只有 `administration: read`、`contents: read`、`pull-requests: read`。
+它复用 Finalizer 的 `AutonomyFinalizerGitHubClient`、classic main protection validator 和 Writer governance
+snapshot validator；每个完整读取同时覆盖 GraphQL classic main protection 与 REST 的 repository identity、
+direct collaborators、parent-inclusive ruleset/detail、Actions/workflow permissions、`writer` Environment 和
+custom deployment branch policy，并连续完成两次完整读取。两次结果必须逐次通过第 1.1 节 fence/secret-lane
+验证且字节级归一化结果一致，否则 fail closed。若 Writer token 的 ruleset response 明确省略 `bypass_actors`，仅可使用
+owner 固定的 ruleset ID、原样 `updated_at`、已审计的唯一 Writer App `Integration/always` bypass 和 token 的
+`current_user_can_bypass=always` 证明该脱敏；`null`、对象、数组异常或任一基线漂移都必须失败。step summary 仅保存
+非敏感的 snapshot SHA-256、精确 ruleset ID 和闭合字段的 snapshot 摘要；不得输出或保存 private key、installation
+token 或原始 API 响应。
+运行完成或失败后立即将 `AERIS_WRITER_GOVERNANCE_CANARY_ENABLED` 删除或恢复为 `false`，并保存 run URL、
+job log、step summary 与变量已关闭的 API 回读，作为完整治理只读 canary 证据。
 
 Finalizer response-loss live canary 仅通过 repository variable
 `AERIS_FINALIZER_RESPONSE_LOSS_CANARY` 配置，值必须是无额外字段的单行 JSON：

@@ -1,0 +1,102 @@
+name: Writer governance full-proof canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prove:
+    name: Double-read Writer governance and classic protection
+    if: >-
+      github.repository == 'JinPengGeng/aeris-token' &&
+      github.actor == 'JinPengGeng' &&
+      github.event.repository.default_branch == 'main' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      vars.AERIS_WRITER_GOVERNANCE_CANARY_ENABLED == 'true' &&
+      vars.AERIS_AGENTS_ENABLED == 'false' &&
+      vars.AERIS_CANDIDATE_AGENTS_ENABLED == 'false' &&
+      vars.AERIS_WRITER_ENABLED == 'false' &&
+      vars.AERIS_UPSTREAM_SYNC_ENABLED == 'false' &&
+      vars.AERIS_AUTONOMOUS_MERGE_ENABLED == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: writer
+    permissions:
+      contents: read
+    steps:
+      - name: Check out default branch policy
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Attest live Writer App and installation
+        id: writer_app_attestation
+        env:
+          AERIS_WRITER_APP_OWNER_DATABASE_ID: ${{ vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}
+          AERIS_WRITER_APP_ID: ${{ vars.AERIS_WRITER_APP_ID }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_APP_NODE_ID: ${{ vars.AERIS_WRITER_APP_NODE_ID }}
+          AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
+          AERIS_WRITER_APP_PRIVATE_KEY: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+        run: node .github/automation/src/github-app-attestation.mjs
+
+      - name: Mint explicitly read-only Writer token
+        id: writer_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.AERIS_WRITER_APP_ID }}
+          private-key: ${{ secrets.AERIS_WRITER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+
+      - name: Prove exact repository and Bot identity with bounded token
+        id: writer_token_proof
+        env:
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
+          AERIS_WRITER_INSTALLATION_ID: ${{ vars.AERIS_WRITER_INSTALLATION_ID }}
+          AERIS_WRITER_TOKEN: ${{ steps.writer_token.outputs.token }}
+          AERIS_WRITER_TOKEN_INSTALLATION_ID: ${{ steps.writer_token.outputs.installation-id }}
+          AERIS_WRITER_TOKEN_APP_SLUG: ${{ steps.writer_token.outputs.app-slug }}
+        run: node .github/automation/src/github-app-attestation.mjs prove-token
+
+      - name: Double-read and validate full governance snapshot
+        id: governance
+        env:
+          GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
+          AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AERIS_WRITER_APP_ID: ${{ steps.writer_app_attestation.outputs.app_id }}
+          AERIS_WRITER_APP_SLUG: ${{ steps.writer_app_attestation.outputs.app_slug }}
+          AERIS_WRITER_APP_OWNER_LOGIN: ${{ steps.writer_app_attestation.outputs.app_owner_login }}
+          AERIS_WRITER_APP_OWNER_DATABASE_ID: ${{ steps.writer_app_attestation.outputs.app_owner_database_id }}
+          AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID: ${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_RULESET_ID }}
+          AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT: ${{ vars.AERIS_WRITER_GOVERNANCE_FENCE_UPDATED_AT }}
+          AERIS_WRITER_TOKEN: ${{ steps.writer_token.outputs.token }}
+        run: node .github/automation/src/writer-governance-canary.mjs
+
+      - name: Summarize governance proof
+        env:
+          SNAPSHOT_SHA256: ${{ steps.governance.outputs.snapshot_sha256 }}
+          RULESET_ID: ${{ steps.governance.outputs.ruleset_id }}
+          SNAPSHOT_SUMMARY: ${{ steps.governance.outputs.snapshot_summary }}
+        shell: bash
+        run: |
+          {
+            echo "### Writer governance full-proof canary"
+            echo
+            printf -- '- Snapshot SHA-256: `%s`\n' "${SNAPSHOT_SHA256}"
+            printf -- '- Governance fence ruleset ID: `%s`\n' "${RULESET_ID}"
+            printf -- '- Snapshot summary: `%s`\n' "${SNAPSHOT_SUMMARY}"
+          } >>"${GITHUB_STEP_SUMMARY}"

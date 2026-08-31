@@ -9,7 +9,7 @@ use aether_scheduler_core::{
     resolve_requested_global_model_name_with_model_directives_and_request_operation,
     row_supports_requested_model_with_model_directives_and_request_operation,
     ClientSessionAffinity, EnumerateMinimalCandidateSelectionInput,
-    SchedulerMinimalCandidateSelectionCandidate,
+    SchedulerMinimalCandidateSelectionCandidate, SchedulerPageId, SchedulerRequestSnapshot,
 };
 use async_trait::async_trait;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -84,6 +84,52 @@ impl GatewayLocalCandidatePreselectionPort<'_> {
         self.model_directive_base_model(candidate_api_format)
             .unwrap_or(self.requested_model)
     }
+}
+
+/// A Responses compaction request carries the OpenAI-only `compaction_trigger`
+/// control item.  It must stay on an OpenAI Responses endpoint: treating it as
+/// an ordinary cross-format request would make Gemini/Claude candidates look
+/// eligible and defer the inevitable lossy-conversion failure until payload
+/// construction.
+fn request_candidate_api_formats_for_operation(
+    client_api_format: &str,
+    require_streaming: bool,
+    request_operation: Option<&str>,
+) -> Vec<String> {
+    let candidate_api_formats =
+        crate::ai_serving::request_candidate_api_formats(client_api_format, require_streaming)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+    restrict_candidate_api_formats_for_operation(
+        client_api_format,
+        request_operation,
+        candidate_api_formats,
+    )
+}
+
+fn restrict_candidate_api_formats_for_operation(
+    client_api_format: &str,
+    request_operation: Option<&str>,
+    candidate_api_formats: Vec<String>,
+) -> Vec<String> {
+    let is_responses_compaction = request_operation.is_some_and(|operation| {
+        operation.eq_ignore_ascii_case(crate::ai_serving::OPENAI_RESPONSES_OPERATION_COMPACT)
+    });
+    let is_standard_responses_client =
+        crate::ai_serving::normalize_api_format_alias(client_api_format) == "openai:responses";
+    if !(is_responses_compaction && is_standard_responses_client) {
+        return candidate_api_formats;
+    }
+
+    candidate_api_formats
+        .into_iter()
+        .filter(|candidate_api_format| {
+            crate::ai_serving::normalize_api_format_alias(candidate_api_format)
+                == "openai:responses"
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -219,11 +265,11 @@ pub(crate) async fn preselect_local_execution_candidates_with_serving(
     >,
     GatewayError,
 > {
-    let candidate_api_formats =
-        crate::ai_serving::request_candidate_api_formats(client_api_format, require_streaming)
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>();
+    let candidate_api_formats = request_candidate_api_formats_for_operation(
+        client_api_format,
+        require_streaming,
+        request_operation,
+    );
     preselect_local_execution_candidates_for_api_formats_with_serving(
         state,
         model_directive_policy,
@@ -264,6 +310,11 @@ pub(crate) async fn preselect_local_execution_candidates_for_api_formats_with_se
     >,
     GatewayError,
 > {
+    let candidate_api_formats = restrict_candidate_api_formats_for_operation(
+        client_api_format,
+        request_operation,
+        candidate_api_formats,
+    );
     let model_directive_routing_models = resolve_model_directive_routing_models(
         model_directive_policy,
         &candidate_api_formats,
@@ -308,7 +359,9 @@ pub(crate) struct LocalCandidatePreselectionPageCursor<'a> {
     model_directive_routing_models: BTreeMap<String, String>,
     model_directive_policy_cache_key: String,
     ordering_config: SchedulerOrderingConfig,
-    ranking_seed: u64,
+    scheduling_snapshot: SchedulerRequestSnapshot,
+    next_page_ordinal: u32,
+    last_emitted_page_id: Option<SchedulerPageId>,
     priority_page_emitted: bool,
     deferred_pages_by_format: BTreeMap<
         String,
@@ -362,23 +415,30 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         allow_priority_page_cache: bool,
         trace_id: Option<&str>,
     ) -> Self {
-        let candidate_api_formats =
-            crate::ai_serving::request_candidate_api_formats(client_api_format, require_streaming)
-                .into_iter()
-                .map(str::to_string)
-                .collect::<Vec<_>>();
+        let candidate_api_formats = request_candidate_api_formats_for_operation(
+            client_api_format,
+            require_streaming,
+            request_operation,
+        );
         let model_directive_routing_models = resolve_model_directive_routing_models(
             model_directive_policy,
             &candidate_api_formats,
             requested_model,
         );
 
-        let ordering_config =
-            super::candidate_ranking::scheduler_ordering_config_for_routing_policy(
-                state,
-                routing_policy,
-            )
-            .await;
+        let ranking_seed = request_distribution_seed();
+        let (generation, ordering_config) = loop {
+            let generation = state.app().scheduler_affinity_epoch();
+            let ordering_config =
+                super::candidate_ranking::scheduler_ordering_config_for_routing_policy(
+                    state,
+                    routing_policy,
+                )
+                .await;
+            if state.app().scheduler_affinity_epoch() == generation {
+                break (generation, ordering_config);
+            }
+        };
 
         Self {
             state,
@@ -399,7 +459,9 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             model_directive_routing_models,
             model_directive_policy_cache_key: model_directive_policy.cache_key().to_string(),
             ordering_config,
-            ranking_seed: request_distribution_seed(),
+            scheduling_snapshot: SchedulerRequestSnapshot::new(generation, ranking_seed),
+            next_page_ordinal: 0,
+            last_emitted_page_id: None,
             priority_page_emitted: false,
             deferred_pages_by_format: BTreeMap::new(),
             format_index: 0,
@@ -425,7 +487,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         >,
         GatewayError,
     > {
-        if !self.priority_page_emitted {
+        let next = if !self.priority_page_emitted {
             self.priority_page_emitted = true;
             let mut priority_page = self.cached_next_priority_page().await?;
             if self.routing_policy.is_some() {
@@ -438,11 +500,22 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             }
             if !priority_page.candidates.is_empty() || !priority_page.skipped_candidates.is_empty()
             {
-                return Ok(Some(priority_page));
+                Some(priority_page)
+            } else {
+                self.next_page_after_priority().await?
             }
-        }
+        } else {
+            self.next_page_after_priority().await?
+        };
 
-        self.next_page_after_priority().await
+        if next.is_some() {
+            self.last_emitted_page_id =
+                Some(self.scheduling_snapshot.page_id(self.next_page_ordinal));
+            self.next_page_ordinal = self.next_page_ordinal.saturating_add(1);
+        } else {
+            self.last_emitted_page_id = None;
+        }
+        Ok(next)
     }
 
     async fn next_page_after_priority(
@@ -511,6 +584,16 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         self.seen_candidate_keys.clear();
         self.priority_page_emitted = false;
         self.deferred_pages_by_format.clear();
+        self.next_page_ordinal = 0;
+        self.last_emitted_page_id = None;
+    }
+
+    pub(crate) fn scheduling_snapshot(&self) -> SchedulerRequestSnapshot {
+        self.scheduling_snapshot
+    }
+
+    pub(crate) fn last_emitted_page_id(&self) -> Option<SchedulerPageId> {
+        self.last_emitted_page_id
     }
 
     pub(crate) fn resolved_page_cache_preselection_mode(&self) -> &'static str {
@@ -591,7 +674,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             self.required_capabilities.as_ref(),
             self.routing_policy.as_ref(),
             self.request_auth_channel.as_deref(),
-            self.state.app().scheduler_affinity_epoch(),
+            self.scheduling_snapshot.generation(),
             self.key_mode.cache_key_name(),
             self.use_api_format_alias_match,
             self.client_session_affinity.as_ref(),
@@ -1239,7 +1322,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                     .is_none()
                     .then_some(self.client_session_affinity.as_ref())
                     .flatten(),
-                self.ranking_seed,
+                self.scheduling_snapshot.ranking_seed(),
             )
             .await?;
         let skipped_candidates = skipped_candidates
@@ -1436,6 +1519,31 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn compaction_operation_excludes_non_responses_provider_formats() {
+        assert_eq!(
+            request_candidate_api_formats_for_operation("openai:responses", true, Some("compact"),),
+            vec!["openai:responses"]
+        );
+        assert_eq!(
+            request_candidate_api_formats_for_operation("openai:responses", true, None),
+            vec![
+                "openai:responses",
+                "openai:chat",
+                "claude:messages",
+                "gemini:generate_content"
+            ]
+        );
+        assert_eq!(
+            request_candidate_api_formats_for_operation(
+                "openai:responses:compact",
+                false,
+                Some("compact"),
+            ),
+            vec!["openai:responses:compact"]
+        );
+    }
 
     #[derive(Default)]
     struct EmptyFallbackCountingRepository {
@@ -1763,6 +1871,14 @@ mod tests {
             .expect("first candidate should be present");
         assert_eq!(first_page.candidates.len(), 1);
         assert_eq!(first_page.candidates[0].provider_id, "provider-first");
+        let first_page_id = cursor
+            .last_emitted_page_id()
+            .expect("first page should have an id");
+        assert_eq!(first_page_id.ordinal(), 0);
+        assert_eq!(
+            first_page_id.generation(),
+            cursor.scheduling_snapshot().generation()
+        );
 
         let second_page = cursor
             .next_page()
@@ -1771,11 +1887,155 @@ mod tests {
             .expect("second candidate should not be skipped");
         assert_eq!(second_page.candidates.len(), 1);
         assert_eq!(second_page.candidates[0].provider_id, "provider-second");
+        let second_page_id = cursor
+            .last_emitted_page_id()
+            .expect("second page should have an id");
+        assert_eq!(second_page_id.ordinal(), 1);
+        assert_eq!(second_page_id.generation(), first_page_id.generation());
         assert!(cursor
             .next_page()
             .await
             .expect("exhausted formats should finish in memory")
             .is_none());
+        assert!(cursor.last_emitted_page_id().is_none());
+
+        cursor.restart_scan();
+        let restarted_first_page = cursor
+            .next_page()
+            .await
+            .expect("restarted first page should load")
+            .expect("restarted first candidate should be present");
+        assert_eq!(
+            restarted_first_page.candidates[0].provider_id,
+            "provider-first"
+        );
+        assert_eq!(cursor.last_emitted_page_id(), Some(first_page_id));
+    }
+
+    #[tokio::test]
+    async fn request_scheduling_snapshot_survives_later_runtime_generation_changes() {
+        let app = AppState::new().expect("gateway state should build");
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+        let cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "openai:chat",
+            "gpt-5",
+            None,
+            false,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            false,
+            None,
+        )
+        .await;
+        let snapshot = cursor.scheduling_snapshot();
+
+        let next_generation = app.invalidate_scheduler_affinity_cache();
+
+        assert!(next_generation > snapshot.generation());
+        assert_eq!(cursor.scheduling_snapshot(), snapshot);
+        assert_eq!(
+            cursor.scheduling_snapshot().ranking_seed(),
+            snapshot.ranking_seed()
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_request_snapshot_reproduces_load_balance_page_order() {
+        let rows = (0..8)
+            .map(|index| standard_candidate_row(&format!("provider-{index}"), "openai:chat", 0))
+            .collect::<Vec<_>>();
+        let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows));
+        let data_state =
+            GatewayDataState::with_minimal_candidate_selection_reader_for_tests(repository)
+                .with_system_config_values_for_tests([(
+                    "scheduling_mode".to_string(),
+                    serde_json::json!("load_balance"),
+                )]);
+        let app = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(data_state);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+        let mut first_cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "openai:chat",
+            "gpt-5",
+            None,
+            false,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            false,
+            Some("trace-deterministic-first"),
+        )
+        .await;
+        let mut second_cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "openai:chat",
+            "gpt-5",
+            None,
+            false,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            false,
+            Some("trace-deterministic-second"),
+        )
+        .await;
+        let snapshot =
+            SchedulerRequestSnapshot::new(first_cursor.scheduling_snapshot().generation(), 0x5eed);
+        first_cursor.scheduling_snapshot = snapshot;
+        second_cursor.scheduling_snapshot = snapshot;
+
+        let first_order = first_cursor
+            .next_page()
+            .await
+            .expect("first deterministic page should load")
+            .expect("first deterministic page should exist")
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.provider_id)
+            .collect::<Vec<_>>();
+        let second_order = second_cursor
+            .next_page()
+            .await
+            .expect("second deterministic page should load")
+            .expect("second deterministic page should exist")
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.provider_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(first_order, second_order);
+        assert_eq!(
+            first_cursor.last_emitted_page_id(),
+            Some(snapshot.page_id(0))
+        );
+        assert_eq!(
+            second_cursor.last_emitted_page_id(),
+            Some(snapshot.page_id(0))
+        );
     }
 
     #[tokio::test]

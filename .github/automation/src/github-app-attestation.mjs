@@ -132,17 +132,19 @@ export class GitHubAppAttestationClient {
     this.timeoutMs = timeoutMs;
   }
 
-  async request(pathname) {
+  async request(pathname, { method = 'GET', body, expectedStatuses = [200] } = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const response = await this.fetchImpl(`${this.apiUrl}${pathname}`, {
-        method: 'GET',
+        method,
         headers: {
           accept: 'application/vnd.github+json',
           authorization: `Bearer ${this.jwt}`,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
           'x-github-api-version': '2022-11-28',
         },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: controller.signal,
       });
       if (!response || typeof response.status !== 'number' || typeof response.text !== 'function') {
@@ -150,9 +152,14 @@ export class GitHubAppAttestationClient {
       }
       let text;
       try { text = await response.text(); } catch { reject('GitHub App attestation response body failed'); }
+      if (Buffer.byteLength(text, 'utf8') > MAXIMUM_PROOF_BYTES) {
+        reject('GitHub App attestation response is too large');
+      }
       let value;
       try { value = JSON.parse(text); } catch { reject('GitHub App attestation returned invalid JSON', response.status); }
-      if (!response.ok) reject(`GitHub App attestation returned HTTP ${response.status}`, response.status);
+      if (!expectedStatuses.includes(response.status)) {
+        reject(`GitHub App attestation returned HTTP ${response.status}`, response.status);
+      }
       return object(value, 'GitHub App attestation response');
     } catch (error) {
       if (error instanceof GitHubAppAttestationError) throw error;
@@ -166,6 +173,17 @@ export class GitHubAppAttestationClient {
 
   getInstallation(installationId) {
     return this.request(`/app/installations/${positiveInteger(installationId, 'Writer installation id')}`);
+  }
+
+  createReadOnlyInstallationInventoryToken(installationId) {
+    return this.request(
+      `/app/installations/${positiveInteger(installationId, 'Writer installation id')}/access_tokens`,
+      {
+        method: 'POST',
+        body: { permissions: { contents: 'read' } },
+        expectedStatuses: [201],
+      },
+    );
   }
 }
 
@@ -225,6 +243,31 @@ export class GitHubInstallationTokenProofClient {
 
   getInstallationRepositories() {
     return this.request('/installation/repositories?per_page=2&page=1');
+  }
+
+  async getCompleteInstallationRepositoryInventory() {
+    const repositories = [];
+    let totalCount = null;
+    for (let page = 1; page <= 100; page += 1) {
+      const response = await this.request(`/installation/repositories?per_page=100&page=${page}`);
+      if (!Number.isSafeInteger(response.total_count) || response.total_count < 0 ||
+          response.total_count > 10_000 || !Array.isArray(response.repositories) ||
+          response.repositories.length > 100) {
+        reject('GitHub installation repository inventory page is invalid');
+      }
+      if (totalCount === null) totalCount = response.total_count;
+      if (response.total_count !== totalCount) {
+        reject('GitHub installation repository inventory total drifted during pagination');
+      }
+      repositories.push(...response.repositories);
+      if (repositories.length === totalCount) {
+        return Object.freeze({ total_count: totalCount, repositories: Object.freeze(repositories) });
+      }
+      if (repositories.length > totalCount || response.repositories.length === 0) {
+        reject('GitHub installation repository inventory pagination is inconsistent');
+      }
+    }
+    reject('GitHub installation repository inventory exceeds the bounded pagination limit');
   }
 
   getBot(login) {

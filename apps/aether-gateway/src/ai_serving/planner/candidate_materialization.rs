@@ -12,7 +12,8 @@ use aether_routing_core::{
     RoutingCandidateTrace, RoutingDecisionTrace,
 };
 use aether_scheduler_core::{
-    ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate, SchedulerRankingOutcome,
+    ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate, SchedulerPageId,
+    SchedulerRankingOutcome, SchedulerRequestSnapshot,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -992,6 +993,11 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 "candidate_page_load",
                 page_started_at.elapsed().as_millis() as u64,
             );
+            let Some(page_id) = self.page_cursor.last_emitted_page_id() else {
+                return Err(GatewayError::Internal(
+                    "candidate page was emitted without a scheduling page id".to_string(),
+                ));
+            };
 
             if page_is_exact_auth_api_key_concurrency_limited(&page) {
                 if self.wait_for_auth_api_key_concurrency_retry().await {
@@ -1004,7 +1010,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
 
             let resolve_started_at = std::time::Instant::now();
             let (candidates, resolved_skipped) =
-                resolve_priority_candidate_page_with_cache(self, page.candidates).await;
+                resolve_priority_candidate_page_with_cache(self, page_id, page.candidates).await;
             observe_gateway_stage_ms(
                 "candidate_page_resolve",
                 resolve_started_at.elapsed().as_millis() as u64,
@@ -1016,6 +1022,10 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 .map(|skipped| (self.decorate_skipped_candidate)(skipped))
                 .collect::<Vec<_>>();
             let skipped_candidate_count = skipped_candidates.len();
+            // `pending_items` is the materialized page snapshot. Skip sets
+            // filter it in place; they never invoke ranking or fetch a new
+            // page. A new resolved snapshot is loaded only after this queue
+            // is exhausted by the next loop iteration.
             self.candidate_count = self
                 .candidate_count
                 .saturating_add(candidates.len() + skipped_candidate_count);
@@ -1278,6 +1288,7 @@ pub(crate) fn remember_first_local_candidate_affinity(
 
 async fn resolve_priority_candidate_page_with_cache(
     cursor: &RequestedModelAttemptPageCursor<'_>,
+    page_id: SchedulerPageId,
     page_candidates: Vec<SchedulerMinimalCandidateSelectionCandidate>,
 ) -> (
     Vec<EligibleLocalExecutionCandidate>,
@@ -1309,7 +1320,7 @@ async fn resolve_priority_candidate_page_with_cache(
         cursor.required_capabilities.as_ref(),
         cursor.routing_policy.as_ref(),
         cursor.request_auth_channel.as_deref(),
-        cursor.state.app().scheduler_affinity_epoch(),
+        cursor.page_cursor.scheduling_snapshot(),
         cursor.page_cursor.resolved_page_cache_preselection_mode(),
         cursor
             .page_cursor
@@ -1319,6 +1330,7 @@ async fn resolve_priority_candidate_page_with_cache(
             .page_cursor
             .resolved_page_cache_model_directive_policy_hash(),
         cursor.resolution_mode,
+        page_id,
     );
     let page_candidates_for_fallback = page_candidates;
     let app = cursor.state.app();
@@ -1336,6 +1348,7 @@ async fn resolve_priority_candidate_page_with_cache(
     let routing_policy = cursor.routing_policy.as_ref();
     let request_auth_channel = cursor.request_auth_channel.as_deref();
     let resolution_mode = cursor.resolution_mode;
+    let scheduling_snapshot = cursor.page_cursor.scheduling_snapshot();
     let cached = cache
         .get_or_load_once_stale_while_revalidating(
             key,
@@ -1353,6 +1366,8 @@ async fn resolve_priority_candidate_page_with_cache(
                     routing_policy.cloned(),
                     request_auth_channel.map(ToOwned::to_owned),
                     resolution_mode,
+                    scheduling_snapshot,
+                    page_id,
                 )
             },
             || {
@@ -1367,6 +1382,8 @@ async fn resolve_priority_candidate_page_with_cache(
                     routing_policy.cloned(),
                     request_auth_channel.map(ToOwned::to_owned),
                     resolution_mode,
+                    scheduling_snapshot,
+                    page_id,
                 )
             },
             CacheLoadObserver::new()
@@ -1379,11 +1396,16 @@ async fn resolve_priority_candidate_page_with_cache(
         .unwrap_or(None);
 
     match cached {
-        Some(snapshot) => (
-            snapshot.candidates.clone(),
-            snapshot.resolved_skipped.clone(),
-        ),
-        None => {
+        Some(snapshot)
+            if snapshot.page_id == page_id
+                && snapshot.scheduling_snapshot == cursor.page_cursor.scheduling_snapshot() =>
+        {
+            (
+                snapshot.candidates.clone(),
+                snapshot.resolved_skipped.clone(),
+            )
+        }
+        Some(_) | None => {
             if page_candidates_for_fallback.is_empty() {
                 return (Vec::new(), Vec::new());
             }
@@ -1416,6 +1438,8 @@ async fn resolve_candidate_page_snapshot(
     routing_policy: Option<ResolvedRoutingPolicy>,
     request_auth_channel: Option<String>,
     resolution_mode: LocalCandidateResolutionMode,
+    scheduling_snapshot: SchedulerRequestSnapshot,
+    page_id: SchedulerPageId,
 ) -> Result<Option<Arc<CandidateResolvedPageSnapshot>>, GatewayError> {
     let state = PlannerAppState::new(&app);
     let (candidates, resolved_skipped) = resolve_and_rank_logical_local_execution_candidates(
@@ -1433,6 +1457,8 @@ async fn resolve_candidate_page_snapshot(
     )
     .await;
     Ok(Some(Arc::new(CandidateResolvedPageSnapshot {
+        scheduling_snapshot,
+        page_id,
         candidates,
         resolved_skipped,
     })))
@@ -2818,6 +2844,7 @@ mod tests {
             .expect("candidate source should succeed")
             .expect("a different credential should remain");
         assert_eq!(key_b_attempt.eligible.candidate.key_id, "key-b");
+        assert_eq!(key_b_attempt.candidate_index, 1);
 
         source.skip_endpoint("endpoint-1");
         let endpoint_2_attempt = source
@@ -2826,6 +2853,7 @@ mod tests {
             .expect("candidate source should succeed")
             .expect("a different endpoint should remain");
         assert_eq!(endpoint_2_attempt.eligible.candidate.key_id, "key-c");
+        assert_eq!(endpoint_2_attempt.candidate_index, 2);
         assert_eq!(
             endpoint_2_attempt.eligible.candidate.endpoint_id,
             "endpoint-2"
