@@ -6749,7 +6749,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                     report_context,
                                     request_id,
                                     candidate_id,
-                                    &report_kind,
+                                    report_kind,
                                     headers,
                                     prefetched_usage_telemetry.clone(),
                                     &provider_prefetched_body,
