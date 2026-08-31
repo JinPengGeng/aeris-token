@@ -483,4 +483,55 @@ expect_rejected 'object directory environment override' \
     'source "$1"; export AERIS_BOUNDED_FETCH_TEST_MODE=true AERIS_BOUNDED_FETCH_TEST_FIXTURE=true; aeris_bounded_fetch_init /dev/null' \
     bash "${SCRIPT_ROOT}/bounded-git-fetch.sh"
 
+unset GIT_SSH GIT_SSH_COMMAND SSH_ASKPASS GIT_ASKPASS GIT_CONFIG_COUNT \
+  GIT_CONFIG_PARAMETERS GIT_CONFIG_SYSTEM GIT_CONFIG_GLOBAL GIT_CONFIG \
+  GIT_PROXY_COMMAND GIT_HTTP_PROXY_AUTHMETHOD GIT_SSL_NO_VERIFY GIT_SSL_CAINFO \
+  GIT_SSL_CAPATH CURL_HOME HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY \
+  http_proxy https_proxy all_proxy no_proxy
+for transport_env in GIT_SSH_COMMAND SSH_ASKPASS GIT_CONFIG_COUNT; do
+  expect_rejected "credentialless inherited ${transport_env}" \
+    env "${transport_env}=hostile" bash -c '
+      source "$1"
+      export AERIS_BOUNDED_FETCH_TEST_MODE=true AERIS_BOUNDED_FETCH_TEST_FIXTURE=true
+      export AERIS_BOUNDED_FETCH_CREDENTIALLESS=true
+      aeris_bounded_network_git ls-remote https://github.com/example/repo.git refs/heads/main
+    ' bash "${SCRIPT_ROOT}/bounded-git-fetch.sh"
+done
+
+for config_case in \
+  'core.sshCommand=!hostile' \
+  'url.https://attacker.invalid/.insteadOf=https://github.com/' \
+  'credential.https://github.com.username=secret-user' \
+  'http.proxy=http://127.0.0.1:9' \
+  'http.extraHeader=X-Hostile: true' \
+  'http.sslVerify=false' \
+  'http.sslCAInfo=/tmp/hostile-ca.pem' \
+  'http.https://github.com/.sslVerify=false'; do
+  key="${config_case%%=*}"
+  value="${config_case#*=}"
+  git config --local "${key}" "${value}"
+  expect_rejected "credentialless Git config ${key}" \
+    bash -c '
+      source "$1"
+      export AERIS_BOUNDED_FETCH_TEST_MODE=true AERIS_BOUNDED_FETCH_TEST_FIXTURE=true
+      export AERIS_BOUNDED_FETCH_CREDENTIALLESS=true
+      aeris_bounded_network_git ls-remote https://github.com/example/repo.git refs/heads/main
+    ' bash "${SCRIPT_ROOT}/bounded-git-fetch.sh"
+  git config --local --unset-all "${key}"
+done
+
+MULTIPACK_STAGE="${RUN_ROOT}/multi-pack-stage.git"
+git clone -q --bare --no-hardlinks "${REMOTE}" "${MULTIPACK_STAGE}"
+git -C "${MULTIPACK_STAGE}" repack -adq
+MULTIPACK_IDX="$(find "${MULTIPACK_STAGE}/objects/pack" -type f -name '*.idx' -print -quit)"
+MULTIPACK_PACK="${MULTIPACK_IDX%.idx}.pack"
+MULTIPACK_COUNT="$(git verify-pack -v "${MULTIPACK_IDX}" | awk 'length($1) == 40 && $1 ~ /^[0-9a-f]+$/ { count += 1 } END { print count + 0 }')"
+cp "${MULTIPACK_IDX}" "${MULTIPACK_STAGE}/objects/pack/pack-duplicate.idx"
+cp "${MULTIPACK_PACK}" "${MULTIPACK_STAGE}/objects/pack/pack-duplicate.pack"
+reset_totals
+AERIS_FETCH_MAX_RECEIVED_OBJECTS="${MULTIPACK_COUNT}"
+expect_rejected 'multi-pack aggregate object count' \
+  aeris_bounded_list_stage_objects "${MULTIPACK_STAGE}/objects" "${MULTIPACK_STAGE}/objects.list"
+AERIS_FETCH_MAX_RECEIVED_OBJECTS=250000
+
 printf 'PASS bounded Git fetch and delta boundaries (%s)\n' "${RUN_ROOT}"

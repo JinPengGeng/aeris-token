@@ -12,6 +12,11 @@ bounded_tree_git() {
   aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git "$@"
 }
 
+bounded_tree_blob_to_file() {
+  local revision="$1" path="$2" destination="$3"
+  bounded_tree_git show "${revision}:${path}" >"${destination}"
+}
+
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 : "${AERIS_SYNC_APP_SLUG:?AERIS_SYNC_APP_SLUG is required}"
@@ -56,22 +61,106 @@ sync_app_bot_type=''
 published_pr_number=''
 published_pr_url=''
 published_pr_body=''
+GITHUB_API_PAGE_BYTES=2097152
+GITHUB_API_MAX_PAGES=10
+GITHUB_API_TOTAL_BYTES=$((GITHUB_API_PAGE_BYTES * GITHUB_API_MAX_PAGES))
 
 output() {
   printf '%s=%s\n' "$1" "$2" >>"${GITHUB_OUTPUT}"
 }
 
+aeris_bounded_gh() {
+  aeris_require_active_autonomy_window || return
+  aeris_bounded_run "${GITHUB_API_PAGE_BYTES}" gh "$@"
+}
+
+aeris_read_bounded_api_array_pages() {
+  local endpoint="$1" destination="$2" label="$3"
+  shift 3
+  local page_dir page_file count size total_bytes=0 page status terminal_proven=false
+  local -a query_args=("$@") page_files=()
+  page_dir="$(mktemp -d)" || return 1
+  for ((page = 1; page <= GITHUB_API_MAX_PAGES + 1; page += 1)); do
+    page_file="${page_dir}/page-${page}.json"
+    if ! aeris_bounded_gh api --method GET "${endpoint}" \
+      "${query_args[@]}" -f per_page=100 -f "page=${page}" >"${page_file}"; then
+      rm -f -- "${page_dir}"/page-*.json
+      rmdir -- "${page_dir}" 2>/dev/null || true
+      echo "Unable to read authoritative ${label} page ${page}." >&2
+      return 1
+    fi
+    size="$(wc -c <"${page_file}")"
+    count="$(aeris_bounded_run 1024 jq -er \
+      'if type == "array" and length <= 100 then length else error("invalid bounded page") end' \
+      "${page_file}")" || {
+      rm -f -- "${page_dir}"/page-*.json
+      rmdir -- "${page_dir}" 2>/dev/null || true
+      echo "Authoritative ${label} page ${page} is not a bounded JSON array." >&2
+      return 1
+    }
+    if [[ ! "${size}" =~ ^[0-9]+$ || ${size} -le 0 || ${size} -gt ${GITHUB_API_PAGE_BYTES} ||
+          ! "${count}" =~ ^[0-9]+$ ]]; then
+      rm -f -- "${page_dir}"/page-*.json
+      rmdir -- "${page_dir}" 2>/dev/null || true
+      echo "Authoritative ${label} page ${page} exceeds its resource bound." >&2
+      return 1
+    fi
+    if ((page > GITHUB_API_MAX_PAGES)); then
+      if ((count != 0)); then
+        rm -f -- "${page_dir}"/page-*.json
+        rmdir -- "${page_dir}" 2>/dev/null || true
+        echo "Authoritative ${label} exceeds ${GITHUB_API_MAX_PAGES} pages." >&2
+        return 1
+      fi
+      rm -f -- "${page_file}"
+      break
+    fi
+    total_bytes=$((total_bytes + size))
+    if ((total_bytes > GITHUB_API_TOTAL_BYTES)); then
+      rm -f -- "${page_dir}"/page-*.json
+      rmdir -- "${page_dir}" 2>/dev/null || true
+      echo "Authoritative ${label} exceeds its aggregate resource bound." >&2
+      return 1
+    fi
+    page_files+=("${page_file}")
+    if ((count < 100)); then
+      terminal_proven=true
+      break
+    fi
+  done
+  if [[ "${terminal_proven}" != true && ${page} -le ${GITHUB_API_MAX_PAGES} ]]; then
+    rm -f -- "${page_dir}"/page-*.json
+    rmdir -- "${page_dir}" 2>/dev/null || true
+    echo "Authoritative ${label} pagination did not prove a terminal page." >&2
+    return 1
+  fi
+  if ((${#page_files[@]} == 0)); then
+    printf '[]\n' >"${destination}"
+    status=0
+  else
+    set +e
+    aeris_bounded_run "${GITHUB_API_TOTAL_BYTES}" jq -cs 'add' \
+      "${page_files[@]}" >"${destination}"
+    status=$?
+    set -e
+  fi
+  rm -f -- "${page_dir}"/page-*.json
+  rmdir -- "${page_dir}" 2>/dev/null || true
+  return "${status}"
+}
+
 list_sync_prs() {
-  aeris_gh api --paginate --slurp \
-    --method GET \
-    "repos/${GITHUB_REPOSITORY}/pulls" \
-    -f state=all \
-    -f base="${BASE_BRANCH}" \
-    -f head="${repo_owner}:${SYNC_BRANCH}" \
-    -f sort=updated \
-    -f direction=desc \
-    -f per_page=100 |
-    jq -c '[.[][] | {
+  local response status
+  response="$(mktemp)" || return 1
+  aeris_read_bounded_api_array_pages \
+    "repos/${GITHUB_REPOSITORY}/pulls" "${response}" 'synchronization pull requests' \
+    -f state=all -f "base=${BASE_BRANCH}" -f "head=${repo_owner}:${SYNC_BRANCH}" \
+    -f sort=updated -f direction=desc || {
+    rm -f -- "${response}"
+    return 1
+  }
+  set +e
+  aeris_bounded_run "${GITHUB_API_TOTAL_BYTES}" jq -c '[.[] | {
       number,
       url:.html_url,
       state:(.state | ascii_upcase),
@@ -82,7 +171,11 @@ list_sync_prs() {
       updatedAt:.updated_at,
       body:(.body // ""),
       author:(.user.login // "")
-    }]'
+    }]' "${response}"
+  status=$?
+  set -e
+  rm -f -- "${response}"
+  return "${status}"
 }
 
 refresh_prs() {
@@ -107,9 +200,22 @@ refresh_prs() {
 }
 
 pr_bot_comments() {
-  aeris_gh api --paginate \
-    "repos/${GITHUB_REPOSITORY}/issues/$1/comments?per_page=100" \
-    --jq ".[] | select(.user.login == \"${SYNC_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") | .body"
+  local response status
+  response="$(mktemp)" || return 1
+  aeris_read_bounded_api_array_pages \
+    "repos/${GITHUB_REPOSITORY}/issues/$1/comments" "${response}" \
+    'synchronization pull request comments' || {
+    rm -f -- "${response}"
+    return 1
+  }
+  set +e
+  aeris_bounded_run "${GITHUB_API_TOTAL_BYTES}" jq -r \
+    --arg sync "${SYNC_APP_BOT_LOGIN}" --arg legacy "${LEGACY_BOT_LOGIN}" \
+    '.[] | select(.user.login == $sync or .user.login == $legacy) | .body' "${response}"
+  status=$?
+  set -e
+  rm -f -- "${response}"
+  return "${status}"
 }
 
 is_sync_automation_login() {
@@ -121,7 +227,7 @@ issue_comment_once() {
   marker="<!-- upstream-sync-${key} -->"
   comments="$(pr_bot_comments "${number}")"
   if [[ "${comments}" != *"${marker}"* ]]; then
-    aeris_gh api --method POST \
+    aeris_bounded_gh api --method POST \
       "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" \
       -f body="${marker}
 ${message}" >/dev/null
@@ -135,27 +241,51 @@ pr_comment_once() {
 # Authenticate the planned SHA before push so an interrupted publication can
 # recover without treating commit author fields as an ownership boundary.
 set_pending_tip() {
-  local number="$1" sha="$2" comment_id body
+  local number="$1" sha="$2" comment_id body comments_file
   body="<!-- upstream-sync-pending-tip:${sha} -->
 Prepared automation branch tip ${sha}."
-  comment_id="$(aeris_gh api --paginate \
-    "repos/${GITHUB_REPOSITORY}/issues/${number}/comments?per_page=100" \
-    --jq ".[] | select((.user.login == \"${SYNC_APP_BOT_LOGIN}\" or .user.login == \"${LEGACY_BOT_LOGIN}\") and (.body | startswith(\"<!-- upstream-sync-pending-tip:\"))) | .id" |
-    tail -n1)"
+  comments_file="$(mktemp)" || return 1
+  aeris_read_bounded_api_array_pages \
+    "repos/${GITHUB_REPOSITORY}/issues/${number}/comments" "${comments_file}" \
+    'synchronization pull request comments' || {
+    rm -f -- "${comments_file}"
+    return 1
+  }
+  comment_id="$(aeris_bounded_run 1024 jq -r \
+    --arg sync "${SYNC_APP_BOT_LOGIN}" --arg legacy "${LEGACY_BOT_LOGIN}" \
+    '[.[] | select((.user.login == $sync or .user.login == $legacy) and
+      ((.body // "") | startswith("<!-- upstream-sync-pending-tip:"))) | .id] | last // empty' \
+    "${comments_file}")" || {
+    rm -f -- "${comments_file}"
+    return 1
+  }
+  rm -f -- "${comments_file}"
   if [[ -n "${comment_id}" ]]; then
-    aeris_gh api \
+    aeris_bounded_gh api \
       --method PATCH \
       "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
       -f body="${body}" >/dev/null
   else
-    aeris_gh pr comment --repo "${GITHUB_REPOSITORY}" "${number}" --body "${body}" >/dev/null
+    aeris_bounded_gh pr comment --repo "${GITHUB_REPOSITORY}" "${number}" --body "${body}" >/dev/null
   fi
 }
 
 latest_close_actor() {
-  aeris_gh api --paginate \
-    "repos/${GITHUB_REPOSITORY}/issues/$1/events?per_page=100" \
-    --jq '.[] | select(.event == "closed") | .actor.login' | tail -n1
+  local response status
+  response="$(mktemp)" || return 1
+  aeris_read_bounded_api_array_pages \
+    "repos/${GITHUB_REPOSITORY}/issues/$1/events" "${response}" \
+    'synchronization pull request events' || {
+    rm -f -- "${response}"
+    return 1
+  }
+  set +e
+  aeris_bounded_run 1024 jq -r \
+    '[.[] | select(.event == "closed") | .actor.login] | last // empty' "${response}"
+  status=$?
+  set -e
+  rm -f -- "${response}"
+  return "${status}"
 }
 
 pr_was_auto_closed() {
@@ -220,7 +350,7 @@ is_automation_commit() {
   automation="$(sed -n 's/^Sync-Upstream-Automation: //p' <<<"${body}" | tail -n1)"
   base_trailer="$(sed -n 's/^Sync-Upstream-Base: //p' <<<"${body}" | tail -n1)"
   [[ "$(bounded_tree_git rev-list --parents -n1 "${sha}" | wc -w)" -eq 2 ]] || return 1
-  actual_parent="$(git rev-parse "${sha}^")"
+  actual_parent="$(bounded_tree_git rev-parse "${sha}^")"
   [[ "${author}" == "${BOT_EMAIL}" && "${committer}" == "${BOT_EMAIL}" ]] || return 1
   [[ "${automation}" == true && "${source}" == "${parent}@"* ]] || return 1
   [[ "${source##*@}" =~ ^[0-9a-f]{40}$ ]] || return 1
@@ -240,7 +370,7 @@ is_legacy_tip() {
   author="$(bounded_tree_git show -s --format=%ae "${sha}")"
   committer="$(bounded_tree_git show -s --format=%ce "${sha}")"
   [[ "$(bounded_tree_git rev-list --parents -n1 "${sha}" | wc -w)" -eq 2 ]] || return 1
-  actual_parent="$(git rev-parse "${sha}^")"
+  actual_parent="$(bounded_tree_git rev-parse "${sha}^")"
   [[ "${author}" == "${BOT_EMAIL}" && "${committer}" == "${BOT_EMAIL}" ]] || return 1
   [[ "${subject}" == "chore: sync ${parent}@${source_sha}" ||
      "${subject}" == "chore: sync ${parent}@${source_sha:0:12}" ]] || return 1
@@ -360,11 +490,22 @@ aeris_post_publish_fence() {
 }
 
 read_checkpoint_from_base() {
-  local base="$1"
-  node - "${base}" "${STATE_FILE}" "${parent}" "${upstream_branch}" <<'NODE'
-const { execFileSync } = require('node:child_process');
-const [base, path, repository, branch] = process.argv.slice(2);
-const state = JSON.parse(execFileSync('git', ['show', `${base}:${path}`], { encoding: 'utf8' }));
+  local base="$1" state_file status
+  state_file="$(mktemp)" || return 1
+  bounded_tree_blob_to_file "${base}" "${STATE_FILE}" "${state_file}" 2>/dev/null || {
+    rm -f -- "${state_file}"
+    return 1
+  }
+  set +e
+  node - "${state_file}" "${parent}" "${upstream_branch}" <<'NODE'
+const fs = require('node:fs');
+const [path, repository, branch] = process.argv.slice(2);
+let state;
+try {
+  state = JSON.parse(fs.readFileSync(path, 'utf8'));
+} catch {
+  process.exit(1);
+}
 if (state === null || Array.isArray(state) || typeof state !== 'object' ||
     state.schema_version !== 1 || state.policy_version !== 1 ||
     state.repository !== repository || state.branch !== branch ||
@@ -372,6 +513,106 @@ if (state === null || Array.isArray(state) || typeof state !== 'object' ||
     !/^[0-9a-f]{40}$/.test(state.last_integrated_sha)) process.exit(1);
 process.stdout.write(state.last_integrated_sha);
 NODE
+  status=$?
+  set -e
+  rm -f -- "${state_file}"
+  return "${status}"
+}
+
+aeris_read_bounded_api_json() {
+  local endpoint="$1" destination="$2" label="$3" size
+  aeris_require_active_autonomy_window || return 1
+  if ! aeris_bounded_run 2097152 gh api "${endpoint}" >"${destination}"; then
+    echo "Unable to read authoritative ${label}." >&2
+    return 1
+  fi
+  size="$(wc -c <"${destination}")"
+  if [[ ! "${size}" =~ ^[0-9]+$ || ${size} -le 0 || ${size} -gt 2097152 ]]; then
+    echo "Authoritative ${label} response is empty or exceeds its bound." >&2
+    return 1
+  fi
+}
+
+read_sync_identity() {
+  local repository_file upstream_file bot_file resolved_parent status
+  repository_file="$(mktemp)" || return 1
+  upstream_file="$(mktemp)" || {
+    rm -f -- "${repository_file}"
+    return 1
+  }
+  bot_file="$(mktemp)" || {
+    rm -f -- "${repository_file}" "${upstream_file}"
+    return 1
+  }
+  aeris_read_bounded_api_json "repos/${GITHUB_REPOSITORY}" "${repository_file}" \
+    'fork repository identity' || {
+    rm -f -- "${repository_file}" "${upstream_file}" "${bot_file}"
+    return 1
+  }
+  resolved_parent="$(node - "${repository_file}" <<'NODE'
+const fs = require('node:fs');
+let repository;
+try {
+  repository = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+} catch {
+  process.exit(1);
+}
+const parent = repository?.parent;
+if (repository === null || Array.isArray(repository) || typeof repository !== 'object' ||
+    parent === null || Array.isArray(parent) || typeof parent !== 'object' ||
+    typeof parent.full_name !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(parent.full_name)) {
+  process.exit(1);
+}
+process.stdout.write(parent.full_name);
+NODE
+)" || {
+    rm -f -- "${repository_file}" "${upstream_file}" "${bot_file}"
+    return 1
+  }
+  aeris_read_bounded_api_json "repos/${resolved_parent}" "${upstream_file}" \
+    'upstream repository identity' || {
+    rm -f -- "${repository_file}" "${upstream_file}" "${bot_file}"
+    return 1
+  }
+  aeris_read_bounded_api_json "users/${AERIS_SYNC_APP_SLUG}%5Bbot%5D" "${bot_file}" \
+    'Sync App bot identity' || {
+    rm -f -- "${repository_file}" "${upstream_file}" "${bot_file}"
+    return 1
+  }
+  set +e
+  node - "${repository_file}" "${upstream_file}" "${bot_file}" \
+    "${resolved_parent}" "${SYNC_APP_BOT_LOGIN}" <<'NODE'
+const fs = require('node:fs');
+const [repositoryPath, upstreamPath, botPath, expectedParent, expectedLogin] = process.argv.slice(2);
+let repository;
+let upstream;
+let bot;
+try {
+  repository = JSON.parse(fs.readFileSync(repositoryPath, 'utf8'));
+  upstream = JSON.parse(fs.readFileSync(upstreamPath, 'utf8'));
+  bot = JSON.parse(fs.readFileSync(botPath, 'utf8'));
+} catch {
+  process.exit(1);
+}
+const parent = repository?.parent;
+if (repository === null || Array.isArray(repository) || typeof repository !== 'object' ||
+    parent === null || Array.isArray(parent) || typeof parent !== 'object' ||
+    parent.full_name !== expectedParent ||
+    upstream === null || Array.isArray(upstream) || typeof upstream !== 'object' ||
+    upstream.full_name !== expectedParent ||
+    typeof upstream.default_branch !== 'string' || upstream.default_branch.length === 0 ||
+    upstream.default_branch.includes('\n') || upstream.default_branch.includes('\r') ||
+    bot === null || Array.isArray(bot) || typeof bot !== 'object' ||
+    bot.login !== expectedLogin || !Number.isSafeInteger(bot.id) || bot.id < 1 || bot.type !== 'Bot') {
+  process.exit(1);
+}
+process.stdout.write(`${expectedParent}\n${upstream.default_branch}\n${bot.id}\n${bot.type}\n`);
+NODE
+  status=$?
+  set -e
+  rm -f -- "${repository_file}" "${upstream_file}" "${bot_file}"
+  return "${status}"
 }
 
 remote_tip_owned() {
@@ -418,7 +659,7 @@ pause_or_resume() {
     return 20
   fi
   for attempt in 1 2; do
-    if aeris_gh pr reopen --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null 2>&1; then
+    if aeris_bounded_gh pr reopen --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null 2>&1; then
       refresh_prs
       [[ -n "${open_pr}" && "$(jq -r '.number' <<<"${open_pr}")" == "${number}" ]] || return 1
       tracked_pr="${open_pr}"
@@ -503,7 +744,7 @@ report_workflow_drift() {
   [[ -n "${changed}" ]] || return 0
 
   title="[sync-upstream] Review upstream workflow tree ${current_tree:0:12}"
-  existing="$(aeris_gh issue list \
+  existing="$(aeris_bounded_gh issue list \
     --repo "${GITHUB_REPOSITORY}" \
     --state all \
     --limit 100 \
@@ -511,7 +752,7 @@ report_workflow_drift() {
     --json title \
     --jq ".[] | select(.title == \"${title}\") | .title" | head -n1)"
   if [[ -z "${existing}" ]]; then
-    aeris_gh issue create \
+    aeris_bounded_gh issue create \
       --repo "${GITHUB_REPOSITORY}" \
       --title "${title}" \
       --body "<!-- upstream-sync-workflow-tree:${current_tree} -->
@@ -526,7 +767,7 @@ report_sync_alert() {
   local kind="$1" key="$2" message="$3" title existing number marker
   title="[sync-upstream] ${kind}: ${key}"
   marker="<!-- upstream-sync-alert:${kind}:${key} -->"
-  existing="$(aeris_gh issue list \
+  existing="$(aeris_bounded_gh issue list \
     --repo "${GITHUB_REPOSITORY}" \
     --state open \
     --limit 100 \
@@ -534,7 +775,7 @@ report_sync_alert() {
     --json number,title,body \
     --jq ".[] | select(.title == \"${title}\" and ((.body // \"\") | contains(\"${marker}\"))) | .number" | head -n1)"
   if [[ -z "${existing}" ]]; then
-    aeris_gh issue create \
+    aeris_bounded_gh issue create \
       --repo "${GITHUB_REPOSITORY}" \
       --title "${title}" \
       --body "${marker}
@@ -558,7 +799,7 @@ close_obsolete_pr() {
     }
     assert_remote_owned "${base_sha}"
     pr_comment_once "${number}" auto-closed 'Closed automatically because the base branch already contains the applicable upstream content.'
-    aeris_gh pr close --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null
+    aeris_bounded_gh pr close --repo "${GITHUB_REPOSITORY}" "${number}" >/dev/null
   fi
   output state noop
   output has_changes false
@@ -568,7 +809,7 @@ close_obsolete_pr() {
 wait_for_pr_head() {
   local pr="$1" expected_sha="$2" attempt view_data
   for attempt in 1 2 3 4 5 6; do
-    if view_data="$(aeris_gh pr view --repo "${GITHUB_REPOSITORY}" "${pr}" --json state,headRefOid)" &&
+    if view_data="$(aeris_bounded_gh pr view --repo "${GITHUB_REPOSITORY}" "${pr}" --json state,headRefOid)" &&
        [[ "$(jq -r '.state' <<<"${view_data}")" == OPEN &&
           "$(jq -r '.headRefOid' <<<"${view_data}")" == "${expected_sha}" ]]; then
       printf '%s\n' "${view_data}"
@@ -604,7 +845,7 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
     view_data="$(wait_for_pr_head "${number}" "${published_sha}")" || return 1
   else
     create_error="$(mktemp)"
-    if create_output="$(aeris_gh pr create \
+    if create_output="$(aeris_bounded_gh pr create \
       --repo "${GITHUB_REPOSITORY}" \
       --base "${BASE_BRANCH}" \
       --head "${SYNC_BRANCH}" \
@@ -624,7 +865,7 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
     view_data="$(wait_for_pr_head "${pr_url}" "${published_sha}")" || return 1
   fi
 
-  aeris_gh pr edit \
+  aeris_bounded_gh pr edit \
     --repo "${GITHUB_REPOSITORY}" \
     "${pr_url}" \
     --title 'chore: sync upstream' \
@@ -637,26 +878,24 @@ Configured fork-owned paths are preserved; upstream workflow changes are reviewe
   published_pr_body="${body}"
 }
 
-parent="$(aeris_gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.full_name // empty')"
-[[ -n "${parent}" ]] || {
-  echo "${GITHUB_REPOSITORY} is not a fork." >&2
-  exit 1
-}
-upstream_branch="$(aeris_gh api "repos/${parent}" --jq '.default_branch')"
-sync_app_bot_id="$(aeris_gh api "users/${AERIS_SYNC_APP_SLUG}%5Bbot%5D" --jq '.id')"
-sync_app_bot_type="$(aeris_gh api "users/${AERIS_SYNC_APP_SLUG}%5Bbot%5D" --jq '.type')"
-[[ "${sync_app_bot_id}" =~ ^[1-9][0-9]*$ && "${sync_app_bot_type}" == Bot ]] || {
+mapfile -t sync_identity < <(read_sync_identity)
+[[ ${#sync_identity[@]} -eq 4 ]] || {
   echo 'Unable to resolve the authoritative Sync App bot identity.' >&2
   exit 1
 }
+parent="${sync_identity[0]}"
+upstream_branch="${sync_identity[1]}"
+sync_app_bot_id="${sync_identity[2]}"
+sync_app_bot_type="${sync_identity[3]}"
 output parent "${parent}"
 output upstream_branch "${upstream_branch}"
 
-git remote remove upstream >/dev/null 2>&1 || true
-git remote add upstream "https://github.com/${parent}.git"
-git config user.name 'github-actions[bot]'
-git config user.email "${BOT_EMAIL}"
+bounded_tree_git remote remove upstream >/dev/null 2>&1 || true
+bounded_tree_git remote add upstream "https://github.com/${parent}.git"
+bounded_tree_git config user.name 'github-actions[bot]'
+bounded_tree_git config user.email "${BOT_EMAIL}"
 AERIS_BOUNDED_FETCH_PREFLIGHT=aeris_require_active_autonomy_window
+AERIS_BOUNDED_FETCH_CREDENTIALLESS=true
 aeris_bounded_fetch_init "${SYNC_POLICY_FILE}"
 
 if pause_or_resume; then
@@ -703,7 +942,8 @@ for attempt in 1 2 3; do
   fi
 
   set +e
-  prepare_output="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" "${PREPARE_HELPER}" \
+  prepare_output="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
+    env "NODE_OPTIONS=--jitless --max-old-space-size=192" "${PREPARE_HELPER}" \
     "${base_sha}" \
     "${upstream_sha}" \
     "${parent}" \
@@ -760,7 +1000,7 @@ for attempt in 1 2 3; do
   }
 
   prepared_tree="$(sed -n 's/^tree=//p' <<<"${prepare_output}" | tail -n1)"
-  git rev-parse --verify "${prepared_tree}^{tree}" >/dev/null
+  bounded_tree_git rev-parse --verify "${prepared_tree}^{tree}" >/dev/null
   report_workflow_drift
 
   aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
@@ -777,7 +1017,7 @@ for attempt in 1 2 3; do
     -m "Sync-Upstream-Source: ${parent}@${upstream_sha}" \
     -m "Sync-Upstream-Checkpoint: ${checkpoint_sha}->${upstream_sha}" \
     -m "Sync-Upstream-Base: ${base_sha}"
-  local_sha="$(git rev-parse HEAD)"
+  local_sha="$(bounded_tree_git rev-parse HEAD)"
 
   fetch_source_refs
   if [[ "${base_sha}" != "${fetched_base_sha}" ||

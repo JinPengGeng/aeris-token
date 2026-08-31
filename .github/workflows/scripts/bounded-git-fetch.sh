@@ -140,11 +140,11 @@ aeris_bounded_fetch_init() {
       return
     fi
   done
-  git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || {
+  git_dir="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --absolute-git-dir 2>/dev/null)" || {
     aeris_bounded_fetch_error 'current Git directory is unavailable'
     return
   }
-  common_dir_raw="$(git rev-parse --git-common-dir 2>/dev/null)" || {
+  common_dir_raw="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --git-common-dir 2>/dev/null)" || {
     aeris_bounded_fetch_error 'current Git common directory is unavailable'
     return
   }
@@ -160,7 +160,7 @@ aeris_bounded_fetch_init() {
     aeris_bounded_fetch_error 'linked worktrees and shared Git common directories are forbidden'
     return
   fi
-  worktree_count="$(git worktree list --porcelain 2>/dev/null |
+  worktree_count="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git worktree list --porcelain 2>/dev/null |
     awk '/^worktree / { count += 1 } END { print count + 0 }')" || {
     aeris_bounded_fetch_error 'unable to enumerate Git worktrees'
     return
@@ -169,7 +169,7 @@ aeris_bounded_fetch_init() {
     aeris_bounded_fetch_error 'repositories with linked worktrees are forbidden'
     return
   fi
-  shallow="$(git rev-parse --is-shallow-repository 2>/dev/null)" || {
+  shallow="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --is-shallow-repository 2>/dev/null)" || {
     aeris_bounded_fetch_error 'current Git repository is unavailable'
     return
   }
@@ -178,13 +178,13 @@ aeris_bounded_fetch_init() {
       aeris_bounded_fetch_error 'shallow repositories cannot prove checkpoint ancestry'
       return
     fi
-    shallow_file="$(git rev-parse --git-path shallow)" || return 1
-    shallow_head="$(git rev-parse --verify HEAD^{commit} 2>/dev/null)" || return 1
+    shallow_file="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --git-path shallow)" || return 1
+    shallow_head="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --verify HEAD^{commit} 2>/dev/null)" || return 1
     if [[ "$(wc -l <"${shallow_file}")" -ne 1 || "$(tr -d '\r\n' <"${shallow_file}")" != "${shallow_head}" ]]; then
       aeris_bounded_fetch_error 'bootstrap checkout must contain exactly one shallow boundary at HEAD'
       return
     fi
-    object_root="$(git rev-parse --git-path objects)" || return 1
+    object_root="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --git-path objects)" || return 1
     if [[ -L "${object_root}" ]] || find "${object_root}" -type l -print -quit | grep -q . ||
        [[ -e "${object_root}/info/alternates" ]]; then
       aeris_bounded_fetch_error 'bootstrap checkout uses a forbidden object-store indirection'
@@ -195,20 +195,21 @@ aeris_bounded_fetch_init() {
     # remain available for the trusted helper; every object is reacquired by
     # the bounded exact-ref receiver before history is inspected.
     while IFS= read -r bootstrap_ref; do
-      git update-ref -d "${bootstrap_ref}" || return 1
-    done < <(git for-each-ref --format='%(refname)')
+      aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
+        git update-ref -d "${bootstrap_ref}" || return 1
+    done < <(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git for-each-ref --format='%(refname)')
     find "${object_root}" -type f \
       \( -path '*/pack/pack-*' -o -regex '.*/[0-9a-f][0-9a-f]/[0-9a-f]\{38\}' \) \
       -delete || return 1
     rm -f -- "${shallow_file}" || return 1
-    [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == false ]] || return 1
+    [[ "$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --is-shallow-repository 2>/dev/null)" == false ]] || return 1
   fi
-  partial="$(git config --get-regexp '^(extensions\.partialClone|remote\..*\.promisor)$' 2>/dev/null || true)"
+  partial="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git config --get-regexp '^(extensions\.partialClone|remote\..*\.promisor)$' 2>/dev/null || true)"
   if [[ -n "${partial}" ]]; then
     aeris_bounded_fetch_error 'partial-clone repositories could trigger an unbounded lazy fetch'
     return
   fi
-  object_root="$(git rev-parse --git-path objects)" || {
+  object_root="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --git-path objects)" || {
     aeris_bounded_fetch_error 'current Git object directory is unavailable'
     return
   }
@@ -216,7 +217,7 @@ aeris_bounded_fetch_init() {
     aeris_bounded_fetch_error 'symbolic links in the object store are forbidden'
     return
   fi
-  alternates="$(git config --get core.alternateRefsCommand 2>/dev/null || true)"
+  alternates="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git config --get core.alternateRefsCommand 2>/dev/null || true)"
   if [[ -n "${alternates}" || -e "${object_root}/info/alternates" ]]; then
     aeris_bounded_fetch_error 'alternate object stores are forbidden'
     return
@@ -231,6 +232,7 @@ aeris_bounded_fetch_init() {
 aeris_bounded_network_git() {
   local delay="${AERIS_TEST_FETCH_DELAY_SECONDS:-0}"
   local max_file_bytes="${AERIS_BOUNDED_NETWORK_MAX_FILE_BYTES:-${AERIS_FETCH_MAX_RECEIVED_BYTES}}"
+  local allow_fixture_config=false transport_home='' status
   if [[ -n "${AERIS_BOUNDED_FETCH_PREFLIGHT:-}" ]]; then
     if ! declare -F "${AERIS_BOUNDED_FETCH_PREFLIGHT}" >/dev/null; then
       aeris_bounded_fetch_error 'configured network preflight is not a shell function'
@@ -240,6 +242,13 @@ aeris_bounded_network_git() {
   fi
   local -a command_line=(git)
   if [[ "${AERIS_BOUNDED_FETCH_CREDENTIALLESS:-false}" == true ]]; then
+    if [[ "${AERIS_BOUNDED_FETCH_TEST_MODE:-false}" == true &&
+          "${AERIS_BOUNDED_FETCH_TEST_FIXTURE:-false}" == true &&
+          "${AERIS_BOUNDED_CREDENTIALLESS_TEST_ALLOW_CONFIG:-false}" == true ]]; then
+      allow_fixture_config=true
+    fi
+    aeris_bounded_assert_credentialless_transport || return
+    transport_home="$(mktemp -d "${AERIS_BOUNDED_FETCH_TMP_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}/aeris-credentialless-home.XXXXXX")" || return 1
     command_line+=(
       -c credential.helper=
       -c http.https://github.com/.extraheader=
@@ -248,12 +257,75 @@ aeris_bounded_network_git() {
     )
   fi
   if [[ "${AERIS_BOUNDED_FETCH_TEST_MODE:-false}" == true && "${delay}" != 0 ]]; then
-    aeris_bounded_run "${max_file_bytes}" bash -c \
-      'sleep "$1"; shift; exec "$@"' bash "${delay}" "${command_line[@]}" "$@"
+    if (
+      unset GIT_SSH GIT_SSH_COMMAND SSH_ASKPASS SSH_AUTH_SOCK GIT_PROXY_COMMAND \
+        GIT_CONFIG_PARAMETERS CURL_HOME
+      [[ "${allow_fixture_config}" == true ]] || export GIT_CONFIG_COUNT=0
+      export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=echo GCM_INTERACTIVE=Never
+      if [[ -n "${transport_home}" ]]; then
+        export HOME="${transport_home}" XDG_CONFIG_HOME="${transport_home}"
+      fi
+      aeris_bounded_run "${max_file_bytes}" bash -c \
+        'sleep "$1"; shift; exec "$@"' bash "${delay}" "${command_line[@]}" "$@"
+    ); then status=0; else status=$?; fi
   else
-    GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=echo \
+    if (
+      unset GIT_SSH GIT_SSH_COMMAND SSH_ASKPASS SSH_AUTH_SOCK GIT_PROXY_COMMAND \
+        GIT_CONFIG_PARAMETERS CURL_HOME
+      [[ "${allow_fixture_config}" == true ]] || export GIT_CONFIG_COUNT=0
+      export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=echo GCM_INTERACTIVE=Never
+      if [[ -n "${transport_home}" ]]; then
+        export HOME="${transport_home}" XDG_CONFIG_HOME="${transport_home}"
+      fi
       aeris_bounded_run "${max_file_bytes}" "${command_line[@]}" "$@"
+    ); then status=0; else status=$?; fi
   fi
+  [[ -z "${transport_home}" ]] || rm -rf -- "${transport_home}"
+  return "${status}"
+}
+
+aeris_bounded_assert_credentialless_transport() {
+  local name config_file status line key allow_fixture_config=false
+  if [[ "${AERIS_BOUNDED_FETCH_TEST_MODE:-false}" == true &&
+        "${AERIS_BOUNDED_FETCH_TEST_FIXTURE:-false}" == true &&
+        "${AERIS_BOUNDED_CREDENTIALLESS_TEST_ALLOW_CONFIG:-false}" == true ]]; then
+    allow_fixture_config=true
+  fi
+  for name in GIT_SSH GIT_SSH_COMMAND SSH_ASKPASS GIT_ASKPASS GIT_CONFIG_COUNT \
+    GIT_CONFIG_PARAMETERS GIT_CONFIG_SYSTEM GIT_CONFIG_GLOBAL GIT_CONFIG \
+    GIT_PROXY_COMMAND GIT_HTTP_PROXY_AUTHMETHOD GIT_SSL_NO_VERIFY GIT_SSL_CAINFO \
+    GIT_SSL_CAPATH CURL_HOME HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY \
+    http_proxy https_proxy all_proxy no_proxy; do
+    if [[ -v "${name}" &&
+          !( "${allow_fixture_config}" == true && "${name}" == GIT_CONFIG_COUNT ) ]]; then
+      aeris_bounded_fetch_error "credentialless transport forbids inherited ${name}"
+      return
+    fi
+  done
+  config_file="$(mktemp "${AERIS_BOUNDED_FETCH_TMP_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}/aeris-transport-config.XXXXXX")" || return 1
+  set +e
+  aeris_bounded_run 1048576 git --no-pager config --show-origin --name-only --get-regexp \
+    '^(url\..*\.(insteadof|pushinsteadof)|credential(\..*)?|http\..*|core\.sshcommand|remote\..*\.proxy|include(\..*)?\.path)$' \
+    >"${config_file}"
+  status=$?
+  set -e
+  if ((status != 0 && status != 1)); then
+    rm -f -- "${config_file}"
+    aeris_bounded_fetch_error 'unable to inspect credentialless transport configuration'
+    return
+  fi
+  while IFS= read -r line; do
+    key="${line#*$'\t'}"
+    # actions/checkout installs this exact header and the command line clears it.
+    [[ "${key,,}" == 'http.https://github.com/.extraheader' ]] && continue
+    if [[ "${allow_fixture_config}" == true && "${key,,}" == url.file://*.insteadof ]]; then
+      continue
+    fi
+    rm -f -- "${config_file}"
+    aeris_bounded_fetch_error "credentialless transport forbids Git config ${key}"
+    return
+  done <"${config_file}"
+  rm -f -- "${config_file}"
 }
 
 aeris_bounded_run() {
@@ -366,7 +438,8 @@ aeris_bounded_stage_bytes() {
 
 aeris_bounded_list_stage_objects() {
   local object_root="$1" output="$2" file current remaining_count remaining_expanded
-  local stage="${object_root%/objects}" oid_file="${output}.oids" memory_kib
+  local stage="${object_root%/objects}" oid_file="${output}.oids" metadata_limit
+  local verify_program metadata_program
   local remaining_count=$((AERIS_FETCH_MAX_RECEIVED_OBJECTS - AERIS_FETCH_RECEIVED_OBJECTS_TOTAL))
   local remaining_expanded=$((AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES - AERIS_FETCH_RECEIVED_EXPANDED_BYTES_TOTAL))
   : >"${output}"
@@ -394,23 +467,25 @@ aeris_bounded_list_stage_objects() {
     remaining_count=$((AERIS_FETCH_MAX_RECEIVED_OBJECTS - AERIS_FETCH_RECEIVED_OBJECTS_TOTAL - current))
     remaining_expanded=$((AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES - AERIS_FETCH_RECEIVED_EXPANDED_BYTES_TOTAL))
     ((remaining_count > 0 && remaining_expanded > 0)) || return 1
-    if ! aeris_bounded_run "${AERIS_FETCH_MAX_RECEIVED_BYTES}" \
-      git verify-pack -v "${file}" |
-      awk -v max_count="${remaining_count}" '
+    verify_program='
           length($1) == 40 && $1 ~ /^[0-9a-f]+$/ {
             count += 1
             if (count > max_count) exit 42
             print $1
           }
-        ' >>"${oid_file}"; then
+        '
+    if ! aeris_bounded_run "${AERIS_FETCH_MAX_RECEIVED_BYTES}" bash -o pipefail -c \
+      'git verify-pack -v "$1" | awk -v max_count="$3" "$4" >>"$2"' \
+      bash "${file}" "${oid_file}" "${remaining_count}" "${verify_program}"; then
       return 1
     fi
   done < <(find "${object_root}/pack" -maxdepth 1 -type f -name '*.idx' -print0 2>/dev/null)
-  if ! aeris_bounded_run "${AERIS_FETCH_MAX_RECEIVED_BYTES}" git -C "${stage}" \
-    cat-file --batch-check='%(objectname) %(objecttype) %(objectsize)' <"${oid_file}" |
-    awk -v max_expanded="${remaining_expanded}" \
-      -v max_object="${AERIS_FETCH_MAX_OBJECT_BYTES}" \
-      -v max_blob="${AERIS_FETCH_MAX_BLOB_BYTES}" '
+  current="$(wc -l <"${oid_file}")"
+  current="${current//[[:space:]]/}"
+  ((current <= AERIS_FETCH_MAX_RECEIVED_OBJECTS - AERIS_FETCH_RECEIVED_OBJECTS_TOTAL)) || return 1
+  metadata_limit=$((current * 128 + 1))
+  ((metadata_limit <= AERIS_FETCH_MAX_RECEIVED_BYTES)) || metadata_limit="${AERIS_FETCH_MAX_RECEIVED_BYTES}"
+  metadata_program='
         {
           if (length($1) != 40 || $1 !~ /^[0-9a-f]+$/ ||
               $2 !~ /^(blob|tree|commit|tag)$/ || $3 !~ /^[0-9]+$/ || NF != 3) exit 43
@@ -419,7 +494,11 @@ aeris_bounded_list_stage_objects() {
               ($2 == "blob" && $3 > max_blob)) exit 42
           print $1, $2, $3
         }
-      ' >"${output}"; then
+      '
+  if ! aeris_bounded_run "${metadata_limit}" bash -o pipefail -c \
+    'git -C "$1" cat-file --batch-check="%(objectname) %(objecttype) %(objectsize)" <"$2" | awk -v max_expanded="$4" -v max_object="$5" -v max_blob="$6" "$7" >"$3"' \
+    bash "${stage}" "${oid_file}" "${output}" "${remaining_expanded}" \
+    "${AERIS_FETCH_MAX_OBJECT_BYTES}" "${AERIS_FETCH_MAX_BLOB_BYTES}" "${metadata_program}"; then
     return 1
   fi
   rm -f -- "${oid_file}"
@@ -437,9 +516,9 @@ aeris_bounded_validate_stage() {
     aeris_bounded_fetch_error 'unable to enumerate received objects'
     return
   fi
-  count="$(wc -l <"${objects_file}")"
+  count="$(aeris_bounded_run 1024 wc -l <"${objects_file}")"
   count="${count//[[:space:]]/}"
-  expanded="$(awk '{ total += $3 } END { print total + 0 }' "${objects_file}")"
+  expanded="$(aeris_bounded_run 1024 awk '{ total += $3 } END { print total + 0 }' "${objects_file}")"
   if [[ ! "${bytes}" =~ ^[0-9]+$ || ! "${count}" =~ ^[0-9]+$ ||
         ! "${expanded}" =~ ^[0-9]+$ ]]; then
     aeris_bounded_fetch_error 'received-object measurements are invalid'
@@ -482,7 +561,8 @@ aeris_bounded_publish_exact_ref() {
     "${AERIS_BOUNDED_IMPORT_PRE_PUBLISH_HOOK}" \
       "${destination}" "${expected}" "${previous_ref}" || return 1
   fi
-  if ! git update-ref "${destination}" "${expected}" "${previous_ref:-${zero}}"; then
+  if ! aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
+    git update-ref "${destination}" "${expected}" "${previous_ref:-${zero}}"; then
     aeris_bounded_fetch_error "${label} destination changed concurrently before publication"
     return
   fi
@@ -491,7 +571,7 @@ aeris_bounded_publish_exact_ref() {
     "${AERIS_BOUNDED_IMPORT_POST_PUBLISH_HOOK}" \
       "${destination}" "${expected}" "${previous_ref}" || return 1
   fi
-  final_ref="$(git rev-parse --verify "${destination}^{commit}" 2>/dev/null)" || true
+  final_ref="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --verify "${destination}^{commit}" 2>/dev/null)" || true
   if [[ "${final_ref}" != "${expected}" ]]; then
     aeris_bounded_fetch_error "${label} destination did not retain the exact validated SHA"
     return
@@ -502,7 +582,7 @@ aeris_bounded_import_stage() {
   local stage="$1" expected="$2" destination="$3" objects_file="$4"
   local imported_metadata previous_ref import_bytes import_objects
   local total_bytes total_objects remaining_bytes remaining_objects
-  previous_ref="$(git rev-parse --verify "${destination}" 2>/dev/null || true)"
+  previous_ref="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --verify "${destination}" 2>/dev/null || true)"
   imported_metadata="${stage}/imported-metadata"
   remaining_bytes=$((AERIS_FETCH_MAX_IMPORT_BYTES - AERIS_FETCH_IMPORT_BYTES_TOTAL))
   remaining_objects=$((AERIS_FETCH_MAX_IMPORT_OBJECTS - AERIS_FETCH_IMPORT_OBJECTS_TOTAL))
@@ -551,7 +631,8 @@ aeris_bounded_fetch_ref() {
     aeris_bounded_fetch_error "${label} fetch coordinates are invalid"
     return
   fi
-  if ! git check-ref-format "${destination}" >/dev/null 2>&1; then
+  if ! aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
+    git check-ref-format "${destination}" >/dev/null 2>&1; then
     aeris_bounded_fetch_error "${label} destination ref is invalid"
     return
   fi
@@ -561,11 +642,11 @@ aeris_bounded_fetch_ref() {
     aeris_bounded_fetch_error "${label} drifted from ${expected} to ${remote_sha}"
     return
   fi
-  if git cat-file -e "${expected}^{commit}" 2>/dev/null &&
+  if aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git cat-file -e "${expected}^{commit}" 2>/dev/null &&
     aeris_bounded_run "${AERIS_FETCH_MAX_IMPORT_BYTES}" git \
       fsck --strict --no-reflogs --no-dangling "${expected}" >/dev/null 2>&1; then
     local previous_ref
-    previous_ref="$(git rev-parse --verify "${destination}" 2>/dev/null || true)"
+    previous_ref="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --verify "${destination}" 2>/dev/null || true)"
     aeris_bounded_publish_exact_ref \
       "${destination}" "${expected}" "${previous_ref}" "local exact ${label}" || {
       aeris_bounded_fetch_error "unable to retain local exact ${label}"
@@ -614,7 +695,7 @@ aeris_bounded_fetch_ref() {
       return
     fi
   fi
-  fetched="$(git -C "${stage}" rev-parse --verify 'refs/aeris/incoming^{commit}' 2>/dev/null)" || {
+  fetched="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git -C "${stage}" rev-parse --verify 'refs/aeris/incoming^{commit}' 2>/dev/null)" || {
     rm -rf -- "${stage}"
     aeris_bounded_fetch_error "${label} did not resolve to a commit"
     return
@@ -640,7 +721,7 @@ aeris_bounded_fetch_ref() {
     aeris_bounded_fetch_error "unable to import validated ${label} within the caller bounds"
     return
   fi
-  fetched="$(git rev-parse --verify "${destination}^{commit}" 2>/dev/null)" || true
+  fetched="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git rev-parse --verify "${destination}^{commit}" 2>/dev/null)" || true
   rm -rf -- "${stage}"
   if [[ "${fetched}" != "${expected}" ]]; then
     aeris_bounded_fetch_error "validated ${label} import did not preserve the exact SHA"
@@ -654,11 +735,11 @@ aeris_enforce_change_bounds() {
   local meta path old_mode new_mode old_oid new_oid status extra type size oid
   local path_count=0 total_blob_bytes=0
   local tmp_root diff_file oid_file metadata_file diff_bytes failed=''
-  git cat-file -e "${base}^{commit}" 2>/dev/null || {
+  aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git cat-file -e "${base}^{commit}" 2>/dev/null || {
     aeris_bounded_fetch_error "${label} checkpoint commit is unavailable"
     return
   }
-  git cat-file -e "${tip}^{commit}" 2>/dev/null || {
+  aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git cat-file -e "${tip}^{commit}" 2>/dev/null || {
     aeris_bounded_fetch_error "${label} tip commit is unavailable"
     return
   }

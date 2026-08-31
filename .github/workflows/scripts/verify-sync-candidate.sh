@@ -10,6 +10,11 @@ source "${BOUNDED_FETCH_HELPER}"
 bounded_tree_git() {
   aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git "$@"
 }
+
+bounded_tree_blob_to_file() {
+  local revision="$1" path="$2" destination="$3"
+  bounded_tree_git show "${revision}:${path}" >"${destination}"
+}
 STATE_PATH='.github/upstream-sync-state.json'
 POLICY_PATH='.github/upstream-sync-policy.yml'
 MAX_PR_BYTES=2097152
@@ -71,10 +76,12 @@ message_file="${work_dir}/message"
 metadata_file="${work_dir}/metadata.json"
 policy_file="${work_dir}/policy.yml"
 changed_paths="${work_dir}/changed-paths"
+state_before="${work_dir}/state-before.json"
+state_after="${work_dir}/state-after.json"
 
 cleanup() {
   rm -f -- "${pr_initial}" "${pr_final}" "${pr_authoritative}" "${bot_identity}" "${message_file}" "${metadata_file}" \
-    "${policy_file}" "${changed_paths}"
+    "${policy_file}" "${changed_paths}" "${state_before}" "${state_after}"
   rmdir -- "${work_dir}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -95,7 +102,7 @@ read_exact_remote_ref() {
 
 read_public_json() {
   local url="$1" destination="$2" label="$3" status size
-  status="$(curl --silent --show-error \
+  status="$(aeris_bounded_run "${MAX_PR_BYTES}" curl -q --silent --show-error \
     --proto '=https' --tlsv1.2 \
     --connect-timeout 10 --max-time 30 --max-filesize "${MAX_PR_BYTES}" \
     --header 'Accept: application/vnd.github+json' \
@@ -193,7 +200,7 @@ base_ref="${pr_coordinates[2]}"
 head_ref="${pr_coordinates[3]}"
 [[ "${head_sha}" == "${EXPECTED_HEAD}" ]] || fail 'expected head no longer matches the pull request'
 
-bounded_tree_git show "${base_sha}:${POLICY_PATH}" >"${policy_file}" 2>/dev/null ||
+bounded_tree_blob_to_file "${base_sha}" "${POLICY_PATH}" "${policy_file}" 2>/dev/null ||
   fail 'sync policy is missing from the protected base tree'
 AERIS_BOUNDED_FETCH_CREDENTIALLESS=true
 aeris_bounded_fetch_init "${policy_file}" || fail 'bounded Git fetch contract is invalid'
@@ -250,7 +257,7 @@ upstream_current="$(read_exact_remote_ref "${upstream_remote}" \
   "refs/heads/${policy_branch}" 'upstream ref')"
 fetch_ref_sha "${upstream_remote}" "refs/heads/${policy_branch}" \
   "${upstream_current}" 'upstream branch'
-git cat-file -e "${upstream_tip}^{commit}" 2>/dev/null || fail 'advertised U1 is unavailable from upstream'
+bounded_tree_git cat-file -e "${upstream_tip}^{commit}" 2>/dev/null || fail 'advertised U1 is unavailable from upstream'
 bounded_tree_git merge-base --is-ancestor "${checkpoint}" "${upstream_tip}" ||
   fail 'U0 is not an ancestor of U1'
 [[ "${upstream_tip}" == "${upstream_current}" ]] ||
@@ -258,7 +265,8 @@ bounded_tree_git merge-base --is-ancestor "${checkpoint}" "${upstream_tip}" ||
 aeris_enforce_change_bounds "${checkpoint}" "${upstream_tip}" 'upstream source delta' ||
   fail 'upstream source delta exceeds the protected resource bounds'
 
-prepare_output="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" bash "${PREPARE_HELPER}" \
+prepare_output="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
+  env "NODE_OPTIONS=--jitless --max-old-space-size=192" bash "${PREPARE_HELPER}" \
   "${base_sha}" "${upstream_tip}" "${policy_repository}" "${policy_branch}" \
   "${STATE_PATH}" "${POLICY_PATH}")" || fail 'deterministic candidate regeneration failed'
 [[ "$(sed -n 's/^state=//p' <<<"${prepare_output}" | tail -n1)" == clean ]] ||
@@ -266,17 +274,26 @@ prepare_output="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" bash "${PREP
 [[ "$(sed -n 's/^checkpoint=//p' <<<"${prepare_output}" | tail -n1)" == "${checkpoint}" ]] ||
   fail 'commit checkpoint does not match protected base state U0'
 expected_tree="$(sed -n 's/^tree=//p' <<<"${prepare_output}" | tail -n1)"
-actual_tree="$(git rev-parse "${head_sha}^{tree}")"
+actual_tree="$(bounded_tree_git rev-parse "${head_sha}^{tree}")"
 [[ "${expected_tree}" == "${actual_tree}" ]] || fail 'candidate tree differs from deterministic integration result'
 
-aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" node - \
-  "${base_sha}" "${head_sha}" "${STATE_PATH}" "${checkpoint}" "${upstream_tip}" \
+bounded_tree_blob_to_file "${base_sha}" "${STATE_PATH}" "${state_before}" ||
+  fail 'unable to read protected checkpoint state through the bounded runner'
+bounded_tree_blob_to_file "${head_sha}" "${STATE_PATH}" "${state_after}" ||
+  fail 'unable to read candidate checkpoint state through the bounded runner'
+aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" node --jitless --max-old-space-size=192 - \
+  "$(to_node_path "${state_before}")" "$(to_node_path "${state_after}")" "${checkpoint}" "${upstream_tip}" \
   "${policy_repository}" "${policy_branch}" <<'NODE' || fail 'checkpoint state transition is invalid'
-const { execFileSync } = require('node:child_process');
-const [base, head, path, checkpoint, upstreamTip, repository, branch] = process.argv.slice(2);
-const read = (revision) => JSON.parse(execFileSync('git', ['show', `${revision}:${path}`], { encoding: 'utf8' }));
-const before = read(base);
-const after = read(head);
+const fs = require('node:fs');
+const [beforePath, afterPath, checkpoint, upstreamTip, repository, branch] = process.argv.slice(2);
+let before;
+let after;
+try {
+  before = JSON.parse(fs.readFileSync(beforePath, 'utf8'));
+  after = JSON.parse(fs.readFileSync(afterPath, 'utf8'));
+} catch {
+  process.exit(1);
+}
 const common = (state) => state && !Array.isArray(state) && state.schema_version === 1 &&
   state.repository === repository && state.branch === branch && Number.isInteger(state.policy_version);
 if (!common(before) || !common(after) || before.policy_version !== after.policy_version ||

@@ -261,6 +261,14 @@ assert(
   ),
   'checkout must reserve the conservative autonomy margin before using the App token',
 );
+const nodeSetupStep = syncSteps.find((step) => step.name === 'Set up Node.js 22');
+assert(
+  nodeSetupStep?.uses ===
+      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' &&
+    nodeSetupStep?.with?.['node-version'] === '22' &&
+    syncSteps.indexOf(nodeSetupStep) === checkoutStepIndex + 1,
+  'sync must pin Node.js 22 immediately after the bounded checkout',
+);
 const publishStep = syncSteps.find(
   (step) => step.name === 'Build and publish automation branch',
 );
@@ -286,7 +294,7 @@ const producerBoundIndex = syncScript.indexOf(
   'if ! aeris_enforce_change_bounds "${checkpoint_sha}" "${upstream_sha}"',
 );
 const producerPrepareIndex = syncScript.indexOf(
-  'prepare_output="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" "${PREPARE_HELPER}"',
+  'prepare_output="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}"',
 );
 assert(autoMergeStep, 'sync workflow must expose the native auto-merge step');
 assert(verifyCandidateStep, 'sync workflow must verify the published candidate tree');
@@ -311,6 +319,7 @@ assert(
 assert(
   syncScript.includes('aeris_bounded_fetch_ref') &&
     verifyCandidateScript.includes('aeris_bounded_fetch_ref') &&
+    syncScript.includes('AERIS_BOUNDED_FETCH_CREDENTIALLESS=true') &&
     boundedFetchScript.includes('fetch.fsckObjects=true') &&
     boundedFetchScript.includes('fetch.unpackLimit=0') &&
     boundedFetchScript.includes('ulimit -f "${file_blocks}"') &&
@@ -321,6 +330,16 @@ assert(
     boundedFetchScript.includes('export GIT_NO_LAZY_FETCH=1') &&
     !boundedFetchScript.includes('>"${stage}/objects/info/alternates"'),
   'producer and verifier must share the exact-ref bounded and fsck-verified fetch path',
+);
+assert(
+  syncScript.includes('GITHUB_API_MAX_PAGES=10') &&
+    syncScript.includes('aeris_read_bounded_api_array_pages') &&
+    syncScript.includes('aeris_bounded_gh') &&
+    !syncScript.includes('--paginate') &&
+    verifyCandidateScript.includes(
+      'aeris_bounded_run "${MAX_PR_BYTES}" curl -q',
+    ),
+  'GitHub pagination and public metadata transport must remain page, time, memory, and file bounded',
 );
 assert(
   boundedFetchScript.includes('--no-write-fetch-head') &&
@@ -429,17 +448,44 @@ assert(
   'sync and auto-merge must not bypass the expiry-guarded GitHub wrapper',
 );
 assert(
-  syncScript.includes('SYNC_APP_BOT_LOGIN="${AERIS_SYNC_APP_SLUG}[bot]"') &&
+    syncScript.includes('SYNC_APP_BOT_LOGIN="${AERIS_SYNC_APP_SLUG}[bot]"') &&
     syncScript.includes("LEGACY_BOT_LOGIN='github-actions[bot]'") &&
-    syncScript.includes(
-      '.user.login == \\"${SYNC_APP_BOT_LOGIN}\\" or .user.login == \\"${LEGACY_BOT_LOGIN}\\"',
-    ) &&
+    syncScript.includes('.user.login == $sync or .user.login == $legacy') &&
     syncScript.includes('is_sync_automation_login'),
   'comment and PR identity checks must accept the Sync App bot and migrate legacy Actions state',
 );
 assert(
   !/(^|\n)\s*git\s+(fetch|push|ls-remote)\b/.test(syncScript),
   'authenticated Git network operations must not bypass expiry revalidation',
+);
+for (const [name, script] of [
+  ['sync-upstream.sh', syncScript],
+  ['verify-sync-candidate.sh', verifyCandidateScript],
+]) {
+  assert(
+    !/execFileSync\(\s*['"]git['"]/.test(script),
+    `${name} must not spawn an unbounded Git history read from Node`,
+  );
+  assert(
+    !/(^|\n)\s*git\s+(show|rev-parse|rev-list|cat-file|ls-tree|verify-pack)\b/.test(script),
+    `${name} history and tree reads must use bounded_tree_git`,
+  );
+}
+assert(
+  boundedFetchScript.includes('aeris_bounded_assert_credentialless_transport') &&
+    boundedFetchScript.includes('GIT_SSH_COMMAND') &&
+    boundedFetchScript.includes('SSH_ASKPASS') &&
+    boundedFetchScript.includes('GIT_CONFIG_COUNT') &&
+    boundedFetchScript.includes('url\\..*\\.(insteadof|pushinsteadof)') &&
+    boundedFetchScript.includes('credential(\\..*)?') &&
+    boundedFetchScript.includes('http\\..*'),
+  'credentialless Git transport must reject inherited environment and configuration overrides',
+);
+assert(
+  boundedFetchScript.includes('git verify-pack -v "$1" | awk') &&
+    boundedFetchScript.includes("cat-file --batch-check") &&
+    boundedFetchScript.includes('metadata_limit=$((current * 128 + 1))'),
+  'verify-pack and cat-file aggregation must be generated inside bounded pipelines',
 );
 const checkDispatchStep = syncSteps.find(
   (step) => step.name === 'Ensure required checks are dispatched',

@@ -143,6 +143,7 @@ run_verifier() {
     PREPARE_HELPER="${HELPER_ROOT}/prepare-checkpoint-sync.sh" \
     CHECKPOINT_HELPER="${HELPER_ROOT}/checkpoint-merge.sh" \
     AERIS_BOUNDED_FETCH_TEST_MODE=true AERIS_BOUNDED_FETCH_TEST_FIXTURE=true \
+    AERIS_BOUNDED_CREDENTIALLESS_TEST_ALLOW_CONFIG=true \
     AERIS_TEST_FETCH_TIMEOUT_SECONDS=300 \
     AERIS_VERIFY_TEST_MODE="${AERIS_VERIFY_TEST_MODE:-false}" \
     AERIS_VERIFY_TEST_FIXTURE="${AERIS_VERIFY_TEST_FIXTURE:-false}" \
@@ -177,14 +178,23 @@ done
 case "${url}" in
   https://api.github.com/repos/example/Fork/pulls/36)
     cp "${PR_JSON}" "${destination}"
+    printf '%s' "${AERIS_TEST_PR_HTTP_STATUS:-200}"
+    exit 0
     ;;
   https://api.github.com/users/aeris-sync%5Bbot%5D)
-    printf '{"login":"aeris-sync[bot]","id":%s,"type":"Bot"}\n' \
-      "${SYNC_APP_BOT_ID}" >"${destination}"
+    if [[ -n "${AERIS_TEST_BOT_BODY_FILE:-}" ]]; then
+      cp "${AERIS_TEST_BOT_BODY_FILE}" "${destination}"
+    elif [[ -n "${AERIS_TEST_BOT_BODY:-}" ]]; then
+      printf '%s' "${AERIS_TEST_BOT_BODY}" >"${destination}"
+    else
+      printf '{"login":"aeris-sync[bot]","id":%s,"type":"Bot"}\n' \
+        "${SYNC_APP_BOT_ID}" >"${destination}"
+    fi
+    printf '%s' "${AERIS_TEST_BOT_HTTP_STATUS:-200}"
+    exit 0
     ;;
   *) exit 2 ;;
 esac
-printf '200'
 EOF
 chmod +x "${FAKE_BIN}/curl"
 for helper in github-autonomy.sh bounded-git-fetch.sh prepare-checkpoint-sync.sh checkpoint-merge.sh; do
@@ -238,6 +248,31 @@ valid_output="$(run_verifier "${VALID}")"
 [[ "${valid_output}" == *"verified sync candidate PR #36"* ]] || fail 'valid PR #36-like case was not verified'
 grep -qx 'verified=true' "${OUTPUT}" || fail 'valid verification output is missing'
 run_verifier "${VALID}" >/dev/null || fail 'deterministic replay of the same candidate failed'
+
+cp "${PR_JSON}" "${RUN_ROOT}/valid-pr.json"
+for invalid_pr in '{' '[]' 'null'; do
+  printf '%s' "${invalid_pr}" >"${PR_JSON}"
+  expect_rejected 'malformed or non-object pull request JSON' "${VALID}"
+done
+cp "${RUN_ROOT}/valid-pr.json" "${PR_JSON}"
+AERIS_TEST_PR_HTTP_STATUS=503
+expect_rejected 'pull request HTTP error body' "${VALID}"
+unset AERIS_TEST_PR_HTTP_STATUS
+node -e "process.stdout.write('x'.repeat(2097153))" >"${PR_JSON}"
+expect_rejected 'oversized pull request JSON' "${VALID}"
+cp "${RUN_ROOT}/valid-pr.json" "${PR_JSON}"
+for invalid_bot in '{' '[]' 'null'; do
+  AERIS_TEST_BOT_BODY="${invalid_bot}"
+  expect_rejected 'malformed or non-object Sync App identity JSON' "${VALID}"
+done
+unset AERIS_TEST_BOT_BODY
+node -e "process.stdout.write('x'.repeat(2097153))" >"${RUN_ROOT}/oversized-bot.json"
+AERIS_TEST_BOT_BODY_FILE="${RUN_ROOT}/oversized-bot.json"
+expect_rejected 'oversized Sync App identity JSON' "${VALID}"
+unset AERIS_TEST_BOT_BODY_FILE
+AERIS_TEST_BOT_HTTP_STATUS=502
+expect_rejected 'Sync App identity HTTP error body' "${VALID}"
+unset AERIS_TEST_BOT_HTTP_STATUS
 
 PR_METADATA_HOOK="${RUN_ROOT}/drift-pr-after-ref-fence.sh"
 cat >"${PR_METADATA_HOOK}" <<'EOF'

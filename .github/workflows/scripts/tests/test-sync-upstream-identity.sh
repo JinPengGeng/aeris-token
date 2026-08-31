@@ -29,35 +29,18 @@ run_identity_case() {
 set -euo pipefail
 printf '%s\n' "$*" >>"${GH_CALLS}"
 case "$*" in
-  *'/issues/42/comments?per_page=100'*)
-    filter=''
-    while (($#)); do
-      if [[ "$1" == --jq ]]; then filter="$2"; break; fi
-      shift
-    done
-    [[ -n "${filter}" ]] || { printf 'missing jq filter\n' >&2; exit 1; }
-    [[ "${filter}" == *'aeris-sync[bot]'* && "${filter}" == *'github-actions[bot]'* ]] || {
-      printf 'comment filter omitted an accepted bot identity\n' >&2
-      exit 1
-    }
-    [[ "${filter}" == *"${COMMENT_LOGIN}"* ]] || {
-      printf 'configured comment author was not accepted\n' >&2
-      exit 1
-    }
-    if [[ "${filter}" == *'startswith('* ]]; then
-      printf '%s\n' "${COMMENT_ID}"
-    else
-      printf '%s\n' '<!-- upstream-sync-once -->'
-    fi
+  *'api --method GET repos/example/repo/issues/42/comments'*'-f page=1'*)
+    printf '[{"id":1,"user":{"login":"%s"},"body":"<!-- upstream-sync-once -->"},{"id":%s,"user":{"login":"%s"},"body":"<!-- upstream-sync-pending-tip:old -->"}]\n' \
+      "${COMMENT_LOGIN}" "${COMMENT_ID}" "${COMMENT_LOGIN}"
     ;;
   *'--method PATCH repos/example/repo/issues/comments/'*) ;;
   *) printf 'unexpected gh invocation: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
   chmod +x "${fake_bin}/gh"
-  cp "${SCRIPT_ROOT}/github-autonomy.sh" "${root}/github-autonomy.sh"
-  cp "${SCRIPT_ROOT}/bounded-git-fetch.sh" "${root}/bounded-git-fetch.sh"
-  sed '/^parent="$(aeris_gh api "repos\/\${GITHUB_REPOSITORY}"/,$d' \
+  awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/github-autonomy.sh" >"${root}/github-autonomy.sh"
+  awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/bounded-git-fetch.sh" >"${root}/bounded-git-fetch.sh"
+  sed '/^mapfile -t sync_identity /,$d' \
     "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
   cat >>"${harness}" <<'EOF'
 issue_comment_once 42 once 'must not duplicate'
@@ -73,8 +56,9 @@ EOF
     "${name} comments must not be duplicated"
   assert_eq 1 "$(grep -c -- "--method PATCH repos/example/repo/issues/comments/${comment_id}" "${calls}" || true)" \
     "${name} pending-tip comment must be updated"
-  grep -q 'aeris-sync\[bot\]' "${calls}" || fail "${name} query omitted the Sync App bot"
-  grep -q 'github-actions\[bot\]' "${calls}" || fail "${name} query omitted the legacy bot"
+  grep -q 'api --method GET repos/example/repo/issues/42/comments' "${calls}" ||
+    fail "${name} omitted the bounded comments read"
+  ! grep -q -- '--paginate' "${calls}" || fail "${name} used unbounded pagination"
 }
 
 run_publication_fence_drift_case() {
@@ -102,9 +86,9 @@ run_publication_fence_drift_case() {
     "${stable}:refs/heads/main" "${stable}:refs/heads/automation/sync-upstream"
   git -C "${source}" push -q upstream "${stable}:refs/heads/main"
 
-  cp "${SCRIPT_ROOT}/github-autonomy.sh" "${root}/github-autonomy.sh"
-  cp "${SCRIPT_ROOT}/bounded-git-fetch.sh" "${root}/bounded-git-fetch.sh"
-  sed '/^parent="$(aeris_gh api "repos\/\${GITHUB_REPOSITORY}"/,$d' \
+  awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/github-autonomy.sh" >"${root}/github-autonomy.sh"
+  awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/bounded-git-fetch.sh" >"${root}/bounded-git-fetch.sh"
+  sed '/^mapfile -t sync_identity /,$d' \
     "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
   cat >>"${harness}" <<'EOF'
 upstream_branch=main
@@ -191,9 +175,9 @@ git push -q --force origin "${DRIFT_SHA}:refs/heads/automation/sync-upstream"
 EOF
   chmod +x "${metadata_hook}" "${head_hook}"
 
-  cp "${SCRIPT_ROOT}/github-autonomy.sh" "${root}/github-autonomy.sh"
-  cp "${SCRIPT_ROOT}/bounded-git-fetch.sh" "${root}/bounded-git-fetch.sh"
-  sed '/^parent="$(aeris_gh api "repos\/\${GITHUB_REPOSITORY}"/,$d' \
+  awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/github-autonomy.sh" >"${root}/github-autonomy.sh"
+  awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/bounded-git-fetch.sh" >"${root}/bounded-git-fetch.sh"
+  sed '/^mapfile -t sync_identity /,$d' \
     "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
   cat >>"${harness}" <<'EOF'
 upstream_branch=main
@@ -235,8 +219,139 @@ NODE
     STABLE_SHA="${stable}" EXPECTED_BODY="${body}" bash "${harness}"
 }
 
+run_authoritative_identity_json_cases() {
+  local root="${RUN_ROOT}/authoritative-json" fake_bin="${RUN_ROOT}/authoritative-json/bin"
+  local harness="${RUN_ROOT}/authoritative-json/harness.sh"
+  local repository_json="${RUN_ROOT}/authoritative-json/repository.json"
+  local upstream_json="${RUN_ROOT}/authoritative-json/upstream.json"
+  local bot_json="${RUN_ROOT}/authoritative-json/bot.json" status
+  mkdir -p "${root}" "${fake_bin}"
+  awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/github-autonomy.sh" >"${root}/github-autonomy.sh"
+  awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/bounded-git-fetch.sh" >"${root}/bounded-git-fetch.sh"
+  sed '/^mapfile -t sync_identity /,$d' "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
+  cat >>"${harness}" <<'EOF'
+read_sync_identity >/dev/null
+EOF
+  cat >"${fake_bin}/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == api ]] || exit 2
+case "$2" in
+  repos/example/repo) cat "${REPOSITORY_JSON}" ;;
+  repos/example/Upstream) cat "${UPSTREAM_JSON}" ;;
+  users/aeris-sync%5Bbot%5D) cat "${BOT_JSON}" ;;
+  *) exit 2 ;;
+esac
+EOF
+  chmod +x "${fake_bin}/gh"
+  printf '%s\n' '{"parent":{"full_name":"example/Upstream","default_branch":"main"}}' >"${repository_json}"
+  printf '%s\n' '{"full_name":"example/Upstream","default_branch":"main"}' >"${upstream_json}"
+  printf '%s\n' '{"login":"aeris-sync[bot]","id":987654,"type":"Bot"}' >"${bot_json}"
+
+  for invalid in '{' '[]' 'null'; do
+    printf '%s' "${invalid}" >"${repository_json}"
+    set +e
+    PATH="${fake_bin}:${PATH}" REPOSITORY_JSON="${repository_json}" UPSTREAM_JSON="${upstream_json}" BOT_JSON="${bot_json}" \
+      GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
+      AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+      bash "${harness}" >/dev/null 2>&1
+    status=$?
+    set -e
+    [[ ${status} -ne 0 ]] || fail 'malformed or non-object fork repository identity was accepted'
+  done
+  printf '%s\n' '{"parent":{"full_name":"example/Upstream","default_branch":"main"}}' >"${repository_json}"
+  for invalid in '{' '[]' 'null'; do
+    printf '%s' "${invalid}" >"${bot_json}"
+    set +e
+    PATH="${fake_bin}:${PATH}" REPOSITORY_JSON="${repository_json}" UPSTREAM_JSON="${upstream_json}" BOT_JSON="${bot_json}" \
+      GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
+      AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+      bash "${harness}" >/dev/null 2>&1
+    status=$?
+    set -e
+    [[ ${status} -ne 0 ]] || fail 'malformed or non-object Sync App identity was accepted'
+  done
+  node -e "process.stdout.write('x'.repeat(2097153))" >"${bot_json}"
+  set +e
+  PATH="${fake_bin}:${PATH}" REPOSITORY_JSON="${repository_json}" UPSTREAM_JSON="${upstream_json}" BOT_JSON="${bot_json}" \
+    GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
+    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+    bash "${harness}" >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ ${status} -ne 0 ]] || fail 'oversized Sync App identity was accepted'
+}
+
+run_bounded_api_pagination_cases() {
+  local root="${RUN_ROOT}/bounded-pagination" fake_bin="${RUN_ROOT}/bounded-pagination/bin"
+  local harness="${RUN_ROOT}/bounded-pagination/harness.sh"
+  local calls="${RUN_ROOT}/bounded-pagination/gh-calls" output_json status
+  mkdir -p "${root}" "${fake_bin}"
+  : >"${calls}"
+  output_json="${root}/combined.json"
+  awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/github-autonomy.sh" >"${root}/github-autonomy.sh"
+  awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/bounded-git-fetch.sh" >"${root}/bounded-git-fetch.sh"
+  sed '/^mapfile -t sync_identity /,$d' "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
+  cat >>"${harness}" <<'EOF'
+aeris_read_bounded_api_array_pages \
+  repos/example/repo/items "${OUTPUT_JSON}" 'pagination fixture'
+EOF
+  cat >"${fake_bin}/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${GH_CALLS}"
+page=''
+while (($#)); do
+  if [[ "$1" == -f && "${2:-}" == page=* ]]; then
+    page="${2#page=}"
+    break
+  fi
+  shift
+done
+[[ "${page}" =~ ^[1-9][0-9]*$ ]] || exit 2
+if [[ "${GH_MODE}" == overflow ]]; then
+  if ((page <= 10)); then
+    jq -nc --argjson page "${page}" '[range(1;101) | {id: (($page - 1) * 100 + .)}]'
+  elif ((page == 11)); then
+    printf '%s\n' '[{"id":1001}]'
+  else
+    printf '%s\n' '[]'
+  fi
+elif ((page == 1)); then
+  jq -nc '[range(1;101) | {id:.}]'
+elif ((page == 2)); then
+  printf '%s\n' '[{"id":101}]'
+else
+  printf '%s\n' '[]'
+fi
+EOF
+  chmod +x "${fake_bin}/gh"
+
+  PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_MODE=normal OUTPUT_JSON="${output_json}" \
+    GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
+    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+    bash "${harness}"
+  assert_eq 101 "$(jq 'length' "${output_json}")" \
+    'bounded pagination must aggregate every proven page'
+  assert_eq 101 "$(jq '.[-1].id' "${output_json}")" \
+    'bounded pagination must preserve page order'
+
+  set +e
+  PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_MODE=overflow OUTPUT_JSON="${output_json}" \
+    GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
+    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+    bash "${harness}" >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ ${status} -ne 0 ]] || fail 'bounded pagination accepted an eleventh non-empty page'
+  grep -q -- '-f page=11' "${calls}" || fail 'bounded pagination did not prove its terminal page'
+  ! grep -q -- '--paginate' "${calls}" || fail 'bounded pagination delegated to gh --paginate'
+}
+
 run_identity_case app 'aeris-sync[bot]' 102
 run_identity_case legacy 'github-actions[bot]' 202
 run_publication_fence_drift_case
 run_post_publish_pr_fence_cases
+run_authoritative_identity_json_cases
+run_bounded_api_pagination_cases
 printf 'PASS sync upstream identity migration (%s)\n' "${RUN_ROOT}"
