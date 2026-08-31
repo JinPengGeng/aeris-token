@@ -103,21 +103,24 @@ use crate::execution_runtime::{
     attach_provider_response_headers_to_report_context, local_failover_response_text,
     resolve_core_stream_direct_finalize_report_kind,
     resolve_core_stream_error_finalize_report_kind,
-    resolve_local_candidate_failover_analysis_stream, should_fallback_to_control_stream,
-    should_retry_next_local_candidate_stream, LocalFailoverDecision,
+    resolve_local_candidate_failover_analysis_stream,
+    resolve_local_candidate_failover_analysis_stream_with_origin,
+    should_fallback_to_control_stream, should_retry_next_local_candidate_stream,
+    LocalFailoverDecision,
 };
 use crate::execution_runtime::{
     MAX_ERROR_BODY_BYTES, MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES,
 };
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, build_local_error_flow_metadata, classify_failure_disposition,
-    cyber_continue_failover_enabled, operation_replay_policy, spawn_local_oauth_success_effect,
-    trace_upstream_response_body, with_error_flow_report_context,
-    with_upstream_response_report_context, FailureDisposition, LocalAdaptiveRateLimitEffect,
-    LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
-    LocalExecutionEffectContext, LocalFailoverAnalysis, LocalHealthFailureEffect,
-    LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect,
+    apply_local_execution_effect, attempt_identity_from_report_context,
+    build_local_error_flow_metadata, classify_failure_disposition, cyber_continue_failover_enabled,
+    failure_origin_from_embedded_upstream_error, failure_origin_from_upstream_response,
+    operation_replay_policy, trace_upstream_response_body, with_error_flow_report_context,
+    with_upstream_response_report_context, FailureDisposition, FailureOrigin,
+    LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
+    LocalExecutionEffect, LocalExecutionEffectContext, LocalFailoverAnalysis,
+    LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
     LocalPoolErrorEffect,
 };
 use crate::provider_pool_demand::{
@@ -1193,6 +1196,19 @@ async fn execute_in_process_stream(
     }
 }
 
+fn should_attempt_stream_oauth_retry(
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    upstream_status_code: u16,
+    prefetched_failure_status_code: Option<u16>,
+) -> bool {
+    attempt_identity_from_report_context(report_context).is_some()
+        && operation_replay_policy(plan, report_context).allows_candidate_switch()
+        && prefetched_failure_status_code.map_or(upstream_status_code >= 400, |status_code| {
+            status_code >= 400
+        })
+}
+
 async fn execute_in_process_stream_with_oauth_retry(
     state: &AppState,
     plan: &mut ExecutionPlan,
@@ -1233,15 +1249,23 @@ async fn execute_in_process_stream_with_oauth_retry(
         .as_ref()
         .map(|failure| failure.status_code)
         .unwrap_or(execution.status_code);
+    let retry_failure_origin = analyzed_prefetched_failure
+        .as_ref()
+        .map(|failure| failure.analysis.failure_origin)
+        .unwrap_or_else(|| {
+            failure_origin_from_upstream_response(execution.status_code, response_text.as_deref())
+        });
     // OAuth refresh has its own strict proof gate. An embedded Anthropic error
     // is an upstream 200 transport response, so its disposition must not
     // suppress that gate before it can inspect the parsed error taxonomy.
-    let retry_requested = operation_replay_policy(plan, report_context).allows_candidate_switch()
-        && analyzed_prefetched_failure
+    let retry_requested = should_attempt_stream_oauth_retry(
+        plan,
+        report_context,
+        execution.status_code,
+        analyzed_prefetched_failure
             .as_ref()
-            .map_or(execution.status_code >= 400, |failure| {
-                failure.status_code >= 400
-            });
+            .map(|failure| failure.status_code),
+    );
     if retry_requested
         && uses_oauth_credential
         && refresh_oauth_plan_auth_for_retry(
@@ -1249,6 +1273,7 @@ async fn execute_in_process_stream_with_oauth_retry(
             plan,
             retry_status_code,
             response_text.as_deref(),
+            retry_failure_origin,
             trace_id,
             report_context,
             Some(execution.response_observation.request_started_at_unix_ms),
@@ -1267,6 +1292,7 @@ async fn execute_in_process_stream_with_oauth_retry(
 struct PrefetchedStreamFailure {
     status_code: u16,
     response_text: String,
+    failure_origin: FailureOrigin,
 }
 
 #[derive(Debug)]
@@ -1284,12 +1310,13 @@ async fn analyze_prefetched_stream_failure(
     report_context: Option<&Value>,
     failure: PrefetchedStreamFailure,
 ) -> AnalyzedPrefetchedStreamFailure {
-    let analysis = resolve_local_candidate_failover_analysis_stream(
+    let analysis = resolve_local_candidate_failover_analysis_stream_with_origin(
         state,
         plan,
         report_context,
         failure.status_code,
         Some(failure.response_text.as_str()),
+        failure.failure_origin,
     )
     .await;
     let disposition = classify_failure_disposition(
@@ -1403,6 +1430,9 @@ async fn prefetch_direct_anthropic_stream_failure(
                 return Some(PrefetchedStreamFailure {
                     status_code,
                     response_text,
+                    failure_origin: failure_origin_from_embedded_upstream_error(Some(
+                        response_text.as_str(),
+                    )),
                 });
             }
         }
@@ -2846,16 +2876,6 @@ async fn execute_stream_from_direct_passthrough(
         response_observation.request_started_at_unix_ms,
         response_observation.response_headers_observed_at_unix_ms,
         &response_observation.request_order_id,
-    );
-    spawn_local_oauth_success_effect(
-        state.clone(),
-        &plan,
-        report_context.as_ref(),
-        LocalOAuthSuccessEffect {
-            status_code,
-            request_started_at_unix_ms: Some(response_observation.request_started_at_unix_ms),
-            request_order_id: Some(&response_observation.request_order_id),
-        },
     );
     if status_code == 200 {
         seed_kiro_simulated_cache_enabled(state, &plan, &mut report_context).await;
@@ -5612,16 +5632,6 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         response_observation.response_headers_observed_at_unix_ms,
         &response_observation.request_order_id,
     );
-    spawn_local_oauth_success_effect(
-        state.clone(),
-        &plan,
-        report_context.as_ref(),
-        LocalOAuthSuccessEffect {
-            status_code,
-            request_started_at_unix_ms: Some(response_observation.request_started_at_unix_ms),
-            request_order_id: Some(&response_observation.request_order_id),
-        },
-    );
     if status_code == 200 {
         seed_kiro_simulated_cache_enabled(state, &plan, &mut report_context).await;
         if kiro_simulated_cache_enabled_from_report_context(report_context.as_ref()) {
@@ -5745,6 +5755,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                 status_code,
                 classification: failover_analysis.classification,
+                failure_origin: failover_analysis.failure_origin,
             }),
         )
         .await;
@@ -5757,6 +5768,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
                 status_code,
                 classification: failover_analysis.classification,
+                failure_origin: failover_analysis.failure_origin,
                 headers: Some(&headers),
             }),
         )
@@ -5770,6 +5782,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                 status_code,
                 classification: failover_analysis.classification,
+                failure_origin: failover_analysis.failure_origin,
             }),
         )
         .await;
@@ -5782,6 +5795,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code,
                 response_text: error_response_text.as_deref(),
+                failure_origin: failover_analysis.failure_origin,
             }),
         )
         .await;
@@ -5794,6 +5808,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
                 status_code,
                 classification: failover_analysis.classification,
+                failure_origin: failover_analysis.failure_origin,
                 headers: &headers,
                 error_body: error_response_text.as_deref(),
             }),
@@ -8099,9 +8114,10 @@ mod tests {
         record_sync_terminal_usage_with_handoff,
         record_sync_terminal_usage_with_handoff_after_spawn,
         resolve_provider_stream_error_status_code, select_direct_anthropic_prefetch_wait,
-        should_limit_direct_finalize_prefetch, should_probe_success_failover_before_stream,
-        should_skip_direct_finalize_prefetch, stream_chunk_contains_sse_done,
-        stream_requires_observed_terminal_event, stream_terminal_summary_missing_observed_finish,
+        should_attempt_stream_oauth_retry, should_limit_direct_finalize_prefetch,
+        should_probe_success_failover_before_stream, should_skip_direct_finalize_prefetch,
+        stream_chunk_contains_sse_done, stream_requires_observed_terminal_event,
+        stream_terminal_summary_missing_observed_finish,
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
         ClientVisibleStreamCompletionTracker, DirectPassthroughFinalizer,
@@ -8652,6 +8668,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stream_oauth_retry_gate_requires_valid_identity_and_blocks_unsafe_replay() {
+        let plain_plan = native_anthropic_stream_plan("stream-oauth-replay-gate");
+        let valid_attempt_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        assert!(should_attempt_stream_oauth_retry(
+            &plain_plan,
+            Some(&valid_attempt_context),
+            200,
+            Some(401),
+        ));
+        let valid_pool_attempt_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+            "candidate_group_id": "group-1",
+            "pool_key_index": 1,
+        });
+        assert!(should_attempt_stream_oauth_retry(
+            &plain_plan,
+            Some(&valid_pool_attempt_context),
+            200,
+            Some(401),
+        ));
+        for invalid_attempt_context in [
+            None,
+            Some(json!({})),
+            Some(json!({"candidate_index": 0})),
+            Some(json!({"candidate_index": "invalid", "retry_index": 0})),
+            Some(json!({"candidate_index": 0, "retry_index": "invalid"})),
+            Some(json!({
+                "candidate_index": 0,
+                "retry_index": 0,
+                "pool_key_index": "invalid",
+            })),
+            Some(json!({
+                "candidate_index": 0,
+                "retry_index": 0,
+                "candidate_group_id": "group-1",
+            })),
+        ] {
+            assert!(!should_attempt_stream_oauth_retry(
+                &plain_plan,
+                invalid_attempt_context.as_ref(),
+                200,
+                Some(401),
+            ));
+        }
+
+        let compact_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+            "api_operation": "compact",
+        });
+        assert!(!should_attempt_stream_oauth_retry(
+            &plain_plan,
+            Some(&compact_context),
+            200,
+            Some(401),
+        ));
+
+        let mut tool_plan = plain_plan;
+        tool_plan.body = RequestBody::from_json(json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+            "stream": true
+        }));
+        assert!(!should_attempt_stream_oauth_retry(
+            &tool_plan,
+            Some(&valid_attempt_context),
+            200,
+            Some(401),
+        ));
+    }
+
     struct StreamDropFlag(Arc<AtomicBool>);
 
     impl Drop for StreamDropFlag {
@@ -9127,12 +9220,16 @@ mod tests {
         );
         plan.headers
             .insert("authorization".to_string(), initial_authorization.clone());
+        let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
 
         let execution = execute_in_process_stream_with_oauth_retry(
             &state,
             &mut plan,
             "trace-agent-invalid-task",
-            None,
+            Some(&report_context),
         )
         .await
         .expect("stream request should recover");
@@ -9264,12 +9361,16 @@ mod tests {
                 .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             )
             .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
+        let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
 
         let execution = execute_in_process_stream_with_oauth_retry(
             &state,
             &mut plan,
             "trace-anthropic-embedded-oauth-refresh",
-            None,
+            Some(&report_context),
         )
         .await
         .expect("embedded authentication error should recover");
@@ -11459,7 +11560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_anthropic_auth_error_stops_without_credential_rotation() {
+    async fn native_anthropic_auth_error_rotates_credential_and_preserves_error() {
         let upstream_error = concat!(
             "event: error\n",
             "data: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid credential\"}}\n\n",
@@ -11470,9 +11571,15 @@ mod tests {
         )
         .await;
 
-        let AiAttemptExecutionOutcome::Responded(response) = outcome else {
-            panic!("embedded authentication error should stop without failover")
+        let AiAttemptExecutionOutcome::Retry {
+            scope,
+            fallback_response,
+        } = outcome
+        else {
+            panic!("structured authentication evidence should rotate the credential")
         };
+        assert_eq!(scope, AiAttemptRetryScope::Credential);
+        let response = fallback_response.expect("upstream auth error should remain available");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let response_body = to_bytes(response.into_body(), usize::MAX)
             .await

@@ -2,8 +2,8 @@ use aether_contracts::{ExecutionPlan, ExecutionResult};
 use serde_json::Value;
 
 use crate::orchestration::{
-    resolve_local_failover_analysis_for_attempt, FailureOrigin, LocalFailoverAnalysis,
-    LocalFailoverClassification, LocalFailoverDecision,
+    failure_origin_from_upstream_response, resolve_local_failover_analysis_for_attempt_with_origin,
+    FailureOrigin, LocalFailoverAnalysis, LocalFailoverClassification, LocalFailoverDecision,
 };
 use crate::AppState;
 
@@ -55,6 +55,27 @@ pub(crate) async fn analyze_local_candidate_failover_sync(
     result: &ExecutionResult,
     response_text: Option<&str>,
 ) -> LocalFailoverAnalysis {
+    analyze_local_candidate_failover_sync_with_origin(
+        state,
+        plan,
+        plan_kind,
+        report_context,
+        result,
+        response_text,
+        failure_origin_from_upstream_response(result.status_code, response_text),
+    )
+    .await
+}
+
+pub(crate) async fn analyze_local_candidate_failover_sync_with_origin(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    plan_kind: &str,
+    report_context: Option<&serde_json::Value>,
+    result: &ExecutionResult,
+    response_text: Option<&str>,
+    failure_origin: FailureOrigin,
+) -> LocalFailoverAnalysis {
     if sync_plan_kind_disables_local_candidate_failover(plan_kind) {
         return LocalFailoverAnalysis::use_default();
     }
@@ -73,12 +94,13 @@ pub(crate) async fn analyze_local_candidate_failover_sync(
         }
     }
 
-    resolve_local_failover_analysis_for_attempt(
+    resolve_local_failover_analysis_for_attempt_with_origin(
         state,
         plan,
         report_context,
         result.status_code,
         response_text,
+        failure_origin,
     )
     .await
 }
@@ -244,16 +266,36 @@ pub(crate) async fn resolve_local_candidate_failover_analysis_stream(
     status_code: u16,
     response_text: Option<&str>,
 ) -> LocalFailoverAnalysis {
-    if openai_image_success_disables_local_success_failover(plan, status_code) {
-        return LocalFailoverAnalysis::use_default();
-    }
-
-    resolve_local_failover_analysis_for_attempt(
+    resolve_local_candidate_failover_analysis_stream_with_origin(
         state,
         plan,
         report_context,
         status_code,
         response_text,
+        failure_origin_from_upstream_response(status_code, response_text),
+    )
+    .await
+}
+
+pub(crate) async fn resolve_local_candidate_failover_analysis_stream_with_origin(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    status_code: u16,
+    response_text: Option<&str>,
+    failure_origin: FailureOrigin,
+) -> LocalFailoverAnalysis {
+    if openai_image_success_disables_local_success_failover(plan, status_code) {
+        return LocalFailoverAnalysis::use_default();
+    }
+
+    resolve_local_failover_analysis_for_attempt_with_origin(
+        state,
+        plan,
+        report_context,
+        status_code,
+        response_text,
+        failure_origin,
     )
     .await
 }
@@ -366,14 +408,17 @@ mod tests {
 
     use super::{
         analyze_local_candidate_failover_sync, resolve_core_stream_error_finalize_report_kind,
-        resolve_core_sync_error_finalize_report_kind, should_fallback_to_control_stream,
-        should_fallback_to_control_sync, should_retry_next_local_candidate_stream,
-        should_retry_next_local_candidate_sync, should_stop_local_candidate_failover_stream,
-        should_stop_local_candidate_failover_sync,
+        resolve_core_sync_error_finalize_report_kind,
+        resolve_local_candidate_failover_analysis_stream,
+        resolve_local_candidate_failover_analysis_stream_with_origin,
+        should_fallback_to_control_stream, should_fallback_to_control_sync,
+        should_retry_next_local_candidate_stream, should_retry_next_local_candidate_sync,
+        should_stop_local_candidate_failover_stream, should_stop_local_candidate_failover_sync,
     };
     use crate::data::GatewayDataState;
     use crate::orchestration::{
-        resolve_local_failover_policy, LocalFailoverPolicy, LocalFailoverRegexRule,
+        resolve_local_failover_policy, FailureOrigin, LocalFailoverClassification,
+        LocalFailoverPolicy, LocalFailoverRegexRule,
     };
     use crate::AppState;
 
@@ -398,6 +443,127 @@ mod tests {
             proxy: None,
             transport_profile: None,
             timeouts: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_or_corrupt_attempt_identity_fails_closed_for_sync_and_stream() {
+        let state = build_state_with_provider_config(None);
+        let plan = sample_plan();
+        let report_contexts = [
+            None,
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({
+                "candidate_index": "not-a-number",
+                "retry_index": 0,
+            })),
+            Some(serde_json::json!({
+                "candidate_index": 0,
+                "retry_index": "not-a-number",
+            })),
+        ];
+
+        for status_code in [429, 503] {
+            let result = ExecutionResult {
+                request_id: "req-1".to_string(),
+                candidate_id: Some("cand-1".to_string()),
+                status_code,
+                headers: Default::default(),
+                response_observation: None,
+                body: None,
+                telemetry: None,
+                error: None,
+            };
+            for report_context in &report_contexts {
+                let sync_analysis = analyze_local_candidate_failover_sync(
+                    &state,
+                    &plan,
+                    "openai_chat_sync",
+                    report_context.as_ref(),
+                    &result,
+                    Some("upstream failure"),
+                )
+                .await;
+                assert_eq!(
+                    sync_analysis.classification,
+                    LocalFailoverClassification::StopFailureOrigin
+                );
+                assert_eq!(
+                    sync_analysis.decision,
+                    crate::orchestration::LocalFailoverDecision::StopLocalFailover
+                );
+                assert_eq!(sync_analysis.failure_origin, FailureOrigin::Unknown);
+
+                let stream_analysis = resolve_local_candidate_failover_analysis_stream_with_origin(
+                    &state,
+                    &plan,
+                    report_context.as_ref(),
+                    status_code,
+                    Some("upstream failure"),
+                    FailureOrigin::UpstreamProvider,
+                )
+                .await;
+                assert_eq!(
+                    stream_analysis.classification,
+                    LocalFailoverClassification::StopFailureOrigin
+                );
+                assert_eq!(
+                    stream_analysis.decision,
+                    crate::orchestration::LocalFailoverDecision::StopLocalFailover
+                );
+                assert_eq!(stream_analysis.failure_origin, FailureOrigin::Unknown);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_type_and_code_auth_taxonomy_matches_in_sync_and_stream() {
+        let state = build_state_with_provider_config(None);
+        let plan = sample_plan();
+        let report_context = serde_json::json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        let response_text = r#"{"error":{"type":"invalid_request_error","code":"invalid_token"}}"#;
+        let result = ExecutionResult {
+            request_id: "req-1".to_string(),
+            candidate_id: Some("cand-1".to_string()),
+            status_code: 403,
+            headers: Default::default(),
+            response_observation: None,
+            body: None,
+            telemetry: None,
+            error: None,
+        };
+
+        let sync_analysis = analyze_local_candidate_failover_sync(
+            &state,
+            &plan,
+            "openai_chat_sync",
+            Some(&report_context),
+            &result,
+            Some(response_text),
+        )
+        .await;
+        let stream_analysis = resolve_local_candidate_failover_analysis_stream(
+            &state,
+            &plan,
+            Some(&report_context),
+            403,
+            Some(response_text),
+        )
+        .await;
+
+        for analysis in [sync_analysis, stream_analysis] {
+            assert_eq!(analysis.failure_origin, FailureOrigin::UpstreamCredential);
+            assert_eq!(
+                analysis.classification,
+                LocalFailoverClassification::RetryUpstreamFailure
+            );
+            assert_eq!(
+                analysis.decision,
+                crate::orchestration::LocalFailoverDecision::RetryNextCandidate
+            );
         }
     }
 
@@ -923,6 +1089,31 @@ mod tests {
                 Some("{\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid auth token\"}}"),
             )
             .await
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_auth_status_keeps_provider_origin_and_stops_rotation() {
+        let local_report_context = serde_json::json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        let state = build_state_with_provider_config(None);
+        let plan = sample_plan();
+        let analysis = resolve_local_candidate_failover_analysis_stream_with_origin(
+            &state,
+            &plan,
+            Some(&local_report_context),
+            401,
+            Some(r#"{"error":{"type":"authentication_error","message":"invalid auth token"}}"#),
+            FailureOrigin::UpstreamProvider,
+        )
+        .await;
+
+        assert_eq!(analysis.failure_origin, FailureOrigin::UpstreamProvider);
+        assert_eq!(
+            analysis.classification,
+            LocalFailoverClassification::StopStatusCode
         );
     }
 

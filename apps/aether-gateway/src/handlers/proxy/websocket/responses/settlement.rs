@@ -2,17 +2,17 @@
 //!
 //! 结算判定本身是 transport 中立的，住在
 //! [`crate::execution_runtime::attempt_lifecycle`]。这里只做 WS 专属的一件事：
-//! 把 relay loop 的结算触发信号 [`ResponsesWebSocketTurnOutcome`] 翻译成那两个
-//! 正交事实。
+//! 把 relay loop 的结算触发信号 [`ResponsesWebSocketTurnOutcome`] 翻译成终态事实。
 
 use super::turn::ResponsesWebSocketTurnOutcome;
 use crate::execution_runtime::attempt_lifecycle::{
     AttemptClientDelivery, AttemptProviderOutcome, AttemptTerminalFacts,
     CLIENT_CANCELLED_STATUS_CODE, STREAM_TIMEOUT_STATUS_CODE,
 };
+use crate::orchestration::FailureOrigin;
 
 /// 把「结算触发信号」+「已观察到的 provider 终态」+「已记录的投递结果」映射成
-/// 两个正交事实。
+/// provider outcome、client delivery 与 failure origin。
 ///
 /// `ResponsesWebSocketTurnOutcome` 描述的是 relay loop 为什么现在结算这一
 /// attempt，它对 provider 的信息量并不总是完整的：
@@ -26,7 +26,7 @@ use crate::execution_runtime::attempt_lifecycle::{
 /// 它与结算信号推出的投递结果取「只要有一侧失败就是失败」，并优先保留明确记录
 /// 的原因。
 pub(super) fn attempt_facts_for_outcome(
-    observed_provider_terminal: Option<AttemptProviderOutcome>,
+    observed_provider_terminal: Option<AttemptTerminalFacts>,
     recorded_delivery: AttemptClientDelivery,
     settling: ResponsesWebSocketTurnOutcome,
 ) -> AttemptTerminalFacts {
@@ -34,16 +34,19 @@ pub(super) fn attempt_facts_for_outcome(
         ResponsesWebSocketTurnOutcome::ProviderTerminal {
             status_code,
             cancelled,
+            failure_origin,
         } => AttemptTerminalFacts {
             provider: AttemptProviderOutcome::Terminal {
                 status_code,
                 cancelled_by_provider: cancelled,
             },
             delivery: AttemptClientDelivery::Complete,
+            failure_origin,
         },
         ResponsesWebSocketTurnOutcome::Failure {
             status_code,
             reason,
+            failure_origin,
         } => AttemptTerminalFacts {
             provider: AttemptProviderOutcome::Aborted {
                 status_code,
@@ -52,14 +55,20 @@ pub(super) fn attempt_facts_for_outcome(
                 stream_timeout: status_code == STREAM_TIMEOUT_STATUS_CODE,
             },
             delivery: AttemptClientDelivery::Complete,
+            failure_origin,
         },
         ResponsesWebSocketTurnOutcome::Cancelled { reason } => AttemptTerminalFacts {
-            provider: observed_provider_terminal.unwrap_or(AttemptProviderOutcome::Aborted {
-                status_code: CLIENT_CANCELLED_STATUS_CODE,
-                reason,
-                stream_timeout: false,
-            }),
+            provider: observed_provider_terminal.map_or(
+                AttemptProviderOutcome::Aborted {
+                    status_code: CLIENT_CANCELLED_STATUS_CODE,
+                    reason,
+                    stream_timeout: false,
+                },
+                |facts| facts.provider,
+            ),
             delivery: AttemptClientDelivery::Aborted { reason },
+            failure_origin: observed_provider_terminal
+                .map_or(FailureOrigin::Unknown, |facts| facts.failure_origin),
         },
     };
     AttemptTerminalFacts {
@@ -89,6 +98,7 @@ mod tests {
     use crate::execution_runtime::attempt_lifecycle::{
         AttemptClientDelivery, AttemptProviderOutcome, AttemptTerminalFacts,
     };
+    use crate::orchestration::FailureOrigin;
 
     const fn terminal(status_code: u16) -> AttemptProviderOutcome {
         AttemptProviderOutcome::Terminal {
@@ -122,11 +132,13 @@ mod tests {
                 ResponsesWebSocketTurnOutcome::ProviderTerminal {
                     status_code: 200,
                     cancelled: false,
+                    failure_origin: FailureOrigin::UpstreamProvider,
                 },
             ),
             AttemptTerminalFacts {
                 provider: terminal(200),
                 delivery: AttemptClientDelivery::Complete,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }
         );
         assert_eq!(
@@ -136,11 +148,13 @@ mod tests {
                 ResponsesWebSocketTurnOutcome::ProviderTerminal {
                     status_code: 499,
                     cancelled: true,
+                    failure_origin: FailureOrigin::UpstreamProvider,
                 },
             ),
             AttemptTerminalFacts {
                 provider: provider_cancelled(),
                 delivery: AttemptClientDelivery::Complete,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }
         );
         assert_eq!(
@@ -155,6 +169,7 @@ mod tests {
                     "upstream WebSocket closed before provider terminal event"
                 ),
                 delivery: AttemptClientDelivery::Complete,
+                failure_origin: FailureOrigin::Transport,
             }
         );
         assert_eq!(
@@ -168,6 +183,7 @@ mod tests {
                 delivery: AttemptClientDelivery::Aborted {
                     reason: "client disconnected before provider terminal event",
                 },
+                failure_origin: FailureOrigin::Unknown,
             }
         );
 
@@ -200,6 +216,7 @@ mod tests {
             ResponsesWebSocketTurnOutcome::ProviderTerminal {
                 status_code: 504,
                 cancelled: false,
+                failure_origin: FailureOrigin::UpstreamProvider,
             },
         )
         .provider
@@ -210,14 +227,18 @@ mod tests {
     /// `ProviderTerminal` / `Failure` 本身就是权威的 provider 事实。
     #[test]
     fn an_observed_provider_terminal_survives_a_client_side_cancellation() {
-        let observed = terminal(200);
+        let observed = AttemptTerminalFacts {
+            provider: terminal(200),
+            delivery: AttemptClientDelivery::Complete,
+            failure_origin: FailureOrigin::UpstreamProvider,
+        };
 
         let facts = attempt_facts_for_outcome(
             Some(observed),
             AttemptClientDelivery::Complete,
             ResponsesWebSocketTurnOutcome::client_disconnected(),
         );
-        assert_eq!(facts.provider, observed);
+        assert_eq!(facts.provider, observed.provider);
         assert_eq!(
             facts.delivery,
             AttemptClientDelivery::Aborted {
@@ -249,6 +270,7 @@ mod tests {
         let terminal_outcome = ResponsesWebSocketTurnOutcome::ProviderTerminal {
             status_code: 200,
             cancelled: false,
+            failure_origin: FailureOrigin::UpstreamProvider,
         };
         assert_eq!(
             settle_signal_for_client_delivery_failure(Some(terminal_outcome)),
@@ -264,13 +286,18 @@ mod tests {
     #[test]
     fn a_recorded_delivery_failure_survives_a_provider_terminal_settle_signal() {
         let facts = attempt_facts_for_outcome(
-            Some(terminal(200)),
+            Some(AttemptTerminalFacts {
+                provider: terminal(200),
+                delivery: AttemptClientDelivery::Complete,
+                failure_origin: FailureOrigin::UpstreamProvider,
+            }),
             AttemptClientDelivery::Aborted {
                 reason: "write failed",
             },
             ResponsesWebSocketTurnOutcome::ProviderTerminal {
                 status_code: 200,
                 cancelled: false,
+                failure_origin: FailureOrigin::UpstreamProvider,
             },
         );
         assert_eq!(facts.provider, terminal(200));

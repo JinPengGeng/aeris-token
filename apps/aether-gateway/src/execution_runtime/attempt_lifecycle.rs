@@ -48,7 +48,8 @@ use tracing::warn;
 use crate::clock::current_unix_ms;
 use crate::orchestration::{
     apply_local_stream_failure_effects, apply_local_stream_success_effects,
-    release_local_pool_key_lease, LocalExecutionEffectContext, LocalStreamFailureEffect,
+    release_local_pool_key_lease, FailureOrigin, LocalExecutionEffectContext,
+    LocalStreamFailureEffect,
 };
 use crate::request_candidate_runtime::record_local_request_candidate_status;
 use crate::usage::{submit_stream_report, GatewayStreamReportRequest};
@@ -131,11 +132,12 @@ impl AttemptClientDelivery {
     }
 }
 
-/// 一次 attempt 结算时的两个正交事实。
+/// 一次 attempt 结算时的 provider、delivery 与失败来源事实。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AttemptTerminalFacts {
     pub(crate) provider: AttemptProviderOutcome,
     pub(crate) delivery: AttemptClientDelivery,
+    pub(crate) failure_origin: FailureOrigin,
 }
 
 impl AttemptTerminalFacts {
@@ -276,7 +278,7 @@ pub(crate) const fn attempt_status_code(facts: AttemptTerminalFacts) -> u16 {
     facts.provider.status_code()
 }
 
-/// 结算判定的输入：两个正交事实 + 记账层对这条 report 的判定 + 终态摘要事实。
+/// 结算判定的输入：终态事实 + 记账层对这条 report 的判定 + 终态摘要事实。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AttemptSettlementInputs {
     pub(crate) facts: AttemptTerminalFacts,
@@ -299,7 +301,7 @@ pub(crate) struct AttemptSettlement {
     pub(crate) submit_execution_report: bool,
 }
 
-/// 由两个正交事实推出结算动作。唯一的判定入口，表驱动测试逐行锁死。
+/// 由终态事实推出结算动作。唯一的判定入口，表驱动测试逐行锁死。
 ///
 /// provider 终态已到达时，客户端投递失败只影响 candidate 的错误分类，不再作废
 /// 账单、不再把状态码改成 499、也不再跳过供应商效果和 execution report。
@@ -735,6 +737,7 @@ impl ExecutionAttemptLifecycle {
                             settlement.status_code,
                             &payload.headers,
                             Some(response_text),
+                            facts.failure_origin,
                         );
                         if facts.provider.stream_timeout() {
                             effect = effect.with_stream_timeout();
@@ -839,6 +842,7 @@ mod tests {
         AttemptProviderEffect, AttemptProviderOutcome, AttemptSettlement, AttemptSettlementInputs,
         AttemptTerminalFacts,
     };
+    use crate::orchestration::FailureOrigin;
 
     fn settle(
         provider: AttemptProviderOutcome,
@@ -848,7 +852,11 @@ mod tests {
         has_parser_error: bool,
     ) -> AttemptSettlement {
         classify_attempt_settlement(AttemptSettlementInputs {
-            facts: AttemptTerminalFacts { provider, delivery },
+            facts: AttemptTerminalFacts {
+                provider,
+                delivery,
+                failure_origin: FailureOrigin::Unknown,
+            },
             report_represents_failure,
             observed_finish,
             has_parser_error,
@@ -886,6 +894,7 @@ mod tests {
             AttemptTerminalFacts {
                 provider: aborted(502, "upstream failed"),
                 delivery: AttemptClientDelivery::Complete,
+                failure_origin: FailureOrigin::Transport,
             }
             .forced_error(),
             Some("upstream failed")
@@ -896,6 +905,7 @@ mod tests {
                 delivery: AttemptClientDelivery::Aborted {
                     reason: "client went away"
                 },
+                failure_origin: FailureOrigin::Unknown,
             }
             .forced_error(),
             None
@@ -904,6 +914,7 @@ mod tests {
             AttemptTerminalFacts {
                 provider: terminal(200),
                 delivery: AttemptClientDelivery::Complete,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }
             .forced_error(),
             None
@@ -918,6 +929,7 @@ mod tests {
                 delivery: AttemptClientDelivery::Aborted {
                     reason: "client went away"
                 },
+                failure_origin: FailureOrigin::UpstreamProvider,
             }
             .reason(),
             "client went away"
@@ -926,6 +938,7 @@ mod tests {
             AttemptTerminalFacts {
                 provider: provider_cancelled(),
                 delivery: AttemptClientDelivery::Complete,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }
             .reason(),
             "provider cancelled the response"
@@ -934,6 +947,7 @@ mod tests {
             AttemptTerminalFacts {
                 provider: terminal(200),
                 delivery: AttemptClientDelivery::Complete,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }
             .reason(),
             "provider returned a terminal response event"
@@ -942,6 +956,7 @@ mod tests {
             AttemptTerminalFacts {
                 provider: aborted(502, "upstream failed"),
                 delivery: AttemptClientDelivery::Complete,
+                failure_origin: FailureOrigin::Transport,
             }
             .reason(),
             "upstream failed"

@@ -43,6 +43,14 @@ impl LocalFailoverAnalysis {
             failure_origin: FailureOrigin::Unknown,
         }
     }
+
+    pub(crate) const fn fail_closed_unknown_origin() -> Self {
+        Self {
+            classification: LocalFailoverClassification::StopFailureOrigin,
+            decision: LocalFailoverDecision::StopLocalFailover,
+            failure_origin: FailureOrigin::Unknown,
+        }
+    }
 }
 
 pub(crate) fn analyze_local_failover(

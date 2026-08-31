@@ -24,9 +24,10 @@ use crate::execution_runtime::submission::{
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
     apply_local_execution_effect, classify_failure_disposition,
-    resolve_local_failover_analysis_for_attempt,
+    failure_origin_from_embedded_upstream_error, failure_origin_from_upstream_response,
+    resolve_local_failover_analysis_for_attempt_with_origin,
     resolve_local_transport_failover_analysis_for_attempt, with_upstream_response_report_context,
-    LocalAdaptiveRateLimitEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
+    FailureOrigin, LocalAdaptiveRateLimitEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
     LocalExecutionEffectContext, LocalFailoverAnalysis, LocalFailoverDecision,
     LocalHealthFailureEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
 };
@@ -43,6 +44,7 @@ pub(super) struct StreamFailureReport {
     upstream_status_code: Option<u16>,
     transport_error: bool,
     honor_http_failover: bool,
+    failure_origin: FailureOrigin,
     extra_error_fields: Map<String, Value>,
     provider_body_json: Option<Value>,
 }
@@ -77,6 +79,7 @@ impl StreamFailureReport {
             upstream_status_code: _,
             transport_error: _,
             honor_http_failover: _,
+            failure_origin: _,
             mut extra_error_fields,
             provider_body_json,
         } = self;
@@ -122,6 +125,7 @@ pub(super) fn build_stream_failure_report(
         upstream_status_code: Some(status_code),
         transport_error: false,
         honor_http_failover: false,
+        failure_origin: FailureOrigin::Internal,
         extra_error_fields: Map::new(),
         provider_body_json: None,
     }
@@ -139,6 +143,7 @@ pub(super) fn build_stream_transport_failure_report(
         upstream_status_code: None,
         transport_error: true,
         honor_http_failover: false,
+        failure_origin: FailureOrigin::Transport,
         extra_error_fields: Map::new(),
         provider_body_json: None,
     }
@@ -184,6 +189,13 @@ pub(super) fn build_stream_failure_from_execution_error(
         upstream_status_code: error.upstream_status,
         transport_error,
         honor_http_failover: error.upstream_status.is_some(),
+        failure_origin: if transport_error {
+            FailureOrigin::Transport
+        } else if let Some(upstream_status) = error.upstream_status {
+            failure_origin_from_upstream_response(upstream_status, Some(error.message.as_str()))
+        } else {
+            FailureOrigin::Internal
+        },
         extra_error_fields: error_object,
         provider_body_json: None,
     }
@@ -214,6 +226,9 @@ pub(super) fn build_stream_failure_from_provider_error_body(
         upstream_status_code: Some(status_code),
         transport_error: false,
         honor_http_failover: true,
+        failure_origin: failure_origin_from_embedded_upstream_error(
+            serde_json::to_string(body_json).ok().as_deref(),
+        ),
         extra_error_fields: Map::new(),
         provider_body_json: Some(body_json.clone()),
     }
@@ -350,6 +365,7 @@ async fn record_stream_sync_failure(
     candidate_status_code: Option<u16>,
     started_at_unix_ms: Option<u64>,
     handling: StreamFailureHandling,
+    failure_origin: FailureOrigin,
 ) -> LocalFailoverAnalysis {
     let error_type = stream_failure_body_field(payload, "type").unwrap_or("internal");
     let error_message = stream_failure_body_field(payload, "message").unwrap_or_default();
@@ -357,12 +373,13 @@ async fn record_stream_sync_failure(
         .body_json
         .as_ref()
         .and_then(|body_json| serde_json::to_string(body_json).ok());
-    let failure_analysis = resolve_local_failover_analysis_for_attempt(
+    let failure_analysis = resolve_local_failover_analysis_for_attempt_with_origin(
         state,
         plan,
         report_context,
         payload.status_code,
         error_body.as_deref(),
+        failure_origin,
     )
     .await;
     if matches!(error_type, "first_byte_timeout" | "read_timeout") {
@@ -385,6 +402,7 @@ async fn record_stream_sync_failure(
         LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
             status_code: payload.status_code,
             classification: failure_analysis.classification,
+            failure_origin: failure_analysis.failure_origin,
         }),
     )
     .await;
@@ -397,6 +415,7 @@ async fn record_stream_sync_failure(
         LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
             status_code: payload.status_code,
             classification: failure_analysis.classification,
+            failure_origin: failure_analysis.failure_origin,
             headers: Some(&payload.headers),
         }),
     )
@@ -410,6 +429,7 @@ async fn record_stream_sync_failure(
         LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
             status_code: payload.status_code,
             classification: failure_analysis.classification,
+            failure_origin: failure_analysis.failure_origin,
         }),
     )
     .await;
@@ -422,6 +442,7 @@ async fn record_stream_sync_failure(
         LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
             status_code: payload.status_code,
             response_text: error_body.as_deref(),
+            failure_origin: failure_analysis.failure_origin,
         }),
     )
     .await;
@@ -434,6 +455,7 @@ async fn record_stream_sync_failure(
         LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
             status_code: payload.status_code,
             classification: failure_analysis.classification,
+            failure_origin: failure_analysis.failure_origin,
             headers: &payload.headers,
             error_body: error_body.as_deref(),
         }),
@@ -533,9 +555,27 @@ pub(super) async fn handle_prefetch_provider_private_stream_error(
         plan,
         payload.report_context.as_ref(),
         &payload,
-        Some(status_code),
+        Some(upstream_status_code),
         None,
         StreamFailureHandling::HonorLocalFailover,
+        if upstream_status_code == status_code {
+            failure_origin_from_upstream_response(
+                status_code,
+                payload
+                    .body_json
+                    .as_ref()
+                    .and_then(|body| serde_json::to_string(body).ok())
+                    .as_deref(),
+            )
+        } else {
+            failure_origin_from_embedded_upstream_error(
+                payload
+                    .body_json
+                    .as_ref()
+                    .and_then(|body| serde_json::to_string(body).ok())
+                    .as_deref(),
+            )
+        },
     )
     .await;
     if matches!(
@@ -609,6 +649,7 @@ pub(super) async fn handle_prefetch_stream_failure(
     let transport_error = failure.transport_error;
     let candidate_status_code = failure.upstream_status_code;
     let honor_http_failover = failure.honor_http_failover;
+    let failure_origin = failure.failure_origin;
     let mut payload = build_stream_failure_sync_payload(
         trace_id,
         report_kind.to_string(),
@@ -652,6 +693,7 @@ pub(super) async fn handle_prefetch_stream_failure(
         } else {
             StreamFailureHandling::Terminal
         },
+        failure_origin,
     )
     .await;
     if honor_local_failover
@@ -822,6 +864,7 @@ pub(super) async fn submit_midstream_stream_failure(
     };
 
     let candidate_status_code = failure.upstream_status_code;
+    let failure_origin = failure.failure_origin;
     let payload = build_stream_failure_sync_payload(
         trace_id,
         report_kind,
@@ -839,6 +882,7 @@ pub(super) async fn submit_midstream_stream_failure(
         candidate_status_code,
         Some(started_at_unix_ms),
         StreamFailureHandling::Terminal,
+        failure_origin,
     )
     .await;
     if let Err(err) = submit_sync_report(state, payload).await {
@@ -868,6 +912,65 @@ mod tests {
         build_stream_failure_from_execution_error, build_stream_failure_from_provider_error_body,
         build_stream_failure_sync_payload, build_stream_transport_failure_report,
     };
+    use crate::orchestration::FailureOrigin;
+
+    #[test]
+    fn structured_stream_envelope_auth_error_has_credential_origin() {
+        for body in [
+            json!({"type": "error", "error": {"type": "authentication_error"}}),
+            json!({"error": {"type": "invalid_request_error", "code": "invalid_token"}}),
+        ] {
+            assert_eq!(
+                build_stream_failure_from_provider_error_body(401, &body).failure_origin,
+                FailureOrigin::UpstreamCredential
+            );
+        }
+        assert_eq!(
+            build_stream_failure_from_provider_error_body(
+                403,
+                &json!({"error": {"message": "oauth token is expired"}}),
+            )
+            .failure_origin,
+            FailureOrigin::UpstreamProvider
+        );
+    }
+
+    #[test]
+    fn direct_http_execution_error_preserves_auth_boundary_origin() {
+        let direct_401 = build_stream_failure_from_execution_error(&ExecutionError {
+            kind: ExecutionErrorKind::Upstream4xx,
+            phase: ExecutionPhase::FirstByte,
+            message: "unauthorized".to_string(),
+            upstream_status: Some(401),
+            retryable: false,
+            failover_recommended: false,
+        });
+        assert_eq!(direct_401.failure_origin, FailureOrigin::UpstreamCredential);
+
+        let plain_403 = build_stream_failure_from_execution_error(&ExecutionError {
+            kind: ExecutionErrorKind::Upstream4xx,
+            phase: ExecutionPhase::FirstByte,
+            message: "oauth token is expired".to_string(),
+            upstream_status: Some(403),
+            retryable: false,
+            failover_recommended: false,
+        });
+        assert_eq!(plain_403.failure_origin, FailureOrigin::UpstreamProvider);
+
+        let structured_403 = build_stream_failure_from_execution_error(&ExecutionError {
+            kind: ExecutionErrorKind::Upstream4xx,
+            phase: ExecutionPhase::FirstByte,
+            message: r#"{"error":{"type":"invalid_request_error","code":"invalid_token"}}"#
+                .to_string(),
+            upstream_status: Some(403),
+            retryable: false,
+            failover_recommended: false,
+        });
+        assert_eq!(
+            structured_403.failure_origin,
+            FailureOrigin::UpstreamCredential
+        );
+    }
 
     #[test]
     fn committed_transport_failure_has_no_upstream_status() {

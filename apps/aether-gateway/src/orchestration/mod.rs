@@ -20,15 +20,16 @@ pub(crate) use self::adaptive::{
     LocalAdaptiveRateLimitProjection, LocalAdaptiveSuccessProjection,
 };
 pub(crate) use self::attempt::{
-    attempt_identity_from_report_context, build_local_attempt_identities,
-    insert_pool_key_lease_report_context_fields, local_attempt_slot_count,
-    local_execution_candidate_metadata_from_report_context, ExecutionAttemptIdentity,
-    LocalExecutionCandidateMetadata, ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD,
-    SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
+    attempt_identity_for_plan, attempt_identity_from_report_context,
+    build_local_attempt_identities, insert_pool_key_lease_report_context_fields,
+    local_attempt_slot_count, local_execution_candidate_metadata_from_report_context,
+    persisted_candidate_matches_attempt, ExecutionAttemptIdentity, LocalExecutionCandidateMetadata,
+    ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD, SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
 };
 pub(crate) use self::classifier::{
     classify_anthropic_failure_disposition, classify_failure_disposition, classify_local_failover,
     classify_local_transport_error, failure_disposition_from_local_classification,
+    failure_origin_from_embedded_upstream_error, failure_origin_from_upstream_response,
     local_failover_error_message, CallerFailureKind, FailureDisposition, FailureOrigin,
     FailureRetryAction, FailureScope, FailureTokenAction, LocalFailoverClassification,
     LocalFailoverInput, LocalTransportFailoverClassification, OperationReplayPolicy,
@@ -80,15 +81,34 @@ pub(crate) async fn resolve_local_failover_analysis_for_attempt(
     status_code: u16,
     response_text: Option<&str>,
 ) -> LocalFailoverAnalysis {
+    resolve_local_failover_analysis_for_attempt_with_origin(
+        state,
+        plan,
+        report_context,
+        status_code,
+        response_text,
+        failure_origin_from_upstream_response(status_code, response_text),
+    )
+    .await
+}
+
+pub(crate) async fn resolve_local_failover_analysis_for_attempt_with_origin(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    status_code: u16,
+    response_text: Option<&str>,
+    failure_origin: FailureOrigin,
+) -> LocalFailoverAnalysis {
     if attempt_identity_from_report_context(report_context).is_none() {
-        return LocalFailoverAnalysis::use_default();
+        return LocalFailoverAnalysis::fail_closed_unknown_origin();
     }
 
     let policy = resolve_local_failover_policy(state, plan, report_context).await;
     let replay_policy = operation_replay_policy(plan, report_context);
     let analysis = analyze_local_failover(
         &policy,
-        LocalFailoverInput::upstream_response(status_code, response_text, replay_policy),
+        LocalFailoverInput::trusted(status_code, response_text, failure_origin, replay_policy),
     );
     apply_provider_failure_disposition(&plan.provider_api_format, status_code, analysis)
 }
@@ -116,6 +136,13 @@ pub(crate) async fn resolve_local_transport_failover_analysis_for_attempt(
     plan: &ExecutionPlan,
     report_context: Option<&serde_json::Value>,
 ) -> LocalTransportFailoverAnalysis {
+    if attempt_identity_from_report_context(report_context).is_none() {
+        return LocalTransportFailoverAnalysis {
+            classification: LocalTransportFailoverClassification::StopTransportError,
+            decision: LocalFailoverDecision::StopLocalFailover,
+        };
+    }
+
     let policy = resolve_local_failover_policy(state, plan, report_context).await;
     analyze_local_transport_error(&policy, operation_replay_policy(plan, report_context))
 }

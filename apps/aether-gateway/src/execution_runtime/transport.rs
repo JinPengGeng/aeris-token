@@ -938,22 +938,8 @@ pub(crate) async fn execute_sync_plan_with_report_context(
         Ok(None) => {}
         Err(err) => return Err(GatewayError::Internal(err.to_string())),
     }
-    let state_for_response_started = state.clone();
     match DirectSyncExecutionRuntime::new()
-        .execute_sync_with_response_started(plan, move |event| {
-            crate::orchestration::spawn_local_oauth_success_effect(
-                state_for_response_started,
-                plan,
-                report_context,
-                crate::orchestration::LocalOAuthSuccessEffect {
-                    status_code: event.status_code,
-                    request_started_at_unix_ms: Some(
-                        event.response_observation.request_started_at_unix_ms,
-                    ),
-                    request_order_id: Some(&event.response_observation.request_order_id),
-                },
-            );
-        })
+        .execute_sync_with_response_started(plan, |_| {})
         .await
     {
         Ok(result) => {
@@ -1109,7 +1095,7 @@ async fn execute_sync_plan_via_local_tunnel(
 async fn execute_sync_plan_via_local_tunnel_inner(
     state: &AppState,
     plan: &ExecutionPlan,
-    report_context: Option<&serde_json::Value>,
+    _report_context: Option<&serde_json::Value>,
 ) -> Result<ExecutionResult, ExecutionRuntimeTransportError> {
     let node_id = resolve_local_tunnel_node_id(state, plan.proxy.as_ref()).ok_or_else(|| {
         ExecutionRuntimeTransportError::RelayError("local tunnel node unavailable".to_string())
@@ -1163,16 +1149,6 @@ async fn execute_sync_plan_via_local_tunnel_inner(
         response_headers_observed_at_unix_ms,
         request_order_id,
     };
-    crate::orchestration::spawn_local_oauth_success_effect(
-        state.clone(),
-        plan,
-        report_context,
-        crate::orchestration::LocalOAuthSuccessEffect {
-            status_code,
-            request_started_at_unix_ms: Some(response_observation.request_started_at_unix_ms),
-            request_order_id: Some(&response_observation.request_order_id),
-        },
-    );
     let proxy_timing = execution_header_for_log(&headers, "x-proxy-timing").unwrap_or("-");
     let (body_bytes, stream_ttfb_ms) =
         collect_local_tunnel_response_body(response, plan, started_at, response_body_limit_bytes)

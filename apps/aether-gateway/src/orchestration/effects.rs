@@ -6,6 +6,9 @@ use std::time::Duration;
 use aether_admin::provider::quota as admin_provider_quota_pure;
 use aether_cache::ExpiringMap;
 use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
+use aether_data_contracts::repository::candidates::{
+    RequestCandidateStatus, StoredRequestCandidate,
+};
 use aether_data_contracts::repository::pool_scores::{
     PoolMemberHardState, PoolMemberIdentity, PoolMemberScheduleFeedback,
 };
@@ -27,11 +30,13 @@ use tokio::sync::Mutex as TokioMutex;
 use tracing::warn;
 
 use super::{
-    classify_failure_disposition, local_failover_error_message, project_local_adaptive_rate_limit,
-    project_local_adaptive_success, project_local_failure_health, project_local_key_circuit_closed,
+    attempt_identity_for_plan, attempt_identity_from_report_context, classify_failure_disposition,
+    local_failover_error_message, persisted_candidate_matches_attempt,
+    project_local_adaptive_rate_limit, project_local_adaptive_success,
+    project_local_failure_health, project_local_key_circuit_closed,
     project_local_key_circuit_failure, project_local_success_health,
-    resolve_local_failover_analysis_for_attempt, FailureScope, LocalFailoverAnalysis,
-    LocalFailoverClassification,
+    resolve_local_failover_analysis_for_attempt_with_origin, FailureOrigin, FailureRetryAction,
+    FailureScope, LocalFailoverAnalysis, LocalFailoverClassification,
 };
 use crate::ai_serving::extract_pool_sticky_session_token;
 use crate::client_session_affinity::{
@@ -203,6 +208,7 @@ pub(crate) struct LocalExecutionEffectContext<'a> {
 pub(crate) struct LocalPoolErrorEffect<'a> {
     pub(crate) status_code: u16,
     pub(crate) classification: LocalFailoverClassification,
+    pub(crate) failure_origin: FailureOrigin,
     pub(crate) headers: &'a BTreeMap<String, String>,
     pub(crate) error_body: Option<&'a str>,
 }
@@ -211,12 +217,14 @@ pub(crate) struct LocalPoolErrorEffect<'a> {
 pub(crate) struct LocalAttemptFailureEffect {
     pub(crate) status_code: u16,
     pub(crate) classification: LocalFailoverClassification,
+    pub(crate) failure_origin: FailureOrigin,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LocalAdaptiveRateLimitEffect<'a> {
     pub(crate) status_code: u16,
     pub(crate) classification: LocalFailoverClassification,
+    pub(crate) failure_origin: FailureOrigin,
     pub(crate) headers: Option<&'a BTreeMap<String, String>>,
 }
 
@@ -224,6 +232,7 @@ pub(crate) struct LocalAdaptiveRateLimitEffect<'a> {
 pub(crate) struct LocalHealthFailureEffect {
     pub(crate) status_code: u16,
     pub(crate) classification: LocalFailoverClassification,
+    pub(crate) failure_origin: FailureOrigin,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -236,6 +245,7 @@ pub(crate) struct LocalAdaptiveSuccessEffect;
 pub(crate) struct LocalOAuthInvalidationEffect<'a> {
     pub(crate) status_code: u16,
     pub(crate) response_text: Option<&'a str>,
+    pub(crate) failure_origin: FailureOrigin,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -281,6 +291,7 @@ fn owned_local_oauth_success_effect(
     report_context: Option<&Value>,
     effect: LocalOAuthSuccessEffect<'_>,
 ) -> Option<OwnedLocalOAuthSuccessEffect> {
+    attempt_identity_from_report_context(report_context)?;
     if !(200..300).contains(&effect.status_code) {
         return None;
     }
@@ -310,19 +321,42 @@ fn owned_local_oauth_success_effect(
 }
 
 /// Schedule a fenced Codex OAuth-success observation after provider headers are available.
-/// Only the small identity/observation tuple is moved into the task; request bodies and plans
-/// remain owned by the caller.
+/// The plan and report identity are retained until the asynchronous effect has
+/// been cross-checked against the request-candidate ledger.
 pub(crate) fn spawn_local_oauth_success_effect(
     state: AppState,
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
     effect: LocalOAuthSuccessEffect<'_>,
 ) {
-    let Some(effect) = owned_local_oauth_success_effect(plan, report_context, effect) else {
+    let Some(request_started_at_unix_ms) = effect.request_started_at_unix_ms else {
         return;
     };
+    let Some(request_order_id) = effect
+        .request_order_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    let status_code = effect.status_code;
+    let plan = plan.clone();
+    let report_context = report_context.cloned();
     tokio::spawn(async move {
-        record_oauth_success_effect_owned(&state, effect).await;
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: report_context.as_ref(),
+            },
+            LocalExecutionEffect::OauthSuccess(LocalOAuthSuccessEffect {
+                status_code,
+                request_started_at_unix_ms: Some(request_started_at_unix_ms),
+                request_order_id: Some(&request_order_id),
+            }),
+        )
+        .await;
     });
 }
 
@@ -338,6 +372,7 @@ pub(crate) struct LocalStreamFailureEffect<'a> {
     pub(crate) status_code: u16,
     pub(crate) headers: &'a BTreeMap<String, String>,
     pub(crate) response_text: Option<&'a str>,
+    pub(crate) failure_origin: FailureOrigin,
     pub(crate) stream_timeout: bool,
 }
 
@@ -346,11 +381,13 @@ impl<'a> LocalStreamFailureEffect<'a> {
         status_code: u16,
         headers: &'a BTreeMap<String, String>,
         response_text: Option<&'a str>,
+        failure_origin: FailureOrigin,
     ) -> Self {
         Self {
             status_code,
             headers,
             response_text,
+            failure_origin,
             stream_timeout: false,
         }
     }
@@ -389,6 +426,19 @@ pub(crate) async fn apply_local_execution_effect(
     context: LocalExecutionEffectContext<'_>,
     effect: LocalExecutionEffect<'_>,
 ) {
+    if !local_execution_effect_context_matches_attempt(state, context, effect).await {
+        if matches!(
+            effect,
+            LocalExecutionEffect::PoolSuccessSync { .. }
+                | LocalExecutionEffect::PoolSuccessStream { .. }
+                | LocalExecutionEffect::PoolError(_)
+                | LocalExecutionEffect::PoolStreamTimeout
+        ) {
+            release_local_pool_key_lease(state, context).await;
+        }
+        return;
+    }
+
     match effect {
         LocalExecutionEffect::AttemptFailure(effect) => {
             record_attempt_failure_effect(state, context, effect).await;
@@ -430,6 +480,58 @@ pub(crate) async fn apply_local_execution_effect(
     }
 }
 
+async fn local_execution_effect_context_matches_attempt(
+    state: &AppState,
+    context: LocalExecutionEffectContext<'_>,
+    effect: LocalExecutionEffect<'_>,
+) -> bool {
+    let Some(identity) = attempt_identity_for_plan(context.plan, context.report_context) else {
+        return false;
+    };
+    let candidates = match state
+        .read_request_candidates_by_request_id(&context.plan.request_id)
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(err) => {
+            warn!(
+                request_id = %context.plan.request_id,
+                candidate_id = ?context.plan.candidate_id,
+                error = ?err,
+                "gateway orchestration effects: failed to validate execution attempt identity"
+            );
+            return false;
+        }
+    };
+    candidates.is_empty()
+        || candidates.iter().any(|candidate| {
+            persisted_candidate_matches_attempt(candidate, context.plan, identity)
+                && local_execution_effect_matches_candidate_terminal_state(effect, candidate)
+        })
+}
+
+fn local_execution_effect_matches_candidate_terminal_state(
+    effect: LocalExecutionEffect<'_>,
+    candidate: &StoredRequestCandidate,
+) -> bool {
+    let success_effect = matches!(
+        effect,
+        LocalExecutionEffect::HealthSuccess(_)
+            | LocalExecutionEffect::AdaptiveSuccess(_)
+            | LocalExecutionEffect::OauthSuccess(_)
+            | LocalExecutionEffect::PoolSuccessSync { .. }
+            | LocalExecutionEffect::PoolSuccessStream { .. }
+    );
+    if success_effect {
+        !matches!(
+            candidate.status,
+            RequestCandidateStatus::Failed | RequestCandidateStatus::Cancelled
+        )
+    } else {
+        candidate.status != RequestCandidateStatus::Success
+    }
+}
+
 /// Apply the provider/key effects shared by every successful streaming
 /// transport. Usage persistence and request-candidate terminal status remain
 /// owned by the report layer; this helper only projects execution health,
@@ -454,6 +556,22 @@ pub(crate) async fn apply_local_stream_success_effects(
     apply_local_execution_effect(
         state,
         context,
+        LocalExecutionEffect::OauthSuccess(LocalOAuthSuccessEffect {
+            status_code: payload.status_code,
+            request_started_at_unix_ms: report_context_u64_field(
+                context.report_context,
+                "provider_request_started_at_unix_ms",
+            ),
+            request_order_id: report_context_string_field(
+                context.report_context,
+                "provider_request_order_id",
+            ),
+        }),
+    )
+    .await;
+    apply_local_execution_effect(
+        state,
+        context,
         LocalExecutionEffect::PoolSuccessStream { payload },
     )
     .await;
@@ -468,12 +586,13 @@ pub(crate) async fn apply_local_stream_failure_effects(
     context: LocalExecutionEffectContext<'_>,
     effect: LocalStreamFailureEffect<'_>,
 ) -> LocalFailoverAnalysis {
-    let analysis = resolve_local_failover_analysis_for_attempt(
+    let analysis = resolve_local_failover_analysis_for_attempt_with_origin(
         state,
         context.plan,
         context.report_context,
         effect.status_code,
         effect.response_text,
+        effect.failure_origin,
     )
     .await;
 
@@ -486,6 +605,7 @@ pub(crate) async fn apply_local_stream_failure_effects(
         LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
             status_code: effect.status_code,
             classification: analysis.classification,
+            failure_origin: analysis.failure_origin,
         }),
     )
     .await;
@@ -495,6 +615,7 @@ pub(crate) async fn apply_local_stream_failure_effects(
         LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
             status_code: effect.status_code,
             classification: analysis.classification,
+            failure_origin: analysis.failure_origin,
             headers: Some(effect.headers),
         }),
     )
@@ -505,6 +626,7 @@ pub(crate) async fn apply_local_stream_failure_effects(
         LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
             status_code: effect.status_code,
             classification: analysis.classification,
+            failure_origin: analysis.failure_origin,
         }),
     )
     .await;
@@ -514,6 +636,7 @@ pub(crate) async fn apply_local_stream_failure_effects(
         LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
             status_code: effect.status_code,
             response_text: effect.response_text,
+            failure_origin: analysis.failure_origin,
         }),
     )
     .await;
@@ -523,6 +646,7 @@ pub(crate) async fn apply_local_stream_failure_effects(
         LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
             status_code: effect.status_code,
             classification: analysis.classification,
+            failure_origin: analysis.failure_origin,
             headers: effect.headers,
             error_body: effect.response_text,
         }),
@@ -908,6 +1032,7 @@ async fn record_attempt_failure_effect(
         &context.plan.provider_api_format,
         effect.classification,
         effect.status_code,
+        effect.failure_origin,
     ) {
         return;
     }
@@ -979,6 +1104,7 @@ async fn record_adaptive_rate_limit_effect(
         &context.plan.provider_api_format,
         effect.classification,
         effect.status_code,
+        effect.failure_origin,
     ) {
         return;
     }
@@ -1267,6 +1393,7 @@ async fn record_health_failure_effect(
         &context.plan.provider_api_format,
         effect.classification,
         effect.status_code,
+        effect.failure_origin,
     ) {
         return;
     }
@@ -1541,6 +1668,7 @@ async fn record_pool_error_effect(
         &context.plan.provider_api_format,
         effect.classification,
         effect.status_code,
+        effect.failure_origin,
     ) {
         return;
     }
@@ -1659,7 +1787,7 @@ async fn record_oauth_invalidation_effect(
     context: LocalExecutionEffectContext<'_>,
     effect: LocalOAuthInvalidationEffect<'_>,
 ) {
-    if effect.status_code < 400 {
+    if effect.status_code < 400 || effect.failure_origin != FailureOrigin::UpstreamCredential {
         return;
     }
 
@@ -1873,6 +2001,7 @@ fn local_candidate_failure_should_invalidate_affinity_for_provider(
     provider_api_format: &str,
     classification: LocalFailoverClassification,
     status_code: u16,
+    failure_origin: FailureOrigin,
 ) -> bool {
     if !local_candidate_failure_should_invalidate_affinity(classification, status_code) {
         return false;
@@ -1888,7 +2017,7 @@ fn local_candidate_failure_should_invalidate_affinity_for_provider(
         provider_api_format,
         classification,
         status_code,
-        provider_failure_origin_for_effect(status_code),
+        failure_origin,
     );
     !(disposition.retry_action == crate::orchestration::FailureRetryAction::Stop
         && disposition.failure_scope == FailureScope::None)
@@ -1898,32 +2027,19 @@ fn local_candidate_failure_should_apply_key_effects(
     provider_api_format: &str,
     classification: LocalFailoverClassification,
     status_code: u16,
+    failure_origin: FailureOrigin,
 ) -> bool {
-    if !provider_api_format
-        .trim()
-        .eq_ignore_ascii_case("claude:messages")
-    {
-        return true;
+    let disposition = classify_failure_disposition(
+        provider_api_format,
+        classification,
+        status_code,
+        failure_origin,
+    );
+    if matches!(status_code, 401 | 403) && failure_origin != FailureOrigin::UpstreamCredential {
+        return false;
     }
-
-    matches!(
-        classify_failure_disposition(
-            provider_api_format,
-            classification,
-            status_code,
-            provider_failure_origin_for_effect(status_code),
-        )
-        .failure_scope,
-        FailureScope::Credential
-    )
-}
-
-fn provider_failure_origin_for_effect(status_code: u16) -> crate::orchestration::FailureOrigin {
-    if status_code == 401 {
-        crate::orchestration::FailureOrigin::UpstreamCredential
-    } else {
-        crate::orchestration::FailureOrigin::UpstreamProvider
-    }
+    disposition.retry_action != FailureRetryAction::Stop
+        && disposition.failure_scope.allows_key_wide_effects()
 }
 
 fn local_candidate_failure_should_record_pool_error(
@@ -2124,7 +2240,7 @@ fn pool_score_delta_for_status(status_code: u16) -> i32 {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, LazyLock};
 
     use aether_contracts::{ExecutionPlan, RequestBody};
     use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
@@ -2146,16 +2262,18 @@ mod tests {
         apply_local_execution_effect, apply_local_stream_failure_effects,
         apply_local_stream_success_effects, execution_plan_bearer_matches_transport,
         local_candidate_failure_should_apply_key_effects,
-        local_candidate_failure_should_record_pool_error, pool_score_feedback_gate_allows,
-        pool_score_hard_state_for_status, resolve_pool_feedback_context,
-        LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
-        LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-        LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect,
-        LocalPoolErrorEffect, LocalStreamFailureEffect, ProviderKeyEffectLockPool,
+        local_candidate_failure_should_record_pool_error,
+        local_execution_effect_matches_candidate_terminal_state, pool_score_feedback_gate_allows,
+        pool_score_hard_state_for_status, resolve_local_oauth_invalid_reason,
+        resolve_pool_feedback_context, LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect,
+        LocalAttemptFailureEffect, LocalExecutionEffect, LocalExecutionEffectContext,
+        LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
+        LocalOAuthSuccessEffect, LocalPoolErrorEffect, LocalStreamFailureEffect,
+        ProviderKeyEffectLockPool,
     };
     use crate::data::{GatewayDataConfig, GatewayDataState};
     use crate::orchestration::{
-        apply_local_report_effect, LocalFailoverClassification, LocalReportEffect,
+        apply_local_report_effect, FailureOrigin, LocalFailoverClassification, LocalReportEffect,
     };
     use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
     use crate::usage::GatewayStreamReportRequest;
@@ -2176,6 +2294,16 @@ mod tests {
             }
             Err(err) => panic!("redis server should start: {err}"),
         }
+    }
+
+    fn valid_attempt_report_context() -> &'static Value {
+        static REPORT_CONTEXT: LazyLock<Value> = LazyLock::new(|| {
+            json!({
+                "candidate_index": 0,
+                "retry_index": 0,
+            })
+        });
+        &REPORT_CONTEXT
     }
 
     fn sample_plan() -> ExecutionPlan {
@@ -2200,6 +2328,69 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         }
+    }
+
+    fn sample_effect_candidate(status: RequestCandidateStatus) -> StoredRequestCandidate {
+        StoredRequestCandidate::new(
+            "cand-1".to_string(),
+            "req-1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+            0,
+            Some("prov-1".to_string()),
+            Some("ep-1".to_string()),
+            Some("key-1".to_string()),
+            status,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            1,
+            Some(2),
+            None,
+        )
+        .expect("candidate should build")
+    }
+
+    #[test]
+    fn stale_terminal_effect_direction_is_rejected() {
+        let failed = sample_effect_candidate(RequestCandidateStatus::Failed);
+        assert!(!local_execution_effect_matches_candidate_terminal_state(
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+            &failed,
+        ));
+
+        let succeeded = sample_effect_candidate(RequestCandidateStatus::Success);
+        assert!(!local_execution_effect_matches_candidate_terminal_state(
+            LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+                status_code: 503,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
+            }),
+            &succeeded,
+        ));
+
+        let pending = sample_effect_candidate(RequestCandidateStatus::Pending);
+        assert!(local_execution_effect_matches_candidate_terminal_state(
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+            &pending,
+        ));
+        assert!(local_execution_effect_matches_candidate_terminal_state(
+            LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+                status_code: 503,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
+            }),
+            &pending,
+        ));
     }
 
     fn sample_claude_plan() -> ExecutionPlan {
@@ -2290,6 +2481,8 @@ mod tests {
 
     fn session_report_context() -> Value {
         json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -2765,6 +2958,8 @@ mod tests {
         let state = AppState::new().expect("gateway state should build");
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -2796,6 +2991,7 @@ mod tests {
             LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                 status_code: 429,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -2837,6 +3033,7 @@ mod tests {
             LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                 status_code: 429,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -2854,6 +3051,8 @@ mod tests {
         let state = AppState::new().expect("gateway state should build");
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -2883,6 +3082,7 @@ mod tests {
             LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                 status_code: 524,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -2898,6 +3098,8 @@ mod tests {
         let state = health_state();
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -2927,6 +3129,7 @@ mod tests {
             LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                 status_code: 524,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -2942,6 +3145,8 @@ mod tests {
         let state = pool_health_state();
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -2970,6 +3175,7 @@ mod tests {
             LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                 status_code: 524,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -2985,6 +3191,8 @@ mod tests {
         let state = AppState::new().expect("gateway state should build");
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -3013,6 +3221,7 @@ mod tests {
             LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                 status_code: 200,
                 classification: LocalFailoverClassification::UseDefault,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -3027,6 +3236,8 @@ mod tests {
         let state = AppState::new().expect("gateway state should build");
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -3061,14 +3272,23 @@ mod tests {
         let state = health_state();
         let plan = sample_plan();
         let headers = BTreeMap::new();
+        let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
         let analysis = apply_local_stream_failure_effects(
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(&report_context),
             },
-            LocalStreamFailureEffect::new(503, &headers, Some("upstream unavailable"))
-                .with_stream_timeout(),
+            LocalStreamFailureEffect::new(
+                503,
+                &headers,
+                Some("upstream unavailable"),
+                FailureOrigin::UpstreamProvider,
+            )
+            .with_stream_timeout(),
         )
         .await;
 
@@ -3096,10 +3316,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_failure_effects_do_not_mutate_state_without_valid_attempt_identity() {
+        let plan = sample_plan();
+        let headers = BTreeMap::new();
+        let report_contexts = [
+            None,
+            Some(json!({})),
+            Some(json!({
+                "candidate_index": "not-a-number",
+                "retry_index": 0,
+            })),
+            Some(json!({
+                "candidate_index": 0,
+                "retry_index": "not-a-number",
+            })),
+        ];
+
+        for status_code in [429, 503] {
+            for report_context in &report_contexts {
+                let state = health_state();
+                let before = state
+                    .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+                    .await
+                    .expect("provider catalog keys should load")
+                    .into_iter()
+                    .next()
+                    .expect("stored key should exist");
+                let analysis = apply_local_stream_failure_effects(
+                    &state,
+                    LocalExecutionEffectContext {
+                        plan: &plan,
+                        report_context: report_context.as_ref(),
+                    },
+                    LocalStreamFailureEffect::new(
+                        status_code,
+                        &headers,
+                        Some("upstream unavailable"),
+                        FailureOrigin::UpstreamProvider,
+                    )
+                    .with_stream_timeout(),
+                )
+                .await;
+
+                assert_eq!(
+                    analysis.classification,
+                    LocalFailoverClassification::StopFailureOrigin
+                );
+                assert_eq!(analysis.decision.as_str(), "stop_local_failover");
+                assert_eq!(analysis.failure_origin, FailureOrigin::Unknown);
+
+                let after = state
+                    .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+                    .await
+                    .expect("provider catalog keys should load")
+                    .into_iter()
+                    .next()
+                    .expect("stored key should exist");
+                assert_eq!(after.health_by_format, before.health_by_format);
+                assert_eq!(
+                    ProviderCatalogKeyAdaptiveState::from(&after),
+                    ProviderCatalogKeyAdaptiveState::from(&before)
+                );
+                assert_eq!(
+                    after.circuit_breaker_by_format,
+                    before.circuit_breaker_by_format
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn configured_stop_pattern_keeps_scheduler_affinity_cache() {
         let state = AppState::new().expect("gateway state should build");
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -3128,6 +3420,7 @@ mod tests {
             LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                 status_code: 400,
                 classification: LocalFailoverClassification::StopErrorPattern,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -3142,6 +3435,8 @@ mod tests {
         let state = AppState::new().expect("gateway state should build");
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -3184,6 +3479,8 @@ mod tests {
         let affinity = session_affinity();
         let scope = SchedulerAffinityScope::new("routing-group-1", Some(7));
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -3240,6 +3537,8 @@ mod tests {
         let state = AppState::new().expect("gateway state should build");
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -3282,6 +3581,8 @@ mod tests {
         let state = AppState::new().expect("gateway state should build");
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -3313,6 +3614,8 @@ mod tests {
         let state = health_state();
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -3353,6 +3656,8 @@ mod tests {
             );
         let plan = sample_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -3419,6 +3724,8 @@ mod tests {
         success_plan.endpoint_id = "ep-2".to_string();
         success_plan.key_id = "key-2".to_string();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "api_key_id": "api-key-1",
             "client_api_format": "openai:chat",
             "model": "gpt-5",
@@ -3446,6 +3753,7 @@ mod tests {
             LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                 status_code: 429,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -3490,57 +3798,145 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_non_credential_failures_do_not_apply_key_wide_effects() {
+    fn key_wide_effects_follow_retry_disposition_scope() {
         assert!(!local_candidate_failure_should_apply_key_effects(
             "claude:messages",
             LocalFailoverClassification::RetryUpstreamFailure,
             529,
+            FailureOrigin::UpstreamProvider,
         ));
-        assert!(!local_candidate_failure_should_apply_key_effects(
+        assert!(local_candidate_failure_should_apply_key_effects(
             "claude:messages",
             LocalFailoverClassification::RetryUpstreamFailure,
             429,
+            FailureOrigin::UpstreamProvider,
         ));
         assert!(!local_candidate_failure_should_apply_key_effects(
             "claude:messages",
             LocalFailoverClassification::RetryUpstreamFailure,
             503,
+            FailureOrigin::UpstreamProvider,
         ));
         assert!(!local_candidate_failure_should_apply_key_effects(
             "claude:messages",
             LocalFailoverClassification::RetryUpstreamFailure,
             401,
+            FailureOrigin::UpstreamProvider,
         ));
         assert!(!local_candidate_failure_should_apply_key_effects(
             "claude:messages",
             LocalFailoverClassification::RetryUpstreamFailure,
             403,
+            FailureOrigin::UpstreamProvider,
         ));
         assert!(!local_candidate_failure_should_apply_key_effects(
             "claude:messages",
             LocalFailoverClassification::RetryUpstreamFailure,
             400,
+            FailureOrigin::UpstreamProvider,
         ));
         assert!(local_candidate_failure_should_apply_key_effects(
+            "claude:messages",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            401,
+            FailureOrigin::UpstreamCredential,
+        ));
+        assert!(local_candidate_failure_should_apply_key_effects(
+            "claude:messages",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            403,
+            FailureOrigin::UpstreamCredential,
+        ));
+        assert!(!local_candidate_failure_should_apply_key_effects(
             "openai:chat",
             LocalFailoverClassification::RetryUpstreamFailure,
             529,
+            FailureOrigin::UpstreamProvider,
         ));
         assert!(local_candidate_failure_should_apply_key_effects(
             "openai:chat",
             LocalFailoverClassification::RetryUpstreamFailure,
             429,
+            FailureOrigin::UpstreamProvider,
         ));
-        assert!(local_candidate_failure_should_apply_key_effects(
+        assert!(!local_candidate_failure_should_apply_key_effects(
             "openai:chat",
             LocalFailoverClassification::RetryUpstreamFailure,
             503,
+            FailureOrigin::UpstreamProvider,
         ));
+        for provider_api_format in ["openai:chat", "gemini:generateContent"] {
+            for status_code in [503, 529] {
+                assert!(!local_candidate_failure_should_apply_key_effects(
+                    provider_api_format,
+                    LocalFailoverClassification::RetryUpstreamFailure,
+                    status_code,
+                    FailureOrigin::UpstreamProvider,
+                ));
+            }
+        }
     }
 
     #[tokio::test]
-    async fn anthropic_non_credential_failures_preserve_key_wide_state() {
-        for status_code in [400, 429, 503, 529] {
+    async fn openai_and_gemini_endpoint_provider_failures_preserve_key_health() {
+        for provider_api_format in ["openai:chat", "gemini:generate_content"] {
+            for status_code in [503, 529] {
+                let mut key = sample_adaptive_key();
+                let expected_health = json!({
+                    (provider_api_format): {
+                        "health_score": 0.9,
+                        "consecutive_failures": 1,
+                        "last_failure_at": "2026-08-20T00:00:00+00:00"
+                    }
+                });
+                key.health_by_format = Some(expected_health.clone());
+                let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![sample_pool_health_provider()],
+                    vec![sample_health_endpoint()],
+                    vec![key],
+                ));
+                let state = AppState::new()
+                    .expect("gateway state should build")
+                    .with_data_state_for_tests(
+                        GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+                    );
+                let mut plan = sample_plan();
+                plan.provider_api_format = provider_api_format.to_string();
+
+                apply_local_execution_effect(
+                    &state,
+                    LocalExecutionEffectContext {
+                        plan: &plan,
+                        report_context: Some(valid_attempt_report_context()),
+                    },
+                    LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+                        status_code,
+                        classification: LocalFailoverClassification::RetryUpstreamFailure,
+                        failure_origin: FailureOrigin::UpstreamProvider,
+                    }),
+                )
+                .await;
+
+                let stored_key = state
+                    .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+                    .await
+                    .expect("provider key should load")
+                    .into_iter()
+                    .next()
+                    .expect("provider key should exist");
+                assert_eq!(
+                    stored_key.health_by_format,
+                    Some(expected_health),
+                    "{provider_api_format} status {status_code} must not penalize credential health"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_endpoint_and_provider_failures_preserve_key_wide_state() {
+        for status_code in [400, 503, 529] {
             let mut key = sample_adaptive_key();
             let circuit = json!({
                 "openai:chat": {
@@ -3564,7 +3960,9 @@ mod tests {
                 );
             let plan = sample_claude_plan();
             let report_context = json!({
-                "api_key_id": "api-key-1",
+                "candidate_index": 0,
+            "retry_index": 0,
+            "api_key_id": "api-key-1",
                 "client_api_format": "claude:messages",
                 "model": "claude-sonnet-4-5",
             });
@@ -3598,6 +3996,7 @@ mod tests {
                 LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                     status_code,
                     classification,
+                    failure_origin: FailureOrigin::UpstreamProvider,
                 }),
             )
             .await;
@@ -3607,6 +4006,7 @@ mod tests {
                 LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
                     status_code,
                     classification,
+                    failure_origin: FailureOrigin::UpstreamProvider,
                     headers: Some(&headers),
                 }),
             )
@@ -3617,6 +4017,7 @@ mod tests {
                 LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                     status_code,
                     classification,
+                    failure_origin: FailureOrigin::UpstreamProvider,
                 }),
             )
             .await;
@@ -3626,6 +4027,7 @@ mod tests {
                 LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
                     status_code,
                     classification,
+                    failure_origin: FailureOrigin::UpstreamProvider,
                     headers: &headers,
                     error_body: Some(r#"{"error":{"message":"temporarily unavailable"}}"#),
                 }),
@@ -3707,11 +4109,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
                 status_code: 401,
                 classification: LocalFailoverClassification::StopErrorPattern,
+                failure_origin: FailureOrigin::UpstreamCredential,
                 headers: &BTreeMap::new(),
                 error_body: Some(r#"{"error":{"message":"account has been deactivated"}}"#),
             }),
@@ -3793,6 +4196,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_invalidation_requires_explicit_credential_origin() {
+        let state = claude_code_oauth_state();
+        let mut plan = sample_codex_plan();
+        plan.provider_name = Some("claude_code".to_string());
+        plan.provider_api_format = "claude:messages".to_string();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(valid_attempt_report_context()),
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 401,
+                response_text: Some(
+                    r#"{"type":"error","error":{"type":"authentication_error","message":"invalid access token"}}"#,
+                ),
+                failure_origin: FailureOrigin::UpstreamProvider,
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert!(stored_key.oauth_invalid_at_unix_secs.is_none());
+        assert!(stored_key.oauth_invalid_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn oauth_invalidation_does_not_mutate_state_without_valid_attempt_identity() {
+        let state = codex_state();
+        let plan = sample_codex_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 401,
+                response_text: Some(r#"{"error":{"code":"invalid_token"}}"#),
+                failure_origin: FailureOrigin::UpstreamCredential,
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert!(stored_key.oauth_invalid_at_unix_secs.is_none());
+        assert!(stored_key.oauth_invalid_reason.is_none());
+    }
+
+    #[tokio::test]
     async fn oauth_invalidation_marks_claude_code_authentication_failures_only() {
         let state = claude_code_oauth_state();
         let mut plan = sample_codex_plan();
@@ -3803,13 +4270,14 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 403,
                 response_text: Some(
                     r#"{"type":"error","error":{"type":"permission_error","message":"insufficient scope"}}"#,
                 ),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -3826,13 +4294,14 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 403,
                 response_text: Some(
                     r#"{"type":"error","error":{"type":"authentication_error","message":"invalid access token"}}"#,
                 ),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -3850,6 +4319,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn oauth_invalidation_reason_uses_mixed_type_and_code_taxonomy() {
+        let response_text = r#"{"error":{"type":"invalid_request_error","code":"invalid_token"}}"#;
+        assert!(
+            resolve_local_oauth_invalid_reason("claude_code", 403, Some(response_text)).is_some()
+        );
+        assert!(resolve_local_oauth_invalid_reason(
+            "claude_code",
+            403,
+            Some(r#"{"error":{"type":"permission_error","code":"permission_denied"}}"#)
+        )
+        .is_none());
+    }
+
     #[tokio::test]
     async fn oauth_invalidation_marks_claude_code_unauthorized_without_body() {
         let state = claude_code_oauth_state();
@@ -3861,11 +4344,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 401,
                 response_text: None,
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -3893,13 +4377,14 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 401,
                 response_text: Some(
                     r#"{"error":{"message":"session expired","type":"invalid_request_error"}}"#,
                 ),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -3942,6 +4427,8 @@ mod tests {
         let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
         let plan = sample_codex_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "codex_credential_generation": "credential-generation-current",
             "provider_request_started_at_unix_ms": 200_000u64,
             "provider_request_order_id": "00000003-0d40-7000-8000-000000000001"
@@ -3986,6 +4473,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_success_does_not_mutate_state_without_valid_attempt_identity() {
+        let mut key = sample_codex_key();
+        key.oauth_invalid_at_unix_secs = Some(100);
+        key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] session expired".to_string());
+        let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
+        let plan = sample_codex_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::OauthSuccess(LocalOAuthSuccessEffect {
+                status_code: 200,
+                request_started_at_unix_ms: Some(200_000),
+                request_order_id: Some("00000003-0d40-7000-8000-000000000001"),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(stored_key.oauth_invalid_at_unix_secs, Some(100));
+        assert_eq!(
+            stored_key.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] session expired")
+        );
+    }
+
+    #[tokio::test]
     async fn same_millisecond_older_oauth_success_does_not_clear_newer_codex_invalidation() {
         let mut key = sample_codex_key();
         key.oauth_invalid_at_unix_secs = Some(300);
@@ -4000,6 +4523,8 @@ mod tests {
         let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
         let plan = sample_codex_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "codex_credential_generation": "credential-generation-current",
             "provider_request_started_at_unix_ms": 300_000u64,
             "provider_request_order_id": "00000004-93e0-7000-8000-000000000001"
@@ -4053,6 +4578,8 @@ mod tests {
         let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
         let plan = sample_codex_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "codex_credential_generation": "credential-generation-current",
             "provider_request_started_at_unix_ms": 200_000u64,
             "provider_request_order_id": "00000003-0d40-7000-8000-000000000001"
@@ -4109,6 +4636,8 @@ mod tests {
             "Bearer replaced-access-token".to_string(),
         );
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "codex_credential_generation": "credential-generation-current",
             "provider_request_started_at_unix_ms": 200_000u64,
             "provider_request_order_id": "00000003-0d40-7000-8000-000000000001"
@@ -4160,6 +4689,8 @@ mod tests {
         let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
         let plan = sample_codex_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "codex_credential_generation": "credential-generation-current",
             "provider_request_started_at_unix_ms": 200_000u64,
             "provider_request_order_id": "00000003-0d40-7000-8000-000000000001"
@@ -4207,11 +4738,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 403,
                 response_text: Some(r#"{"error":{"message":"forbidden"}}"#),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -4248,13 +4780,14 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 403,
                 response_text: Some(
                     r#"{"error":{"code":"biscuit_baker_service_auth_credential_error_status","message":"Personal access token owner is inactive."},"status":403}"#,
                 ),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -4291,13 +4824,14 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 403,
                 response_text: Some(
                     r#"{"error":{"code":"biscuit_baker_service_auth_credential_error_status","message":"Personal access token owner is inactive."},"status":403}"#,
                 ),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -4324,13 +4858,14 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 403,
                 response_text: Some(
                     r#"{"error":{"message":"account has been deactivated"},"status":403}"#,
                 ),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -4351,13 +4886,14 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 401,
                 response_text: Some(
                     r#"{"error":{"message":"session expired","type":"invalid_request_error"}}"#,
                 ),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -4384,13 +4920,14 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 403,
                 response_text: Some(
                     r#"{"error":{"code":"biscuit_baker_service_auth_credential_error_status","message":"Personal access token owner is inactive."},"status":403}"#,
                 ),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -4422,13 +4959,14 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 403,
                 response_text: Some(
                     r#"{"error":{"code":"biscuit_baker_service_auth_credential_error_status","message":"Personal access token owner is inactive."},"status":403}"#,
                 ),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -4455,6 +4993,8 @@ mod tests {
         let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
         let plan = sample_codex_plan();
         let report_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "codex_credential_generation": "credential-generation-stale",
             "provider_request_started_at_unix_ms": 100_000u64,
             "provider_request_order_id": "00000001-86a0-7000-8000-000000000001"
@@ -4469,6 +5009,7 @@ mod tests {
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 401,
                 response_text: Some(r#"{"error":{"message":"session expired"}}"#),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
@@ -4509,6 +5050,8 @@ mod tests {
         assert!(older_uuid < newer_uuid);
 
         let invalidation_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
             "codex_credential_generation": "credential-generation-current",
             "provider_request_started_at_unix_ms": 100_000u64,
             "provider_request_order_id": newer_request_id
@@ -4522,12 +5065,15 @@ mod tests {
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: 401,
                 response_text: Some(r#"{"error":{"message":"session expired"}}"#),
+                failure_origin: FailureOrigin::UpstreamCredential,
             }),
         )
         .await;
 
         let delayed_report_context = json!({
             "key_id": plan.key_id,
+            "candidate_index": 0,
+            "retry_index": 0,
             "codex_credential_generation": "credential-generation-current",
             "codex_quota_reset_generation": 0,
             "provider_request_started_at_unix_ms": 100_000u64,
@@ -4602,11 +5148,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                 status_code: 503,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -4652,11 +5199,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                 status_code: 503,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -4696,11 +5244,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
                 status_code: 429,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
                 headers: Some(&BTreeMap::from([(
                     "x-ratelimit-limit-requests".to_string(),
                     "42".to_string(),
@@ -4750,11 +5299,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
                 status_code: 401,
                 classification: LocalFailoverClassification::StopErrorPattern,
+                failure_origin: FailureOrigin::UpstreamCredential,
                 headers: &BTreeMap::new(),
                 error_body: Some(r#"{"error":{"message":"account has been deactivated"}}"#),
             }),
@@ -4780,11 +5330,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                 status_code: 503,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -4825,11 +5376,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                 status_code: 503,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -4863,11 +5415,12 @@ mod tests {
                 &state,
                 LocalExecutionEffectContext {
                     plan: &plan,
-                    report_context: None,
+                    report_context: Some(valid_attempt_report_context()),
                 },
                 LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                     status_code: 503,
                     classification: LocalFailoverClassification::RetryUpstreamFailure,
+                    failure_origin: FailureOrigin::UpstreamProvider,
                 }),
             )
             .await;
@@ -4912,11 +5465,12 @@ mod tests {
                     &state,
                     LocalExecutionEffectContext {
                         plan: &plan,
-                        report_context: None,
+                        report_context: Some(valid_attempt_report_context()),
                     },
                     LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                         status_code: 503,
                         classification: LocalFailoverClassification::RetryUpstreamFailure,
+                        failure_origin: FailureOrigin::UpstreamProvider,
                     }),
                 )
                 .await;
@@ -4961,11 +5515,12 @@ mod tests {
                 &state,
                 LocalExecutionEffectContext {
                     plan: &plan,
-                    report_context: None,
+                    report_context: Some(valid_attempt_report_context()),
                 },
                 LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                     status_code: 503,
                     classification: LocalFailoverClassification::RetryUpstreamFailure,
+                    failure_origin: FailureOrigin::UpstreamProvider,
                 }),
             )
             .await;
@@ -4999,11 +5554,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                 status_code: 503,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -5011,7 +5567,7 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
         )
@@ -5045,7 +5601,7 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
         )
@@ -5063,7 +5619,7 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
         )
@@ -5082,11 +5638,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                 status_code: 503,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
             }),
         )
         .await;
@@ -5094,7 +5651,7 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
         )
@@ -5135,7 +5692,7 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
         )
@@ -5182,11 +5739,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
                 status_code: 429,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
                 headers: Some(&BTreeMap::from([(
                     "x-ratelimit-limit-requests".to_string(),
                     "42".to_string(),
@@ -5262,11 +5820,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
                 status_code: 429,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
                 headers: None,
             }),
         )
@@ -5294,11 +5853,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
                 status_code: 429,
                 classification: LocalFailoverClassification::RetryUpstreamFailure,
+                failure_origin: FailureOrigin::UpstreamProvider,
                 headers: Some(&BTreeMap::from([(
                     "x-ratelimit-limit-requests".to_string(),
                     "42".to_string(),
@@ -5331,11 +5891,12 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
                 status_code: 429,
                 classification: LocalFailoverClassification::RetryStatusCode,
+                failure_origin: FailureOrigin::UpstreamProvider,
                 headers: None,
             }),
         )
@@ -5433,7 +5994,7 @@ mod tests {
             &state,
             LocalExecutionEffectContext {
                 plan: &plan,
-                report_context: None,
+                report_context: Some(valid_attempt_report_context()),
             },
             LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
         )

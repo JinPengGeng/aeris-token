@@ -48,8 +48,9 @@ use crate::execution_runtime::attempt_lifecycle::{
 };
 use crate::orchestration::{
     apply_local_stream_failure_effects, apply_local_stream_success_effects,
-    release_local_pool_key_lease, release_pool_key_lease_from_report_context,
-    LocalExecutionEffectContext, LocalStreamFailureEffect,
+    failure_origin_from_embedded_upstream_error, release_local_pool_key_lease,
+    release_pool_key_lease_from_report_context, FailureOrigin, LocalExecutionEffectContext,
+    LocalStreamFailureEffect,
 };
 use crate::request_candidate_runtime::{
     ensure_execution_request_candidate_slot, record_local_request_candidate_status,
@@ -122,6 +123,7 @@ pub(super) enum ResponsesWebSocketTurnOutcome {
     ProviderTerminal {
         status_code: u16,
         cancelled: bool,
+        failure_origin: FailureOrigin,
     },
     Cancelled {
         reason: &'static str,
@@ -129,6 +131,7 @@ pub(super) enum ResponsesWebSocketTurnOutcome {
     Failure {
         status_code: u16,
         reason: &'static str,
+        failure_origin: FailureOrigin,
     },
 }
 
@@ -155,6 +158,7 @@ impl ResponsesWebSocketTurnOutcome {
         Self::Failure {
             status_code: 502,
             reason: "upstream WebSocket closed before provider terminal event",
+            failure_origin: FailureOrigin::Transport,
         }
     }
 
@@ -162,6 +166,7 @@ impl ResponsesWebSocketTurnOutcome {
         Self::Failure {
             status_code: 502,
             reason: "upstream WebSocket receive failed before provider terminal event",
+            failure_origin: FailureOrigin::Transport,
         }
     }
 
@@ -169,6 +174,7 @@ impl ResponsesWebSocketTurnOutcome {
         Self::Failure {
             status_code: 502,
             reason: "gateway could not forward response.create to the upstream",
+            failure_origin: FailureOrigin::Transport,
         }
     }
 
@@ -176,6 +182,7 @@ impl ResponsesWebSocketTurnOutcome {
         Self::Failure {
             status_code: 502,
             reason,
+            failure_origin: FailureOrigin::Transport,
         }
     }
 
@@ -183,6 +190,7 @@ impl ResponsesWebSocketTurnOutcome {
         Self::Failure {
             status_code: 429,
             reason: "provider reported exhausted quota before closing the WebSocket",
+            failure_origin: FailureOrigin::UpstreamProvider,
         }
     }
 
@@ -190,6 +198,7 @@ impl ResponsesWebSocketTurnOutcome {
         Self::Failure {
             status_code: 504,
             reason: "upstream WebSocket did not emit a response event before timeout",
+            failure_origin: FailureOrigin::Transport,
         }
     }
 
@@ -197,6 +206,7 @@ impl ResponsesWebSocketTurnOutcome {
         Self::Failure {
             status_code: 504,
             reason: "upstream WebSocket did not finish the response before timeout",
+            failure_origin: FailureOrigin::Transport,
         }
     }
 
@@ -204,6 +214,7 @@ impl ResponsesWebSocketTurnOutcome {
         Self::Failure {
             status_code: 500,
             reason: "gateway relay task went away before the response finished",
+            failure_origin: FailureOrigin::Internal,
         }
     }
 
@@ -253,7 +264,7 @@ pub(super) struct ResponsesProviderAttempt {
     terminal_error_body: Option<String>,
     /// 观察到的 provider 终态事实，与「为什么现在结算」这个信号分开保存。
     /// 客户端投递失败不会把它擦掉。
-    provider_outcome: Option<AttemptProviderOutcome>,
+    provider_terminal_facts: Option<AttemptTerminalFacts>,
     /// 这一个 attempt 的内容是否完整交付给了客户端。与 provider 终态正交。
     client_delivery: AttemptClientDelivery,
     /// True only after `response.create` has been accepted by the upstream
@@ -443,7 +454,7 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
         terminal_timeout,
         admission: Some(admission),
         terminal_error_body: None,
-        provider_outcome: None,
+        provider_terminal_facts: None,
         client_delivery: AttemptClientDelivery::Complete,
         upstream_request_sent: false,
     })
@@ -666,9 +677,9 @@ impl ResponsesProviderAttempt {
         if let Some(outcome) = provider_terminal_outcome(frame) {
             // provider 的终态是独立事实：先记下来，之后即使客户端投递失败、
             // 结算信号变成 Cancelled，这条事实也不会被擦掉。
-            self.provider_outcome.get_or_insert(
-                attempt_facts_for_outcome(None, AttemptClientDelivery::Complete, outcome).provider,
-            );
+            self.provider_terminal_facts.get_or_insert_with(|| {
+                attempt_facts_for_outcome(None, AttemptClientDelivery::Complete, outcome)
+            });
             return Some(ResponsesWebSocketTurnObservation::Terminal(outcome));
         }
         if frame.is_started() {
@@ -698,6 +709,7 @@ impl ResponsesProviderAttempt {
             ResponsesWebSocketTurnOutcome::Failure {
                 status_code: 502,
                 reason: "upstream Responses WebSocket event was not valid JSON",
+                failure_origin: FailureOrigin::Internal,
             },
         ))
     }
@@ -733,7 +745,8 @@ impl ResponsesProviderAttempt {
     /// execution report）由共享的 [`ExecutionAttemptLifecycle::settle`] 负责，
     /// 这里只提供 WS 观察到的终态事实。
     async fn settle(mut self, state: &AppState, outcome: ResponsesWebSocketTurnOutcome) {
-        let facts = attempt_facts_for_outcome(self.provider_outcome, self.client_delivery, outcome);
+        let facts =
+            attempt_facts_for_outcome(self.provider_terminal_facts, self.client_delivery, outcome);
         if let Some(reason) = facts.delivery.aborted_reason() {
             let report_context = attach_client_delivery_to_report_context(
                 self.lifecycle.take_report_context(),
@@ -954,12 +967,23 @@ fn attach_client_delivery_to_report_context(
 fn provider_terminal_outcome(
     frame: &ParsedResponsesWebSocketFrame<'_>,
 ) -> Option<ResponsesWebSocketTurnOutcome> {
-    frame
-        .terminal()
-        .map(|terminal| ResponsesWebSocketTurnOutcome::ProviderTerminal {
+    frame.terminal().map(|terminal| {
+        let failure_origin = if matches!(terminal.status_code, 401 | 403) {
+            failure_origin_from_embedded_upstream_error(
+                frame
+                    .terminal_event()
+                    .and_then(|event| serde_json::to_string(event).ok())
+                    .as_deref(),
+            )
+        } else {
+            FailureOrigin::UpstreamProvider
+        };
+        ResponsesWebSocketTurnOutcome::ProviderTerminal {
             status_code: terminal.status_code,
             cancelled: terminal.cancelled,
-        })
+            failure_origin,
+        }
+    })
 }
 
 fn resolve_responses_websocket_turn_timeouts(
@@ -1026,6 +1050,7 @@ mod tests {
         classify_attempt_settlement, AttemptBilling, AttemptCandidateError, AttemptCandidateStatus,
         AttemptClientDelivery, AttemptProviderEffect, AttemptSettlementInputs,
     };
+    use crate::orchestration::FailureOrigin;
     use crate::GatewayError;
 
     #[tokio::test]
@@ -1182,7 +1207,8 @@ mod tests {
             outcome,
             Some(ResponsesWebSocketTurnOutcome::ProviderTerminal {
                 status_code: 200,
-                cancelled: false
+                cancelled: false,
+                failure_origin: FailureOrigin::UpstreamProvider,
             })
         );
         let capture = String::from_utf8(websocket_event_as_sse_line(&event))
@@ -1230,7 +1256,8 @@ mod tests {
             outcome,
             Some(ResponsesWebSocketTurnOutcome::ProviderTerminal {
                 status_code: 200,
-                cancelled: false
+                cancelled: false,
+                failure_origin: FailureOrigin::UpstreamProvider,
             })
         );
         let outcome = outcome.expect("incomplete should end the turn");
@@ -1282,7 +1309,8 @@ mod tests {
             provider_terminal_outcome(&frame),
             Some(ResponsesWebSocketTurnOutcome::ProviderTerminal {
                 status_code: 502,
-                cancelled: false
+                cancelled: false,
+                failure_origin: FailureOrigin::UpstreamProvider,
             })
         );
     }
@@ -1309,7 +1337,7 @@ mod tests {
         // relay loop 观察到终态帧：attempt 记下 provider 事实。
         let observed = provider_terminal_outcome(&frame).expect("completed ends the turn");
         let recorded_provider =
-            attempt_facts_for_outcome(None, AttemptClientDelivery::Complete, observed).provider;
+            attempt_facts_for_outcome(None, AttemptClientDelivery::Complete, observed);
 
         // 随后写客户端失败：记录投递失败，并按 provider 终态选结算信号。
         let delivery = AttemptClientDelivery::Aborted {
@@ -1322,6 +1350,7 @@ mod tests {
         );
 
         let facts = attempt_facts_for_outcome(Some(recorded_provider), delivery, signal);
+        assert_eq!(facts.failure_origin, FailureOrigin::UpstreamProvider);
 
         // 终态摘要保留真实 usage 与 finish_reason，不被改写成 cancelled。
         let report_context = json!({
@@ -1429,8 +1458,40 @@ mod tests {
             Some(ResponsesWebSocketTurnOutcome::ProviderTerminal {
                 status_code: 429,
                 cancelled: false,
+                failure_origin: FailureOrigin::UpstreamProvider,
             })
         );
+    }
+
+    #[test]
+    fn websocket_auth_terminal_requires_trusted_structured_taxonomy() {
+        for (raw, expected_origin) in [
+            (
+                r#"{"type":"error","status_code":401,"error":{"type":"authentication_error"}}"#,
+                FailureOrigin::UpstreamCredential,
+            ),
+            (
+                r#"{"type":"error","status_code":403,"error":{"type":"invalid_request_error","code":"invalid_token"}}"#,
+                FailureOrigin::UpstreamCredential,
+            ),
+            (
+                r#"{"type":"error","status_code":403,"error":{"message":"oauth token is expired"}}"#,
+                FailureOrigin::UpstreamProvider,
+            ),
+        ] {
+            let frame = ParsedResponsesWebSocketFrame::parse(raw).expect("event should parse");
+            let outcome = provider_terminal_outcome(&frame).expect("error should end the turn");
+            assert_eq!(
+                outcome,
+                ResponsesWebSocketTurnOutcome::ProviderTerminal {
+                    status_code: frame.status().expect("terminal status should exist"),
+                    cancelled: false,
+                    failure_origin: expected_origin,
+                }
+            );
+            let facts = attempt_facts_for_outcome(None, AttemptClientDelivery::Complete, outcome);
+            assert_eq!(facts.failure_origin, expected_origin);
+        }
     }
 
     #[test]

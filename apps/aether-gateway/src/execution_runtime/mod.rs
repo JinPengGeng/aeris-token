@@ -33,10 +33,11 @@ pub(crate) use self::constants::{
     MAX_ERROR_BODY_BYTES, MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES,
 };
 pub(crate) use self::fallback::{
-    analyze_local_candidate_failover_sync, local_failover_response_text,
-    resolve_core_stream_direct_finalize_report_kind,
+    analyze_local_candidate_failover_sync, analyze_local_candidate_failover_sync_with_origin,
+    local_failover_response_text, resolve_core_stream_direct_finalize_report_kind,
     resolve_core_stream_error_finalize_report_kind, resolve_core_sync_error_finalize_report_kind,
     resolve_local_candidate_failover_analysis_stream,
+    resolve_local_candidate_failover_analysis_stream_with_origin,
     resolve_local_candidate_failover_decision_stream, should_fallback_to_control_stream,
     should_fallback_to_control_sync, should_finalize_sync_response,
     should_retry_next_local_candidate_stream, should_retry_next_local_candidate_sync,

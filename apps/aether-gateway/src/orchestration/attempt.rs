@@ -2,6 +2,9 @@ use aether_runtime_state::RuntimeLockLease;
 use aether_scheduler_core::parse_request_candidate_report_context;
 use serde_json::Value;
 
+use aether_contracts::ExecutionPlan;
+use aether_data_contracts::repository::candidates::StoredRequestCandidate;
+
 use crate::provider_transport::GatewayProviderTransportSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,14 +48,79 @@ pub(crate) const POOL_KEY_LEASE_TTL_MS_REPORT_FIELD: &str = "pool_key_lease_ttl_
 pub(crate) fn attempt_identity_from_report_context(
     report_context: Option<&Value>,
 ) -> Option<ExecutionAttemptIdentity> {
-    let metadata = parse_request_candidate_report_context(report_context)?;
-    let candidate_metadata = local_execution_candidate_metadata_from_report_context(report_context);
+    let report_context = report_context?;
+    let metadata = parse_request_candidate_report_context(Some(report_context))?;
+    let retry_index = report_context
+        .get("retry_index")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())?;
+    let pool_key_index = match report_context.get("pool_key_index") {
+        Some(value) => Some(value.as_u64().and_then(|value| u32::try_from(value).ok())?),
+        None => None,
+    };
+    if report_context.get("candidate_group_id").is_some() && pool_key_index.is_none() {
+        return None;
+    }
 
     Some(ExecutionAttemptIdentity {
         candidate_index: metadata.candidate_index?,
-        retry_index: metadata.retry_index,
-        pool_key_index: candidate_metadata.pool_key_index,
+        retry_index,
+        pool_key_index,
     })
+}
+
+pub(crate) fn attempt_identity_for_plan(
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+) -> Option<ExecutionAttemptIdentity> {
+    let report_context = report_context?;
+    let identity = attempt_identity_from_report_context(Some(report_context))?;
+    let candidate_id = plan.candidate_id.as_deref()?.trim();
+    if candidate_id.is_empty()
+        || !report_context_string_matches(report_context, "request_id", &plan.request_id)
+        || !report_context_string_matches(report_context, "candidate_id", candidate_id)
+        || !report_context_string_matches(report_context, "provider_id", &plan.provider_id)
+        || !report_context_string_matches(report_context, "endpoint_id", &plan.endpoint_id)
+        || !report_context_string_matches(report_context, "key_id", &plan.key_id)
+    {
+        return None;
+    }
+    Some(identity)
+}
+
+pub(crate) fn persisted_candidate_matches_attempt(
+    candidate: &StoredRequestCandidate,
+    plan: &ExecutionPlan,
+    identity: ExecutionAttemptIdentity,
+) -> bool {
+    let Some(candidate_id) = plan
+        .candidate_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    candidate.id == candidate_id
+        && candidate.request_id == plan.request_id
+        && candidate.candidate_index == identity.candidate_index
+        && candidate.retry_index == identity.retry_index
+        && candidate.provider_id.as_deref() == Some(plan.provider_id.as_str())
+        && candidate.endpoint_id.as_deref() == Some(plan.endpoint_id.as_str())
+        && candidate.key_id.as_deref() == Some(plan.key_id.as_str())
+}
+
+fn report_context_string_matches(report_context: &Value, field: &str, expected: &str) -> bool {
+    // Older locally actionable report contexts may omit echoed plan fields.
+    // When present they are fences; the persisted candidate row remains the
+    // authoritative binding for deployments with candidate persistence.
+    match report_context.get(field) {
+        None => true,
+        Some(value) => value
+            .as_str()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty() && value == expected.trim()),
+    }
 }
 
 pub(crate) fn local_execution_candidate_metadata_from_report_context(
@@ -196,11 +264,18 @@ fn local_attempt_slots_from_transport(transport: &GatewayProviderTransportSnapsh
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use aether_contracts::{ExecutionPlan, RequestBody};
+    use aether_data_contracts::repository::candidates::{
+        RequestCandidateStatus, StoredRequestCandidate,
+    };
     use serde_json::json;
 
     use super::{
-        attempt_identity_from_report_context, build_local_attempt_identities,
-        local_execution_candidate_metadata_from_report_context, ExecutionAttemptIdentity,
+        attempt_identity_for_plan, attempt_identity_from_report_context,
+        build_local_attempt_identities, local_execution_candidate_metadata_from_report_context,
+        persisted_candidate_matches_attempt, ExecutionAttemptIdentity,
         LocalExecutionCandidateMetadata,
     };
     use crate::provider_transport::snapshot::{
@@ -208,6 +283,59 @@ mod tests {
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
     };
     use aether_runtime_state::RuntimeLockLease;
+
+    fn sample_plan() -> ExecutionPlan {
+        ExecutionPlan {
+            request_id: "request-1".to_string(),
+            candidate_id: Some("candidate-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/chat/completions".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-test"})),
+            stream: false,
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: "openai:chat".to_string(),
+            model_name: Some("gpt-test".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        }
+    }
+
+    fn sample_persisted_candidate() -> StoredRequestCandidate {
+        StoredRequestCandidate {
+            id: "candidate-1".to_string(),
+            request_id: "request-1".to_string(),
+            user_id: None,
+            api_key_id: None,
+            username: None,
+            api_key_name: None,
+            candidate_index: 4,
+            retry_index: 2_001,
+            provider_id: Some("provider-1".to_string()),
+            endpoint_id: Some("endpoint-1".to_string()),
+            key_id: Some("key-1".to_string()),
+            status: RequestCandidateStatus::Pending,
+            skip_reason: None,
+            is_cached: false,
+            status_code: None,
+            error_type: None,
+            error_message: None,
+            latency_ms: None,
+            concurrent_requests: None,
+            extra_data: None,
+            required_capabilities: None,
+            created_at_unix_ms: 1,
+            started_at_unix_ms: Some(2),
+            finished_at_unix_ms: None,
+        }
+    }
 
     fn sample_transport(
         provider_max_retries: Option<i32>,
@@ -487,6 +615,100 @@ mod tests {
                 pool_key_index: Some(7),
             }
         );
+    }
+
+    #[test]
+    fn parse_attempt_identity_rejects_missing_or_corrupt_indices() {
+        for report_context in [
+            json!({}),
+            json!({"candidate_index": 0}),
+            json!({"candidate_index": "invalid", "retry_index": 0}),
+            json!({"candidate_index": 0, "retry_index": "invalid"}),
+            json!({"candidate_index": 0, "retry_index": 0, "pool_key_index": "invalid"}),
+            json!({"candidate_index": 0, "retry_index": 0, "candidate_group_id": "group-1"}),
+        ] {
+            assert!(attempt_identity_from_report_context(Some(&report_context)).is_none());
+        }
+    }
+
+    #[test]
+    fn parse_attempt_identity_enforces_pool_expansion_identity() {
+        assert!(attempt_identity_from_report_context(Some(&json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        })))
+        .is_some());
+        assert!(attempt_identity_from_report_context(Some(&json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+            "candidate_group_id": "group-1",
+            "pool_key_index": 2,
+        })))
+        .is_some());
+    }
+
+    #[test]
+    fn attempt_identity_binds_report_echoes_to_plan_and_pool_attempt() {
+        let plan = sample_plan();
+        let report_context = json!({
+            "request_id": "request-1",
+            "candidate_id": "candidate-1",
+            "candidate_index": 4,
+            "retry_index": 2001,
+            "candidate_group_id": "group-1",
+            "pool_key_index": 2,
+            "provider_id": "provider-1",
+            "endpoint_id": "endpoint-1",
+            "key_id": "key-1",
+        });
+
+        assert_eq!(
+            attempt_identity_for_plan(&plan, Some(&report_context)),
+            Some(ExecutionAttemptIdentity::new(4, 2_001).with_pool_key_index(Some(2)))
+        );
+        for (field, value) in [
+            ("request_id", "stale-request"),
+            ("candidate_id", "stale-candidate"),
+            ("provider_id", "stale-provider"),
+            ("endpoint_id", "stale-endpoint"),
+            ("key_id", "stale-key"),
+        ] {
+            let mut mismatch = report_context.clone();
+            mismatch[field] = json!(value);
+            assert!(attempt_identity_for_plan(&plan, Some(&mismatch)).is_none());
+        }
+    }
+
+    #[test]
+    fn persisted_attempt_binding_rejects_mismatch_and_stale_pool_rows() {
+        let plan = sample_plan();
+        let identity = ExecutionAttemptIdentity::new(4, 2_001).with_pool_key_index(Some(2));
+        let candidate = sample_persisted_candidate();
+        assert!(persisted_candidate_matches_attempt(
+            &candidate, &plan, identity
+        ));
+
+        let mut stale_candidate = candidate.clone();
+        stale_candidate.id = "candidate-old".to_string();
+        assert!(!persisted_candidate_matches_attempt(
+            &stale_candidate,
+            &plan,
+            identity
+        ));
+
+        let mut wrong_pool_attempt = candidate.clone();
+        wrong_pool_attempt.retry_index = 1_001;
+        assert!(!persisted_candidate_matches_attempt(
+            &wrong_pool_attempt,
+            &plan,
+            identity
+        ));
+
+        let mut wrong_key = candidate;
+        wrong_key.key_id = Some("key-2".to_string());
+        assert!(!persisted_candidate_matches_attempt(
+            &wrong_key, &plan, identity
+        ));
     }
 
     #[test]

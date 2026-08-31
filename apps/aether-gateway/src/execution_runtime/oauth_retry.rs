@@ -3,7 +3,7 @@ use tracing::warn;
 
 use crate::orchestration::{
     local_failover_error_message, oauth_status_may_be_invalid as status_may_be_oauth_invalid,
-    oauth_status_proves_access_token_invalid as status_proves_access_token_invalid,
+    oauth_status_proves_access_token_invalid as status_proves_access_token_invalid, FailureOrigin,
 };
 use crate::state::{AgentIdentityAuthConfigFence, CodexRuntimeOAuthObservation};
 use crate::{provider_transport::LocalOAuthRefreshError, AppState};
@@ -13,6 +13,7 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
     plan: &mut ExecutionPlan,
     status_code: u16,
     response_text: Option<&str>,
+    failure_origin: FailureOrigin,
     trace_id: &str,
     report_context: Option<&serde_json::Value>,
     request_started_at_unix_ms: Option<u64>,
@@ -24,6 +25,13 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
     let request_authorization = execution_plan_authorization(plan);
     let request_uses_agent_identity = request_authorization
         .is_some_and(aether_provider_transport::is_codex_agent_identity_authorization);
+    // Generic OAuth refresh is a replay decision. It requires provenance from
+    // the typed upstream boundary; status codes and message phrases alone are
+    // not credential proof. Agent Identity uses its separate exact task fence
+    // below rather than generic provider taxonomy.
+    if !request_uses_agent_identity && failure_origin != FailureOrigin::UpstreamCredential {
+        return false;
+    }
     let access_token_invalid_proven = !request_uses_agent_identity
         && status_proves_access_token_invalid(status_code, response_text);
 
@@ -249,6 +257,7 @@ mod tests {
         refresh_oauth_plan_auth_for_retry, status_may_be_oauth_invalid,
         status_proves_access_token_invalid,
     };
+    use crate::orchestration::FailureOrigin;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -296,6 +305,10 @@ mod tests {
             Some(
                 r#"{"type":"error","error":{"type":"authentication_error","message":"credential expired"}}"#
             )
+        ));
+        assert!(status_may_be_oauth_invalid(
+            403,
+            Some(r#"{"error":{"type":"invalid_request_error","code":"invalid_token"}}"#)
         ));
         assert!(status_may_be_oauth_invalid(
             403,
@@ -349,6 +362,10 @@ mod tests {
                 r#"{"error":{"code":"biscuit_baker_service_auth_credential_error_status","message":"Personal access token owner is inactive."}}"#
             )
         ));
+        assert!(status_proves_access_token_invalid(
+            403,
+            Some(r#"{"error":{"type":"invalid_request_error","code":"invalid_token"}}"#)
+        ));
         assert!(!status_proves_access_token_invalid(403, None));
         assert!(!status_proves_access_token_invalid(
             403,
@@ -358,6 +375,80 @@ mod tests {
             429,
             Some("token bucket")
         ));
+    }
+
+    fn oauth_origin_gate_plan(request_id: &str) -> ExecutionPlan {
+        ExecutionPlan {
+            request_id: request_id.to_string(),
+            candidate_id: None,
+            provider_name: Some("claude_code".to_string()),
+            provider_id: format!("provider-{request_id}"),
+            endpoint_id: format!("endpoint-{request_id}"),
+            key_id: format!("key-{request_id}"),
+            method: "POST".to_string(),
+            url: "https://api.anthropic.com/v1/messages".to_string(),
+            headers: BTreeMap::from([(
+                "authorization".to_string(),
+                "Bearer caller-controlled-token".to_string(),
+            )]),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "claude-sonnet-4-5"})),
+            stream: false,
+            client_api_format: "claude:messages".to_string(),
+            provider_api_format: "claude:messages".to_string(),
+            model_name: Some("claude-sonnet-4-5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_refresh_requires_typed_credential_origin() {
+        let state = crate::AppState::new().expect("state should build");
+        let mut plan = oauth_origin_gate_plan("req-oauth-origin-gate");
+
+        assert!(status_may_be_oauth_invalid(
+            403,
+            Some("oauth token is expired")
+        ));
+        assert!(
+            !refresh_oauth_plan_auth_for_retry(
+                &state,
+                &mut plan,
+                403,
+                Some("oauth token is expired"),
+                FailureOrigin::UpstreamProvider,
+                "trace-oauth-origin-gate",
+                None,
+                None,
+                None,
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_refresh_rejects_untyped_401_status() {
+        let state = crate::AppState::new().expect("state should build");
+        let mut plan = oauth_origin_gate_plan("req-oauth-401-origin-gate");
+
+        assert!(status_may_be_oauth_invalid(401, None));
+        assert!(
+            !refresh_oauth_plan_auth_for_retry(
+                &state,
+                &mut plan,
+                401,
+                None,
+                FailureOrigin::UpstreamProvider,
+                "trace-oauth-401-origin-gate",
+                None,
+                None,
+                None,
+            )
+            .await
+        );
     }
 
     #[tokio::test]
@@ -506,6 +597,7 @@ mod tests {
             &mut plan,
             401,
             Some(r#"{"error":"oauth_token_invalid"}"#),
+            FailureOrigin::UpstreamCredential,
             "trace-oauth-retry",
             None,
             Some(1_000),
@@ -685,6 +777,7 @@ mod tests {
                 &mut first_plan,
                 401,
                 Some(r#"{"error":"invalid_token"}"#),
+                FailureOrigin::UpstreamCredential,
                 "trace-claude-oauth-fence-first",
                 None,
                 None,
@@ -716,6 +809,7 @@ mod tests {
                 &mut stale_in_flight_plan,
                 401,
                 Some(r#"{"error":"invalid_token"}"#),
+                FailureOrigin::UpstreamCredential,
                 "trace-claude-oauth-fence-stale",
                 None,
                 None,

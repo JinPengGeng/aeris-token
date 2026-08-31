@@ -64,14 +64,17 @@ use crate::execution_runtime::transport::{
 };
 use crate::execution_runtime::windsurf::maybe_execute_windsurf_sync;
 use crate::execution_runtime::{
-    ai_attempt_retry_scope_from_failure_disposition, analyze_local_candidate_failover_sync,
-    apply_endpoint_response_header_rules, attach_provider_response_headers_to_report_context,
-    local_failover_response_text, resolve_core_sync_error_finalize_report_kind,
-    should_fallback_to_control_sync, should_finalize_sync_response, LocalFailoverDecision,
+    ai_attempt_retry_scope_from_failure_disposition,
+    analyze_local_candidate_failover_sync_with_origin, apply_endpoint_response_header_rules,
+    attach_provider_response_headers_to_report_context, local_failover_response_text,
+    resolve_core_sync_error_finalize_report_kind, should_fallback_to_control_sync,
+    should_finalize_sync_response, LocalFailoverDecision,
 };
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, build_local_error_flow_metadata,
+    apply_local_execution_effect, attempt_identity_from_report_context,
+    build_local_error_flow_metadata, failure_origin_from_embedded_upstream_error,
+    failure_origin_from_upstream_response, operation_replay_policy,
     spawn_local_oauth_success_effect, trace_upstream_response_body, with_error_flow_report_context,
     with_upstream_response_report_context, LocalAdaptiveRateLimitEffect,
     LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
@@ -1382,18 +1385,6 @@ async fn execute_direct_sync_runtime_candidate(
                     event.status_code,
                     event.ttfb_ms,
                 );
-                spawn_local_oauth_success_effect(
-                    state_for_response_started.clone(),
-                    plan,
-                    report_context,
-                    LocalOAuthSuccessEffect {
-                        status_code: event.status_code,
-                        request_started_at_unix_ms: Some(
-                            event.response_observation.request_started_at_unix_ms,
-                        ),
-                        request_order_id: Some(&event.response_observation.request_order_id),
-                    },
-                );
             })
             .await
             .map_err(SyncExecutionFailure::from_transport);
@@ -1507,16 +1498,6 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
     let response_headers_observed_at_unix_ms = current_request_candidate_unix_ms();
     let status_code = response.status_code();
     let headers = response.headers();
-    spawn_local_oauth_success_effect(
-        state.clone(),
-        plan,
-        report_context,
-        LocalOAuthSuccessEffect {
-            status_code,
-            request_started_at_unix_ms: Some(request_started_at_unix_ms),
-            request_order_id: Some(&request_order_id),
-        },
-    );
     progress.record_response_started(status_code, ttfb_ms).await;
 
     let mut body_bytes = Vec::new();
@@ -1945,6 +1926,24 @@ pub(crate) async fn execute_execution_runtime_sync_with_retry_scope(
             fallback_response,
         },
     })
+}
+
+fn should_attempt_sync_oauth_retry(
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    status_code: u16,
+    oauth_retry_attempted: bool,
+) -> bool {
+    status_code >= 400
+        && !oauth_retry_attempted
+        && attempt_identity_from_report_context(report_context).is_some()
+        && operation_replay_policy(plan, report_context).allows_candidate_switch()
+}
+
+fn should_record_sync_oauth_success(status_code: u16, response_text: Option<&str>) -> bool {
+    (200..300).contains(&status_code)
+        && failure_origin_from_embedded_upstream_error(response_text)
+            != crate::orchestration::FailureOrigin::UpstreamCredential
 }
 
 #[allow(clippy::too_many_arguments)] // internal function, grouping would add unnecessary indirection
@@ -2529,18 +2528,7 @@ async fn execute_execution_runtime_sync_impl(
         local_failover_response_text,
         local_failover_analysis,
     ) = loop {
-        spawn_local_oauth_success_effect(
-            state.clone(),
-            &plan,
-            report_context.as_ref(),
-            LocalOAuthSuccessEffect {
-                status_code: result.status_code,
-                request_started_at_unix_ms: Some(
-                    provider_response_observation.request_started_at_unix_ms,
-                ),
-                request_order_id: Some(&provider_response_observation.request_order_id),
-            },
-        );
+        let upstream_status_code = result.status_code;
         let result_latency_ms = result
             .telemetry
             .as_ref()
@@ -2593,14 +2581,27 @@ async fn execute_execution_runtime_sync_impl(
             &body_bytes,
             result.error.as_ref().map(|error| error.message.as_str()),
         );
+        let failure_origin = if upstream_status_code != result.status_code {
+            failure_origin_from_embedded_upstream_error(local_failover_response_text.as_deref())
+        } else {
+            failure_origin_from_upstream_response(
+                result.status_code,
+                local_failover_response_text.as_deref(),
+            )
+        };
 
-        if result.status_code >= 400
-            && !oauth_retry_attempted
+        if should_attempt_sync_oauth_retry(
+            &plan,
+            report_context.as_ref(),
+            result.status_code,
+            oauth_retry_attempted,
+        )
             && refresh_oauth_plan_auth_for_retry(
                 state,
                 &mut plan,
                 result.status_code,
                 local_failover_response_text.as_deref(),
+                failure_origin,
                 trace_id,
                 report_context.as_ref(),
                 Some(provider_response_observation.request_started_at_unix_ms),
@@ -2656,13 +2657,14 @@ async fn execute_execution_runtime_sync_impl(
             }
         }
 
-        let local_failover_analysis = analyze_local_candidate_failover_sync(
+        let local_failover_analysis = analyze_local_candidate_failover_sync_with_origin(
             state,
             &plan,
             plan_kind,
             report_context.as_ref(),
             &result,
             local_failover_response_text.as_deref(),
+            failure_origin,
         )
         .await;
         break (
@@ -2694,6 +2696,7 @@ async fn execute_execution_runtime_sync_impl(
             LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                 status_code: result.status_code,
                 classification: local_failover_analysis.classification,
+                failure_origin: local_failover_analysis.failure_origin,
             }),
         )
         .await;
@@ -2706,6 +2709,7 @@ async fn execute_execution_runtime_sync_impl(
             LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
                 status_code: result.status_code,
                 classification: local_failover_analysis.classification,
+                failure_origin: local_failover_analysis.failure_origin,
                 headers: Some(&headers),
             }),
         )
@@ -2719,6 +2723,7 @@ async fn execute_execution_runtime_sync_impl(
             LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
                 status_code: result.status_code,
                 classification: local_failover_analysis.classification,
+                failure_origin: local_failover_analysis.failure_origin,
             }),
         )
         .await;
@@ -2731,6 +2736,7 @@ async fn execute_execution_runtime_sync_impl(
             LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
                 status_code: result.status_code,
                 response_text: local_failover_response_text.as_deref(),
+                failure_origin: local_failover_analysis.failure_origin,
             }),
         )
         .await;
@@ -2743,6 +2749,7 @@ async fn execute_execution_runtime_sync_impl(
             LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
                 status_code: result.status_code,
                 classification: local_failover_analysis.classification,
+                failure_origin: local_failover_analysis.failure_origin,
                 headers: &headers,
                 error_body: local_failover_response_text.as_deref(),
             }),
@@ -2827,6 +2834,23 @@ async fn execute_execution_runtime_sync_impl(
             "gateway local sync decision retrying next candidate after retryable execution runtime result"
         );
         return Ok(None);
+    }
+    if should_record_sync_oauth_success(
+        result.status_code,
+        local_failover_response_text.as_deref(),
+    ) {
+        spawn_local_oauth_success_effect(
+            state.clone(),
+            &plan,
+            report_context.as_ref(),
+            LocalOAuthSuccessEffect {
+                status_code: result.status_code,
+                request_started_at_unix_ms: Some(
+                    provider_response_observation.request_started_at_unix_ms,
+                ),
+                request_order_id: Some(&provider_response_observation.request_order_id),
+            },
+        );
     }
     let status_code = result.status_code;
     let has_body_bytes = body_base64.is_some();
@@ -3408,9 +3432,15 @@ async fn execute_sync_via_remote_execution_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
     use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data::repository::usage::InMemoryUsageReadRepository;
     use aether_data_contracts::repository::candidates::RequestCandidateReadRepository;
+    use aether_data_contracts::repository::provider_catalog::{
+        ProviderCatalogReadRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+        StoredProviderCatalogProvider,
+    };
     use aether_data_contracts::repository::usage::UsageReadRepository;
     use aether_usage_runtime::UsageRuntimeConfig;
     use futures_util::{pin_mut, StreamExt as _};
@@ -3460,6 +3490,316 @@ mod tests {
             Some("openai:chat".to_string()),
         )
         .with_execution_runtime_candidate(true)
+    }
+
+    #[test]
+    fn sync_oauth_retry_gate_requires_valid_identity_and_blocks_unsafe_replay() {
+        let mut plain_plan = test_openai_image_plan(false);
+        plain_plan.client_api_format = "openai:responses".to_string();
+        plain_plan.provider_api_format = "openai:responses".to_string();
+        plain_plan.body = aether_contracts::RequestBody::from_json(json!({
+            "model": "gpt-test",
+            "input": "hello"
+        }));
+        let valid_attempt_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        assert!(should_attempt_sync_oauth_retry(
+            &plain_plan,
+            Some(&valid_attempt_context),
+            401,
+            false,
+        ));
+        let valid_pool_attempt_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+            "candidate_group_id": "group-1",
+            "pool_key_index": 1,
+        });
+        assert!(should_attempt_sync_oauth_retry(
+            &plain_plan,
+            Some(&valid_pool_attempt_context),
+            401,
+            false,
+        ));
+        for invalid_attempt_context in [
+            None,
+            Some(json!({})),
+            Some(json!({"candidate_index": 0})),
+            Some(json!({"candidate_index": "invalid", "retry_index": 0})),
+            Some(json!({"candidate_index": 0, "retry_index": "invalid"})),
+            Some(json!({
+                "candidate_index": 0,
+                "retry_index": 0,
+                "pool_key_index": "invalid",
+            })),
+            Some(json!({
+                "candidate_index": 0,
+                "retry_index": 0,
+                "candidate_group_id": "group-1",
+            })),
+        ] {
+            assert!(!should_attempt_sync_oauth_retry(
+                &plain_plan,
+                invalid_attempt_context.as_ref(),
+                401,
+                false,
+            ));
+        }
+
+        let compact_context = json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+            "api_operation": "compact",
+        });
+        assert!(!should_attempt_sync_oauth_retry(
+            &plain_plan,
+            Some(&compact_context),
+            401,
+            false,
+        ));
+
+        let mut tool_plan = plain_plan;
+        tool_plan.body = aether_contracts::RequestBody::from_json(json!({
+            "model": "gpt-test",
+            "input": "hello",
+            "tools": [{"type": "function", "name": "lookup"}]
+        }));
+        assert!(!should_attempt_sync_oauth_retry(
+            &tool_plan,
+            Some(&valid_attempt_context),
+            401,
+            false,
+        ));
+        assert!(!should_attempt_sync_oauth_retry(
+            &tool_plan,
+            Some(&valid_attempt_context),
+            401,
+            true,
+        ));
+    }
+
+    #[test]
+    fn sync_oauth_success_waits_for_embedded_auth_error_parsing() {
+        assert!(!should_record_sync_oauth_success(
+            200,
+            Some(r#"{"type":"error","error":{"type":"authentication_error"}}"#),
+        ));
+        assert!(!should_record_sync_oauth_success(
+            200,
+            Some(r#"{"error":{"type":"invalid_request_error","code":"invalid_token"}}"#),
+        ));
+        assert!(should_record_sync_oauth_success(
+            200,
+            Some(r#"{"id":"response-1","output":[]}"#),
+        ));
+        assert!(!should_record_sync_oauth_success(401, None));
+    }
+
+    #[tokio::test]
+    async fn sync_oauth_retry_uses_current_bearer_and_fences_second_success() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            for (expected_bearer, response) in [
+                (
+                    "Bearer stale-access-token",
+                    concat!(
+                        "HTTP/1.1 401 Unauthorized\r\n",
+                        "content-type: application/json\r\n",
+                        "content-length: 61\r\n",
+                        "connection: close\r\n\r\n",
+                        "{\"error\":{\"type\":\"authentication_error\",\"message\":\"expired\"}}"
+                    ),
+                ),
+                (
+                    "Bearer current-access-token",
+                    concat!(
+                        "HTTP/1.1 200 OK\r\n",
+                        "content-type: application/json\r\n",
+                        "content-length: 31\r\n",
+                        "connection: close\r\n\r\n",
+                        "{\"id\":\"response-2\",\"output\":[]}"
+                    ),
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().await.expect("client should connect");
+                let mut request = [0_u8; 8192];
+                let read = socket
+                    .read(&mut request)
+                    .await
+                    .expect("request should read");
+                let request = String::from_utf8_lossy(&request[..read]);
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains(&expected_bearer.to_ascii_lowercase()),
+                    "request did not contain expected authorization: {request}"
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("response should write");
+            }
+        });
+
+        let provider = StoredProviderCatalogProvider::new(
+            "provider-1".to_string(),
+            "Codex".to_string(),
+            Some(format!("http://{addr}")),
+            "codex".to_string(),
+        )
+        .expect("provider should build");
+        let endpoint = StoredProviderCatalogEndpoint::new(
+            "endpoint-1".to_string(),
+            "provider-1".to_string(),
+            "openai:responses".to_string(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            format!("http://{addr}/responses"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build");
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "OAuth".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(json!(["openai:responses"])),
+            Some(
+                encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "current-access-token")
+                    .expect("access token should encrypt"),
+            ),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build");
+        key.encrypted_auth_config = Some(
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                r#"{"provider_type":"codex","refresh_token":"refresh-current","expires_at":4102444800}"#,
+            )
+            .expect("auth config should encrypt"),
+        );
+        key.oauth_invalid_at_unix_secs = Some(100);
+        key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] stale request".to_string());
+        key.upstream_metadata = Some(json!({
+            "codex": {"credential_generation": "credential-generation-1"}
+        }));
+        let provider_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![endpoint],
+            vec![key],
+        ));
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+
+        let mut plan = test_openai_image_plan(false);
+        plan.request_id = "sync-oauth-retry-request".to_string();
+        plan.candidate_id = Some("sync-oauth-retry-candidate".to_string());
+        plan.url = format!("http://{addr}/responses");
+        plan.provider_name = Some("Codex".to_string());
+        plan.client_api_format = "openai:responses".to_string();
+        plan.provider_api_format = "openai:responses".to_string();
+        plan.model_name = Some("gpt-5".to_string());
+        plan.headers.insert(
+            "authorization".to_string(),
+            "Bearer stale-access-token".to_string(),
+        );
+        plan.body = aether_contracts::RequestBody::from_json(json!({
+            "model": "gpt-5",
+            "input": "hello"
+        }));
+        let report_context = Some(json!({
+            "request_id": "sync-oauth-retry-request",
+            "candidate_id": "sync-oauth-retry-candidate",
+            "candidate_index": 0,
+            "retry_index": 0,
+            "provider_id": "provider-1",
+            "endpoint_id": "endpoint-1",
+            "key_id": "key-1",
+            "codex_credential_generation": "credential-generation-1",
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses",
+            "model": "gpt-5",
+        }));
+
+        let response = execute_execution_runtime_sync(
+            &state,
+            "/v1/responses",
+            plan,
+            "trace-sync-oauth-retry",
+            &test_decision(),
+            "openai_responses_sync",
+            None,
+            report_context,
+        )
+        .await
+        .expect("sync execution should succeed")
+        .expect("sync execution should return a response");
+        assert_eq!(response.status(), StatusCode::OK);
+        server
+            .await
+            .expect("both upstream requests should complete");
+
+        let mut stored_key = None;
+        for _ in 0..50 {
+            stored_key = provider_repository
+                .list_keys_by_ids(&["key-1".to_string()])
+                .await
+                .expect("key should read")
+                .into_iter()
+                .next();
+            if stored_key.as_ref().is_some_and(|key| {
+                key.upstream_metadata
+                    .as_ref()
+                    .and_then(|metadata| {
+                        metadata.pointer("/codex/oauth_state_request_started_at_unix_ms")
+                    })
+                    .is_some()
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let stored_key = stored_key.expect("stored key should exist");
+        assert_eq!(stored_key.oauth_invalid_at_unix_secs, None);
+        assert_eq!(stored_key.oauth_invalid_reason, None);
+        assert!(stored_key
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/codex/oauth_state_request_id"))
+            .and_then(Value::as_str)
+            .is_some_and(|request_id| !request_id.is_empty()));
     }
 
     #[tokio::test]
