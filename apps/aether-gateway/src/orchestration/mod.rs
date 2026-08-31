@@ -29,8 +29,8 @@ pub(crate) use self::attempt::{
 pub(crate) use self::classifier::{
     classify_anthropic_failure_disposition, classify_failure_disposition, classify_local_failover,
     classify_local_transport_error, failure_disposition_from_local_classification,
-    local_failover_error_message, FailureDisposition, FailureRetryAction, FailureScope,
-    FailureTokenAction, LocalFailoverClassification, LocalFailoverInput,
+    local_failover_error_message, FailureDisposition, FailureRetryAction, FailureRetryDimension,
+    FailureScope, FailureTokenAction, LocalFailoverClassification, LocalFailoverInput,
     LocalTransportFailoverClassification,
 };
 pub(crate) use self::codex_quota_breaker::{

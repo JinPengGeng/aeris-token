@@ -1,11 +1,18 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 trait AttemptClock: fmt::Debug + Send + Sync {
     fn now(&self) -> Instant;
 }
+
+static NEXT_ATTEMPT_GRANT_ID: AtomicU64 = AtomicU64::new(1);
+pub const MAX_REQUEST_ATTEMPT_TOTAL_DISPATCHES: u64 = 64;
+pub const MAX_REQUEST_ATTEMPT_CREDENTIAL_ENTRIES: u64 = 32;
+pub const MAX_REQUEST_ATTEMPT_PROVIDER_SWITCHES: u64 = 16;
 
 #[derive(Debug)]
 struct SystemAttemptClock;
@@ -186,7 +193,9 @@ pub enum AttemptBudgetError {
         intent: AttemptRetryIntent,
         violation: AttemptTransitionViolation,
     },
-    ReservationAlreadyConsumed,
+    DispatchTargetMismatch,
+    InvalidGrant,
+    ScopeMissing,
     StateUnavailable,
 }
 
@@ -209,9 +218,11 @@ impl fmt::Display for AttemptBudgetError {
                 formatter,
                 "attempt retry intent {intent:?} rejected: {violation:?}"
             ),
-            Self::ReservationAlreadyConsumed => {
-                formatter.write_str("attempt budget reservation already consumed")
+            Self::DispatchTargetMismatch => {
+                formatter.write_str("attempt budget dispatch target does not match reservation")
             }
+            Self::InvalidGrant => formatter.write_str("attempt budget delegation grant is invalid"),
+            Self::ScopeMissing => formatter.write_str("request attempt budget scope is missing"),
             Self::StateUnavailable => formatter.write_str("attempt budget state unavailable"),
         }
     }
@@ -224,6 +235,17 @@ pub struct AttemptBudgetUsage {
     total_dispatches: u64,
     credential_entries: u64,
     provider_switches: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptBudgetTerminalCause {
+    BudgetExhausted(AttemptBudgetDimension),
+    DeadlineExceeded,
+    InvalidTransition,
+    DispatchTargetMismatch,
+    InvalidGrant,
+    ScopeMissing,
+    StateUnavailable,
 }
 
 impl AttemptBudgetUsage {
@@ -244,6 +266,16 @@ impl AttemptBudgetUsage {
 struct AttemptBudgetState {
     usage: AttemptBudgetUsage,
     previous_target: Option<AttemptTarget>,
+    last_target_sequence: u64,
+    outstanding_delegations: BTreeMap<String, OutstandingDelegation>,
+    terminal_cause: Option<AttemptBudgetTerminalCause>,
+}
+
+#[derive(Debug, Clone)]
+struct OutstandingDelegation {
+    sequence: u64,
+    reserved_usage: AttemptBudgetUsage,
+    target: AttemptTarget,
 }
 
 #[derive(Debug, Clone)]
@@ -258,12 +290,51 @@ impl AttemptBudget {
         Self::with_clock(limits, Arc::new(SystemAttemptClock))
     }
 
+    pub fn from_delegation_grant(
+        grant: &aether_contracts::ExecutionAttemptBudgetGrant,
+    ) -> Result<Self, AttemptBudgetError> {
+        let now_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if grant.grant_id.trim().is_empty() {
+            return Err(AttemptBudgetError::InvalidGrant);
+        }
+        if grant.max_total_dispatches == 0
+            || grant.max_total_dispatches > MAX_REQUEST_ATTEMPT_TOTAL_DISPATCHES
+            || grant.max_credential_entries > MAX_REQUEST_ATTEMPT_CREDENTIAL_ENTRIES
+            || grant.max_provider_switches > MAX_REQUEST_ATTEMPT_PROVIDER_SWITCHES
+            || grant.deadline_unix_ms.saturating_sub(now_unix_ms)
+                > aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_MS
+        {
+            return Err(AttemptBudgetError::InvalidGrant);
+        }
+        if grant.deadline_unix_ms <= now_unix_ms {
+            let now = Instant::now();
+            return Err(AttemptBudgetError::DeadlineExceeded {
+                deadline: now,
+                observed_at: now,
+            });
+        }
+        let deadline =
+            Instant::now() + std::time::Duration::from_millis(grant.deadline_unix_ms - now_unix_ms);
+        Ok(Self::new(AttemptBudgetLimits::new(
+            grant.max_total_dispatches,
+            grant.max_credential_entries,
+            grant.max_provider_switches,
+            deadline,
+        )))
+    }
+
     fn with_clock(limits: AttemptBudgetLimits, clock: Arc<dyn AttemptClock>) -> Self {
         Self {
             limits,
             state: Arc::new(Mutex::new(AttemptBudgetState {
                 usage: AttemptBudgetUsage::default(),
                 previous_target: None,
+                last_target_sequence: 0,
+                outstanding_delegations: BTreeMap::new(),
+                terminal_cause: None,
             })),
             clock,
         }
@@ -278,6 +349,190 @@ impl AttemptBudget {
             .lock()
             .map(|state| state.usage)
             .map_err(|_| AttemptBudgetError::StateUnavailable)
+    }
+
+    pub fn terminal_cause(&self) -> Option<AttemptBudgetTerminalCause> {
+        self.state
+            .lock()
+            .map(|state| state.terminal_cause)
+            .unwrap_or(Some(AttemptBudgetTerminalCause::StateUnavailable))
+    }
+
+    pub fn remaining(&self) -> Result<std::time::Duration, AttemptBudgetError> {
+        let observed_at = self.check_dispatch_deadline()?;
+        Ok(self
+            .limits
+            .dispatch_deadline
+            .saturating_duration_since(observed_at))
+    }
+
+    /// Atomically reserves one remote provider dispatch from this request.
+    ///
+    /// A remote execution-runtime request carries exactly one already-selected plan, so granting
+    /// more than one provider dispatch would let a missing stream trailer consume the entire
+    /// request budget. The gateway-to-runtime hop is charged separately at its physical send
+    /// boundary. This grant accounts for the one provider-facing send performed by the runtime;
+    /// the gateway-to-runtime RPC is an infrastructure hop and is not counted again.
+    pub fn reserve_delegation_grant(
+        &self,
+        target: &AttemptTarget,
+    ) -> Result<AttemptBudgetDelegation, AttemptBudgetError> {
+        let remaining = self.remaining()?;
+        let now_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AttemptBudgetError::StateUnavailable)?;
+        if let Err(error) = self.check_dispatch_deadline() {
+            state.terminal_cause = Some(AttemptBudgetTerminalCause::DeadlineExceeded);
+            return Err(error);
+        }
+        let sequence = NEXT_ATTEMPT_GRANT_ID.fetch_add(1, Ordering::Relaxed);
+        let grant_id = format!("{now_unix_ms}-{sequence}");
+        let previous = effective_previous_target(&state);
+        let reserved = AttemptBudgetUsage {
+            total_dispatches: 1,
+            credential_entries: u64::from(
+                previous.is_none_or(|previous| !previous.same_credential(target)),
+            ),
+            provider_switches: u64::from(
+                previous.is_some_and(|previous| !previous.same_provider(target)),
+            ),
+        };
+        let outstanding = outstanding_usage(&state);
+        for (used, delta, limit, dimension) in [
+            (
+                state
+                    .usage
+                    .total_dispatches
+                    .saturating_add(outstanding.total_dispatches),
+                reserved.total_dispatches,
+                self.limits.max_total_dispatches,
+                AttemptBudgetDimension::TotalDispatches,
+            ),
+            (
+                state
+                    .usage
+                    .credential_entries
+                    .saturating_add(outstanding.credential_entries),
+                reserved.credential_entries,
+                self.limits.max_credential_entries,
+                AttemptBudgetDimension::CredentialEntries,
+            ),
+            (
+                state
+                    .usage
+                    .provider_switches
+                    .saturating_add(outstanding.provider_switches),
+                reserved.provider_switches,
+                self.limits.max_provider_switches,
+                AttemptBudgetDimension::ProviderSwitches,
+            ),
+        ] {
+            if let Err(error) = check_dimension(used, delta, limit, dimension) {
+                state.terminal_cause = Some(AttemptBudgetTerminalCause::BudgetExhausted(dimension));
+                return Err(error);
+            }
+        }
+        state.outstanding_delegations.insert(
+            grant_id.clone(),
+            OutstandingDelegation {
+                sequence,
+                reserved_usage: reserved,
+                target: target.clone(),
+            },
+        );
+        Ok(AttemptBudgetDelegation {
+            budget: self.clone(),
+            grant: aether_contracts::ExecutionAttemptBudgetGrant {
+                grant_id,
+                max_total_dispatches: 1,
+                max_credential_entries: 1,
+                max_provider_switches: 0,
+                deadline_unix_ms: now_unix_ms.saturating_add(remaining.as_millis() as u64),
+            },
+            settled: false,
+        })
+    }
+
+    fn reconcile_delegated_consumption(
+        &self,
+        grant_id: &str,
+        consumption: aether_contracts::ExecutionAttemptBudgetConsumption,
+    ) -> Result<(), AttemptBudgetError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AttemptBudgetError::StateUnavailable)?;
+        let Some(outstanding) = state.outstanding_delegations.remove(grant_id) else {
+            state.terminal_cause = Some(AttemptBudgetTerminalCause::InvalidGrant);
+            return Err(AttemptBudgetError::InvalidGrant);
+        };
+        if consumption.total_dispatches > outstanding.reserved_usage.total_dispatches
+            || consumption.credential_entries > 1
+            || consumption.provider_switches > 0
+        {
+            state
+                .outstanding_delegations
+                .insert(grant_id.to_string(), outstanding);
+            state.terminal_cause = Some(AttemptBudgetTerminalCause::InvalidGrant);
+            return Err(AttemptBudgetError::InvalidGrant);
+        }
+        let dispatched = u64::from(consumption.total_dispatches > 0);
+        let credential_delta = outstanding.reserved_usage.credential_entries * dispatched;
+        let provider_delta = outstanding.reserved_usage.provider_switches * dispatched;
+        let remaining_outstanding = outstanding_usage(&state);
+        for (used, delta, limit, dimension) in [
+            (
+                state
+                    .usage
+                    .total_dispatches
+                    .saturating_add(remaining_outstanding.total_dispatches),
+                consumption.total_dispatches,
+                self.limits.max_total_dispatches,
+                AttemptBudgetDimension::TotalDispatches,
+            ),
+            (
+                state
+                    .usage
+                    .credential_entries
+                    .saturating_add(remaining_outstanding.credential_entries),
+                credential_delta,
+                self.limits.max_credential_entries,
+                AttemptBudgetDimension::CredentialEntries,
+            ),
+            (
+                state
+                    .usage
+                    .provider_switches
+                    .saturating_add(remaining_outstanding.provider_switches),
+                provider_delta,
+                self.limits.max_provider_switches,
+                AttemptBudgetDimension::ProviderSwitches,
+            ),
+        ] {
+            if let Err(error) = check_dimension(used, delta, limit, dimension) {
+                state.terminal_cause = Some(AttemptBudgetTerminalCause::BudgetExhausted(dimension));
+                return Err(error);
+            }
+        }
+        state.usage.total_dispatches += consumption.total_dispatches;
+        state.usage.credential_entries += credential_delta;
+        state.usage.provider_switches += provider_delta;
+        if dispatched > 0 && outstanding.sequence > state.last_target_sequence {
+            state.last_target_sequence = outstanding.sequence;
+            state.previous_target = Some(outstanding.target);
+        }
+        Ok(())
+    }
+
+    fn release_delegation(&self, grant_id: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            state.outstanding_delegations.remove(grant_id);
+        }
     }
 
     /// Performs an advisory deadline check before planning or other auxiliary work.
@@ -297,10 +552,11 @@ impl AttemptBudget {
         Ok(observed_at)
     }
 
-    /// Atomically records budget consumption for a proposed dispatch.
+    /// Prepares a target-bound reservation without charging the budget.
     ///
-    /// The returned evidence is not authority to send. A gateway-owned consuming send boundary
-    /// must compose it with the request lifecycle before any physical dispatch is allowed.
+    /// Charging and transition ordering happen only when the reservation is consumed at the
+    /// physical send boundary. This prevents concurrently prepared sends from undercounting
+    /// credential or provider transitions when they reach the transport out of order.
     pub fn try_reserve(
         &self,
         target: &AttemptTarget,
@@ -310,55 +566,275 @@ impl AttemptBudget {
             .state
             .lock()
             .map_err(|_| AttemptBudgetError::StateUnavailable)?;
-        let reserved_at = self.check_dispatch_deadline()?;
-        validate_transition(state.previous_target.as_ref(), target, intent)?;
+        let reserved_at = match self.check_dispatch_deadline() {
+            Ok(observed_at) => observed_at,
+            Err(error) => {
+                state.terminal_cause = Some(AttemptBudgetTerminalCause::DeadlineExceeded);
+                return Err(error);
+            }
+        };
+        let previous = effective_previous_target(&state);
+        if let Err(error) = validate_transition(previous, target, intent) {
+            state.terminal_cause = Some(AttemptBudgetTerminalCause::InvalidTransition);
+            return Err(error);
+        }
+        let credential_delta =
+            u64::from(previous.is_none_or(|previous| !previous.same_credential(target)));
+        let provider_switch_delta =
+            u64::from(previous.is_some_and(|previous| previous.provider_id != target.provider_id));
+        let outstanding = outstanding_usage(&state);
+        for (used, delta, limit, dimension) in [
+            (
+                state
+                    .usage
+                    .total_dispatches
+                    .saturating_add(outstanding.total_dispatches),
+                1,
+                self.limits.max_total_dispatches,
+                AttemptBudgetDimension::TotalDispatches,
+            ),
+            (
+                state
+                    .usage
+                    .credential_entries
+                    .saturating_add(outstanding.credential_entries),
+                credential_delta,
+                self.limits.max_credential_entries,
+                AttemptBudgetDimension::CredentialEntries,
+            ),
+            (
+                state
+                    .usage
+                    .provider_switches
+                    .saturating_add(outstanding.provider_switches),
+                provider_switch_delta,
+                self.limits.max_provider_switches,
+                AttemptBudgetDimension::ProviderSwitches,
+            ),
+        ] {
+            if let Err(error) = check_dimension(used, delta, limit, dimension) {
+                state.terminal_cause = Some(AttemptBudgetTerminalCause::BudgetExhausted(dimension));
+                return Err(error);
+            }
+        }
+        let predicted_usage = AttemptBudgetUsage {
+            total_dispatches: state.usage.total_dispatches + 1,
+            credential_entries: state.usage.credential_entries + credential_delta,
+            provider_switches: state.usage.provider_switches + provider_switch_delta,
+        };
 
-        let credential_delta = u64::from(
-            state
-                .previous_target
-                .as_ref()
-                .is_none_or(|previous| !previous.same_credential(target)),
-        );
-        let provider_switch_delta = u64::from(
-            state
-                .previous_target
-                .as_ref()
-                .is_some_and(|previous| previous.provider_id != target.provider_id),
-        );
+        Ok(AttemptBudgetReservation {
+            budget: self.clone(),
+            target: target.clone(),
+            intent,
+            reserved_at,
+            predicted_usage,
+        })
+    }
 
-        check_dimension(
-            state.usage.total_dispatches,
-            1,
-            self.limits.max_total_dispatches,
-            AttemptBudgetDimension::TotalDispatches,
-        )?;
-        check_dimension(
-            state.usage.credential_entries,
-            credential_delta,
-            self.limits.max_credential_entries,
-            AttemptBudgetDimension::CredentialEntries,
-        )?;
-        check_dimension(
-            state.usage.provider_switches,
-            provider_switch_delta,
-            self.limits.max_provider_switches,
-            AttemptBudgetDimension::ProviderSwitches,
-        )?;
+    /// Atomically charges and authorizes the next physical dispatch using its actual target.
+    ///
+    /// This is the sealed transport integration entrypoint. Transition intent is derived from the
+    /// last physically authorized target, so concurrent callers linearize in send-admission order.
+    pub fn authorize_next_dispatch(
+        &self,
+        target: &AttemptTarget,
+    ) -> Result<AttemptDispatchPermit, AttemptBudgetError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| AttemptBudgetError::StateUnavailable)?;
+        let authorized_at = self.check_dispatch_deadline()?;
+        Ok(AttemptDispatchPermit {
+            budget: self.clone(),
+            target: target.clone(),
+            intent: None,
+            reserved_at: authorized_at,
+            authorized_at,
+            predicted_ordinal: state.usage.total_dispatches.saturating_add(1),
+            predicted_usage: predicted_usage(&state, target),
+        })
+    }
 
+    fn charge_dispatch(
+        &self,
+        state: &mut AttemptBudgetState,
+        target: &AttemptTarget,
+        intent: AttemptRetryIntent,
+    ) -> Result<(u64, AttemptBudgetUsage), AttemptBudgetError> {
+        let previous = effective_previous_target(state);
+        if let Err(error) = validate_transition(previous, target, intent) {
+            state.terminal_cause = Some(AttemptBudgetTerminalCause::InvalidTransition);
+            return Err(error);
+        }
+        let credential_delta =
+            u64::from(previous.is_none_or(|previous| !previous.same_credential(target)));
+        let provider_switch_delta =
+            u64::from(previous.is_some_and(|previous| previous.provider_id != target.provider_id));
+        let outstanding = outstanding_usage(state);
+        for (used, delta, limit, dimension) in [
+            (
+                state
+                    .usage
+                    .total_dispatches
+                    .saturating_add(outstanding.total_dispatches),
+                1,
+                self.limits.max_total_dispatches,
+                AttemptBudgetDimension::TotalDispatches,
+            ),
+            (
+                state
+                    .usage
+                    .credential_entries
+                    .saturating_add(outstanding.credential_entries),
+                credential_delta,
+                self.limits.max_credential_entries,
+                AttemptBudgetDimension::CredentialEntries,
+            ),
+            (
+                state
+                    .usage
+                    .provider_switches
+                    .saturating_add(outstanding.provider_switches),
+                provider_switch_delta,
+                self.limits.max_provider_switches,
+                AttemptBudgetDimension::ProviderSwitches,
+            ),
+        ] {
+            if let Err(error) = check_dimension(used, delta, limit, dimension) {
+                state.terminal_cause = Some(AttemptBudgetTerminalCause::BudgetExhausted(dimension));
+                return Err(error);
+            }
+        }
         state.usage.total_dispatches += 1;
         state.usage.credential_entries += credential_delta;
         state.usage.provider_switches += provider_switch_delta;
+        state.last_target_sequence = NEXT_ATTEMPT_GRANT_ID.fetch_add(1, Ordering::Relaxed);
         state.previous_target = Some(target.clone());
+        Ok((state.usage.total_dispatches, state.usage))
+    }
+}
 
-        Ok(AttemptBudgetReservation {
-            ordinal: state.usage.total_dispatches,
-            target: target.clone(),
-            reserved_at,
-            usage: state.usage,
-            dispatch_deadline: self.limits.dispatch_deadline,
-            clock: self.clock.clone(),
-            consumed: false,
-        })
+fn predicted_usage(state: &AttemptBudgetState, target: &AttemptTarget) -> AttemptBudgetUsage {
+    let previous = effective_previous_target(state);
+    let credential_delta =
+        u64::from(previous.is_none_or(|previous| !previous.same_credential(target)));
+    let provider_switch_delta =
+        u64::from(previous.is_some_and(|previous| previous.provider_id != target.provider_id));
+    AttemptBudgetUsage {
+        total_dispatches: state.usage.total_dispatches.saturating_add(1),
+        credential_entries: state
+            .usage
+            .credential_entries
+            .saturating_add(credential_delta),
+        provider_switches: state
+            .usage
+            .provider_switches
+            .saturating_add(provider_switch_delta),
+    }
+}
+
+fn add_usage(left: AttemptBudgetUsage, right: AttemptBudgetUsage) -> AttemptBudgetUsage {
+    AttemptBudgetUsage {
+        total_dispatches: left.total_dispatches.saturating_add(right.total_dispatches),
+        credential_entries: left
+            .credential_entries
+            .saturating_add(right.credential_entries),
+        provider_switches: left
+            .provider_switches
+            .saturating_add(right.provider_switches),
+    }
+}
+
+fn outstanding_usage(state: &AttemptBudgetState) -> AttemptBudgetUsage {
+    state
+        .outstanding_delegations
+        .values()
+        .map(|delegation| delegation.reserved_usage)
+        .fold(AttemptBudgetUsage::default(), add_usage)
+}
+
+fn effective_previous_target(state: &AttemptBudgetState) -> Option<&AttemptTarget> {
+    let outstanding_tail = state
+        .outstanding_delegations
+        .values()
+        .max_by_key(|delegation| delegation.sequence);
+    match outstanding_tail {
+        Some(delegation) if delegation.sequence > state.last_target_sequence => {
+            Some(&delegation.target)
+        }
+        _ => state.previous_target.as_ref(),
+    }
+}
+
+/// One outstanding remote-runtime reservation. Dropping it before a send releases capacity;
+/// callers must use conservative reconciliation once the send outcome becomes uncertain.
+pub struct AttemptBudgetDelegation {
+    budget: AttemptBudget,
+    grant: aether_contracts::ExecutionAttemptBudgetGrant,
+    settled: bool,
+}
+
+impl fmt::Debug for AttemptBudgetDelegation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AttemptBudgetDelegation")
+            .field("grant_id", &self.grant.grant_id)
+            .field("settled", &self.settled)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AttemptBudgetDelegation {
+    pub fn grant(&self) -> &aether_contracts::ExecutionAttemptBudgetGrant {
+        &self.grant
+    }
+
+    pub fn reconcile(
+        mut self,
+        consumption: aether_contracts::ExecutionAttemptBudgetConsumption,
+    ) -> Result<(), AttemptBudgetError> {
+        self.budget
+            .reconcile_delegated_consumption(&self.grant.grant_id, consumption)?;
+        self.settled = true;
+        Ok(())
+    }
+
+    pub fn reconcile_conservative(self) -> Result<(), AttemptBudgetError> {
+        let consumption = aether_contracts::ExecutionAttemptBudgetConsumption {
+            total_dispatches: self.grant.max_total_dispatches,
+            credential_entries: self.grant.max_credential_entries,
+            provider_switches: self.grant.max_provider_switches,
+        };
+        self.reconcile(consumption)
+    }
+}
+
+impl Drop for AttemptBudgetDelegation {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.budget.release_delegation(&self.grant.grant_id);
+        }
+    }
+}
+
+fn infer_transition_intent(
+    previous: Option<&AttemptTarget>,
+    target: &AttemptTarget,
+) -> AttemptRetryIntent {
+    match previous {
+        None => AttemptRetryIntent::Initial,
+        Some(previous) if previous == target => AttemptRetryIntent::SameTargetReplay,
+        Some(previous) if !previous.same_provider(target) => AttemptRetryIntent::Provider,
+        Some(previous)
+            if previous.endpoint_id != target.endpoint_id && previous.key_id != target.key_id =>
+        {
+            AttemptRetryIntent::Candidate
+        }
+        Some(previous) if previous.endpoint_id != target.endpoint_id => {
+            AttemptRetryIntent::Endpoint
+        }
+        Some(_) => AttemptRetryIntent::Credential,
     }
 }
 
@@ -435,31 +911,26 @@ fn check_dimension(
 /// Construction and fields stay private so callers cannot forge reservations. The consuming
 /// boundary checks the trusted clock again and issues one non-cloneable, target-bound permit.
 pub struct AttemptBudgetReservation {
-    ordinal: u64,
+    budget: AttemptBudget,
     target: AttemptTarget,
+    intent: AttemptRetryIntent,
     reserved_at: Instant,
-    usage: AttemptBudgetUsage,
-    dispatch_deadline: Instant,
-    clock: Arc<dyn AttemptClock>,
-    consumed: bool,
+    predicted_usage: AttemptBudgetUsage,
 }
 
 impl fmt::Debug for AttemptBudgetReservation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AttemptBudgetReservation")
-            .field("ordinal", &self.ordinal)
             .field("reserved_at", &self.reserved_at)
-            .field("usage", &self.usage)
-            .field("dispatch_deadline", &self.dispatch_deadline)
-            .field("consumed", &self.consumed)
+            .field("predicted_usage", &self.predicted_usage)
             .finish_non_exhaustive()
     }
 }
 
 impl AttemptBudgetReservation {
     pub fn ordinal(&self) -> u64 {
-        self.ordinal
+        self.predicted_usage.total_dispatches
     }
 
     pub fn reserved_at(&self) -> Instant {
@@ -467,33 +938,32 @@ impl AttemptBudgetReservation {
     }
 
     pub fn usage(&self) -> AttemptBudgetUsage {
-        self.usage
+        self.predicted_usage
     }
 
     /// Consumes this reservation's one-shot authority at the physical dispatch boundary.
     ///
-    /// Transport entrypoints must accept the returned permit by value. An expired or previously
-    /// consumed reservation fails closed; its already-recorded budget charge is never refunded.
-    pub fn consume_for_dispatch(&mut self) -> Result<AttemptDispatchPermit, AttemptBudgetError> {
-        if self.consumed {
-            return Err(AttemptBudgetError::ReservationAlreadyConsumed);
+    /// Transport entrypoints must accept the returned permit by value. An expired or mismatched
+    /// reservation fails closed without charging a dispatch that never reached admission.
+    pub fn consume_for_dispatch(
+        self,
+        actual_target: &AttemptTarget,
+    ) -> Result<AttemptDispatchPermit, AttemptBudgetError> {
+        if self.target != *actual_target {
+            if let Ok(mut state) = self.budget.state.lock() {
+                state.terminal_cause = Some(AttemptBudgetTerminalCause::DispatchTargetMismatch);
+            }
+            return Err(AttemptBudgetError::DispatchTargetMismatch);
         }
-
-        let authorized_at = self.clock.now();
-        if authorized_at >= self.dispatch_deadline {
-            return Err(AttemptBudgetError::DeadlineExceeded {
-                deadline: self.dispatch_deadline,
-                observed_at: authorized_at,
-            });
-        }
-
-        self.consumed = true;
+        let authorized_at = self.budget.check_dispatch_deadline()?;
         Ok(AttemptDispatchPermit {
-            ordinal: self.ordinal,
-            target: self.target.clone(),
+            budget: self.budget,
+            target: self.target,
+            intent: Some(self.intent),
             reserved_at: self.reserved_at,
             authorized_at,
-            usage: self.usage,
+            predicted_ordinal: self.predicted_usage.total_dispatches,
+            predicted_usage: self.predicted_usage,
         })
     }
 }
@@ -504,26 +974,99 @@ impl AttemptBudgetReservation {
 /// This type intentionally does not implement `Clone`. Transport integrations must take it by
 /// value so safe Rust cannot authorize two sends with the same permit.
 pub struct AttemptDispatchPermit {
-    ordinal: u64,
+    budget: AttemptBudget,
     target: AttemptTarget,
+    intent: Option<AttemptRetryIntent>,
     reserved_at: Instant,
     authorized_at: Instant,
-    usage: AttemptBudgetUsage,
+    predicted_ordinal: u64,
+    predicted_usage: AttemptBudgetUsage,
 }
 
 impl fmt::Debug for AttemptDispatchPermit {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AttemptDispatchPermit")
-            .field("ordinal", &self.ordinal)
+            .field("predicted_ordinal", &self.predicted_ordinal)
             .field("reserved_at", &self.reserved_at)
             .field("authorized_at", &self.authorized_at)
-            .field("usage", &self.usage)
+            .field("predicted_usage", &self.predicted_usage)
             .finish_non_exhaustive()
     }
 }
 
 impl AttemptDispatchPermit {
+    /// Consumes this permit at the physical I/O boundary after checking the logical target.
+    pub fn consume_for_physical_dispatch(
+        self,
+        actual_target: &AttemptTarget,
+    ) -> Result<AttemptDispatchEvidence, AttemptBudgetError> {
+        if self.target != *actual_target {
+            if let Ok(mut state) = self.budget.state.lock() {
+                state.terminal_cause = Some(AttemptBudgetTerminalCause::DispatchTargetMismatch);
+            }
+            return Err(AttemptBudgetError::DispatchTargetMismatch);
+        }
+        let mut state = self
+            .budget
+            .state
+            .lock()
+            .map_err(|_| AttemptBudgetError::StateUnavailable)?;
+        let dispatched_at = match self.budget.check_dispatch_deadline() {
+            Ok(dispatched_at) => dispatched_at,
+            Err(error) => {
+                state.terminal_cause = Some(AttemptBudgetTerminalCause::DeadlineExceeded);
+                return Err(error);
+            }
+        };
+        let intent = self.intent.unwrap_or_else(|| {
+            infer_transition_intent(effective_previous_target(&state), actual_target)
+        });
+        let (ordinal, usage) = self
+            .budget
+            .charge_dispatch(&mut state, actual_target, intent)?;
+        Ok(AttemptDispatchEvidence {
+            ordinal,
+            target: self.target,
+            reserved_at: self.reserved_at,
+            authorized_at: self.authorized_at,
+            dispatched_at,
+            usage,
+        })
+    }
+
+    pub fn ordinal(&self) -> u64 {
+        self.predicted_ordinal
+    }
+
+    pub fn target(&self) -> &AttemptTarget {
+        &self.target
+    }
+
+    pub fn reserved_at(&self) -> Instant {
+        self.reserved_at
+    }
+
+    pub fn authorized_at(&self) -> Instant {
+        self.authorized_at
+    }
+
+    pub fn usage(&self) -> AttemptBudgetUsage {
+        self.predicted_usage
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct AttemptDispatchEvidence {
+    ordinal: u64,
+    target: AttemptTarget,
+    reserved_at: Instant,
+    authorized_at: Instant,
+    dispatched_at: Instant,
+    usage: AttemptBudgetUsage,
+}
+
+impl AttemptDispatchEvidence {
     pub fn ordinal(&self) -> u64 {
         self.ordinal
     }
@@ -538,6 +1081,10 @@ impl AttemptDispatchPermit {
 
     pub fn authorized_at(&self) -> Instant {
         self.authorized_at
+    }
+
+    pub fn dispatched_at(&self) -> Instant {
+        self.dispatched_at
     }
 
     pub fn usage(&self) -> AttemptBudgetUsage {
@@ -602,6 +1149,17 @@ mod tests {
         }
     }
 
+    fn dispatch_reservation(
+        reservation: AttemptBudgetReservation,
+        target: &AttemptTarget,
+    ) -> AttemptDispatchEvidence {
+        reservation
+            .consume_for_dispatch(target)
+            .expect("reservation should authorize")
+            .consume_for_physical_dispatch(target)
+            .expect("physical dispatch should be admitted")
+    }
+
     fn assert_violation(
         result: Result<AttemptBudgetReservation, AttemptBudgetError>,
         intent: AttemptRetryIntent,
@@ -621,13 +1179,14 @@ mod tests {
         let reservation = budget
             .try_reserve(&target, AttemptRetryIntent::Initial)
             .expect("first dispatch should fit");
+        let permit = dispatch_reservation(reservation, &target);
 
-        assert_eq!(reservation.ordinal(), 1);
-        assert_eq!(reservation.usage().total_dispatches(), 1);
-        assert_eq!(reservation.usage().credential_entries(), 1);
-        assert_eq!(reservation.usage().provider_switches(), 0);
+        assert_eq!(permit.ordinal(), 1);
+        assert_eq!(permit.usage().total_dispatches(), 1);
+        assert_eq!(permit.usage().credential_entries(), 1);
+        assert_eq!(permit.usage().provider_switches(), 0);
 
-        let evidence = format!("{reservation:?}");
+        let evidence = format!("{permit:?}");
         assert!(!evidence.contains("provider-a"));
         assert!(!evidence.contains("endpoint-a"));
         assert!(!evidence.contains("key-a"));
@@ -637,13 +1196,15 @@ mod tests {
     fn same_target_replay_only_consumes_total_dispatches() {
         let budget = AttemptBudget::new(limits(3, 1, 0));
         let target = target("provider-a", "endpoint-a", "key-a");
-        let _reservation = budget
+        let reservation = budget
             .try_reserve(&target, AttemptRetryIntent::Initial)
             .expect("initial dispatch should fit");
+        let _permit = dispatch_reservation(reservation, &target);
 
         let replay = budget
             .try_reserve(&target, AttemptRetryIntent::SameTargetReplay)
             .expect("same target replay should not re-enter credential");
+        let replay = dispatch_reservation(replay, &target);
 
         assert_eq!(replay.ordinal(), 2);
         assert_eq!(replay.usage().credential_entries(), 1);
@@ -659,25 +1220,27 @@ mod tests {
         let new_candidate = target("provider-a", "endpoint-c", "key-c");
         let new_provider = target("provider-b", "endpoint-d", "key-d");
 
-        let _reservation = budget
-            .try_reserve(&a, AttemptRetryIntent::Initial)
-            .expect("initial dispatch should fit");
-        let _reservation = budget
-            .try_reserve(&new_credential, AttemptRetryIntent::Credential)
-            .expect("credential transition should fit");
-        let _reservation = budget
-            .try_reserve(&new_endpoint_same_credential, AttemptRetryIntent::Endpoint)
-            .expect("endpoint-only transition should fit");
-        let _reservation = budget
-            .try_reserve(&new_candidate, AttemptRetryIntent::Candidate)
-            .expect("candidate transition should charge every actual delta");
-        let reservation = budget
-            .try_reserve(&new_provider, AttemptRetryIntent::Provider)
-            .expect("provider transition should fit");
+        for (target, intent) in [
+            (&a, AttemptRetryIntent::Initial),
+            (&new_credential, AttemptRetryIntent::Credential),
+            (&new_endpoint_same_credential, AttemptRetryIntent::Endpoint),
+            (&new_candidate, AttemptRetryIntent::Candidate),
+            (&new_provider, AttemptRetryIntent::Provider),
+        ] {
+            let reservation = budget
+                .try_reserve(target, intent)
+                .expect("transition should fit");
+            dispatch_reservation(reservation, target);
+        }
 
-        assert_eq!(reservation.usage().total_dispatches(), 5);
-        assert_eq!(reservation.usage().credential_entries(), 4);
-        assert_eq!(reservation.usage().provider_switches(), 1);
+        assert_eq!(
+            budget.usage().unwrap(),
+            AttemptBudgetUsage {
+                total_dispatches: 5,
+                credential_entries: 4,
+                provider_switches: 1,
+            }
+        );
     }
 
     #[test]
@@ -686,18 +1249,21 @@ mod tests {
         let a = target("provider-a", "endpoint-a", "key-a");
         let b = target("provider-b", "endpoint-b", "key-b");
 
-        let _reservation = budget
+        let reservation = budget
             .try_reserve(&a, AttemptRetryIntent::Initial)
             .expect("A should fit");
-        let _reservation = budget
+        dispatch_reservation(reservation, &a);
+        let reservation = budget
             .try_reserve(&b, AttemptRetryIntent::Provider)
             .expect("A to B should fit");
+        dispatch_reservation(reservation, &b);
         let reservation = budget
             .try_reserve(&a, AttemptRetryIntent::Provider)
             .expect("B to A should fit");
+        let permit = dispatch_reservation(reservation, &a);
 
-        assert_eq!(reservation.usage().credential_entries(), 3);
-        assert_eq!(reservation.usage().provider_switches(), 2);
+        assert_eq!(permit.usage().credential_entries(), 3);
+        assert_eq!(permit.usage().provider_switches(), 2);
     }
 
     #[test]
@@ -705,9 +1271,10 @@ mod tests {
         let budget = AttemptBudget::new(limits(4, 1, 4));
         let a = target("provider-a", "endpoint-a", "key-a");
         let b = target("provider-b", "endpoint-b", "key-b");
-        let _reservation = budget
+        let reservation = budget
             .try_reserve(&a, AttemptRetryIntent::Initial)
             .expect("initial dispatch should fit");
+        dispatch_reservation(reservation, &a);
 
         let error = budget
             .try_reserve(&b, AttemptRetryIntent::Provider)
@@ -745,6 +1312,12 @@ mod tests {
             .dimension(),
             AttemptBudgetDimension::TotalDispatches
         );
+        assert_eq!(
+            zero_total.terminal_cause(),
+            Some(AttemptBudgetTerminalCause::BudgetExhausted(
+                AttemptBudgetDimension::TotalDispatches
+            ))
+        );
 
         let zero_credentials = AttemptBudget::new(limits(1, 0, 0));
         assert_eq!(
@@ -763,9 +1336,10 @@ mod tests {
         let budget = AttemptBudget::new(limits(3, 3, 0));
         let a = target("provider-a", "endpoint-a", "key-a");
         let b = target("provider-b", "endpoint-b", "key-b");
-        let _reservation = budget
+        let reservation = budget
             .try_reserve(&a, AttemptRetryIntent::Initial)
             .expect("initial dispatch should fit");
+        dispatch_reservation(reservation, &a);
 
         let error = budget
             .try_reserve(&b, AttemptRetryIntent::Provider)
@@ -843,22 +1417,24 @@ mod tests {
         let clock = Arc::new(TestClock::new(before_deadline));
         let budget =
             AttemptBudget::with_clock(AttemptBudgetLimits::new(1, 1, 0, deadline), clock.clone());
-        let mut reservation = budget
-            .try_reserve(
-                &target("provider-a", "endpoint-a", "key-a"),
-                AttemptRetryIntent::Initial,
-            )
+        let target = target("provider-a", "endpoint-a", "key-a");
+        let reservation = budget
+            .try_reserve(&target, AttemptRetryIntent::Initial)
             .expect("reservation before deadline should fit");
 
         clock.set(deadline);
         assert!(matches!(
-            reservation.consume_for_dispatch(),
+            reservation.consume_for_dispatch(&target),
             Err(AttemptBudgetError::DeadlineExceeded {
                 deadline: actual_deadline,
                 observed_at,
             }) if actual_deadline == deadline && observed_at == deadline
         ));
-        assert_eq!(budget.usage().unwrap().total_dispatches(), 1);
+        assert_eq!(budget.usage().unwrap().total_dispatches(), 0);
+        assert_eq!(
+            budget.terminal_cause(),
+            Some(AttemptBudgetTerminalCause::DeadlineExceeded)
+        );
     }
 
     #[test]
@@ -868,27 +1444,136 @@ mod tests {
         let clock = Arc::new(TestClock::new(now));
         let budget = AttemptBudget::with_clock(AttemptBudgetLimits::new(1, 1, 0, deadline), clock);
         let target = target("provider-a", "endpoint-a", "key-a");
-        let mut reservation = budget
+        let reservation = budget
             .try_reserve(&target, AttemptRetryIntent::Initial)
             .expect("reservation should fit");
 
         let permit = reservation
-            .consume_for_dispatch()
-            .expect("first consumption should issue a permit");
+            .consume_for_dispatch(&target)
+            .expect("consumption should issue a permit");
         assert_eq!(permit.ordinal(), 1);
         assert_eq!(permit.target(), &target);
         assert_eq!(permit.reserved_at(), now);
         assert_eq!(permit.authorized_at(), now);
         assert_eq!(permit.usage().total_dispatches(), 1);
-        assert!(matches!(
-            reservation.consume_for_dispatch(),
-            Err(AttemptBudgetError::ReservationAlreadyConsumed)
-        ));
-
         let evidence = format!("{permit:?}");
         assert!(!evidence.contains("provider-a"));
         assert!(!evidence.contains("endpoint-a"));
         assert!(!evidence.contains("key-a"));
+        permit
+            .consume_for_physical_dispatch(&target)
+            .expect("permit should charge only at physical dispatch");
+    }
+
+    #[test]
+    fn reservation_rejects_a_different_physical_dispatch_target() {
+        let budget = AttemptBudget::new(limits(1, 1, 0));
+        let reserved_target = target("provider-a", "endpoint-a", "key-a");
+        let actual_target = target("provider-a", "endpoint-a", "key-b");
+        let reservation = budget
+            .try_reserve(&reserved_target, AttemptRetryIntent::Initial)
+            .expect("reservation should fit");
+
+        assert!(matches!(
+            reservation.consume_for_dispatch(&actual_target),
+            Err(AttemptBudgetError::DispatchTargetMismatch)
+        ));
+        assert_eq!(budget.usage().unwrap(), AttemptBudgetUsage::default());
+        assert_eq!(
+            budget.terminal_cause(),
+            Some(AttemptBudgetTerminalCause::DispatchTargetMismatch)
+        );
+    }
+
+    #[test]
+    fn authorization_order_controls_transition_charging() {
+        let budget = AttemptBudget::new(limits(3, 3, 2));
+        let initial = target("provider-initial", "endpoint-initial", "key-initial");
+        let prepared_first = target("provider-first", "endpoint-first", "key-first");
+        let dispatched_first = target(
+            "provider-dispatched",
+            "endpoint-dispatched",
+            "key-dispatched",
+        );
+        budget
+            .authorize_next_dispatch(&initial)
+            .expect("initial dispatch should fit")
+            .consume_for_physical_dispatch(&initial)
+            .expect("initial physical dispatch should fit");
+
+        let prepared_first_reservation = budget
+            .try_reserve(&prepared_first, AttemptRetryIntent::Provider)
+            .expect("first provider transition should prepare");
+        let dispatched_first_reservation = budget
+            .try_reserve(&dispatched_first, AttemptRetryIntent::Provider)
+            .expect("second provider transition should prepare concurrently");
+
+        let dispatched_first_permit = dispatched_first_reservation
+            .consume_for_dispatch(&dispatched_first)
+            .expect("second preparation may reach physical admission first");
+        dispatched_first_permit
+            .consume_for_physical_dispatch(&dispatched_first)
+            .expect("second preparation should charge first");
+        let final_permit = prepared_first_reservation
+            .consume_for_dispatch(&prepared_first)
+            .expect("later physical admission must charge from the actual previous target");
+        let final_evidence = final_permit
+            .consume_for_physical_dispatch(&prepared_first)
+            .expect("later physical admission must charge from the actual previous target");
+
+        assert_eq!(
+            final_evidence.usage(),
+            AttemptBudgetUsage {
+                total_dispatches: 3,
+                credential_entries: 3,
+                provider_switches: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn dispatch_permit_rejects_a_different_physical_target() {
+        let budget = AttemptBudget::new(limits(1, 1, 0));
+        let authorized_target = target("provider-a", "endpoint-a", "key-a");
+        let actual_target = target("provider-a", "endpoint-b", "key-a");
+        let permit = budget
+            .authorize_next_dispatch(&authorized_target)
+            .expect("dispatch should authorize");
+
+        assert_eq!(
+            permit.consume_for_physical_dispatch(&actual_target),
+            Err(AttemptBudgetError::DispatchTargetMismatch)
+        );
+        assert_eq!(
+            budget.terminal_cause(),
+            Some(AttemptBudgetTerminalCause::DispatchTargetMismatch)
+        );
+    }
+
+    #[test]
+    fn dispatch_permit_rechecks_the_exact_physical_io_deadline() {
+        let before_deadline = Instant::now();
+        let deadline = before_deadline + Duration::from_secs(10);
+        let clock = Arc::new(TestClock::new(before_deadline));
+        let budget =
+            AttemptBudget::with_clock(AttemptBudgetLimits::new(1, 1, 0, deadline), clock.clone());
+        let target = target("provider-a", "endpoint-a", "key-a");
+        let permit = budget
+            .authorize_next_dispatch(&target)
+            .expect("admission before the deadline should fit");
+
+        clock.set(deadline);
+        assert!(matches!(
+            permit.consume_for_physical_dispatch(&target),
+            Err(AttemptBudgetError::DeadlineExceeded {
+                deadline: actual_deadline,
+                observed_at,
+            }) if actual_deadline == deadline && observed_at == deadline
+        ));
+        assert_eq!(
+            budget.terminal_cause(),
+            Some(AttemptBudgetTerminalCause::DeadlineExceeded)
+        );
     }
 
     #[test]
@@ -900,9 +1585,10 @@ mod tests {
             AttemptRetryIntent::Candidate,
             AttemptTransitionViolation::InitialRequired,
         );
-        let _reservation = budget
+        let reservation = budget
             .try_reserve(&a, AttemptRetryIntent::Initial)
             .expect("initial dispatch should fit");
+        dispatch_reservation(reservation, &a);
 
         let cases = [
             (
@@ -980,7 +1666,7 @@ mod tests {
     }
 
     #[test]
-    fn dropping_reservation_evidence_never_refunds_its_charge() {
+    fn dropping_a_prepared_reservation_does_not_charge_the_budget() {
         let budget = AttemptBudget::new(limits(1, 1, 0));
         let target = target("provider-a", "endpoint-a", "key-a");
         drop(
@@ -989,12 +1675,236 @@ mod tests {
                 .expect("initial dispatch should fit"),
         );
 
-        let error = budget
-            .try_reserve(&target, AttemptRetryIntent::SameTargetReplay)
-            .expect_err("dropped reservation evidence must remain charged");
+        assert_eq!(budget.usage().unwrap(), AttemptBudgetUsage::default());
+        budget
+            .authorize_next_dispatch(&target)
+            .expect("an unconsumed preparation must leave dispatch capacity available");
+    }
+
+    #[test]
+    fn dropping_an_authorized_permit_does_not_charge_or_advance_physical_order() {
+        let budget = AttemptBudget::new(limits(2, 3, 2));
+        let dropped = target("provider-a", "endpoint-a", "key-a");
+        let dispatched = target("provider-b", "endpoint-b", "key-b");
+
+        drop(
+            budget
+                .authorize_next_dispatch(&dropped)
+                .expect("authorization should prepare a permit"),
+        );
+        assert_eq!(budget.usage().unwrap(), AttemptBudgetUsage::default());
+
+        let evidence = budget
+            .authorize_next_dispatch(&dispatched)
+            .expect("dropped permit must leave capacity")
+            .consume_for_physical_dispatch(&dispatched)
+            .expect("first physical send should be the initial transition");
+        assert_eq!(evidence.ordinal(), 1);
+        assert_eq!(evidence.usage().credential_entries(), 1);
+        assert_eq!(evidence.usage().provider_switches(), 0);
+    }
+
+    #[test]
+    fn reordered_authorizations_charge_in_physical_send_order() {
+        let budget = AttemptBudget::new(limits(3, 3, 2));
+        let a = target("provider-a", "endpoint-a", "key-a");
+        let b = target("provider-b", "endpoint-b", "key-b");
+        let c = target("provider-c", "endpoint-c", "key-c");
+
+        let permit_a = budget.authorize_next_dispatch(&a).unwrap();
+        let permit_b = budget.authorize_next_dispatch(&b).unwrap();
+        let permit_c = budget.authorize_next_dispatch(&c).unwrap();
+        permit_c.consume_for_physical_dispatch(&c).unwrap();
+        permit_a.consume_for_physical_dispatch(&a).unwrap();
+        let evidence = permit_b.consume_for_physical_dispatch(&b).unwrap();
+
         assert_eq!(
-            exhausted(error),
-            AttemptBudgetExhausted::new(AttemptBudgetDimension::TotalDispatches, 1, 1)
+            evidence.usage(),
+            AttemptBudgetUsage {
+                total_dispatches: 3,
+                credential_entries: 3,
+                provider_switches: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn delegated_grant_is_bounded_and_reconciliation_consumes_parent_capacity() {
+        let budget = AttemptBudget::new(limits(4, 3, 2));
+        let initial = target("provider-a", "endpoint-a", "key-a");
+        budget
+            .authorize_next_dispatch(&initial)
+            .unwrap()
+            .consume_for_physical_dispatch(&initial)
+            .unwrap();
+
+        let delegation = budget.reserve_delegation_grant(&initial).unwrap();
+        assert_eq!(delegation.grant().max_total_dispatches, 1);
+        assert_eq!(delegation.grant().max_credential_entries, 1);
+        assert_eq!(delegation.grant().max_provider_switches, 0);
+        let remote = AttemptBudget::from_delegation_grant(delegation.grant()).unwrap();
+        assert_eq!(remote.limits().max_total_dispatches(), 1);
+
+        delegation
+            .reconcile(aether_contracts::ExecutionAttemptBudgetConsumption {
+                total_dispatches: 1,
+                credential_entries: 1,
+                provider_switches: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            budget.usage().unwrap(),
+            AttemptBudgetUsage {
+                total_dispatches: 2,
+                credential_entries: 1,
+                provider_switches: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn concurrent_remote_grants_cannot_overbook_parent_capacity() {
+        let budget = AttemptBudget::new(limits(2, 2, 1));
+        let first_target = target("provider-a", "endpoint-a", "key-a");
+        let second_target = target("provider-b", "endpoint-b", "key-b");
+        let first = budget.reserve_delegation_grant(&first_target).unwrap();
+        let second = budget.reserve_delegation_grant(&second_target).unwrap();
+        assert!(matches!(
+            budget.reserve_delegation_grant(&first_target),
+            Err(AttemptBudgetError::BudgetExhausted(_))
+        ));
+        drop(first);
+        let replacement = budget.reserve_delegation_grant(&first_target).unwrap();
+        second.reconcile_conservative().unwrap();
+        replacement.reconcile_conservative().unwrap();
+        assert_eq!(budget.usage().unwrap().total_dispatches(), 2);
+    }
+
+    #[test]
+    fn outstanding_remote_grant_blocks_competing_local_dispatch() {
+        let budget = AttemptBudget::new(limits(1, 1, 0));
+        let remote_target = target("provider-a", "endpoint-a", "key-a");
+        let grant = budget.reserve_delegation_grant(&remote_target).unwrap();
+
+        let local = budget
+            .authorize_next_dispatch(&remote_target)
+            .unwrap()
+            .consume_for_physical_dispatch(&remote_target);
+        assert!(matches!(
+            local,
+            Err(AttemptBudgetError::BudgetExhausted(
+                AttemptBudgetExhausted {
+                    dimension: AttemptBudgetDimension::TotalDispatches,
+                    ..
+                }
+            ))
+        ));
+
+        grant.reconcile_conservative().unwrap();
+        assert_eq!(budget.usage().unwrap().total_dispatches(), 1);
+    }
+
+    #[test]
+    fn out_of_order_remote_reconcile_preserves_send_order_target() {
+        let budget = AttemptBudget::new(limits(3, 3, 2));
+        let first_target = target("provider-a", "endpoint-a", "key-a");
+        let second_target = target("provider-b", "endpoint-b", "key-b");
+        let first = budget.reserve_delegation_grant(&first_target).unwrap();
+        let second = budget.reserve_delegation_grant(&second_target).unwrap();
+
+        second.reconcile_conservative().unwrap();
+        first.reconcile_conservative().unwrap();
+        budget
+            .authorize_next_dispatch(&second_target)
+            .unwrap()
+            .consume_for_physical_dispatch(&second_target)
+            .unwrap();
+
+        assert_eq!(
+            budget.usage().unwrap(),
+            AttemptBudgetUsage {
+                total_dispatches: 3,
+                credential_entries: 2,
+                provider_switches: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn one_conservative_remote_reconcile_consumes_only_one_dispatch() {
+        let budget = AttemptBudget::new(limits(4, 4, 3));
+        let remote_target = target("provider-a", "endpoint-a", "key-a");
+        budget
+            .reserve_delegation_grant(&remote_target)
+            .unwrap()
+            .reconcile_conservative()
+            .unwrap();
+        assert_eq!(budget.usage().unwrap().total_dispatches(), 1);
+        assert!(budget.reserve_delegation_grant(&remote_target).is_ok());
+    }
+
+    #[test]
+    fn local_and_remote_topologies_count_one_provider_send_identically() {
+        let local = AttemptBudget::new(limits(4, 4, 3));
+        let remote = AttemptBudget::new(limits(4, 4, 3));
+        let provider_target = target("provider-a", "endpoint-a", "key-a");
+
+        local
+            .authorize_next_dispatch(&provider_target)
+            .unwrap()
+            .consume_for_physical_dispatch(&provider_target)
+            .unwrap();
+        remote
+            .reserve_delegation_grant(&provider_target)
+            .unwrap()
+            .reconcile_conservative()
+            .unwrap();
+
+        assert_eq!(local.usage().unwrap(), remote.usage().unwrap());
+        assert_eq!(local.usage().unwrap().total_dispatches(), 1);
+        assert_eq!(local.usage().unwrap().credential_entries(), 1);
+    }
+
+    #[test]
+    fn invalid_or_expired_delegated_grant_fails_closed() {
+        let now_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let missing_id = aether_contracts::ExecutionAttemptBudgetGrant {
+            grant_id: String::new(),
+            max_total_dispatches: 1,
+            max_credential_entries: 1,
+            max_provider_switches: 0,
+            deadline_unix_ms: now_unix_ms + 1_000,
+        };
+        assert_eq!(
+            AttemptBudget::from_delegation_grant(&missing_id).unwrap_err(),
+            AttemptBudgetError::InvalidGrant
+        );
+
+        let expired = aether_contracts::ExecutionAttemptBudgetGrant {
+            grant_id: "expired".to_string(),
+            max_total_dispatches: 1,
+            max_credential_entries: 1,
+            max_provider_switches: 0,
+            deadline_unix_ms: now_unix_ms,
+        };
+        assert!(matches!(
+            AttemptBudget::from_delegation_grant(&expired),
+            Err(AttemptBudgetError::DeadlineExceeded { .. })
+        ));
+
+        let unbounded = aether_contracts::ExecutionAttemptBudgetGrant {
+            grant_id: "unbounded".to_string(),
+            max_total_dispatches: MAX_REQUEST_ATTEMPT_TOTAL_DISPATCHES + 1,
+            max_credential_entries: 1,
+            max_provider_switches: 0,
+            deadline_unix_ms: now_unix_ms + 1_000,
+        };
+        assert_eq!(
+            AttemptBudget::from_delegation_grant(&unbounded).unwrap_err(),
+            AttemptBudgetError::InvalidGrant
         );
     }
 
@@ -1005,9 +1915,6 @@ mod tests {
 
         let budget = AttemptBudget::new(limits(LIMIT, 1, 0));
         let target = target("provider-a", "endpoint-a", "key-a");
-        let _reservation = budget
-            .try_reserve(&target, AttemptRetryIntent::Initial)
-            .expect("initial dispatch should fit");
         let barrier = Arc::new(Barrier::new(THREADS));
 
         let handles = (0..THREADS)
@@ -1017,7 +1924,9 @@ mod tests {
                 let barrier = barrier.clone();
                 thread::spawn(move || {
                     barrier.wait();
-                    budget.try_reserve(&target, AttemptRetryIntent::SameTargetReplay)
+                    budget
+                        .authorize_next_dispatch(&target)?
+                        .consume_for_physical_dispatch(&target)
                 })
             })
             .collect::<Vec<_>>();
@@ -1027,7 +1936,7 @@ mod tests {
             .map(|handle| handle.join().expect("thread should not panic"))
             .filter(Result::is_ok)
             .count();
-        assert_eq!(successes, LIMIT as usize - 1);
+        assert_eq!(successes, LIMIT as usize);
         assert_eq!(budget.usage().unwrap().total_dispatches(), LIMIT);
     }
 
@@ -1070,30 +1979,12 @@ mod tests {
                 .collect::<Vec<_>>();
             let budget = AttemptBudget::new(limits(5, 5, 4));
 
-            for (index, target) in sequence.iter().enumerate() {
-                let intent = match (index, sequence.get(index.wrapping_sub(1))) {
-                    (0, _) => AttemptRetryIntent::Initial,
-                    (_, Some(previous)) if previous == target => {
-                        AttemptRetryIntent::SameTargetReplay
-                    }
-                    (_, Some(previous)) if previous.provider_id != target.provider_id => {
-                        AttemptRetryIntent::Provider
-                    }
-                    (_, Some(previous))
-                        if previous.endpoint_id != target.endpoint_id
-                            && previous.key_id != target.key_id =>
-                    {
-                        AttemptRetryIntent::Candidate
-                    }
-                    (_, Some(previous)) if previous.endpoint_id != target.endpoint_id => {
-                        AttemptRetryIntent::Endpoint
-                    }
-                    (_, Some(_)) => AttemptRetryIntent::Credential,
-                    _ => unreachable!("non-initial sequence entries have a previous target"),
-                };
-                let _reservation = budget
-                    .try_reserve(target, intent)
-                    .expect("unbounded small sequence should fit");
+            for target in &sequence {
+                budget
+                    .authorize_next_dispatch(target)
+                    .expect("unbounded small sequence should fit")
+                    .consume_for_physical_dispatch(target)
+                    .expect("unbounded small physical sequence should fit");
             }
 
             let expected_credentials = 1 + sequence

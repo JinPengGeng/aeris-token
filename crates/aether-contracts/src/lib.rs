@@ -9,8 +9,9 @@ mod usage;
 pub use error::{ExecutionError, ExecutionErrorKind, ExecutionPhase};
 pub use frame::{StreamFrame, StreamFramePayload, StreamFrameType};
 pub use plan::{
-    ExecutionPlan, ExecutionResponseBodyMode, ExecutionTimeouts, ProxySnapshot, RequestBody,
-    ResolvedTransportProfile, EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER,
+    ExecutionAttemptBudgetConsumption, ExecutionAttemptBudgetGrant, ExecutionPlan,
+    ExecutionResponseBodyMode, ExecutionRuntimeRequest, ExecutionTimeouts, ProxySnapshot,
+    RequestBody, ResolvedTransportProfile, EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER,
     EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
     EXECUTION_RESPONSE_BODY_MODE_HEADER, MAX_EXECUTION_REQUEST_TIMEOUT_MS,
     MAX_EXECUTION_REQUEST_TIMEOUT_SECS, MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_MS,

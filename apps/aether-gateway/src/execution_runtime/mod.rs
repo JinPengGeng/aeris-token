@@ -54,20 +54,17 @@ pub(crate) use aether_ai_serving::{ConversionMode, ExecutionStrategy};
 pub(crate) fn ai_attempt_retry_scope_from_failure_disposition(
     disposition: crate::orchestration::FailureDisposition,
 ) -> aether_ai_serving::AiAttemptRetryScope {
-    use crate::orchestration::{FailureRetryAction, FailureScope};
+    use crate::orchestration::FailureRetryDimension;
     use aether_ai_serving::AiAttemptRetryScope;
 
-    match disposition.failure_scope {
-        FailureScope::Credential | FailureScope::CredentialModel => AiAttemptRetryScope::Credential,
-        FailureScope::Endpoint => AiAttemptRetryScope::Endpoint,
-        FailureScope::Provider => AiAttemptRetryScope::Provider,
-        FailureScope::None => match disposition.retry_action {
-            FailureRetryAction::NextCredential => AiAttemptRetryScope::Credential,
-            FailureRetryAction::NextEndpoint => AiAttemptRetryScope::Endpoint,
-            FailureRetryAction::Stop
-            | FailureRetryAction::SameCredential
-            | FailureRetryAction::NextCandidate => AiAttemptRetryScope::Candidate,
-        },
+    // Retry traversal is explicitly bound to retry_action. failure_scope describes which
+    // resource receives health/quarantine effects and must not silently widen traversal.
+    match disposition.retry_dimension {
+        FailureRetryDimension::Credential => AiAttemptRetryScope::Credential,
+        FailureRetryDimension::Endpoint => AiAttemptRetryScope::Endpoint,
+        FailureRetryDimension::None
+        | FailureRetryDimension::SameTarget
+        | FailureRetryDimension::Candidate => AiAttemptRetryScope::Candidate,
     }
 }
 
@@ -90,7 +87,7 @@ mod retry_scope_tests {
 
         assert_eq!(retry_scope(429), AiAttemptRetryScope::Credential);
         assert_eq!(retry_scope(500), AiAttemptRetryScope::Endpoint);
-        assert_eq!(retry_scope(529), AiAttemptRetryScope::Provider);
+        assert_eq!(retry_scope(529), AiAttemptRetryScope::Endpoint);
         assert_eq!(retry_scope(400), AiAttemptRetryScope::Candidate);
     }
 

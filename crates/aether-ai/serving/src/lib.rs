@@ -54,9 +54,11 @@ pub use aether_pool_core::{
     REQUEST_FAILURE_PENALTY, UNSCHEDULABLE_SCORE_CAP,
 };
 pub use attempt_budget::{
-    AttemptBudget, AttemptBudgetDimension, AttemptBudgetError, AttemptBudgetExhausted,
-    AttemptBudgetLimits, AttemptBudgetReservation, AttemptBudgetUsage, AttemptDispatchPermit,
-    AttemptRetryIntent, AttemptTarget, AttemptTransitionViolation,
+    AttemptBudget, AttemptBudgetDelegation, AttemptBudgetDimension, AttemptBudgetError,
+    AttemptBudgetExhausted, AttemptBudgetLimits, AttemptBudgetReservation,
+    AttemptBudgetTerminalCause, AttemptBudgetUsage, AttemptDispatchPermit, AttemptRetryIntent,
+    AttemptTarget, AttemptTransitionViolation, MAX_REQUEST_ATTEMPT_CREDENTIAL_ENTRIES,
+    MAX_REQUEST_ATTEMPT_PROVIDER_SWITCHES, MAX_REQUEST_ATTEMPT_TOTAL_DISPATCHES,
 };
 pub use attempt_loop::{
     run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopOutcome, AiAttemptLoopPort,

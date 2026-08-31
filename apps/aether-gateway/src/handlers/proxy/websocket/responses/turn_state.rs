@@ -29,6 +29,7 @@ pub(super) struct LogicalTurn {
     /// this logical turn. Quota retries reuse it instead of falling back to the
     /// connection's Upgrade-time authorization snapshot.
     pub(super) turn_control: Option<ResponsesWebSocketTurnControl>,
+    pub(super) attempt_budget: aether_ai_serving::AttemptBudget,
 }
 
 impl LogicalTurn {
@@ -41,6 +42,7 @@ impl LogicalTurn {
             retry_attempted: false,
             retry_unsafe_reason: None,
             turn_control: None,
+            attempt_budget: crate::execution_runtime::transport::new_bounded_attempt_budget(),
         }
     }
 

@@ -79,10 +79,12 @@ impl<'a> OAuthHttpExecutor for GatewayOAuthHttpExecutor<'a> {
                 ..ExecutionTimeouts::default()
             }),
         };
-        let result =
-            crate::execution_runtime::execute_execution_runtime_sync_plan(&self.app, None, &plan)
-                .await
-                .map_err(gateway_error_to_oauth_error)?;
+        let result = crate::execution_runtime::transport::with_request_attempt_budget(
+            crate::execution_runtime::transport::new_bounded_attempt_budget(),
+            crate::execution_runtime::execute_execution_runtime_sync_plan(&self.app, None, &plan),
+        )
+        .await
+        .map_err(gateway_error_to_oauth_error)?;
         Ok(OAuthHttpResponse {
             status_code: result.status_code,
             body_text: execution_body_text(&result),

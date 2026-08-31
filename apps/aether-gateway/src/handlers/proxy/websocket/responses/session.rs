@@ -617,45 +617,51 @@ async fn bootstrap_responses_websocket(
         }
     };
 
-    let mut bound =
-        match bind_responses_upstream(&decision, normalization, &first_event, adapter).await {
-            Ok(connection) => connection,
-            Err(code) => {
-                let finalizer = finalize_unbound_turn(
-                    state.clone(),
-                    first_turn,
-                    ResponsesWebSocketTurnOutcome::upstream_connect_failed(code),
-                );
-                warn!(
-                    event_name = "responses_websocket_upstream_connect_failed",
-                    log_type = "ops",
-                    transport = WEBSOCKET_LOG_TRANSPORT,
-                    websocket = true,
-                    trace_id = %context.trace_id,
-                    error_code = code,
-                    "gateway failed to establish Responses WebSocket upstream"
-                );
-                send_gateway_error_with_status(
-                    client_socket,
-                    502,
-                    code,
-                    "Gateway could not establish the Provider connection",
-                )
-                .await;
-                close_client_socket(client_socket, CLOSE_TRY_AGAIN, code).await;
-                await_turn_finalization_handle(finalizer).await;
-                return None;
-            }
-        };
+    let first_logical_turn = LogicalTurn::new(first_event.clone(), 1, first_logical_turn_id)
+        .with_turn_control(turn_control);
+    let mut bound = match bind_responses_upstream(
+        &decision,
+        normalization,
+        &first_event,
+        adapter,
+        &first_logical_turn.attempt_budget,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(code) => {
+            let finalizer = finalize_unbound_turn(
+                state.clone(),
+                first_turn,
+                ResponsesWebSocketTurnOutcome::upstream_connect_failed(code),
+            );
+            warn!(
+                event_name = "responses_websocket_upstream_connect_failed",
+                log_type = "ops",
+                transport = WEBSOCKET_LOG_TRANSPORT,
+                websocket = true,
+                trace_id = %context.trace_id,
+                error_code = code,
+                "gateway failed to establish Responses WebSocket upstream"
+            );
+            send_gateway_error_with_status(
+                client_socket,
+                502,
+                code,
+                "Gateway could not establish the Provider connection",
+            )
+            .await;
+            close_client_socket(client_socket, CLOSE_TRY_AGAIN, code).await;
+            await_turn_finalization_handle(finalizer).await;
+            return None;
+        }
+    };
     first_turn.mark_upstream_request_sent();
     first_turn.set_provider_response_headers(bound.upstream_response_headers.clone());
     if let Some(session) = first_turn_redaction_session {
         bound.redaction_restorer.register(session);
     }
-    bound.turn_state.begin(
-        LogicalTurn::new(first_event, 1, first_logical_turn_id).with_turn_control(turn_control),
-        first_turn,
-    );
+    bound.turn_state.begin(first_logical_turn, first_turn);
 
     Some(bound)
 }
@@ -1507,6 +1513,7 @@ mod tests {
             resolve_responses_websocket_adapter(
                 crate::orchestration::ResponsesWebSocketAdapter::Standard,
             ),
+            &crate::execution_runtime::transport::new_bounded_attempt_budget(),
         )
         .await
         .expect("upstream binding should succeed");

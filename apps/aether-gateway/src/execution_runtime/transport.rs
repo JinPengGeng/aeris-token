@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, OnceLock, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
+use aether_ai_serving::{AttemptBudget, AttemptBudgetError, AttemptDispatchPermit, AttemptTarget};
 use aether_contracts::{
     ExecutionPlan, ExecutionResponseBodyMode, ExecutionResponseObservation, ExecutionResult,
     ExecutionTelemetry, ProxySnapshot, ResolvedTransportProfile, ResponseBody,
@@ -52,8 +53,59 @@ use crate::frontdoor_loop_guard::{
 };
 use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::tunnel::{self, tunnel_protocol};
+
 use crate::upstream_admission::UpstreamTargetAdmissionPermit;
 use crate::{AppState, GatewayError};
+
+tokio::task_local! {
+    static REQUEST_ATTEMPT_BUDGET: AttemptBudget;
+}
+
+pub(crate) async fn with_request_attempt_budget<T, F>(budget: AttemptBudget, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    if REQUEST_ATTEMPT_BUDGET.try_with(|_| ()).is_ok() {
+        future.await
+    } else {
+        REQUEST_ATTEMPT_BUDGET.scope(budget, future).await
+    }
+}
+
+pub(crate) fn new_bounded_attempt_budget() -> AttemptBudget {
+    AttemptBudget::new(aether_ai_serving::AttemptBudgetLimits::new(
+        aether_ai_serving::MAX_REQUEST_ATTEMPT_TOTAL_DISPATCHES,
+        aether_ai_serving::MAX_REQUEST_ATTEMPT_CREDENTIAL_ENTRIES,
+        aether_ai_serving::MAX_REQUEST_ATTEMPT_PROVIDER_SWITCHES,
+        std::time::Instant::now()
+            + Duration::from_secs(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS),
+    ))
+}
+
+pub(crate) fn request_attempt_budget() -> Result<AttemptBudget, ExecutionRuntimeTransportError> {
+    REQUEST_ATTEMPT_BUDGET
+        .try_with(Clone::clone)
+        .map_err(|_| AttemptBudgetError::ScopeMissing.into())
+}
+
+pub(crate) fn spawn_with_request_attempt_budget<F>(
+    future: F,
+) -> Result<tokio::task::JoinHandle<F::Output>, ExecutionRuntimeTransportError>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let budget = request_attempt_budget()?;
+    Ok(tokio::spawn(with_request_attempt_budget(budget, future)))
+}
+
+pub(super) fn authorize_attempt_dispatch(
+    target: &AttemptTarget,
+) -> Result<AttemptDispatchPermit, ExecutionRuntimeTransportError> {
+    request_attempt_budget()?
+        .authorize_next_dispatch(target)
+        .map_err(Into::into)
+}
 
 const HUB_RELAY_CONTENT_TYPE: &str = "application/vnd.aether.tunnel-envelope";
 const HUB_RELAY_ERROR_HEADER: &str = "x-aether-tunnel-error";
@@ -595,6 +647,15 @@ pub(crate) enum ExecutionRuntimeTransportError {
     RelayError(String),
     #[error("upstream response is not valid JSON: {0}")]
     InvalidJson(serde_json::Error),
+    #[error("request attempt budget terminated dispatch: {0}")]
+    AttemptBudget(#[from] AttemptBudgetError),
+}
+
+pub(crate) fn gateway_transport_error(error: ExecutionRuntimeTransportError) -> GatewayError {
+    match error {
+        ExecutionRuntimeTransportError::AttemptBudget(error) => GatewayError::AttemptBudget(error),
+        other => GatewayError::Internal(other.to_string()),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -898,6 +959,23 @@ pub(crate) async fn execute_sync_plan_with_report_context(
     plan: &ExecutionPlan,
     report_context: Option<&serde_json::Value>,
 ) -> Result<ExecutionResult, GatewayError> {
+    if request_attempt_budget().is_ok() {
+        return execute_sync_plan_with_report_context_inner(state, trace_id, plan, report_context)
+            .await;
+    }
+    with_request_attempt_budget(
+        new_bounded_attempt_budget(),
+        execute_sync_plan_with_report_context_inner(state, trace_id, plan, report_context),
+    )
+    .await
+}
+
+async fn execute_sync_plan_with_report_context_inner(
+    state: &AppState,
+    trace_id: Option<&str>,
+    plan: &ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+) -> Result<ExecutionResult, GatewayError> {
     #[cfg(test)]
     {
         let remote_execution_runtime_base_url = state
@@ -917,7 +995,7 @@ pub(crate) async fn execute_sync_plan_with_report_context(
     if resolve_local_tunnel_node_id(state, plan.proxy.as_ref()).is_some() {
         return execute_sync_plan_via_local_tunnel(state, plan, report_context)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()));
+            .map_err(gateway_transport_error);
     }
 
     match super::grok::maybe_execute_grok_sync(plan, report_context).await {
@@ -928,7 +1006,7 @@ pub(crate) async fn execute_sync_plan_with_report_context(
         Ok(None) => {}
         Err(err) => {
             record_manual_proxy_request_failure(state, plan).await;
-            return Err(GatewayError::Internal(err.to_string()));
+            return Err(gateway_transport_error(err));
         }
     }
 
@@ -936,7 +1014,7 @@ pub(crate) async fn execute_sync_plan_with_report_context(
     match maybe_execute_windsurf_sync(state, plan, None).await {
         Ok(Some(result)) => return Ok(result),
         Ok(None) => {}
-        Err(err) => return Err(GatewayError::Internal(err.to_string())),
+        Err(err) => return Err(gateway_transport_error(err)),
     }
     let state_for_response_started = state.clone();
     match DirectSyncExecutionRuntime::new()
@@ -962,7 +1040,7 @@ pub(crate) async fn execute_sync_plan_with_report_context(
         }
         Err(err) => {
             record_manual_proxy_request_failure(state, plan).await;
-            Err(GatewayError::Internal(err.to_string()))
+            Err(gateway_transport_error(err))
         }
     }
 }
@@ -989,6 +1067,9 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
     let started_at = Instant::now();
     let request_started_at_unix_ms = crate::clock::current_unix_ms();
     let request_order_id = uuid::Uuid::now_v7().to_string();
+    let target = AttemptTarget::from(plan);
+    let permit = authorize_attempt_dispatch(&target)?;
+    consume_dispatch_permit(permit, &target)?;
     let response = state
         .tunnel
         .open_direct_relay_stream(
@@ -1145,6 +1226,9 @@ async fn execute_sync_plan_via_local_tunnel_inner(
     let started_at = Instant::now();
     let request_started_at_unix_ms = crate::clock::current_unix_ms();
     let request_order_id = uuid::Uuid::now_v7().to_string();
+    let target = AttemptTarget::from(plan);
+    let permit = authorize_attempt_dispatch(&target)?;
+    consume_dispatch_permit(permit, &target)?;
     let mut response = state
         .tunnel
         .open_direct_relay_stream(
@@ -1400,9 +1484,13 @@ async fn send_request_inner(
         "direct_reqwest_request_build",
         request_build_started_at.elapsed().as_millis() as u64,
     );
-    send_reqwest_request(request, stream_first_byte_timeout)
-        .await
-        .map(DirectHttpResponse::Reqwest)
+    send_reqwest_request(
+        AttemptTarget::from(plan),
+        request,
+        stream_first_byte_timeout,
+    )
+    .await
+    .map(DirectHttpResponse::Reqwest)
 }
 
 pub(crate) enum DirectHttpResponse {
@@ -2240,11 +2328,18 @@ async fn send_via_direct_h2c_fast_path(
         request_build_started_at.elapsed().as_millis() as u64,
     );
 
-    send_hyper_h2c_request(sender, request, stream_first_byte_timeout).await
+    send_hyper_h2c_request(
+        sender,
+        AttemptTarget::from(plan),
+        request,
+        stream_first_byte_timeout,
+    )
+    .await
 }
 
 async fn send_hyper_h2c_request(
     mut sender: DirectHyperH2cSenderLease,
+    target: AttemptTarget,
     request: hyper::Request<DirectHyperH2cRequestBody>,
     stream_first_byte_timeout: Option<Duration>,
 ) -> Result<hyper::Response<HyperIncomingBody>, ExecutionRuntimeTransportError> {
@@ -2281,6 +2376,8 @@ async fn send_hyper_h2c_request(
 
     let headers_started_at = Instant::now();
     let dispatch_started_at = Instant::now();
+    let permit = authorize_attempt_dispatch(&target)?;
+    consume_dispatch_permit(permit, &target)?;
     let response_future = sender.sender().send_request(request);
     observe_gateway_stage_ms(
         "direct_h2c_request_dispatch",
@@ -2358,9 +2455,13 @@ async fn send_via_browser_wreq_transport(
     if let Some(timeout) = total_timeout {
         request = request.timeout(timeout);
     }
-    send_wreq_request(request, stream_first_byte_timeout)
-        .await
-        .map(DirectHttpResponse::BrowserWreq)
+    send_wreq_request(
+        AttemptTarget::from(plan),
+        request,
+        stream_first_byte_timeout,
+    )
+    .await
+    .map(DirectHttpResponse::BrowserWreq)
 }
 
 async fn send_via_tunnel_relay(
@@ -2430,7 +2531,9 @@ async fn send_via_tunnel_relay(
     };
 
     let started_at = Instant::now();
-    let response = send_relay_request(request, first_byte_timeout)
+    let target = AttemptTarget::from(plan);
+    let permit = authorize_attempt_dispatch(&target)?;
+    let response = send_relay_request(permit, &target, request, first_byte_timeout)
         .await
         .map_err(ExecutionRuntimeTransportError::RelayError)?;
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -2524,9 +2627,12 @@ async fn send_via_tunnel_relay(
 }
 
 async fn send_relay_request(
+    permit: AttemptDispatchPermit,
+    target: &AttemptTarget,
     request: reqwest::RequestBuilder,
     first_byte_timeout: Option<Duration>,
 ) -> Result<reqwest::Response, String> {
+    consume_dispatch_permit(permit, target).map_err(|error| error.to_string())?;
     if let Some(timeout) = first_byte_timeout {
         return match tokio::time::timeout(timeout, request.send()).await {
             Ok(Ok(response)) => Ok(response),
@@ -2711,12 +2817,19 @@ where
 }
 
 async fn send_reqwest_request(
+    target: AttemptTarget,
     request: reqwest::RequestBuilder,
     stream_first_byte_timeout: Option<Duration>,
 ) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
     let started_at = Instant::now();
+    let permit = authorize_attempt_dispatch(&target)?;
     if let Some(timeout) = stream_first_byte_timeout {
-        return match tokio::time::timeout(timeout, request.send()).await {
+        return match tokio::time::timeout(
+            timeout,
+            dispatch_reqwest_request(target, permit, request),
+        )
+        .await
+        {
             Ok(Ok(response)) => {
                 observe_gateway_stage_ms(
                     "direct_reqwest_request_send",
@@ -2724,18 +2837,14 @@ async fn send_reqwest_request(
                 );
                 Ok(response)
             }
-            Ok(Err(error)) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
-                format_upstream_request_error(&error),
-            )),
+            Ok(Err(error)) => Err(error),
             Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
                 stream_first_byte_timeout_message(timeout),
             )),
         };
     }
 
-    let response = request.send().await.map_err(|err| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
-    })?;
+    let response = dispatch_reqwest_request(target, permit, request).await?;
     observe_gateway_stage_ms(
         "direct_reqwest_request_send",
         started_at.elapsed().as_millis() as u64,
@@ -2744,23 +2853,55 @@ async fn send_reqwest_request(
 }
 
 async fn send_wreq_request(
+    target: AttemptTarget,
     request: wreq::RequestBuilder,
     stream_first_byte_timeout: Option<Duration>,
 ) -> Result<wreq::Response, ExecutionRuntimeTransportError> {
+    let permit = authorize_attempt_dispatch(&target)?;
     if let Some(timeout) = stream_first_byte_timeout {
-        return match tokio::time::timeout(timeout, request.send()).await {
+        return match tokio::time::timeout(timeout, dispatch_wreq_request(target, permit, request))
+            .await
+        {
             Ok(Ok(response)) => Ok(response),
-            Ok(Err(error)) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
-                format_wreq_upstream_request_error(&error),
-            )),
+            Ok(Err(error)) => Err(error),
             Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
                 stream_first_byte_timeout_message(timeout),
             )),
         };
     }
 
-    request.send().await.map_err(|err| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format_wreq_upstream_request_error(&err))
+    dispatch_wreq_request(target, permit, request).await
+}
+
+pub(super) fn consume_dispatch_permit(
+    permit: AttemptDispatchPermit,
+    actual_target: &AttemptTarget,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    permit
+        .consume_for_physical_dispatch(actual_target)
+        .map(|_| ())
+        .map_err(Into::into)
+}
+
+async fn dispatch_reqwest_request(
+    target: AttemptTarget,
+    permit: AttemptDispatchPermit,
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
+    consume_dispatch_permit(permit, &target)?;
+    request.send().await.map_err(|error| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&error))
+    })
+}
+
+async fn dispatch_wreq_request(
+    target: AttemptTarget,
+    permit: AttemptDispatchPermit,
+    request: wreq::RequestBuilder,
+) -> Result<wreq::Response, ExecutionRuntimeTransportError> {
+    consume_dispatch_permit(permit, &target)?;
+    request.send().await.map_err(|error| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format_wreq_upstream_request_error(&error))
     })
 }
 
@@ -4355,6 +4496,17 @@ mod tests {
     use crate::AppState;
 
     const LOCAL_HTTP_SUCCESS_TIMEOUT_MS: u64 = 15_000;
+
+    #[test]
+    fn physical_dispatch_authorization_without_request_scope_fails_closed() {
+        let target = aether_ai_serving::AttemptTarget::new("provider", "endpoint", "key");
+        assert!(matches!(
+            super::authorize_attempt_dispatch(&target),
+            Err(super::ExecutionRuntimeTransportError::AttemptBudget(
+                aether_ai_serving::AttemptBudgetError::ScopeMissing
+            ))
+        ));
+    }
 
     #[test]
     fn upstream_error_url_sanitization_removes_secrets_everywhere() {

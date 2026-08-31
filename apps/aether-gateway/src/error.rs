@@ -11,6 +11,7 @@ use crate::insert_header_if_missing;
 
 #[derive(Debug, Clone)]
 pub(crate) enum GatewayError {
+    AttemptBudget(aether_ai_serving::AttemptBudgetError),
     UpstreamUnavailable {
         trace_id: String,
         message: String,
@@ -39,6 +40,7 @@ pub(crate) enum GatewayError {
 impl GatewayError {
     pub(crate) fn into_message(self) -> String {
         match self {
+            Self::AttemptBudget(error) => error.to_string(),
             Self::UpstreamUnavailable { message, .. }
             | Self::ControlUnavailable { message, .. }
             | Self::Client { message, .. }
@@ -62,6 +64,35 @@ impl GatewayError {
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response<Body> {
         match self {
+            Self::AttemptBudget(error) => {
+                let status = match error {
+                    aether_ai_serving::AttemptBudgetError::BudgetExhausted(_) => {
+                        StatusCode::TOO_MANY_REQUESTS
+                    }
+                    aether_ai_serving::AttemptBudgetError::DeadlineExceeded { .. } => {
+                        StatusCode::GATEWAY_TIMEOUT
+                    }
+                    aether_ai_serving::AttemptBudgetError::ScopeMissing
+                    | aether_ai_serving::AttemptBudgetError::StateUnavailable => {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                    aether_ai_serving::AttemptBudgetError::InvalidTransition { .. }
+                    | aether_ai_serving::AttemptBudgetError::DispatchTargetMismatch
+                    | aether_ai_serving::AttemptBudgetError::InvalidGrant => {
+                        StatusCode::BAD_GATEWAY
+                    }
+                };
+                (
+                    status,
+                    Json(json!({
+                        "error": {
+                            "type": "attempt_budget_terminated",
+                            "message": error.to_string(),
+                        }
+                    })),
+                )
+                    .into_response()
+            }
             Self::UpstreamUnavailable { trace_id, message } => {
                 warn!(trace_id = %trace_id, error = %message, "gateway proxy unavailable");
                 let body = Json(json!({

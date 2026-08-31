@@ -308,8 +308,11 @@ impl<'a> AdminAppState<'a> {
         trace_id: Option<&str>,
         plan: &aether_contracts::ExecutionPlan,
     ) -> Result<aether_contracts::ExecutionResult, GatewayError> {
-        crate::execution_runtime::execute_execution_runtime_sync_plan(self.app, trace_id, plan)
-            .await
+        crate::execution_runtime::transport::with_request_attempt_budget(
+            crate::execution_runtime::transport::new_bounded_attempt_budget(),
+            crate::execution_runtime::execute_execution_runtime_sync_plan(self.app, trace_id, plan),
+        )
+        .await
     }
 
     pub(crate) async fn execute_execution_runtime_sync_plan_with_report_context(
@@ -318,11 +321,14 @@ impl<'a> AdminAppState<'a> {
         plan: &aether_contracts::ExecutionPlan,
         report_context: Option<&serde_json::Value>,
     ) -> Result<aether_contracts::ExecutionResult, GatewayError> {
-        crate::execution_runtime::execute_execution_runtime_sync_plan_with_report_context(
-            self.app,
-            trace_id,
-            plan,
-            report_context,
+        crate::execution_runtime::transport::with_request_attempt_budget(
+            crate::execution_runtime::transport::new_bounded_attempt_budget(),
+            crate::execution_runtime::execute_execution_runtime_sync_plan_with_report_context(
+                self.app,
+                trace_id,
+                plan,
+                report_context,
+            ),
         )
         .await
     }

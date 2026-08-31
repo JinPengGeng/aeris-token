@@ -1,7 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use aether_contracts::ExecutionPlan;
+use aether_ai_serving::AttemptBudgetError;
+use aether_contracts::{ExecutionPlan, ExecutionRuntimeRequest};
 use aether_runtime::{
     maybe_hold_axum_response_permit, prometheus_response, service_up_sample, AdmissionPermit,
     ConcurrencyError, ConcurrencyGate, ConcurrencySnapshot, MetricKind, MetricLabel, MetricSample,
@@ -16,6 +17,9 @@ use axum::{Json, Router};
 use serde_json::json;
 use thiserror::Error;
 
+use crate::execution_runtime::transport::{
+    new_bounded_attempt_budget, with_request_attempt_budget,
+};
 use crate::execution_runtime::{
     build_direct_execution_frame_stream, DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
 };
@@ -234,16 +238,22 @@ async fn execute_sync(
     request: Request,
 ) -> Result<Response, ExecutionRuntimeAppError> {
     let request_permit = acquire_request_permit(&state).await?;
-    let plan = parse_request_json::<ExecutionPlan>(request).await?;
-    let result = state
-        .execution_runtime
-        .execute_sync(&plan)
-        .await
-        .map_err(|err| ExecutionRuntimeAppError(ExecutionRuntimeServerError::Transport(err)))?;
-    Ok(maybe_hold_axum_response_permit(
-        Json(result).into_response(),
-        request_permit,
-    ))
+    let execution_request = parse_execution_request(request).await?;
+    let plan = execution_request.plan;
+    let attempt_budget =
+        aether_ai_serving::AttemptBudget::from_delegation_grant(&execution_request.attempt_budget)
+            .map_err(|error| {
+                ExecutionRuntimeAppError(ExecutionRuntimeServerError::BudgetGrant(error))
+            })?;
+    let result = with_request_attempt_budget(
+        attempt_budget.clone(),
+        state.execution_runtime.execute_sync(&plan),
+    )
+    .await
+    .map_err(|err| ExecutionRuntimeAppError(ExecutionRuntimeServerError::Transport(err)))?;
+    let mut response = Json(result).into_response();
+    append_attempt_budget_consumption_headers(&mut response, &attempt_budget)?;
+    Ok(maybe_hold_axum_response_permit(response, request_permit))
 }
 
 async fn execute_stream(
@@ -251,12 +261,19 @@ async fn execute_stream(
     request: Request,
 ) -> Result<Response, ExecutionRuntimeAppError> {
     let request_permit = acquire_request_permit(&state).await?;
-    let plan = parse_request_json::<ExecutionPlan>(request).await?;
-    let execution = state
-        .execution_runtime
-        .execute_stream(&plan)
-        .await
-        .map_err(|err| ExecutionRuntimeAppError(ExecutionRuntimeServerError::Transport(err)))?;
+    let execution_request = parse_execution_request(request).await?;
+    let plan = execution_request.plan;
+    let attempt_budget =
+        aether_ai_serving::AttemptBudget::from_delegation_grant(&execution_request.attempt_budget)
+            .map_err(|error| {
+                ExecutionRuntimeAppError(ExecutionRuntimeServerError::BudgetGrant(error))
+            })?;
+    let execution = with_request_attempt_budget(
+        attempt_budget.clone(),
+        state.execution_runtime.execute_stream(&plan),
+    )
+    .await
+    .map_err(|err| ExecutionRuntimeAppError(ExecutionRuntimeServerError::Transport(err)))?;
 
     let mut response = Response::new(Body::from_stream(build_direct_execution_frame_stream(
         execution,
@@ -266,7 +283,74 @@ async fn execute_stream(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/x-ndjson"),
     );
+    append_attempt_budget_consumption_headers(&mut response, &attempt_budget)?;
     Ok(maybe_hold_axum_response_permit(response, request_permit))
+}
+
+#[cfg(not(test))]
+async fn parse_execution_request(
+    request: Request,
+) -> Result<ExecutionRuntimeRequest, ExecutionRuntimeAppError> {
+    parse_request_json(request).await
+}
+
+#[cfg(test)]
+async fn parse_execution_request(
+    request: Request,
+) -> Result<ExecutionRuntimeRequest, ExecutionRuntimeAppError> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum TestRequest {
+        Delegated(ExecutionRuntimeRequest),
+        Legacy(ExecutionPlan),
+    }
+    match parse_request_json(request).await? {
+        TestRequest::Delegated(request) => Ok(request),
+        TestRequest::Legacy(plan) => {
+            let budget = new_bounded_attempt_budget();
+            let target = aether_ai_serving::AttemptTarget::from(&plan);
+            let delegation = budget.reserve_delegation_grant(&target).map_err(|error| {
+                ExecutionRuntimeAppError(ExecutionRuntimeServerError::BudgetGrant(error))
+            })?;
+            Ok(ExecutionRuntimeRequest {
+                plan,
+                attempt_budget: delegation.grant().clone(),
+            })
+        }
+    }
+}
+
+fn append_attempt_budget_consumption_headers(
+    response: &mut Response,
+    budget: &aether_ai_serving::AttemptBudget,
+) -> Result<(), ExecutionRuntimeAppError> {
+    let usage = budget.usage().map_err(|error| {
+        ExecutionRuntimeAppError(ExecutionRuntimeServerError::BudgetGrant(error))
+    })?;
+    for (name, value) in [
+        (
+            "x-aether-attempt-total-dispatches",
+            usage.total_dispatches(),
+        ),
+        (
+            "x-aether-attempt-credential-entries",
+            usage.credential_entries(),
+        ),
+        (
+            "x-aether-attempt-provider-switches",
+            usage.provider_switches(),
+        ),
+    ] {
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static(name),
+            axum::http::HeaderValue::from_str(&value.to_string()).map_err(|error| {
+                ExecutionRuntimeAppError(ExecutionRuntimeServerError::RequestRead(
+                    error.to_string(),
+                ))
+            })?,
+        );
+    }
+    Ok(())
 }
 
 async fn acquire_request_permit(
@@ -343,6 +427,8 @@ enum ExecutionRuntimeServerError {
     InvalidRequestJson(serde_json::Error),
     #[error("execution runtime overloaded: gate {gate} saturated at {limit}")]
     Overloaded { gate: &'static str, limit: usize },
+    #[error("execution runtime attempt budget grant is invalid: {0}")]
+    BudgetGrant(AttemptBudgetError),
     #[error(transparent)]
     Transport(#[from] ExecutionRuntimeTransportError),
 }
@@ -358,6 +444,16 @@ impl IntoResponse for ExecutionRuntimeAppError {
             ExecutionRuntimeServerError::Overloaded { .. } => {
                 return build_overloaded_response(&self.0.to_string());
             }
+            ExecutionRuntimeServerError::BudgetGrant(AttemptBudgetError::BudgetExhausted(_)) => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+            ExecutionRuntimeServerError::BudgetGrant(AttemptBudgetError::DeadlineExceeded {
+                ..
+            }) => StatusCode::GATEWAY_TIMEOUT,
+            ExecutionRuntimeServerError::BudgetGrant(
+                AttemptBudgetError::ScopeMissing | AttemptBudgetError::StateUnavailable,
+            ) => StatusCode::SERVICE_UNAVAILABLE,
+            ExecutionRuntimeServerError::BudgetGrant(_) => StatusCode::BAD_GATEWAY,
             ExecutionRuntimeServerError::Transport(
                 ExecutionRuntimeTransportError::RequestBodyRequired
                 | ExecutionRuntimeTransportError::BodyDecode(_)
@@ -373,6 +469,28 @@ impl IntoResponse for ExecutionRuntimeAppError {
             ExecutionRuntimeServerError::Transport(
                 ExecutionRuntimeTransportError::UpstreamHttpStatus { status_code, .. },
             ) => StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
+            ExecutionRuntimeServerError::Transport(
+                ExecutionRuntimeTransportError::AttemptBudget(AttemptBudgetError::BudgetExhausted(
+                    _,
+                )),
+            ) => StatusCode::TOO_MANY_REQUESTS,
+            ExecutionRuntimeServerError::Transport(
+                ExecutionRuntimeTransportError::AttemptBudget(
+                    AttemptBudgetError::DeadlineExceeded { .. },
+                ),
+            ) => StatusCode::GATEWAY_TIMEOUT,
+            ExecutionRuntimeServerError::Transport(
+                ExecutionRuntimeTransportError::AttemptBudget(
+                    AttemptBudgetError::ScopeMissing | AttemptBudgetError::StateUnavailable,
+                ),
+            ) => StatusCode::SERVICE_UNAVAILABLE,
+            ExecutionRuntimeServerError::Transport(
+                ExecutionRuntimeTransportError::AttemptBudget(
+                    AttemptBudgetError::InvalidTransition { .. }
+                    | AttemptBudgetError::DispatchTargetMismatch
+                    | AttemptBudgetError::InvalidGrant,
+                ),
+            ) => StatusCode::BAD_GATEWAY,
             ExecutionRuntimeServerError::Transport(
                 ExecutionRuntimeTransportError::ClientBuild(_)
                 | ExecutionRuntimeTransportError::BrowserClientBuild(_)
@@ -463,6 +581,32 @@ mod tests {
                 ..ExecutionTimeouts::default()
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn execution_runtime_rejects_expired_remote_attempt_budget_grant() {
+        let runtime = build_execution_runtime_router_with_request_concurrency_limit(None);
+        let (runtime_url, runtime_handle) = start_server(runtime).await;
+        let request = aether_contracts::ExecutionRuntimeRequest {
+            plan: stream_plan("https://example.com/never-sent".to_string()),
+            attempt_budget: aether_contracts::ExecutionAttemptBudgetGrant {
+                grant_id: "expired-grant".to_string(),
+                max_total_dispatches: 1,
+                max_credential_entries: 1,
+                max_provider_switches: 0,
+                deadline_unix_ms: 0,
+            },
+        };
+
+        let response = reqwest::Client::new()
+            .post(format!("{runtime_url}/v1/execute/sync"))
+            .json(&request)
+            .send()
+            .await
+            .expect("execution request should receive a terminal response");
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        runtime_handle.abort();
     }
 
     #[tokio::test]

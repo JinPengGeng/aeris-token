@@ -14,6 +14,29 @@ pub const MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_SECS: u64 = 300;
 pub const MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_MS: u64 =
     MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_SECS * 1_000;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionAttemptBudgetGrant {
+    pub grant_id: String,
+    pub max_total_dispatches: u64,
+    pub max_credential_entries: u64,
+    pub max_provider_switches: u64,
+    pub deadline_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExecutionRuntimeRequest {
+    #[serde(flatten)]
+    pub plan: ExecutionPlan,
+    pub attempt_budget: ExecutionAttemptBudgetGrant,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionAttemptBudgetConsumption {
+    pub total_dispatches: u64,
+    pub credential_entries: u64,
+    pub provider_switches: u64,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionResponseBodyMode {
@@ -267,5 +290,51 @@ mod tests {
                 .and_then(|timeouts| timeouts.total_ms),
             Some(300_000)
         );
+    }
+
+    #[test]
+    fn execution_runtime_request_requires_explicit_budget_grant() {
+        let plan = ExecutionPlan {
+            request_id: "req-budget".into(),
+            candidate_id: None,
+            provider_name: Some("openai".into()),
+            provider_id: "provider-1".into(),
+            endpoint_id: "endpoint-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/v1/responses".into(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(serde_json::json!({})),
+            stream: false,
+            client_api_format: "openai:responses".into(),
+            provider_api_format: "openai:responses".into(),
+            model_name: Some("gpt-test".into()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let request = ExecutionRuntimeRequest {
+            plan,
+            attempt_budget: ExecutionAttemptBudgetGrant {
+                grant_id: "grant-1".into(),
+                max_total_dispatches: 3,
+                max_credential_entries: 2,
+                max_provider_switches: 1,
+                deadline_unix_ms: 42,
+            },
+        };
+
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["attempt_budget"]["grant_id"], "grant-1");
+        assert_eq!(value["attempt_budget"]["max_total_dispatches"], 3);
+        assert_eq!(value["request_id"], "req-budget");
+        let mut missing_grant = value.clone();
+        missing_grant
+            .as_object_mut()
+            .unwrap()
+            .remove("attempt_budget");
+        assert!(serde_json::from_value::<ExecutionRuntimeRequest>(missing_grant).is_err());
     }
 }

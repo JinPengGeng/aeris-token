@@ -7,6 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use aether_ai_serving::{AttemptBudget, AttemptTarget};
 use aether_contracts::{
     ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionPlan, ExecutionResult,
     ExecutionStreamTerminalSummary, ExecutionTelemetry, ResponseBody, StandardizedUsage,
@@ -36,7 +37,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::ndjson::encode_stream_frame_ndjson;
-use super::transport::{with_non_stream_total_timeout, ExecutionRuntimeTransportError};
+use super::transport::{
+    authorize_attempt_dispatch, consume_dispatch_permit, with_non_stream_total_timeout,
+    with_request_attempt_budget, ExecutionRuntimeTransportError,
+};
 use crate::AppState;
 
 const LS_SERVICE: &str = "/exa.language_server_pb.LanguageServerService";
@@ -171,6 +175,7 @@ struct LsHandle {
 #[derive(Clone)]
 struct PreparedCascade {
     plan: ExecutionPlan,
+    attempt_budget: AttemptBudget,
     input: WindsurfRequestInput,
     key_upstream_metadata: Option<Value>,
     request_id: String,
@@ -297,7 +302,7 @@ async fn prepare_windsurf_cascade(
     let mut ls = ensure_windsurf_language_server(plan).await?;
     ls = warmup_windsurf_cascade_with_transport_recovery(plan, ls, &input.api_key).await?;
 
-    let mut cascade_id = match start_windsurf_cascade(&ls, &input.api_key).await {
+    let mut cascade_id = match start_windsurf_cascade(plan, &ls, &input.api_key).await {
         Ok(cascade_id) => cascade_id,
         Err(err) if is_windsurf_panel_missing_error(&err) => {
             warn!(
@@ -308,7 +313,7 @@ async fn prepare_windsurf_cascade(
                 "gateway rewarming Windsurf language server after missing panel state on StartCascade"
             );
             ls = force_rewarm_windsurf_cascade(plan, &ls, &input.api_key).await?;
-            start_windsurf_cascade(&ls, &input.api_key).await?
+            start_windsurf_cascade(plan, &ls, &input.api_key).await?
         }
         Err(err) => return Err(err),
     };
@@ -362,6 +367,7 @@ async fn prepare_windsurf_cascade(
         )
         .map_err(|err| ExecutionRuntimeTransportError::UpstreamRequest(err.to_string()))?;
         match windsurf_grpc_unary(
+            Some(plan),
             ls.port,
             &ls.csrf_token,
             "SendUserCascadeMessage",
@@ -391,7 +397,7 @@ async fn prepare_windsurf_cascade(
                 if send_retry > 1 {
                     tokio::time::sleep(Duration::from_millis(250 * send_retry as u64)).await;
                 }
-                cascade_id = start_windsurf_cascade(&ls, &input.api_key).await?;
+                cascade_id = start_windsurf_cascade(plan, &ls, &input.api_key).await?;
             }
             Err(err) => return Err(err),
         }
@@ -399,6 +405,7 @@ async fn prepare_windsurf_cascade(
 
     Ok(PreparedCascade {
         plan: plan.clone(),
+        attempt_budget: super::transport::request_attempt_budget()?,
         input,
         key_upstream_metadata,
         request_id: plan.request_id.clone(),
@@ -497,10 +504,12 @@ fn normalize_windsurf_dynamic_model_name(value: &str) -> String {
 }
 
 async fn start_windsurf_cascade(
+    plan: &ExecutionPlan,
     ls: &LsHandle,
     api_key: &str,
 ) -> Result<String, ExecutionRuntimeTransportError> {
     let start_response = windsurf_grpc_unary(
+        Some(plan),
         ls.port,
         &ls.csrf_token,
         "StartCascade",
@@ -533,7 +542,8 @@ fn build_windsurf_stream_frame_stream(
         });
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Result<Bytes, IoError>>();
-        tokio::spawn(async move {
+        let attempt_budget = prepared.attempt_budget.clone();
+        tokio::spawn(with_request_attempt_budget(attempt_budget, async move {
             let mut deltas = Vec::new();
             let mut streamed_native_call_ids = HashSet::new();
             let mut next_tool_index = 0usize;
@@ -643,7 +653,7 @@ fn build_windsurf_stream_frame_stream(
                     let _ = tx.send(encode_stream_frame_ndjson(&StreamFrame::eof()));
                 }
             }
-        });
+        }));
 
         while let Some(frame) = rx.recv().await {
             yield frame;
@@ -839,6 +849,7 @@ where
         }
 
         let steps_response = windsurf_grpc_unary(
+            Some(&prepared.plan),
             prepared.ls.port,
             &prepared.ls.csrf_token,
             "GetCascadeTrajectorySteps",
@@ -901,6 +912,7 @@ where
         }
 
         let status_response = windsurf_grpc_unary(
+            Some(&prepared.plan),
             prepared.ls.port,
             &prepared.ls.csrf_token,
             "GetCascadeTrajectory",
@@ -918,6 +930,7 @@ where
             let saw_output = saw_text || !native_tool_calls.is_empty();
             if (saw_output && idle_count >= 2 && growth_settled) || idle_count >= 4 {
                 let final_steps_response = windsurf_grpc_unary(
+                    Some(&prepared.plan),
                     prepared.ls.port,
                     &prepared.ls.csrf_token,
                     "GetCascadeTrajectorySteps",
@@ -986,6 +999,7 @@ where
 
 async fn fetch_windsurf_generator_usage(prepared: &PreparedCascade) -> Option<CascadeUsage> {
     let response = match windsurf_grpc_unary(
+        Some(&prepared.plan),
         prepared.ls.port,
         &prepared.ls.csrf_token,
         "GetCascadeTrajectoryGeneratorMetadata",
@@ -1302,11 +1316,13 @@ async fn ensure_windsurf_language_server(
 }
 
 async fn warmup_windsurf_cascade(
+    plan: &ExecutionPlan,
     ls: &LsHandle,
     api_key: &str,
 ) -> Result<(), ExecutionRuntimeTransportError> {
     let workspace_path = ls.workspace_path.to_string_lossy();
     windsurf_warmup_unary(
+        plan,
         ls.port,
         &ls.csrf_token,
         "InitializeCascadePanelState",
@@ -1314,8 +1330,9 @@ async fn warmup_windsurf_cascade(
         GRPC_SHORT_TIMEOUT,
     )
     .await?;
-    sync_windsurf_user_status_with_panel(ls, api_key).await;
+    sync_windsurf_user_status_with_panel(plan, ls, api_key).await;
     windsurf_warmup_unary(
+        plan,
         ls.port,
         &ls.csrf_token,
         "AddTrackedWorkspace",
@@ -1324,6 +1341,7 @@ async fn warmup_windsurf_cascade(
     )
     .await?;
     windsurf_warmup_unary(
+        plan,
         ls.port,
         &ls.csrf_token,
         "UpdateWorkspaceTrust",
@@ -1332,6 +1350,7 @@ async fn warmup_windsurf_cascade(
     )
     .await?;
     windsurf_warmup_unary(
+        plan,
         ls.port,
         &ls.csrf_token,
         "Heartbeat",
@@ -1348,7 +1367,7 @@ async fn warmup_windsurf_cascade_with_transport_recovery(
     api_key: &str,
 ) -> Result<LsHandle, ExecutionRuntimeTransportError> {
     for attempt in 0..=WARMUP_TRANSPORT_MAX_RESTARTS {
-        match warmup_windsurf_cascade(&ls, api_key).await {
+        match warmup_windsurf_cascade(plan, &ls, api_key).await {
             Ok(()) => return Ok(ls),
             Err(err)
                 if is_windsurf_cascade_transport_error(&err)
@@ -1382,7 +1401,7 @@ async fn force_rewarm_windsurf_cascade(
     api_key: &str,
 ) -> Result<LsHandle, ExecutionRuntimeTransportError> {
     let refreshed = reset_windsurf_language_server_session(plan, ls)?;
-    match warmup_windsurf_cascade(&refreshed, api_key).await {
+    match warmup_windsurf_cascade(plan, &refreshed, api_key).await {
         Ok(()) => Ok(refreshed),
         Err(err) if is_windsurf_cascade_transport_error(&err) => {
             warn!(
@@ -1423,13 +1442,14 @@ fn reset_windsurf_language_server_session(
 }
 
 async fn windsurf_warmup_unary(
+    plan: &ExecutionPlan,
     port: u16,
     csrf_token: &str,
     stage: &'static str,
     payload: Vec<u8>,
     timeout: Duration,
 ) -> Result<(), ExecutionRuntimeTransportError> {
-    match windsurf_grpc_unary(port, csrf_token, stage, payload, timeout).await {
+    match windsurf_grpc_unary(Some(plan), port, csrf_token, stage, payload, timeout).await {
         Ok(_) => Ok(()),
         Err(err) if is_windsurf_cascade_transport_error(&err) => Err(err),
         Err(err) => {
@@ -1504,8 +1524,9 @@ fn is_windsurf_send_retryable_error(err: &ExecutionRuntimeTransportError) -> boo
         || is_windsurf_cascade_transport_error(err)
 }
 
-async fn sync_windsurf_user_status_with_panel(ls: &LsHandle, api_key: &str) {
+async fn sync_windsurf_user_status_with_panel(plan: &ExecutionPlan, ls: &LsHandle, api_key: &str) {
     let status_response = match windsurf_grpc_unary(
+        Some(plan),
         ls.port,
         &ls.csrf_token,
         "GetUserStatus",
@@ -1536,6 +1557,7 @@ async fn sync_windsurf_user_status_with_panel(ls: &LsHandle, api_key: &str) {
         return;
     };
     if let Err(err) = windsurf_grpc_unary(
+        Some(plan),
         ls.port,
         &ls.csrf_token,
         "UpdatePanelStateWithUserStatus",
@@ -1559,6 +1581,7 @@ async fn sync_windsurf_user_status_with_panel(ls: &LsHandle, api_key: &str) {
 }
 
 async fn windsurf_grpc_unary(
+    dispatch_plan: Option<&ExecutionPlan>,
     port: u16,
     csrf_token: &str,
     method: &str,
@@ -1571,21 +1594,23 @@ async fn windsurf_grpc_unary(
         .timeout(timeout)
         .build()
         .map_err(ExecutionRuntimeTransportError::ClientBuild)?;
-    let response = client
+    let request = client
         .post(url)
         .header("content-type", "application/proto")
         .header("connect-protocol-version", "1")
         .header("user-agent", "connect-es/1.5.0")
         .header("x-codeium-csrf-token", csrf_token)
-        .body(payload)
-        .send()
-        .await
-        .map_err(|err| {
-            ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                "Windsurf Connect {method} request failed: {}",
-                super::transport::format_upstream_request_error(&err)
-            ))
-        })?;
+        .body(payload);
+    let plan = dispatch_plan.ok_or(aether_ai_serving::AttemptBudgetError::ScopeMissing)?;
+    let target = AttemptTarget::from(plan);
+    let permit = authorize_attempt_dispatch(&target)?;
+    consume_dispatch_permit(permit, &target)?;
+    let response = request.send().await.map_err(|err| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "Windsurf Connect {method} request failed: {}",
+            super::transport::format_upstream_request_error(&err)
+        ))
+    })?;
     let status = response.status();
     let body = response.bytes().await.map_err(|err| {
         ExecutionRuntimeTransportError::UpstreamRequest(format!(

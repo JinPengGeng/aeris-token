@@ -45,10 +45,14 @@ use crate::execution_runtime::sync::{
     build_openai_image_sync_json_whitespace_heartbeat_stream,
     build_sync_json_whitespace_heartbeat_stream,
 };
+use crate::execution_runtime::transport::{
+    spawn_with_request_attempt_budget, with_request_attempt_budget,
+};
 use crate::executor::candidate_loop::{
     execute_stream_attempt_source_with_transfer_tracker, execute_sync_attempt_source,
     execute_sync_attempt_source_with_transfer_tracker,
-    execute_sync_plan_and_reports_with_transfer_tracker, ProviderTransferTracker,
+    execute_sync_plan_and_reports_with_transfer_tracker, new_request_attempt_budget,
+    ProviderTransferTracker,
 };
 use crate::executor::{
     record_failed_usage_for_exhausted_request, LocalExecutionExhaustion,
@@ -847,7 +851,7 @@ where
     let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(1);
     let request_diagnostics = current_request_diagnostics();
 
-    tokio::spawn(async move {
+    spawn_with_request_attempt_budget(async move {
         scope_request_diagnostics_with(request_diagnostics, async move {
             let bytes = standard_text_sync_heartbeat_final_bytes(
                 client_api_format.as_str(),
@@ -858,7 +862,8 @@ where
             let _ = tx.send(Ok(Bytes::from(bytes))).await;
         })
         .await;
-    });
+    })
+    .map_err(|error| GatewayError::Internal(error.to_string()))?;
 
     let headers = BTreeMap::from([(
         CONTENT_TYPE.as_str().to_string(),
@@ -1122,7 +1127,7 @@ fn build_openai_image_sync_heartbeat_shell_response(
     let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(1);
     let request_diagnostics = current_request_diagnostics();
 
-    tokio::spawn(async move {
+    spawn_with_request_attempt_budget(async move {
         scope_request_diagnostics_with(request_diagnostics, async move {
             let bytes = openai_image_sync_heartbeat_final_bytes(
                 execute_openai_image_sync_heartbeat_attempts(
@@ -1141,7 +1146,8 @@ fn build_openai_image_sync_heartbeat_shell_response(
             let _ = tx.send(Ok(Bytes::from(bytes))).await;
         })
         .await;
-    });
+    })
+    .map_err(|error| GatewayError::Internal(error.to_string()))?;
 
     let headers = BTreeMap::from([(
         CONTENT_TYPE.as_str().to_string(),
@@ -1493,8 +1499,11 @@ pub(crate) fn maybe_execute_sync_request<'a>(
             if parts.method != http::Method::POST {
                 return Ok(LocalExecutionRequestOutcome::NoPath);
             }
-            return maybe_execute_sync_local_path(state, parts, body_bytes, trace_id, decision)
-                .await;
+            return with_request_attempt_budget(
+                new_request_attempt_budget(),
+                maybe_execute_sync_local_path(state, parts, body_bytes, trace_id, decision),
+            )
+            .await;
         }
         #[cfg(test)]
         {
@@ -1506,7 +1515,11 @@ pub(crate) fn maybe_execute_sync_request<'a>(
             {
                 return Ok(LocalExecutionRequestOutcome::NoPath);
             }
-            maybe_execute_sync_local_path(state, parts, body_bytes, trace_id, decision).await
+            with_request_attempt_budget(
+                new_request_attempt_budget(),
+                maybe_execute_sync_local_path(state, parts, body_bytes, trace_id, decision),
+            )
+            .await
         }
     })
 }
@@ -1527,8 +1540,11 @@ pub(crate) fn maybe_execute_stream_request<'a>(
             if parts.method != http::Method::POST {
                 return Ok(LocalExecutionRequestOutcome::NoPath);
             }
-            return maybe_execute_stream_local_path(state, parts, body_bytes, trace_id, decision)
-                .await;
+            return with_request_attempt_budget(
+                new_request_attempt_budget(),
+                maybe_execute_stream_local_path(state, parts, body_bytes, trace_id, decision),
+            )
+            .await;
         }
         #[cfg(test)]
         {
@@ -1540,7 +1556,11 @@ pub(crate) fn maybe_execute_stream_request<'a>(
             {
                 return Ok(LocalExecutionRequestOutcome::NoPath);
             }
-            maybe_execute_stream_local_path(state, parts, body_bytes, trace_id, decision).await
+            with_request_attempt_budget(
+                new_request_attempt_budget(),
+                maybe_execute_stream_local_path(state, parts, body_bytes, trace_id, decision),
+            )
+            .await
         }
     })
 }

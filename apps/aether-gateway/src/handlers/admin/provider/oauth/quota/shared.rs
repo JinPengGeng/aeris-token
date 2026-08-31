@@ -1439,6 +1439,19 @@ pub(super) async fn execute_provider_quota_plan(
     plan: ExecutionPlan,
     quota_kind: &str,
 ) -> Result<ProviderQuotaExecutionOutcome, GatewayError> {
+    crate::execution_runtime::transport::with_request_attempt_budget(
+        crate::execution_runtime::transport::new_bounded_attempt_budget(),
+        execute_provider_quota_plan_with_budget(state, transport, plan, quota_kind),
+    )
+    .await
+}
+
+async fn execute_provider_quota_plan_with_budget(
+    state: &AdminAppState<'_>,
+    transport: &AdminGatewayProviderTransportSnapshot,
+    plan: ExecutionPlan,
+    quota_kind: &str,
+) -> Result<ProviderQuotaExecutionOutcome, GatewayError> {
     match state.execute_execution_runtime_sync_plan(None, &plan).await {
         Ok(result) => {
             if !crate::provider_transport::is_codex_agent_identity_transport(transport)

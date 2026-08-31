@@ -1046,23 +1046,36 @@ fn spawn_chatgpt_web_image_quota_refresh_after_request(
     let plan = plan.clone();
     let base_url = base_url.to_string();
     let token = token.to_string();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        if let Err(err) =
-            refresh_chatgpt_web_image_quota_after_success(&state, &plan, &base_url, &token).await
-        {
-            warn!(
-                event_name = "chatgpt_web_image_quota_refresh_after_success_failed",
-                log_type = "ops",
-                request_id = %plan.request_id,
-                candidate_id = ?plan.candidate_id,
-                provider_id = %plan.provider_id,
-                key_id = %plan.key_id,
-                error = %err,
-                "gateway failed to refresh ChatGPT-Web image quota after a generation request"
-            );
-        }
-    });
+    let Ok(attempt_budget) = super::transport::request_attempt_budget() else {
+        warn!(
+            event_name = "chatgpt_web_image_quota_refresh_budget_missing",
+            log_type = "ops",
+            request_id = %plan.request_id,
+            "gateway refused to spawn ChatGPT-Web quota refresh without request budget"
+        );
+        return;
+    };
+    tokio::spawn(super::transport::with_request_attempt_budget(
+        attempt_budget,
+        async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if let Err(err) =
+                refresh_chatgpt_web_image_quota_after_success(&state, &plan, &base_url, &token)
+                    .await
+            {
+                warn!(
+                    event_name = "chatgpt_web_image_quota_refresh_after_success_failed",
+                    log_type = "ops",
+                    request_id = %plan.request_id,
+                    candidate_id = ?plan.candidate_id,
+                    provider_id = %plan.provider_id,
+                    key_id = %plan.key_id,
+                    error = %err,
+                    "gateway failed to refresh ChatGPT-Web image quota after a generation request"
+                );
+            }
+        },
+    ));
 }
 
 async fn apply_chatgpt_web_image_quota_request_delta(

@@ -89,6 +89,27 @@ pub(crate) enum FailureRetryAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureRetryDimension {
+    None,
+    SameTarget,
+    Candidate,
+    Credential,
+    Endpoint,
+}
+
+impl FailureRetryAction {
+    const fn dimension(self) -> FailureRetryDimension {
+        match self {
+            Self::Stop => FailureRetryDimension::None,
+            Self::SameCredential => FailureRetryDimension::SameTarget,
+            Self::NextCandidate => FailureRetryDimension::Candidate,
+            Self::NextCredential => FailureRetryDimension::Credential,
+            Self::NextEndpoint => FailureRetryDimension::Endpoint,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FailureScope {
     None,
     Credential,
@@ -118,6 +139,7 @@ pub(crate) enum FailureTokenAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FailureDisposition {
     pub(crate) retry_action: FailureRetryAction,
+    pub(crate) retry_dimension: FailureRetryDimension,
     pub(crate) failure_scope: FailureScope,
     pub(crate) token_action: FailureTokenAction,
     pub(crate) preserve_upstream_error: bool,
@@ -132,6 +154,7 @@ impl FailureDisposition {
     ) -> Self {
         Self {
             retry_action,
+            retry_dimension: retry_action.dimension(),
             failure_scope,
             token_action,
             preserve_upstream_error,
@@ -512,8 +535,9 @@ mod tests {
     use super::{
         classify_anthropic_failure_disposition, classify_local_failover,
         classify_local_transport_error, failure_disposition_from_local_classification,
-        FailureDisposition, FailureRetryAction, FailureScope, FailureTokenAction,
-        LocalFailoverClassification, LocalFailoverInput, LocalTransportFailoverClassification,
+        FailureDisposition, FailureRetryAction, FailureRetryDimension, FailureScope,
+        FailureTokenAction, LocalFailoverClassification, LocalFailoverInput,
+        LocalTransportFailoverClassification,
     };
     use crate::orchestration::{LocalFailoverPolicy, LocalFailoverRegexRule};
 
@@ -822,6 +846,7 @@ mod tests {
             ),
             FailureDisposition {
                 retry_action: FailureRetryAction::NextCandidate,
+                retry_dimension: FailureRetryDimension::Candidate,
                 failure_scope: FailureScope::None,
                 token_action: FailureTokenAction::None,
                 preserve_upstream_error: false,
@@ -894,6 +919,7 @@ mod tests {
         );
 
         assert_eq!(disposition.retry_action, FailureRetryAction::NextEndpoint);
+        assert_eq!(disposition.retry_dimension, FailureRetryDimension::Endpoint);
         assert_eq!(disposition.failure_scope, FailureScope::Provider);
         assert!(!disposition.failure_scope.affects_credential());
         assert!(!disposition.failure_scope.allows_key_wide_effects());
@@ -936,6 +962,7 @@ mod tests {
             401,
         );
         assert_eq!(auth.retry_action, FailureRetryAction::Stop);
+        assert_eq!(auth.retry_dimension, FailureRetryDimension::None);
         assert_eq!(auth.failure_scope, FailureScope::Credential);
         assert_eq!(auth.token_action, FailureTokenAction::ForceRefresh);
 

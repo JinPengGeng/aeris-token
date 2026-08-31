@@ -4004,10 +4004,13 @@ pub(crate) async fn build_admin_provider_query_test_model_local_response(
     state: &AdminAppState<'_>,
     payload: &Value,
 ) -> Result<Response<Body>, GatewayError> {
-    let response = build_admin_provider_query_kiro_failover_response(
-        state,
-        payload,
-        "/api/admin/provider-query/test-model",
+    let response = crate::execution_runtime::transport::with_request_attempt_budget(
+        crate::execution_runtime::transport::new_bounded_attempt_budget(),
+        build_admin_provider_query_kiro_failover_response(
+            state,
+            payload,
+            "/api/admin/provider-query/test-model",
+        ),
     )
     .await?;
     if !response.status().is_success() {
@@ -4043,10 +4046,13 @@ pub(crate) async fn build_admin_provider_query_test_model_failover_local_respons
     state: &AdminAppState<'_>,
     payload: &Value,
 ) -> Result<Response<Body>, GatewayError> {
-    build_admin_provider_query_kiro_failover_response(
-        state,
-        payload,
-        "/api/admin/provider-query/test-model-failover",
+    crate::execution_runtime::transport::with_request_attempt_budget(
+        crate::execution_runtime::transport::new_bounded_attempt_budget(),
+        build_admin_provider_query_kiro_failover_response(
+            state,
+            payload,
+            "/api/admin/provider-query/test-model-failover",
+        ),
     )
     .await
 }

@@ -182,10 +182,13 @@ async fn fetch_video_task_refresh_attempt(
     state: &AppState,
     refresh_plan: &LocalVideoTaskReadRefreshPlan,
 ) -> Result<VideoTaskRefreshAttempt, GatewayError> {
-    let result = match crate::execution_runtime::execute_execution_runtime_sync_plan(
-        state,
-        None,
-        &refresh_plan.plan,
+    let result = match crate::execution_runtime::transport::with_request_attempt_budget(
+        crate::execution_runtime::transport::new_bounded_attempt_budget(),
+        crate::execution_runtime::execute_execution_runtime_sync_plan(
+            state,
+            None,
+            &refresh_plan.plan,
+        ),
     )
     .await
     {

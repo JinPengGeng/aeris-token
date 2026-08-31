@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use aether_ai_serving::AttemptTarget;
 use aether_contracts::{
     ExecutionPlan, ExecutionResult, ExecutionStreamTerminalSummary, ExecutionTelemetry,
     RequestBody, ResponseBody, StandardizedUsage, StreamFrame, StreamFramePayload, StreamFrameType,
@@ -30,11 +31,12 @@ use crate::ai_serving::openai_responses_synthetic_reasoning_item_id;
 use crate::clock::current_unix_secs;
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
 use crate::execution_runtime::transport::{
-    build_browser_wreq_client, build_request_body, build_request_headers,
-    decode_response_body_bytes, format_hyper_error_chain, format_upstream_request_error,
-    format_wreq_upstream_request_error, resolve_stream_first_byte_timeout, send_request,
-    stream_first_byte_timeout_message, with_non_stream_total_timeout, DirectHttpResponse,
-    ExecutionRuntimeTransportError, ExecutionTransportControls,
+    authorize_attempt_dispatch, build_browser_wreq_client, build_request_body,
+    build_request_headers, consume_dispatch_permit, decode_response_body_bytes,
+    format_hyper_error_chain, format_upstream_request_error, format_wreq_upstream_request_error,
+    resolve_stream_first_byte_timeout, send_request, stream_first_byte_timeout_message,
+    with_non_stream_total_timeout, DirectHttpResponse, ExecutionRuntimeTransportError,
+    ExecutionTransportControls,
 };
 
 const GROK_INTERNAL_HEADER: &str = "x-aether-grok-runtime";
@@ -400,14 +402,14 @@ async fn grok_imagine_websocket_images(
         .websocket(GROK_IMAGINE_WS_URL)
         .headers(headers)
         .max_frame_size(64 << 20)
-        .max_message_size(64 << 20)
-        .send()
-        .await
-        .map_err(|err| {
-            ExecutionRuntimeTransportError::UpstreamRequest(format_wreq_upstream_request_error(
-                &err,
-            ))
-        })?;
+        .max_message_size(64 << 20);
+    let target = AttemptTarget::from(plan);
+    let permit = authorize_attempt_dispatch(&target)?;
+    consume_dispatch_permit(permit, &target)?;
+    let response_future = response.send();
+    let response = response_future.await.map_err(|err| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format_wreq_upstream_request_error(&err))
+    })?;
     let status = response.status();
     if !status.is_success() && status.as_u16() != 101 {
         return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
@@ -419,6 +421,8 @@ async fn grok_imagine_websocket_images(
         ExecutionRuntimeTransportError::UpstreamRequest(format_wreq_upstream_request_error(&err))
     })?;
     let reset = grok_imagine_reset_message();
+    let permit = authorize_attempt_dispatch(&target)?;
+    consume_dispatch_permit(permit, &target)?;
     websocket
         .send(WreqWsMessage::text(reset.to_string()))
         .await
@@ -428,6 +432,8 @@ async fn grok_imagine_websocket_images(
             ))
         })?;
     let request = grok_imagine_request_message(prompt, aspect_ratio, enable_pro);
+    let permit = authorize_attempt_dispatch(&target)?;
+    consume_dispatch_permit(permit, &target)?;
     websocket
         .send(WreqWsMessage::text(request.to_string()))
         .await
@@ -1113,7 +1119,7 @@ async fn attach_grok_uploaded_files(
 
     let mut attachment_ids = Vec::with_capacity(inputs.len());
     for (index, input) in inputs.into_iter().enumerate() {
-        let payload = resolve_grok_attachment_payload(&input, index).await?;
+        let payload = resolve_grok_attachment_payload(plan, &input, index).await?;
         let uploaded = upload_grok_attachment(plan, payload).await?;
         if !uploaded.file_id.trim().is_empty() {
             attachment_ids.push(Value::String(uploaded.file_id));
@@ -1145,7 +1151,7 @@ async fn attach_grok_image_edit_references(
 
     let mut image_references = Vec::with_capacity(inputs.len());
     for (index, input) in inputs.into_iter().enumerate() {
-        let payload = resolve_grok_attachment_payload(&input, index).await?;
+        let payload = resolve_grok_attachment_payload(plan, &input, index).await?;
         let uploaded = upload_grok_attachment(plan, payload).await?;
         let reference = resolve_grok_uploaded_asset_reference(plan, &uploaded)?;
         image_references.push(Value::String(reference));
@@ -1388,13 +1394,14 @@ fn trimmed_string(value: &str) -> String {
 }
 
 async fn resolve_grok_attachment_payload(
+    plan: &ExecutionPlan,
     input: &GrokAttachmentInput,
     index: usize,
 ) -> Result<GrokAttachmentPayload, ExecutionRuntimeTransportError> {
     if input.source.starts_with("data:") {
         return grok_attachment_payload_from_data_uri(input, index);
     }
-    grok_attachment_payload_from_url(input, index).await
+    grok_attachment_payload_from_url(plan, input, index).await
 }
 
 fn grok_attachment_payload_from_data_uri(
@@ -1443,6 +1450,7 @@ fn grok_attachment_payload_from_data_uri(
 }
 
 async fn grok_attachment_payload_from_url(
+    plan: &ExecutionPlan,
     input: &GrokAttachmentInput,
     index: usize,
 ) -> Result<GrokAttachmentPayload, ExecutionRuntimeTransportError> {
@@ -1456,7 +1464,7 @@ async fn grok_attachment_payload_from_url(
             "Grok attachment URL must use http or https".to_string(),
         ));
     }
-    let response = fetch_grok_attachment_url(url.clone(), 0).await?;
+    let response = fetch_grok_attachment_url(plan, url.clone(), 0).await?;
     let final_url = response.url().clone();
     let mime_type = input
         .mime_type
@@ -1484,12 +1492,13 @@ async fn grok_attachment_payload_from_url(
 }
 
 async fn fetch_grok_attachment_url(
+    plan: &ExecutionPlan,
     mut url: reqwest::Url,
     mut redirects: usize,
 ) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
     loop {
         validate_grok_attachment_public_url(&url).await?;
-        let response = reqwest::Client::builder()
+        let request = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .resolve_to_addrs(
@@ -1498,12 +1507,13 @@ async fn fetch_grok_attachment_url(
             )
             .build()
             .map_err(ExecutionRuntimeTransportError::ClientBuild)?
-            .get(url.clone())
-            .send()
-            .await
-            .map_err(|err| {
-                ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
-            })?;
+            .get(url.clone());
+        let target = AttemptTarget::from(plan);
+        let permit = authorize_attempt_dispatch(&target)?;
+        consume_dispatch_permit(permit, &target)?;
+        let response = request.send().await.map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
+        })?;
         if response.status().is_redirection() {
             redirects += 1;
             if redirects > GROK_MAX_ATTACHMENT_REDIRECTS {

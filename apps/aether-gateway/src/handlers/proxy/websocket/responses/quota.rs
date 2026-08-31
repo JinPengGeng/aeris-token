@@ -137,6 +137,7 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
     let turn_index = active.turn_index;
     let logical_turn_id = active.logical_turn_id.clone();
     let turn_attempt = active.turn_attempt;
+    let attempt_budget = active.attempt_budget.clone();
 
     let retry_exclusion_until_unix_secs = bound
         .pending_adapter_drain
@@ -275,6 +276,7 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
         normalization,
         &client_event,
         adapter,
+        &attempt_budget,
     )
     .await
     {

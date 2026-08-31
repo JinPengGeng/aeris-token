@@ -30,7 +30,8 @@ use super::turn::{
 };
 use super::turn_state::LogicalTurn;
 use super::upstream::{
-    bind_responses_upstream, decision_bound_upstream_change_fields, decision_reuses_bound_upstream,
+    authorize_responses_websocket_dispatch, bind_responses_upstream,
+    decision_bound_upstream_change_fields, decision_reuses_bound_upstream,
 };
 use crate::ai_serving::ResponsesWebSocketPinnedCandidate;
 use crate::clock::current_unix_secs;
@@ -598,6 +599,8 @@ async fn forward_pinned_continuation(
         }
     };
 
+    let logical_turn =
+        LogicalTurn::new(client_event, turn_index, logical_turn_id).with_turn_control(turn_control);
     let Some(upstream) = bound.upstream.as_mut() else {
         queue_turn_finalization(
             bound,
@@ -608,6 +611,18 @@ async fn forward_pinned_continuation(
         .await;
         return RelayDisposition::UpstreamError("responses_websocket_send_failed");
     };
+    if let Err(code) =
+        authorize_responses_websocket_dispatch(&logical_turn.attempt_budget, &decision)
+    {
+        queue_turn_finalization(
+            bound,
+            state,
+            turn,
+            ResponsesWebSocketTurnOutcome::upstream_send_failed(),
+        )
+        .await;
+        return RelayDisposition::UpstreamError(code);
+    }
     if send_upstream_message(upstream, WreqWsMessage::text(outbound))
         .await
         .is_err()
@@ -627,10 +642,7 @@ async fn forward_pinned_continuation(
     bound.adapter = adapter;
     bound.decision_template = decision;
     bound.body_normalization = normalization;
-    bound.turn_state.begin(
-        LogicalTurn::new(client_event, turn_index, logical_turn_id).with_turn_control(turn_control),
-        turn,
-    );
+    bound.turn_state.begin(logical_turn, turn);
     bound.next_turn_index = bound.next_turn_index.saturating_add(1);
     debug!(
         event_name = "responses_websocket_continuation_forwarding",
@@ -782,6 +794,8 @@ async fn forward_replanned_response_create(
         }
     };
 
+    let logical_turn = LogicalTurn::new(client_event.clone(), turn_index, logical_turn_id.clone())
+        .with_turn_control(turn_control);
     if reuses_bound_upstream {
         let outbound = match serde_json::to_string(&provider_event) {
             Ok(outbound) => outbound,
@@ -812,6 +826,18 @@ async fn forward_replanned_response_create(
             .await;
             return RelayDisposition::UpstreamError("responses_websocket_send_failed");
         };
+        if let Err(code) =
+            authorize_responses_websocket_dispatch(&logical_turn.attempt_budget, &decision)
+        {
+            queue_turn_finalization(
+                bound,
+                state,
+                turn,
+                ResponsesWebSocketTurnOutcome::upstream_send_failed(),
+            )
+            .await;
+            return RelayDisposition::UpstreamError(code);
+        }
         if send_upstream_message(upstream, WreqWsMessage::text(outbound))
             .await
             .is_err()
@@ -836,11 +862,7 @@ async fn forward_replanned_response_create(
         // The re-plan keeps this upstream but resolved a new model, so later
         // continuations must normalize against the new plan, not the old one.
         bound.body_normalization = normalization;
-        bound.turn_state.begin(
-            LogicalTurn::new(client_event.clone(), turn_index, logical_turn_id.clone())
-                .with_turn_control(turn_control),
-            turn,
-        );
+        bound.turn_state.begin(logical_turn, turn);
         bound.next_turn_index = bound.next_turn_index.saturating_add(1);
         debug!(
             event_name = "responses_websocket_followup_model_replanned",
@@ -860,37 +882,44 @@ async fn forward_replanned_response_create(
         return RelayDisposition::Continue;
     }
 
-    let mut replacement =
-        match bind_responses_upstream(&decision, normalization, &client_event, adapter).await {
-            Ok(connection) => connection,
-            Err(code) => {
-                queue_turn_finalization(
-                    bound,
-                    state,
-                    turn,
-                    ResponsesWebSocketTurnOutcome::upstream_connect_failed(code),
-                )
-                .await;
-                warn!(
-                    event_name = "responses_websocket_followup_model_rebind_failed",
-                    log_type = "ops",
-                    transport = WEBSOCKET_LOG_TRANSPORT,
-                    websocket = true,
-                    trace_id = %context.trace_id,
-                    requested_model = %requested_model,
-                    error_code = code,
-                    "gateway failed to rebind Responses WebSocket follow-up model"
-                );
-                send_gateway_error_with_status(
-                    client_socket,
-                    502,
-                    code,
-                    "Gateway could not establish the requested model",
-                )
-                .await;
-                return RelayDisposition::Continue;
-            }
-        };
+    let mut replacement = match bind_responses_upstream(
+        &decision,
+        normalization,
+        &client_event,
+        adapter,
+        &logical_turn.attempt_budget,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(code) => {
+            queue_turn_finalization(
+                bound,
+                state,
+                turn,
+                ResponsesWebSocketTurnOutcome::upstream_connect_failed(code),
+            )
+            .await;
+            warn!(
+                event_name = "responses_websocket_followup_model_rebind_failed",
+                log_type = "ops",
+                transport = WEBSOCKET_LOG_TRANSPORT,
+                websocket = true,
+                trace_id = %context.trace_id,
+                requested_model = %requested_model,
+                error_code = code,
+                "gateway failed to rebind Responses WebSocket follow-up model"
+            );
+            send_gateway_error_with_status(
+                client_socket,
+                502,
+                code,
+                "Gateway could not establish the requested model",
+            )
+            .await;
+            return RelayDisposition::Continue;
+        }
+    };
 
     turn.mark_upstream_request_sent();
     turn.set_provider_response_headers(replacement.upstream_response_headers.clone());
@@ -909,10 +938,7 @@ async fn forward_replanned_response_create(
     bound.decision_template = replacement.decision_template;
     bound.body_normalization = replacement.body_normalization;
     bound.binding_identity = replacement.binding_identity;
-    bound.turn_state.begin(
-        LogicalTurn::new(client_event, turn_index, logical_turn_id).with_turn_control(turn_control),
-        turn,
-    );
+    bound.turn_state.begin(logical_turn, turn);
     bound.next_turn_index = bound.next_turn_index.saturating_add(1);
     bound.upstream_response_headers = replacement.upstream_response_headers;
     bound.pending_adapter_drain = replacement.pending_adapter_drain;

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use aether_ai_serving::{
     run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopOutcome, AiAttemptLoopPort,
-    AiAttemptRetryScope, AiExecutionAttempt,
+    AiAttemptRetryScope, AiExecutionAttempt, AttemptBudget, AttemptBudgetTerminalCause,
 };
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_runtime::ConcurrencyPermit;
@@ -19,6 +19,7 @@ use tracing::{debug, warn, Instrument};
 use crate::ai_serving::LocalExecutionAttemptSource;
 use crate::clock::current_unix_ms;
 use crate::control::GatewayControlDecision;
+use crate::execution_runtime::transport::{new_bounded_attempt_budget, request_attempt_budget};
 use crate::execution_runtime::{
     acquire_upstream_execution_gate, build_transport_error_stop_response,
     execute_execution_runtime_stream_with_retry_scope,
@@ -50,6 +51,67 @@ const UPSTREAM_EXECUTION_GATE_HOLD_STREAM_RESPONSE_ENV: &str =
     "AETHER_GATEWAY_UPSTREAM_EXECUTION_GATE_HOLD_STREAM_RESPONSE";
 const UPSTREAM_EXECUTION_GATE_STREAM_HOLD_MODE_ENV: &str =
     "AETHER_GATEWAY_UPSTREAM_EXECUTION_GATE_STREAM_HOLD_MODE";
+pub(crate) fn new_request_attempt_budget() -> AttemptBudget {
+    new_bounded_attempt_budget()
+}
+
+fn attempt_budget_terminal_response(
+    trace_id: &str,
+    cause: AttemptBudgetTerminalCause,
+) -> Response<Body> {
+    let (status, code) = match cause {
+        AttemptBudgetTerminalCause::BudgetExhausted(_) => (
+            http::StatusCode::TOO_MANY_REQUESTS,
+            "attempt_budget_exhausted",
+        ),
+        AttemptBudgetTerminalCause::DeadlineExceeded => (
+            http::StatusCode::GATEWAY_TIMEOUT,
+            "attempt_deadline_exceeded",
+        ),
+        AttemptBudgetTerminalCause::InvalidTransition => {
+            (http::StatusCode::BAD_GATEWAY, "attempt_transition_invalid")
+        }
+        AttemptBudgetTerminalCause::DispatchTargetMismatch => (
+            http::StatusCode::BAD_GATEWAY,
+            "attempt_dispatch_target_mismatch",
+        ),
+        AttemptBudgetTerminalCause::InvalidGrant => (
+            http::StatusCode::BAD_GATEWAY,
+            "attempt_budget_grant_invalid",
+        ),
+        AttemptBudgetTerminalCause::StateUnavailable => (
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "attempt_budget_unavailable",
+        ),
+        AttemptBudgetTerminalCause::ScopeMissing => (
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "attempt_budget_scope_missing",
+        ),
+    };
+    warn!(
+        event_name = "request_attempt_budget_terminated",
+        log_type = "ops",
+        trace_id,
+        terminal_reason = code,
+        ?cause,
+        "request attempt budget terminated candidate execution"
+    );
+    let body = serde_json::json!({
+        "error": {
+            "type": code,
+            "code": code,
+            "message": "request attempt policy terminated upstream dispatch",
+            "trace_id": trace_id,
+        }
+    });
+    let mut response = Response::new(Body::from(body.to_string()));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        http::header::HeaderName::from_static("x-aether-attempt-terminal"),
+        http::HeaderValue::from_static(code),
+    );
+    response
+}
 
 fn attach_redaction_execution_candidate(response: &mut Response<Body>, candidate_id: Option<&str>) {
     if let Some(candidate_id) = candidate_id
@@ -122,6 +184,9 @@ where
             "candidate loop started"
         );
 
+        let attempt_budget = request_attempt_budget().map_err(|error| {
+            GatewayError::Internal(format!("request attempt budget unavailable: {error}"))
+        })?;
         let port = SyncAttemptLoopPort {
             state,
             parts,
@@ -129,8 +194,25 @@ where
             decision,
             plan_kind,
             transfer_tracker,
+            attempt_budget: attempt_budget.clone(),
         };
-        match run_ai_attempt_loop(&port, plan_and_reports).await? {
+        let remaining = attempt_budget.remaining().map_err(|error| {
+            GatewayError::Internal(format!("request attempt budget unavailable: {error}"))
+        })?;
+        let loop_result =
+            tokio::time::timeout(remaining, run_ai_attempt_loop(&port, plan_and_reports)).await;
+        let outcome = match loop_result {
+            Ok(result) => result?,
+            Err(_) => {
+                return Ok(LocalExecutionRequestOutcome::responded(
+                    attempt_budget_terminal_response(
+                        trace_id,
+                        AttemptBudgetTerminalCause::DeadlineExceeded,
+                    ),
+                ));
+            }
+        };
+        match outcome {
             AiAttemptLoopOutcome::Responded(response) => {
                 Ok(LocalExecutionRequestOutcome::responded(response))
             }
@@ -140,6 +222,9 @@ where
             AiAttemptLoopOutcome::Exhausted(exhaustion) => {
                 Ok(LocalExecutionRequestOutcome::Exhausted(exhaustion))
             }
+            AiAttemptLoopOutcome::Terminated(cause) => Ok(LocalExecutionRequestOutcome::responded(
+                attempt_budget_terminal_response(trace_id, cause),
+            )),
             AiAttemptLoopOutcome::NoPath => Ok(LocalExecutionRequestOutcome::NoPath),
         }
     }
@@ -196,6 +281,9 @@ where
             "dynamic candidate loop started"
         );
 
+        let attempt_budget = request_attempt_budget().map_err(|error| {
+            GatewayError::Internal(format!("request attempt budget unavailable: {error}"))
+        })?;
         let port = SyncAttemptLoopPort {
             state,
             parts,
@@ -203,17 +291,33 @@ where
             decision,
             plan_kind,
             transfer_tracker,
+            attempt_budget: attempt_budget.clone(),
         };
-        run_dynamic_attempt_loop(
-            &port,
-            &mut source,
-            trace_id,
-            plan_kind,
-            state
-                .frontdoor_runtime_guards
-                .local_execution_planning_timeout,
+        let remaining = attempt_budget.remaining().map_err(|error| {
+            GatewayError::Internal(format!("request attempt budget unavailable: {error}"))
+        })?;
+        match tokio::time::timeout(
+            remaining,
+            run_dynamic_attempt_loop(
+                &port,
+                &mut source,
+                trace_id,
+                plan_kind,
+                state
+                    .frontdoor_runtime_guards
+                    .local_execution_planning_timeout,
+            ),
         )
         .await
+        {
+            Ok(result) => result,
+            Err(_) => Ok(LocalExecutionRequestOutcome::responded(
+                attempt_budget_terminal_response(
+                    trace_id,
+                    AttemptBudgetTerminalCause::DeadlineExceeded,
+                ),
+            )),
+        }
     }
     .instrument(span)
     .await
@@ -226,6 +330,7 @@ struct SyncAttemptLoopPort<'a> {
     decision: &'a GatewayControlDecision,
     plan_kind: &'a str,
     transfer_tracker: &'a ProviderTransferTracker,
+    attempt_budget: AttemptBudget,
 }
 
 #[async_trait]
@@ -236,6 +341,10 @@ where
     type Response = Response<Body>;
     type Exhaustion = crate::executor::LocalExecutionExhaustion;
     type Error = GatewayError;
+
+    fn attempt_budget_terminal_cause(&self) -> Option<AttemptBudgetTerminalCause> {
+        self.attempt_budget.terminal_cause()
+    }
 
     async fn should_skip_attempt(&self, attempt: &T) -> Result<bool, Self::Error> {
         Ok(should_skip_provider_transfer_attempt(
@@ -402,14 +511,34 @@ where
             "candidate loop started"
         );
 
+        let attempt_budget = request_attempt_budget().map_err(|error| {
+            GatewayError::Internal(format!("request attempt budget unavailable: {error}"))
+        })?;
         let port = StreamAttemptLoopPort {
             state,
             trace_id,
             decision,
             plan_kind,
             transfer_tracker,
+            attempt_budget: attempt_budget.clone(),
         };
-        match run_ai_attempt_loop(&port, plan_and_reports).await? {
+        let remaining = attempt_budget.remaining().map_err(|error| {
+            GatewayError::Internal(format!("request attempt budget unavailable: {error}"))
+        })?;
+        let loop_result =
+            tokio::time::timeout(remaining, run_ai_attempt_loop(&port, plan_and_reports)).await;
+        let outcome = match loop_result {
+            Ok(result) => result?,
+            Err(_) => {
+                return Ok(LocalExecutionRequestOutcome::responded(
+                    attempt_budget_terminal_response(
+                        trace_id,
+                        AttemptBudgetTerminalCause::DeadlineExceeded,
+                    ),
+                ));
+            }
+        };
+        match outcome {
             AiAttemptLoopOutcome::Responded(response) => {
                 Ok(LocalExecutionRequestOutcome::responded(response))
             }
@@ -419,6 +548,9 @@ where
             AiAttemptLoopOutcome::Exhausted(exhaustion) => {
                 Ok(LocalExecutionRequestOutcome::Exhausted(exhaustion))
             }
+            AiAttemptLoopOutcome::Terminated(cause) => Ok(LocalExecutionRequestOutcome::responded(
+                attempt_budget_terminal_response(trace_id, cause),
+            )),
             AiAttemptLoopOutcome::NoPath => Ok(LocalExecutionRequestOutcome::NoPath),
         }
     }
@@ -472,23 +604,42 @@ where
             "dynamic candidate loop started"
         );
 
+        let attempt_budget = request_attempt_budget().map_err(|error| {
+            GatewayError::Internal(format!("request attempt budget unavailable: {error}"))
+        })?;
         let port = StreamAttemptLoopPort {
             state,
             trace_id,
             decision,
             plan_kind,
             transfer_tracker,
+            attempt_budget: attempt_budget.clone(),
         };
-        run_dynamic_attempt_loop(
-            &port,
-            &mut source,
-            trace_id,
-            plan_kind,
-            state
-                .frontdoor_runtime_guards
-                .local_execution_planning_timeout,
+        let remaining = attempt_budget.remaining().map_err(|error| {
+            GatewayError::Internal(format!("request attempt budget unavailable: {error}"))
+        })?;
+        match tokio::time::timeout(
+            remaining,
+            run_dynamic_attempt_loop(
+                &port,
+                &mut source,
+                trace_id,
+                plan_kind,
+                state
+                    .frontdoor_runtime_guards
+                    .local_execution_planning_timeout,
+            ),
         )
         .await
+        {
+            Ok(result) => result,
+            Err(_) => Ok(LocalExecutionRequestOutcome::responded(
+                attempt_budget_terminal_response(
+                    trace_id,
+                    AttemptBudgetTerminalCause::DeadlineExceeded,
+                ),
+            )),
+        }
     }
     .instrument(span)
     .await
@@ -814,9 +965,21 @@ where
             Err(err) => {
                 let remaining = source.drain_execution_attempts().await?;
                 port.mark_unused_attempts(remaining).await?;
+                if let Some(cause) = port.attempt_budget_terminal_cause() {
+                    return Ok(LocalExecutionRequestOutcome::responded(
+                        attempt_budget_terminal_response(trace_id, cause),
+                    ));
+                }
                 return Err(err);
             }
         };
+        if let Some(cause) = port.attempt_budget_terminal_cause() {
+            let remaining = source.drain_execution_attempts().await?;
+            port.mark_unused_attempts(remaining).await?;
+            return Ok(LocalExecutionRequestOutcome::responded(
+                attempt_budget_terminal_response(trace_id, cause),
+            ));
+        }
         observe_gateway_stage_ms(
             "stream_candidate_execute",
             execute_started_at.elapsed().as_millis() as u64,
@@ -926,6 +1089,7 @@ struct StreamAttemptLoopPort<'a> {
     decision: &'a GatewayControlDecision,
     plan_kind: &'a str,
     transfer_tracker: &'a ProviderTransferTracker,
+    attempt_budget: AttemptBudget,
 }
 
 #[async_trait]
@@ -936,6 +1100,10 @@ where
     type Response = Response<Body>;
     type Exhaustion = crate::executor::LocalExecutionExhaustion;
     type Error = GatewayError;
+
+    fn attempt_budget_terminal_cause(&self) -> Option<AttemptBudgetTerminalCause> {
+        self.attempt_budget.terminal_cause()
+    }
 
     async fn should_skip_attempt(&self, attempt: &T) -> Result<bool, Self::Error> {
         Ok(should_skip_provider_transfer_attempt(

@@ -20,6 +20,7 @@ pub enum AiAttemptLoopOutcome<Response, Exhaustion> {
     Responded(Response),
     Deferred(Response),
     Exhausted(Exhaustion),
+    Terminated(crate::AttemptBudgetTerminalCause),
     NoPath,
 }
 
@@ -83,6 +84,10 @@ where
         Ok(())
     }
 
+    fn attempt_budget_terminal_cause(&self) -> Option<crate::AttemptBudgetTerminalCause> {
+        None
+    }
+
     async fn mark_unused_attempts(&self, attempts: Vec<Attempt>) -> Result<(), Self::Error>;
 
     async fn build_exhaustion(
@@ -117,9 +122,16 @@ where
             Ok(execution) => execution,
             Err(err) => {
                 port.mark_unused_attempts(remaining.collect()).await?;
+                if let Some(cause) = port.attempt_budget_terminal_cause() {
+                    return Ok(AiAttemptLoopOutcome::Terminated(cause));
+                }
                 return Err(err);
             }
         };
+        if let Some(cause) = port.attempt_budget_terminal_cause() {
+            port.mark_unused_attempts(remaining.collect()).await?;
+            return Ok(AiAttemptLoopOutcome::Terminated(cause));
+        }
         match execution {
             AiAttemptExecutionOutcome::Responded(response) => {
                 port.mark_unused_attempts(remaining.collect()).await?;

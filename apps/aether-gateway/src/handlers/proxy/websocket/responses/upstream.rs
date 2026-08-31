@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use aether_ai_serving::{AttemptBudget, AttemptTarget};
 use serde_json::Value;
 use wreq::ws::message::Message as WreqWsMessage;
 
@@ -42,13 +43,20 @@ pub(super) async fn bind_responses_upstream(
     normalization: ResponsesWebSocketBodyNormalization,
     initial_event: &Value,
     adapter: &'static dyn ResponsesWebSocketProtocolAdapter,
+    attempt_budget: &AttemptBudget,
 ) -> Result<BoundResponsesConnection, &'static str> {
     // 绝对 deadline：从此刻起必须在限定时间内完成握手 + 首条事件发送，
     // 防止慢 TLS / 慢 HTTP Upgrade 无限占用 connection permit。
     let handshake_deadline = resolve_upstream_handshake_deadline(decision);
     tokio::time::timeout(
         handshake_deadline,
-        bind_responses_upstream_inner(decision, normalization, initial_event, adapter),
+        bind_responses_upstream_inner(
+            decision,
+            normalization,
+            initial_event,
+            adapter,
+            attempt_budget,
+        ),
     )
     .await
     .map_err(|_| "responses_websocket_upstream_handshake_timeout")?
@@ -60,6 +68,7 @@ async fn bind_responses_upstream_inner(
     normalization: ResponsesWebSocketBodyNormalization,
     initial_event: &Value,
     adapter: &'static dyn ResponsesWebSocketProtocolAdapter,
+    attempt_budget: &AttemptBudget,
 ) -> Result<BoundResponsesConnection, &'static str> {
     let binding_identity =
         UpstreamBindingIdentity::from_decision(adapter, decision).map_err(|error| match error {
@@ -80,6 +89,7 @@ async fn bind_responses_upstream_inner(
     )
     .await?;
     let first_event = planned_response_create_event(decision, initial_event)?;
+    authorize_responses_websocket_dispatch(attempt_budget, decision)?;
     send_upstream_message(&mut upstream.socket, WreqWsMessage::text(first_event))
         .await
         .map_err(|_| "responses_websocket_initial_send_failed")?;
@@ -128,6 +138,31 @@ async fn bind_responses_upstream_inner(
         exhausted_exclusions: ExhaustedResponsesWebSocketExclusions::default(),
         pending_turn_finalization: None,
     })
+}
+
+pub(super) fn authorize_responses_websocket_dispatch(
+    attempt_budget: &AttemptBudget,
+    decision: &AiExecutionDecision,
+) -> Result<(), &'static str> {
+    let target = AttemptTarget::new(
+        decision
+            .provider_id
+            .as_deref()
+            .ok_or("responses_websocket_attempt_target_missing")?,
+        decision
+            .endpoint_id
+            .as_deref()
+            .ok_or("responses_websocket_attempt_target_missing")?,
+        decision
+            .key_id
+            .as_deref()
+            .ok_or("responses_websocket_attempt_target_missing")?,
+    );
+    attempt_budget
+        .authorize_next_dispatch(&target)
+        .and_then(|permit| permit.consume_for_physical_dispatch(&target))
+        .map(|_| ())
+        .map_err(|_| "responses_websocket_attempt_budget_exhausted")
 }
 
 pub(super) async fn receive_optional_upstream(
@@ -286,6 +321,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn websocket_quota_retry_uses_the_same_logical_turn_budget() {
+        use std::time::Instant;
+
+        let budget =
+            aether_ai_serving::AttemptBudget::new(aether_ai_serving::AttemptBudgetLimits::new(
+                2,
+                2,
+                1,
+                Instant::now() + Duration::from_secs(30),
+            ));
+        let mut first = sample_decision();
+        first.provider_id = Some("provider-a".to_string());
+        first.endpoint_id = Some("endpoint-a".to_string());
+        first.key_id = Some("key-a".to_string());
+        super::authorize_responses_websocket_dispatch(&budget, &first).unwrap();
+
+        let mut retry = first.clone();
+        retry.key_id = Some("key-b".to_string());
+        super::authorize_responses_websocket_dispatch(&budget, &retry).unwrap();
+        assert_eq!(budget.usage().unwrap().total_dispatches(), 2);
+        assert_eq!(budget.usage().unwrap().credential_entries(), 2);
+        assert_eq!(
+            super::authorize_responses_websocket_dispatch(&budget, &retry),
+            Err("responses_websocket_attempt_budget_exhausted")
+        );
+    }
+
     #[tokio::test]
     async fn bind_responses_upstream_times_out_against_stalled_server() {
         use super::bind_responses_upstream;
@@ -327,6 +390,7 @@ mod tests {
             ResponsesWebSocketBodyNormalization::for_tests("test-model"),
             &json!({"type": "response.create", "model": "test-model"}),
             adapter,
+            &crate::execution_runtime::transport::new_bounded_attempt_budget(),
         )
         .await;
 
