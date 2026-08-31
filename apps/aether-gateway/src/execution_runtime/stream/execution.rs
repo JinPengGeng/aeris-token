@@ -6729,6 +6729,39 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 provider_prefetched_body_bytes = provider_prefetched_body.len(),
                                 "gateway detected embedded error while prefetching execution runtime stream"
                             );
+                            if plan
+                                .provider_api_format
+                                .eq_ignore_ascii_case("openai:responses")
+                                && plan
+                                    .provider_api_format
+                                    .eq_ignore_ascii_case(&plan.client_api_format)
+                            {
+                                let error_status_code = resolve_provider_stream_error_status_code(
+                                    plan.provider_api_format.as_str(),
+                                    status_code,
+                                    &body_json,
+                                );
+                                return handle_prefetch_provider_private_stream_error(
+                                    state,
+                                    trace_id,
+                                    decision,
+                                    &plan,
+                                    report_context,
+                                    request_id,
+                                    candidate_id,
+                                    &report_kind,
+                                    headers,
+                                    prefetched_usage_telemetry.clone(),
+                                    &provider_prefetched_body,
+                                    status_code,
+                                    error_status_code,
+                                    body_json,
+                                    retry_scope_out.as_deref_mut(),
+                                    retry_fallback_out.as_deref_mut(),
+                                )
+                                .await;
+                            }
+
                             let request_diagnostics = current_request_diagnostics();
                             let terminal_report_context = report_context_with_request_diagnostics(
                                 report_context,
@@ -8858,8 +8891,10 @@ mod tests {
         );
     }
 
+    /// 构造 Responses 失败流；`bare_error` 控制首段是裸错误 JSON 还是标准 SSE 终端错误事件。
     async fn execute_prefetched_codex_cyber_policy_failure(
         continue_failover: bool,
+        bare_error: bool,
     ) -> Option<axum::http::Response<Body>> {
         let request_id = if continue_failover {
             "req-cyber-policy-retry"
@@ -8883,7 +8918,11 @@ mod tests {
         let state = AppState::new()
             .expect("app state should build")
             .with_data_state_for_tests(data_state);
-        let upstream_setup = "event: response.created\ndata: {\"type\":\"response.created\"}\n\n";
+        let upstream_setup = if bare_error {
+            r#"{"error":{"type":"server_error","code":"server_error","message":"upstream overloaded"}}"#
+        } else {
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+        };
         let upstream_error = "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"invalid_request\",\"message\":\"cyber policy rejected the request\",\"code\":\"cyber_policy_violation\",\"param\":\"input\"}}}\n\n";
         let frame_stream = stream! {
             yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
@@ -8904,13 +8943,15 @@ mod tests {
                     text: Some(upstream_setup.to_string()),
                 },
             }));
-            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
-                frame_type: StreamFrameType::Data,
-                payload: StreamFramePayload::Data {
-                    chunk_b64: None,
-                    text: Some(upstream_error.to_string()),
-                },
-            }));
+            if !bare_error {
+                yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                    frame_type: StreamFrameType::Data,
+                    payload: StreamFramePayload::Data {
+                        chunk_b64: None,
+                        text: Some(upstream_error.to_string()),
+                    },
+                }));
+            }
             yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame::eof()));
         }
         .boxed();
@@ -10848,7 +10889,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefetched_codex_cyber_policy_violation_stops_failover_by_default() {
-        let response = execute_prefetched_codex_cyber_policy_failure(false)
+        let response = execute_prefetched_codex_cyber_policy_failure(false, false)
             .await
             .expect("default Codex cyber policy handling should return the provider error");
 
@@ -10858,10 +10899,21 @@ mod tests {
     #[tokio::test]
     async fn prefetched_codex_cyber_policy_violation_retries_when_system_setting_is_enabled() {
         assert!(
-            execute_prefetched_codex_cyber_policy_failure(true)
+            execute_prefetched_codex_cyber_policy_failure(true, false)
                 .await
                 .is_none(),
             "enabling cyber failover should retry the next candidate"
+        );
+    }
+
+    /// 验证同格式 Responses 的首段裸错误会在提交客户端 HTTP 200 前进入既有候选重试。
+    #[tokio::test]
+    async fn same_format_responses_prefetch_retries_bare_error_before_committing_success() {
+        assert!(
+            execute_prefetched_codex_cyber_policy_failure(true, true)
+                .await
+                .is_none(),
+            "bare Responses error should retry before a client response is committed"
         );
     }
 

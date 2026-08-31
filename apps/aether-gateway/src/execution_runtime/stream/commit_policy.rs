@@ -17,6 +17,7 @@ pub(super) enum StreamCommitPolicy {
 }
 
 impl StreamCommitPolicy {
+    /// 根据上下游格式与响应类型选择提交时机；同格式 Responses SSE 必须先分类首段，避免把流内错误提交成 HTTP 200。
     #[allow(clippy::too_many_arguments)]
     pub(super) fn for_response(
         has_direct_finalize: bool,
@@ -41,6 +42,11 @@ impl StreamCommitPolicy {
             .unwrap_or_default()
             .to_ascii_lowercase();
         if content_type.contains("text/event-stream") {
+            if provider_api_format.eq_ignore_ascii_case("openai:responses")
+                && provider_api_format.eq_ignore_ascii_case(client_api_format)
+            {
+                return Self::FirstClassifiedBody;
+            }
             if provider_api_format.eq_ignore_ascii_case("claude:messages")
                 && provider_api_format.eq_ignore_ascii_case(client_api_format)
                 && !has_private_stream_normalizer
@@ -379,6 +385,33 @@ mod tests {
             "claude:messages",
             false,
             true,
+            false,
+        )
+        .commits_on_response_headers());
+    }
+
+    /// 验证同格式 Responses SSE 会等待首段分类，同时不改变 Chat Completions 的响应头提交策略。
+    #[test]
+    fn policy_prefetches_same_format_openai_responses_sse_only() {
+        let responses = StreamCommitPolicy::for_response(
+            true,
+            Some("text/event-stream; charset=utf-8"),
+            "openai:responses",
+            "openai:responses",
+            false,
+            false,
+            false,
+        );
+        assert_eq!(responses, StreamCommitPolicy::FirstClassifiedBody);
+        assert!(!responses.commits_on_response_headers());
+
+        assert!(StreamCommitPolicy::for_response(
+            true,
+            Some("text/event-stream"),
+            "openai:chat",
+            "openai:chat",
+            false,
+            false,
             false,
         )
         .commits_on_response_headers());
