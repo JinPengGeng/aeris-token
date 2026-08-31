@@ -23,8 +23,9 @@ use aether_scheduler_core::{
 };
 use aether_usage_runtime::{
     build_lifecycle_usage_seed, build_stream_terminal_usage_payload_seed,
-    build_sync_terminal_usage_payload_seed, build_terminal_usage_context_seed, LifecycleUsageSeed,
-    SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed, UsageRequestRecordLevel,
+    build_sync_terminal_usage_payload_seed, build_terminal_usage_context_seed,
+    build_usage_event_data_seed, LifecycleUsageSeed, SyncTerminalUsagePayloadSeed,
+    TerminalUsageContextSeed, UsageEvent, UsageEventType, UsageRequestRecordLevel,
     DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
 };
 use async_stream::stream;
@@ -137,7 +138,7 @@ use crate::request_candidate_runtime::{
 use crate::request_diagnostics::{
     attach_current_request_diagnostics_to_report_context,
     attach_request_diagnostics_and_candidate_start_timing_to_report_context,
-    current_request_diagnostics, RequestDiagnostics,
+    attach_request_diagnostics_to_report_context, current_request_diagnostics, RequestDiagnostics,
 };
 use crate::stage_metrics::{
     attach_stage_trace_to_report_context, observe_gateway_stage_ms, observe_gateway_stage_trace_ms,
@@ -2755,6 +2756,189 @@ async fn record_stream_pending_lifecycle(
     );
 }
 
+/// Finalizes the request-candidate/usage rows when a streaming attempt is
+/// dropped before its terminal state was written (typically because the
+/// client disconnected before the first byte, or the request task was
+/// cancelled). Normal exits disarm the guard explicitly; an error exit writes
+/// a Failed terminal state. When the first-byte watchdog already claimed the
+/// terminal state for a timeout, the guard yields so the timeout stays the
+/// recorded outcome instead of being rewritten as a client cancellation.
+struct StreamAttemptTerminalGuard {
+    state: AppState,
+    plan: ExecutionPlan,
+    report_context: Option<Value>,
+    request_diagnostics: Option<Arc<RequestDiagnostics>>,
+    candidate_started_unix_ms: u64,
+    candidate_started_at: Instant,
+    watchdog_progress: Option<Arc<crate::execution_runtime::StreamCandidateWatchdogProgress>>,
+    armed: bool,
+}
+
+impl StreamAttemptTerminalGuard {
+    fn new(
+        state: &AppState,
+        plan: &ExecutionPlan,
+        report_context: Option<Value>,
+        candidate_started_unix_ms: u64,
+        candidate_started_at: Instant,
+    ) -> Self {
+        Self {
+            state: state.clone(),
+            plan: plan.clone(),
+            report_context,
+            request_diagnostics: current_request_diagnostics(),
+            candidate_started_unix_ms,
+            candidate_started_at,
+            watchdog_progress: crate::execution_runtime::StreamCandidateWatchdogProgress::current(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    async fn fail_and_disarm(&mut self, error: &GatewayError) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        record_stream_attempt_forced_terminal_state(
+            self.state.clone(),
+            self.plan.clone(),
+            self.report_context.clone(),
+            self.request_diagnostics.clone(),
+            self.candidate_started_unix_ms,
+            self.candidate_started_at,
+            UsageEventType::Failed,
+            RequestCandidateStatus::Failed,
+            http::StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            "local_stream_attempt_aborted",
+            format!("Local stream attempt failed before terminal finalization: {error:?}"),
+        )
+        .await;
+    }
+}
+
+impl Drop for StreamAttemptTerminalGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if self
+            .watchdog_progress
+            .as_ref()
+            .is_some_and(|progress| progress.timeout_terminal_claimed())
+        {
+            return;
+        }
+        let state = self.state.clone();
+        let plan = self.plan.clone();
+        let report_context = self.report_context.clone();
+        let request_diagnostics = self.request_diagnostics.clone();
+        let candidate_started_unix_ms = self.candidate_started_unix_ms;
+        let candidate_started_at = self.candidate_started_at;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                record_stream_attempt_forced_terminal_state(
+                    state,
+                    plan,
+                    report_context,
+                    request_diagnostics,
+                    candidate_started_unix_ms,
+                    candidate_started_at,
+                    UsageEventType::Cancelled,
+                    RequestCandidateStatus::Cancelled,
+                    499,
+                    "local_stream_attempt_cancelled",
+                    "Local stream attempt was dropped before terminal finalization, usually because the client disconnected or the request task was cancelled.",
+                )
+                .await;
+            });
+        } else {
+            warn!(
+                event_name = "local_stream_attempt_terminal_guard_no_runtime",
+                log_type = "ops",
+                request_id = %short_request_id(self.plan.request_id.as_str()),
+                candidate_id = ?self.plan.candidate_id,
+                "gateway could not finalize dropped local stream attempt because no Tokio runtime is available"
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_stream_attempt_forced_terminal_state(
+    state: AppState,
+    plan: ExecutionPlan,
+    report_context: Option<Value>,
+    request_diagnostics: Option<Arc<RequestDiagnostics>>,
+    candidate_started_unix_ms: u64,
+    candidate_started_at: Instant,
+    usage_event_type: UsageEventType,
+    candidate_status: RequestCandidateStatus,
+    status_code: u16,
+    error_type: &'static str,
+    error_message: impl Into<String>,
+) {
+    let error_message = error_message.into();
+    let report_context =
+        attach_request_diagnostics_to_report_context(report_context, request_diagnostics.as_ref());
+    let terminal_unix_ms = current_request_candidate_unix_ms();
+    let latency_ms = stream_elapsed_ms_since(candidate_started_at);
+    record_local_request_candidate_status(
+        &state,
+        &plan,
+        report_context.as_ref(),
+        SchedulerRequestCandidateStatusUpdate {
+            status: candidate_status,
+            status_code: Some(status_code),
+            error_type: Some(error_type.to_string()),
+            error_message: Some(error_message.clone()),
+            latency_ms: Some(latency_ms),
+            started_at_unix_ms: Some(candidate_started_unix_ms),
+            finished_at_unix_ms: Some(terminal_unix_ms),
+        },
+    )
+    .await;
+
+    if !state.usage_runtime.is_enabled() {
+        return;
+    }
+
+    let mut usage_data = build_usage_event_data_seed(&plan, report_context.as_ref());
+    usage_data.status_code = Some(status_code);
+    usage_data.error_message = Some(error_message.clone());
+    usage_data.error_category = Some(
+        match usage_event_type {
+            UsageEventType::Cancelled => "cancelled",
+            _ => "server_error",
+        }
+        .to_string(),
+    );
+    usage_data.response_time_ms = Some(latency_ms);
+    let error_body = json!({
+        "error": {
+            "type": error_type,
+            "message": error_message,
+            "code": status_code
+        }
+    });
+    usage_data.response_headers = Some(json!({"content-type": "application/json"}));
+    usage_data.response_body = Some(error_body.clone());
+    usage_data.client_response_headers = Some(json!({"content-type": "application/json"}));
+    usage_data.client_response_body = Some(error_body);
+
+    state
+        .usage_runtime
+        .record_terminal_event_direct(
+            state.usage_lifecycle_data_state().as_ref(),
+            UsageEvent::new(usage_event_type, plan.request_id.clone(), usage_data),
+        )
+        .await;
+}
+
 fn should_defer_stream_pending_for_direct_inline(
     state: &AppState,
     plan: &ExecutionPlan,
@@ -3752,8 +3936,8 @@ async fn execute_execution_runtime_stream_inner(
     plan_kind: &str,
     report_kind: Option<String>,
     mut report_context: Option<serde_json::Value>,
-    mut retry_scope_out: Option<&mut AiAttemptRetryScope>,
-    mut retry_fallback_out: Option<&mut Option<Response<Body>>>,
+    retry_scope_out: Option<&mut AiAttemptRetryScope>,
+    retry_fallback_out: Option<&mut Option<Response<Body>>>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let stream_started_at = Instant::now();
     let mut stage_trace = RequestStageTrace::from_env();
@@ -3774,7 +3958,7 @@ async fn execute_execution_runtime_stream_inner(
     );
     // Inline passthrough records its lifecycle seed after upstream headers are
     // available. Avoid constructing a throwaway seed on the common path.
-    let mut lifecycle_seed = (!defer_stream_pending_for_direct_inline)
+    let lifecycle_seed = (!defer_stream_pending_for_direct_inline)
         .then(|| build_lifecycle_usage_seed(&plan, report_context.as_ref()));
     let mut lifecycle_pending_recorded = false;
     if let Some(seed) = lifecycle_seed.as_ref() {
@@ -3798,6 +3982,55 @@ async fn execute_execution_runtime_stream_inner(
         )
         .await;
     }
+    let mut terminal_guard = StreamAttemptTerminalGuard::new(
+        state,
+        &plan,
+        report_context.clone(),
+        candidate_started_unix_secs,
+        stream_started_at,
+    );
+    let result = execute_execution_runtime_stream_after_pending(
+        state,
+        plan,
+        trace_id,
+        decision,
+        plan_kind,
+        report_kind,
+        report_context,
+        retry_scope_out,
+        retry_fallback_out,
+        stream_started_at,
+        stage_trace,
+        lifecycle_seed,
+        lifecycle_pending_recorded,
+        candidate_started_unix_secs,
+    )
+    .await;
+    if let Err(error) = result.as_ref() {
+        terminal_guard.fail_and_disarm(error).await;
+    } else {
+        terminal_guard.disarm();
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_execution_runtime_stream_after_pending(
+    state: &AppState,
+    mut plan: ExecutionPlan,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    plan_kind: &str,
+    report_kind: Option<String>,
+    report_context: Option<serde_json::Value>,
+    mut retry_scope_out: Option<&mut AiAttemptRetryScope>,
+    mut retry_fallback_out: Option<&mut Option<Response<Body>>>,
+    stream_started_at: Instant,
+    mut stage_trace: RequestStageTrace,
+    mut lifecycle_seed: Option<LifecycleUsageSeed>,
+    mut lifecycle_pending_recorded: bool,
+    candidate_started_unix_secs: u64,
+) -> Result<Option<Response<Body>>, GatewayError> {
     let plan_request_id_for_log = short_request_id(plan.request_id.as_str());
     let provider_name = plan
         .provider_name
@@ -8210,8 +8443,9 @@ mod tests {
         ClientVisibleStreamCompletionTracker, DirectPassthroughFinalizer,
         DirectPassthroughFinalizerCore, DirectPassthroughInlineBodyState, DirectPassthroughMode,
         PostStopFrameReadBudget, PostStopLimitedStreamReader, ProviderStreamErrorInspection,
-        ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES, GEMINI_FILES_DOWNLOAD_PLAN_KIND,
-        OPENAI_CHAT_STREAM_PLAN_KIND, POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL,
+        StreamAttemptTerminalGuard, ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES,
+        GEMINI_FILES_DOWNLOAD_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND,
+        POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL,
     };
     use crate::control::GatewayControlDecision;
     use crate::stage_metrics::RequestStageTrace;
@@ -8456,6 +8690,172 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         }
+    }
+
+    #[tokio::test]
+    async fn stream_attempt_terminal_guard_marks_dropped_pending_attempt_cancelled() {
+        let request_id = "req-stream-cancel-guard";
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    Arc::clone(&request_candidate_repository),
+                    Arc::clone(&usage_repository),
+                ),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            });
+        let plan = codex_cyber_policy_plan(request_id);
+        let report_context = Some(json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        }));
+        let candidate_started_at = Instant::now();
+        let started_at = crate::clock::current_unix_ms();
+        state.usage_runtime.record_pending(
+            state.usage_lifecycle_data_state().as_ref(),
+            aether_usage_runtime::build_lifecycle_usage_seed(&plan, report_context.as_ref()),
+        );
+        crate::request_candidate_runtime::record_local_request_candidate_status(
+            &state,
+            &plan,
+            report_context.as_ref(),
+            aether_scheduler_core::SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Pending,
+                status_code: None,
+                error_type: None,
+                error_message: None,
+                latency_ms: None,
+                started_at_unix_ms: Some(started_at),
+                finished_at_unix_ms: None,
+            },
+        )
+        .await;
+
+        {
+            let _guard = StreamAttemptTerminalGuard::new(
+                &state,
+                &plan,
+                report_context.clone(),
+                started_at,
+                candidate_started_at,
+            );
+        }
+
+        let mut stored_usage = None;
+        for _ in 0..50 {
+            if let Some(usage) = usage_repository
+                .find_by_request_id(request_id)
+                .await
+                .expect("usage should read")
+            {
+                if usage.status == "cancelled" {
+                    stored_usage = Some(usage);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let stored_usage = stored_usage.expect("cancelled usage should be recorded");
+        assert_eq!(stored_usage.status, "cancelled");
+        assert_eq!(stored_usage.billing_status, "void");
+        assert_eq!(stored_usage.status_code, Some(499));
+        assert_eq!(stored_usage.error_category.as_deref(), Some("cancelled"));
+
+        let stored_candidates = request_candidate_repository
+            .list_by_request_id(request_id)
+            .await
+            .expect("request candidates should read");
+        assert_eq!(stored_candidates.len(), 1);
+        assert_eq!(
+            stored_candidates[0].status,
+            RequestCandidateStatus::Cancelled
+        );
+        assert_eq!(stored_candidates[0].status_code, Some(499));
+        assert_eq!(
+            stored_candidates[0].error_type.as_deref(),
+            Some("local_stream_attempt_cancelled")
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_attempt_watchdog_timeout_is_not_recorded_as_client_cancellation() {
+        let request_id = "req-stream-watchdog-not-cancelled";
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    Arc::clone(&request_candidate_repository),
+                    Arc::clone(&usage_repository),
+                ),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            });
+        let plan = codex_cyber_policy_plan(request_id);
+        let report_context = Some(json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        }));
+        let started_at = crate::clock::current_unix_ms();
+        let progress = crate::execution_runtime::StreamCandidateWatchdogProgress::shared();
+        let progress_for_scope = Arc::clone(&progress);
+
+        progress
+            .scope(async move {
+                let guard = StreamAttemptTerminalGuard::new(
+                    &state,
+                    &plan,
+                    report_context.clone(),
+                    started_at,
+                    Instant::now(),
+                );
+                // The watchdog claims the terminal state and records the timeout
+                // failure before the dropped execution future runs the guard.
+                progress_for_scope.claim_timeout_terminal();
+                crate::request_candidate_runtime::record_local_request_candidate_status(
+                    &state,
+                    &plan,
+                    report_context.as_ref(),
+                    aether_scheduler_core::SchedulerRequestCandidateStatusUpdate {
+                        status: RequestCandidateStatus::Failed,
+                        status_code: None,
+                        error_type: Some("local_stream_candidate_watchdog_timeout".to_string()),
+                        error_message: Some("Stream first byte timeout".to_string()),
+                        latency_ms: Some(30_000),
+                        started_at_unix_ms: Some(started_at),
+                        finished_at_unix_ms: Some(crate::clock::current_unix_ms()),
+                    },
+                )
+                .await;
+                drop(guard);
+            })
+            .await;
+
+        // The claimed guard must not rewrite the watchdog timeout as a 499 cancel.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(usage_repository
+            .find_by_request_id(request_id)
+            .await
+            .expect("usage should read")
+            .is_none());
+        let stored_candidates = request_candidate_repository
+            .list_by_request_id(request_id)
+            .await
+            .expect("request candidates should read");
+        assert_eq!(stored_candidates.len(), 1);
+        assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Failed);
+        assert_eq!(
+            stored_candidates[0].error_type.as_deref(),
+            Some("local_stream_candidate_watchdog_timeout")
+        );
     }
 
     async fn execute_prefetched_codex_cyber_policy_failure(

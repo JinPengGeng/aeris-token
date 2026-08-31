@@ -2037,7 +2037,7 @@ const UPDATE_FAILED_PENDING_CANDIDATES_SQL: &str = r#"
 UPDATE request_candidates
 SET status = 'failed',
     finished_at = $2,
-    error_message = '请求超时（服务器可能已重启）'
+    error_message = '请求超时未完成（可能因客户端断开或实例重启）'
 WHERE request_id = $1
   AND status IN ('pending', 'streaming')
 "#;
