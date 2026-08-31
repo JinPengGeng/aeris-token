@@ -12,7 +12,8 @@ use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelect
 use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data_contracts::repository::candidate_selection::{
-    StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
+    MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
+    StoredProviderModelMapping,
 };
 use aether_data_contracts::repository::candidates::{
     RequestCandidateReadRepository, RequestCandidateStatus, RequestCandidateWriteRepository,
@@ -1124,6 +1125,84 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
         .expect("key transport should build")
     }
 
+    struct CountingCandidateSelectionRepository {
+        inner: InMemoryMinimalCandidateSelectionReadRepository,
+        selection_reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl aether_data_contracts::repository::candidate_selection::MinimalCandidateSelectionReadRepository
+        for CountingCandidateSelectionRepository
+    {
+        async fn list_for_exact_api_format(
+            &self,
+            api_format: &str,
+        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
+        {
+            self.selection_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.inner.list_for_exact_api_format(api_format).await
+        }
+
+        async fn list_for_exact_api_format_and_global_model(
+            &self,
+            api_format: &str,
+            global_model_name: &str,
+        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
+        {
+            self.selection_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.inner
+                .list_for_exact_api_format_and_global_model(api_format, global_model_name)
+                .await
+        }
+
+        async fn list_for_exact_api_format_and_requested_model(
+            &self,
+            api_format: &str,
+            requested_model_name: &str,
+        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
+        {
+            self.selection_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.inner
+                .list_for_exact_api_format_and_requested_model(api_format, requested_model_name)
+                .await
+        }
+
+        async fn list_for_exact_api_format_and_requested_model_page(
+            &self,
+            query: &aether_data_contracts::repository::candidate_selection::StoredRequestedModelCandidateRowsQuery,
+        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
+        {
+            self.selection_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.inner
+                .list_for_exact_api_format_and_requested_model_page(query)
+                .await
+        }
+
+        async fn list_pool_key_rows_for_group(
+            &self,
+            query: &aether_data_contracts::repository::candidate_selection::StoredPoolKeyCandidateRowsQuery,
+        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
+        {
+            self.selection_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.inner.list_pool_key_rows_for_group(query).await
+        }
+
+        async fn list_pool_key_rows_for_group_key_ids(
+            &self,
+            query: &aether_data_contracts::repository::candidate_selection::StoredPoolKeyCandidateRowsByKeyIdsQuery,
+        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
+        {
+            self.selection_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.inner.list_pool_key_rows_for_group_key_ids(query).await
+        }
+    }
+
     let execution_runtime_hits = Arc::new(Mutex::new(0usize));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let public_hits = Arc::new(Mutex::new(0usize));
@@ -1170,41 +1249,64 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
             }),
         );
 
-    let execution_runtime = Router::new().route(
-        "/v1/execute/sync",
-        any(move |_request: Request| {
-            let execution_runtime_hits_inner = Arc::clone(&execution_runtime_hits_clone);
-            async move {
-                *execution_runtime_hits_inner
-                    .lock()
-                    .expect("mutex should lock") += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                Json(json!({
-                    "request_id": "trace-openai-cli-local-timeout-123",
-                    "status_code": 200,
-                    "headers": {
-                        "content-type": "application/json"
-                    },
-                    "body": {
-                        "json_body": {
-                            "id": "resp-cli-local-timeout-123",
-                            "object": "response",
-                            "model": "gpt-5-upstream",
-                            "output": [],
-                            "usage": {
-                                "input_tokens": 1,
-                                "output_tokens": 2,
-                                "total_tokens": 3
-                            }
-                        }
-                    },
-                    "telemetry": {
-                        "elapsed_ms": 21
+    let first_execution_holding = Arc::new(tokio::sync::Notify::new());
+    let release_first_execution = Arc::new(tokio::sync::Notify::new());
+    let execution_runtime = {
+        let first_execution_holding = Arc::clone(&first_execution_holding);
+        let release_first_execution = Arc::clone(&release_first_execution);
+        Router::new().route(
+            "/v1/execute/sync",
+            any(move |_request: Request| {
+                let execution_runtime_hits_inner = Arc::clone(&execution_runtime_hits_clone);
+                let first_execution_holding = Arc::clone(&first_execution_holding);
+                let release_first_execution = Arc::clone(&release_first_execution);
+                async move {
+                    let hit = {
+                        let mut hits = execution_runtime_hits_inner
+                            .lock()
+                            .expect("mutex should lock");
+                        *hits += 1;
+                        *hits
+                    };
+                    if hit == 1 {
+                        // The first request holds the only concurrency slot
+                        // until the test observes the second request parked in
+                        // the bounded wait loop and explicitly releases it.
+                        first_execution_holding.notify_one();
+                        release_first_execution.notified().await;
+                    } else {
+                        // Floor the second request's execution time so the
+                        // elapsed assertion holds regardless of how long the
+                        // bounded wait actually took.
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
-                }))
-            }
-        }),
-    );
+                    Json(json!({
+                        "request_id": "trace-openai-cli-local-timeout-123",
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "id": "resp-cli-local-timeout-123",
+                                "object": "response",
+                                "model": "gpt-5-upstream",
+                                "output": [],
+                                "usage": {
+                                    "input_tokens": 1,
+                                    "output_tokens": 2,
+                                    "total_tokens": 3
+                                }
+                            }
+                        },
+                        "telemetry": {
+                            "elapsed_ms": 21
+                        }
+                    }))
+                }
+            }),
+        )
+    };
 
     let mut auth_snapshot = sample_auth_snapshot(
         "key-openai-cli-local-timeout-123",
@@ -1215,10 +1317,11 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
         Some(hash_api_key("sk-client-openai-cli-local-timeout")),
         auth_snapshot,
     )]));
-    let candidate_selection_repository =
-        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
-            sample_candidate_row(),
-        ]));
+    let selection_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let candidate_selection_repository = Arc::new(CountingCandidateSelectionRepository {
+        inner: InMemoryMinimalCandidateSelectionReadRepository::seed(vec![sample_candidate_row()]),
+        selection_reads: Arc::clone(&selection_reads),
+    });
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider_catalog_provider()],
         vec![sample_provider_catalog_endpoint()],
@@ -1260,10 +1363,12 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
             .await
             .expect("inflight request should complete")
     });
-    wait_until(5_000, || {
-        *execution_runtime_hits.lock().expect("mutex should lock") >= 1
-    })
-    .await;
+    tokio::time::timeout(
+        std::time::Duration::from_millis(5_000),
+        first_execution_holding.notified(),
+    )
+    .await
+    .expect("first request should be holding the only concurrency slot");
     let active_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(5_000);
     loop {
         let inflight_candidates = request_candidate_repository
@@ -1285,19 +1390,35 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
+    let selection_reads_before_second = selection_reads.load(std::sync::atomic::Ordering::Acquire);
     let started_at = std::time::Instant::now();
-    let response = client
-        .post(format!("{gateway_url}/v1/responses"))
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .header(
-            http::header::AUTHORIZATION,
-            "Bearer sk-client-openai-cli-local-timeout",
-        )
-        .header(TRACE_ID_HEADER, "trace-openai-cli-local-timeout-123")
-        .body("{\"model\":\"gpt-5\",\"input\":\"hello\",\"store\":false}")
-        .send()
-        .await
-        .expect("request should complete");
+    let second_client = client.clone();
+    let second_gateway_url = gateway_url.clone();
+    let second_request = tokio::spawn(async move {
+        second_client
+            .post(format!("{second_gateway_url}/v1/responses"))
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header(
+                http::header::AUTHORIZATION,
+                "Bearer sk-client-openai-cli-local-timeout",
+            )
+            .header(TRACE_ID_HEADER, "trace-openai-cli-local-timeout-123")
+            .body("{\"model\":\"gpt-5\",\"input\":\"hello\",\"store\":false}")
+            .send()
+            .await
+            .expect("request should complete")
+    });
+    // Every attempt of the bounded concurrency wait loop re-reads the candidate
+    // rows, so a read bump proves the second request evaluated selection while
+    // the first request still holds the only slot — i.e. it is parked in the
+    // wait loop now and it is safe to release the slot.
+    wait_until(5_000, || {
+        selection_reads.load(std::sync::atomic::Ordering::Acquire) > selection_reads_before_second
+    })
+    .await;
+    release_first_execution.notify_one();
+
+    let response = second_request.await.expect("second request should join");
 
     assert!(
         started_at.elapsed() >= std::time::Duration::from_millis(100),

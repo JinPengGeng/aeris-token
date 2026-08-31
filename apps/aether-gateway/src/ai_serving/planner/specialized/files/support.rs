@@ -108,6 +108,7 @@ pub(super) async fn materialize_local_gemini_files_candidate_attempts(
             Some(&input.auth_snapshot),
             input.client_session_affinity.as_ref(),
             current_unix_secs(),
+            current_unix_secs(),
         )
         .await?;
     let outcome = materialize_local_execution_candidates_with_serving(
@@ -180,6 +181,7 @@ pub(super) async fn build_local_gemini_files_candidate_attempt_source<'a>(
             false,
             Some(&input.auth_snapshot),
             input.client_session_affinity.as_ref(),
+            current_unix_secs(),
             current_unix_secs(),
         )
         .await?;

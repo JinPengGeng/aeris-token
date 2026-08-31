@@ -126,6 +126,7 @@ pub(super) async fn list_local_openai_image_candidate_attempts(
                 matches_client_format.then_some(&input.auth_snapshot),
                 input.client_session_affinity.as_ref(),
                 current_unix_secs(),
+                current_unix_secs(),
                 false,
             )
             .await
@@ -199,6 +200,7 @@ pub(super) async fn build_local_openai_image_candidate_attempt_source<'a>(
                 input.required_capabilities.as_ref(),
                 matches_client_format.then_some(&input.auth_snapshot),
                 input.client_session_affinity.as_ref(),
+                current_unix_secs(),
                 current_unix_secs(),
                 false,
             )

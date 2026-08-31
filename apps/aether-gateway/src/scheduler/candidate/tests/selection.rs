@@ -50,6 +50,7 @@ async fn select_candidate(
         auth_snapshot,
         None,
         now_unix_secs,
+        now_unix_secs,
         false,
     )
     .await
@@ -73,6 +74,7 @@ async fn collect_selectable_candidates(
         None,
         auth_snapshot,
         None,
+        now_unix_secs,
         now_unix_secs,
         false,
     )
@@ -103,6 +105,7 @@ async fn collect_selectable_candidates_with_skip_reasons(
         None,
         auth_snapshot,
         None,
+        now_unix_secs,
         now_unix_secs,
         false,
         None,
@@ -413,6 +416,7 @@ async fn scheduler_selection_prefers_required_capability_matches_before_priority
         None,
         None,
         100,
+        100,
         false,
     )
     .await
@@ -608,6 +612,7 @@ async fn cache_affinity_promotes_cached_scheduler_affinity_candidate_when_enable
         Some(&auth_snapshot),
         Some(&client_session_affinity),
         100,
+        100,
         false,
     )
     .await
@@ -718,6 +723,7 @@ async fn load_balance_selection_does_not_remember_scheduler_affinity() {
         None,
         Some(&auth_snapshot),
         Some(&client_session_affinity),
+        100,
         100,
         false,
     )
@@ -1773,6 +1779,169 @@ async fn exposes_runtime_skipped_candidates_with_skip_reasons() {
     assert_eq!(skipped[0].candidate.provider_id, "provider-a");
     assert_eq!(skipped[0].skip_reason, "key_circuit_open");
     assert!(!is_exact_all_skipped_by_auth_limit(&selected, &skipped));
+}
+
+#[tokio::test]
+async fn open_key_in_cooldown_is_skipped_even_with_huge_ranking_seed() {
+    // Regression for issue #108: the per-request ranking seed is a rotated
+    // millisecond value vastly larger than any unix second.  Admission checks
+    // must compare against now_unix_secs only, so a huge seed must not make a
+    // cooling-down circuit look probeable.
+    let now_unix_secs = 1_000;
+    let mut first = sample_row();
+    first.provider_id = "provider-a".to_string();
+    first.provider_name = "openai-a".to_string();
+    first.endpoint_id = "endpoint-a".to_string();
+    first.key_id = "key-a".to_string();
+    first.key_name = "alpha".to_string();
+    first.key_global_priority_by_format = Some(serde_json::json!({"openai:chat": 1}));
+
+    let mut second = sample_row();
+    second.provider_id = "provider-b".to_string();
+    second.provider_name = "openai-b".to_string();
+    second.endpoint_id = "endpoint-b".to_string();
+    second.key_id = "key-b".to_string();
+    second.key_name = "beta".to_string();
+    second.key_global_priority_by_format = Some(serde_json::json!({"openai:chat": 2}));
+
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        first, second,
+    ]));
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![
+            sample_provider("provider-a", None),
+            sample_provider("provider-b", None),
+        ],
+        Vec::new(),
+        vec![
+            sample_key("key-a", "provider-a", Some(10)).with_health_fields(
+                Some(serde_json::json!({"openai:chat": {"health_score": 0.2}})),
+                Some(serde_json::json!({
+                    "openai:chat": {
+                        "open": true,
+                        "next_probe_at_unix_secs": now_unix_secs + 3600,
+                    }
+                })),
+            ),
+            sample_key("key-b", "provider-b", Some(10)),
+        ],
+    ));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_provider_catalog_quota_and_request_candidates_for_tests(
+                candidates,
+                provider_catalog,
+                quotas,
+                request_candidates,
+            ),
+        );
+
+    let (selected, skipped) = collect_selectable_candidates_with_skip_reasons_impl(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        None,
+        None,
+        None,
+        now_unix_secs,
+        u64::MAX,
+        false,
+        None,
+    )
+    .await
+    .expect("selection should succeed");
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].provider_id, "provider-b");
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].candidate.provider_id, "provider-a");
+    assert_eq!(skipped[0].skip_reason, "key_circuit_open");
+}
+
+#[tokio::test]
+async fn open_key_probe_is_allowed_once_cooldown_expires_even_with_huge_ranking_seed() {
+    // Cooldown boundary: the circuit stays open only while
+    // now_unix_secs < next_probe_at_unix_secs, so an expired probe window must
+    // let the key back in regardless of the ranking seed.
+    let now_unix_secs = 1_000;
+    let mut first = sample_row();
+    first.provider_id = "provider-a".to_string();
+    first.provider_name = "openai-a".to_string();
+    first.endpoint_id = "endpoint-a".to_string();
+    first.key_id = "key-a".to_string();
+    first.key_name = "alpha".to_string();
+    first.key_global_priority_by_format = Some(serde_json::json!({"openai:chat": 1}));
+
+    let mut second = sample_row();
+    second.provider_id = "provider-b".to_string();
+    second.provider_name = "openai-b".to_string();
+    second.endpoint_id = "endpoint-b".to_string();
+    second.key_id = "key-b".to_string();
+    second.key_name = "beta".to_string();
+    second.key_global_priority_by_format = Some(serde_json::json!({"openai:chat": 2}));
+
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        first, second,
+    ]));
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![
+            sample_provider("provider-a", None),
+            sample_provider("provider-b", None),
+        ],
+        Vec::new(),
+        vec![
+            sample_key("key-a", "provider-a", Some(10)).with_health_fields(
+                Some(serde_json::json!({"openai:chat": {"health_score": 0.2}})),
+                Some(serde_json::json!({
+                    "openai:chat": {
+                        "open": true,
+                        "next_probe_at_unix_secs": now_unix_secs,
+                    }
+                })),
+            ),
+            sample_key("key-b", "provider-b", Some(10)),
+        ],
+    ));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_provider_catalog_quota_and_request_candidates_for_tests(
+                candidates,
+                provider_catalog,
+                quotas,
+                request_candidates,
+            ),
+        );
+
+    let (selected, skipped) = collect_selectable_candidates_with_skip_reasons_impl(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        None,
+        None,
+        None,
+        now_unix_secs,
+        u64::MAX,
+        false,
+        None,
+    )
+    .await
+    .expect("selection should succeed");
+
+    assert_eq!(selected.len(), 2);
+    assert!(selected
+        .iter()
+        .any(|candidate| candidate.provider_id == "provider-a"));
+    assert!(skipped.is_empty());
 }
 
 #[tokio::test]

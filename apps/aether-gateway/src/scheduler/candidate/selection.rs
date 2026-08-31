@@ -58,6 +58,7 @@ pub(super) async fn select_minimal_candidate(
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
+    ranking_seed: u64,
     enable_model_directives: bool,
 ) -> Result<Option<SchedulerMinimalCandidateSelectionCandidate>, GatewayError> {
     let affinity_epoch = runtime_state.scheduler_affinity_epoch();
@@ -93,6 +94,7 @@ pub(super) async fn select_minimal_candidate(
         auth_snapshot,
         client_session_affinity,
         now_unix_secs,
+        ranking_seed,
         ordering_config,
         priority_affinity_key,
     )
@@ -125,6 +127,7 @@ pub(super) async fn collect_selectable_candidates(
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
+    ranking_seed: u64,
     enable_model_directives: bool,
 ) -> Result<Vec<SchedulerMinimalCandidateSelectionCandidate>, GatewayError> {
     Ok(collect_selectable_candidates_with_skip_reasons(
@@ -137,6 +140,7 @@ pub(super) async fn collect_selectable_candidates(
         auth_snapshot,
         client_session_affinity,
         now_unix_secs,
+        ranking_seed,
         enable_model_directives,
         None,
     )
@@ -154,6 +158,7 @@ pub(super) async fn collect_selectable_candidates_with_skip_reasons(
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
+    ranking_seed: u64,
     enable_model_directives: bool,
     request_operation: Option<&str>,
 ) -> Result<
@@ -189,6 +194,7 @@ pub(super) async fn collect_selectable_candidates_with_skip_reasons(
         auth_snapshot,
         client_session_affinity,
         now_unix_secs,
+        ranking_seed,
         ordering_config,
         priority_affinity_key,
     )
@@ -205,6 +211,7 @@ pub(super) async fn collect_selectable_enumerated_candidates_with_skip_reasons(
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
+    ranking_seed: u64,
     ordering_config: crate::scheduler::config::SchedulerOrderingConfig,
     priority_affinity_key: Option<&str>,
 ) -> Result<
@@ -246,7 +253,7 @@ pub(super) async fn collect_selectable_enumerated_candidates_with_skip_reasons(
             required_capabilities,
             priority_affinity_key,
             cached_affinity_target.as_ref(),
-            now_unix_secs,
+            ranking_seed,
         );
         return Ok((
             Vec::new(),
@@ -269,7 +276,7 @@ pub(super) async fn collect_selectable_enumerated_candidates_with_skip_reasons(
         required_capabilities,
         priority_affinity_key,
         cached_affinity_target.as_ref(),
-        now_unix_secs,
+        ranking_seed,
     );
 
     Ok((selected, skipped))
