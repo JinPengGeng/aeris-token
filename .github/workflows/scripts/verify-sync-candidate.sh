@@ -61,9 +61,9 @@ valid_repository "${REPOSITORY}" || usage
 PR_NUMBER="$(parse_pr_number "$2")"
 EXPECTED_HEAD="${3,,}"
 [[ "${EXPECTED_HEAD}" =~ ^[0-9a-f]{40}$ ]] || usage
-: "${AERIS_SYNC_APP_SLUG:?AERIS_SYNC_APP_SLUG is required}"
-[[ "${AERIS_SYNC_APP_SLUG}" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]] || usage
-SYNC_APP_BOT_LOGIN="${AERIS_SYNC_APP_SLUG}[bot]"
+: "${AERIS_WRITER_APP_SLUG:?AERIS_WRITER_APP_SLUG is required}"
+[[ "${AERIS_WRITER_APP_SLUG}" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]] || usage
+WRITER_APP_BOT_LOGIN="${AERIS_WRITER_APP_SLUG}[bot]"
 
 tmp_root="${AERIS_TMP_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}"
 mkdir -p "${tmp_root}"
@@ -150,7 +150,7 @@ NODE
 validate_authoritative_pr() {
   node - "$(to_node_path "$1")" "$(to_node_path "${pr_initial}")" \
     "${PR_NUMBER}" "${REPOSITORY}" "${base_ref}" "${base_sha}" \
-    "${head_ref}" "${head_sha}" "${SYNC_APP_BOT_LOGIN}" \
+    "${head_ref}" "${head_sha}" "${WRITER_APP_BOT_LOGIN}" \
     "${trusted_author_id}" "${trusted_author_type}" <<'NODE'
 const fs = require('node:fs');
 const [currentPath, initialPath, number, repository, baseRef, baseSha, headRef, headSha,
@@ -173,11 +173,11 @@ NODE
 }
 
 read_pr "${pr_initial}"
-read_public_json "https://api.github.com/users/${AERIS_SYNC_APP_SLUG}%5Bbot%5D" \
-  "${bot_identity}" 'Sync App bot identity'
+read_public_json "https://api.github.com/users/${AERIS_WRITER_APP_SLUG}%5Bbot%5D" \
+  "${bot_identity}" 'Writer App bot identity'
 
 mapfile -t trusted_author < <(node - "$(to_node_path "${bot_identity}")" \
-  "${AERIS_SYNC_APP_SLUG}[bot]" <<'NODE'
+  "${AERIS_WRITER_APP_SLUG}[bot]" <<'NODE'
 const fs = require('node:fs');
 const [path, expectedLogin] = process.argv.slice(2);
 const user = JSON.parse(fs.readFileSync(path, 'utf8'));
@@ -188,7 +188,7 @@ if (user === null || Array.isArray(user) || typeof user !== 'object' ||
 process.stdout.write(`${user.id}\n${user.type}\n`);
 NODE
 )
-[[ ${#trusted_author[@]} -eq 2 ]] || fail 'trusted Sync App bot identity is invalid'
+[[ ${#trusted_author[@]} -eq 2 ]] || fail 'trusted Writer App bot identity is invalid'
 trusted_author_id="${trusted_author[0]}"
 trusted_author_type="${trusted_author[1]}"
 
@@ -228,7 +228,7 @@ actual_parent="${parents[1]:-0000000000000000000000000000000000000000}"
 
 node "${METADATA_HELPER}" \
   "${pr_initial}" "${message_file}" "${REPOSITORY}" "${base_ref}" "${head_ref}" \
-  "${EXPECTED_HEAD}" "${AERIS_SYNC_APP_SLUG}" "${trusted_author_id}" "${trusted_author_type}" \
+  "${EXPECTED_HEAD}" "${AERIS_WRITER_APP_SLUG}" "${trusted_author_id}" "${trusted_author_type}" \
   "${commit_author}" "${commit_committer}" \
   "${parent_count}" "${actual_parent}" >"${metadata_file}" || fail 'managed metadata validation failed'
 
@@ -387,7 +387,7 @@ NODE
   printf 'verified_head_ref=%s\n' "${head_ref}" >>"${GITHUB_OUTPUT}"
   printf 'verified_head=%s\n' "${head_sha}" >>"${GITHUB_OUTPUT}"
   printf 'verified_upstream=%s\n' "${upstream_tip}" >>"${GITHUB_OUTPUT}"
-  printf 'verified_author_login=%s\n' "${SYNC_APP_BOT_LOGIN}" >>"${GITHUB_OUTPUT}"
+  printf 'verified_author_login=%s\n' "${WRITER_APP_BOT_LOGIN}" >>"${GITHUB_OUTPUT}"
   printf 'verified_author_id=%s\n' "${trusted_author_id}" >>"${GITHUB_OUTPUT}"
   printf 'verified_author_type=%s\n' "${trusted_author_type}" >>"${GITHUB_OUTPUT}"
   printf 'verified_body_sha256=%s\n' "${verified_body_sha256}" >>"${GITHUB_OUTPUT}"

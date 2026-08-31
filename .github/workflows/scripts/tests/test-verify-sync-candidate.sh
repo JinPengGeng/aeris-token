@@ -50,6 +50,8 @@ sync:
   base_branch: main
   branch: automation/sync-upstream
   state_file: .github/upstream-sync-state.json
+  fail_closed: true
+  autonomous_merge: eligible
 resource_bounds:
   fetch_timeout_seconds: 90
   max_received_bytes: 268435456
@@ -65,11 +67,51 @@ resource_bounds:
   max_tree_entries: 500000
   max_diff_bytes: 33554432
 matching:
+  syntax: aeris-glob-v1
   enforced_fork_owned_subset: exact_or_directory_recursive
+  precedence:
+    - sensitive
+    - review_required
+    - fork_owned
+    - generated
+    - upstream_owned
+  default: review_required
 fork_owned:
   - .github/upstream-sync-policy.yml
   - .github/upstream-sync-state.json
   - .github/workflows/**
+review_required:
+  - .github/**
+sensitive:
+  - .gitmodules
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/*.p12"
+generated: []
+upstream_owned:
+  - "**"
+conflicts:
+  overwrite_unknown_tip: false
+  create_or_update_alert: true
+  preserve_existing_branch_and_pr: true
+  require_explicit_adoption_of_resolution: true
+  ai_resolution:
+    enabled: true
+    profile: aeris-sync-conflict-v2
+    required_pre_conflict_verdict: eligible
+    allowed_type: modify_modify_utf8_text
+    allowed_mode: "100644"
+    maximum_files: 4
+    maximum_bytes_per_file: 16384
+    maximum_total_input_bytes: 65536
+    resolver_model_variable: AERIS_AI_MODEL_CONFLICT_RESOLVER
+    reviewer_model_variable: AERIS_AI_MODEL_CONFLICT_REVIEWER
+    require_distinct_model_ids: true
+    require_complete_resolution: true
+    require_independent_review_pass: true
+    allow_non_conflict_edits: false
+    allow_sensitive_or_review_required_paths: false
+    allow_binary_rename_delete_mode_or_case_ambiguity: false
 YAML
 }
 
@@ -137,7 +179,7 @@ run_verifier() {
   local expected_head="$1"
   : >"${OUTPUT}"
   PATH="${FAKE_BIN}:${PATH}" PR_JSON="${PR_JSON}" SYNC_APP_BOT_ID="${SYNC_APP_BOT_ID}" \
-    AERIS_AUTONOMY_EXPIRES_AT='2099-01-01T00:00:00Z' AERIS_SYNC_APP_SLUG='aeris-sync' \
+    AERIS_AUTONOMY_EXPIRES_AT='2099-01-01T00:00:00Z' AERIS_WRITER_APP_SLUG='aeris-sync' \
     AERIS_TMP_ROOT="${RUN_ROOT}/tmp" GITHUB_OUTPUT="${OUTPUT}" \
     AUTONOMY_HELPER="${HELPER_ROOT}/github-autonomy.sh" \
     PREPARE_HELPER="${HELPER_ROOT}/prepare-checkpoint-sync.sh" \
@@ -255,22 +297,22 @@ for invalid_pr in '{' '[]' 'null'; do
   expect_rejected 'malformed or non-object pull request JSON' "${VALID}"
 done
 cp "${RUN_ROOT}/valid-pr.json" "${PR_JSON}"
-AERIS_TEST_PR_HTTP_STATUS=503
+export AERIS_TEST_PR_HTTP_STATUS=503
 expect_rejected 'pull request HTTP error body' "${VALID}"
 unset AERIS_TEST_PR_HTTP_STATUS
 node -e "process.stdout.write('x'.repeat(2097153))" >"${PR_JSON}"
 expect_rejected 'oversized pull request JSON' "${VALID}"
 cp "${RUN_ROOT}/valid-pr.json" "${PR_JSON}"
 for invalid_bot in '{' '[]' 'null'; do
-  AERIS_TEST_BOT_BODY="${invalid_bot}"
+  export AERIS_TEST_BOT_BODY="${invalid_bot}"
   expect_rejected 'malformed or non-object Sync App identity JSON' "${VALID}"
 done
 unset AERIS_TEST_BOT_BODY
 node -e "process.stdout.write('x'.repeat(2097153))" >"${RUN_ROOT}/oversized-bot.json"
-AERIS_TEST_BOT_BODY_FILE="${RUN_ROOT}/oversized-bot.json"
+export AERIS_TEST_BOT_BODY_FILE="${RUN_ROOT}/oversized-bot.json"
 expect_rejected 'oversized Sync App identity JSON' "${VALID}"
 unset AERIS_TEST_BOT_BODY_FILE
-AERIS_TEST_BOT_HTTP_STATUS=502
+export AERIS_TEST_BOT_HTTP_STATUS=502
 expect_rejected 'Sync App identity HTTP error body' "${VALID}"
 unset AERIS_TEST_BOT_HTTP_STATUS
 

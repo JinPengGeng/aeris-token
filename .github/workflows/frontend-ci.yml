@@ -34,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -47,6 +49,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -62,7 +66,11 @@ jobs:
         working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-ensure-required-checks.sh
         working-directory: .github/automation
+      - run: bash ../workflows/scripts/tests/test-sync-upstream-git-auth.sh
+        working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-sync-upstream-identity.sh
+        working-directory: .github/automation
+      - run: bash ../workflows/scripts/tests/test-sync-upstream-alerts.sh
         working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-bounded-git-fetch.sh
         working-directory: .github/automation
@@ -74,6 +82,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -87,6 +97,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -100,6 +112,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -113,7 +127,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      statuses: write
     needs:
       - lint
       - type_check
@@ -124,29 +137,39 @@ jobs:
     steps:
       - name: Verify required jobs
         working-directory: .
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          result=success
           if [ "${{ needs.lint.result }}" != "success" ] || \
              [ "${{ needs.type_check.result }}" != "success" ] || \
              [ "${{ needs.test.result }}" != "success" ] || \
              [ "${{ needs.build.result }}" != "success" ] || \
              [ "${{ needs.automation.result }}" != "success" ]; then
-            result=failure
-          fi
-
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            gh api \
-              --method POST \
-              "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-              -f state="${result}" \
-              -f context="Frontend CI / check" \
-              -f description="Frontend CI ${result}" \
-              -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          fi
-
-          if [ "${result}" != "success" ]; then
             echo "Frontend CI failed"
             exit 1
           fi
+
+  publish_dispatch_status:
+    name: Publish dispatch status
+    runs-on: ubuntu-latest
+    needs: check
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - name: Publish Frontend CI status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_RESULT: ${{ needs.check.result }}
+        run: |
+          result=success
+          if [ "${CHECK_RESULT}" != "success" ]; then
+            result=failure
+          fi
+
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state="${result}" \
+            -f context="Frontend CI / check" \
+            -f description="Frontend CI ${result}" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"

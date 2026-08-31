@@ -1,5 +1,5 @@
-# Path ownership contract for checkpoint-based upstream sync. Rules use
-# gitignore-style globs and the precedence listed below.
+# Path ownership contract for checkpoint-based upstream sync. Rules use the
+# deliberately small aeris-glob-v1 matcher implemented by the sync runtime.
 version: 1
 
 upstream:
@@ -12,6 +12,7 @@ sync:
   state_file: .github/upstream-sync-state.json
   pull_request_limit: 1
   fail_closed: true
+  autonomous_merge: eligible
 
 # These are compiled ceilings in bounded-git-fetch.sh. They are intentionally
 # generous relative to the current ~52 MiB / 70k-object repository, while still
@@ -32,11 +33,12 @@ resource_bounds:
   max_diff_bytes: 33554432
 
 matching:
-  syntax: gitignore
+  syntax: aeris-glob-v1
   enforced_fork_owned_subset: exact_or_directory_recursive
   precedence:
-    - fork_owned
+    - sensitive
     - review_required
+    - fork_owned
     - generated
     - upstream_owned
   default: review_required
@@ -71,6 +73,13 @@ review_required:
   - "**/migrations/**"
   - "**/security/**"
 
+# These paths are not safe to advance past, even through a manual sync PR.
+sensitive:
+  - .gitmodules
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/*.p12"
+
 generated: []
 
 upstream_owned:
@@ -94,6 +103,23 @@ conflicts:
   overwrite_unknown_tip: false
   create_or_update_alert: true
   require_explicit_resolution_adoption: true
+  ai_resolution:
+    enabled: true
+    profile: aeris-sync-conflict-v2
+    required_pre_conflict_verdict: eligible
+    allowed_type: modify_modify_utf8_text
+    allowed_mode: "100644"
+    maximum_files: 4
+    maximum_bytes_per_file: 16384
+    maximum_total_input_bytes: 65536
+    resolver_model_variable: AERIS_AI_MODEL_CONFLICT_RESOLVER
+    reviewer_model_variable: AERIS_AI_MODEL_CONFLICT_REVIEWER
+    require_distinct_model_ids: true
+    require_complete_resolution: true
+    require_independent_review_pass: true
+    allow_non_conflict_edits: false
+    allow_sensitive_or_review_required_paths: false
+    allow_binary_rename_delete_mode_or_case_ambiguity: false
 
 workflow_drift:
   action: create_or_update_issue

@@ -34,9 +34,9 @@ if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(expectedRep
 for (const [label, value] of [['expected head', expectedHead], ['actual parent', actualParent]]) {
   if (!/^[0-9a-f]{40}$/.test(value)) fail(`${label} is not a full lowercase SHA`);
 }
-if (!/^[a-z0-9][a-z0-9-]{0,99}$/.test(syncAppSlug)) fail('Sync App slug is invalid');
+if (!/^[a-z0-9][a-z0-9-]{0,99}$/.test(syncAppSlug)) fail('Writer App slug is invalid');
 if (!/^[1-9][0-9]*$/.test(expectedAuthorId) || expectedAuthorType !== 'Bot') {
-  fail('trusted Sync App bot identity is invalid');
+  fail('trusted Writer App bot identity is invalid');
 }
 
 let pr;
@@ -83,7 +83,7 @@ if (!/^[0-9a-f]{40}$/.test(pr.base.sha)) fail('pull request base SHA is invalid'
 
 if (pr.user.login !== `${syncAppSlug}[bot]` ||
     String(pr.user.id) !== expectedAuthorId || pr.user.type !== expectedAuthorType) {
-  fail('pull request author is not the exact trusted Sync App bot identity');
+  fail('pull request author is not the exact trusted Writer App bot identity');
 }
 
 const body = pr.body;

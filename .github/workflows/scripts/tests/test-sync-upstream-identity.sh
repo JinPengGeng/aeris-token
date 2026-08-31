@@ -18,7 +18,7 @@ assert_eq() {
 }
 
 run_identity_case() {
-  local name="$1" login="$2" comment_id="$3"
+  local name="$1" login="$2" comment_id="$3" expected_posts="${4:-0}" exercise_pr_comment="${5:-false}"
   local root="${RUN_ROOT}/${name}" fake_bin="${RUN_ROOT}/${name}/bin"
   local calls="${RUN_ROOT}/${name}/gh-calls" harness="${RUN_ROOT}/${name}/harness.sh"
   mkdir -p "${fake_bin}"
@@ -30,10 +30,55 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${GH_CALLS}"
 case "$*" in
   *'api --method GET repos/example/repo/issues/42/comments'*'-f page=1'*)
-    printf '[{"id":1,"user":{"login":"%s"},"body":"<!-- upstream-sync-once -->"},{"id":%s,"user":{"login":"%s"},"body":"<!-- upstream-sync-pending-tip:old -->"}]\n' \
-      "${COMMENT_LOGIN}" "${COMMENT_ID}" "${COMMENT_LOGIN}"
+    case "${AERIS_TEST_CHANNEL:-}" in
+      issue)
+        [[ "${GH_TOKEN}" == test-issues-token ]] || {
+          printf 'ordinary issue comment lookup used the wrong token channel\n' >&2
+          exit 1
+        }
+        ;;
+      writer)
+        [[ "${GH_TOKEN}" == test-writer-token ]] || {
+          printf 'PR comment lookup used the wrong token channel\n' >&2
+          exit 1
+        }
+        ;;
+      *)
+        printf 'comment lookup did not declare its channel\n' >&2
+        exit 1
+        ;;
+    esac
+    printf '[{"id":1,"user":{"login":"%s"},"body":"<!-- upstream-sync-once -->"}' \
+      "${COMMENT_LOGIN}"
+    if [[ -n "${COMMENT_ID}" ]]; then
+      printf ',{"id":%s,"user":{"login":"%s"},"body":"<!-- upstream-sync-pending-tip:old -->"}' \
+        "${COMMENT_ID}" "${COMMENT_LOGIN}"
+    fi
+    printf ']\n'
     ;;
-  *'--method PATCH repos/example/repo/issues/comments/'*) ;;
+  *'--method PATCH repos/example/repo/issues/comments/'*)
+    [[ "${GH_TOKEN}" == test-writer-token ]] || {
+      printf 'pending-tip update used the wrong token channel\n' >&2
+      exit 1
+    }
+    ;;
+  *'--method POST repos/example/repo/issues/42/comments'*)
+    [[ "${GH_TOKEN}" == test-writer-token ]] || {
+      printf 'pending-tip creation used the wrong token channel\n' >&2
+      exit 1
+    }
+    if [[ "$*" == *'upstream-sync-pending-tip:'* ]]; then
+      [[ "${EXPECT_PENDING_POST}" == true ]] || {
+        printf 'unexpected pending-tip REST comment creation\n' >&2
+        exit 1
+      }
+    else
+      [[ "${EXPECT_PR_POST}" == true ]] || {
+        printf 'unexpected PR REST comment creation\n' >&2
+        exit 1
+      }
+    fi
+    ;;
   *) printf 'unexpected gh invocation: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
@@ -42,20 +87,29 @@ EOF
   awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/bounded-git-fetch.sh" >"${root}/bounded-git-fetch.sh"
   sed '/^mapfile -t sync_identity /,$d' \
     "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
-  cat >>"${harness}" <<'EOF'
-issue_comment_once 42 once 'must not duplicate'
-set_pending_tip 42 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+cat >>"${harness}" <<'EOF'
+AERIS_TEST_CHANNEL=issue issue_comment_once 42 once 'must not duplicate'
+AERIS_TEST_CHANNEL=writer set_pending_tip 42 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+if [[ "${EXERCISE_PR_COMMENT:-false}" == true ]]; then
+  AERIS_TEST_CHANNEL=writer pr_comment_once 42 pr-once 'writer PR comment'
+fi
 EOF
 
   PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" COMMENT_ID="${comment_id}" COMMENT_LOGIN="${login}" \
+    EXPECT_PENDING_POST="$([[ "${expected_posts}" -ge 1 ]] && printf true || printf false)" \
+    EXPECT_PR_POST="${exercise_pr_comment}" EXERCISE_PR_COMMENT="${exercise_pr_comment}" GH_TOKEN=test-writer-token \
     GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
-    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_ISSUES_GH_TOKEN=test-issues-token AERIS_WRITER_APP_SLUG=aeris-writer \
     bash "${harness}"
 
-  assert_eq 0 "$(grep -Ec -- '--method POST|^pr comment ' "${calls}" || true)" \
-    "${name} comments must not be duplicated"
-  assert_eq 1 "$(grep -c -- "--method PATCH repos/example/repo/issues/comments/${comment_id}" "${calls}" || true)" \
-    "${name} pending-tip comment must be updated"
+  assert_eq "${expected_posts}" "$(grep -c -- '--method POST repos/example/repo/issues/42/comments' "${calls}" || true)" \
+    "${name} comment writes must use REST"
+  assert_eq 0 "$(grep -c -- '^pr comment ' "${calls}" || true)" \
+    "${name} PR comments must not use GraphQL CLI"
+  if [[ -n "${comment_id}" ]]; then
+    assert_eq 1 "$(grep -c -- "--method PATCH repos/example/repo/issues/comments/${comment_id}" "${calls}" || true)" \
+      "${name} pending-tip comment must be updated"
+  fi
   grep -q 'api --method GET repos/example/repo/issues/42/comments' "${calls}" ||
     fail "${name} omitted the bounded comments read"
   ! grep -q -- '--paginate' "${calls}" || fail "${name} used unbounded pagination"
@@ -106,7 +160,7 @@ EOF
   chmod +x "${hook}"
   cd "${source}"
   GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
-    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_WRITER_APP_SLUG=aeris-sync AERIS_ISSUES_GH_TOKEN=test-issues-token \
     AERIS_SYNC_TEST_MODE=true AERIS_SYNC_TEST_FIXTURE=true \
     AERIS_SYNC_BEFORE_FINAL_REF_FENCE_HOOK="${hook}" DRIFT_SHA="${drift}" \
     EXPECTED_BASE="${stable}" EXPECTED_UPSTREAM="${stable}" EXPECTED_HEAD="${stable}" \
@@ -197,7 +251,7 @@ EOF
   cd "${source}"
   PATH="${fake_bin}:${PATH}" PR_JSON="${pr_json}" GITHUB_OUTPUT="${root}/output" \
     GITHUB_REPOSITORY=example/repo AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z \
-    AERIS_SYNC_APP_SLUG=aeris-sync AERIS_SYNC_TEST_MODE=true AERIS_SYNC_TEST_FIXTURE=true \
+    AERIS_WRITER_APP_SLUG=aeris-sync AERIS_ISSUES_GH_TOKEN=test-issues-token AERIS_SYNC_TEST_MODE=true AERIS_SYNC_TEST_FIXTURE=true \
     AERIS_SYNC_AFTER_PUBLISH_REF_FENCE_HOOK="${metadata_hook}" \
     STABLE_SHA="${stable}" EXPECTED_BODY="${body}" bash "${harness}"
 
@@ -213,7 +267,7 @@ fs.writeFileSync(process.argv[2], JSON.stringify({
 NODE
   PATH="${fake_bin}:${PATH}" PR_JSON="${pr_json}" DRIFT_SHA="${drift}" \
     GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
-    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_WRITER_APP_SLUG=aeris-sync AERIS_ISSUES_GH_TOKEN=test-issues-token \
     AERIS_SYNC_TEST_MODE=true AERIS_SYNC_TEST_FIXTURE=true \
     AERIS_SYNC_BEFORE_SUCCESS_REF_FENCE_HOOK="${head_hook}" \
     STABLE_SHA="${stable}" EXPECTED_BODY="${body}" bash "${harness}"
@@ -253,7 +307,7 @@ EOF
     set +e
     PATH="${fake_bin}:${PATH}" REPOSITORY_JSON="${repository_json}" UPSTREAM_JSON="${upstream_json}" BOT_JSON="${bot_json}" \
       GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
-      AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+      AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_WRITER_APP_SLUG=aeris-sync AERIS_ISSUES_GH_TOKEN=test-issues-token \
       bash "${harness}" >/dev/null 2>&1
     status=$?
     set -e
@@ -265,7 +319,7 @@ EOF
     set +e
     PATH="${fake_bin}:${PATH}" REPOSITORY_JSON="${repository_json}" UPSTREAM_JSON="${upstream_json}" BOT_JSON="${bot_json}" \
       GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
-      AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+      AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_WRITER_APP_SLUG=aeris-sync AERIS_ISSUES_GH_TOKEN=test-issues-token \
       bash "${harness}" >/dev/null 2>&1
     status=$?
     set -e
@@ -275,7 +329,7 @@ EOF
   set +e
   PATH="${fake_bin}:${PATH}" REPOSITORY_JSON="${repository_json}" UPSTREAM_JSON="${upstream_json}" BOT_JSON="${bot_json}" \
     GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
-    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_WRITER_APP_SLUG=aeris-sync AERIS_ISSUES_GH_TOKEN=test-issues-token \
     bash "${harness}" >/dev/null 2>&1
   status=$?
   set -e
@@ -293,7 +347,7 @@ run_bounded_api_pagination_cases() {
   awk '{ sub(/\r$/, ""); print }' "${SCRIPT_ROOT}/bounded-git-fetch.sh" >"${root}/bounded-git-fetch.sh"
   sed '/^mapfile -t sync_identity /,$d' "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
   cat >>"${harness}" <<'EOF'
-aeris_read_bounded_api_array_pages \
+aeris_read_bounded_api_array_pages aeris_bounded_gh \
   repos/example/repo/items "${OUTPUT_JSON}" 'pagination fixture'
 EOF
   cat >"${fake_bin}/gh" <<'EOF'
@@ -329,7 +383,7 @@ EOF
 
   PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_MODE=normal OUTPUT_JSON="${output_json}" \
     GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
-    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_WRITER_APP_SLUG=aeris-sync AERIS_ISSUES_GH_TOKEN=test-issues-token \
     bash "${harness}"
   assert_eq 101 "$(jq 'length' "${output_json}")" \
     'bounded pagination must aggregate every proven page'
@@ -339,7 +393,7 @@ EOF
   set +e
   PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_MODE=overflow OUTPUT_JSON="${output_json}" \
     GITHUB_OUTPUT="${root}/output" GITHUB_REPOSITORY=example/repo \
-    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_SYNC_APP_SLUG=aeris-sync \
+    AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z AERIS_WRITER_APP_SLUG=aeris-sync AERIS_ISSUES_GH_TOKEN=test-issues-token \
     bash "${harness}" >/dev/null 2>&1
   status=$?
   set -e
@@ -348,8 +402,10 @@ EOF
   ! grep -q -- '--paginate' "${calls}" || fail 'bounded pagination delegated to gh --paginate'
 }
 
-run_identity_case app 'aeris-sync[bot]' 102
+run_identity_case app 'aeris-writer[bot]' 102
 run_identity_case legacy 'github-actions[bot]' 202
+run_identity_case rest-create 'aeris-writer[bot]' '' 1
+run_identity_case pr-comment 'aeris-writer[bot]' 102 1 true
 run_publication_fence_drift_case
 run_post_publish_pr_fence_cases
 run_authoritative_identity_json_cases

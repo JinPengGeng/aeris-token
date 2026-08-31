@@ -51,8 +51,18 @@ upstream:
   branch: main
 sync:
   state_file: .github/upstream-sync-state.json
+  fail_closed: true
+  autonomous_merge: eligible
 matching:
+  syntax: aeris-glob-v1
   enforced_fork_owned_subset: exact_or_directory_recursive
+  precedence:
+    - sensitive
+    - review_required
+    - fork_owned
+    - generated
+    - upstream_owned
+  default: review_required
 fork_owned:
   - .github/upstream-sync-policy.yml
   - .github/upstream-sync-state.json
@@ -60,6 +70,36 @@ fork_owned:
   - .github/workflows/**
 review_required:
   - .github/**
+sensitive:
+  - .gitmodules
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/*.p12"
+generated: []
+upstream_owned:
+  - "**"
+conflicts:
+  overwrite_unknown_tip: false
+  create_or_update_alert: true
+  preserve_existing_branch_and_pr: true
+  require_explicit_adoption_of_resolution: true
+  ai_resolution:
+    enabled: true
+    profile: aeris-sync-conflict-v2
+    required_pre_conflict_verdict: eligible
+    allowed_type: modify_modify_utf8_text
+    allowed_mode: "100644"
+    maximum_files: 4
+    maximum_bytes_per_file: 16384
+    maximum_total_input_bytes: 65536
+    resolver_model_variable: AERIS_AI_MODEL_CONFLICT_RESOLVER
+    reviewer_model_variable: AERIS_AI_MODEL_CONFLICT_REVIEWER
+    require_distinct_model_ids: true
+    require_complete_resolution: true
+    require_independent_review_pass: true
+    allow_non_conflict_edits: false
+    allow_sensitive_or_review_required_paths: false
+    allow_binary_rename_delete_mode_or_case_ambiguity: false
 YAML
 }
 
@@ -73,11 +113,87 @@ upstream:
   branch: main
 sync:
   state_file: .github/upstream-sync-state.json
+  fail_closed: true
+  autonomous_merge: eligible
 matching:
+  syntax: aeris-glob-v1
   enforced_fork_owned_subset: exact_or_directory_recursive
+  precedence:
+    - sensitive
+    - review_required
+    - fork_owned
+    - generated
+    - upstream_owned
+  default: review_required
 fork_owned:
   - ${fork_owned}
+review_required:
+  - .github/**
+sensitive:
+  - .gitmodules
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/*.p12"
+generated: []
+upstream_owned:
+  - "**"
+conflicts:
+  overwrite_unknown_tip: false
+  create_or_update_alert: true
+  preserve_existing_branch_and_pr: true
+  require_explicit_adoption_of_resolution: true
+  ai_resolution:
+    enabled: true
+    profile: aeris-sync-conflict-v2
+    required_pre_conflict_verdict: eligible
+    allowed_type: modify_modify_utf8_text
+    allowed_mode: "100644"
+    maximum_files: 4
+    maximum_bytes_per_file: 16384
+    maximum_total_input_bytes: 65536
+    resolver_model_variable: AERIS_AI_MODEL_CONFLICT_RESOLVER
+    reviewer_model_variable: AERIS_AI_MODEL_CONFLICT_REVIEWER
+    require_distinct_model_ids: true
+    require_complete_resolution: true
+    require_independent_review_pass: true
+    allow_non_conflict_edits: false
+    allow_sensitive_or_review_required_paths: false
+    allow_binary_rename_delete_mode_or_case_ambiguity: false
 YAML
+}
+
+write_executor_registry() {
+  mkdir -p .github
+  cat >.github/ai-executors.json <<'JSON'
+{
+  "schema_version": 1,
+  "executors": [
+    {
+      "id": "openai-chat-v1",
+      "kind": "completion",
+      "protocol": "openai-chat-completions-v1"
+    },
+    {
+      "id": "openai-responses-v1",
+      "kind": "completion",
+      "protocol": "openai-responses-v1"
+    },
+    {
+      "id": "codex-action-v1",
+      "kind": "workspace_candidate",
+      "protocol": "aeris-workspace-candidate-v1",
+      "action_sha": "52fe01ec70a42f454c9d2ebd47598f9fd6893d56",
+      "tool_version": "0.148.0"
+    }
+  ],
+  "routes": {
+    "agent_analysis": "openai-chat-v1",
+    "sync_conflict_resolver": "openai-chat-v1",
+    "sync_conflict_reviewer": "openai-chat-v1",
+    "candidate": "codex-action-v1"
+  }
+}
+JSON
 }
 
 prepare() {
@@ -159,6 +275,10 @@ test_fork_owned_filter_and_state_advance() {
 
   output="$(prepare "${main}" "${upstream_tip}")"
   assert_eq clean "$(sed -n 's/^state=//p' <<<"${output}")" 'filtered merge state'
+  assert_eq false "$(sed -n 's/^autonomous_eligible=//p' <<<"${output}")" \
+    'review-required backlog autonomous eligibility'
+  assert_eq manual_review "$(sed -n 's/^policy_verdict=//p' <<<"${output}")" \
+    'review-required backlog verdict'
   assert_eq 3 "$(sed -n 's/^filtered_paths=//p' <<<"${output}")" 'filtered path count'
   tree="$(tree_from_output "${output}")"
   assert_eq 'upstream next' "$(git show "${tree}:app.txt")" 'upstream app change'
@@ -177,8 +297,8 @@ test_fork_owned_filter_and_state_advance() {
 
 test_exact_path_and_recursive_directory_filter() {
   local case_name repo root checkpoint upstream_tip main output tree expected_filtered
-  local expected_foo expected_nested
-  for case_name in exact recursive; do
+  local expected_foo expected_nested expected_eligible expected_verdict
+  for case_name in exact recursive policy-manual; do
     repo="${RUN_ROOT}/${case_name}-path-filter"
     new_repo "${repo}"
     cd "${repo}"
@@ -201,16 +321,26 @@ test_exact_path_and_recursive_directory_filter() {
 
     git switch -qc main "${root}"
     write_state "${checkpoint}"
-    if [[ "${case_name}" == exact ]]; then
+    if [[ "${case_name}" == exact || "${case_name}" == policy-manual ]]; then
       write_policy_with_fork_owned 'docs/foo.md'
       expected_filtered=1
       expected_foo='foo v0'
       expected_nested='nested v1'
+      if [[ "${case_name}" == policy-manual ]]; then
+        sed -i 's/autonomous_merge: eligible/autonomous_merge: manual/' .github/upstream-sync-policy.yml
+        expected_eligible=false
+        expected_verdict=manual_review
+      else
+        expected_eligible=true
+        expected_verdict=eligible
+      fi
     else
       write_policy_with_fork_owned 'docs/**'
       expected_filtered=2
       expected_foo='foo v0'
       expected_nested='nested v0'
+      expected_eligible=true
+      expected_verdict=eligible
     fi
     git add .github
     git commit -qm "${case_name} fork-owned policy"
@@ -219,6 +349,10 @@ test_exact_path_and_recursive_directory_filter() {
     output="$(prepare "${main}" "${upstream_tip}")"
     assert_eq clean "$(sed -n 's/^state=//p' <<<"${output}")" \
       "${case_name} path filter state"
+    assert_eq "${expected_eligible}" "$(sed -n 's/^autonomous_eligible=//p' <<<"${output}")" \
+      "${case_name} low-risk eligibility"
+    assert_eq "${expected_verdict}" "$(sed -n 's/^policy_verdict=//p' <<<"${output}")" \
+      "${case_name} low-risk verdict"
     assert_eq "${expected_filtered}" "$(sed -n 's/^filtered_paths=//p' <<<"${output}")" \
       "${case_name} path filter count"
     tree="$(tree_from_output "${output}")"
@@ -260,6 +394,94 @@ test_non_fork_conflict() {
   set -e
   assert_eq 1 "${status}" 'non-fork conflict exit code'
   assert_eq conflict "$(sed -n 's/^state=//p' <<<"${output}")" 'non-fork conflict state'
+}
+
+test_ai_resolution_policy_controls_conflict_bundle() {
+  local repo="${RUN_ROOT}/ai-policy" root checkpoint upstream_tip main output status bundle
+  new_repo "${repo}"
+  cd "${repo}"
+
+  printf 'base\n' >shared.txt
+  write_executor_registry
+  git add shared.txt .github/ai-executors.json
+  git commit -qm 'base'
+  root="$(git rev-parse HEAD)"
+
+  git switch -qc upstream
+  git commit --allow-empty -qm 'checkpoint'
+  checkpoint="$(git rev-parse HEAD)"
+  printf 'upstream\n' >shared.txt
+  git commit -qam 'upstream conflict'
+  upstream_tip="$(git rev-parse HEAD)"
+
+  git switch -qc main "${root}"
+  printf 'fork\n' >shared.txt
+  write_state "${checkpoint}"
+  write_policy
+  git add .
+  git commit -qm 'fork conflict with AI policy'
+  main="$(git rev-parse HEAD)"
+  bundle="${RUN_ROOT}/ai-policy-artifacts/bundle.json"
+
+  set +e
+  output="$(
+    AERIS_TMP_ROOT="${RUN_ROOT}/tmp" \
+    AERIS_ARTIFACT_ROOT="${RUN_ROOT}" \
+    AERIS_CONFLICT_BUNDLE_PATH="${bundle}" \
+    AERIS_AI_MODEL_CONFLICT_RESOLVER=resolver-model \
+    AERIS_AI_MODEL_CONFLICT_REVIEWER=reviewer-model \
+    GITHUB_REPOSITORY=example/Fork GITHUB_REPOSITORY_ID=1 \
+      "${HELPER}" "${main}" "${upstream_tip}" example/Upstream main 2>/dev/null
+  )"
+  status=$?
+  set -e
+  assert_eq 1 "${status}" 'enabled AI conflict policy exit code'
+  assert_eq conflict "$(sed -n 's/^state=//p' <<<"${output}")" 'enabled AI conflict policy state'
+  [[ -f "${bundle}" ]] || fail 'enabled AI conflict policy did not produce a bundle'
+  assert_eq sync_conflict_bundle "$(node -e "const fs=require('fs');process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],'utf8')).artifact_type)" "${bundle}")" \
+    'enabled AI conflict policy artifact type'
+
+  sed -i 's/    enabled: true/    enabled: false/' .github/upstream-sync-policy.yml
+  git add .github/upstream-sync-policy.yml
+  git commit -qm 'disable AI conflict policy'
+  main="$(git rev-parse HEAD)"
+  rm -f -- "${bundle}"
+  set +e
+  output="$(
+    AERIS_TMP_ROOT="${RUN_ROOT}/tmp" \
+    AERIS_ARTIFACT_ROOT="${RUN_ROOT}" \
+    AERIS_CONFLICT_BUNDLE_PATH="${bundle}" \
+    AERIS_AI_MODEL_CONFLICT_RESOLVER=resolver-model \
+    AERIS_AI_MODEL_CONFLICT_REVIEWER=reviewer-model \
+    GITHUB_REPOSITORY=example/Fork GITHUB_REPOSITORY_ID=1 \
+      "${HELPER}" "${main}" "${upstream_tip}" example/Upstream main 2>/dev/null
+  )"
+  status=$?
+  set -e
+  assert_eq 3 "${status}" 'disabled AI conflict policy exit code'
+  assert_eq error "$(sed -n 's/^state=//p' <<<"${output}")" 'disabled AI conflict policy state'
+  [[ ! -e "${bundle}" ]] || fail 'disabled AI conflict policy produced a bundle'
+
+  sed -i 's/    enabled: false/    enabled: true/' .github/upstream-sync-policy.yml
+  sed -i 's/    maximum_files: 4/    maximum_files: 5/' .github/upstream-sync-policy.yml
+  git add .github/upstream-sync-policy.yml
+  git commit -qm 'widen unsupported AI conflict policy'
+  main="$(git rev-parse HEAD)"
+  set +e
+  output="$(
+    AERIS_TMP_ROOT="${RUN_ROOT}/tmp" \
+    AERIS_ARTIFACT_ROOT="${RUN_ROOT}" \
+    AERIS_CONFLICT_BUNDLE_PATH="${bundle}" \
+    AERIS_AI_MODEL_CONFLICT_RESOLVER=resolver-model \
+    AERIS_AI_MODEL_CONFLICT_REVIEWER=reviewer-model \
+    GITHUB_REPOSITORY=example/Fork GITHUB_REPOSITORY_ID=1 \
+      "${HELPER}" "${main}" "${upstream_tip}" example/Upstream main 2>/dev/null
+  )"
+  status=$?
+  set -e
+  assert_eq 3 "${status}" 'unsupported AI conflict policy limit exit code'
+  assert_eq error "$(sed -n 's/^state=//p' <<<"${output}")" 'unsupported AI conflict policy limit state'
+  [[ ! -e "${bundle}" ]] || fail 'unsupported AI conflict policy limit produced a bundle'
 }
 
 test_invalid_state_and_history_rewrite() {
@@ -390,13 +612,120 @@ test_unenforced_tree_stage_rejected() {
     fail 'unenforced prepare tree stage did not fail closed'
 }
 
+test_sensitive_paths_fail_closed() {
+  local case_name repo checkpoint upstream_tip main output status path
+  for case_name in sensitive; do
+    repo="${RUN_ROOT}/${case_name}-policy"
+    new_repo "${repo}"
+    cd "${repo}"
+
+    printf 'base\n' >app.txt
+    git add app.txt
+    git commit -qm 'checkpoint'
+    checkpoint="$(git rev-parse HEAD)"
+
+    git switch -qc upstream
+    if [[ "${case_name}" == sensitive ]]; then
+      path='crates/core/token.pem'
+    fi
+    mkdir -p "$(dirname "${path}")"
+    printf 'unsafe backlog\n' >"${path}"
+    git add .
+    git commit -qm "${case_name} upstream path"
+    upstream_tip="$(git rev-parse HEAD)"
+
+    git switch -qc main "${checkpoint}"
+    write_state "${checkpoint}"
+    write_policy
+    git add .github
+    git commit -qm "${case_name} policy fixture"
+    main="$(git rev-parse HEAD)"
+
+    set +e
+    output="$(prepare "${main}" "${upstream_tip}" 2>/dev/null)"
+    status=$?
+    set -e
+    assert_eq 3 "${status}" "${case_name} policy exit code"
+    assert_eq error "$(sed -n 's/^state=//p' <<<"${output}")" \
+      "${case_name} policy state"
+  done
+}
+
+test_rejected_aeris_glob_syntax() {
+  local pattern repo checkpoint main output status
+  for pattern in '!docs/**' '/docs/**' 'docs\\**' 'docs/[a-z].md' '' 'docs/'; do
+    repo="${RUN_ROOT}/rejected-pattern-${RANDOM}"
+    new_repo "${repo}"; cd "${repo}"
+    printf 'base\n' >app.txt; git add app.txt; git commit -qm base; checkpoint="$(git rev-parse HEAD)"
+    write_state "${checkpoint}"
+    cat >.github/upstream-sync-policy.yml <<YAML
+version: 1
+upstream:
+  repository: example/Upstream
+  branch: main
+sync:
+  state_file: .github/upstream-sync-state.json
+  fail_closed: true
+  autonomous_merge: eligible
+matching:
+  syntax: aeris-glob-v1
+  enforced_fork_owned_subset: exact_or_directory_recursive
+  precedence:
+    - sensitive
+    - review_required
+    - fork_owned
+    - generated
+    - upstream_owned
+  default: review_required
+fork_owned:
+  - '$pattern'
+review_required:
+  - .github/**
+sensitive:
+  - .gitmodules
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/*.p12"
+generated: []
+upstream_owned:
+  - apps/**
+YAML
+    git add .github; git commit -qm policy; main="$(git rev-parse HEAD)"
+    set +e; output="$(prepare "${main}" "${checkpoint}" 2>/dev/null)"; status=$?; set -e
+    assert_eq 3 "${status}" "rejected syntax ${pattern} exit code"
+    assert_eq error "$(sed -n 's/^state=//p' <<<"${output}")" "rejected syntax ${pattern} state"
+  done
+}
+
+test_unknown_paths_are_manual_review() {
+  local repo="${RUN_ROOT}/unknown-policy" checkpoint upstream_tip main output
+  new_repo "${repo}"
+  cd "${repo}"
+  printf 'base\n' >app.txt; git add app.txt; git commit -qm checkpoint
+  checkpoint="$(git rev-parse HEAD)"
+  git switch -qc upstream
+  printf 'unknown\n' >unclassified.txt; git add .; git commit -qm unknown
+  upstream_tip="$(git rev-parse HEAD)"
+  git switch -qc main "${checkpoint}"; write_state "${checkpoint}"; write_policy
+  sed -i 's#  - "\*\*"#  - apps/**#' .github/upstream-sync-policy.yml
+  git add .github; git commit -qm policy; main="$(git rev-parse HEAD)"
+  output="$(prepare "${main}" "${upstream_tip}")"
+  assert_eq clean "$(sed -n 's/^state=//p' <<<"${output}")" 'unknown path state'
+  assert_eq false "$(sed -n 's/^autonomous_eligible=//p' <<<"${output}")" 'unknown path eligibility'
+  assert_eq manual_review "$(sed -n 's/^policy_verdict=//p' <<<"${output}")" 'unknown path verdict'
+}
+
 test_squash_checkpoint_noop
 test_fork_owned_filter_and_state_advance
 test_exact_path_and_recursive_directory_filter
 test_non_fork_conflict
+test_ai_resolution_policy_controls_conflict_bundle
 test_invalid_state_and_history_rewrite
 test_unsupported_policy_pattern
 test_policy_identity_mismatch
 test_unenforced_tree_stage_rejected
+test_sensitive_paths_fail_closed
+test_unknown_paths_are_manual_review
+test_rejected_aeris_glob_syntax
 
 printf 'PASS prepare checkpoint sync (%s)\n' "${RUN_ROOT}"
