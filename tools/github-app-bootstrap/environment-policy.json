@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "repository": "JinPengGeng/aeris-token",
+  "default_branch": "main",
+  "environments": {
+    "writer": {"deployment_branches": ["main"], "required_reviewers": [], "wait_timer": 0},
+    "policy": {"deployment_branches": ["main"], "required_reviewers": [], "wait_timer": 0},
+    "merger": {"deployment_branches": ["main"], "required_reviewers": [], "wait_timer": 0},
+    "sync": {"deployment_branches": ["main"], "required_reviewers": [], "wait_timer": 0}
+  },
+  "release_unchanged": {"required_reviewers": ["maintainer"], "preserve_manual_approval": true}
+}

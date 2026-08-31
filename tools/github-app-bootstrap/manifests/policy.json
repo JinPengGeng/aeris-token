@@ -1,0 +1,1 @@
+{"name":"aeris-policy","description":"Repository-scoped deterministic policy check publisher for aeris-token.","url":"https://github.com/JinPengGeng/aeris-token","public":false,"hook_attributes":{"active":false},"default_permissions":{"metadata":"read","actions":"read","contents":"read","pull_requests":"read","checks":"write"},"default_events":[]}

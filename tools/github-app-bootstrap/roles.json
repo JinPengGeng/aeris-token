@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "repository": "JinPengGeng/aeris-token",
+  "roles": {
+    "writer": {
+      "app_name": "aeris-writer",
+      "app_slug": "aeris-writer",
+      "environment": "writer",
+      "enabled_variable": "AERIS_WRITER_ENABLED",
+      "app_id_variable": "AERIS_WRITER_APP_ID",
+      "app_slug_variable": "AERIS_WRITER_APP_SLUG",
+      "private_key_secret": "AERIS_WRITER_PRIVATE_KEY",
+      "additional_variables": ["AERIS_WRITER_PUBLIC_KEY"],
+      "permissions": {"metadata": "read", "contents": "write", "pull_requests": "write"}
+    },
+    "policy": {
+      "app_name": "aeris-policy",
+      "app_slug": "aeris-policy",
+      "environment": "policy",
+      "enabled_variable": "AERIS_POLICY_ENABLED",
+      "app_id_variable": "AERIS_POLICY_APP_ID",
+      "app_slug_variable": "AERIS_POLICY_APP_SLUG",
+      "private_key_secret": "AERIS_POLICY_PRIVATE_KEY",
+      "additional_variables": [],
+      "permissions": {"metadata": "read", "actions": "read", "contents": "read", "pull_requests": "read", "checks": "write"}
+    },
+    "merger": {
+      "app_name": "aeris-merger",
+      "app_slug": "aeris-merger",
+      "environment": "merger",
+      "enabled_variable": "AERIS_MERGER_ENABLED",
+      "app_id_variable": "AERIS_MERGER_APP_ID",
+      "app_slug_variable": "AERIS_MERGER_APP_SLUG",
+      "private_key_secret": "AERIS_MERGER_PRIVATE_KEY",
+      "additional_variables": [],
+      "permissions": {"metadata": "read", "actions": "read", "administration": "read", "contents": "write", "pull_requests": "write", "checks": "write"}
+    },
+    "sync": {
+      "app_name": "aeris-sync",
+      "app_slug": "aeris-sync",
+      "environment": "sync",
+      "enabled_variable": "AERIS_SYNC_APP_ENABLED",
+      "app_id_variable": "AERIS_SYNC_APP_ID",
+      "app_slug_variable": "AERIS_SYNC_APP_SLUG",
+      "private_key_secret": "AERIS_SYNC_APP_PRIVATE_KEY",
+      "additional_variables": [],
+      "permissions": {"metadata": "read", "contents": "write", "pull_requests": "write", "issues": "write", "checks": "read", "statuses": "read"}
+    }
+  },
+  "reviewer_security_identity": {"app_id": 15368, "app_slug": "github-actions"}
+}

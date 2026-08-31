@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Aeris GitHub App staged provisioning receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "repository", "configuration_digest", "status", "created_at", "updated_at", "failure", "disable_failures", "release", "rulesets", "roles"],
+  "properties": {
+    "schema_version": {"const": 5},
+    "repository": {"const": "JinPengGeng/aeris-token"},
+    "configuration_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "status": {"enum": ["in_progress", "partial_failed", "verified"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "failure": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "stage", "role"],
+          "properties": {
+            "code": {"type": "string", "pattern": "^[a-z0-9_]{3,80}$"},
+            "stage": {"type": "string", "pattern": "^[a-z0-9_]{3,80}$"},
+            "role": {"enum": [null, "writer", "policy", "merger", "sync"]}
+          }
+        }
+      ]
+    },
+    "disable_failures": {
+      "type": "array",
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "code"],
+        "properties": {
+          "role": {"enum": ["writer", "policy", "merger", "sync"]},
+          "code": {"type": "string", "pattern": "^[a-z0-9_]{3,80}$"}
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_digest", "end_digest", "checked", "unchanged", "manual_approval_verified", "reviewer_count"],
+      "properties": {
+        "start_digest": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[a-f0-9]{64}$"}]},
+        "end_digest": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[a-f0-9]{64}$"}]},
+        "checked": {"type": "boolean"},
+        "unchanged": {"type": "boolean"},
+        "manual_approval_verified": {"type": "boolean"},
+        "reviewer_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "rulesets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_branches", "merger_generation_tags"],
+      "properties": {
+        "agent_branches": {"$ref": "#/$defs/rulesetEvidence"},
+        "merger_generation_tags": {"$ref": "#/$defs/rulesetEvidence"}
+      }
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["writer", "policy", "merger", "sync"],
+      "properties": {
+        "writer": {"$ref": "#/$defs/role"},
+        "policy": {"$ref": "#/$defs/role"},
+        "merger": {"$ref": "#/$defs/role"},
+        "sync": {"$ref": "#/$defs/role"}
+      }
+    }
+  },
+  "$defs": {
+    "rulesetEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "verified", "digest"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "verified": {"type": "boolean"},
+        "digest": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[a-f0-9]{64}$"}]}
+      }
+    },
+    "namedReadback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "readback"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "value": {"type": ["string", "null"]},
+        "readback": {"type": "boolean"}
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "app_id", "app_slug", "switch", "private_key_secret", "variables", "public_key_variable", "pem_probe", "environment", "installation"],
+      "properties": {
+        "status": {"enum": ["pending", "conversion_started", "reconciliation_required", "converted", "adoption_required", "configuring", "awaiting_install", "verified", "partial_failed"]},
+        "app_id": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1}]},
+        "app_slug": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,99}$"}]},
+        "switch": {"$ref": "#/$defs/namedReadback"},
+        "private_key_secret": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "present", "updated_at"],
+          "properties": {
+            "name": {"type": "string"},
+            "present": {"type": "boolean"},
+            "updated_at": {"oneOf": [{"type": "null"}, {"type": "string", "format": "date-time"}]}
+          }
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["app_id", "app_slug"],
+          "properties": {"app_id": {"$ref": "#/$defs/namedReadback"}, "app_slug": {"$ref": "#/$defs/namedReadback"}}
+        },
+        "public_key_variable": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/namedReadback"}]},
+        "pem_probe": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["verified", "app_updated_at"],
+          "properties": {
+            "verified": {"type": "boolean"},
+            "app_updated_at": {"oneOf": [{"type": "null"}, {"type": "string", "format": "date-time"}]}
+          }
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "verified", "evidence"],
+          "properties": {
+            "name": {"type": "string"},
+            "verified": {"type": "boolean"},
+            "evidence": {
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["reviewer_count", "wait_timer", "branch_policies"],
+                  "properties": {
+                    "reviewer_count": {"const": 0},
+                    "wait_timer": {"const": 0},
+                    "branch_policies": {"const": ["main"]}
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "installation": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "app_updated_at", "account_id", "account_login", "repository_selection", "repository_id", "repository_full_name"],
+              "properties": {
+                "id": {"type": "integer", "minimum": 1},
+                "app_updated_at": {"type": "string", "format": "date-time"},
+                "account_id": {"type": "integer", "minimum": 1},
+                "account_login": {"const": "JinPengGeng"},
+                "repository_selection": {"const": "selected"},
+                "repository_id": {"type": "integer", "minimum": 1},
+                "repository_full_name": {"const": "JinPengGeng/aeris-token"}
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

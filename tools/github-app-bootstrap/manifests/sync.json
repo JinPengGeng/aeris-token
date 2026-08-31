@@ -1,0 +1,1 @@
+{"name":"aeris-sync","description":"Repository-scoped upstream synchronization publisher for aeris-token.","url":"https://github.com/JinPengGeng/aeris-token","public":false,"hook_attributes":{"active":false},"default_permissions":{"metadata":"read","contents":"write","pull_requests":"write","issues":"write","checks":"read","statuses":"read"},"default_events":[]}
