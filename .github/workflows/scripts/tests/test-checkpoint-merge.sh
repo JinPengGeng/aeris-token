@@ -248,11 +248,29 @@ test_git_helper_failure_reports_structured_error() {
   assert_eq 'state=error' "${output}" 'Git helper failure state missing'
 }
 
+test_unenforced_merge_tree_rejected() {
+  local repo="${RUN_ROOT}/unenforced-merge-tree" output status
+  new_repo "${repo}"
+  cd "${repo}"
+  printf 'base\n' >file.txt
+  git add file.txt
+  git commit -qm 'base'
+  set +e
+  output="$(GITHUB_ACTIONS=true AERIS_BOUNDED_FETCH_TEST_MODE=true \
+    AERIS_BOUNDED_FETCH_TEST_FIXTURE=true AERIS_BOUNDED_TEST_DISABLE_LIMITS=true \
+    "${HELPER}" HEAD HEAD HEAD 2>/dev/null)"
+  status=$?
+  set -e
+  assert_eq 3 "${status}" 'unenforced merge-tree must fail closed'
+  assert_eq 'state=error' "${output}" 'unenforced merge-tree state missing'
+}
+
 test_incremental_and_noop
 test_conflict_resolved_once
 test_history_rewrite_rejected
 test_invalid_ref_reports_structured_error
 test_unsupported_git_reports_structured_error
 test_git_helper_failure_reports_structured_error
+test_unenforced_merge_tree_rejected
 
 printf 'PASS checkpoint merge PoC (%s)\n' "${RUN_ROOT}"

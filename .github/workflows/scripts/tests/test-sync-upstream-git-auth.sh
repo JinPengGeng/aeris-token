@@ -72,7 +72,8 @@ EOF
 chmod +x "${fake_bin}/git"
 
 sed 's/\r$//' "${SCRIPT_ROOT}/github-autonomy.sh" >"${RUN_ROOT}/github-autonomy.sh"
-sed '/^parent="$(aeris_gh api "repos\/\${GITHUB_REPOSITORY}"/,$d' \
+sed 's/\r$//' "${SCRIPT_ROOT}/bounded-git-fetch.sh" >"${RUN_ROOT}/bounded-git-fetch.sh"
+sed '/^mapfile -t sync_identity /,$d' \
   "${SCRIPT_ROOT}/sync-upstream.sh" | sed 's/\r$//' >"${harness}"
 cat >>"${harness}" <<'EOF'
 aeris_git_network fetch --no-tags origin main

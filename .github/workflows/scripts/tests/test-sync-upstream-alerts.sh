@@ -33,13 +33,15 @@ case "$*" in
     }
     printf '42\n'
     ;;
-  *'/issues/42/comments?per_page=100'*)
+  *'api --method GET repos/example/repo/issues/42/comments'*'-f page=1'*)
     [[ "${GH_TOKEN}" == test-issues-token ]] || {
       printf 'ordinary issue comment lookup used the wrong token channel\n' >&2
       exit 1
     }
     if [[ -f "${GH_COMMENT_CREATED}" ]]; then
-      printf '%s\n' '<!-- upstream-sync-alert:conflict:deadbeef -->'
+      printf '%s\n' '[{"id":1,"user":{"login":"aeris-writer[bot]"},"body":"<!-- upstream-sync-alert:conflict:deadbeef -->"}]'
+    else
+      printf '%s\n' '[]'
     fi
     ;;
   *'--method POST repos/example/repo/issues/42/comments'*)
@@ -56,7 +58,8 @@ EOF
 
   harness="${RUN_ROOT}/alert-harness.sh"
   cp "${SCRIPT_ROOT}/github-autonomy.sh" "${RUN_ROOT}/github-autonomy.sh"
-  sed '/^parent="$(aeris_gh api "repos\/\${GITHUB_REPOSITORY}"/,$d' "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
+  cp "${SCRIPT_ROOT}/bounded-git-fetch.sh" "${RUN_ROOT}/bounded-git-fetch.sh"
+  sed '/^mapfile -t sync_identity /,$d' "${SCRIPT_ROOT}/sync-upstream.sh" >"${harness}"
   printf '%s\n' 'report_sync_alert conflict deadbeef "conflict detected"' >>"${harness}"
 
   PATH="${fake_bin}:${PATH}" GH_CALLS="${calls}" GH_COMMENT_CREATED="${RUN_ROOT}/comment-created" GITHUB_OUTPUT="${RUN_ROOT}/output" GITHUB_REPOSITORY=example/repo AERIS_AUTONOMY_EXPIRES_AT=2099-01-01T00:00:00Z \

@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BOUNDED_FETCH_HELPER="${BOUNDED_FETCH_HELPER:-${SCRIPT_ROOT}/bounded-git-fetch.sh}"
+source "${BOUNDED_FETCH_HELPER}"
+
+bounded_tree_git() {
+  aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git "$@"
+}
+
 base="${1:?checkpoint base is required}"
 ours="${2:?fork base is required}"
 theirs="${3:?upstream tip is required}"
@@ -31,7 +39,7 @@ require_git_capabilities
 for entry in "checkpoint:${base}" "fork:${ours}" "upstream:${theirs}"; do
   label="${entry%%:*}"
   ref="${entry#*:}"
-  resolved="$(git rev-parse --verify "${ref}^{commit}" 2>/dev/null)" ||
+  resolved="$(bounded_tree_git rev-parse --verify "${ref}^{commit}" 2>/dev/null)" ||
     fail_error "invalid ${label} commit: ${ref}"
   case "${label}" in
     checkpoint) base="${resolved}" ;;
@@ -41,7 +49,7 @@ for entry in "checkpoint:${base}" "fork:${ours}" "upstream:${theirs}"; do
 done
 
 set +e
-git merge-base --is-ancestor "${base}" "${theirs}"
+bounded_tree_git merge-base --is-ancestor "${base}" "${theirs}"
 ancestor_status=$?
 set -e
 
@@ -56,7 +64,7 @@ esac
 
 set +e
 merge_output="$({
-  git merge-tree \
+  bounded_tree_git merge-tree \
     --write-tree \
     --name-only \
     --merge-base="${base}" \
@@ -78,7 +86,7 @@ if ((merge_status != 0)); then
 fi
 
 tree="${merge_output%%$'\n'*}"
-git rev-parse --verify "${tree}^{tree}" >/dev/null 2>&1 ||
+bounded_tree_git rev-parse --verify "${tree}^{tree}" >/dev/null 2>&1 ||
   fail_error 'git merge-tree returned an invalid tree'
 
 printf 'state=clean\n'

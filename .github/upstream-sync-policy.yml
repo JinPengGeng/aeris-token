@@ -14,6 +14,24 @@ sync:
   fail_closed: true
   autonomous_merge: eligible
 
+# These are compiled ceilings in bounded-git-fetch.sh. They are intentionally
+# generous relative to the current ~52 MiB / 70k-object repository, while still
+# bounding a single synchronization run and its deterministic source delta.
+resource_bounds:
+  fetch_timeout_seconds: 90
+  max_received_bytes: 268435456
+  max_received_expanded_bytes: 1073741824
+  max_received_objects: 250000
+  max_import_bytes: 268435456
+  max_import_objects: 250000
+  max_process_memory_bytes: 536870912
+  max_object_bytes: 33554432
+  max_blob_bytes: 33554432
+  max_changed_blob_bytes: 268435456
+  max_changed_paths: 20000
+  max_tree_entries: 500000
+  max_diff_bytes: 33554432
+
 matching:
   syntax: aeris-glob-v1
   enforced_fork_owned_subset: exact_or_directory_recursive

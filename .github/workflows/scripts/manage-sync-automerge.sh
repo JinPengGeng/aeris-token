@@ -4,6 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/github-autonomy.sh"
 
+BASE_BRANCH="${BASE_BRANCH:-main}"
+SYNC_BRANCH="${SYNC_BRANCH:-automation/sync-upstream}"
+
 aeris_checks_gh() {
   aeris_require_active_autonomy_window || return
   GH_TOKEN="${AERIS_CHECKS_GH_TOKEN:?AERIS_CHECKS_GH_TOKEN is required}" command gh "$@"

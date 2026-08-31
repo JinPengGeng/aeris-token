@@ -31,6 +31,13 @@ const syncScript = read('.github/workflows/scripts/sync-upstream.sh');
 const autoMergeScript = read('.github/workflows/scripts/manage-sync-automerge.sh');
 const autonomyScript = read('.github/workflows/scripts/github-autonomy.sh');
 const checkDispatchScript = read('.github/workflows/scripts/ensure-required-checks.sh');
+const verifyCandidateScript = read('.github/workflows/scripts/verify-sync-candidate.sh');
+const boundedFetchScript = read('.github/workflows/scripts/bounded-git-fetch.sh');
+const prepareScript = read('.github/workflows/scripts/prepare-checkpoint-sync.sh');
+const checkpointScript = read('.github/workflows/scripts/checkpoint-merge.sh');
+const verifyCandidateMetadata = read(
+  '.github/workflows/scripts/validate-sync-candidate-metadata.cjs',
+);
 const state = JSON.parse(read('.github/upstream-sync-state.json'));
 
 for (const [name, workflow, context] of [
@@ -91,6 +98,24 @@ for (const [name, workflow, context] of [
 for (const contract of [agents, automation, sync]) {
   assert(contract.version === 1, 'all automation contracts must use version 1');
 }
+assert(
+  JSON.stringify(sync.resource_bounds) === JSON.stringify({
+    fetch_timeout_seconds: 90,
+    max_received_bytes: 268435456,
+    max_received_expanded_bytes: 1073741824,
+    max_received_objects: 250000,
+    max_import_bytes: 268435456,
+    max_import_objects: 250000,
+    max_process_memory_bytes: 536870912,
+    max_object_bytes: 33554432,
+    max_blob_bytes: 33554432,
+    max_changed_blob_bytes: 268435456,
+    max_changed_paths: 20000,
+    max_tree_entries: 500000,
+    max_diff_bytes: 33554432,
+  }),
+  'sync resource-bound constants must remain deterministic',
+);
 
 const expectedAgents = [
   'triage',
@@ -104,6 +129,15 @@ const expectedAgents = [
 assert(
   sameMembers(Object.keys(agents.agents), expectedAgents),
   'agent registry must contain exactly the approved roles',
+);
+assert(
+  boundedFetchScript.includes('AERIS_FETCH_MAX_REMOTE_REF_BYTES=4096') &&
+    boundedFetchScript.includes('AERIS_BOUNDED_NETWORK_MAX_FILE_BYTES') &&
+    boundedFetchScript.includes('aeris-remote-ref.XXXXXX') &&
+    !boundedFetchScript.includes(
+      'output="$(aeris_bounded_network_git ls-remote',
+    ),
+  'exact-ref discovery stdout must be file-bounded before shell parsing',
 );
 assert(agents.runtime.default_enabled === false, 'agent runtime must default off');
 assert(
@@ -534,6 +568,10 @@ assert(
 const checkoutStep = syncSteps.find((step) => step.name === 'Check out fork default branch');
 assert(checkoutStep?.with?.token === '${{ steps.sync_token.outputs.token }}', 'sync checkout must use the Writer App token');
 assert(
+  checkoutStep?.with?.['fetch-depth'] === 1,
+  'bootstrap checkout must not perform an unbounded full-history fetch',
+);
+assert(
   checkoutStep['timeout-minutes'] === 5,
   'authenticated checkout must remain within the reserved autonomy margin',
 );
@@ -548,11 +586,27 @@ assert(
   ),
   'checkout must reserve the conservative autonomy margin before using the App token',
 );
+const nodeSetupStep = syncSteps.find((step) => step.name === 'Set up Node.js 22');
+assert(
+  nodeSetupStep?.uses ===
+      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' &&
+    nodeSetupStep?.with?.['node-version'] === '22' &&
+    syncSteps.indexOf(nodeSetupStep) === checkoutStepIndex + 1,
+  'sync must pin Node.js 22 immediately after the bounded checkout',
+);
 const publishStep = syncSteps.find(
   (step) => step.name === 'Build and publish automation branch',
 );
 const syncValidationStep = syncSteps.find(
   (step) => step.name === 'Validate checkpoint synchronization',
+);
+assert(
+  publishStep?.['timeout-minutes'] === 15,
+  'sync publication must have a hard workflow-step deadline',
+);
+assert(
+  publishStep?.env.AERIS_BOUNDED_BOOTSTRAP_SHALLOW === 'true',
+  'sync must explicitly convert the one-commit bootstrap before bounded exact-ref fetches',
 );
 assert(
   syncValidationStep?.run.includes(
@@ -585,23 +639,135 @@ assert(
   publishStep?.env.AERIS_ISSUES_GH_TOKEN === '${{ github.token }}' &&
     syncScript.includes(': "${AERIS_ISSUES_GH_TOKEN:?AERIS_ISSUES_GH_TOKEN is required}"') &&
     syncScript.includes('aeris_issues_gh()') &&
-    syncScript.includes('issue_bot_comments() {\n  aeris_issues_gh api') &&
-    syncScript.includes('pr_bot_comments() {\n  aeris_gh api') &&
+    syncScript.includes('aeris_bounded_issues_gh()') &&
+    syncScript.includes('issue_bot_comments() {') &&
+    syncScript.includes('pr_bot_comments() {') &&
     syncScript.includes('pr_comment_once() {') &&
     syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"') &&
-    syncScript.includes('aeris_gh api \\\n      --method PATCH') &&
-    syncScript.includes('aeris_gh api --method POST \\\n      "repos/${GITHUB_REPOSITORY}/issues/${number}/comments"'),
-  'sync issue inventory uses the workflow token while pending-tip mutations use the Writer token',
+    syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" aeris_bounded_run') &&
+    syncScript.includes('aeris_bounded_gh api \\\n      --method PATCH') &&
+    syncScript.includes('aeris_bounded_gh api --method POST \\\n      "repos/${GITHUB_REPOSITORY}/issues/${number}/comments"'),
+  'sync issue inventory uses the workflow token while pending-tip mutations use the bounded Writer token',
+);
+const verifyCandidateStep = syncSteps.find(
+  (step) => step.name === 'Verify managed synchronization candidate',
 );
 const mergeStep = syncSteps.find((step) => step.name === 'Merge synchronization PR');
 const disarmCallIndex = syncScript.search(/^disarm_tracked_pr$/m);
 const rebuildLoopIndex = syncScript.search(/^for attempt in 1 2 3; do$/m);
+const producerBoundIndex = syncScript.indexOf(
+  'if ! aeris_enforce_change_bounds "${checkpoint_sha}" "${upstream_sha}"',
+);
+const producerPrepareIndex = syncScript.indexOf(
+  'prepare_output="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}"',
+);
+assert(verifyCandidateStep, 'sync workflow must verify the published candidate tree');
+assert(
+  verifyCandidateStep.env.GH_TOKEN === undefined &&
+    verifyCandidateStep.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
+    verifyCandidateStep.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}' &&
+    verifyCandidateStep.run.includes('verify-sync-candidate.sh'),
+  'candidate verification must bind the App-authored PR URL and exact published head',
+);
+assert(
+  verifyCandidateStep['timeout-minutes'] === 10,
+  'candidate verification must have a hard workflow runtime bound',
+);
+assert(
+  verifyCandidateScript.includes('"${expected_tree}" == "${actual_tree}"') &&
+    verifyCandidateScript.includes('git merge-base --is-ancestor "${checkpoint}" "${upstream_tip}"') &&
+    verifyCandidateScript.includes('"${upstream_tip}" == "${upstream_current}"') &&
+    !verifyCandidateScript.includes('--paginate'),
+  'candidate verification must regenerate the exact tree without trusting paginated metadata',
+);
+assert(
+  syncScript.includes('aeris_bounded_fetch_ref') &&
+    verifyCandidateScript.includes('aeris_bounded_fetch_ref') &&
+    syncScript.includes('AERIS_BOUNDED_FETCH_CREDENTIALLESS=true') &&
+    boundedFetchScript.includes('fetch.fsckObjects=true') &&
+    boundedFetchScript.includes('fetch.unpackLimit=0') &&
+    boundedFetchScript.includes('ulimit -f "${file_blocks}"') &&
+    boundedFetchScript.includes('ulimit -v "${memory_kib}"') &&
+    boundedFetchScript.includes('fsck --strict') &&
+    boundedFetchScript.includes('--no-tags --no-recurse-submodules --refmap=') &&
+    boundedFetchScript.includes('aeris_enforce_change_bounds') &&
+    boundedFetchScript.includes('export GIT_NO_LAZY_FETCH=1') &&
+    !boundedFetchScript.includes('>"${stage}/objects/info/alternates"'),
+  'producer and verifier must share the exact-ref bounded and fsck-verified fetch path',
+);
+assert(
+  syncScript.includes('GITHUB_API_MAX_PAGES=10') &&
+    syncScript.includes('aeris_read_bounded_api_array_pages') &&
+    syncScript.includes('aeris_bounded_gh') &&
+    !syncScript.includes('--paginate') &&
+    verifyCandidateScript.includes(
+      'aeris_bounded_run "${MAX_PR_BYTES}" curl -q',
+    ),
+  'GitHub pagination and public metadata transport must remain page, time, memory, and file bounded',
+);
+assert(
+  boundedFetchScript.includes('--no-write-fetch-head') &&
+    boundedFetchScript.includes(
+      'git update-ref "${destination}" "${expected}" "${previous_ref:-${zero}}"',
+    ) &&
+    boundedFetchScript.includes('destination changed concurrently before publication') &&
+    boundedFetchScript.includes('destination did not retain the exact validated SHA') &&
+    !boundedFetchScript.includes('aeris_bounded_rollback_import') &&
+    !boundedFetchScript.includes('caller-objects-before'),
+  'validated objects must publish through an exact-ref CAS without shared-object rollback',
+);
+assert(
+  prepareScript.includes('source "${BOUNDED_FETCH_HELPER}"') &&
+    prepareScript.includes('bounded_tree_git diff') &&
+    prepareScript.includes('bounded_tree_git read-tree') &&
+    prepareScript.includes('bounded_tree_git write-tree') &&
+    prepareScript.includes('bounded_tree_git commit-tree') &&
+    checkpointScript.includes('source "${BOUNDED_FETCH_HELPER}"') &&
+    checkpointScript.includes('bounded_tree_git merge-tree') &&
+    syncScript.includes('aeris_writer_git_push push'),
+  'all untrusted-tree preparation stages must use the fail-closed runner and publication must use the Writer credential channel',
+);
+assert(
+  boundedFetchScript.includes('git rev-parse --absolute-git-dir') &&
+    boundedFetchScript.includes('git rev-parse --git-common-dir') &&
+    boundedFetchScript.includes('git worktree list --porcelain') &&
+    boundedFetchScript.includes('repositories with linked worktrees are forbidden'),
+  'bootstrap conversion must reject linked or shared worktrees before object deletion',
+);
+assert(
+  syncScript.includes('aeris_assert_publication_refs_exact') &&
+    syncScript.includes('"${base_sha}" "${upstream_sha}" "${published_sha}"') &&
+    verifyCandidateScript.includes('AERIS_VERIFY_BEFORE_FINAL_FENCE_HOOK') &&
+    verifyCandidateScript.includes("fail 'upstream branch drifted during verification'"),
+  'producer and verifier must re-fence exact refs immediately before successful completion',
+);
+assert(
+  producerBoundIndex >= 0 &&
+    producerPrepareIndex >= 0 &&
+    producerBoundIndex < producerPrepareIndex,
+  'producer must bound the untrusted upstream tree before candidate preparation',
+);
+assert(
+  !verifyCandidateScript.includes('GH_TOKEN') &&
+    verifyCandidateScript.includes("--max-filesize \"${MAX_PR_BYTES}\"") &&
+    boundedFetchScript.includes('-c credential.helper=') &&
+    boundedFetchScript.includes('-c http.https://github.com/.extraheader='),
+  'candidate verification reads must be credentialless and resource-bounded',
+);
+assert(
+  verifyCandidateMetadata.includes('`${syncAppSlug}[bot]`') &&
+    verifyCandidateMetadata.includes("pr.user.type !== expectedAuthorType") &&
+    !verifyCandidateMetadata.includes("'github-actions[bot]'") &&
+    !verifyCandidateMetadata.includes("'app/github-actions'"),
+  'managed sync PR identity must be the exact configured Writer App bot without legacy fallback',
+);
 assert(mergeStep, 'sync workflow must expose the direct synchronization merge step');
 assert(
   mergeStep.if.includes("steps.sync.outputs.has_changes == 'true'") &&
+    mergeStep.if.includes("steps.verify.outputs.verified == 'true'") &&
     mergeStep.if.includes("steps.sync.outputs.autonomous_eligible == 'true'") &&
     mergeStep.if.includes("steps.sync.outputs.policy_verdict == 'eligible'"),
-  'direct merge must require a published synchronization change',
+  'direct merge must require a verified published synchronization change',
 );
 assert(
   mergeStep.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
@@ -646,6 +812,15 @@ assert(
   'direct merge must use one REST merge and prove the exact post-merge outcome',
 );
 assert(
+  autoMergeScript.includes('repos/${REPOSITORY}/pulls/${PR_NUMBER}') &&
+    autoMergeScript.includes('.auto_merge == null') &&
+    autoMergeScript.includes('Sync-Upstream-Policy-Verdict') &&
+    autoMergeScript.includes('.head.sha == $head_sha') &&
+    autoMergeScript.includes('.base.sha == $base_sha') &&
+    autoMergeScript.includes("fail 'pull request drifted before merge mutation'"),
+  'direct merge must revalidate the exact managed PR snapshot before mutation',
+);
+assert(
   disarmCallIndex >= 0 && rebuildLoopIndex >= 0 && disarmCallIndex < rebuildLoopIndex,
   'sync must disarm a stale auto-merge before rebuilding its fixed branch',
 );
@@ -666,9 +841,7 @@ assert(
 assert(
   syncScript.includes('WRITER_APP_BOT_LOGIN="${AERIS_WRITER_APP_SLUG}[bot]"') &&
     syncScript.includes("LEGACY_BOT_LOGIN='github-actions[bot]'") &&
-    syncScript.includes(
-      '.user.login == \\"${WRITER_APP_BOT_LOGIN}\\" or .user.login == \\"${LEGACY_BOT_LOGIN}\\"',
-    ) &&
+    syncScript.includes('.user.login == $sync or .user.login == $legacy') &&
     syncScript.includes('is_sync_automation_login'),
   'comment and PR identity checks must accept the Writer App bot and migrate legacy Actions state',
 );
@@ -680,6 +853,35 @@ assert(
 assert(
   !/(^|\n)\s*git\s+(fetch|push|ls-remote)\b/.test(syncScript),
   'authenticated Git network operations must not bypass expiry revalidation',
+);
+for (const [name, script] of [
+  ['sync-upstream.sh', syncScript],
+  ['verify-sync-candidate.sh', verifyCandidateScript],
+]) {
+  assert(
+    !/execFileSync\(\s*['"]git['"]/.test(script),
+    `${name} must not spawn an unbounded Git history read from Node`,
+  );
+  assert(
+    !/(^|\n)\s*git\s+(show|rev-parse|rev-list|cat-file|ls-tree|verify-pack)\b/.test(script),
+    `${name} history and tree reads must use bounded_tree_git`,
+  );
+}
+assert(
+  boundedFetchScript.includes('aeris_bounded_assert_credentialless_transport') &&
+    boundedFetchScript.includes('GIT_SSH_COMMAND') &&
+    boundedFetchScript.includes('SSH_ASKPASS') &&
+    boundedFetchScript.includes('GIT_CONFIG_COUNT') &&
+    boundedFetchScript.includes('url\\..*\\.(insteadof|pushinsteadof)') &&
+    boundedFetchScript.includes('credential(\\..*)?') &&
+    boundedFetchScript.includes('http\\..*'),
+  'credentialless Git transport must reject inherited environment and configuration overrides',
+);
+assert(
+  boundedFetchScript.includes('git verify-pack -v "$1" | awk') &&
+    boundedFetchScript.includes("cat-file --batch-check") &&
+    boundedFetchScript.includes('metadata_limit=$((current * 128 + 1))'),
+  'verify-pack and cat-file aggregation must be generated inside bounded pipelines',
 );
 const checkDispatchStep = syncSteps.find(
   (step) => step.name === 'Ensure required checks are dispatched',
@@ -729,10 +931,24 @@ assert(
   'workflow validation must exercise Writer App sync alert identity migration',
 );
 assert(
+  validationStep?.run.includes('test-bounded-git-fetch.sh'),
+  'workflow validation must exercise bounded Git transport failure fixtures',
+);
+assert(
+  validationStep?.run.includes('test-verify-sync-candidate.sh'),
+  'workflow validation must exercise deterministic candidate verification fixtures',
+);
+assert(
   frontendWorkflow.jobs.automation.steps.some(
     (step) => step.run === 'bash ../workflows/scripts/tests/test-github-autonomy.sh',
   ),
   'required CI must execute the fake-clock autonomy integration test',
+);
+assert(
+  frontendWorkflow.jobs.automation.steps.some(
+    (step) => step.run === 'bash ../workflows/scripts/tests/test-verify-sync-candidate.sh',
+  ),
+  'required CI must execute candidate tamper and replay fixtures',
 );
 assert(
   frontendWorkflow.jobs.automation.steps.some(
