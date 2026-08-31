@@ -128,7 +128,10 @@ tree_with_file() {
 
 make_candidate() {
   local tree="$1" base="$2" checkpoint="$3" upstream_tip="$4" duplicate="${5:-false}"
+  local second_parent="${6:-${upstream_tip}}"
   local message="${RUN_ROOT}/message" duplicate_line=''
+  local -a parent_args=(-p "${base}")
+  [[ "${second_parent}" == none ]] || parent_args+=(-p "${second_parent}")
   [[ "${duplicate}" != true ]] || duplicate_line=$'\nSync-Upstream-Base: '"${base}"
   cat >"${message}" <<EOF
 chore: sync example/Upstream@${upstream_tip}
@@ -143,7 +146,7 @@ Sync-Upstream-Base: ${base}${duplicate_line}
 EOF
   GIT_AUTHOR_NAME='github-actions[bot]' GIT_AUTHOR_EMAIL="${BOT_EMAIL}" \
     GIT_COMMITTER_NAME='github-actions[bot]' GIT_COMMITTER_EMAIL="${BOT_EMAIL}" \
-    git commit-tree "${tree}" -p "${base}" -F "${message}"
+    git commit-tree "${tree}" "${parent_args[@]}" -F "${message}"
 }
 
 write_pr() {
@@ -430,6 +433,16 @@ DUPLICATE="$(make_candidate "${EXPECTED_TREE}" "${BASE}" "${U0}" "${U1}" true)"
 publish_refs "${BASE}" "${DUPLICATE}"
 write_pr "${BASE}" "${DUPLICATE}"
 expect_rejected 'duplicate commit trailer' "${DUPLICATE}"
+
+SINGLE_PARENT="$(make_candidate "${EXPECTED_TREE}" "${BASE}" "${U0}" "${U1}" false none)"
+publish_refs "${BASE}" "${SINGLE_PARENT}"
+write_pr "${BASE}" "${SINGLE_PARENT}"
+expect_rejected 'single-parent candidate without the upstream link' "${SINGLE_PARENT}"
+
+WRONG_SECOND_PARENT="$(make_candidate "${EXPECTED_TREE}" "${BASE}" "${U0}" "${U1}" false "${U0}")"
+publish_refs "${BASE}" "${WRONG_SECOND_PARENT}"
+write_pr "${BASE}" "${WRONG_SECOND_PARENT}"
+expect_rejected 'second parent that is not the advertised upstream tip' "${WRONG_SECOND_PARENT}"
 
 publish_refs "${BASE}" "${VALID}"
 write_pr "${BASE}" "${VALID}" aeris-sync[bot] main automation/sync-upstream false

@@ -541,7 +541,9 @@ async function readBoundPull({ environment, repository, pullNumber, headSha, bas
 function validateHeadCommit({ bundle, candidate, materialization, headSha, expectedHeadTree }) {
   verifyObject(headSha, 'commit', 'published conflict head');
   const parents = gitText(['show', '-s', '--format=%P', headSha]).trim().split(/\s+/u).filter(Boolean);
-  if (parents.length !== 1 || parents[0] !== bundle.base_sha) fail('published conflict head is not a single-parent commit on the exact base');
+  if (parents.length !== 2 || parents[0] !== bundle.base_sha || parents[1] !== bundle.upstream.sha) {
+    fail('published conflict head is not a dual-parent commit on the exact base and upstream tip');
+  }
   const headTree = exactSha(gitText(['show', '-s', '--format=%T', headSha]).trim(), 'published head tree SHA');
   if (expectedHeadTree && headTree !== expectedHeadTree) fail('published head tree does not match the workflow output');
   const message = gitText(['show', '-s', '--format=%B', headSha]);

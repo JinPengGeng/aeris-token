@@ -135,8 +135,8 @@ run_helper() {
   head_commit="${FAKE_GH_HEAD_COMMIT_RESPONSE:-}"
   if [[ -z "${head_commit}" ]]; then
     message="$(printf 'Sync-Upstream-Automation: true\nSync-Upstream-Source: %s\nSync-Upstream-Base: %s\nSync-Upstream-Policy-Verdict: eligible' "${source}" "${base}")"
-    head_commit="$(jq -nc --arg head "${head}" --arg base "${base}" --arg message "${message}" \
-      '{sha:$head,parents:[{sha:$base}],commit:{message:$message}}')"
+    head_commit="$(jq -nc --arg head "${head}" --arg base "${base}" --arg upstream "${source#*@}" --arg message "${message}" \
+      '{sha:$head,parents:[{sha:$base},{sha:$upstream}],commit:{message:$message}}')"
   fi
   governance="${FAKE_GH_GOVERNANCE_RESPONSE:-}"
   if [[ -z "${governance}" ]]; then
@@ -296,7 +296,7 @@ test_merge_preflight_drift_never_mutates() {
 
 test_merge_governance_and_trailer_failures_never_mutate() {
   local case_name bin log status sha='0123456789abcdef0123456789abcdef01234567'
-  for case_name in unresolved blocking-review bad-trailer; do
+  for case_name in unresolved blocking-review bad-trailer bad-parent; do
     bin="${RUN_ROOT}/${case_name}/bin"
     log="${RUN_ROOT}/${case_name}/gh.log"
     new_fake_gh "${bin}"
@@ -307,8 +307,11 @@ test_merge_governance_and_trailer_failures_never_mutate() {
     elif [[ "${case_name}" == blocking-review ]]; then
       FAKE_GH_GOVERNANCE_RESPONSE="{\"data\":{\"repository\":{\"pullRequest\":{\"number\":42,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"automation/sync-upstream\",\"headRefOid\":\"${sha}\",\"baseRefName\":\"main\",\"baseRefOid\":\"${TEST_BASE_SHA}\",\"headRepository\":{\"nameWithOwner\":\"owner/repo\"},\"autoMergeRequest\":null,\"reviewDecision\":\"CHANGES_REQUESTED\",\"reviewThreads\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}}" \
         run_helper "${bin}" "${log}" merge owner/repo 42 "${sha}" >/dev/null 2>&1
+    elif [[ "${case_name}" == bad-trailer ]]; then
+      FAKE_GH_HEAD_COMMIT_RESPONSE="{\"sha\":\"${sha}\",\"parents\":[{\"sha\":\"${TEST_BASE_SHA}\"},{\"sha\":\"1111111111111111111111111111111111111111\"}],\"commit\":{\"message\":\"Sync-Upstream-Automation: true\\nSync-Upstream-Source: attacker/repo@1111111111111111111111111111111111111111\\nSync-Upstream-Base: ${TEST_BASE_SHA}\\nSync-Upstream-Policy-Verdict: eligible\"}}" \
+        run_helper "${bin}" "${log}" merge owner/repo 42 "${sha}" >/dev/null 2>&1
     else
-      FAKE_GH_HEAD_COMMIT_RESPONSE="{\"sha\":\"${sha}\",\"parents\":[{\"sha\":\"${TEST_BASE_SHA}\"}],\"commit\":{\"message\":\"Sync-Upstream-Automation: true\\nSync-Upstream-Source: attacker/repo@1111111111111111111111111111111111111111\\nSync-Upstream-Base: ${TEST_BASE_SHA}\\nSync-Upstream-Policy-Verdict: eligible\"}}" \
+      FAKE_GH_HEAD_COMMIT_RESPONSE="{\"sha\":\"${sha}\",\"parents\":[{\"sha\":\"${TEST_BASE_SHA}\"},{\"sha\":\"2222222222222222222222222222222222222222\"}],\"commit\":{\"message\":\"Sync-Upstream-Automation: true\\nSync-Upstream-Source: ${TEST_SOURCE}\\nSync-Upstream-Base: ${TEST_BASE_SHA}\\nSync-Upstream-Policy-Verdict: eligible\"}}" \
         run_helper "${bin}" "${log}" merge owner/repo 42 "${sha}" >/dev/null 2>&1
     fi
     status=$?
