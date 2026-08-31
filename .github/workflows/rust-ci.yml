@@ -398,6 +398,129 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
         run: sccache --show-stats
 
+  scheduler_backend_reachability:
+    name: Scheduler Backend Reachability (Not Acceptance)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: aether_scheduler_acceptance
+          POSTGRES_USER: aether
+          POSTGRES_PASSWORD: aether
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -h 127.0.0.1 -U aether -d aether_scheduler_acceptance"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=20
+          --memory=512m
+          --cpus=1
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=20
+          --memory=256m
+          --cpus=1
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ci-${{ runner.os }}
+          workspaces: . -> target
+
+      - name: Run shared-backend reachability smoke
+        env:
+          AETHER_SCHEDULER_ACCEPTANCE_POSTGRES_URL: postgres://aether:aether@127.0.0.1:5432/aether_scheduler_acceptance
+          AETHER_SCHEDULER_ACCEPTANCE_REDIS_URL: redis://127.0.0.1:6379/0
+          RUST_MIN_STACK: "16777216"
+          RUST_TEST_THREADS: "1"
+        run: |
+          set -o pipefail
+          cargo test -p aether-integration-tests \
+            --test multi_instance_scheduler_acceptance \
+            -- --ignored --exact backend_reachability_two_gateways_share_redis_and_postgres \
+            --nocapture --test-threads=1 2>&1 | tee scheduler-backend-reachability.log
+
+      - name: Upload reachability failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduler-backend-reachability-${{ github.run_id }}
+          path: scheduler-backend-reachability.log
+          if-no-files-found: error
+          retention-days: 7
+
+  issue47_multi_instance_acceptance:
+    name: Issue 47 Multi-Instance Acceptance (Blocked)
+    if: ${{ vars.AETHER_ENABLE_ISSUE47_E2E == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: aether_issue47
+          POSTGRES_USER: aether
+          POSTGRES_PASSWORD: aether
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -h 127.0.0.1 -U aether -d aether_issue47"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=20
+          --memory=512m
+          --cpus=1
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=20
+          --memory=256m
+          --cpus=1
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run all seven fail-closed E2E entries
+        env:
+          AETHER_SCHEDULER_ACCEPTANCE_POSTGRES_URL: postgres://aether:aether@127.0.0.1:5432/aether_issue47
+          AETHER_SCHEDULER_ACCEPTANCE_REDIS_URL: redis://127.0.0.1:6379/0
+          RUST_TEST_THREADS: "1"
+        run: |
+          set -o pipefail
+          cargo test -p aether-integration-tests \
+            --test issue47_multi_instance_e2e \
+            -- --ignored --nocapture --test-threads=1 2>&1 | tee issue47-acceptance.log
+
+      - name: Upload acceptance failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue47-acceptance-${{ github.run_id }}
+          path: issue47-acceptance.log
+          if-no-files-found: error
+          retention-days: 7
+
   test:
     name: Test
     runs-on: ubuntu-latest

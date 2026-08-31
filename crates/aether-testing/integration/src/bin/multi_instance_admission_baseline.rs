@@ -185,6 +185,8 @@ async fn start_gateway_pair(
         data_config: None,
         max_in_flight_requests: None,
         distributed_request_gate: Some(gate_a),
+        runtime_state: None,
+        seed_pressure_catalog: false,
         tunnel_instance_id: None,
         tunnel_relay_base_url: None,
     })
@@ -194,6 +196,8 @@ async fn start_gateway_pair(
         data_config: None,
         max_in_flight_requests: None,
         distributed_request_gate: Some(gate_b),
+        runtime_state: None,
+        seed_pressure_catalog: false,
         tunnel_instance_id: None,
         tunnel_relay_base_url: None,
     })

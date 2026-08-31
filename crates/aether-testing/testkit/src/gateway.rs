@@ -1,5 +1,7 @@
 use aether_gateway::{build_router_with_state, AppState, GatewayDataConfig};
-use aether_runtime_state::RuntimeSemaphore;
+use std::sync::Arc;
+
+use aether_runtime_state::{RuntimeSemaphore, RuntimeState};
 
 use crate::server::SpawnedServer;
 
@@ -11,6 +13,8 @@ pub struct GatewayHarnessConfig {
     pub data_config: Option<GatewayDataConfig>,
     pub max_in_flight_requests: Option<usize>,
     pub distributed_request_gate: Option<RuntimeSemaphore>,
+    pub runtime_state: Option<Arc<RuntimeState>>,
+    pub seed_pressure_catalog: bool,
     pub tunnel_instance_id: Option<String>,
     pub tunnel_relay_base_url: Option<String>,
 }
@@ -22,6 +26,8 @@ impl GatewayHarnessConfig {
             data_config: None,
             max_in_flight_requests: None,
             distributed_request_gate: None,
+            runtime_state: None,
+            seed_pressure_catalog: false,
             tunnel_instance_id: None,
             tunnel_relay_base_url: None,
         }
@@ -46,18 +52,35 @@ impl GatewayHarness {
         config: GatewayHarnessConfig,
         port: Option<u16>,
     ) -> Result<Self, String> {
-        let mut state = match config.data_config {
-            Some(data_config) => AppState::new()
+        let mut state = match (config.seed_pressure_catalog, config.data_config) {
+            (true, data_config) => {
+                let state = aether_gateway::testkit::build_openai_chat_pressure_state(
+                    aether_gateway::testkit::OpenAiChatPressureStateConfig::new(vec![format!(
+                        "{}/v1",
+                        config.upstream_base_url.trim_end_matches('/')
+                    )]),
+                )?;
+                match data_config {
+                    Some(data_config) => state.with_data_config(data_config).map_err(|err| {
+                        format!("failed to configure gateway harness data state: {err}")
+                    })?,
+                    None => state,
+                }
+            }
+            (false, Some(data_config)) => AppState::new()
                 .map_err(|err| format!("failed to build gateway harness state: {err}"))?
                 .with_data_config(data_config)
                 .map_err(|err| format!("failed to configure gateway harness data state: {err}"))?,
-            None => aether_gateway::testkit::build_openai_chat_pressure_state(
+            (false, None) => aether_gateway::testkit::build_openai_chat_pressure_state(
                 aether_gateway::testkit::OpenAiChatPressureStateConfig::new(vec![format!(
                     "{}/v1",
                     config.upstream_base_url.trim_end_matches('/')
                 )]),
             )?,
         };
+        if let Some(runtime_state) = config.runtime_state {
+            state = state.with_runtime_state(runtime_state);
+        }
         if let Some(instance_id) = config.tunnel_instance_id {
             state = state.with_tunnel_identity(instance_id, config.tunnel_relay_base_url);
         }

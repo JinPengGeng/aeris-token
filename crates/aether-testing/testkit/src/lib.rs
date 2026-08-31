@@ -1,7 +1,9 @@
 mod fixtures;
 mod redis;
+mod scheduler_acceptance;
 mod server;
 mod tracing;
+mod upstream_recorder;
 mod wait;
 
 #[cfg(feature = "gateway")]
@@ -24,8 +26,18 @@ pub use aether_loadtools::{
 pub use aether_loadtools::{BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot};
 pub use fixtures::test_trace_id;
 pub use redis::ManagedRedisServer;
+pub use scheduler_acceptance::{
+    validate_attempt_budget, validate_attempt_order, validate_denied_admission_never_sends,
+    validate_denied_admission_with_network, validate_exactly_one_half_open_probe,
+    validate_frozen_pages, validate_half_open_probe_e2e, validate_network_authority,
+    validate_no_pool_stampede, validate_no_replay_after_client_commit,
+    validate_no_replay_after_commit_with_network, validate_send_contract, AcceptanceEvent,
+    AcceptanceEventSink, AcceptanceNamespace, AttemptBudgetExpectation, ControlledCheckpoint,
+    DiagnosticTrace, FaultInjector, ManualClock, NetworkObservation, NetworkSend, TraceKind,
+};
 pub use server::{reserve_local_port, SpawnedServer};
 pub use tracing::{init_test_runtime, init_test_runtime_for, test_runtime_config};
+pub use upstream_recorder::CountingUpstreamRecorder;
 pub use wait::wait_until;
 
 #[cfg(feature = "gateway")]

@@ -198,6 +198,8 @@ async fn run_gateway_curve(
             data_config: None,
             max_in_flight_requests: Some(*limit),
             distributed_request_gate: None,
+            runtime_state: None,
+            seed_pressure_catalog: false,
             tunnel_instance_id: None,
             tunnel_relay_base_url: None,
         })
