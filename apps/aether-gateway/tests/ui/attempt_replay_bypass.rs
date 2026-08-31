@@ -10,7 +10,8 @@ mod sibling_adapter {
         let mut owner = LogicalRequestReplayOwner::new_disabled();
         let (attempt, _) = owner.begin_first_attempt().unwrap();
         let _approval = ReplayPolicyApproval::approve_disabled(&attempt).unwrap();
-        let _fresh = AttemptDispatchLifecycle::default();
+        let _fresh = AttemptDispatchLifecycle::new();
+        let _default = AttemptDispatchLifecycle::default();
     }
 }
 

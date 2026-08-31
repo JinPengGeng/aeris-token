@@ -433,7 +433,7 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
     .await;
     let replay = AttemptReplayHandle::new().map_err(replay_lifecycle_error)?;
     replay
-        .apply_request_policy("openai_responses_websocket", Some(client_event))
+        .apply_request_policy(false, Some(client_event))
         .map_err(replay_lifecycle_error)?;
 
     Ok(ResponsesProviderAttempt {

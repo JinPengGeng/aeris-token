@@ -305,13 +305,14 @@ impl AttemptReplayHandle {
     }
 
     /// Applies the conservative request-kind hooks before the physical send.
+    /// `is_compact_operation` must come from the canonical public route, not
+    /// from an internal plan kind or provider transport format.
     pub(crate) fn apply_request_policy(
         &self,
-        plan_kind: &str,
+        is_compact_operation: bool,
         body: Option<&serde_json::Value>,
     ) -> Result<(), AttemptDispatchLifecycleError> {
-        let normalized = plan_kind.trim().to_ascii_lowercase();
-        if normalized.contains("compact") {
+        if is_compact_operation {
             self.close_barrier(ReplayBarrierReason::CompactOperation)?;
         }
         if body.is_some_and(request_has_tool_surface) {
@@ -1018,20 +1019,22 @@ mod tests {
 
     #[test]
     fn compact_and_tool_request_hooks_close_before_send() {
-        for (plan_kind, body, reason) in [
+        for (is_compact_operation, body, reason) in [
             (
-                "openai_responses_compact",
+                true,
                 serde_json::json!({"input": "x"}),
                 ReplayBarrierReason::CompactOperation,
             ),
             (
-                "openai_responses",
+                false,
                 serde_json::json!({"tools": [{"type": "function", "name": "lookup"}]}),
                 ReplayBarrierReason::ToolCall,
             ),
         ] {
             let replay = AttemptReplayHandle::new().unwrap();
-            replay.apply_request_policy(plan_kind, Some(&body)).unwrap();
+            replay
+                .apply_request_policy(is_compact_operation, Some(&body))
+                .unwrap();
             assert_eq!(
                 replay.snapshot().unwrap().barrier,
                 ReplayBarrier::Closed(reason)

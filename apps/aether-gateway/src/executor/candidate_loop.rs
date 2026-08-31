@@ -77,11 +77,14 @@ fn new_replay_handle() -> Result<AttemptReplayHandle, GatewayError> {
 
 fn begin_replay_dispatch(
     replay: &AttemptReplayHandle,
-    plan_kind: &str,
+    decision: &GatewayControlDecision,
     plan: &aether_contracts::ExecutionPlan,
 ) -> Result<(), GatewayError> {
     replay
-        .apply_request_policy(plan_kind, plan.body.json_body.as_ref())
+        .apply_request_policy(
+            decision.public_path == "/v1/responses/compact",
+            plan.body.json_body.as_ref(),
+        )
         .and_then(|()| replay.mark_sent())
         .map_err(replay_error)
 }
@@ -338,7 +341,7 @@ where
         }
         prewarm_direct_reqwest_candidate_client(plan);
         let _permit = acquire_upstream_execution_gate(self.state, self.trace_id).await?;
-        begin_replay_dispatch(&self.replay, self.plan_kind, plan)?;
+        begin_replay_dispatch(&self.replay, self.decision, plan)?;
         let upstream_execution_gate_held_started_at = std::time::Instant::now();
         let execution = execute_execution_runtime_sync_with_retry_scope(
             self.state,
@@ -1094,7 +1097,7 @@ where
             LocalFailoverDecision::StopLocalFailover
         );
         let watchdog_started_at = std::time::Instant::now();
-        begin_replay_dispatch(&self.replay, self.plan_kind, plan)?;
+        begin_replay_dispatch(&self.replay, self.decision, plan)?;
         let execution = execute_stream_candidate_with_watchdog(
             self.state,
             self.trace_id,
@@ -2252,6 +2255,92 @@ mod tests {
             proxy: None,
             transport_profile: None,
             timeouts,
+        }
+    }
+
+    #[test]
+    fn replay_policy_uses_public_operation_instead_of_internal_plan_kind() {
+        let replay = new_replay_handle().expect("logical request replay owner should initialize");
+        let mut plan = test_plan(None);
+        plan.stream = false;
+        plan.client_api_format = "openai:responses:compact".to_string();
+        plan.provider_api_format = "openai:responses:compact".to_string();
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/responses",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("responses".to_string()),
+            Some("openai:responses:compact".to_string()),
+        );
+
+        begin_replay_dispatch(&replay, &decision, &plan)
+            .expect("the first physical dispatch is admitted");
+        replay
+            .authorize_classified_scheduler_retry()
+            .expect("a classified regular Responses retry consumes a permit");
+        begin_replay_dispatch(&replay, &decision, &plan)
+            .expect("the permitted next generation is admitted exactly once");
+        replay
+            .finish_quiesced()
+            .expect("the second physical dispatch settles");
+    }
+
+    #[test]
+    fn production_dispatch_adapter_blocks_compact_and_tool_replay() {
+        use crate::execution_runtime::attempt_replay::ReplayBarrierReason;
+
+        for (decision, body, reason) in [
+            (
+                GatewayControlDecision::synthetic(
+                    "/v1/responses/compact",
+                    Some("ai_public".to_string()),
+                    Some("openai".to_string()),
+                    Some("responses:compact".to_string()),
+                    Some("openai:responses:compact".to_string()),
+                ),
+                json!({"model": "gpt-test", "input": "compact this"}),
+                ReplayBarrierReason::CompactOperation,
+            ),
+            (
+                GatewayControlDecision::synthetic(
+                    "/v1/responses",
+                    Some("ai_public".to_string()),
+                    Some("openai".to_string()),
+                    Some("responses".to_string()),
+                    Some("openai:responses".to_string()),
+                ),
+                json!({
+                    "model": "gpt-test",
+                    "tools": [{"type": "function", "name": "lookup"}]
+                }),
+                ReplayBarrierReason::ToolCall,
+            ),
+        ] {
+            let replay =
+                new_replay_handle().expect("logical request replay owner should initialize");
+            let mut plan = test_plan(None);
+            plan.body = RequestBody::from_json(body);
+            begin_replay_dispatch(&replay, &decision, &plan)
+                .expect("the initial physical dispatch remains available");
+            let before = replay.snapshot().expect("snapshot should be observable");
+
+            assert_eq!(
+                replay
+                    .authorize_classified_scheduler_retry()
+                    .expect_err("conservative operations never receive a replay permit"),
+                AttemptDispatchLifecycleError::ReplayBarrierClosed(reason)
+            );
+            let after = replay
+                .snapshot()
+                .expect("snapshot should remain observable");
+            assert_eq!(after.generation, before.generation);
+            assert_eq!(after.state, before.state);
+            let error = begin_replay_dispatch(&replay, &decision, &plan)
+                .expect_err("a second physical dispatch cannot bypass permit issuance");
+            assert!(matches!(
+                error,
+                GatewayError::Internal(message) if message.contains("a physical dispatch is still in flight")
+            ));
         }
     }
 
