@@ -36,11 +36,6 @@ use super::protocol::{
 use super::registry::{LiveCallBinding, LiveCallRegistry};
 
 const MAX_LIVE_HTTP_BODY_BYTES: usize = 1024 * 1024;
-const LIVE_WEBRTC_MEDIA_REVOCATION_UNSUPPORTED_CODE: &str = "media_leg_revocation_unsupported";
-// Aether has no provider-side WebRTC call termination primitive.  The SDP
-// response hands the media leg directly to the provider, so a later auth
-// refresh can close only an Aether sideband and cannot revoke RTP media.
-const LIVE_WEBRTC_MEDIA_TERMINATION_SUPPORTED: bool = false;
 
 pub(crate) async fn maybe_handle_live_http(
     state: &AppState,
@@ -285,34 +280,6 @@ async fn handle_live_http(
         );
     };
     let lease = LivePoolLeaseGuard::new(state, &candidate);
-    // The provider media leg is handed off by the SDP response and cannot be
-    // revoked by Aether after this request. Refuse the call only after a valid
-    // candidate has been selected, preserving deterministic candidate-miss
-    // diagnostics while still guaranteeing no provider POST is attempted.
-    if !LIVE_WEBRTC_MEDIA_TERMINATION_SUPPORTED {
-        warn!(
-            event_name = "codex_live_webrtc_media_termination_unavailable",
-            log_type = "security",
-            trace_id = %request_context.trace_id,
-            transport = "webrtc",
-            mode = "call_create",
-            status_code = StatusCode::NOT_IMPLEMENTED.as_u16(),
-            code = LIVE_WEBRTC_MEDIA_REVOCATION_UNSUPPORTED_CODE,
-            termination = LIVE_WEBRTC_MEDIA_REVOCATION_UNSUPPORTED_CODE,
-            provider_id = ?candidate.execution.provider_id,
-            endpoint_id = ?candidate.execution.endpoint_id,
-            key_id = ?candidate.execution.key_id,
-            "Codex Live WebRTC call creation rejected because the provider media leg cannot be terminated by Aether"
-        );
-        lease.release().await;
-        return audited_local_live_error(
-            &mut call_audit,
-            request_context,
-            StatusCode::NOT_IMPLEMENTED,
-            "Codex Live WebRTC is unavailable because provider media termination is unsupported",
-            LIVE_WEBRTC_MEDIA_REVOCATION_UNSUPPORTED_CODE,
-        );
-    }
     let binding = LiveCallBinding::from_candidate(&candidate);
     let mut provider_session = offer.session.clone();
     provider_session
