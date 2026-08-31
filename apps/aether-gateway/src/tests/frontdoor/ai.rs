@@ -1549,10 +1549,11 @@ async fn run_openai_realtime_websocket_frontdoor_scenario() {
                 .list_usage_audits(&UsageAuditListQuery::default())
                 .await
                 .expect("Realtime usage audit list should load");
-            if let Some(record) = records
-                .into_iter()
-                .find(|record| record.request_type.as_deref() == Some("realtime"))
-            {
+            if let Some(record) = records.into_iter().find(|record| {
+                // Durable admission writes a pending row at session start;
+                // wait until the terminal event settles it.
+                record.request_type.as_deref() == Some("realtime") && record.status == "completed"
+            }) {
                 break record;
             }
             tokio::task::yield_now().await;
@@ -1953,7 +1954,11 @@ async fn run_codex_live_oauth_frontdoor_scenario(dialect: CodexLiveWebRtcTestDia
                 .await
                 .expect("Live call-create usage read should succeed")
             {
-                break usage;
+                // Durable admission writes a pending row before the upstream
+                // POST; wait until the terminal event settles it.
+                if usage.status == "completed" {
+                    break usage;
+                }
             }
             tokio::task::yield_now().await;
         }
