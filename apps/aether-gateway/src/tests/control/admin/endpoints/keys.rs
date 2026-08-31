@@ -2185,14 +2185,14 @@ async fn gateway_clears_allowed_models_when_disabling_auto_fetch_on_provider_key
 }
 
 #[test]
-fn gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch() {
+fn gateway_retains_manual_allowed_models_pending_grace_when_enabling_auto_fetch() {
     run_provider_keys_test(
-        "gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch",
-        gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch_impl,
+        "gateway_retains_manual_allowed_models_pending_grace_when_enabling_auto_fetch",
+        gateway_retains_manual_allowed_models_pending_grace_when_enabling_auto_fetch_impl,
     );
 }
 
-async fn gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch_impl() {
+async fn gateway_retains_manual_allowed_models_pending_grace_when_enabling_auto_fetch_impl() {
     let execution_runtime_hits = Arc::new(Mutex::new(0usize));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let execution_runtime = Router::new().route(
@@ -2278,9 +2278,12 @@ async fn gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch_
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["auto_fetch_models"], true);
+    // The first auto-fetch snapshot adds the discovered models, but the
+    // previously configured manual entries are retained pending the removal
+    // grace threshold instead of being silently dropped (issue #109).
     assert_eq!(
         payload["allowed_models"],
-        json!(["gpt-4.1", "gpt-5", "gpt-o1"])
+        json!(["gpt-4.1", "gpt-5", "gpt-o1", "manual-a", "manual-b"])
     );
     assert_eq!(payload["last_models_fetch_error"], serde_json::Value::Null);
     assert_eq!(
@@ -2296,7 +2299,17 @@ async fn gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch_
     assert!(reloaded[0].auto_fetch_models);
     assert_eq!(
         reloaded[0].allowed_models,
-        Some(json!(["gpt-4.1", "gpt-5", "gpt-o1"]))
+        Some(json!([
+            "gpt-4.1", "gpt-5", "gpt-o1", "manual-a", "manual-b"
+        ]))
+    );
+    assert_eq!(
+        reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("model_fetch"))
+            .and_then(|metadata| metadata.get("pending_removal")),
+        Some(&json!({"manual-a": 1, "manual-b": 1}))
     );
     assert_eq!(reloaded[0].locked_models, None);
 

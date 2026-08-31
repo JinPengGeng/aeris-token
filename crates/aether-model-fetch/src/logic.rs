@@ -720,6 +720,200 @@ pub fn apply_model_filters(
     filtered.into_iter().collect()
 }
 
+/// `upstream_metadata` namespace used to persist model-fetch reconciliation
+/// state and the audit trail of the most recent sync.
+pub const MODEL_FETCH_SYNC_METADATA_NAMESPACE: &str = "model_fetch";
+
+/// Outcome of reconciling one model-fetch snapshot against the key's
+/// previously persisted `allowed_models` whitelist.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AllowedModelsReconciliation {
+    /// The whitelist that should be persisted for the key.
+    pub allowed_models: Vec<String>,
+    /// Models added to the whitelist by this snapshot.
+    pub added: Vec<String>,
+    /// Models removed from the whitelist after reaching the missing grace
+    /// threshold on a complete snapshot.
+    pub removed: Vec<String>,
+    /// Models missing from this snapshot but retained while their consecutive
+    /// missing counts stay below the grace threshold.
+    pub pending_removal: BTreeMap<String, u64>,
+}
+
+/// Reconciles a successful model-fetch snapshot with the key's existing
+/// whitelist without silently deleting previously confirmed models.
+///
+/// A single `/models` HTTP success only proves the request succeeded; it does
+/// not prove the returned set is a complete authoritative snapshot. To keep a
+/// transient upstream catalog omission from shrinking production routing
+/// capability, removals converge under three rules:
+///
+/// - Models that no longer match the key's current include/exclude patterns
+///   are removed immediately: the filter configuration is explicit local
+///   admin intent, not upstream data.
+/// - Models still matching the filters but missing from the snapshot are
+///   removed only after `removal_grace_count` consecutive complete snapshots
+///   (tracked in `previous_pending_removal`) have omitted them.
+/// - Partial snapshots (`complete_snapshot == false`, i.e. some selected
+///   endpoint failed) never apply the missing grace rule: newly discovered
+///   models are added, re-observed models clear their missing counters, and
+///   no missing counter advances.
+pub fn reconcile_allowed_models(
+    fetched_models: &[String],
+    previous_allowed_models: Option<&[String]>,
+    model_include_patterns: &[String],
+    model_exclude_patterns: &[String],
+    previous_pending_removal: BTreeMap<String, u64>,
+    removal_grace_count: u64,
+    complete_snapshot: bool,
+) -> AllowedModelsReconciliation {
+    let fetched = fetched_models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    let removal_grace_count = removal_grace_count.max(1);
+
+    let Some(previous_allowed_models) = previous_allowed_models else {
+        // Bootstrap: no previously confirmed whitelist exists, so the snapshot
+        // is adopted verbatim and there is nothing to protect.
+        let allowed_models = fetched.into_iter().collect::<Vec<_>>();
+        return AllowedModelsReconciliation {
+            added: allowed_models.clone(),
+            allowed_models,
+            ..Default::default()
+        };
+    };
+    let previous = previous_allowed_models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+
+    let added = fetched.difference(&previous).cloned().collect::<Vec<_>>();
+    let mut removed = Vec::new();
+    let mut grace_candidates = Vec::new();
+    for model in previous.difference(&fetched) {
+        if model_passes_model_filters(model, model_include_patterns, model_exclude_patterns) {
+            grace_candidates.push(model.clone());
+        } else {
+            removed.push(model.clone());
+        }
+    }
+
+    if !complete_snapshot {
+        let mut pending_removal = previous_pending_removal;
+        pending_removal.retain(|model, _| {
+            grace_candidates.iter().any(|candidate| candidate == model) && !fetched.contains(model)
+        });
+        let allowed_models = previous
+            .iter()
+            .filter(|model| !removed.contains(model))
+            .cloned()
+            .chain(fetched.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        return AllowedModelsReconciliation {
+            allowed_models: allowed_models.into_iter().collect(),
+            added,
+            removed,
+            pending_removal,
+        };
+    }
+
+    let mut allowed_models = fetched.clone();
+    let mut pending_removal = BTreeMap::new();
+    for model in grace_candidates {
+        let missed = previous_pending_removal
+            .get(&model)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        if missed >= removal_grace_count {
+            removed.push(model);
+        } else {
+            allowed_models.insert(model.clone());
+            pending_removal.insert(model, missed);
+        }
+    }
+
+    AllowedModelsReconciliation {
+        allowed_models: allowed_models.into_iter().collect(),
+        added,
+        removed,
+        pending_removal,
+    }
+}
+
+fn model_passes_model_filters(
+    model_id: &str,
+    include_patterns: &[String],
+    exclude_patterns: &[String],
+) -> bool {
+    let included = include_patterns.is_empty()
+        || include_patterns
+            .iter()
+            .any(|pattern| wildcard_matches(pattern, model_id));
+    included
+        && !exclude_patterns
+            .iter()
+            .any(|pattern| wildcard_matches(pattern, model_id))
+}
+
+/// Reads the consecutive-missing counters persisted in the key's
+/// `upstream_metadata` under [`MODEL_FETCH_SYNC_METADATA_NAMESPACE`].
+pub fn model_fetch_pending_removals(upstream_metadata: Option<&Value>) -> BTreeMap<String, u64> {
+    upstream_metadata
+        .and_then(|value| value.get(MODEL_FETCH_SYNC_METADATA_NAMESPACE))
+        .and_then(|value| value.get("pending_removal"))
+        .and_then(Value::as_object)
+        .map(|object| {
+            object
+                .iter()
+                .filter_map(|(model, count)| {
+                    let model = model.trim();
+                    if model.is_empty() {
+                        return None;
+                    }
+                    let count = count.as_u64().filter(|count| *count > 0)?;
+                    Some((model.to_string(), count))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Builds the auditable sync record persisted in the key's
+/// `upstream_metadata` under [`MODEL_FETCH_SYNC_METADATA_NAMESPACE`].
+pub fn model_fetch_sync_metadata(
+    reconciliation: &AllowedModelsReconciliation,
+    complete_snapshot: bool,
+    now_unix_secs: u64,
+) -> Value {
+    let pending_removal = reconciliation
+        .pending_removal
+        .iter()
+        .map(|(model, count)| (model.clone(), json!(count)))
+        .collect::<serde_json::Map<String, Value>>();
+    let added = reconciliation.added.clone();
+    let removed = reconciliation.removed.clone();
+    Value::Object(
+        [(
+            MODEL_FETCH_SYNC_METADATA_NAMESPACE.to_string(),
+            json!({
+                "complete_snapshot": complete_snapshot,
+                "last_reconciled_at_unix_secs": now_unix_secs,
+                "added": added,
+                "removed": removed,
+                "pending_removal": Value::Object(pending_removal),
+            }),
+        )]
+        .into_iter()
+        .collect(),
+    )
+}
+
 pub fn json_string_list(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
@@ -1158,8 +1352,9 @@ mod tests {
     use super::{
         aggregate_models_for_cache, apply_model_filters, build_gemini_models_url,
         build_models_fetch_url, build_models_fetch_url_for_client_version, merge_upstream_metadata,
-        parse_codex_models_response_page, parse_models_response, parse_models_response_page,
-        preset_models_for_provider, project_codex_models_for_legacy_cache,
+        model_fetch_pending_removals, model_fetch_sync_metadata, parse_codex_models_response_page,
+        parse_models_response, parse_models_response_page, preset_models_for_provider,
+        project_codex_models_for_legacy_cache, reconcile_allowed_models,
         selected_models_fetch_endpoints,
     };
 
@@ -1235,6 +1430,207 @@ mod tests {
             filtered,
             vec!["gpt-5".to_string(), "locked-model".to_string()]
         );
+    }
+
+    #[test]
+    fn reconcile_allowed_models_bootstraps_from_first_snapshot() {
+        let reconciliation = reconcile_allowed_models(
+            &["model-a".to_string(), "model-b".to_string()],
+            None,
+            &[],
+            &[],
+            Default::default(),
+            2,
+            true,
+        );
+        assert_eq!(reconciliation.allowed_models, vec!["model-a", "model-b"]);
+        assert_eq!(reconciliation.added, vec!["model-a", "model-b"]);
+        assert!(reconciliation.removed.is_empty());
+        assert!(reconciliation.pending_removal.is_empty());
+    }
+
+    #[test]
+    fn reconcile_allowed_models_retains_missing_models_until_grace_threshold() {
+        let previous = vec!["model-a".to_string(), "model-sol".to_string()];
+
+        // First complete snapshot missing model-sol: retained with count 1.
+        let first = reconcile_allowed_models(
+            &["model-a".to_string()],
+            Some(&previous),
+            &[],
+            &[],
+            Default::default(),
+            2,
+            true,
+        );
+        assert_eq!(first.allowed_models, vec!["model-a", "model-sol"]);
+        assert!(first.removed.is_empty());
+        assert_eq!(
+            first.pending_removal.get("model-sol"),
+            Some(&1),
+            "missing count should advance"
+        );
+
+        // Second consecutive complete snapshot missing model-sol: removed.
+        let second = reconcile_allowed_models(
+            &["model-a".to_string()],
+            Some(&first.allowed_models),
+            &[],
+            &[],
+            first.pending_removal.clone(),
+            2,
+            true,
+        );
+        assert_eq!(second.allowed_models, vec!["model-a"]);
+        assert_eq!(second.removed, vec!["model-sol"]);
+        assert!(second.pending_removal.is_empty());
+    }
+
+    #[test]
+    fn reconcile_allowed_models_reappearing_model_clears_missing_count() {
+        let previous = vec!["model-a".to_string(), "model-sol".to_string()];
+        let first = reconcile_allowed_models(
+            &["model-a".to_string()],
+            Some(&previous),
+            &[],
+            &[],
+            Default::default(),
+            2,
+            true,
+        );
+        let second = reconcile_allowed_models(
+            &["model-a".to_string(), "model-sol".to_string()],
+            Some(&first.allowed_models),
+            &[],
+            &[],
+            first.pending_removal.clone(),
+            2,
+            true,
+        );
+        assert_eq!(second.allowed_models, vec!["model-a", "model-sol"]);
+        assert!(second.removed.is_empty());
+        assert!(second.pending_removal.is_empty());
+    }
+
+    #[test]
+    fn reconcile_allowed_models_partial_snapshot_never_removes() {
+        let previous = vec!["model-a".to_string(), "model-sol".to_string()];
+        let mut pending = std::collections::BTreeMap::new();
+        pending.insert("model-sol".to_string(), 1_u64);
+
+        let reconciliation = reconcile_allowed_models(
+            &["model-a".to_string(), "model-new".to_string()],
+            Some(&previous),
+            &[],
+            &[],
+            pending,
+            2,
+            false,
+        );
+        // Union-only: model-sol kept without advancing its missing count,
+        // model-new added immediately.
+        assert_eq!(
+            reconciliation.allowed_models,
+            vec!["model-a", "model-new", "model-sol"]
+        );
+        assert_eq!(reconciliation.added, vec!["model-new"]);
+        assert!(reconciliation.removed.is_empty());
+        assert_eq!(
+            reconciliation.pending_removal.get("model-sol"),
+            Some(&1),
+            "partial snapshot must not advance missing counters"
+        );
+    }
+
+    #[test]
+    fn reconcile_allowed_models_grace_count_one_removes_immediately() {
+        let previous = vec!["model-a".to_string(), "model-sol".to_string()];
+        let reconciliation = reconcile_allowed_models(
+            &["model-a".to_string()],
+            Some(&previous),
+            &[],
+            &[],
+            Default::default(),
+            1,
+            true,
+        );
+        assert_eq!(reconciliation.allowed_models, vec!["model-a"]);
+        assert_eq!(reconciliation.removed, vec!["model-sol"]);
+    }
+
+    #[test]
+    fn reconcile_allowed_models_removes_policy_excluded_models_immediately() {
+        let previous = vec![
+            "gpt-4.1".to_string(),
+            "gpt-5".to_string(),
+            "model-sol".to_string(),
+        ];
+        // gpt-4.1 no longer matches the narrowed include patterns: explicit
+        // admin policy, removed on the first snapshot. model-sol still matches
+        // but is missing upstream: retained pending the grace threshold.
+        let reconciliation = reconcile_allowed_models(
+            &["gpt-5".to_string()],
+            Some(&previous),
+            &["gpt-5*".to_string(), "model-*".to_string()],
+            &[],
+            Default::default(),
+            2,
+            true,
+        );
+        assert_eq!(reconciliation.allowed_models, vec!["gpt-5", "model-sol"]);
+        assert_eq!(reconciliation.removed, vec!["gpt-4.1"]);
+        assert_eq!(reconciliation.pending_removal.get("model-sol"), Some(&1));
+
+        // Policy exclusions apply even on partial snapshots.
+        let partial = reconcile_allowed_models(
+            &["gpt-5".to_string()],
+            Some(&previous),
+            &["gpt-5*".to_string(), "model-*".to_string()],
+            &[],
+            Default::default(),
+            2,
+            false,
+        );
+        assert_eq!(partial.allowed_models, vec!["gpt-5", "model-sol"]);
+        assert_eq!(partial.removed, vec!["gpt-4.1"]);
+        assert!(
+            partial.pending_removal.is_empty(),
+            "partial snapshot must not advance missing counters"
+        );
+    }
+
+    #[test]
+    fn model_fetch_sync_metadata_round_trips_pending_removals() {
+        let previous = vec!["model-a".to_string(), "model-sol".to_string()];
+        let reconciliation = reconcile_allowed_models(
+            &["model-a".to_string()],
+            Some(&previous),
+            &[],
+            &[],
+            Default::default(),
+            2,
+            true,
+        );
+        let metadata = model_fetch_sync_metadata(&reconciliation, true, 42);
+        assert_eq!(
+            metadata["model_fetch"]["pending_removal"],
+            json!({"model-sol": 1})
+        );
+        assert_eq!(metadata["model_fetch"]["complete_snapshot"], json!(true));
+        assert_eq!(
+            metadata["model_fetch"]["last_reconciled_at_unix_secs"],
+            json!(42)
+        );
+
+        let parsed = model_fetch_pending_removals(Some(&metadata));
+        assert_eq!(parsed, reconciliation.pending_removal);
+        assert!(model_fetch_pending_removals(None).is_empty());
+        assert!(model_fetch_pending_removals(Some(&json!({}))).is_empty());
+        // Corrupt counters are ignored rather than trusted.
+        assert!(model_fetch_pending_removals(Some(&json!({
+            "model_fetch": {"pending_removal": {"model-sol": 0, "": 3, "model-x": "bad"}}
+        })))
+        .is_empty());
     }
 
     #[test]
