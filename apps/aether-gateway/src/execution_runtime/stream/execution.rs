@@ -4617,6 +4617,13 @@ fn encode_terminal_sse_error_event_for_plan(
     }
 }
 
+fn success_stream_chunk_is_forwardable(
+    chunk: &[u8],
+    terminal_failure: Option<&StreamFailureReport>,
+) -> bool {
+    terminal_failure.is_none() && !chunk.is_empty()
+}
+
 fn image_stream_failed_event_name(report_context: Option<&Value>) -> &'static str {
     let operation = report_context
         .and_then(|value| value.get("image_request"))
@@ -6445,7 +6452,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             ) {
                                 Ok(Some(outcome)) => {
                                     if let Some(record) = outcome.response_history_record {
-                                        crate::ai_serving::persist_response_history_record(
+                                        crate::ai_serving::persist_response_history_record_advisory(
                                             state.runtime_state(),
                                             record,
                                         )
@@ -6659,7 +6666,8 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         .as_mut()
         .and_then(|rewriter| rewriter.take_response_history_record())
     {
-        crate::ai_serving::persist_response_history_record(state.runtime_state(), record).await;
+        crate::ai_serving::persist_response_history_record_advisory(state.runtime_state(), record)
+            .await;
         true
     } else {
         false
@@ -7263,7 +7271,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 .as_mut()
                                 .and_then(|rewriter| rewriter.take_response_history_record())
                             {
-                                crate::ai_serving::persist_response_history_record(
+                                crate::ai_serving::persist_response_history_record_advisory(
                                     state_for_report.runtime_state(),
                                     record,
                                 )
@@ -7271,7 +7279,14 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             }
                         }
 
-                        if rewritten_chunk.is_empty() {
+                        if terminal_failure.is_some() {
+                            break;
+                        }
+
+                        if !success_stream_chunk_is_forwardable(
+                            &rewritten_chunk,
+                            terminal_failure.as_ref(),
+                        ) {
                             if let Some(error_body_json) = provider_private_error_body_json {
                                 let error_status_code = resolve_provider_stream_error_status_code(
                                     plan_for_report.provider_api_format.as_str(),
@@ -7467,14 +7482,17 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 .as_mut()
                                 .and_then(|rewriter| rewriter.take_response_history_record())
                             {
-                                crate::ai_serving::persist_response_history_record(
+                                crate::ai_serving::persist_response_history_record_advisory(
                                     state_for_report.runtime_state(),
                                     record,
                                 )
                                 .await;
                             }
                         }
-                        if !rewritten_chunk.is_empty() {
+                        if success_stream_chunk_is_forwardable(
+                            &rewritten_chunk,
+                            terminal_failure.as_ref(),
+                        ) {
                             append_stream_capture_bytes(
                                 &mut buffered_body,
                                 &rewritten_chunk,
@@ -7549,14 +7567,19 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             if let Some(rewriter) = local_stream_rewriter.as_mut() {
                 let finish_result = rewriter.finish();
                 if let Some(record) = rewriter.take_response_history_record() {
-                    crate::ai_serving::persist_response_history_record(
+                    crate::ai_serving::persist_response_history_record_advisory(
                         state_for_report.runtime_state(),
                         record,
                     )
                     .await;
                 }
                 match finish_result {
-                    Ok(flushed_chunk) if !flushed_chunk.is_empty() => {
+                    Ok(flushed_chunk)
+                        if success_stream_chunk_is_forwardable(
+                            &flushed_chunk,
+                            terminal_failure.as_ref(),
+                        ) =>
+                    {
                         append_stream_capture_bytes(
                             &mut buffered_body,
                             &flushed_chunk,
@@ -7591,7 +7614,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         }
                     }
                     Ok(_) => {}
-                    Err(err) => {
+                    Err(err) if terminal_failure.is_none() => {
                         warn!(
                             event_name = "stream_execution_rewrite_flush_failed",
                             log_type = "ops",
@@ -7609,6 +7632,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             )
                         });
                     }
+                    Err(_) => {}
                 }
             }
         }
@@ -7618,7 +7642,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 .as_mut()
                 .and_then(|rewriter| rewriter.take_response_history_record())
             {
-                crate::ai_serving::persist_response_history_record(
+                crate::ai_serving::persist_response_history_record_advisory(
                     state_for_report.runtime_state(),
                     record,
                 )
@@ -11407,6 +11431,321 @@ mod tests {
         assert!(event.contains("\"type\":\"api_error\""));
         assert!(event.contains("upstream disconnected"));
         assert!(!event.contains("[DONE]"));
+    }
+
+    #[tokio::test]
+    async fn history_persistence_failure_keeps_real_rewriter_success_and_finalizes_once() {
+        use crate::ai_serving::{
+            conversation_history_scope, evict_response_history,
+            fail_next_response_history_persistence_for_tests, response_history_is_loaded,
+            response_history_storage_key,
+        };
+
+        let request_id = "req-history-persistence-terminal";
+        let provider_response_id = "chatcmpl_history_persistence_terminal";
+        let response_id = "resp_history_persistence_terminal";
+        let scope = conversation_history_scope("history-sse-user", "history-sse-key").unwrap();
+        let storage_key = response_history_storage_key(response_id, Some(scope.as_str()));
+        evict_response_history(response_id, Some(scope.as_str()));
+        let _failure_guard = fail_next_response_history_persistence_for_tests(storage_key.clone());
+
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_usage_repository_for_tests(Arc::clone(
+                    &usage_repository,
+                )),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            });
+        let plan = ExecutionPlan {
+            request_id: request_id.to_string(),
+            candidate_id: Some("cand-history-persistence-terminal".to_string()),
+            provider_name: Some("openai".to_string()),
+            provider_id: "provider-history-persistence".to_string(),
+            endpoint_id: "endpoint-history-persistence".to_string(),
+            key_id: "credential-history-persistence".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.test/v1/chat/completions".to_string(),
+            headers: BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("accept".to_string(), "text/event-stream".to_string()),
+            ]),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "history-test-model",
+                "messages": [{"role": "user", "content": "remember this turn"}],
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:chat".to_string(),
+            model_name: Some("history-test-model".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let release_terminal = Arc::new(Notify::new());
+        let release_terminal_for_stream = Arc::clone(&release_terminal);
+        let first_chunk = format!(
+            "data: {{\"id\":\"{provider_response_id}\",\"object\":\"chat.completion.chunk\",\"model\":\"history-test-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":\"partial\"}},\"finish_reason\":null}}]}}\n\n"
+        );
+        let terminal_chunk = format!(
+            "data: {{\"id\":\"{provider_response_id}\",\"object\":\"chat.completion.chunk\",\"model\":\"history-test-model\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}}}\n\ndata: [DONE]\n\n"
+        );
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                    response_observation: None,
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(first_chunk),
+                },
+            }));
+            release_terminal_for_stream.notified().await;
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(terminal_chunk),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame::eof()));
+        }
+        .boxed();
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            execute_stream_from_frame_stream(
+                &state,
+                plan,
+                "trace-history-persistence-terminal",
+                &test_decision(),
+                "openai_responses_stream",
+                Some("openai_responses_stream_success".to_string()),
+                Some(json!({
+                    "request_id": request_id,
+                    "candidate_id": "cand-history-persistence-terminal",
+                    "candidate_index": 0,
+                    "retry_index": 0,
+                    "provider_api_format": "openai:chat",
+                    "client_api_format": "openai:responses",
+                    "mapped_model": "history-test-model",
+                    "needs_conversion": true,
+                    "user_id": "history-sse-user",
+                    "api_key_id": "history-sse-key",
+                    "provider_id": "provider-history-persistence",
+                    "endpoint_id": "endpoint-history-persistence",
+                    "key_id": "credential-history-persistence",
+                    "original_request_body": {
+                        "model": "history-test-model",
+                        "input": "remember this turn"
+                    }
+                })),
+                crate::clock::current_unix_ms(),
+                Instant::now(),
+                RequestStageTrace::from_env(),
+                true,
+                frame_stream,
+                None,
+            ),
+        )
+        .await
+        .expect("the response must commit before the terminal frame is released")
+        .expect("execution should succeed")
+        .expect("execution should return a client response");
+
+        release_terminal.notify_one();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let delivered = String::from_utf8(body.to_vec()).expect("SSE should be UTF-8");
+        assert!(delivered.contains("response.output_text.delta"));
+        assert!(delivered.contains("response.completed"));
+        assert!(!delivered.contains("openai_response_history_persistence_failed"));
+        assert_eq!(delivered.matches("data: [DONE]").count(), 1);
+        assert!(!response_history_is_loaded(
+            response_id,
+            Some(scope.as_str())
+        ));
+        assert!(state
+            .runtime_state()
+            .kv_get(&storage_key)
+            .await
+            .expect("memory KV read should succeed")
+            .is_none());
+
+        let terminal_usage = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(usage) = usage_repository
+                    .find_by_request_id(request_id)
+                    .await
+                    .expect("usage repository read should succeed")
+                {
+                    if usage.status == "completed" {
+                        break usage;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("one successful terminal usage record should be finalized");
+        assert_eq!(terminal_usage.request_id, request_id);
+        assert_eq!(terminal_usage.status, "completed");
+        assert!(terminal_usage.finalized_at_unix_secs.is_some());
+    }
+
+    #[tokio::test]
+    async fn native_history_terminal_persists_when_parent_exists_only_at_provider() {
+        use crate::ai_serving::{
+            conversation_history_scope, evict_response_history, response_history_is_loaded,
+            response_history_storage_key,
+        };
+
+        let request_id = "req-native-history-provider-resolved";
+        let response_id = "resp_native_history_provider_resolved";
+        let scope = conversation_history_scope("native-history-sse-user", "native-history-sse-key")
+            .unwrap();
+        let storage_key = response_history_storage_key(response_id, Some(scope.as_str()));
+        evict_response_history(response_id, Some(scope.as_str()));
+        let state = AppState::new().expect("app state should build");
+        let plan = ExecutionPlan {
+            request_id: request_id.to_string(),
+            candidate_id: Some("cand-native-history-provider-resolved".to_string()),
+            provider_name: Some("openai".to_string()),
+            provider_id: "provider-native-history".to_string(),
+            endpoint_id: "endpoint-native-history".to_string(),
+            key_id: "credential-native-history".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.test/v1/responses".to_string(),
+            headers: BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("accept".to_string(), "text/event-stream".to_string()),
+            ]),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "history-test-model",
+                "previous_response_id": "resp_native_history_parent_only_at_provider",
+                "input": "native stream continuation",
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("history-test-model".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let terminal_chunk = format!(
+            concat!(
+                "event: response.output_text.delta\n",
+                "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"native output\"}}\n\n",
+                "event: response.completed\n",
+                "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\",\"status\":\"completed\",\"output\":[{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"native output\"}}]}}]}}}}\n\n"
+            )
+        );
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                    response_observation: None,
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(terminal_chunk),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame::eof()));
+        }
+        .boxed();
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/responses",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("responses".to_string()),
+            Some("openai:responses".to_string()),
+        )
+        .with_execution_runtime_candidate(true);
+
+        let response = execute_stream_from_frame_stream(
+            &state,
+            plan,
+            "trace-native-history-provider-resolved",
+            &decision,
+            "openai_responses_stream",
+            Some("openai_responses_stream_success".to_string()),
+            Some(json!({
+                "request_id": request_id,
+                "candidate_id": "cand-native-history-provider-resolved",
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "openai:responses",
+                "client_api_format": "openai:responses",
+                "mapped_model": "history-test-model",
+                "needs_conversion": false,
+                "user_id": "native-history-sse-user",
+                "api_key_id": "native-history-sse-key",
+                "provider_id": "provider-native-history",
+                "endpoint_id": "endpoint-native-history",
+                "key_id": "credential-native-history",
+                "original_request_body": {
+                    "model": "history-test-model",
+                    "previous_response_id": "resp_native_history_parent_only_at_provider",
+                    "input": "native stream continuation"
+                }
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            RequestStageTrace::from_env(),
+            true,
+            frame_stream,
+            None,
+        )
+        .await
+        .expect("execution should succeed")
+        .expect("execution should return a client response");
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let delivered = String::from_utf8(body.to_vec()).expect("SSE should be UTF-8");
+        assert!(delivered.contains("response.completed"));
+        let persisted = state
+            .runtime_state()
+            .kv_get(&storage_key)
+            .await
+            .expect("memory KV read should succeed")
+            .expect("native stream child history should persist before terminal delivery");
+        assert!(persisted.contains("\"transcript_materialized\":false"));
+        assert!(!response_history_is_loaded(
+            response_id,
+            Some(scope.as_str())
+        ));
     }
 
     #[tokio::test]

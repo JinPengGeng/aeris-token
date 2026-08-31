@@ -381,7 +381,8 @@ fn normalize_standard_request_to_openai_chat_request_cow<'a>(
 #[cfg(test)]
 mod tests {
     use crate::formats::openai::responses::history::{
-        conversation_history_scope, record_converted_response_history,
+        commit_response_history_record, conversation_history_scope,
+        record_converted_response_history,
     };
 
     use super::{
@@ -538,7 +539,7 @@ mod tests {
 
     #[test]
     fn standard_request_body_scopes_previous_response_history_by_tenant_and_api_key() {
-        record_converted_response_history(
+        let record = record_converted_response_history(
             &json!({
                 "needs_conversion": true,
                 "client_api_format": "openai:responses",
@@ -561,7 +562,9 @@ mod tests {
                     "arguments": "{}"
                 }]
             }),
-        );
+        )
+        .expect("completed response should produce a history record");
+        commit_response_history_record(&record);
         let continuation = json!({
             "model": "source-model",
             "previous_response_id": "resp_standard_history_scope_1",

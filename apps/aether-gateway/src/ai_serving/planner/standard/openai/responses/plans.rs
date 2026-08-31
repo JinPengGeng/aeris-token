@@ -85,6 +85,11 @@ pub(super) async fn build_local_sync_attempt_source<'a>(
     .await?;
     apply_local_runtime_candidate_evaluation_progress(state, trace_id, candidate_count);
     if candidate_count == 0 {
+        if let Some(error) =
+            crate::ai_serving::conversation_history_candidates_exhausted_error(&effective_body_json)
+        {
+            return Err(error);
+        }
         return Ok(None);
     }
 
@@ -142,6 +147,11 @@ pub(super) async fn build_local_stream_attempt_source<'a>(
     .await?;
     apply_local_runtime_candidate_evaluation_progress(state, trace_id, candidate_count);
     if candidate_count == 0 {
+        if let Some(error) =
+            crate::ai_serving::conversation_history_candidates_exhausted_error(&effective_body_json)
+        {
+            return Err(error);
+        }
         return Ok(None);
     }
 
@@ -173,6 +183,11 @@ impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalOpenAiResponsesSyncAtte
             self.trace_id,
             "no_local_sync_plans",
         );
+        if let Some(error) =
+            crate::ai_serving::conversation_history_candidates_exhausted_error(&self.body_json)
+        {
+            return Err(error);
+        }
         Ok(None)
     }
 
@@ -216,6 +231,11 @@ impl LocalExecutionAttemptSource<AiStreamAttempt> for LocalOpenAiResponsesStream
             self.trace_id,
             "no_local_stream_plans",
         );
+        if let Some(error) =
+            crate::ai_serving::conversation_history_candidates_exhausted_error(&self.body_json)
+        {
+            return Err(error);
+        }
         Ok(None)
     }
 
@@ -357,6 +377,11 @@ pub(super) async fn build_local_sync_plan_and_reports(
     .await?;
     apply_local_runtime_candidate_evaluation_progress(state, trace_id, candidate_count);
     if candidate_count == 0 {
+        if let Some(error) =
+            crate::ai_serving::conversation_history_candidates_exhausted_error(body_json)
+        {
+            return Err(error);
+        }
         return Ok(Vec::new());
     }
 
@@ -390,6 +415,13 @@ pub(super) async fn build_local_sync_plan_and_reports(
     }
 
     apply_local_runtime_candidate_terminal_reason(state, trace_id, "no_local_sync_plans");
+    if plans.is_empty() {
+        if let Some(error) =
+            crate::ai_serving::conversation_history_candidates_exhausted_error(body_json)
+        {
+            return Err(error);
+        }
+    }
     Ok(plans)
 }
 
@@ -429,6 +461,11 @@ pub(super) async fn build_local_stream_plan_and_reports(
     .await?;
     apply_local_runtime_candidate_evaluation_progress(state, trace_id, candidate_count);
     if candidate_count == 0 {
+        if let Some(error) =
+            crate::ai_serving::conversation_history_candidates_exhausted_error(body_json)
+        {
+            return Err(error);
+        }
         return Ok(Vec::new());
     }
 
@@ -462,5 +499,12 @@ pub(super) async fn build_local_stream_plan_and_reports(
     }
 
     apply_local_runtime_candidate_terminal_reason(state, trace_id, "no_local_stream_plans");
+    if plans.is_empty() {
+        if let Some(error) =
+            crate::ai_serving::conversation_history_candidates_exhausted_error(body_json)
+        {
+            return Err(error);
+        }
+    }
     Ok(plans)
 }

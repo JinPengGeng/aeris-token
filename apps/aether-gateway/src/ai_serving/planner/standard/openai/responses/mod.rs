@@ -178,6 +178,11 @@ pub(crate) async fn maybe_build_sync_local_openai_responses_decision_payload(
         }
     }
 
+    if let Some(error) =
+        crate::ai_serving::conversation_history_candidates_exhausted_error(body_json)
+    {
+        return Err(error);
+    }
     Ok(None)
 }
 
@@ -217,6 +222,11 @@ pub(crate) async fn maybe_build_stream_local_openai_responses_decision_payload(
         }
     }
 
+    if let Some(error) =
+        crate::ai_serving::conversation_history_candidates_exhausted_error(body_json)
+    {
+        return Err(error);
+    }
     Ok(None)
 }
 
@@ -563,6 +573,11 @@ pub(crate) async fn maybe_build_responses_websocket_decision(
         planning_lease.release().await;
     }
 
+    if let Some(error) =
+        crate::ai_serving::conversation_history_candidates_exhausted_error(body_json)
+    {
+        return Err(error);
+    }
     Ok(None)
 }
 

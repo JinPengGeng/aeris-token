@@ -252,6 +252,8 @@ pub(super) struct ResponsesProviderAttempt {
     admission: Option<ResponsesWebSocketTurnAdmission>,
     terminal_error_body: Option<String>,
     response_history_record: Option<crate::ai_serving::ResponseHistoryRecord>,
+    response_history_record_error: Option<String>,
+    response_history_failure: Option<String>,
     /// 观察到的 provider 终态事实，与「为什么现在结算」这个信号分开保存。
     /// 客户端投递失败不会把它擦掉。
     provider_outcome: Option<AttemptProviderOutcome>,
@@ -261,6 +263,12 @@ pub(super) struct ResponsesProviderAttempt {
     /// socket writer. Cancellation before this point must not be projected as
     /// provider failure or billed usage.
     upstream_request_sent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResponsesWebSocketSettlementReceipt {
+    facts: AttemptTerminalFacts,
+    gateway_history_persistence_failure: Option<String>,
 }
 
 /// 组装一轮 turn 的 decision。
@@ -445,6 +453,8 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
         admission: Some(admission),
         terminal_error_body: None,
         response_history_record: None,
+        response_history_record_error: None,
+        response_history_failure: None,
         provider_outcome: None,
         client_delivery: AttemptClientDelivery::Complete,
         upstream_request_sent: false,
@@ -658,9 +668,11 @@ impl ResponsesProviderAttempt {
         });
         let report_context = self.lifecycle.report_context().unwrap_or(&fallback_context);
         self.observer.observe_events(report_context, &events);
-        if self.response_history_record.is_none() {
-            self.response_history_record =
-                response_history_record_from_completed_events(report_context, &events);
+        if self.response_history_record.is_none() && self.response_history_record_error.is_none() {
+            match response_history_record_from_completed_events(report_context, &events) {
+                Ok(record) => self.response_history_record = record,
+                Err(error) => self.response_history_record_error = Some(error),
+            }
         }
 
         let event_type = frame.event_type().unwrap_or_default();
@@ -730,6 +742,36 @@ impl ResponsesProviderAttempt {
             .await;
     }
 
+    pub(super) async fn persist_response_history_before_terminal(
+        &mut self,
+        state: &AppState,
+    ) -> Result<(), GatewayError> {
+        if let Some(error) = self.response_history_record_error.take() {
+            self.response_history_failure = Some(format!("history construction failed: {error}"));
+            warn!(
+                event_name = "responses_websocket_history_record_build_failed",
+                log_type = "ops",
+                trace_id = %self.lifecycle.trace_id(),
+                error = %error,
+                "gateway could not construct advisory Responses WebSocket history"
+            );
+            return Ok(());
+        }
+        let Some(record) = self.response_history_record.take() else {
+            return Ok(());
+        };
+        match crate::ai_serving::persist_response_history_record(state.runtime_state(), record)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.response_history_failure =
+                    Some(format!("history persistence failed: {error:?}"));
+                Ok(())
+            }
+        }
+    }
+
     /// 结算这一个 attempt。
     ///
     /// `outcome` 是「为什么现在结算」的信号，不是供应商事实本身：
@@ -739,6 +781,46 @@ impl ResponsesProviderAttempt {
     /// execution report）由共享的 [`ExecutionAttemptLifecycle::settle`] 负责，
     /// 这里只提供 WS 观察到的终态事实。
     async fn settle(mut self, state: &AppState, outcome: ResponsesWebSocketTurnOutcome) {
+        let runtime_state = state.runtime_state();
+        let _ = self
+            .settle_with_history_persistence(state, outcome, |record| async move {
+                crate::ai_serving::persist_response_history_record(runtime_state, record).await
+            })
+            .await;
+    }
+
+    async fn settle_with_history_persistence<F, Fut>(
+        mut self,
+        state: &AppState,
+        outcome: ResponsesWebSocketTurnOutcome,
+        persist_history: F,
+    ) -> ResponsesWebSocketSettlementReceipt
+    where
+        F: FnOnce(crate::ai_serving::ResponseHistoryRecord) -> Fut,
+        Fut: std::future::Future<Output = Result<(), GatewayError>>,
+    {
+        let history_persistence_error = if let Some(error) = self.response_history_failure.take() {
+            Some(error)
+        } else if let Some(error) = self.response_history_record_error.take() {
+            Some(format!("history construction failed: {error}"))
+        } else if let Some(record) = self.response_history_record.take() {
+            persist_history(record)
+                .await
+                .err()
+                .map(|error| format!("{error:?}"))
+        } else {
+            None
+        };
+        if let Some(error) = history_persistence_error.as_deref() {
+            warn!(
+                event_name = "responses_websocket_history_persistence_failed",
+                log_type = "ops",
+                failure_origin = "gateway",
+                trace_id = %self.lifecycle.trace_id(),
+                error,
+                "gateway settled a successful Responses WebSocket turn without advisory history"
+            );
+        }
         let facts = attempt_facts_for_outcome(self.provider_outcome, self.client_delivery, outcome);
         if let Some(reason) = facts.delivery.aborted_reason() {
             let report_context = attach_client_delivery_to_report_context(
@@ -750,9 +832,6 @@ impl ResponsesProviderAttempt {
         let summary = self.finish_summary(facts);
         let telemetry = self.telemetry();
         let terminal_error_body = self.terminal_error_body.take();
-        if let Some(record) = self.response_history_record.take() {
-            crate::ai_serving::persist_response_history_record(state.runtime_state(), record).await;
-        }
 
         // 终态载荷完整了才释放准入：usage/审计写入期间不再占着 gateway/供应商容量。
         if let Some(admission) = self.admission.take() {
@@ -782,6 +861,10 @@ impl ResponsesProviderAttempt {
                 },
             )
             .await;
+        ResponsesWebSocketSettlementReceipt {
+            facts,
+            gateway_history_persistence_failure: history_persistence_error,
+        }
     }
 
     fn capture_sse_event(&mut self, event: &Value) {
@@ -993,8 +1076,8 @@ fn resolve_responses_websocket_turn_timeouts(
 fn response_history_record_from_completed_events(
     report_context: &Value,
     events: &[&Value],
-) -> Option<crate::ai_serving::ResponseHistoryRecord> {
-    events
+) -> Result<Option<crate::ai_serving::ResponseHistoryRecord>, String> {
+    let Some(response) = events
         .iter()
         .find(|event| {
             matches!(
@@ -1003,15 +1086,16 @@ fn response_history_record_from_completed_events(
             )
         })
         .and_then(|event| event.get("response"))
-        .and_then(|response| {
-            let mut response = response.clone();
-            if let Some(object) = response.as_object_mut() {
-                object
-                    .entry("status".to_string())
-                    .or_insert_with(|| Value::String("completed".to_string()));
-            }
-            crate::ai_serving::record_converted_response_history(report_context, &response)
-        })
+    else {
+        return Ok(None);
+    };
+    let mut response = response.clone();
+    if let Some(object) = response.as_object_mut() {
+        object
+            .entry("status".to_string())
+            .or_insert_with(|| Value::String("completed".to_string()));
+    }
+    crate::ai_serving::try_record_converted_response_history(report_context, &response)
 }
 
 fn websocket_event_as_sse_line(event: &Value) -> Vec<u8> {
@@ -1034,18 +1118,19 @@ fn elapsed_ms(started_at: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use aether_contracts::ExecutionTimeouts;
+    use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
     use aether_data_contracts::repository::candidates::RequestCandidateStatus;
     use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeState};
     use serde_json::json;
 
-    use super::super::observation::ResponsesStructuredTerminalObserver;
-
+    use super::super::adapter::resolve_responses_websocket_adapter;
     use super::super::frame::ParsedResponsesWebSocketFrame;
+    use super::super::observation::ResponsesStructuredTerminalObserver;
     use super::super::settlement::{
         attempt_facts_for_outcome, settle_signal_for_client_delivery_failure,
     };
@@ -1054,19 +1139,82 @@ mod tests {
         provider_terminal_outcome, release_then_record_responses_websocket_admission_failure,
         resolve_responses_websocket_turn_timeouts, response_history_record_from_completed_events,
         responses_websocket_admission_failure_update, websocket_event_as_sse_line,
-        ResponsesWebSocketTurnDeadline, ResponsesWebSocketTurnOutcome,
+        ResponsesProviderAttempt, ResponsesWebSocketTurnDeadline,
+        ResponsesWebSocketTurnObservation, ResponsesWebSocketTurnOutcome,
         ResponsesWebSocketTurnTimeoutPhase,
     };
     use crate::ai_serving::{
         build_standard_request_body_with_model_directives_request_headers_and_history_scope,
-        conversation_history_scope, evict_response_history, persist_response_history_record,
-        resolve_openai_response_history, response_history_is_loaded,
+        conversation_history_scope, evict_response_history,
+        fail_next_response_history_persistence_for_tests, persist_response_history_record,
+        resolve_openai_response_history, response_history_is_loaded, response_history_storage_key,
     };
     use crate::execution_runtime::attempt_lifecycle::{
-        classify_attempt_settlement, AttemptBilling, AttemptCandidateError, AttemptCandidateStatus,
-        AttemptClientDelivery, AttemptProviderEffect, AttemptSettlementInputs,
+        classify_attempt_settlement, AttemptBilling, AttemptBodyCapture, AttemptCandidateError,
+        AttemptCandidateStatus, AttemptClientDelivery, AttemptLifecycleSeed, AttemptProviderEffect,
+        AttemptProviderOutcome, AttemptSettlementInputs, AttemptStageGuard,
+        ExecutionAttemptLifecycle,
     };
-    use crate::GatewayError;
+    use crate::orchestration::ResponsesWebSocketAdapter;
+    use crate::{AppState, GatewayError};
+
+    async fn history_test_attempt(
+        state: &AppState,
+        report_context: serde_json::Value,
+    ) -> ResponsesProviderAttempt {
+        let lifecycle = ExecutionAttemptLifecycle::begin(
+            state,
+            AttemptLifecycleSeed {
+                plan: ExecutionPlan {
+                    request_id: uuid::Uuid::now_v7().to_string(),
+                    candidate_id: Some("candidate-history-ws".to_string()),
+                    provider_name: Some("provider-history-ws".to_string()),
+                    provider_id: "provider-history-ws".to_string(),
+                    endpoint_id: "endpoint-history-ws".to_string(),
+                    key_id: "credential-history-ws".to_string(),
+                    method: "POST".to_string(),
+                    url: "https://example.test/v1/responses".to_string(),
+                    headers: BTreeMap::new(),
+                    content_type: Some("application/json".to_string()),
+                    content_encoding: None,
+                    body: RequestBody::from_json(json!({"model": "test-model"})),
+                    stream: true,
+                    client_api_format: "openai:responses".to_string(),
+                    provider_api_format: "openai:responses".to_string(),
+                    model_name: Some("test-model".to_string()),
+                    proxy: None,
+                    transport_profile: None,
+                    timeouts: None,
+                },
+                report_kind: "openai_responses_stream_success".to_string(),
+                report_context: Some(report_context),
+                stage_guard: AttemptStageGuard::Unbounded,
+            },
+        )
+        .await;
+        ResponsesProviderAttempt {
+            lifecycle,
+            started_at: Instant::now(),
+            provider_request_started_at_unix_ms: 0,
+            provider_request_order_id: "history-ws-order".to_string(),
+            provider_headers: BTreeMap::new(),
+            observer: ResponsesStructuredTerminalObserver::default(),
+            provider_capture: AttemptBodyCapture::default(),
+            client_capture: AttemptBodyCapture::default(),
+            upstream_bytes: 0,
+            first_event_elapsed_ms: None,
+            first_event_timeout: Duration::from_secs(30),
+            terminal_timeout: Duration::from_secs(60),
+            admission: None,
+            terminal_error_body: None,
+            response_history_record: None,
+            response_history_record_error: None,
+            response_history_failure: None,
+            provider_outcome: None,
+            client_delivery: AttemptClientDelivery::Complete,
+            upstream_request_sent: true,
+        }
+    }
 
     #[tokio::test]
     async fn admission_failure_releases_pool_lease_before_recording_candidate_terminal() {
@@ -1269,6 +1417,9 @@ mod tests {
             "provider_api_format": "openai:responses",
             "user_id": "tenant-ws",
             "api_key_id": "key-ws",
+            "provider_id": "provider-ws",
+            "endpoint_id": "endpoint-ws",
+            "key_id": "credential-ws",
             "original_request_body": {
                 "type": "response.create",
                 "model": "source-model",
@@ -1276,8 +1427,11 @@ mod tests {
             }
         });
         let record = response_history_record_from_completed_events(&report_context, &events)
+            .expect("completed WS history construction should succeed")
             .expect("a completed WS frame with full identity should produce history");
-        persist_response_history_record(&runtime, record).await;
+        persist_response_history_record(&runtime, record)
+            .await
+            .expect("memory history persistence should succeed");
 
         let partial_identity_context = json!({
             "client_api_format": "openai:responses",
@@ -1287,8 +1441,40 @@ mod tests {
         });
         assert!(
             response_history_record_from_completed_events(&partial_identity_context, &events)
-                .is_none()
+                .is_err()
         );
+        let missing_identity_context = json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses",
+            "original_request_body": {"input": "must-not-persist-unscoped"}
+        });
+        assert!(
+            response_history_record_from_completed_events(&missing_identity_context, &events)
+                .is_err()
+        );
+
+        let duplicate_completed = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_ws_duplicate_terminal",
+                "output": [{"type": "message", "role": "assistant", "content": "first-terminal"}]
+            }
+        });
+        let duplicate_done = json!({
+            "type": "response.done",
+            "response": {
+                "id": "resp_ws_duplicate_terminal",
+                "output": [{"type": "message", "role": "assistant", "content": "second-terminal"}]
+            }
+        });
+        let duplicate_record = response_history_record_from_completed_events(
+            &report_context,
+            &[&duplicate_completed, &duplicate_done],
+        )
+        .expect("duplicate terminal history construction should succeed")
+        .expect("duplicate terminal events should produce one scoped history record");
+        assert!(duplicate_record.payload.contains("first-terminal"));
+        assert!(!duplicate_record.payload.contains("second-terminal"));
 
         let scope = conversation_history_scope("tenant-ws", "key-ws").unwrap();
         evict_response_history("resp_ws_persisted_scope", Some(scope.as_str()));
@@ -1314,6 +1500,9 @@ mod tests {
             "openai:chat",
             "tenant-ws",
             "key-ws",
+            "",
+            "",
+            "",
         )
         .await
         .expect("the next WS turn should hydrate its scoped persisted history");
@@ -1337,6 +1526,112 @@ mod tests {
         assert!(serialized.contains("ws-private-turn"));
         assert!(serialized.contains("call-ws-persisted"));
         assert!(serialized.contains("ws-inspection-complete"));
+    }
+
+    #[tokio::test]
+    async fn websocket_attempt_lifecycle_persists_one_owned_terminal_record() {
+        let state = AppState::new().expect("test state should build");
+        let scope = conversation_history_scope("tenant-ws-lifecycle", "key-ws-lifecycle").unwrap();
+        evict_response_history(
+            "resp_ws_lifecycle_parent_only_at_provider",
+            Some(scope.as_str()),
+        );
+        let report_context = json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses",
+            "user_id": "tenant-ws-lifecycle",
+            "api_key_id": "key-ws-lifecycle",
+            "provider_id": "provider-history-ws",
+            "endpoint_id": "endpoint-history-ws",
+            "key_id": "credential-history-ws",
+            "original_request_body": {
+                "previous_response_id": "resp_ws_lifecycle_parent_only_at_provider",
+                "input": "lifecycle-private-turn"
+            }
+        });
+        let mut attempt = history_test_attempt(&state, report_context).await;
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_ws_lifecycle_owned",
+                "output": [{"type": "message", "role": "assistant", "content": "first-terminal"}]
+            }
+        });
+        let done = json!({
+            "type": "response.done",
+            "response": {
+                "id": "resp_ws_lifecycle_owned",
+                "output": [{"type": "message", "role": "assistant", "content": "duplicate-terminal"}]
+            }
+        });
+        let completed_raw = completed.to_string();
+        let done_raw = done.to_string();
+        let completed_frame = ParsedResponsesWebSocketFrame::parse(&completed_raw).unwrap();
+        let done_frame = ParsedResponsesWebSocketFrame::parse(&done_raw).unwrap();
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Standard);
+        let observation = attempt
+            .observe_upstream_frame(&completed_frame, adapter)
+            .expect("completed frame should terminate the attempt");
+        let _ = attempt.observe_upstream_frame(&done_frame, adapter);
+        let ResponsesWebSocketTurnObservation::Terminal(outcome) = observation else {
+            panic!("completed frame should produce a terminal outcome");
+        };
+        attempt.finalize_detached(&state, outcome).await;
+
+        let storage_key =
+            response_history_storage_key("resp_ws_lifecycle_owned", Some(scope.as_str()));
+        let payload = state
+            .runtime_state()
+            .kv_get(&storage_key)
+            .await
+            .expect("memory KV read should succeed")
+            .expect("production finalization should persist one scoped record");
+        assert!(payload.contains("first-terminal"));
+        assert!(!payload.contains("duplicate-terminal"));
+        assert!(payload.contains("\"transcript_materialized\":false"));
+        assert!(!response_history_is_loaded(
+            "resp_ws_lifecycle_owned",
+            Some(scope.as_str())
+        ));
+
+        let partial_context = json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses",
+            "user_id": "tenant-ws-partial",
+            "provider_id": "provider-history-ws",
+            "endpoint_id": "endpoint-history-ws",
+            "key_id": "credential-history-ws",
+            "original_request_body": {"input": "partial-identity-turn"}
+        });
+        let mut partial_attempt = history_test_attempt(&state, partial_context).await;
+        let partial_event = json!({
+            "type": "response.completed",
+            "response": {"id": "resp_ws_lifecycle_partial", "output": []}
+        });
+        let partial_raw = partial_event.to_string();
+        let partial_frame = ParsedResponsesWebSocketFrame::parse(&partial_raw).unwrap();
+        let partial_observation = partial_attempt
+            .observe_upstream_frame(&partial_frame, adapter)
+            .expect("completed frame should terminate the partial attempt");
+        let ResponsesWebSocketTurnObservation::Terminal(partial_outcome) = partial_observation
+        else {
+            panic!("completed frame should produce a terminal outcome");
+        };
+        partial_attempt
+            .finalize_detached(&state, partial_outcome)
+            .await;
+        let hypothetical_scope =
+            conversation_history_scope("tenant-ws-partial", "key-ws-lifecycle").unwrap();
+        let partial_key = response_history_storage_key(
+            "resp_ws_lifecycle_partial",
+            Some(hypothetical_scope.as_str()),
+        );
+        assert!(state
+            .runtime_state()
+            .kv_get(&partial_key)
+            .await
+            .expect("memory KV read should succeed")
+            .is_none());
     }
 
     #[test]
@@ -1548,6 +1843,148 @@ mod tests {
         assert_eq!(context["request_id"], "turn-2");
         assert_eq!(context["websocket_mode"], true);
         assert_eq!(context["original_request_body"]["model"], "public");
+    }
+
+    #[tokio::test]
+    async fn history_persistence_failure_does_not_block_terminal_delivery() {
+        let state = AppState::new().expect("test state should build");
+        let response_id = "resp_ws_history_persistence_failure";
+        let scope = conversation_history_scope("tenant-ws-failure", "key-ws-failure").unwrap();
+        evict_response_history(response_id, Some(scope.as_str()));
+        let mut attempt = history_test_attempt(
+            &state,
+            json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses",
+                "user_id": "tenant-ws-failure",
+                "api_key_id": "key-ws-failure",
+                "provider_id": "provider-history-ws",
+                "endpoint_id": "endpoint-history-ws",
+                "key_id": "credential-history-ws",
+                "original_request_body": {"input": "history failure turn"}
+            }),
+        )
+        .await;
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "output": [{"type": "message", "role": "assistant", "content": "done"}]
+            }
+        });
+        let raw = completed.to_string();
+        let frame = ParsedResponsesWebSocketFrame::parse(&raw).unwrap();
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Standard);
+        let observation = attempt
+            .observe_upstream_frame(&frame, adapter)
+            .expect("completed frame should terminate the attempt");
+        let ResponsesWebSocketTurnObservation::Terminal(outcome) = observation else {
+            panic!("completed frame should produce a terminal outcome");
+        };
+
+        let storage_key = response_history_storage_key(response_id, Some(scope.as_str()));
+        let _failure_guard = fail_next_response_history_persistence_for_tests(storage_key.clone());
+        attempt
+            .persist_response_history_before_terminal(&state)
+            .await
+            .expect("a failed advisory history write must not block terminal delivery");
+        let fallback_persistence_calls = Arc::new(AtomicU8::new(0));
+        let calls = Arc::clone(&fallback_persistence_calls);
+        let receipt = attempt
+            .settle_with_history_persistence(&state, outcome, move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            })
+            .await;
+        let provider_success = AttemptProviderOutcome::Terminal {
+            status_code: 200,
+            cancelled_by_provider: false,
+        };
+        let facts = receipt.facts;
+        assert_eq!(facts.provider, provider_success);
+        assert!(facts.provider.is_terminal());
+        assert_eq!(facts.provider.status_code(), 200);
+        assert_eq!(facts.delivery, AttemptClientDelivery::Complete);
+        let settlement = classify_attempt_settlement(AttemptSettlementInputs {
+            facts,
+            report_represents_failure: false,
+            observed_finish: true,
+            has_parser_error: false,
+        });
+        assert_eq!(settlement.candidate_status, AttemptCandidateStatus::Success);
+        assert_eq!(settlement.candidate_error, AttemptCandidateError::None);
+        assert_eq!(
+            settlement.provider_effect,
+            AttemptProviderEffect::ProviderSuccess
+        );
+        assert!(receipt
+            .gateway_history_persistence_failure
+            .as_deref()
+            .is_some_and(|error| error.contains("history persistence failed")));
+        assert_eq!(fallback_persistence_calls.load(Ordering::SeqCst), 0);
+        assert!(!response_history_is_loaded(
+            response_id,
+            Some(scope.as_str())
+        ));
+        assert!(state
+            .runtime_state()
+            .kv_get(&storage_key)
+            .await
+            .expect("memory KV read should succeed")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn detached_settlement_keeps_history_construction_error_advisory() {
+        let state = AppState::new().expect("test state should build");
+        let mut attempt = history_test_attempt(
+            &state,
+            json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses"
+            }),
+        )
+        .await;
+        attempt.provider_outcome = Some(AttemptProviderOutcome::Terminal {
+            status_code: 200,
+            cancelled_by_provider: false,
+        });
+        attempt.response_history_record_error =
+            Some("missing scoped requester identity".to_string());
+        let persistence_calls = Arc::new(AtomicU8::new(0));
+        let calls = Arc::clone(&persistence_calls);
+        let receipt = attempt
+            .settle_with_history_persistence(
+                &state,
+                ResponsesWebSocketTurnOutcome::ProviderTerminal {
+                    status_code: 200,
+                    cancelled: false,
+                },
+                move |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(()) }
+                },
+            )
+            .await;
+
+        assert_eq!(persistence_calls.load(Ordering::SeqCst), 0);
+        assert!(receipt
+            .gateway_history_persistence_failure
+            .as_deref()
+            .is_some_and(|error| error.contains("history construction failed")));
+        assert_eq!(receipt.facts.delivery, AttemptClientDelivery::Complete);
+        assert!(receipt.facts.provider.is_terminal());
+        let settlement = classify_attempt_settlement(AttemptSettlementInputs {
+            facts: receipt.facts,
+            report_represents_failure: false,
+            observed_finish: true,
+            has_parser_error: false,
+        });
+        assert_eq!(settlement.candidate_status, AttemptCandidateStatus::Success);
+        assert_eq!(
+            settlement.provider_effect,
+            AttemptProviderEffect::ProviderSuccess
+        );
     }
 
     #[test]

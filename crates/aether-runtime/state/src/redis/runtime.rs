@@ -6,8 +6,25 @@ use crate::redis::{
     RedisKeyspace, RedisLaneDiagnostics,
 };
 use crate::{
-    DataLayerError, RateLimitCheck, RateLimitInput, RateLimitScope, RuntimeSemaphoreError,
+    DataLayerError, KvCreateResult, RateLimitCheck, RateLimitInput, RateLimitScope,
+    RuntimeSemaphoreError,
 };
+
+const KV_CREATE_IF_ABSENT_OR_SAME_SCRIPT: &str = r#"
+local existing = redis.call('GET', KEYS[1])
+if existing then
+    if existing ~= ARGV[1] then
+        return 2
+    end
+    return 1
+end
+if ARGV[2] == '' then
+    redis.call('SET', KEYS[1], ARGV[1])
+else
+    redis.call('PSETEX', KEYS[1], ARGV[2], ARGV[1])
+end
+return 0
+"#;
 
 const RATE_LIMIT_CHECK_AND_CONSUME_SCRIPT: &str = r#"
 local user_key = KEYS[1]
@@ -145,6 +162,43 @@ impl RedisRuntimeRunner {
         self.query_string(RedisConnectionLane::Fast, "runtime kv set ttl", command)
             .await?;
         Ok(())
+    }
+
+    pub(crate) async fn kv_create_if_absent_or_same(
+        &self,
+        key: &str,
+        value: String,
+        ttl: Option<Duration>,
+    ) -> Result<KvCreateResult, DataLayerError> {
+        let namespaced_key = self.keyspace.key(key);
+        let ttl_ms = ttl
+            .map(|ttl| u64::try_from(ttl.as_millis().max(1)).unwrap_or(u64::MAX))
+            .map(|ttl| ttl.to_string())
+            .unwrap_or_default();
+        let result = self
+            .run_with_timeout(
+                RedisConnectionLane::Fast,
+                "runtime kv create if absent or same",
+                async {
+                    let mut connection = self.connections.connection(RedisConnectionLane::Fast);
+                    script(KV_CREATE_IF_ABSENT_OR_SAME_SCRIPT)
+                        .key(namespaced_key)
+                        .arg(value)
+                        .arg(ttl_ms)
+                        .invoke_async::<i32>(&mut connection)
+                        .await
+                        .map_redis_err()
+                },
+            )
+            .await?;
+        match result {
+            0 => Ok(KvCreateResult::Created),
+            1 => Ok(KvCreateResult::AlreadyExistsWithSameValue),
+            2 => Ok(KvCreateResult::Conflict),
+            other => Err(DataLayerError::UnexpectedValue(format!(
+                "unexpected runtime KV create result {other}"
+            ))),
+        }
     }
 
     pub(crate) async fn kv_get_many(

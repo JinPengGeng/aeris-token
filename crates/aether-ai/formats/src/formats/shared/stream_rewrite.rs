@@ -686,6 +686,7 @@ fn rewrite_model_directive_stream_line(
 #[derive(Default)]
 struct OpenAiResponsesCompatStreamState {
     pending_history_record: Option<ResponseHistoryRecord>,
+    history_recorded: bool,
 }
 
 fn rewrite_openai_responses_compat_stream_line(
@@ -721,7 +722,11 @@ fn rewrite_openai_responses_compat_stream_line(
     if matches!(event_type, "response.completed" | "response.done") {
         if let Some(response) = value.get_mut("response").and_then(Value::as_object_mut) {
             changed |= ensure_modern_openai_responses_response_fields(response);
-            if state.pending_history_record.is_none() {
+            if !state.history_recorded {
+                // Providers may emit both response.completed and response.done,
+                // sometimes in separate chunks. The first terminal event owns
+                // history construction for this stream permanently.
+                state.history_recorded = true;
                 let mut completed_response = Value::Object(response.clone());
                 if let Some(object) = completed_response.as_object_mut() {
                     object
@@ -1141,6 +1146,9 @@ data: {\"type\":\"response.reasoning_summary_text.delta\",\"response_id\":\"resp
             "client_api_format": "openai:responses",
             "user_id": "stream-tenant",
             "api_key_id": "stream-key",
+            "provider_id": "stream-provider",
+            "endpoint_id": "stream-endpoint",
+            "key_id": "stream-credential",
             "original_request_body": {"input": "keep this conversation"}
         });
         let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
@@ -1157,6 +1165,11 @@ data: {\"type\":\"response.reasoning_summary_text.delta\",\"response_id\":\"resp
             .take_response_history_record()
             .expect("completed native stream should produce one history record");
         assert!(record.payload.contains("resp_native_stream_history"));
+        rewriter
+            .push_chunk(
+                b"data: {\"type\":\"response.done\",\"response\":{\"id\":\"resp_native_stream_history\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"duplicate terminal must not rebuild history\"}]}]}}\n\n",
+            )
+            .expect("duplicate terminal event should remain relayable");
         assert!(rewriter.take_response_history_record().is_none());
     }
 

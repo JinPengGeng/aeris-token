@@ -67,9 +67,14 @@ pub(crate) use self::planner::{
     ResponsesWebSocketPinnedCandidate, SkippedLocalExecutionCandidate,
 };
 pub(crate) use self::pure::*;
+#[cfg(test)]
+pub(crate) use self::response_history::fail_next_response_history_lookup_for_tests;
+#[cfg(test)]
+pub(crate) use self::response_history::fail_next_response_history_persistence_for_tests;
 pub(crate) use self::response_history::{
-    persist_converted_response_history, persist_response_history_record,
-    resolve_openai_response_history,
+    conversation_history_candidates_exhausted_error, persist_converted_response_history,
+    persist_response_history_record, persist_response_history_record_advisory,
+    resolve_openai_response_history, ConversationHistoryCandidateResolution,
 };
 pub(crate) use self::transport::{
     append_transport_diagnostics_to_value, build_request_trace_proxy_value,

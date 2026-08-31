@@ -317,7 +317,11 @@ pub(crate) const fn classify_attempt_settlement(
     let status_code = attempt_status_code(facts);
     let failed = !void && report_represents_failure;
     let missing_terminal = !void && !observed_finish;
+    let gateway_failed_after_provider_success = facts.provider.is_terminal()
+        && facts.provider.status_code() < 400
+        && facts.delivery.is_aborted();
     let projects_provider_failure = !void
+        && !gateway_failed_after_provider_success
         && (status_code >= 400
             || facts.forced_error().is_some()
             || has_parser_error
@@ -1119,6 +1123,30 @@ mod tests {
             delivered.submit_execution_report
         );
         assert_ne!(settlement.candidate_error, delivered.candidate_error);
+    }
+
+    #[test]
+    fn gateway_failure_after_provider_terminal_fails_candidate_without_penalizing_provider() {
+        let settlement = settle(
+            terminal(200),
+            AttemptClientDelivery::Aborted {
+                reason: "gateway could not preserve the provider response history",
+            },
+            true,
+            true,
+            true,
+        );
+        assert_eq!(settlement.billing, AttemptBilling::Billed);
+        assert_eq!(settlement.candidate_status, AttemptCandidateStatus::Failed);
+        assert_eq!(
+            settlement.candidate_error,
+            AttemptCandidateError::ClientDeliveryFailed
+        );
+        assert_eq!(
+            settlement.provider_effect,
+            AttemptProviderEffect::ReleasePoolKeyLease
+        );
+        assert!(settlement.submit_execution_report);
     }
 
     /// 供应商还没给出终态时，客户端投递失败仍然作废账单：这一轮确实没有产出。

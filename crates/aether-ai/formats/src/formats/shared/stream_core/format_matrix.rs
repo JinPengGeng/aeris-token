@@ -94,7 +94,7 @@ impl StreamingStandardFormatMatrix {
         if let Some(client) = self.client.as_mut() {
             out.extend(client.finish()?);
         }
-        self.record_response_history(report_context);
+        self.record_response_history(report_context)?;
         Ok(out)
     }
 
@@ -146,13 +146,16 @@ impl StreamingStandardFormatMatrix {
             }
             out.extend(client.emit(frame)?);
         }
-        self.record_response_history(report_context);
+        self.record_response_history(report_context)?;
         Ok(out)
     }
 
-    fn record_response_history(&mut self, report_context: &Value) {
+    fn record_response_history(
+        &mut self,
+        report_context: &Value,
+    ) -> Result<(), AiSurfaceFinalizeError> {
         if self.history_recorded {
-            return;
+            return Ok(());
         }
         let Some(response) = self.client.as_ref().and_then(|client| match client {
             ClientStreamEmitter::OpenAIResponses(emitter) => {
@@ -160,10 +163,11 @@ impl StreamingStandardFormatMatrix {
             }
             _ => None,
         }) else {
-            return;
+            return Ok(());
         };
         self.pending_history_record = record_converted_response_history(report_context, response);
         self.history_recorded = true;
+        Ok(())
     }
 
     pub fn take_response_history_record(&mut self) -> Option<ResponseHistoryRecord> {
@@ -746,6 +750,7 @@ fn parse_gemini_error(payload: &Value) -> Option<(String, Option<String>, LocalC
 #[cfg(test)]
 mod tests {
     use super::{StreamingStandardFormatMatrix, StreamingStandardTerminalObserver};
+    use crate::formats::openai::responses::history::commit_response_history_record;
     use crate::formats::{context::FormatContext, registry::convert_request};
     use serde_json::{json, Value};
 
@@ -923,6 +928,7 @@ mod tests {
             .starts_with("ai:responses:history:v1:"));
         assert!(persisted.payload.contains("resp_history_stream_test_1"));
         assert!(matrix.take_response_history_record().is_none());
+        commit_response_history_record(&persisted);
 
         let continuation = convert_request(
             "openai:responses",

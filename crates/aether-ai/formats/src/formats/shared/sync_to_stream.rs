@@ -162,6 +162,8 @@ fn bridge_openai_responses_same_family_sync_json_to_stream(
     )?;
     let terminal_event_type = openai_responses_terminal_event_type(bridge_response.as_ref())
         .expect("bridge response should have a terminal status");
+    let response_history_record =
+        record_converted_response_history(report_context, bridge_response.as_ref());
     let sse_body = emit_openai_responses_stream_with_authoritative_terminal(
         canonical_frames,
         response,
@@ -175,7 +177,7 @@ fn bridge_openai_responses_same_family_sync_json_to_stream(
             response,
             provider_actual_service_tier_from_sync_response(response, provider_api_format),
         ),
-        response_history_record: None,
+        response_history_record,
     }))
 }
 
@@ -757,11 +759,21 @@ fn maybe_bridge_aether_sse_response_capture_to_stream(
         captured_api_format.as_str(),
         client_api_format,
     );
-    let sse_body = if captured_api_format == client_api_format {
+    let (sse_body, response_history_record) = if captured_api_format == client_api_format {
         if captured_api_format == "claude:messages" {
-            sanitize_same_format_claude_sse_body(body_text.as_bytes(), report_context)?
+            (
+                sanitize_same_format_claude_sse_body(body_text.as_bytes(), report_context)?,
+                None,
+            )
+        } else if is_openai_responses_family_api_format(client_api_format) {
+            rewrite_sse_body_between_formats(
+                body_text.as_bytes(),
+                captured_api_format.as_str(),
+                client_api_format,
+                &bridge_context,
+            )?
         } else {
-            body_text.as_bytes().to_vec()
+            (body_text.as_bytes().to_vec(), None)
         }
     } else {
         rewrite_sse_body_between_formats(
@@ -780,7 +792,7 @@ fn maybe_bridge_aether_sse_response_capture_to_stream(
     Ok(Some(SyncToStreamBridgeOutcome {
         sse_body,
         terminal_summary,
-        response_history_record: None,
+        response_history_record,
     }))
 }
 
@@ -846,7 +858,7 @@ fn rewrite_sse_body_between_formats(
     provider_api_format: &str,
     client_api_format: &str,
     report_context: &Value,
-) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+) -> Result<(Vec<u8>, Option<ResponseHistoryRecord>), AiSurfaceFinalizeError> {
     let mut context =
         build_bridge_report_context(Some(report_context), provider_api_format, client_api_format);
     if let Some(object) = context.as_object_mut() {
@@ -863,7 +875,8 @@ fn rewrite_sse_body_between_formats(
         Ok(())
     })?;
     out.extend(matrix.finish(&context)?);
-    Ok(out)
+    let response_history_record = matrix.take_response_history_record();
+    Ok((out, response_history_record))
 }
 
 fn observe_sse_terminal_summary(
@@ -1382,6 +1395,41 @@ mod tests {
     }
 
     #[test]
+    fn chat_sync_bridge_keeps_history_without_scope_advisory() {
+        let report_context = json!({
+            "provider_api_format": "openai:chat",
+            "client_api_format": "openai:responses",
+            "needs_conversion": true,
+            "original_request_body": {
+                "model": "deepseek-v4-flash",
+                "input": [{"role": "user", "content": "inspect the repository"}]
+            }
+        });
+        let outcome = maybe_bridge_standard_sync_json_to_stream(
+            &json!({
+                "id": "chatcmpl_sync_history_without_scope",
+                "object": "chat.completion",
+                "model": "deepseek-v4-flash",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "done"},
+                    "finish_reason": "stop"
+                }]
+            }),
+            "openai:chat",
+            "openai:responses",
+            Some(&report_context),
+        )
+        .expect("completed history without a scope must not fail the bridge")
+        .expect("bridge should still produce the successful response stream");
+
+        assert!(outcome.response_history_record.is_none());
+        assert!(String::from_utf8(outcome.sse_body)
+            .expect("bridge output should be UTF-8")
+            .contains("response.completed"));
+    }
+
+    #[test]
     fn openai_sync_usage_derives_missing_input_tokens_from_total() {
         let usage = standardized_usage_from_openai_usage(&json!({
             "output_tokens": 177,
@@ -1462,6 +1510,40 @@ mod tests {
         assert_eq!(events.last(), Some(event));
         assert_eq!(event["type"], "response.completed");
         assert_eq!(event["response"], response);
+    }
+
+    #[test]
+    fn native_responses_sync_bridge_exposes_scoped_history_record() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:responses",
+            "user_id": "native-sync-bridge-user",
+            "api_key_id": "native-sync-bridge-key",
+            "provider_id": "native-sync-bridge-provider",
+            "endpoint_id": "native-sync-bridge-endpoint",
+            "key_id": "native-sync-bridge-credential",
+            "original_request_body": {"input": "preserve native sync history"}
+        });
+        let outcome = maybe_bridge_standard_sync_json_to_stream(
+            &json!({
+                "id": "resp_native_sync_bridge_history",
+                "object": "response",
+                "status": "completed",
+                "output": []
+            }),
+            "openai:responses",
+            "openai:responses",
+            Some(&report_context),
+        )
+        .expect("native Responses bridge should succeed")
+        .expect("native Responses bridge should emit SSE");
+
+        let history_record = outcome
+            .response_history_record
+            .expect("native Responses bridge should expose scoped history");
+        assert!(history_record
+            .payload
+            .contains("resp_native_sync_bridge_history"));
     }
 
     #[test]
@@ -1922,7 +2004,11 @@ mod tests {
             }),
             "claude:messages",
             "openai:responses",
-            None,
+            Some(&json!({
+                "user_id": "capture-history-user",
+                "api_key_id": "capture-history-key",
+                "original_request_body": {"input": "edit the file"}
+            })),
         )
         .expect("bridge should succeed")
         .expect("capture should bridge");
@@ -1932,5 +2018,6 @@ mod tests {
         assert!(output.contains("event: response.function_call_arguments.delta"));
         assert!(output.contains("event: response.completed"));
         assert!(!output.contains("status_code"));
+        assert!(outcome.response_history_record.is_some());
     }
 }

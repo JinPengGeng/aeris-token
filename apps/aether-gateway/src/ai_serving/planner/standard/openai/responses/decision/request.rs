@@ -152,10 +152,10 @@ fn log_responses_to_chat_tool_conversion(trace_id: &str, inbound: &Value, outbou
     let outbound_tool_names = chat_function_tool_names(outbound);
     let inbound_call_ids = response_input_call_ids(inbound);
     let outbound_call_ids = chat_message_call_ids(outbound);
-    let previous_response_id = inbound
+    let previous_response_id_fingerprint = inbound
         .get("previous_response_id")
         .and_then(Value::as_str)
-        .unwrap_or_default();
+        .map(crate::ai_serving::previous_response_id_fingerprint);
     debug!(
         event_name = "openai_responses_to_chat_tool_conversion",
         log_type = "debug",
@@ -164,10 +164,10 @@ fn log_responses_to_chat_tool_conversion(trace_id: &str, inbound: &Value, outbou
         outbound_tool_count = outbound_tool_names.len(),
         inbound_tool_names = ?inbound_tool_names,
         outbound_tool_names = ?outbound_tool_names,
-        previous_response_id = %previous_response_id,
+        previous_response_id_fingerprint = ?previous_response_id_fingerprint,
         inbound_call_ids = ?inbound_call_ids,
         outbound_call_ids = ?outbound_call_ids,
-        history_recovered = !previous_response_id.is_empty()
+        history_recovered = previous_response_id_fingerprint.is_some()
             && outbound_call_ids.iter().any(|call_id| inbound_call_ids.contains(call_id)),
         "converted OpenAI Responses tools and continuation context to OpenAI Chat"
     );
@@ -397,22 +397,37 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
                 return Ok(None);
             }
         };
-    crate::ai_serving::resolve_openai_response_history(
+    let history_resolution = crate::ai_serving::resolve_openai_response_history(
         state.runtime_state(),
         body_json,
         spec_metadata.api_format,
         provider_api_format,
         input.auth_context.user_id.as_str(),
         input.auth_context.api_key_id.as_str(),
+        candidate.provider_id.as_str(),
+        candidate.endpoint_id.as_str(),
+        candidate.key_id.as_str(),
     )
     .await?;
+    if let crate::ai_serving::ConversationHistoryCandidateResolution::Skip(skip_reason) =
+        history_resolution
+    {
+        mark_skipped_local_openai_responses_candidate(
+            state,
+            input,
+            trace_id,
+            candidate,
+            candidate_index,
+            candidate_id,
+            skip_reason,
+        )
+        .await;
+        return Ok(None);
+    }
     let history_scope = crate::ai_serving::conversation_history_scope(
         input.auth_context.user_id.as_str(),
         input.auth_context.api_key_id.as_str(),
-    )
-    .ok_or_else(|| {
-        GatewayError::Internal("conversation history requester identity is incomplete".to_string())
-    })?;
+    );
     let redaction = resolve_provider_chat_pii_redaction(
         state,
         parts,
@@ -474,7 +489,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
                     transport.endpoint.body_rules.as_ref()
                 },
                 effective_headers,
-                Some(history_scope.as_str()),
+                history_scope.as_deref(),
                 codex_model_capabilities.as_ref(),
                 false,
             )
@@ -1992,7 +2007,301 @@ async fn build_kiro_openai_responses_payload_parts(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    fn history_test_input() -> LocalOpenAiResponsesDecisionInput {
+        LocalOpenAiResponsesDecisionInput {
+            auth_context: crate::ai_serving::ExecutionRuntimeAuthContext {
+                user_id: "history-planner-user".to_string(),
+                api_key_id: "history-planner-key".to_string(),
+                username: Some("history-planner".to_string()),
+                api_key_name: Some("default".to_string()),
+                balance_remaining: Some(10.0),
+                access_allowed: true,
+                api_key_is_standalone: false,
+            },
+            requested_model: "gpt-history".to_string(),
+            auth_snapshot: crate::ai_serving::GatewayAuthApiKeySnapshot {
+                user_id: "history-planner-user".to_string(),
+                username: "history-planner".to_string(),
+                email: None,
+                user_role: "user".to_string(),
+                user_auth_source: "local".to_string(),
+                user_is_active: true,
+                user_is_deleted: false,
+                user_rate_limit: None,
+                user_allowed_providers: None,
+                user_allowed_api_formats: None,
+                user_allowed_models: None,
+                api_key_id: "history-planner-key".to_string(),
+                api_key_name: Some("default".to_string()),
+                api_key_is_active: true,
+                api_key_is_locked: false,
+                api_key_is_standalone: false,
+                api_key_rate_limit: None,
+                api_key_concurrent_limit: None,
+                api_key_expires_at_unix_secs: None,
+                api_key_allowed_providers: None,
+                api_key_allowed_api_formats: None,
+                api_key_allowed_models: None,
+                api_key_ip_rules: None,
+                currently_usable: true,
+            },
+            required_capabilities: None,
+            request_auth_channel: None,
+            client_surface: None,
+            gateway_credential_carrier: None,
+            client_session_affinity: None,
+            original_client_session_id: None,
+            routing_policy: None,
+            routing_trace_seed: None,
+            routing_context: None,
+            model_directive_policy: Default::default(),
+        }
+    }
+
+    fn history_test_candidate(api_format: &str, index: usize) -> EligibleLocalExecutionCandidate {
+        use crate::ai_serving::planner::candidate_resolution::LocalExecutionCandidateKind;
+        use crate::ai_serving::{
+            GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
+            GatewayProviderTransportProvider,
+        };
+        use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
+
+        let endpoint_id = format!("history-endpoint-{index}");
+        let provider_id = format!("history-provider-{index}");
+        let key_id = format!("history-key-{index}");
+        let candidate = SchedulerMinimalCandidateSelectionCandidate {
+            provider_id: provider_id.clone(),
+            provider_name: format!("history-provider-{index}"),
+            provider_type: "custom".to_string(),
+            provider_priority: 1,
+            endpoint_id: endpoint_id.clone(),
+            endpoint_api_format: api_format.to_string(),
+            key_id: key_id.clone(),
+            key_name: format!("history-key-{index}"),
+            key_auth_type: "api_key".to_string(),
+            key_internal_priority: 1,
+            key_global_priority_for_format: Some(1),
+            key_capabilities: None,
+            model_id: format!("history-model-{index}"),
+            global_model_id: "history-global-model".to_string(),
+            global_model_name: "gpt-history".to_string(),
+            selected_provider_model_name: "gpt-history-upstream".to_string(),
+            supports_streaming: true,
+            mapping_matched_model: None,
+        };
+        let transport = GatewayProviderTransportSnapshot {
+            provider: GatewayProviderTransportProvider {
+                id: provider_id.clone(),
+                name: format!("history-provider-{index}"),
+                provider_type: "custom".to_string(),
+                website: None,
+                is_active: true,
+                keep_priority_on_conversion: false,
+                enable_format_conversion: true,
+                concurrent_limit: None,
+                max_retries: None,
+                proxy: None,
+                request_timeout_secs: None,
+                stream_first_byte_timeout_secs: None,
+                config: None,
+            },
+            endpoint: GatewayProviderTransportEndpoint {
+                id: endpoint_id.clone(),
+                provider_id: provider_id.clone(),
+                api_format: api_format.to_string(),
+                api_family: Some("openai".to_string()),
+                endpoint_kind: Some("chat".to_string()),
+                is_active: true,
+                base_url: "https://api.example.test".to_string(),
+                header_rules: None,
+                body_rules: None,
+                max_retries: None,
+                custom_path: None,
+                config: None,
+                format_acceptance_config: (api_format == "openai:chat").then(|| {
+                    json!({
+                        "enabled": true,
+                        "accept_formats": ["openai:responses"]
+                    })
+                }),
+                proxy: None,
+            },
+            key: GatewayProviderTransportKey {
+                id: key_id,
+                provider_id,
+                name: format!("history-key-{index}"),
+                auth_type: "api_key".to_string(),
+                is_active: true,
+                api_formats: Some(vec![api_format.to_string()]),
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+                allowed_models: None,
+                capabilities: None,
+                rate_multipliers: None,
+                global_priority_by_format: None,
+                expires_at_unix_secs: None,
+                proxy: None,
+                fingerprint: None,
+                upstream_metadata: None,
+                decrypted_api_key: "sk-history-upstream".to_string(),
+                decrypted_auth_config: None,
+            },
+        };
+        EligibleLocalExecutionCandidate {
+            kind: LocalExecutionCandidateKind::SingleKey,
+            candidate,
+            transport: Arc::new(transport),
+            provider_api_format: api_format.to_string(),
+            orchestration: crate::orchestration::LocalExecutionCandidateMetadata::default(),
+            ranking: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn planner_keeps_candidate_order_when_hydrate_skips_before_native() {
+        let state = crate::AppState::new().expect("state should build");
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(())
+            .expect("request should build");
+        let (parts, _) = request.into_parts();
+        let body = json!({
+            "model": "gpt-history",
+            "previous_response_id": "resp_history_missing_for_chat_candidate",
+            "input": "continue",
+        });
+        let input = history_test_input();
+        let candidates = [
+            history_test_candidate("openai:chat", 0),
+            history_test_candidate("openai:responses", 1),
+        ];
+        let spec = LocalOpenAiResponsesSpec {
+            api_format: "openai:responses",
+            decision_kind: crate::ai_serving::OPENAI_RESPONSES_SYNC_PLAN_KIND,
+            report_kind: crate::ai_serving::OPENAI_RESPONSES_SYNC_SUCCESS_REPORT_KIND,
+            compact: false,
+            require_streaming: false,
+        };
+
+        let first = resolve_local_openai_responses_candidate_payload_parts(
+            &state,
+            &parts,
+            "trace-history-candidate-order",
+            &body,
+            &input,
+            &candidates[0],
+            0,
+            "history-candidate-0",
+            spec,
+        )
+        .await
+        .expect("missing hydrate history should be candidate-local");
+        assert!(first.is_none());
+
+        let second = resolve_local_openai_responses_candidate_payload_parts(
+            &state,
+            &parts,
+            "trace-history-candidate-order",
+            &body,
+            &input,
+            &candidates[1],
+            1,
+            "history-candidate-1",
+            spec,
+        )
+        .await
+        .expect("native candidate should remain reachable")
+        .expect("native candidate should build in original order");
+        assert_eq!(second.provider_api_format, "openai:responses");
+        assert_eq!(
+            second.provider_request_body["previous_response_id"],
+            "resp_history_missing_for_chat_candidate"
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLogWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedLogWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl CapturedLogs {
+        fn contents(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )
+            .expect("captured tracing output should be UTF-8")
+        }
+    }
+
+    #[test]
+    fn response_history_debug_log_fingerprints_the_provider_owned_id() {
+        let raw_response_id = "resp_private_provider_history_identifier";
+        let expected_fingerprint =
+            crate::ai_serving::previous_response_id_fingerprint(raw_response_id);
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_responses_to_chat_tool_conversion(
+                "trace-history-redaction",
+                &json!({
+                    "previous_response_id": raw_response_id,
+                    "input": [{
+                        "type": "function_call_output",
+                        "call_id": "call-history-redaction",
+                        "output": "done"
+                    }]
+                }),
+                &json!({
+                    "messages": [{
+                        "role": "assistant",
+                        "tool_calls": [{"id": "call-history-redaction"}]
+                    }]
+                }),
+            );
+        });
+
+        let logs = logs.contents();
+        assert!(logs.contains(&expected_fingerprint));
+        assert!(!logs.contains(raw_response_id));
+    }
 
     #[test]
     fn openai_responses_image_bridge_builds_images_api_body() {

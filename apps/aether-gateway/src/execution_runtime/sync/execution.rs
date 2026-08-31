@@ -1834,7 +1834,7 @@ async fn apply_sync_success_effects(
     plan: &ExecutionPlan,
     report_context: Option<&serde_json::Value>,
     payload: &GatewaySyncReportRequest,
-) {
+) -> Result<(), GatewayError> {
     if let Some(report_context) = report_context {
         crate::ai_serving::persist_converted_response_history(
             state.runtime_state(),
@@ -1844,7 +1844,7 @@ async fn apply_sync_success_effects(
                 .as_ref()
                 .or(payload.body_json.as_ref()),
         )
-        .await;
+        .await?;
     }
     apply_local_execution_effect(
         state,
@@ -1873,6 +1873,7 @@ async fn apply_sync_success_effects(
         LocalExecutionEffect::PoolSuccessSync { payload },
     )
     .await;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2959,7 +2960,7 @@ async fn execute_execution_runtime_sync_impl(
             implicit_finalize.payload.report_context.as_ref(),
             usage_payload,
         )
-        .await;
+        .await?;
         record_sync_terminal_usage_and_disarm_guard(
             state,
             &plan,
@@ -3014,7 +3015,7 @@ async fn execute_execution_runtime_sync_impl(
                     payload.report_context.as_ref(),
                     usage_payload,
                 )
-                .await;
+                .await?;
             }
             record_sync_terminal_usage_and_disarm_guard(
                 state,
@@ -3064,7 +3065,7 @@ async fn execute_execution_runtime_sync_impl(
                     original_report_context.as_ref(),
                     &report_payload,
                 )
-                .await;
+                .await?;
                 record_sync_terminal_usage_and_disarm_guard(
                     state,
                     &plan,
@@ -3101,7 +3102,7 @@ async fn execute_execution_runtime_sync_impl(
             let background_success_report_kind =
                 resolve_local_sync_success_background_report_kind(payload.report_kind.as_str());
             apply_sync_success_effects(state, &plan, payload.report_context.as_ref(), &payload)
-                .await;
+                .await?;
             record_sync_terminal_usage_and_disarm_guard(
                 state,
                 &plan,
@@ -3216,7 +3217,7 @@ async fn execute_execution_runtime_sync_impl(
             usage_payload.report_context.as_ref(),
             &usage_payload,
         )
-        .await;
+        .await?;
     }
     record_sync_terminal_usage_and_disarm_guard(
         state,
@@ -3459,6 +3460,123 @@ mod tests {
             Some("openai:chat".to_string()),
         )
         .with_execution_runtime_candidate(true)
+    }
+
+    #[tokio::test]
+    async fn sync_success_effects_ignore_advisory_history_persistence_failure() {
+        use crate::ai_serving::{
+            conversation_history_scope, evict_response_history,
+            fail_next_response_history_persistence_for_tests, response_history_is_loaded,
+            response_history_storage_key,
+        };
+
+        let state = AppState::new().expect("test state should build");
+        let mut plan = test_openai_image_plan(false);
+        plan.client_api_format = "openai:responses".to_string();
+        plan.provider_api_format = "openai:chat".to_string();
+        let response_id = "resp_sync_history_persistence_failure";
+        let scope = conversation_history_scope("history-sync-user", "history-sync-key").unwrap();
+        let storage_key = response_history_storage_key(response_id, Some(scope.as_str()));
+        evict_response_history(response_id, Some(scope.as_str()));
+        let _failure_guard = fail_next_response_history_persistence_for_tests(storage_key.clone());
+        let report_context = json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:chat",
+            "user_id": "history-sync-user",
+            "api_key_id": "history-sync-key",
+            "original_request_body": {"input": "sync history request"}
+        });
+        let payload = GatewaySyncReportRequest {
+            trace_id: "trace-sync-history-persistence-failure".to_string(),
+            report_kind: "openai_responses_sync_success".to_string(),
+            report_context: Some(report_context.clone()),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body_json: None,
+            client_body_json: Some(json!({
+                "id": response_id,
+                "status": "completed",
+                "output": []
+            })),
+            body_base64: None,
+            telemetry: None,
+        };
+
+        apply_sync_success_effects(&state, &plan, Some(&report_context), &payload)
+            .await
+            .expect("sync success must ignore an advisory history write failure");
+        assert!(!response_history_is_loaded(
+            response_id,
+            Some(scope.as_str())
+        ));
+        assert!(
+            state
+                .runtime_state()
+                .kv_get(&storage_key)
+                .await
+                .expect("memory KV read should succeed")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_sync_success_persists_child_when_parent_exists_only_at_provider() {
+        use crate::ai_serving::{
+            conversation_history_scope, evict_response_history, response_history_is_loaded,
+            response_history_storage_key,
+        };
+
+        let state = AppState::new().expect("test state should build");
+        let mut plan = test_openai_image_plan(false);
+        plan.client_api_format = "openai:responses".to_string();
+        plan.provider_api_format = "openai:responses".to_string();
+        let response_id = "resp_sync_native_provider_resolved_child";
+        let scope = conversation_history_scope("native-sync-user", "native-sync-key").unwrap();
+        let storage_key = response_history_storage_key(response_id, Some(scope.as_str()));
+        evict_response_history(response_id, Some(scope.as_str()));
+        let report_context = json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses",
+            "user_id": "native-sync-user",
+            "api_key_id": "native-sync-key",
+            "provider_id": plan.provider_id,
+            "endpoint_id": plan.endpoint_id,
+            "key_id": plan.key_id,
+            "original_request_body": {
+                "previous_response_id": "resp_sync_native_parent_only_at_provider",
+                "input": "native sync continuation"
+            }
+        });
+        let payload = GatewaySyncReportRequest {
+            trace_id: "trace-sync-native-provider-resolved".to_string(),
+            report_kind: "openai_responses_sync_success".to_string(),
+            report_context: Some(report_context.clone()),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body_json: None,
+            client_body_json: Some(json!({
+                "id": response_id,
+                "status": "completed",
+                "output": []
+            })),
+            body_base64: None,
+            telemetry: None,
+        };
+
+        apply_sync_success_effects(&state, &plan, Some(&report_context), &payload)
+            .await
+            .expect("native sync success should not require a local parent transcript");
+        let persisted = state
+            .runtime_state()
+            .kv_get(&storage_key)
+            .await
+            .expect("memory KV read should succeed")
+            .expect("native sync child history should persist");
+        assert!(persisted.contains("\"transcript_materialized\":false"));
+        assert!(!response_history_is_loaded(
+            response_id,
+            Some(scope.as_str())
+        ));
     }
 
     #[tokio::test]

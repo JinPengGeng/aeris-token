@@ -43,7 +43,6 @@ const LOG_TARGET: &str = "aether_gateway::handlers::proxy::responses_ws";
 /// 供应商的终态可能已经到达，只是最后一跳没送出去。
 const CLIENT_DELIVERY_FAILED_REASON: &str =
     "gateway could not relay the provider event to the client";
-
 macro_rules! debug {
     ($($arg:tt)*) => {
         tracing::debug!(target: LOG_TARGET, $($arg)*)
@@ -300,6 +299,11 @@ pub(super) async fn relay_bound_connection(
                     Some(ResponsesWebSocketTurnObservation::Terminal(outcome)) => Some(outcome),
                     _ => None,
                 };
+                if terminal_outcome.is_some() {
+                    if let Some(turn) = bound.turn_state.attempt_mut() {
+                        let _ = turn.persist_response_history_before_terminal(state).await;
+                    }
+                }
                 if matches!(&upstream_message, WreqWsMessage::Text(_))
                     && parsed_upstream_frame.is_none()
                 {

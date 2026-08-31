@@ -159,6 +159,13 @@ pub enum RuntimeStateBackendKind {
     Redis,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvCreateResult {
+    Created,
+    AlreadyExistsWithSameValue,
+    Conflict,
+}
+
 impl RuntimeStateBackendKind {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -362,6 +369,28 @@ impl RuntimeState {
                     redis.runtime.kv_set_plain(key, value).await?;
                 }
                 Ok(())
+            }
+        }
+    }
+
+    /// Atomically creates an expiring value without replacing an existing one.
+    /// Replaying the exact value is idempotent; a different value is a conflict.
+    pub async fn kv_create_if_absent_or_same(
+        &self,
+        key: &str,
+        value: impl Into<String> + Send,
+        ttl: Option<Duration>,
+    ) -> Result<KvCreateResult, DataLayerError> {
+        let value = value.into();
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                Ok(memory.kv_create_if_absent_or_same(key, value, ttl).await)
+            }
+            RuntimeStateBackend::Redis(redis) => {
+                redis
+                    .runtime
+                    .kv_create_if_absent_or_same(key, value, ttl)
+                    .await
             }
         }
     }
@@ -1067,6 +1096,12 @@ pub trait ExpiringKvStore: Send + Sync {
         value: String,
         ttl: Option<Duration>,
     ) -> Result<(), DataLayerError>;
+    async fn create_if_absent_or_same(
+        &self,
+        key: &str,
+        value: String,
+        ttl: Option<Duration>,
+    ) -> Result<KvCreateResult, DataLayerError>;
     async fn get(&self, key: &str) -> Result<Option<String>, DataLayerError>;
     async fn get_many(&self, keys: &[String]) -> Result<Vec<Option<String>>, DataLayerError>;
     async fn take(&self, key: &str) -> Result<Option<String>, DataLayerError>;
@@ -1083,6 +1118,15 @@ impl ExpiringKvStore for RuntimeState {
         ttl: Option<Duration>,
     ) -> Result<(), DataLayerError> {
         self.kv_set(key, value, ttl).await
+    }
+
+    async fn create_if_absent_or_same(
+        &self,
+        key: &str,
+        value: String,
+        ttl: Option<Duration>,
+    ) -> Result<KvCreateResult, DataLayerError> {
+        self.kv_create_if_absent_or_same(key, value, ttl).await
     }
 
     async fn get(&self, key: &str) -> Result<Option<String>, DataLayerError> {
@@ -1531,6 +1575,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_kv_create_is_idempotent_and_rejects_divergent_duplicates() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        assert_eq!(
+            runtime
+                .kv_create_if_absent_or_same("history", "first", Some(Duration::from_secs(60)),)
+                .await
+                .expect("create"),
+            KvCreateResult::Created
+        );
+        assert_eq!(
+            runtime
+                .kv_create_if_absent_or_same("history", "first", Some(Duration::from_secs(60)),)
+                .await
+                .expect("idempotent replay"),
+            KvCreateResult::AlreadyExistsWithSameValue
+        );
+        assert_eq!(
+            runtime
+                .kv_create_if_absent_or_same("history", "different", Some(Duration::from_secs(60)),)
+                .await
+                .expect("conflict"),
+            KvCreateResult::Conflict
+        );
+        assert_eq!(
+            runtime.kv_get("history").await.expect("get").as_deref(),
+            Some("first")
+        );
+    }
+
+    #[tokio::test]
     async fn memory_rate_limit_rejects_after_limit() {
         let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
         let input = RateLimitInput {
@@ -1872,6 +1946,86 @@ mod tests {
                 .expect("history ttl"),
             Some(1..=30)
         ));
+    }
+
+    #[tokio::test]
+    async fn redis_runtime_instances_atomically_reject_divergent_duplicate_creates() {
+        let external_redis_url = std::env::var("AETHER_TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let redis = if external_redis_url.is_none() {
+            TestRedisServer::start().await
+        } else {
+            None
+        };
+        let Some(redis_url) =
+            external_redis_url.or_else(|| redis.as_ref().map(|redis| redis.redis_url.clone()))
+        else {
+            return;
+        };
+        let key_prefix = format!("aether-history-cas-test-{}", Uuid::new_v4());
+        let runtime_config = || RedisClientConfig {
+            url: redis_url.clone(),
+            key_prefix: Some(key_prefix.clone()),
+        };
+        let first = RuntimeState::redis(runtime_config(), Some(1_000))
+            .await
+            .expect("first runtime should connect");
+        let second = RuntimeState::redis(runtime_config(), Some(1_000))
+            .await
+            .expect("second runtime should connect");
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let spawn_create =
+            |runtime: RuntimeState, barrier: Arc<tokio::sync::Barrier>, value: &'static str| {
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    runtime
+                        .kv_create_if_absent_or_same(
+                            "shared-history",
+                            value,
+                            Some(Duration::from_secs(30)),
+                        )
+                        .await
+                })
+            };
+        let first_create = spawn_create(first.clone(), Arc::clone(&barrier), "first");
+        let second_create = spawn_create(second.clone(), Arc::clone(&barrier), "second");
+        barrier.wait().await;
+        let first_result = first_create
+            .await
+            .expect("first task")
+            .expect("first create");
+        let second_result = second_create
+            .await
+            .expect("second task")
+            .expect("second create");
+        assert_eq!(
+            usize::from(first_result == KvCreateResult::Created)
+                + usize::from(second_result == KvCreateResult::Created),
+            1
+        );
+        assert_eq!(
+            usize::from(first_result == KvCreateResult::Conflict)
+                + usize::from(second_result == KvCreateResult::Conflict),
+            1
+        );
+        let winner = first
+            .kv_get("shared-history")
+            .await
+            .expect("winner")
+            .unwrap();
+        assert!(matches!(winner.as_str(), "first" | "second"));
+        assert_eq!(
+            second
+                .kv_create_if_absent_or_same(
+                    "shared-history",
+                    winner,
+                    Some(Duration::from_secs(30)),
+                )
+                .await
+                .expect("same-value replay"),
+            KvCreateResult::AlreadyExistsWithSameValue
+        );
     }
 
     #[tokio::test]

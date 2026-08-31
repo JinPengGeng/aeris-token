@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use aether_contracts::ExecutionPlan;
 use axum::body::Body;
-use axum::http::header::HeaderValue;
 use axum::http::Response;
+use axum::http::header::HeaderValue;
 use serde_json::json;
 
 use crate::api::response::{
@@ -12,13 +12,13 @@ use crate::api::response::{
 use crate::async_task::VideoTaskService;
 use crate::control::GatewayControlDecision;
 use crate::video_tasks::{
-    build_local_sync_finalize_read_response, LocalVideoTaskSnapshot, VideoTaskSyncReportMode,
+    LocalVideoTaskSnapshot, VideoTaskSyncReportMode, build_local_sync_finalize_read_response,
 };
 pub(crate) use crate::video_tasks::{
     resolve_local_sync_error_background_report_kind,
     resolve_local_sync_success_background_report_kind,
 };
-use crate::{usage::GatewaySyncReportRequest, GatewayError};
+use crate::{GatewayError, usage::GatewaySyncReportRequest};
 
 pub(crate) enum LocalVideoSyncSuccessBuild {
     Handled(LocalVideoSyncSuccessOutcome),

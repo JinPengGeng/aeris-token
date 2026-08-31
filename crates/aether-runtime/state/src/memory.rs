@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use crate::{DataLayerError, RuntimeQueueEntry, RuntimeQueueReclaimConfig, RuntimeQueueStats};
+use crate::{
+    DataLayerError, KvCreateResult, RuntimeQueueEntry, RuntimeQueueReclaimConfig, RuntimeQueueStats,
+};
 
 const MEMORY_RATE_LIMIT_COUNTER_SHARD_COUNT: usize = 64;
 const MEMORY_RATE_LIMIT_COUNTER_PRUNE_INTERVAL: u64 = 256;
@@ -204,6 +206,45 @@ impl MemoryRuntimeBackend {
                 expires_at: ttl.map(|ttl| now + ttl),
             },
         );
+    }
+
+    pub(crate) async fn kv_create_if_absent_or_same(
+        &self,
+        key: &str,
+        value: String,
+        ttl: Option<Duration>,
+    ) -> KvCreateResult {
+        let mut kv = self.kv.lock().await;
+        let now = Instant::now();
+        prune_kv(&mut kv, now);
+        if let Some(existing) = kv.get(key) {
+            if existing.value != value {
+                return KvCreateResult::Conflict;
+            }
+            return KvCreateResult::AlreadyExistsWithSameValue;
+        }
+        if ttl.is_some_and(|ttl| ttl.is_zero()) {
+            return KvCreateResult::Created;
+        }
+        while kv.len() >= self.config.max_kv_entries.max(1) {
+            let Some(oldest_key) = kv
+                .iter()
+                .min_by_key(|(_, entry)| entry.inserted_at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            kv.remove(&oldest_key);
+        }
+        kv.insert(
+            key.to_string(),
+            MemoryKvEntry {
+                value,
+                inserted_at: now,
+                expires_at: ttl.map(|ttl| now + ttl),
+            },
+        );
+        KvCreateResult::Created
     }
 
     pub(crate) fn kv_set_nowait(&self, key: &str, value: String, ttl: Option<Duration>) -> bool {
