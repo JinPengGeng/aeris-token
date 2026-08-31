@@ -89,6 +89,7 @@ pub(super) fn error_event(code: &str, message: &str) -> Value {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RealtimeUsageTotals {
+    pub(super) authoritative: bool,
     pub(super) responses: u64,
     pub(super) input_tokens: u64,
     pub(super) output_tokens: u64,
@@ -102,10 +103,14 @@ pub(super) struct RealtimeUsageTotals {
 pub(super) struct RealtimeUsageObserver {
     totals: RealtimeUsageTotals,
     response_ids: BTreeSet<String>,
+    invalid: bool,
 }
 
 impl RealtimeUsageObserver {
     pub(super) fn observe(&mut self, raw: &str) {
+        if self.invalid {
+            return;
+        }
         let Ok(event) = serde_json::from_str::<Value>(raw) else {
             return;
         };
@@ -128,10 +133,18 @@ impl RealtimeUsageObserver {
                 return;
             }
             if self.response_ids.len() >= MAX_OBSERVED_RESPONSE_IDS {
+                self.invalidate();
                 return;
             }
             self.response_ids.insert(response_id.to_string());
+        } else {
+            // Without a stable response identity, a replayed response.done
+            // cannot be distinguished from a new response. Do not meter any
+            // usage from an observer that has lost this exact-once invariant.
+            self.invalidate();
+            return;
         }
+        self.totals.authoritative = true;
         let input_tokens = json_u64(usage.get("input_tokens"));
         let output_tokens = json_u64(usage.get("output_tokens"));
         let total_tokens = usage
@@ -163,6 +176,12 @@ impl RealtimeUsageObserver {
     pub(super) const fn totals(&self) -> RealtimeUsageTotals {
         self.totals
     }
+
+    fn invalidate(&mut self) {
+        self.invalid = true;
+        self.totals = RealtimeUsageTotals::default();
+        self.response_ids.clear();
+    }
 }
 
 fn json_u64(value: Option<&Value>) -> u64 {
@@ -171,7 +190,7 @@ fn json_u64(value: Option<&Value>) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{model_from_query, RealtimeUsageObserver};
+    use super::{model_from_query, RealtimeUsageObserver, MAX_OBSERVED_RESPONSE_IDS};
 
     #[test]
     fn model_query_requires_one_bounded_model_and_ignores_safe_hints() {
@@ -207,6 +226,7 @@ mod tests {
         observer.observe(event.as_str());
 
         let totals = observer.totals();
+        assert!(totals.authoritative);
         assert_eq!(totals.responses, 1);
         assert_eq!(totals.input_tokens, 12);
         assert_eq!(totals.output_tokens, 7);
@@ -232,5 +252,58 @@ mod tests {
         );
 
         assert_eq!(observer.totals().total_tokens, 13);
+    }
+
+    #[test]
+    fn response_done_without_id_is_unmetered_and_replay_safe() {
+        let event = serde_json::json!({
+            "type": "response.done",
+            "response": {
+                "usage": {"input_tokens": 9, "output_tokens": 4, "total_tokens": 13}
+            }
+        })
+        .to_string();
+        let mut observer = RealtimeUsageObserver::default();
+        observer.observe(&event);
+        observer.observe(&event);
+
+        assert_eq!(observer.totals(), super::RealtimeUsageTotals::default());
+    }
+
+    #[test]
+    fn response_id_bound_exhaustion_invalidates_the_entire_usage_snapshot() {
+        let mut observer = RealtimeUsageObserver::default();
+        for index in 0..MAX_OBSERVED_RESPONSE_IDS {
+            observer.observe(
+                serde_json::json!({
+                    "type": "response.done",
+                    "response": {
+                        "id": format!("resp_{index}"),
+                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                    }
+                })
+                .to_string()
+                .as_str(),
+            );
+        }
+        assert!(observer.totals().authoritative);
+        assert_eq!(
+            observer.totals().responses,
+            MAX_OBSERVED_RESPONSE_IDS as u64
+        );
+
+        observer.observe(
+            serde_json::json!({
+                "type": "response.done",
+                "response": {
+                    "id": "resp_over_bound",
+                    "usage": {"input_tokens": 100, "output_tokens": 100}
+                }
+            })
+            .to_string()
+            .as_str(),
+        );
+
+        assert_eq!(observer.totals(), super::RealtimeUsageTotals::default());
     }
 }

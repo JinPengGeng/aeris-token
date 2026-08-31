@@ -30,12 +30,18 @@ const RECORD_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 const EXPIRED_LOOKUP_GRACE: Duration = Duration::from_secs(5 * 60);
 const LOCK_TTL: Duration = Duration::from_secs(2);
 const SIDEBAND_LOCK_TTL: Duration = Duration::from_secs(30);
+// Registration and sideband attachment share the call-specific lock. The
+// registration path can perform several storage operations, so give its
+// short critical section the same bounded lease window as the attachment
+// lock rather than allowing it to expire halfway through a write.
+const SIDEBAND_REGISTRATION_LOCK_TTL: Duration = SIDEBAND_LOCK_TTL;
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
 const COMMIT_VERIFY_TIMEOUT: Duration = Duration::from_millis(250);
 const LOCK_INITIAL_RETRY: Duration = Duration::from_millis(5);
 const LOCK_MAX_RETRY: Duration = Duration::from_millis(50);
 const LOCK_OWNER: &str = "codex_live_call_registry";
 const SIDEBAND_LOCK_OWNER: &str = "codex_live_sideband_attachment";
+const SIDEBAND_REGISTRATION_LOCK_OWNER: &str = "codex_live_call_registry_binding";
 const MAX_RECORDS_PER_PRINCIPAL: usize = 64;
 const MAX_SERIALIZED_RECORD_BYTES: usize = 4 * 1024;
 const MAX_PRINCIPAL_BYTES: usize = 256;
@@ -74,6 +80,8 @@ pub(super) enum LiveCallRegistryError {
     CapacityLockBusy,
     #[error("Codex Live call already has an active sideband attachment")]
     SidebandAlreadyAttached,
+    #[error("Codex Live call binding changed while acquiring sideband ownership")]
+    SidebandBindingChanged,
     #[error("Codex Live call registry storage is unavailable")]
     Storage(#[source] aether_runtime_state::DataLayerError),
 }
@@ -89,6 +97,7 @@ impl LiveCallRegistryError {
             Self::OwnershipConflict => "ownership_conflict",
             Self::CapacityLockBusy => "capacity_lock_busy",
             Self::SidebandAlreadyAttached => "sideband_already_attached",
+            Self::SidebandBindingChanged => "sideband_binding_changed",
             Self::Storage(_) => "storage_unavailable",
         }
     }
@@ -375,12 +384,36 @@ impl LiveCallRegistry {
         let key = record_key(user_id, api_key_id, call_id)?;
         let index = index_key(user_id, api_key_id)?;
         let lock = lock_key(user_id, api_key_id)?;
+        let sideband_lock = sideband_lock_key(user_id, api_key_id, call_id)?;
         let serialized =
             serde_json::to_string(binding).map_err(LiveCallRegistryError::Serialization)?;
         if serialized.len() > MAX_SERIALIZED_RECORD_BYTES {
             return Err(LiveCallRegistryError::RecordTooLarge);
         }
         let lease = self.acquire_lock(lock.as_str()).await?;
+        // A sideband session holds this call-specific lock for its lifetime.
+        // Taking the same lock here prevents an expired/rebound call record
+        // from being registered while a sideband attach is being prepared or
+        // relayed. The principal lock above still protects index accounting.
+        let sideband_lease = match self
+            .runtime_state
+            .lock_try_acquire(
+                sideband_lock.as_str(),
+                SIDEBAND_REGISTRATION_LOCK_OWNER,
+                SIDEBAND_REGISTRATION_LOCK_TTL,
+            )
+            .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => {
+                let _ = self.runtime_state.lock_release(&lease).await;
+                return Err(LiveCallRegistryError::SidebandAlreadyAttached);
+            }
+            Err(error) => {
+                let _ = self.runtime_state.lock_release(&lease).await;
+                return Err(LiveCallRegistryError::Storage(error));
+            }
+        };
         let result = self
             .register_locked(key.as_str(), index.as_str(), serialized, binding)
             .await;
@@ -390,6 +423,7 @@ impl LiveCallRegistry {
             false
         };
         let commit_state = classify_register_commit(&result, exact_binding_committed);
+        let sideband_release = self.runtime_state.lock_release(&sideband_lease).await;
         let release = self.runtime_state.lock_release(&lease).await;
 
         if commit_state == RegisterCommitState::Uncommitted {
@@ -415,6 +449,15 @@ impl LiveCallRegistry {
                 log_type = "ops",
                 error_kind = "storage_unavailable",
                 "Codex Live binding was committed but its short-lived capacity lock could not be released"
+            );
+        }
+        if sideband_release.is_err() {
+            tracing::warn!(
+                target: LIVE_LOG_TARGET,
+                event_name = "codex_live_sideband_registration_lock_release_failed",
+                log_type = "ops",
+                error_kind = "storage_unavailable",
+                "Codex Live binding registration completed but its call lock could not be released"
             );
         }
         Ok(())
@@ -479,6 +522,41 @@ impl LiveCallRegistry {
     ) -> Result<LiveSidebandLease, LiveCallRegistryError> {
         self.acquire_sideband_attachment_with_ttl(user_id, api_key_id, call_id, SIDEBAND_LOCK_TTL)
             .await
+    }
+
+    /// Acquire exclusive sideband ownership and then re-read the call record.
+    ///
+    /// The initial lookup is necessarily performed before this operation by
+    /// the HTTP handler. A call may expire and be rebound in that interval;
+    /// accepting the lease without checking the record again could attach the
+    /// socket to a different provider binding. The lease is released before
+    /// reporting the mismatch so a failed admission never strands ownership.
+    pub(super) async fn acquire_sideband_attachment_for_binding(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        call_id: &str,
+        expected: &LiveCallBinding,
+    ) -> Result<LiveSidebandLease, LiveCallRegistryError> {
+        let mut lease = self
+            .acquire_sideband_attachment(user_id, api_key_id, call_id)
+            .await?;
+        let current = self.lookup_with_status(user_id, api_key_id, call_id).await;
+        let matches =
+            matches!(current, Ok(LiveCallLookup::Found(ref binding)) if binding == expected);
+        if matches {
+            return Ok(lease);
+        }
+
+        // Do not allow a stale owner to remain active after a failed
+        // revalidation. Ignore release errors here: the lease drop path still
+        // performs a fenced best-effort release, while the binding mismatch
+        // itself is the fail-closed result returned to the caller.
+        let _ = lease.release().await;
+        match current {
+            Err(error) => Err(error),
+            Ok(_) => Err(LiveCallRegistryError::SidebandBindingChanged),
+        }
     }
 
     async fn acquire_sideband_attachment_with_ttl(
@@ -872,6 +950,56 @@ mod tests {
             .await
             .unwrap();
         assert!(reconnected.release().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn sideband_acquisition_revalidates_binding_after_initial_lookup() {
+        let state = runtime_state();
+        let registry = LiveCallRegistry::new(Arc::clone(&state));
+        let original = binding("global-original");
+        let replacement = binding("global-replacement");
+        registry
+            .register("user", "key", "rtc_revalidate", &original)
+            .await
+            .unwrap();
+
+        // Model the handler's initial lookup, followed by expiry/rebinding
+        // before it can acquire the sideband ownership lease.
+        assert_eq!(
+            registry
+                .lookup("user", "key", "rtc_revalidate")
+                .await
+                .unwrap(),
+            Some(original.clone())
+        );
+        let key = record_key("user", "key", "rtc_revalidate").unwrap();
+        state
+            .kv_set(
+                key.as_str(),
+                serde_json::to_string(&replacement).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            registry
+                .acquire_sideband_attachment_for_binding(
+                    "user",
+                    "key",
+                    "rtc_revalidate",
+                    &original,
+                )
+                .await,
+            Err(LiveCallRegistryError::SidebandBindingChanged)
+        ));
+
+        // The rejected attempt must not strand the attachment lease.
+        let mut successor = registry
+            .acquire_sideband_attachment("user", "key", "rtc_revalidate")
+            .await
+            .unwrap();
+        assert!(successor.release().await.unwrap());
     }
 
     #[tokio::test]

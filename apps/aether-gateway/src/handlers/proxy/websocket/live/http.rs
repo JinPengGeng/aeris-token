@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use aether_contracts::{
     ExecutionPlan, ExecutionResponseBodyMode, ExecutionResult, EXECUTION_RESPONSE_BODY_MODE_HEADER,
 };
+use aether_usage_runtime::build_lifecycle_usage_seed;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderValue, Response, StatusCode};
 use base64::Engine as _;
@@ -109,6 +110,45 @@ async fn handle_live_http(
             "route_unavailable",
         );
     };
+    // The SDP exchange creates a provider-side WebRTC session whose media leg
+    // bypasses Aether after this request.  Its only bounded audit is the
+    // terminal call-create row, so do not send the upstream POST unless the
+    // runtime is enabled and the actual lifecycle data target has a writer.
+    // Checking the lifecycle target matters when background persistence is
+    // isolated from foreground request data.
+    let usage_runtime_enabled = state.usage_runtime.is_enabled();
+    let usage_data_writer_available = state.usage_lifecycle_data_state().has_usage_writer();
+    if !(usage_runtime_enabled && usage_data_writer_available) {
+        warn!(
+            event_name = "codex_live_call_usage_runtime_admission_rejected",
+            log_type = "security",
+            trace_id = %request_context.trace_id,
+            transport = "webrtc",
+            mode = "call_create",
+            status_code = StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+            user_id = control_decision
+                .auth_context
+                .as_ref()
+                .map(|auth| auth.user_id.as_str())
+                .unwrap_or("-"),
+            api_key_id = control_decision
+                .auth_context
+                .as_ref()
+                .map(|auth| auth.api_key_id.as_str())
+                .unwrap_or("-"),
+            usage_runtime_enabled,
+            usage_data_writer_available,
+            termination = "usage_runtime_unavailable",
+            "Codex Live call creation rejected because usage accounting is unavailable"
+        );
+        return audited_local_live_error(
+            &mut call_audit,
+            request_context,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Codex Live is temporarily unavailable because usage accounting is unavailable",
+            "usage_runtime_unavailable",
+        );
+    }
     if !live_usage_accounting_is_safe(control_decision) {
         return audited_local_live_error(
             &mut call_audit,
@@ -361,6 +401,41 @@ async fn handle_live_http(
         };
         call_audit.fail(response.status(), "balance_capacity_rejected");
         return Ok(Some(response));
+    }
+    // The provider-side media leg is externally owned.  Before sending the
+    // SDP offer, require a confirmed durable pending row so a later terminal
+    // audit cannot depend on an in-memory dispatcher or a foreground writer.
+    if let Err(error) = state
+        .usage_runtime
+        .admit_pending_durable(
+            state.usage_lifecycle_data_state().as_ref(),
+            build_lifecycle_usage_seed(&attempt.plan, attempt.report_context.as_ref()),
+        )
+        .await
+    {
+        warn!(
+            event_name = "codex_live_call_durable_pending_admission_failed",
+            log_type = "security",
+            trace_id = %request_context.trace_id,
+            transport = "webrtc",
+            mode = "call_create",
+            status_code = StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+            error = %error,
+            termination = "durable_admission_rejected",
+            "Codex Live call creation rejected because durable usage admission failed"
+        );
+        lease.release().await;
+        call_audit.fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "durable_admission_rejected",
+        );
+        return audited_local_live_error(
+            &mut call_audit,
+            request_context,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Codex Live usage admission is temporarily unavailable",
+            "durable_admission_rejected",
+        );
     }
     let admission = match ResponsesWebSocketTurnAdmission::acquire(
         state,
@@ -815,6 +890,16 @@ mod tests {
         }
     }
 
+    fn live_accounting_enabled_state() -> AppState {
+        AppState::new()
+            .expect("gateway state should build")
+            .with_usage_data_repository_for_tests(Arc::new(InMemoryUsageReadRepository::default()))
+            .with_usage_runtime_for_tests(crate::usage::UsageRuntimeConfig {
+                enabled: true,
+                ..crate::usage::UsageRuntimeConfig::default()
+            })
+    }
+
     #[test]
     fn preserved_wire_bytes_win_over_the_json_projection() {
         let result = ExecutionResult {
@@ -1046,7 +1131,7 @@ mod tests {
             .into_parts();
 
         let response = maybe_handle_live_http(
-            &AppState::new().expect("gateway state should build"),
+            &live_accounting_enabled_state(),
             &request_context,
             &parts,
             None,
@@ -1091,25 +1176,35 @@ mod tests {
             host_header: None,
             control_decision: Some(decision),
         };
+        let (content_type, body) = build_live_multipart(
+            "v=0\r\no=codex-realtime-offer",
+            &json!({"model": "gpt-live"}),
+        );
         let (parts, _) = http::Request::builder()
             .method(http::Method::POST)
             .uri("/v1/realtime/calls?intent=quicksilver&architecture=avas")
+            .header(http::header::CONTENT_TYPE, content_type)
             .body(())
             .expect("request should build")
             .into_parts();
 
         let response = maybe_handle_live_http(
-            &AppState::new().expect("gateway state should build"),
+            &live_accounting_enabled_state(),
             &request_context,
             &parts,
-            None,
+            Some(&Bytes::from(body)),
             &"127.0.0.1:65004".parse().unwrap(),
         )
         .await
         .expect("Codex Realtime hook check should succeed")
         .expect("Codex Realtime call must stay on the Live handler");
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("local routing rejection body should read");
+        let body = String::from_utf8_lossy(body.as_ref());
+        assert!(body.contains("No eligible Codex Live provider mapping is available"));
     }
 
     #[tokio::test]
@@ -1152,7 +1247,7 @@ mod tests {
             .unwrap()
             .into_parts();
         let response = maybe_handle_live_http(
-            &AppState::new().expect("gateway state should build"),
+            &live_accounting_enabled_state(),
             &request_context,
             &parts,
             None,
@@ -1164,6 +1259,95 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert!(String::from_utf8_lossy(body.as_ref()).contains("finite-balance"));
+    }
+
+    fn unlimited_live_request_context() -> GatewayPublicRequestContext {
+        let mut decision = GatewayControlDecision::synthetic(
+            "/v1/live",
+            Some("ai_public".to_string()),
+            Some("codex".to_string()),
+            Some("live".to_string()),
+            Some("codex:live".to_string()),
+        );
+        decision.auth_context = Some(GatewayControlAuthContext {
+            user_id: "user-live-accounting-gate".to_string(),
+            api_key_id: "key-live-accounting-gate".to_string(),
+            username: Some("live-gate".to_string()),
+            api_key_name: Some("live-gate".to_string()),
+            balance_remaining: None,
+            access_allowed: true,
+            user_rate_limit: None,
+            api_key_rate_limit: None,
+            api_key_is_standalone: true,
+            admin_bypass_limits: false,
+            local_rejection: None,
+            allowed_models: None,
+            ip_rules: None,
+        });
+        GatewayPublicRequestContext {
+            trace_id: "trace-live-accounting-gate".to_string(),
+            request_method: http::Method::POST,
+            request_path: "/v1/live".to_string(),
+            request_query_string: None,
+            request_content_type: None,
+            host_header: None,
+            control_decision: Some(decision),
+        }
+    }
+
+    #[tokio::test]
+    async fn unlimited_live_call_create_fails_closed_when_usage_runtime_is_disabled() {
+        let state = AppState::new().expect("gateway state should build");
+        let request_context = unlimited_live_request_context();
+        let (parts, _) = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/live")
+            .body(())
+            .expect("request should build")
+            .into_parts();
+
+        let response = maybe_handle_live_http(
+            &state,
+            &request_context,
+            &parts,
+            None,
+            &"127.0.0.1:65005".parse().unwrap(),
+        )
+        .await
+        .expect("Live accounting gate should return a response")
+        .expect("Live route must reject when usage runtime is disabled");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn unlimited_live_call_create_fails_closed_when_usage_writer_is_missing() {
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_usage_runtime_for_tests(crate::usage::UsageRuntimeConfig {
+                enabled: true,
+                ..crate::usage::UsageRuntimeConfig::default()
+            });
+        let request_context = unlimited_live_request_context();
+        let (parts, _) = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/live")
+            .body(())
+            .expect("request should build")
+            .into_parts();
+
+        let response = maybe_handle_live_http(
+            &state,
+            &request_context,
+            &parts,
+            None,
+            &"127.0.0.1:65006".parse().unwrap(),
+        )
+        .await
+        .expect("Live accounting gate should return a response")
+        .expect("Live route must reject when usage writer is missing");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

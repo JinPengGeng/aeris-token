@@ -4,6 +4,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use aether_usage_runtime::build_lifecycle_usage_seed;
 use axum::extract::ws::{Message as AxumWsMessage, WebSocket};
 use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
@@ -11,7 +12,9 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 use wreq::ws::message::Message as WreqWsMessage;
 
-use crate::control::execution_plan_balance_capacity_rejection;
+use crate::control::{
+    execution_plan_balance_capacity_rejection, refresh_execution_runtime_auth_context_with_snapshot,
+};
 use crate::handlers::proxy::websocket::ingress::{
     WebSocketConnectionLog, WebSocketConnectionLogSpec, WebSocketRequestContext,
 };
@@ -75,6 +78,7 @@ const LIVE_UPSTREAM_ERRORS: UpstreamWebSocketErrorCodes = UpstreamWebSocketError
 enum LiveRelayAdmissionError {
     PlanUnavailable,
     BalanceRejected,
+    DurableAdmissionRejected,
     Gateway(GatewayError),
 }
 
@@ -95,6 +99,7 @@ impl LiveRelayAdmissionError {
             Self::BalanceRejected | Self::Gateway(GatewayError::AdmissionTimeout { .. }) => {
                 StatusCode::TOO_MANY_REQUESTS
             }
+            Self::DurableAdmissionRejected => StatusCode::SERVICE_UNAVAILABLE,
             Self::Gateway(GatewayError::Client { status, .. }) => *status,
             Self::Gateway(GatewayError::LocalExecutionPlanningTimeout { .. }) => {
                 StatusCode::GATEWAY_TIMEOUT
@@ -111,6 +116,9 @@ impl LiveRelayAdmissionError {
         match self {
             Self::PlanUnavailable => "Codex Live provider admission could not be prepared",
             Self::BalanceRejected => "Codex Live request capacity is unavailable",
+            Self::DurableAdmissionRejected => {
+                "Codex Live usage admission is temporarily unavailable"
+            }
             Self::Gateway(GatewayError::AdmissionTimeout { .. }) => {
                 "Gateway capacity is busy; retry this Live connection"
             }
@@ -126,6 +134,7 @@ impl LiveRelayAdmissionError {
         match self {
             Self::PlanUnavailable => "admission_plan_unavailable",
             Self::BalanceRejected => "balance_rejected",
+            Self::DurableAdmissionRejected => "durable_admission_rejected",
             Self::Gateway(GatewayError::AdmissionTimeout { .. }) => "admission_timeout",
             Self::Gateway(GatewayError::Client { .. }) => "request_rejected",
             Self::Gateway(GatewayError::LocalExecutionPlanningTimeout { .. }) => {
@@ -573,10 +582,11 @@ async fn prepare_sideband_live_websocket(
     let registry = LiveCallRegistry::new(std::sync::Arc::clone(&state.runtime_state));
     let mut sideband_lease = match tokio::time::timeout(
         SIDEBAND_LOOKUP_TIMEOUT,
-        registry.acquire_sideband_attachment(
+        registry.acquire_sideband_attachment_for_binding(
             auth.user_id.as_str(),
             auth.api_key_id.as_str(),
             call_id.as_str(),
+            &binding,
         ),
     )
     .await
@@ -601,6 +611,24 @@ async fn prepare_sideband_live_websocket(
                 StatusCode::CONFLICT,
                 "sideband_attachment_conflict",
                 "Codex Live call already has an active sideband connection",
+            ));
+        }
+        Ok(Err(LiveCallRegistryError::SidebandBindingChanged)) => {
+            info!(
+                target: LIVE_LOG_TARGET,
+                event_name = "codex_live_sideband_binding_changed",
+                log_type = "event",
+                transport = WEBSOCKET_LOG_TRANSPORT,
+                websocket = true,
+                trace_id = %context.trace_id,
+                "Codex Live sideband binding changed during ownership acquisition"
+            );
+            return Err(preflight_rejection(
+                context,
+                "sideband",
+                StatusCode::GONE,
+                "sideband_binding_changed",
+                "Codex Live call provider binding is no longer valid",
             ));
         }
         Ok(Err(error)) => {
@@ -993,6 +1021,7 @@ async fn run_direct(
     let terminal = relay_live(
         client_socket,
         &mut upstream,
+        state,
         context,
         "direct",
         provider_id.as_str(),
@@ -1048,6 +1077,7 @@ async fn run_sideband(
     let terminal = relay_live(
         client_socket,
         &mut upstream,
+        state,
         context,
         "sideband",
         provider_id.as_str(),
@@ -1123,6 +1153,22 @@ async fn acquire_live_relay_admission(
                 audit: Some(audit),
             });
         }
+    }
+    // A Live WebSocket is an externally-owned, long-lived session. Require the
+    // pending usage row to be durable before reserving capacity or connecting upstream.
+    if state
+        .usage_runtime
+        .admit_pending_durable(
+            state.usage_lifecycle_data_state().as_ref(),
+            build_lifecycle_usage_seed(&attempt.plan, attempt.report_context.as_ref()),
+        )
+        .await
+        .is_err()
+    {
+        return Err(LiveRelayAdmissionFailure {
+            error: LiveRelayAdmissionError::DurableAdmissionRejected,
+            audit: Some(audit),
+        });
     }
     match ResponsesWebSocketTurnAdmission::acquire(state, &attempt.plan, context.trace_id.as_str())
         .await
@@ -1345,6 +1391,7 @@ struct RelayStats {
 async fn relay_live(
     client_socket: &mut WebSocket,
     upstream: &mut wreq::ws::WebSocket,
+    state: &AppState,
     context: &WebSocketRequestContext,
     mode: &'static str,
     provider_id: &str,
@@ -1362,6 +1409,8 @@ async fn relay_live(
     tokio::pin!(connection_deadline);
     let mut pool_lease_health = tokio::time::interval(Duration::from_secs(1));
     pool_lease_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut auth_health = tokio::time::interval(Duration::from_secs(1));
+    auth_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let stats = Arc::new(Mutex::new(stats));
     let session_close = Arc::new(tokio::sync::Notify::new());
     let relay_control = WebSocketRelayPumpControl::new();
@@ -1566,6 +1615,25 @@ async fn relay_live(
                         break "pool_key_lease_lost";
                     }
                 }
+                _ = auth_health.tick() => {
+                    match live_auth_policy_is_current(state, context).await {
+                        Ok(true) => {}
+                        Ok(false) => break "auth_policy_revoked",
+                        Err(error) => {
+                            warn!(
+                                target: LIVE_LOG_TARGET,
+                                event_name = "codex_live_auth_refresh_failed",
+                                log_type = "security",
+                                transport = WEBSOCKET_LOG_TRANSPORT,
+                                websocket = true,
+                                trace_id = %context.trace_id,
+                                error = ?error,
+                                "Codex Live closed because live authorization could not be refreshed"
+                            );
+                            break "auth_refresh_failed";
+                        }
+                    }
+                }
                 _ = session_close.notified(), if close_deadline.is_none() => {
                     close_deadline = Some(Instant::now() + SESSION_CLOSE_DRAIN_TIMEOUT);
                 }
@@ -1613,6 +1681,21 @@ async fn relay_live(
             )
             .await;
         }
+        "auth_policy_revoked" | "auth_refresh_failed" => {
+            let (code, message) = if termination == "auth_policy_revoked" {
+                (
+                    "codex_live_auth_revoked",
+                    "Live authorization is no longer valid",
+                )
+            } else {
+                (
+                    "codex_live_auth_refresh_failed",
+                    "Live authorization could not be verified",
+                )
+            };
+            send_live_error(client_socket, 401, code, message).await;
+            close_client_socket(client_socket, CLOSE_POLICY_VIOLATION, termination).await;
+        }
         _ => {}
     }
     let stats = *stats
@@ -1658,7 +1741,9 @@ fn live_terminal_from_relay(
         "pool_key_lease_lost"
         | "connection_admission_lost"
         | "sideband_attachment_lease_lost"
-        | "sideband_attachment_lease_renewal_failed" => (LiveSessionDisposition::Failed, 503),
+        | "sideband_attachment_lease_renewal_failed"
+        | "auth_policy_revoked"
+        | "auth_refresh_failed" => (LiveSessionDisposition::Failed, 503),
         "upstream_closed" | "upstream_read_failed" | "upstream_write_failed" => {
             (LiveSessionDisposition::Failed, 502)
         }
@@ -1675,6 +1760,69 @@ fn live_terminal_from_relay(
         upstream_frames: stats.upstream_frames,
         upstream_bytes: stats.upstream_bytes,
     }
+}
+
+async fn live_auth_policy_is_current(
+    state: &AppState,
+    context: &WebSocketRequestContext,
+) -> Result<bool, GatewayError> {
+    if state
+        .admin_security_ip_blacklisted(context.client_ip)
+        .await?
+    {
+        return Ok(false);
+    }
+    let Some(original) = context.decision.auth_context.as_ref() else {
+        return Ok(false);
+    };
+    if context
+        .decision
+        .auth_endpoint_signature
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        // A long-lived socket cannot safely rely on the one-time Upgrade
+        // decision when its route has no refreshable auth signature. Treat a
+        // missing signature as unverifiable rather than extending stale
+        // authorization indefinitely.
+        return Ok(false);
+    }
+    let (refreshed, _) = refresh_execution_runtime_auth_context_with_snapshot(
+        state,
+        original.clone(),
+        context.decision.auth_endpoint_signature.as_deref(),
+    )
+    .await?;
+    Ok(live_auth_context_is_current(
+        original,
+        &refreshed,
+        context.client_ip,
+    ))
+}
+
+fn live_auth_context_is_current(
+    original: &crate::control::GatewayControlAuthContext,
+    refreshed: &crate::control::GatewayControlAuthContext,
+    client_ip: std::net::IpAddr,
+) -> bool {
+    refreshed.access_allowed
+        && refreshed.local_rejection.is_none()
+        && refreshed.user_id == original.user_id
+        && refreshed.api_key_id == original.api_key_id
+        // Live is admitted only for unlimited principals. A transition to a
+        // wallet-backed finite balance must therefore terminate the socket;
+        // otherwise it would continue serving unmetered traffic.
+        && refreshed.balance_remaining == original.balance_remaining
+        && refreshed.balance_remaining.is_none()
+        && refreshed.allowed_models == original.allowed_models
+        && refreshed.ip_rules == original.ip_rules
+        && refreshed.user_rate_limit == original.user_rate_limit
+        && refreshed.api_key_rate_limit == original.api_key_rate_limit
+        && refreshed.api_key_is_standalone == original.api_key_is_standalone
+        && refreshed.admin_bypass_limits == original.admin_bypass_limits
+        && refreshed.ip_rules.as_ref().is_none_or(|rules| {
+            crate::handlers::shared::ip_rules_allow(Some(rules.as_slice()), client_ip)
+        })
 }
 
 async fn while_sideband_lease_healthy<T, F>(
@@ -1906,5 +2054,88 @@ mod tests {
         ] {
             assert_eq!(rewrite_live_session_model(raw, "provider-model"), None);
         }
+    }
+
+    #[test]
+    fn revoked_auth_is_a_failed_terminal_and_not_a_clean_disconnect() {
+        let terminal = live_terminal_from_relay("auth_policy_revoked", 100, RelayStats::default());
+        assert_eq!(terminal.status_code, 503);
+        assert_eq!(terminal.disposition, LiveSessionDisposition::Failed);
+    }
+
+    fn auth_context() -> crate::control::GatewayControlAuthContext {
+        crate::control::GatewayControlAuthContext {
+            user_id: "user-1".to_string(),
+            api_key_id: "key-1".to_string(),
+            username: None,
+            api_key_name: None,
+            balance_remaining: None,
+            access_allowed: true,
+            user_rate_limit: Some(10),
+            api_key_rate_limit: Some(20),
+            api_key_is_standalone: true,
+            admin_bypass_limits: false,
+            local_rejection: None,
+            allowed_models: Some(vec!["gpt-live".to_string()]),
+            ip_rules: Some(vec!["192.0.2.10/32".to_string()]),
+        }
+    }
+
+    #[test]
+    fn auth_refresh_accepts_unchanged_context_for_original_ip() {
+        let original = auth_context();
+        assert!(live_auth_context_is_current(
+            &original,
+            &original,
+            "192.0.2.10".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn auth_refresh_rejects_revocation_and_identity_drift() {
+        let original = auth_context();
+        let mut revoked = original.clone();
+        revoked.access_allowed = false;
+        assert!(!live_auth_context_is_current(
+            &original,
+            &revoked,
+            "192.0.2.10".parse().unwrap()
+        ));
+
+        let mut changed_key = original.clone();
+        changed_key.api_key_id = "key-2".to_string();
+        assert!(!live_auth_context_is_current(
+            &original,
+            &changed_key,
+            "192.0.2.10".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn auth_refresh_rejects_ip_rule_and_limit_policy_drift() {
+        let original = auth_context();
+        let mut changed_ip_rules = original.clone();
+        changed_ip_rules.ip_rules = Some(vec!["198.51.100.4/32".to_string()]);
+        assert!(!live_auth_context_is_current(
+            &original,
+            &changed_ip_rules,
+            "192.0.2.10".parse().unwrap()
+        ));
+
+        let mut changed_limits = original.clone();
+        changed_limits.api_key_rate_limit = Some(1);
+        assert!(!live_auth_context_is_current(
+            &original,
+            &changed_limits,
+            "192.0.2.10".parse().unwrap()
+        ));
+
+        let mut finite_balance = original.clone();
+        finite_balance.balance_remaining = Some(1.0);
+        assert!(!live_auth_context_is_current(
+            &original,
+            &finite_balance,
+            "192.0.2.10".parse().unwrap()
+        ));
     }
 }

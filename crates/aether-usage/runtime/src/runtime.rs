@@ -25,11 +25,12 @@ use crate::worker::{
     build_usage_queue_worker_with_record_gate, UsageWorkerControl, UsageWorkerObservation,
 };
 use crate::{
-    apply_usage_body_capture_policy_to_event, build_stream_terminal_usage_seed,
-    build_sync_terminal_usage_seed, build_terminal_usage_event_from_seed,
-    build_upsert_usage_record_from_event, settle_usage_if_needed, LifecycleUsageSeed,
-    StreamTerminalUsagePayloadSeed, SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed,
-    UsageEvent, UsageQueue, UsageRecordWriter, UsageRuntimeConfig, UsageSettlementWriter,
+    apply_usage_body_capture_policy_to_event, build_pending_usage_record_from_seed,
+    build_stream_terminal_usage_seed, build_sync_terminal_usage_seed,
+    build_terminal_usage_event_from_seed, build_upsert_usage_record_from_event,
+    settle_usage_if_needed, LifecycleUsageSeed, StreamTerminalUsagePayloadSeed,
+    SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed, UsageEvent, UsageQueue,
+    UsageRecordWriter, UsageRuntimeConfig, UsageSettlementWriter,
 };
 
 #[async_trait]
@@ -3803,6 +3804,62 @@ impl UsageRuntime {
         self.record_pending(data, seed);
     }
 
+    /// Persist a pending lifecycle row before admitting an externally-owned session.
+    ///
+    /// The normal `record_pending`/`record_pending_direct` APIs intentionally hand work to the
+    /// ordered lifecycle dispatcher and return before a database write. They are therefore not
+    /// admission barriers: queue capacity, process termination, or the pending-only degraded
+    /// path can leave no durable row. Callers that are about to create a long-lived provider
+    /// session must use this method and reject the session unless it returns `Ok(())`.
+    ///
+    /// A successful result means the repository returned its stored row after the upsert
+    /// transaction completed. `Ok(None)` is treated as failure because it means the data state
+    /// had no writer at the time of the write, even if an earlier capability check succeeded.
+    pub async fn admit_pending_durable<T>(
+        &self,
+        data: &T,
+        seed: LifecycleUsageSeed,
+    ) -> Result<(), DataLayerError>
+    where
+        T: UsageRuntimeAccess,
+    {
+        if !self.is_enabled() {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime is disabled; durable pending admission is unavailable".to_string(),
+            ));
+        }
+        if !data.has_usage_writer() {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage writer is unavailable; durable pending admission is unavailable".to_string(),
+            ));
+        }
+        if data.usage_worker_should_defer_for_database_pressure() {
+            return Err(DataLayerError::TimedOut(
+                "usage database is under pressure; durable pending admission is deferred"
+                    .to_string(),
+            ));
+        }
+
+        let record = build_pending_usage_record_from_seed(&seed, now_unix_secs())?;
+        let _worker_record_permit = if let Some(gate) = self.worker_record_gate.as_ref() {
+            Some(gate.acquire().await)
+        } else {
+            None
+        };
+        match catch_usage_writer_panic(
+            "durable pending usage admission",
+            data.upsert_usage_record(record),
+        )
+        .await
+        {
+            Ok(Some(_stored)) => Ok(()),
+            Ok(None) => Err(DataLayerError::UnexpectedValue(
+                "usage writer did not return a stored pending row".to_string(),
+            )),
+            Err(err) => Err(err),
+        }
+    }
+
     pub fn record_stream_started<T>(
         &self,
         data: &T,
@@ -6280,6 +6337,7 @@ mod tests {
     #[derive(Default)]
     struct NoRedisUsageStore {
         records: Mutex<Vec<UpsertUsageRecord>>,
+        return_stored_record: bool,
     }
 
     struct QueueConfiguredUsageStore {
@@ -6440,8 +6498,53 @@ mod tests {
             &self,
             record: UpsertUsageRecord,
         ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
-            self.records.lock().expect("records lock").push(record);
-            Ok(None)
+            self.records
+                .lock()
+                .expect("records lock")
+                .push(record.clone());
+            if !self.return_stored_record {
+                return Ok(None);
+            }
+            Ok(Some(StoredRequestUsageAudit::new(
+                "usage-test".to_string(),
+                record.request_id,
+                record.user_id,
+                record.api_key_id,
+                record.username,
+                record.api_key_name,
+                record.provider_name,
+                record.model,
+                record.target_model,
+                record.provider_id,
+                record.provider_endpoint_id,
+                record.provider_api_key_id,
+                record.request_type,
+                record.api_format,
+                record.api_family,
+                record.endpoint_kind,
+                record.endpoint_api_format,
+                record.provider_api_family,
+                record.provider_endpoint_kind,
+                record.has_format_conversion.unwrap_or(false),
+                record.is_stream.unwrap_or(false),
+                record.input_tokens.unwrap_or_default() as i32,
+                record.output_tokens.unwrap_or_default() as i32,
+                record.total_tokens.unwrap_or_default() as i32,
+                record.total_cost_usd.unwrap_or_default(),
+                record.actual_total_cost_usd.unwrap_or_default(),
+                record.status_code.map(i32::from),
+                record.error_message,
+                record.error_category,
+                record.response_time_ms.map(|value| value as i32),
+                record.first_byte_time_ms.map(|value| value as i32),
+                record.status,
+                record.billing_status,
+                record
+                    .created_at_unix_ms
+                    .unwrap_or(record.updated_at_unix_secs) as i64,
+                record.updated_at_unix_secs as i64,
+                record.finalized_at_unix_secs.map(|value| value as i64),
+            )?))
         }
     }
 
@@ -7595,6 +7698,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_pending_admission_rejects_unconfirmed_writer_result() {
+        let runtime = UsageRuntime::new(UsageRuntimeConfig {
+            enabled: true,
+            ..UsageRuntimeConfig::default()
+        })
+        .expect("usage runtime should build");
+        let store = NoRedisUsageStore::default();
+
+        let result = runtime
+            .admit_pending_durable(
+                &store,
+                build_lifecycle_usage_seed(&terminal_test_plan("req-admission-none"), None),
+            )
+            .await;
+
+        assert!(matches!(result, Err(DataLayerError::UnexpectedValue(_))));
+        assert_eq!(
+            store.records.lock().expect("records lock").len(),
+            1,
+            "the writer was called, but an unconfirmed result must not admit the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_pending_admission_fails_closed_when_runtime_disabled() {
+        let runtime = UsageRuntime::new(UsageRuntimeConfig::disabled())
+            .expect("disabled usage runtime should build");
+        let store = NoRedisUsageStore::default();
+
+        let result = runtime
+            .admit_pending_durable(
+                &store,
+                build_lifecycle_usage_seed(&terminal_test_plan("req-admission-disabled"), None),
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DataLayerError::InvalidConfiguration(_))
+        ));
+        assert!(store.records.lock().expect("records lock").is_empty());
+    }
+
+    #[tokio::test]
     async fn direct_terminal_usage_bypasses_redis_queue_and_writes_repository() {
         let runtime = UsageRuntime::new(UsageRuntimeConfig {
             enabled: true,
@@ -7626,6 +7773,52 @@ mod tests {
         assert_eq!(records[0].status, "failed");
         assert_eq!(records[0].billing_status, "void");
         assert_eq!(records[0].status_code, Some(503));
+    }
+
+    #[tokio::test]
+    async fn durable_pending_admission_requires_confirmed_repository_write() {
+        let seed = build_lifecycle_usage_seed(&terminal_test_plan("req-durable-pending-1"), None);
+        let runtime = UsageRuntime::new(UsageRuntimeConfig {
+            enabled: true,
+            ..UsageRuntimeConfig::default()
+        })
+        .expect("usage runtime should build");
+
+        let unconfirmed = NoRedisUsageStore::default();
+        let err = runtime
+            .admit_pending_durable(&unconfirmed, seed.clone())
+            .await
+            .expect_err("a writer returning no stored row must fail closed");
+        assert!(matches!(err, DataLayerError::UnexpectedValue(_)));
+        assert_eq!(unconfirmed.records.lock().expect("records lock").len(), 1);
+
+        let confirmed = NoRedisUsageStore {
+            return_stored_record: true,
+            ..NoRedisUsageStore::default()
+        };
+        runtime
+            .admit_pending_durable(&confirmed, seed.clone())
+            .await
+            .expect("confirmed in-memory write should admit");
+        assert_eq!(confirmed.records.lock().expect("records lock").len(), 1);
+
+        let no_writer = QueueOnlyUsageStore {
+            queue: Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default())),
+            upsert_attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let err = runtime
+            .admit_pending_durable(&no_writer, seed.clone())
+            .await
+            .expect_err("missing writer must fail closed before calling it");
+        assert!(matches!(err, DataLayerError::InvalidConfiguration(_)));
+        assert_eq!(no_writer.upsert_attempts.load(Ordering::Acquire), 0);
+
+        let disabled = UsageRuntime::disabled();
+        let err = disabled
+            .admit_pending_durable(&confirmed, seed)
+            .await
+            .expect_err("disabled runtime must fail closed");
+        assert!(matches!(err, DataLayerError::InvalidConfiguration(_)));
     }
 
     #[tokio::test]

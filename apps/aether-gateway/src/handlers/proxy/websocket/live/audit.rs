@@ -24,7 +24,6 @@ use crate::usage::{UsageEvent, UsageEventData, UsageEventType};
 use crate::AppState;
 
 const LIVE_AUDIT_WRITE_WAIT: Duration = Duration::from_secs(5);
-const LIVE_AUDIT_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(30);
 const LIVE_AUDIT_SCHEMA_VERSION: &str = "1";
 const LIVE_AUDIT_LOG_TARGET: &str = "aether_gateway::handlers::proxy::codex_live";
 pub(super) const LIVE_CALL_CANDIDATE_UNAVAILABLE_MESSAGE: &str =
@@ -507,26 +506,13 @@ async fn persist_live_audit_event(
     let request_id = event.request_id.clone();
     let usage_runtime = std::sync::Arc::clone(&state.usage_runtime);
     let usage_data = std::sync::Arc::clone(state.usage_lifecycle_data_state());
-    let write_request_id = request_id.clone();
     let task = tokio::spawn(async move {
-        if tokio::time::timeout(
-            LIVE_AUDIT_WRITE_HARD_TIMEOUT,
-            usage_runtime.record_terminal_event_direct(usage_data.as_ref(), event),
-        )
-        .await
-        .is_err()
-        {
-            warn!(
-                target: LIVE_AUDIT_LOG_TARGET,
-                event_name = "codex_live_audit_write_timeout",
-                log_type = "ops",
-                request_id = write_request_id,
-                audit_scope,
-                wait_ms = LIVE_AUDIT_WRITE_HARD_TIMEOUT.as_millis() as u64,
-                write_cancelled = true,
-                "Codex Live cancelled an audit write after its hard timeout"
-            );
-        }
+        // Terminal submission uses the usage runtime's queue/retry/direct-fallback
+        // path. Do not cap this future: cancelling it would discard the only
+        // lifecycle row while its durable enqueue is still in progress.
+        usage_runtime
+            .record_terminal_event(usage_data.as_ref(), event)
+            .await;
     });
     match tokio::time::timeout(wait, task).await {
         Ok(Ok(())) => {}
@@ -546,9 +532,9 @@ async fn persist_live_audit_event(
             request_id,
             audit_scope,
             wait_ms = wait.as_millis() as u64,
-            hard_timeout_ms = LIVE_AUDIT_WRITE_HARD_TIMEOUT.as_millis() as u64,
             write_detached = true,
-            "Codex Live stopped waiting for a slow audit write"
+            persistence_strategy = "terminal_queue_retry_or_direct_fallback",
+            "Codex Live detached after terminal audit submission exceeded the socket-close wait"
         ),
     }
 }
@@ -573,25 +559,9 @@ fn spawn_live_audit_event_detached(state: &AppState, event: UsageEvent, audit_sc
     let usage_runtime = std::sync::Arc::clone(&state.usage_runtime);
     let usage_data = std::sync::Arc::clone(state.usage_lifecycle_data_state());
     runtime.spawn(async move {
-        if tokio::time::timeout(
-            LIVE_AUDIT_WRITE_HARD_TIMEOUT,
-            usage_runtime.record_terminal_event_direct(usage_data.as_ref(), event),
-        )
-        .await
-        .is_err()
-        {
-            warn!(
-                target: LIVE_AUDIT_LOG_TARGET,
-                event_name = "codex_live_audit_write_timeout",
-                log_type = "ops",
-                request_id,
-                audit_scope,
-                write_detached = true,
-                wait_ms = LIVE_AUDIT_WRITE_HARD_TIMEOUT.as_millis() as u64,
-                write_cancelled = true,
-                "Codex Live cancelled a detached audit write after its hard timeout"
-            );
-        }
+        usage_runtime
+            .record_terminal_event(usage_data.as_ref(), event)
+            .await;
     });
 }
 
