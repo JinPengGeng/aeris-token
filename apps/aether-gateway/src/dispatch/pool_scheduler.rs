@@ -676,7 +676,10 @@ impl<'a> PoolKeyCursor<'a> {
         let row_count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
         self.next_offset = self.next_offset.saturating_add(row_count);
         let seen_count_before = self.seen_key_ids.len();
-        let candidates = self.build_page_eligible_candidates(rows).await;
+        let candidates = tag_pool_selection_source(
+            self.build_page_eligible_candidates(rows).await,
+            "pool_cursor",
+        );
         let distinct_row_count = self.seen_key_ids.len().saturating_sub(seen_count_before);
         self.scanned_keys = self.scanned_keys.saturating_add(row_count);
         self.budget_scanned_keys = self
@@ -820,7 +823,10 @@ impl<'a> PoolKeyCursor<'a> {
 
             let row_count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
             let seen_count_before = self.seen_key_ids.len();
-            let candidates = self.build_page_eligible_candidates(rows).await;
+            let candidates = tag_pool_selection_source(
+                self.build_page_eligible_candidates(rows).await,
+                "routing_policy",
+            );
             let distinct_row_count = self.seen_key_ids.len().saturating_sub(seen_count_before);
             self.scanned_keys = self.scanned_keys.saturating_add(row_count);
             self.budget_scanned_keys = self
@@ -949,7 +955,10 @@ impl<'a> PoolKeyCursor<'a> {
                 .or_insert(0) += u32::try_from(missing_score_count).unwrap_or(u32::MAX);
         }
         let seen_count_before = self.seen_key_ids.len();
-        let candidates = self.build_page_eligible_candidates(rows).await;
+        let candidates = tag_pool_selection_source(
+            self.build_page_eligible_candidates(rows).await,
+            "pool_score",
+        );
         let distinct_row_count = self.seen_key_ids.len().saturating_sub(seen_count_before);
         self.scanned_keys = self.scanned_keys.saturating_add(materialized_row_count);
         self.budget_scanned_keys = self
@@ -1009,7 +1018,9 @@ impl<'a> PoolKeyCursor<'a> {
         }
 
         let candidate = pool_candidate_from_catalog_key(&self.group, key);
-        self.build_eligible_candidate(candidate).await
+        let mut candidate = self.build_eligible_candidate(candidate).await?;
+        candidate.orchestration.pool_selection_source = Some("pool_sticky".to_string());
+        Some(candidate)
     }
 
     async fn refill_queued_candidates(&mut self) -> bool {
@@ -1926,8 +1937,19 @@ fn apply_pool_orchestration(
         pool_key_index: orchestration.pool_key_index,
         pool_key_lease: None,
         scheduler_affinity_epoch,
+        pool_selection_source: Some("pool_cursor".to_string()),
     };
     candidate
+}
+
+fn tag_pool_selection_source(
+    mut candidates: Vec<EligibleLocalExecutionCandidate>,
+    source: &'static str,
+) -> Vec<EligibleLocalExecutionCandidate> {
+    for candidate in &mut candidates {
+        candidate.orchestration.pool_selection_source = Some(source.to_string());
+    }
+    candidates
 }
 
 #[cfg(test)]
@@ -2129,6 +2151,7 @@ mod tests {
                 pool_key_index: Some(0),
                 pool_key_lease: None,
                 scheduler_affinity_epoch: None,
+                pool_selection_source: Some("pool_cursor".to_string()),
             }
         );
         assert_eq!(reordered[1].orchestration.pool_key_index, Some(1));
@@ -2146,6 +2169,7 @@ mod tests {
                 pool_key_index: None,
                 pool_key_lease: None,
                 scheduler_affinity_epoch: None,
+                pool_selection_source: Some("pool_cursor".to_string()),
             }
         );
     }

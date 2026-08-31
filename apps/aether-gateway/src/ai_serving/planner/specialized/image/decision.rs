@@ -122,6 +122,7 @@ pub(super) async fn maybe_build_local_openai_image_decision_payload_for_candidat
             client_session_affinity: input.client_session_affinity.as_ref(),
             routing_policy: input.routing_policy.as_ref(),
             scheduler_affinity_epoch: eligible.orchestration.scheduler_affinity_epoch,
+            pool_selection_source: eligible.orchestration.pool_selection_source.as_deref(),
             client_requested_stream: spec_metadata.require_streaming,
             upstream_is_stream,
             has_envelope: false,

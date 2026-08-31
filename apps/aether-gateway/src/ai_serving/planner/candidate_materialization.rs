@@ -873,6 +873,7 @@ where
         skipped_credential_ids: BTreeSet::new(),
         candidate_count: 0,
         next_candidate_index: 0,
+        page_index: 0,
         remembered_affinity: false,
         scheduler_cache_affinity_enabled,
         auth_api_key_concurrency_wait_deadline: None,
@@ -926,6 +927,7 @@ struct RequestedModelAttemptPageCursor<'a> {
     skipped_credential_ids: BTreeSet<String>,
     candidate_count: usize,
     next_candidate_index: u32,
+    page_index: u32,
     remembered_affinity: bool,
     scheduler_cache_affinity_enabled: bool,
     auth_api_key_concurrency_wait_deadline: Option<Instant>,
@@ -1016,6 +1018,23 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 .map(|skipped| (self.decorate_skipped_candidate)(skipped))
                 .collect::<Vec<_>>();
             let skipped_candidate_count = skipped_candidates.len();
+            let page_index = self.page_index;
+            self.page_index = self.page_index.saturating_add(1);
+            let selection_source = self
+                .routing_policy
+                .as_ref()
+                .map(|policy| policy.selection_source.as_str())
+                .unwrap_or("scheduler_default");
+            crate::scheduling_trace::emit_candidate_page(
+                &self.trace_id,
+                self.state.app().scheduler_affinity_epoch(),
+                page_index,
+                self.next_candidate_index,
+                selection_source,
+                self.routing_policy.as_ref(),
+                &candidates,
+                &skipped_candidates,
+            );
             self.candidate_count = self
                 .candidate_count
                 .saturating_add(candidates.len() + skipped_candidate_count);
@@ -1110,6 +1129,23 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
             .map(|skipped| (self.decorate_skipped_candidate)(skipped))
             .collect::<Vec<_>>();
         let skipped_candidate_count = skipped_candidates.len();
+        let page_index = self.page_index;
+        self.page_index = self.page_index.saturating_add(1);
+        let selection_source = self
+            .routing_policy
+            .as_ref()
+            .map(|policy| policy.selection_source.as_str())
+            .unwrap_or("scheduler_default");
+        crate::scheduling_trace::emit_candidate_page(
+            &self.trace_id,
+            self.state.app().scheduler_affinity_epoch(),
+            page_index,
+            self.next_candidate_index,
+            selection_source,
+            self.routing_policy.as_ref(),
+            &[],
+            &skipped_candidates,
+        );
         self.candidate_count = self.candidate_count.saturating_add(skipped_candidate_count);
         let skipped_persistence = LocalSkippedCandidatePersistenceContext {
             user_id: self.skipped_user_id.as_str(),
@@ -2276,6 +2312,7 @@ mod tests {
                 pool_key_index,
                 pool_key_lease: None,
                 scheduler_affinity_epoch: None,
+                pool_selection_source: pool_key_index.map(|_| "pool_cursor".to_string()),
             },
             ranking: None,
         }

@@ -71,6 +71,7 @@ mod roles;
 mod router;
 mod routing;
 mod scheduler;
+mod scheduling_trace;
 mod server_chan_push;
 mod stage_metrics;
 mod state;

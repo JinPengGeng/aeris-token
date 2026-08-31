@@ -538,15 +538,23 @@ pub(super) async fn handle_prefetch_provider_private_stream_error(
         StreamFailureHandling::HonorLocalFailover,
     )
     .await;
+    let failure_disposition = classify_failure_disposition(
+        &plan.provider_api_format,
+        failure_analysis.classification,
+        status_code,
+    );
+    crate::scheduling_trace::emit_classifier_disposition(
+        trace_id,
+        payload.report_context.as_ref(),
+        0,
+        status_code,
+        failure_analysis.classification,
+        failure_disposition,
+    );
     if matches!(
         failure_analysis.decision,
         LocalFailoverDecision::RetryNextCandidate
     ) {
-        let failure_disposition = classify_failure_disposition(
-            &plan.provider_api_format,
-            failure_analysis.classification,
-            status_code,
-        );
         if let Some(retry_scope) = retry_scope_out {
             *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
         }
@@ -653,17 +661,25 @@ pub(super) async fn handle_prefetch_stream_failure(
         },
     )
     .await;
+    let failure_disposition = classify_failure_disposition(
+        &plan.provider_api_format,
+        failure_analysis.classification,
+        payload.status_code,
+    );
+    crate::scheduling_trace::emit_classifier_disposition(
+        trace_id,
+        payload.report_context.as_ref(),
+        0,
+        payload.status_code,
+        failure_analysis.classification,
+        failure_disposition,
+    );
     if honor_local_failover
         && matches!(
             failure_analysis.decision,
             LocalFailoverDecision::RetryNextCandidate
         )
     {
-        let failure_disposition = classify_failure_disposition(
-            &plan.provider_api_format,
-            failure_analysis.classification,
-            payload.status_code,
-        );
         if let Some(retry_scope) = retry_scope_out {
             *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
         }

@@ -2749,15 +2749,25 @@ async fn execute_execution_runtime_sync_impl(
         )
         .await;
     }
+    let failure_disposition = crate::orchestration::classify_failure_disposition(
+        &plan.provider_api_format,
+        local_failover_analysis.classification,
+        result.status_code,
+    );
+    if result.status_code >= 400 {
+        crate::scheduling_trace::emit_classifier_disposition(
+            trace_id,
+            report_context.as_ref(),
+            0,
+            result.status_code,
+            local_failover_analysis.classification,
+            failure_disposition,
+        );
+    }
     if matches!(
         local_failover_analysis.decision,
         LocalFailoverDecision::RetryNextCandidate
     ) {
-        let failure_disposition = crate::orchestration::classify_failure_disposition(
-            &plan.provider_api_format,
-            local_failover_analysis.classification,
-            result.status_code,
-        );
         if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
             *retry_scope =
                 ai_attempt_retry_scope_from_failure_disposition(failure_disposition);

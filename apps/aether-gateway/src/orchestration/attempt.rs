@@ -32,6 +32,7 @@ pub(crate) struct LocalExecutionCandidateMetadata {
     pub(crate) pool_key_index: Option<u32>,
     pub(crate) pool_key_lease: Option<RuntimeLockLease>,
     pub(crate) scheduler_affinity_epoch: Option<u64>,
+    pub(crate) pool_selection_source: Option<String>,
 }
 
 pub(crate) const SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD: &str = "scheduler_affinity_epoch";
@@ -41,6 +42,7 @@ pub(crate) const POOL_KEY_LEASE_OWNER_REPORT_FIELD: &str = "pool_key_lease_owner
 pub(crate) const POOL_KEY_LEASE_TOKEN_REPORT_FIELD: &str = "pool_key_lease_token";
 pub(crate) const POOL_KEY_LEASE_FENCING_REPORT_FIELD: &str = "pool_key_lease_fencing_token";
 pub(crate) const POOL_KEY_LEASE_TTL_MS_REPORT_FIELD: &str = "pool_key_lease_ttl_ms";
+pub(crate) const POOL_SELECTION_SOURCE_REPORT_FIELD: &str = "pool_selection_source";
 
 pub(crate) fn attempt_identity_from_report_context(
     report_context: Option<&Value>,
@@ -72,6 +74,10 @@ pub(crate) fn local_execution_candidate_metadata_from_report_context(
         scheduler_affinity_epoch: report_context
             .and_then(|value| value.get(SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD))
             .and_then(Value::as_u64),
+        pool_selection_source: report_context
+            .and_then(|value| value.get(POOL_SELECTION_SOURCE_REPORT_FIELD))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     }
 }
 
@@ -514,6 +520,7 @@ mod tests {
                     ttl_ms: 900000,
                 }),
                 scheduler_affinity_epoch: None,
+                pool_selection_source: None,
             }
         );
     }

@@ -195,6 +195,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
                 client_session_affinity: input.client_session_affinity.as_ref(),
                 routing_policy: input.routing_policy.as_ref(),
                 scheduler_affinity_epoch: eligible.orchestration.scheduler_affinity_epoch,
+                pool_selection_source: eligible.orchestration.pool_selection_source.as_deref(),
                 client_requested_stream: body_json
                     .get("stream")
                     .and_then(serde_json::Value::as_bool)

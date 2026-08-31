@@ -21,7 +21,8 @@ use crate::client_session_affinity::{
 };
 use crate::orchestration::{
     insert_pool_key_lease_report_context_fields, ExecutionAttemptIdentity,
-    ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD, SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
+    POOL_SELECTION_SOURCE_REPORT_FIELD, ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD,
+    SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
 };
 use crate::scheduler::affinity::insert_scheduler_affinity_policy_report_context_field;
 
@@ -59,6 +60,7 @@ pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) client_session_affinity: Option<&'a ClientSessionAffinity>,
     pub(crate) routing_policy: Option<&'a ResolvedRoutingPolicy>,
     pub(crate) scheduler_affinity_epoch: Option<u64>,
+    pub(crate) pool_selection_source: Option<&'a str>,
     pub(crate) client_requested_stream: bool,
     pub(crate) upstream_is_stream: bool,
     pub(crate) has_envelope: bool,
@@ -122,6 +124,16 @@ pub(crate) fn build_local_execution_report_context(
         extra_fields.insert(
             SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD.to_string(),
             Value::Number(epoch.into()),
+        );
+    }
+    if let Some(source) = parts
+        .pool_selection_source
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+    {
+        extra_fields.insert(
+            POOL_SELECTION_SOURCE_REPORT_FIELD.to_string(),
+            Value::String(source.to_string()),
         );
     }
     insert_request_path_fields(
@@ -330,6 +342,7 @@ mod tests {
                 client_session_affinity: Some(&client_session_affinity),
                 routing_policy: None,
                 scheduler_affinity_epoch: None,
+                pool_selection_source: None,
                 client_requested_stream: false,
                 upstream_is_stream: false,
                 has_envelope: false,
@@ -413,6 +426,7 @@ mod tests {
                 client_session_affinity: None,
                 routing_policy: None,
                 scheduler_affinity_epoch: None,
+                pool_selection_source: None,
                 client_requested_stream: false,
                 upstream_is_stream: true,
                 has_envelope: false,
@@ -480,6 +494,7 @@ mod tests {
                 client_session_affinity: None,
                 routing_policy: None,
                 scheduler_affinity_epoch: None,
+                pool_selection_source: None,
                 client_requested_stream: false,
                 upstream_is_stream: false,
                 has_envelope: false,

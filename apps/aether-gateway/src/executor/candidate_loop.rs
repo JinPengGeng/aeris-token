@@ -1,4 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+};
 
 use aether_ai_serving::{
     run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopOutcome, AiAttemptLoopPort,
@@ -40,6 +44,10 @@ use crate::orchestration::{
 use crate::privacy::RedactionExecutionCandidateId;
 use crate::request_candidate_runtime::{
     record_local_request_candidate_status, RequestCandidateRuntimeWriter,
+};
+use crate::scheduling_trace::{
+    annotate_report_context_with_attempt_ordinal, attempt_index_from_report_context,
+    emit_attempt_selected, emit_dynamic_gate, emit_termination, AttemptIndex,
 };
 use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AppState, GatewayError};
@@ -129,18 +137,59 @@ where
             decision,
             plan_kind,
             transfer_tracker,
+            attempt_counter: Arc::new(AtomicU32::new(0)),
         };
-        match run_ai_attempt_loop(&port, plan_and_reports).await? {
+        let outcome = match run_ai_attempt_loop(&port, plan_and_reports).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                emit_termination(
+                    trace_id,
+                    "error",
+                    port.attempt_counter.load(Ordering::Acquire),
+                    None,
+                );
+                return Err(error);
+            }
+        };
+        match outcome {
             AiAttemptLoopOutcome::Responded(response) => {
+                emit_termination(
+                    trace_id,
+                    "responded",
+                    port.attempt_counter.load(Ordering::Acquire),
+                    None,
+                );
                 Ok(LocalExecutionRequestOutcome::responded(response))
             }
-            AiAttemptLoopOutcome::Deferred(response) => Ok(
-                LocalExecutionRequestOutcome::responded(mark_deferred_upstream_response(response)),
-            ),
+            AiAttemptLoopOutcome::Deferred(response) => {
+                emit_termination(
+                    trace_id,
+                    "deferred",
+                    port.attempt_counter.load(Ordering::Acquire),
+                    None,
+                );
+                Ok(LocalExecutionRequestOutcome::responded(
+                    mark_deferred_upstream_response(response),
+                ))
+            }
             AiAttemptLoopOutcome::Exhausted(exhaustion) => {
+                emit_termination(
+                    trace_id,
+                    "candidates_exhausted",
+                    port.attempt_counter.load(Ordering::Acquire),
+                    None,
+                );
                 Ok(LocalExecutionRequestOutcome::Exhausted(exhaustion))
             }
-            AiAttemptLoopOutcome::NoPath => Ok(LocalExecutionRequestOutcome::NoPath),
+            AiAttemptLoopOutcome::NoPath => {
+                emit_termination(
+                    trace_id,
+                    "no_path",
+                    port.attempt_counter.load(Ordering::Acquire),
+                    None,
+                );
+                Ok(LocalExecutionRequestOutcome::NoPath)
+            }
         }
     }
     .instrument(span)
@@ -203,6 +252,7 @@ where
             decision,
             plan_kind,
             transfer_tracker,
+            attempt_counter: Arc::new(AtomicU32::new(0)),
         };
         run_dynamic_attempt_loop(
             &port,
@@ -212,6 +262,7 @@ where
             state
                 .frontdoor_runtime_guards
                 .local_execution_planning_timeout,
+            port.attempt_counter.as_ref(),
         )
         .await
     }
@@ -226,6 +277,7 @@ struct SyncAttemptLoopPort<'a> {
     decision: &'a GatewayControlDecision,
     plan_kind: &'a str,
     transfer_tracker: &'a ProviderTransferTracker,
+    attempt_counter: Arc<AtomicU32>,
 }
 
 #[async_trait]
@@ -249,6 +301,16 @@ where
 
     async fn record_attempt_started(&self, attempt: &T) -> Result<(), Self::Error> {
         record_provider_transfer_attempt_started(self.transfer_tracker, attempt).await;
+        let ordinal = self
+            .attempt_counter
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        emit_attempt_selected(
+            self.trace_id,
+            attempt.execution_plan(),
+            attempt.report_context().as_ref(),
+            ordinal,
+        );
         Ok(())
     }
 
@@ -269,7 +331,7 @@ where
         attempt: &T,
     ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error> {
         let plan = attempt.execution_plan();
-        let report_context = attempt.report_context();
+        let mut report_context = attempt.report_context();
         if let Some(response) = execution_plan_balance_capacity_response(
             self.state,
             self.trace_id,
@@ -282,7 +344,38 @@ where
             return Ok(AiAttemptExecutionOutcome::Responded(response));
         }
         prewarm_direct_reqwest_candidate_client(plan);
-        let _permit = acquire_upstream_execution_gate(self.state, self.trace_id).await?;
+        let ordinal = self.attempt_counter.load(Ordering::Acquire);
+        annotate_report_context_with_attempt_ordinal(&mut report_context, ordinal);
+        let _permit = match acquire_upstream_execution_gate(self.state, self.trace_id).await {
+            Ok(permit) => {
+                emit_dynamic_gate(
+                    self.trace_id,
+                    report_context.as_ref(),
+                    ordinal,
+                    "allowed",
+                    if permit.is_some() {
+                        "permit_acquired"
+                    } else {
+                        "gate_not_configured"
+                    },
+                );
+                permit
+            }
+            Err(error) => {
+                emit_dynamic_gate(
+                    self.trace_id,
+                    report_context.as_ref(),
+                    ordinal,
+                    "denied",
+                    if is_candidate_level_admission_timeout(&error) {
+                        "admission_timeout"
+                    } else {
+                        "gate_error"
+                    },
+                );
+                return Err(error);
+            }
+        };
         let upstream_execution_gate_held_started_at = std::time::Instant::now();
         let mut execution = execute_execution_runtime_sync_with_retry_scope(
             self.state,
@@ -408,18 +501,59 @@ where
             decision,
             plan_kind,
             transfer_tracker,
+            attempt_counter: Arc::new(AtomicU32::new(0)),
         };
-        match run_ai_attempt_loop(&port, plan_and_reports).await? {
+        let outcome = match run_ai_attempt_loop(&port, plan_and_reports).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                emit_termination(
+                    trace_id,
+                    "error",
+                    port.attempt_counter.load(Ordering::Acquire),
+                    None,
+                );
+                return Err(error);
+            }
+        };
+        match outcome {
             AiAttemptLoopOutcome::Responded(response) => {
+                emit_termination(
+                    trace_id,
+                    "responded",
+                    port.attempt_counter.load(Ordering::Acquire),
+                    None,
+                );
                 Ok(LocalExecutionRequestOutcome::responded(response))
             }
-            AiAttemptLoopOutcome::Deferred(response) => Ok(
-                LocalExecutionRequestOutcome::responded(mark_deferred_upstream_response(response)),
-            ),
+            AiAttemptLoopOutcome::Deferred(response) => {
+                emit_termination(
+                    trace_id,
+                    "deferred",
+                    port.attempt_counter.load(Ordering::Acquire),
+                    None,
+                );
+                Ok(LocalExecutionRequestOutcome::responded(
+                    mark_deferred_upstream_response(response),
+                ))
+            }
             AiAttemptLoopOutcome::Exhausted(exhaustion) => {
+                emit_termination(
+                    trace_id,
+                    "candidates_exhausted",
+                    port.attempt_counter.load(Ordering::Acquire),
+                    None,
+                );
                 Ok(LocalExecutionRequestOutcome::Exhausted(exhaustion))
             }
-            AiAttemptLoopOutcome::NoPath => Ok(LocalExecutionRequestOutcome::NoPath),
+            AiAttemptLoopOutcome::NoPath => {
+                emit_termination(
+                    trace_id,
+                    "no_path",
+                    port.attempt_counter.load(Ordering::Acquire),
+                    None,
+                );
+                Ok(LocalExecutionRequestOutcome::NoPath)
+            }
         }
     }
     .instrument(span)
@@ -478,6 +612,7 @@ where
             decision,
             plan_kind,
             transfer_tracker,
+            attempt_counter: Arc::new(AtomicU32::new(0)),
         };
         run_dynamic_attempt_loop(
             &port,
@@ -487,6 +622,7 @@ where
             state
                 .frontdoor_runtime_guards
                 .local_execution_planning_timeout,
+            port.attempt_counter.as_ref(),
         )
         .await
     }
@@ -701,6 +837,16 @@ fn log_provider_transfer_limit_reached(
     plan_kind: &str,
     reached: &ProviderTransferLimitReached,
 ) {
+    crate::scheduling_trace::emit_provider_transfer_budget(
+        trace_id,
+        reached.transfer_count,
+        reached.limits.max_transfer_count,
+        if reached.timeout_reached {
+            "deadline_exhausted"
+        } else {
+            "transfer_count_exhausted"
+        },
+    );
     warn!(
         event_name = "provider_transfer_limit_reached",
         log_type = "event",
@@ -769,12 +915,52 @@ async fn record_provider_transfer_attempt_failed<Attempt>(
     }
 }
 
+struct DynamicSchedulingTerminationGuard<'a> {
+    trace_id: &'a str,
+    attempt_counter: &'a AtomicU32,
+    armed: bool,
+}
+
+impl<'a> DynamicSchedulingTerminationGuard<'a> {
+    fn new(trace_id: &'a str, attempt_counter: &'a AtomicU32) -> Self {
+        Self {
+            trace_id,
+            attempt_counter,
+            armed: true,
+        }
+    }
+
+    fn finish(&mut self, reason: &'static str, last_attempt: Option<AttemptIndex>) {
+        emit_termination(
+            self.trace_id,
+            reason,
+            self.attempt_counter.load(Ordering::Acquire),
+            last_attempt,
+        );
+        self.armed = false;
+    }
+}
+
+impl Drop for DynamicSchedulingTerminationGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            emit_termination(
+                self.trace_id,
+                "error",
+                self.attempt_counter.load(Ordering::Acquire),
+                None,
+            );
+        }
+    }
+}
+
 async fn run_dynamic_attempt_loop<Port, Source, Attempt>(
     port: &Port,
     source: &mut Source,
     trace_id: &str,
     plan_kind: &str,
     planning_timeout: Duration,
+    attempt_counter: &AtomicU32,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError>
 where
     Port: AiAttemptLoopPort<
@@ -788,12 +974,24 @@ where
 {
     let mut last_attempted = None;
     let mut fallback_response = None;
+    let mut termination = DynamicSchedulingTerminationGuard::new(trace_id, attempt_counter);
 
     loop {
         let next_started_at = std::time::Instant::now();
-        let next_attempt =
-            next_execution_attempt_with_timeout(source, trace_id, plan_kind, planning_timeout)
-                .await?;
+        let next_attempt = match next_execution_attempt_with_timeout(
+            source,
+            trace_id,
+            plan_kind,
+            planning_timeout,
+        )
+        .await
+        {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                termination.finish("planning_error", None);
+                return Err(error);
+            }
+        };
         observe_gateway_stage_ms(
             "stream_candidate_next",
             next_started_at.elapsed().as_millis() as u64,
@@ -830,6 +1028,14 @@ where
                     "stream_candidate_unused",
                     unused_started_at.elapsed().as_millis() as u64,
                 );
+                let ordinal = attempt_counter.load(Ordering::Acquire);
+                termination.finish(
+                    "responded",
+                    Some(attempt_index_from_report_context(
+                        attempt.report_context_ref(),
+                        ordinal,
+                    )),
+                );
                 return Ok(LocalExecutionRequestOutcome::responded(response));
             }
             AiAttemptExecutionOutcome::Retry {
@@ -856,19 +1062,30 @@ where
     }
 
     if let Some(response) = fallback_response {
+        let ordinal = attempt_counter.load(Ordering::Acquire);
+        let last_attempt = last_attempted
+            .as_ref()
+            .map(|(_, context)| attempt_index_from_report_context(context.as_ref(), ordinal));
+        termination.finish("deferred", last_attempt);
         return Ok(LocalExecutionRequestOutcome::responded(
             mark_deferred_upstream_response(response),
         ));
     }
 
     let Some((last_plan, last_report_context)) = last_attempted else {
+        termination.finish("no_path", None);
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    Ok(LocalExecutionRequestOutcome::Exhausted(
-        port.build_exhaustion(last_plan, last_report_context)
-            .await?,
-    ))
+    let last_attempt = Some(attempt_index_from_report_context(
+        last_report_context.as_ref(),
+        attempt_counter.load(Ordering::Acquire),
+    ));
+    let exhaustion = port
+        .build_exhaustion(last_plan, last_report_context)
+        .await?;
+    termination.finish("candidates_exhausted", last_attempt);
+    Ok(LocalExecutionRequestOutcome::Exhausted(exhaustion))
 }
 
 async fn apply_attempt_retry_scope<Source, Attempt>(
@@ -926,6 +1143,7 @@ struct StreamAttemptLoopPort<'a> {
     decision: &'a GatewayControlDecision,
     plan_kind: &'a str,
     transfer_tracker: &'a ProviderTransferTracker,
+    attempt_counter: Arc<AtomicU32>,
 }
 
 #[async_trait]
@@ -949,6 +1167,16 @@ where
 
     async fn record_attempt_started(&self, attempt: &T) -> Result<(), Self::Error> {
         record_provider_transfer_attempt_started(self.transfer_tracker, attempt).await;
+        let ordinal = self
+            .attempt_counter
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        emit_attempt_selected(
+            self.trace_id,
+            attempt.execution_plan(),
+            attempt.report_context().as_ref(),
+            ordinal,
+        );
         Ok(())
     }
 
@@ -969,7 +1197,9 @@ where
         attempt: &T,
     ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error> {
         let plan = attempt.execution_plan();
-        let report_context = attempt.report_context();
+        let mut report_context = attempt.report_context();
+        let ordinal = self.attempt_counter.load(Ordering::Acquire);
+        annotate_report_context_with_attempt_ordinal(&mut report_context, ordinal);
         let candidate_index = parse_request_candidate_report_context(report_context.as_ref())
             .and_then(|context| context.candidate_index)
             .map(|value| value.to_string())
@@ -1034,6 +1264,7 @@ where
             self.plan_kind,
             plan,
             watchdog_report_context,
+            ordinal,
             stop_on_transport_errors,
             move || async move {
                 execute_execution_runtime_stream_with_retry_scope(
@@ -1344,6 +1575,7 @@ async fn execute_stream_candidate_with_watchdog<Fut>(
     plan_kind: &str,
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
+    attempt_ordinal: u32,
     stop_on_transport_errors: bool,
     execute: impl FnOnce() -> Fut,
 ) -> Result<StreamCandidateWatchdogOutcome, GatewayError>
@@ -1356,8 +1588,28 @@ where
     let candidate_started_at = std::time::Instant::now();
     let candidate_started_unix_ms = current_unix_ms();
     let permit = match acquire_upstream_execution_gate(state, trace_id).await {
-        Ok(permit) => permit,
+        Ok(permit) => {
+            emit_dynamic_gate(
+                trace_id,
+                report_context,
+                attempt_ordinal,
+                "allowed",
+                if permit.is_some() {
+                    "permit_acquired"
+                } else {
+                    "gate_not_configured"
+                },
+            );
+            permit
+        }
         Err(err) if is_candidate_level_admission_timeout(&err) => {
+            emit_dynamic_gate(
+                trace_id,
+                report_context,
+                attempt_ordinal,
+                "denied",
+                "admission_timeout",
+            );
             record_stream_candidate_admission_timeout(
                 state,
                 plan,
@@ -1371,7 +1623,16 @@ where
                 AiAttemptExecutionOutcome::retry(AiAttemptRetryScope::Candidate),
             ));
         }
-        Err(err) => return Err(err),
+        Err(err) => {
+            emit_dynamic_gate(
+                trace_id,
+                report_context,
+                attempt_ordinal,
+                "denied",
+                "gate_error",
+            );
+            return Err(err);
+        }
     };
     let permit_hold = permit.map(UpstreamExecutionPermitHold::new);
     let watchdog_started_at = std::time::Instant::now();
@@ -2361,6 +2622,7 @@ mod tests {
                 "claude_cli_stream",
                 &plan,
                 Some(&report_context),
+                0,
                 false,
                 || {
                     std::future::pending::<
@@ -2414,6 +2676,7 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
+            0,
             true,
             || {
                 std::future::pending::<
@@ -2451,6 +2714,7 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
+            0,
             true,
             || async {
                 mark_stream_candidate_watchdog_terminal_started();
@@ -2483,6 +2747,7 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
+            0,
             true,
             || async {
                 Err(GatewayError::UpstreamUnavailable {
@@ -2522,6 +2787,7 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
+            0,
             false,
             || async {
                 panic!("execute future should not run while upstream execution gate is saturated")
@@ -2569,6 +2835,7 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
+            0,
             false,
             || async {
                 Err(GatewayError::AdmissionTimeout {
