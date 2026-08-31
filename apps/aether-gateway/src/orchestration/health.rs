@@ -310,6 +310,7 @@ fn current_bool(current: &serde_json::Map<String, Value>, field: &str) -> bool {
 pub(crate) fn clear_local_half_open_claim(
     circuit_by_format: &mut Value,
     api_format: &str,
+    expected_owner: &str,
     expected_fencing_token: u64,
 ) -> bool {
     let Some(circuit) = circuit_by_format
@@ -320,6 +321,17 @@ pub(crate) fn clear_local_half_open_claim(
         return false;
     };
     if current_u64(circuit, "half_open_fencing_token") != expected_fencing_token {
+        return false;
+    }
+    let claim_matches = circuit
+        .get("half_open_claim")
+        .and_then(Value::as_object)
+        .is_some_and(|claim| {
+            claim.get("owner").and_then(Value::as_str) == Some(expected_owner)
+                && claim.get("fencing_token").and_then(Value::as_u64)
+                    == Some(expected_fencing_token)
+        });
+    if !claim_matches {
         return false;
     }
     circuit.remove("half_open_claim");
@@ -612,7 +624,7 @@ mod tests {
                     "reason": "account_deactivated_401",
                     "next_probe_at_unix_secs": 1_760_001_920u64,
                     "half_open_fencing_token": 19,
-                    "half_open_claim": {"owner": "node-a"}
+                    "half_open_claim": {"owner": "node-a", "fencing_token": 19}
                 }
             })),
             "openai:chat",
@@ -637,9 +649,57 @@ mod tests {
         assert!(super::clear_local_half_open_claim(
             &mut completed,
             "openai:chat",
+            "node-a",
             19
         ));
         assert!(completed["openai:chat"].get("half_open_claim").is_none());
+    }
+
+    #[test]
+    fn half_open_claim_clear_requires_exact_owner_and_claim_fence() {
+        let original = json!({
+            "openai:chat": {
+                "half_open_fencing_token": 19,
+                "half_open_until_unix_ms": 20_000,
+                "half_open_claim": {
+                    "owner": "owner-new",
+                    "fencing_token": 19,
+                    "expires_at_unix_ms": 20_000
+                }
+            }
+        });
+
+        let mut wrong_owner = original.clone();
+        assert!(!super::clear_local_half_open_claim(
+            &mut wrong_owner,
+            "openai:chat",
+            "owner-old",
+            19
+        ));
+        assert_eq!(wrong_owner, original);
+
+        let mut wrong_claim_fence = original.clone();
+        wrong_claim_fence["openai:chat"]["half_open_claim"]["fencing_token"] = json!(18);
+        let expected = wrong_claim_fence.clone();
+        assert!(!super::clear_local_half_open_claim(
+            &mut wrong_claim_fence,
+            "openai:chat",
+            "owner-new",
+            19
+        ));
+        assert_eq!(wrong_claim_fence, expected);
+
+        let mut exact = original;
+        assert!(super::clear_local_half_open_claim(
+            &mut exact,
+            "openai:chat",
+            "owner-new",
+            19
+        ));
+        assert!(exact["openai:chat"].get("half_open_claim").is_none());
+        assert!(exact["openai:chat"]
+            .get("half_open_until_unix_ms")
+            .is_none());
     }
 
     #[test]

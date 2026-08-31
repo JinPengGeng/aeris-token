@@ -1354,6 +1354,7 @@ async fn record_health_failure_effect(
             if !super::clear_local_half_open_claim(
                 circuit,
                 api_format,
+                prepared.owner(),
                 prepared.durable_fencing_token(),
             ) {
                 super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;
@@ -1501,6 +1502,7 @@ async fn record_health_success_effect(
             if !super::clear_local_half_open_claim(
                 circuit,
                 api_format,
+                prepared.owner(),
                 prepared.durable_fencing_token(),
             ) {
                 super::isolate_aborted_half_open_completion(state, probe_completion.as_ref()).await;

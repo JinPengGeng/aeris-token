@@ -92,9 +92,32 @@ pub(crate) struct PreparedHalfOpenProbeCompletion {
     completion: HalfOpenProbeCompletion,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionWriteDisposition {
+    Cleanup,
+    RetainStale { current_fencing_token: u64 },
+}
+
+fn completion_write_disposition(
+    write: &HalfOpenProbeCompletionWrite,
+) -> CompletionWriteDisposition {
+    match write {
+        HalfOpenProbeCompletionWrite::Applied(_) => CompletionWriteDisposition::Cleanup,
+        HalfOpenProbeCompletionWrite::RejectedStale {
+            current_fencing_token,
+        } => CompletionWriteDisposition::RetainStale {
+            current_fencing_token: *current_fencing_token,
+        },
+    }
+}
+
 impl PreparedHalfOpenProbeCompletion {
     pub(crate) fn durable_fencing_token(&self) -> u64 {
         self.session.durable_fencing_token
+    }
+
+    pub(crate) fn owner(&self) -> &str {
+        self.session.lease.owner()
     }
 
     pub(crate) fn completion(&self) -> &HalfOpenProbeCompletion {
@@ -146,17 +169,8 @@ pub(crate) async fn enforce_half_open_probe_admission(
     state: &AppState,
     plan: &ExecutionPlan,
 ) -> Result<(), GatewayError> {
-    let correlation_key = probe_correlation_key(plan);
-    match renew_active_probe_for_reuse(state, &correlation_key).await {
-        Ok(true) => return Ok(()),
-        Ok(false) => {}
-        Err(message) => {
-            return Err(GatewayError::UpstreamUnavailable {
-                trace_id: plan.request_id.clone(),
-                message,
-            })
-        }
-    }
+    // Every physical send must acquire admission independently. ACTIVE_PROBES is only a
+    // completion sidecar; plan identifiers are caller-controlled and are not a lease credential.
     match admit_half_open_probe(state, plan).await {
         HalfOpenProbeAdmission::NotRequired => Ok(()),
         HalfOpenProbeAdmission::Claimed(session) => {
@@ -286,11 +300,18 @@ async fn admit_half_open_probe(state: &AppState, plan: &ExecutionPlan) -> HalfOp
                 return HalfOpenProbeAdmission::FailClosed(message);
             }
         }
-        if durable_claim_is_active(
+        let durable_claim_is_active = match durable_claim_is_active(
             current_key.circuit_breaker_by_format.as_ref(),
             api_format,
             now_ms,
         ) {
+            Ok(is_active) => is_active,
+            Err(message) => {
+                let _ = coordinator.release(&lease).await;
+                return HalfOpenProbeAdmission::FailClosed(message);
+            }
+        };
+        if durable_claim_is_active {
             let _ = coordinator.release(&lease).await;
             return HalfOpenProbeAdmission::Denied(
                 HalfOpenProbeAdmissionDeniedReason::ActiveDurableClaim,
@@ -420,12 +441,19 @@ pub(crate) async fn commit_half_open_probe_after_health_cas(
             return;
         }
     };
-    match state
+    let completion_write = match state
         .data
         .complete_half_open_probe_if_newer(pending_completion.clone())
         .await
     {
-        Ok(HalfOpenProbeCompletionWrite::Applied(_)) => {
+        Ok(write) => write,
+        Err(error) => {
+            warn!(error = ?error, "half-open probe completion audit failed closed");
+            return;
+        }
+    };
+    match completion_write_disposition(&completion_write) {
+        CompletionWriteDisposition::Cleanup => {
             if let Err(error) = clear_pending_completion(state, &pending_completion).await {
                 warn!(
                     error,
@@ -437,32 +465,16 @@ pub(crate) async fn commit_half_open_probe_after_health_cas(
                 warn!(error = ?error, "half-open probe lease release failed closed");
             }
         }
-        Ok(HalfOpenProbeCompletionWrite::RejectedStale {
+        CompletionWriteDisposition::RetainStale {
             current_fencing_token,
-        }) => {
-            if let Err(error) = clear_pending_completion(state, &pending_completion).await {
-                warn!(error, "stale half-open probe outbox cleanup failed closed");
-            }
+        } => {
             warn!(
                 durable_fencing_token = session.durable_fencing_token,
                 current_fencing_token,
-                "half-open probe completion audit rejected a stale durable fence"
+                "half-open probe completion audit rejected a stale durable fence; pending marker retained fail closed"
             );
         }
-        Err(error) => {
-            warn!(error = ?error, "half-open probe completion audit failed closed");
-        }
     }
-}
-
-async fn renew_active_probe_for_reuse(state: &AppState, key: &str) -> Result<bool, String> {
-    let active = ACTIVE_PROBES
-        .get(key)
-        .map(|entry| Arc::clone(entry.value()));
-    let Some(active) = active else {
-        return Ok(false);
-    };
-    renew_exact_active_probe(state, key, &active).await
 }
 
 pub(crate) async fn half_open_probe_is_active(plan: &ExecutionPlan) -> bool {
@@ -717,16 +729,19 @@ async fn replay_pending_completion(
         &current_key.id,
         api_format,
     )?;
-    match state
+    let completion_write = state
         .data
         .complete_half_open_probe_if_newer(completion.clone())
         .await
-        .map_err(|error| format!("{error:?}"))?
-    {
-        HalfOpenProbeCompletionWrite::Applied(_)
-        | HalfOpenProbeCompletionWrite::RejectedStale { .. } => {
-            clear_pending_completion(state, &completion).await
-        }
+        .map_err(|error| format!("{error:?}"))?;
+    match completion_write_disposition(&completion_write) {
+        CompletionWriteDisposition::Cleanup => clear_pending_completion(state, &completion).await,
+        CompletionWriteDisposition::RetainStale {
+            current_fencing_token,
+        } => Err(format!(
+            "half-open completion audit rejected stale fence {}; current SQL fence is {}; pending marker retained fail closed",
+            completion.fencing_token, current_fencing_token
+        )),
     }
 }
 
@@ -893,13 +908,43 @@ fn durable_claim_is_active(
     circuit_by_format: Option<&Value>,
     api_format: &str,
     now_ms: u64,
-) -> bool {
-    circuit_entry(circuit_by_format, api_format)
-        .and_then(|circuit| circuit.get("half_open_claim"))
-        .and_then(Value::as_object)
-        .and_then(|claim| claim.get("expires_at_unix_ms"))
+) -> Result<bool, String> {
+    let Some(circuit) = circuit_entry(circuit_by_format, api_format) else {
+        return Ok(false);
+    };
+    let Some(claim_value) = circuit.get("half_open_claim") else {
+        return Ok(false);
+    };
+    let claim = claim_value.as_object().ok_or_else(|| {
+        "half-open probe durable claim is malformed at final send gate".to_string()
+    })?;
+    let _owner = claim
+        .get("owner")
+        .and_then(Value::as_str)
+        .filter(|owner| !owner.trim().is_empty())
+        .ok_or_else(|| "half-open probe durable claim owner is missing or malformed".to_string())?;
+    let claim_fence = claim
+        .get("fencing_token")
         .and_then(Value::as_u64)
-        .is_some_and(|expires_at| expires_at > now_ms)
+        .ok_or_else(|| "half-open probe durable claim fence is missing or malformed".to_string())?;
+    let circuit_fence = circuit
+        .get("half_open_fencing_token")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "half-open probe durable circuit fence is missing or malformed".to_string()
+        })?;
+    if claim_fence != circuit_fence {
+        return Err(
+            "half-open probe durable claim fence does not match the circuit fence".to_string(),
+        );
+    }
+    let expires_at = claim
+        .get("expires_at_unix_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "half-open probe durable claim expiry is missing or malformed".to_string()
+        })?;
+    Ok(expires_at > now_ms)
 }
 
 fn durable_fencing_token(circuit_by_format: Option<&Value>, api_format: &str) -> u64 {
@@ -965,7 +1010,28 @@ fn probe_correlation_key(plan: &ExecutionPlan) -> String {
 
 #[cfg(test)]
 mod tests {
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
+    use aether_runtime_state::{RedisClientConfig, RuntimeState};
+    use aether_test_support::ManagedRedisServer;
+
     use super::*;
+    use crate::data::GatewayDataState;
+
+    async fn start_managed_redis_or_skip() -> Option<ManagedRedisServer> {
+        match ManagedRedisServer::start().await {
+            Ok(server) => Some(server),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                eprintln!("skipping Redis-backed half-open probe test: {error}");
+                None
+            }
+            Err(error) => panic!("redis server should start: {error}"),
+        }
+    }
 
     #[test]
     fn durable_claim_projection_preserves_circuit_and_increments_authoritative_fence() {
@@ -982,16 +1048,157 @@ mod tests {
             projected["openai:chat"]["half_open_fencing_token"],
             json!(8)
         );
-        assert!(durable_claim_is_active(
-            Some(&projected),
-            "openai:chat",
-            19_999
+        assert_eq!(
+            durable_claim_is_active(Some(&projected), "openai:chat", 19_999),
+            Ok(true)
+        );
+        assert_eq!(
+            durable_claim_is_active(Some(&projected), "openai:chat", 20_000),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn malformed_durable_claims_fail_closed_instead_of_appearing_expired() {
+        let malformed = [
+            (
+                "missing owner",
+                json!({
+                    "openai:chat": {
+                        "half_open_fencing_token": 7,
+                        "half_open_claim": {
+                            "fencing_token": 7,
+                            "expires_at_unix_ms": 10
+                        }
+                    }
+                }),
+            ),
+            (
+                "missing expiry",
+                json!({
+                    "openai:chat": {
+                        "half_open_fencing_token": 7,
+                        "half_open_claim": {"owner": "owner-1", "fencing_token": 7}
+                    }
+                }),
+            ),
+            (
+                "non-numeric expiry",
+                json!({
+                    "openai:chat": {
+                        "half_open_fencing_token": 7,
+                        "half_open_claim": {
+                            "owner": "owner-1",
+                            "fencing_token": 7,
+                            "expires_at_unix_ms": "10"
+                        }
+                    }
+                }),
+            ),
+            (
+                "claim and circuit fences differ",
+                json!({
+                    "openai:chat": {
+                        "half_open_fencing_token": 8,
+                        "half_open_claim": {
+                            "owner": "owner-1",
+                            "fencing_token": 7,
+                            "expires_at_unix_ms": 10
+                        }
+                    }
+                }),
+            ),
+        ];
+        for (case, circuit) in malformed {
+            assert!(
+                durable_claim_is_active(Some(&circuit), "openai:chat", 20).is_err(),
+                "{case} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_completion_write_requires_pending_marker_retention() {
+        let write = HalfOpenProbeCompletionWrite::RejectedStale {
+            current_fencing_token: 9,
+        };
+        assert_eq!(
+            completion_write_disposition(&write),
+            CompletionWriteDisposition::RetainStale {
+                current_fencing_token: 9
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_concurrent_plans_cannot_share_an_active_lease() {
+        let Some(redis) = start_managed_redis_or_skip().await else {
+            return;
+        };
+        let key = StoredProviderCatalogKey::new(
+            "key-concurrent-half-open".to_string(),
+            "provider-concurrent-half-open".to_string(),
+            "probe-key".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("provider key")
+        .with_health_fields(
+            None,
+            Some(json!({
+                "openai:chat": {
+                    "open": true,
+                    "next_probe_at_unix_secs": 1,
+                    "half_open_fencing_token": 0
+                }
+            })),
+        );
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            Vec::new(),
+            Vec::new(),
+            vec![key],
         ));
-        assert!(!durable_claim_is_active(
-            Some(&projected),
-            "openai:chat",
-            20_000
-        ));
+        let runtime = RuntimeState::redis(
+            RedisClientConfig {
+                url: redis.redis_url().to_string(),
+                key_prefix: Some(format!("half_open_collision:{}", Uuid::now_v7())),
+            },
+            Some(5_000),
+        )
+        .await
+        .expect("Redis runtime state");
+        let state = AppState::new()
+            .expect("gateway state")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository),
+            )
+            .with_runtime_state(Arc::new(runtime));
+        let plan: ExecutionPlan = serde_json::from_value(json!({
+            "request_id": "request-collision",
+            "candidate_id": "candidate-collision",
+            "provider_id": "provider-concurrent-half-open",
+            "endpoint_id": "endpoint-concurrent-half-open",
+            "key_id": "key-concurrent-half-open",
+            "method": "POST",
+            "url": "https://example.invalid",
+            "body": {},
+            "client_api_format": "openai:chat",
+            "provider_api_format": "openai:chat"
+        }))
+        .expect("execution plan");
+
+        let (first, second) = tokio::join!(
+            enforce_half_open_probe_admission(&state, &plan),
+            enforce_half_open_probe_admission(&state, &plan)
+        );
+        assert_eq!(
+            usize::from(first.is_ok()) + usize::from(second.is_ok()),
+            1,
+            "identical plan identifiers must not reuse the winning lease"
+        );
+
+        isolate_active_half_open_probe(&state, &plan).await;
     }
 
     #[test]
