@@ -8,10 +8,12 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use aether_model_fetch::{
     apply_model_filters, fetch_models_from_transports_for_client_version, json_string_list,
-    model_catalog_upstream_metadata, model_fetch_interval_minutes,
-    model_fetch_startup_delay_seconds, model_fetch_startup_enabled, preset_models_for_provider,
-    selected_models_fetch_endpoints, sync_provider_model_whitelist_associations,
-    upstream_metadata_namespace_updates, ModelFetchAssociationStore, ModelFetchRunSummary,
+    model_catalog_upstream_metadata, model_fetch_interval_minutes, model_fetch_pending_removals,
+    model_fetch_removal_grace_count, model_fetch_startup_delay_seconds,
+    model_fetch_startup_enabled, model_fetch_sync_metadata, preset_models_for_provider,
+    reconcile_allowed_models, selected_models_fetch_endpoints,
+    sync_provider_model_whitelist_associations, upstream_metadata_namespace_updates,
+    AllowedModelsReconciliation, ModelFetchAssociationStore, ModelFetchRunSummary,
 };
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
@@ -256,12 +258,26 @@ async fn fetch_and_persist_key_models(
             );
             let upstream_metadata =
                 model_catalog_upstream_metadata(&target.provider.provider_type, &models);
+            // Preset catalogs are bundled and authoritative: complete snapshot.
+            let reconciliation = reconcile_key_allowed_models(&target.key, &filtered_models, true);
+            log_model_fetch_reconciliation(
+                &target.provider.id,
+                &target.key.id,
+                &reconciliation,
+                true,
+            );
             persist_key_fetch_success(
                 state,
                 &target.key,
                 now_unix_secs,
-                &filtered_models,
-                upstream_metadata.as_ref(),
+                &reconciliation.allowed_models,
+                merged_sync_metadata(
+                    upstream_metadata.as_ref(),
+                    &reconciliation,
+                    true,
+                    now_unix_secs,
+                )
+                .as_ref(),
             )
             .await?;
             state
@@ -270,7 +286,7 @@ async fn fetch_and_persist_key_models(
             sync_provider_model_whitelist_associations(
                 state,
                 &target.provider.id,
-                &filtered_models,
+                &reconciliation.allowed_models,
             )
             .await
             .map_err(GatewayError::Internal)?;
@@ -369,21 +385,113 @@ async fn fetch_and_persist_key_models(
         json_string_list(target.key.model_include_patterns.as_ref()),
         json_string_list(target.key.model_exclude_patterns.as_ref()),
     );
+    // A snapshot is complete only when every selected endpoint was fetched
+    // successfully; partial snapshots never remove models.
+    let complete_snapshot = result.errors.is_empty();
+    let reconciliation =
+        reconcile_key_allowed_models(&target.key, &filtered_models, complete_snapshot);
+    log_model_fetch_reconciliation(
+        &target.provider.id,
+        &target.key.id,
+        &reconciliation,
+        complete_snapshot,
+    );
     persist_key_fetch_success(
         state,
         &target.key,
         now_unix_secs,
-        &filtered_models,
-        result.upstream_metadata.as_ref(),
+        &reconciliation.allowed_models,
+        merged_sync_metadata(
+            result.upstream_metadata.as_ref(),
+            &reconciliation,
+            complete_snapshot,
+            now_unix_secs,
+        )
+        .as_ref(),
     )
     .await?;
     state
         .write_upstream_models_cache(&target.provider.id, &target.key.id, &result.legacy_models)
         .await;
-    sync_provider_model_whitelist_associations(state, &target.provider.id, &filtered_models)
-        .await
-        .map_err(GatewayError::Internal)?;
+    sync_provider_model_whitelist_associations(
+        state,
+        &target.provider.id,
+        &reconciliation.allowed_models,
+    )
+    .await
+    .map_err(GatewayError::Internal)?;
     Ok(KeyFetchDisposition::Succeeded)
+}
+
+fn reconcile_key_allowed_models(
+    key: &StoredProviderCatalogKey,
+    fetched_models: &[String],
+    complete_snapshot: bool,
+) -> AllowedModelsReconciliation {
+    let previous_allowed_models = key
+        .allowed_models
+        .as_ref()
+        .map(|value| json_string_list(Some(value)));
+    reconcile_allowed_models(
+        fetched_models,
+        previous_allowed_models.as_deref(),
+        &json_string_list(key.model_include_patterns.as_ref()),
+        &json_string_list(key.model_exclude_patterns.as_ref()),
+        model_fetch_pending_removals(key.upstream_metadata.as_ref()),
+        model_fetch_removal_grace_count(),
+        complete_snapshot,
+    )
+}
+
+fn merged_sync_metadata(
+    upstream_metadata: Option<&Value>,
+    reconciliation: &AllowedModelsReconciliation,
+    complete_snapshot: bool,
+    now_unix_secs: u64,
+) -> Option<Value> {
+    let mut merged = upstream_metadata
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let Value::Object(sync_metadata) =
+        model_fetch_sync_metadata(reconciliation, complete_snapshot, now_unix_secs)
+    else {
+        return None;
+    };
+    merged.extend(sync_metadata);
+    Some(Value::Object(merged))
+}
+
+fn log_model_fetch_reconciliation(
+    provider_id: &str,
+    key_id: &str,
+    reconciliation: &AllowedModelsReconciliation,
+    complete_snapshot: bool,
+) {
+    if !complete_snapshot {
+        warn!(
+            provider_id = %provider_id,
+            key_id = %key_id,
+            "gateway model fetch snapshot incomplete; model removals skipped for this sync"
+        );
+    }
+    if !reconciliation.pending_removal.is_empty() {
+        warn!(
+            provider_id = %provider_id,
+            key_id = %key_id,
+            pending_removal = ?reconciliation.pending_removal,
+            "gateway model fetch retained models missing from upstream snapshot pending grace threshold"
+        );
+    }
+    if !reconciliation.removed.is_empty() {
+        warn!(
+            provider_id = %provider_id,
+            key_id = %key_id,
+            removed = ?reconciliation.removed,
+            added = ?reconciliation.added,
+            "gateway model fetch removed models from key allowed_models after consecutive upstream absences"
+        );
+    }
 }
 
 async fn persist_key_fetch_failure(
@@ -980,13 +1088,15 @@ mod tests {
             .upstream_metadata_updates
             .lock()
             .expect("metadata updates mutex");
-        assert_eq!(metadata_updates.len(), 1);
+        assert_eq!(metadata_updates.len(), 2);
         assert_eq!(metadata_updates[0].0, "key-codex");
         assert_eq!(metadata_updates[0].1, "codex_models");
         assert_eq!(
             metadata_updates[0].2["cards"]["gpt-5.6-sol"]["multi_agent_version"],
             "v2"
         );
+        assert_eq!(metadata_updates[1].0, "key-codex");
+        assert_eq!(metadata_updates[1].1, "model_fetch");
         assert!(state
             .cached_models
             .lock()
@@ -1195,6 +1305,176 @@ mod tests {
             cached_models[0]["api_formats"],
             json!(["openai:chat", "openai:responses", "claude:messages"])
         );
+    }
+
+    #[tokio::test]
+    async fn model_fetch_incomplete_list_retains_models_until_grace_threshold() {
+        let provider = sample_provider("provider-openai", "openai");
+        let endpoint = sample_endpoint("endpoint-openai-chat", "provider-openai", "openai:chat");
+        let mut key = sample_key(
+            "key-openai-chat",
+            "provider-openai",
+            "api_key",
+            &["openai:chat"],
+        );
+        key.allowed_models = Some(json!(["model-a", "model-sol"]));
+        let transport = sample_transport(
+            "openai",
+            "provider-openai",
+            "endpoint-openai-chat",
+            "key-openai-chat",
+            "openai:chat",
+            "api_key",
+            None,
+        );
+        let state = TestState::new(
+            vec![provider],
+            vec![endpoint],
+            vec![key],
+            HashMap::from([(
+                (
+                    "provider-openai".to_string(),
+                    "endpoint-openai-chat".to_string(),
+                    "key-openai-chat".to_string(),
+                ),
+                transport,
+            )]),
+            vec![
+                execution_result(json!({
+                    "object": "list",
+                    "data": [{"id": "model-a", "object": "model"}]
+                })),
+                execution_result(json!({
+                    "object": "list",
+                    "data": [{"id": "model-a", "object": "model"}]
+                })),
+            ],
+        );
+
+        // A single successful but incomplete upstream list must not silently
+        // remove a previously allowed model (issue #109).
+        let summary = perform_model_fetch_once_with_state(&state)
+            .await
+            .expect("first fetch should succeed");
+        assert_eq!(summary.succeeded, 1);
+        let updated = state.key("key-openai-chat");
+        assert_eq!(
+            updated.allowed_models,
+            Some(json!(["model-a", "model-sol"]))
+        );
+        assert_eq!(updated.last_models_fetch_error, None);
+        let sync_metadata = updated
+            .upstream_metadata
+            .as_ref()
+            .and_then(|value| value.get("model_fetch"))
+            .cloned()
+            .expect("model_fetch sync metadata should be recorded");
+        assert_eq!(sync_metadata["pending_removal"], json!({"model-sol": 1}));
+        assert_eq!(sync_metadata["removed"], json!([]));
+
+        // The model is removed only after consecutive misses reach the grace
+        // threshold, and the removal is recorded for audit.
+        let summary = perform_model_fetch_once_with_state(&state)
+            .await
+            .expect("second fetch should succeed");
+        assert_eq!(summary.succeeded, 1);
+        let updated = state.key("key-openai-chat");
+        assert_eq!(updated.allowed_models, Some(json!(["model-a"])));
+        let sync_metadata = updated
+            .upstream_metadata
+            .as_ref()
+            .and_then(|value| value.get("model_fetch"))
+            .cloned()
+            .expect("model_fetch sync metadata should be recorded");
+        assert_eq!(sync_metadata["removed"], json!(["model-sol"]));
+        assert_eq!(sync_metadata["pending_removal"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn model_fetch_partial_endpoint_success_never_removes_models() {
+        let provider = sample_provider("provider-openai", "openai");
+        let chat_endpoint =
+            sample_endpoint("endpoint-openai-chat", "provider-openai", "openai:chat");
+        let claude_endpoint = sample_endpoint(
+            "endpoint-claude-messages",
+            "provider-openai",
+            "claude:messages",
+        );
+        let mut key = sample_key(
+            "key-openai",
+            "provider-openai",
+            "api_key",
+            &["openai:chat", "claude:messages"],
+        );
+        key.allowed_models = Some(json!(["model-a", "model-sol"]));
+        let chat_transport = sample_transport(
+            "openai",
+            "provider-openai",
+            "endpoint-openai-chat",
+            "key-openai",
+            "openai:chat",
+            "api_key",
+            None,
+        );
+        let claude_transport = sample_transport(
+            "openai",
+            "provider-openai",
+            "endpoint-claude-messages",
+            "key-openai",
+            "claude:messages",
+            "api_key",
+            None,
+        );
+        let state = TestState::new(
+            vec![provider],
+            vec![chat_endpoint, claude_endpoint],
+            vec![key],
+            HashMap::from([
+                (
+                    (
+                        "provider-openai".to_string(),
+                        "endpoint-openai-chat".to_string(),
+                        "key-openai".to_string(),
+                    ),
+                    chat_transport,
+                ),
+                (
+                    (
+                        "provider-openai".to_string(),
+                        "endpoint-claude-messages".to_string(),
+                        "key-openai".to_string(),
+                    ),
+                    claude_transport,
+                ),
+            ]),
+            // Only the chat endpoint gets a response; the claude endpoint
+            // fails, making this snapshot partial.
+            vec![execution_result(json!({
+                "object": "list",
+                "data": [{"id": "model-a", "object": "model"}]
+            }))],
+        );
+
+        let summary = perform_model_fetch_once_with_state(&state)
+            .await
+            .expect("fetch should succeed");
+        assert_eq!(summary.succeeded, 1);
+        let updated = state.key("key-openai");
+        // A partial snapshot must not remove models nor advance their
+        // missing counters.
+        assert_eq!(
+            updated.allowed_models,
+            Some(json!(["model-a", "model-sol"]))
+        );
+        let sync_metadata = updated
+            .upstream_metadata
+            .as_ref()
+            .and_then(|value| value.get("model_fetch"))
+            .cloned()
+            .expect("model_fetch sync metadata should be recorded");
+        assert_eq!(sync_metadata["complete_snapshot"], json!(false));
+        assert_eq!(sync_metadata["pending_removal"], json!({}));
+        assert_eq!(sync_metadata["removed"], json!([]));
     }
 
     #[tokio::test]

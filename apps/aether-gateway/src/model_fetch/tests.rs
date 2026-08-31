@@ -284,9 +284,19 @@ async fn gateway_model_fetch_updates_key_and_syncs_provider_model_whitelist_asso
         .into_iter()
         .next()
         .expect("updated key should exist");
+    // gpt-4.1 was previously allowed but is missing from this single snapshot;
+    // it must be retained pending the removal grace threshold (issue #109).
     assert_eq!(
         updated_key.allowed_models,
-        Some(json!(["gpt-5", "locked-model"]))
+        Some(json!(["gpt-4.1", "gpt-5", "locked-model"]))
+    );
+    assert_eq!(
+        updated_key
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("model_fetch"))
+            .and_then(|metadata| metadata.get("pending_removal")),
+        Some(&json!({"gpt-4.1": 1}))
     );
     assert_eq!(updated_key.last_models_fetch_error, None);
     assert!(updated_key.last_models_fetch_at_unix_secs.is_some());
@@ -492,9 +502,19 @@ async fn gateway_model_fetch_updates_key_and_syncs_provider_model_whitelist_asso
         .into_iter()
         .next()
         .expect("updated key should exist");
+    // gpt-4.1 was previously allowed but is missing from this single snapshot;
+    // it must be retained pending the removal grace threshold (issue #109).
     assert_eq!(
         updated_key.allowed_models,
-        Some(json!(["gpt-5", "locked-model"]))
+        Some(json!(["gpt-4.1", "gpt-5", "locked-model"]))
+    );
+    assert_eq!(
+        updated_key
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("model_fetch"))
+            .and_then(|metadata| metadata.get("pending_removal")),
+        Some(&json!({"gpt-4.1": 1}))
     );
     assert_eq!(updated_key.last_models_fetch_error, None);
     assert!(updated_key.last_models_fetch_at_unix_secs.is_some());
@@ -594,9 +614,19 @@ async fn gateway_background_model_fetch_updates_key_and_syncs_provider_model_whi
     .await
     .expect("background worker should fetch models on startup");
 
+    // gpt-4.1 was previously allowed but is missing from this single snapshot;
+    // it must be retained pending the removal grace threshold (issue #109).
     assert_eq!(
         updated_key.allowed_models,
-        Some(json!(["gpt-5", "locked-model"]))
+        Some(json!(["gpt-4.1", "gpt-5", "locked-model"]))
+    );
+    assert_eq!(
+        updated_key
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("model_fetch"))
+            .and_then(|metadata| metadata.get("pending_removal")),
+        Some(&json!({"gpt-4.1": 1}))
     );
     assert_eq!(updated_key.last_models_fetch_error, None);
 

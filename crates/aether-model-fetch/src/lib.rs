@@ -8,17 +8,20 @@ pub use association_sync::{
     sync_provider_model_whitelist_associations, ModelFetchAssociationStore,
 };
 pub use config::{
-    model_fetch_interval_minutes, model_fetch_startup_delay_seconds, model_fetch_startup_enabled,
+    model_fetch_interval_minutes, model_fetch_removal_grace_count,
+    model_fetch_startup_delay_seconds, model_fetch_startup_enabled,
 };
 pub use logic::{
     aggregate_models_for_cache, apply_model_filters, build_models_fetch_url,
     build_models_fetch_url_for_client_version, deepseek_anthropic_models_fetch_uses_openai_auth,
     endpoint_supports_rust_models_fetch, extract_error_message, json_string_list,
-    merge_upstream_metadata, model_catalog_upstream_metadata, parse_models_response,
-    parse_models_response_page, parse_windsurf_model_configs_response, preset_models_for_provider,
+    merge_upstream_metadata, model_catalog_upstream_metadata, model_fetch_pending_removals,
+    model_fetch_sync_metadata, parse_models_response, parse_models_response_page,
+    parse_windsurf_model_configs_response, preset_models_for_provider,
     project_codex_models_for_legacy_cache, provider_type_uses_preset_models,
-    select_models_fetch_endpoint, selected_models_fetch_endpoints,
-    upstream_metadata_namespace_updates, ModelFetchRunSummary, ModelsFetchPage, ModelsFetchSuccess,
+    reconcile_allowed_models, select_models_fetch_endpoint, selected_models_fetch_endpoints,
+    upstream_metadata_namespace_updates, AllowedModelsReconciliation, ModelFetchRunSummary,
+    ModelsFetchPage, ModelsFetchSuccess, MODEL_FETCH_SYNC_METADATA_NAMESPACE,
 };
 pub use strategy::{
     fetch_models_from_transports, fetch_models_from_transports_for_client_version,
