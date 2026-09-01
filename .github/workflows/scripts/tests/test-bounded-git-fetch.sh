@@ -161,6 +161,25 @@ IMPORTED_OBJECTS="${AERIS_BOUNDED_LAST_IMPORT_OBJECTS}"
    IMPORTED_BYTES > 0 && IMPORTED_OBJECTS > 0)) || fail 'positive fetch had incomplete resource measurements'
 assert_stages_clean
 
+# Real pipelines pass a remote name (origin/upstream); the isolated receiver
+# has no remote configuration, so the name must resolve through the caller's
+# repository. URLs and paths keep passing through unchanged.
+RECEIVER_NAMED="$(new_receiver receiver-named-remote)"
+cd "${RECEIVER_NAMED}"
+reset_totals
+git remote add origin "${REMOTE}"
+aeris_bounded_fetch_ref origin refs/heads/exact "${TIP}" refs/aeris/test/named-remote exact
+[[ "$(git rev-parse refs/aeris/test/named-remote)" == "${TIP}" ]] ||
+  fail 'named remote fetch missed its tip'
+assert_stages_clean
+
+expect_rejected 'unconfigured bare remote name' \
+  aeris_bounded_fetch_ref unconfigured-remote refs/heads/exact "${TIP}" \
+    refs/aeris/test/unconfigured exact
+git show-ref --verify --quiet refs/aeris/test/unconfigured &&
+  fail 'unconfigured-remote rejection imported a destination ref'
+assert_stages_clean
+
 RECEIVER_EXPANDED="$(new_receiver receiver-expanded)"
 cd "${RECEIVER_EXPANDED}"
 reset_totals
