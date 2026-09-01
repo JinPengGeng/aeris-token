@@ -584,6 +584,13 @@ pub(crate) enum ExecutionRuntimeTransportError {
     UpstreamHttpStatus { status_code: u16, message: String },
     #[error("failed to execute upstream request: {0}")]
     UpstreamRequest(String),
+    /// Same display as [`Self::UpstreamRequest`], but raised specifically when
+    /// the stream first-byte timer expires while awaiting the upstream
+    /// response. The structured variant lets the stream runtime apply the same
+    /// key-health projection the outer candidate watchdog would, regardless of
+    /// which of the two equal timers is observed first.
+    #[error("failed to execute upstream request: {0}")]
+    UpstreamFirstByteTimeout(String),
     #[error("upstream response {phase} body exceeds {limit_bytes} bytes")]
     UpstreamResponseTooLarge {
         phase: UpstreamResponseBodyPhase,
@@ -2260,13 +2267,9 @@ async fn send_hyper_h2c_request(
                 Ok(Err(err)) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
                     format_hyper_error_chain(&err),
                 )),
-                Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
-                    stream_first_byte_timeout_message(timeout),
-                )),
+                Err(_) => Err(stream_first_byte_timeout_error(timeout)),
             },
-            None => Err(ExecutionRuntimeTransportError::UpstreamRequest(
-                stream_first_byte_timeout_message(timeout),
-            )),
+            None => Err(stream_first_byte_timeout_error(timeout)),
         }
     } else {
         sender.sender().ready().await.map_err(|err| {
@@ -2295,13 +2298,9 @@ async fn send_hyper_h2c_request(
                 Ok(Err(err)) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
                     format_hyper_error_chain(&err),
                 )),
-                Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
-                    stream_first_byte_timeout_message(timeout),
-                )),
+                Err(_) => Err(stream_first_byte_timeout_error(timeout)),
             },
-            None => Err(ExecutionRuntimeTransportError::UpstreamRequest(
-                stream_first_byte_timeout_message(timeout),
-            )),
+            None => Err(stream_first_byte_timeout_error(timeout)),
         }
     } else {
         response_future.await.map_err(|err| {
@@ -2727,9 +2726,7 @@ async fn send_reqwest_request(
             Ok(Err(error)) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
                 format_upstream_request_error(&error),
             )),
-            Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
-                stream_first_byte_timeout_message(timeout),
-            )),
+            Err(_) => Err(stream_first_byte_timeout_error(timeout)),
         };
     }
 
@@ -2753,9 +2750,7 @@ async fn send_wreq_request(
             Ok(Err(error)) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
                 format_wreq_upstream_request_error(&error),
             )),
-            Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
-                stream_first_byte_timeout_message(timeout),
-            )),
+            Err(_) => Err(stream_first_byte_timeout_error(timeout)),
         };
     }
 
@@ -2776,6 +2771,12 @@ pub(crate) fn stream_first_byte_timeout_message(timeout: Duration) -> String {
         "provider stream first byte timeout after {} ms",
         timeout.as_millis()
     )
+}
+
+fn stream_first_byte_timeout_error(timeout: Duration) -> ExecutionRuntimeTransportError {
+    ExecutionRuntimeTransportError::UpstreamFirstByteTimeout(stream_first_byte_timeout_message(
+        timeout,
+    ))
 }
 
 fn resolve_tunnel_timeout_metadata(plan: &ExecutionPlan) -> TunnelTimeoutMetadata {
