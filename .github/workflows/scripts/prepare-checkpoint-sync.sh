@@ -436,6 +436,11 @@ if ((merge_status != 0)); then
     exit "${merge_status}"
   fi
   if [[ "${policy_result}" != eligible ]]; then
+    # The AI bundle gate below stays closed for non-eligible verdicts, but the
+    # conflict path must still emit the evaluated verdict so the caller can
+    # route and summarize it.
+    printf 'policy_verdict=%s\n' "${policy_result}"
+    printf 'autonomous_eligible=false\n'
     printf '%s\n' "${merge_output}"
     exit 1
   fi
@@ -446,6 +451,8 @@ if ((merge_status != 0)); then
     fail_error 'a conflict candidate requires its exact conflict bundle'
   fi
   if [[ -z "${conflict_bundle_path}" ]]; then
+    printf 'policy_verdict=%s\n' "${policy_result}"
+    printf 'autonomous_eligible=false\n'
     printf '%s\n' "${merge_output}"
     exit 1
   fi
