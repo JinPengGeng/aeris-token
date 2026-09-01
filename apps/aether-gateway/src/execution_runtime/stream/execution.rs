@@ -3928,6 +3928,42 @@ async fn maybe_build_stream_transport_error_stop_response(
     .map(Some)
 }
 
+/// Project an in-process stream first-byte timeout into key health and pool
+/// feedback, mirroring the outer stream candidate watchdog's timeout branch.
+/// Both timers share `plan.timeouts.first_byte_ms`, so whichever one the
+/// runtime observes first must produce the same exactly-once health feedback.
+/// The terminal marker is set before any await so a concurrently expiring
+/// watchdog awaits this path instead of dropping it mid-projection.
+async fn apply_stream_transport_first_byte_timeout_effects(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+) {
+    crate::execution_runtime::mark_stream_candidate_watchdog_terminal_started();
+    let analysis = crate::orchestration::resolve_local_failover_analysis_for_attempt(
+        state,
+        plan,
+        report_context,
+        http::StatusCode::GATEWAY_TIMEOUT.as_u16(),
+        None,
+    )
+    .await;
+    let context = LocalExecutionEffectContext {
+        plan,
+        report_context,
+    };
+    apply_local_execution_effect(state, context, LocalExecutionEffect::PoolStreamTimeout).await;
+    apply_local_execution_effect(
+        state,
+        context,
+        LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+            status_code: http::StatusCode::GATEWAY_TIMEOUT.as_u16(),
+            classification: analysis.classification,
+        }),
+    )
+    .await;
+}
+
 async fn execute_execution_runtime_stream_inner(
     state: &AppState,
     mut plan: ExecutionPlan,
@@ -4397,6 +4433,17 @@ async fn execute_execution_runtime_stream_after_pending(
                 return Err(err);
             }
             Err(InProcessStreamExecutionError::Transport(err)) => {
+                if matches!(
+                    err,
+                    ExecutionRuntimeTransportError::UpstreamFirstByteTimeout(_)
+                ) {
+                    apply_stream_transport_first_byte_timeout_effects(
+                        state,
+                        &plan,
+                        report_context.as_ref(),
+                    )
+                    .await;
+                }
                 let transport_error_message = err.to_string();
                 info!(
                     event_name = "stream_execution_runtime_unavailable",
@@ -4537,6 +4584,17 @@ async fn execute_execution_runtime_stream_after_pending(
                     return Err(err);
                 }
                 Err(InProcessStreamExecutionError::Transport(err)) => {
+                    if matches!(
+                        err,
+                        ExecutionRuntimeTransportError::UpstreamFirstByteTimeout(_)
+                    ) {
+                        apply_stream_transport_first_byte_timeout_effects(
+                            state,
+                            &plan,
+                            report_context.as_ref(),
+                        )
+                        .await;
+                    }
                     let transport_error_message = err.to_string();
                     info!(
                         event_name = "stream_execution_runtime_unavailable",

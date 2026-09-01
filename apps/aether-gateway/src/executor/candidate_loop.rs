@@ -2465,12 +2465,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn stream_candidate_watchdog_timeout_applies_health_feedback_exactly_once() {
+    async fn run_watchdog_timeout_health_feedback_scenario(stall_runtime: bool) {
         // The outer candidate watchdog and the inner stream first-byte timer
-        // share plan.timeouts.first_byte_ms. With equal values the outer timer
-        // starts first and wins; the dropped inner execution must not emit a
-        // second health feedback.
+        // share plan.timeouts.first_byte_ms. Whichever timer the runtime
+        // observes first must produce exactly one health feedback: the outer
+        // watchdog applies it when it wins, and the in-process transport
+        // first-byte timeout projects the same effect when it wins.
         let provider = aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider::new(
             "prov-1".to_string(),
             "openai".to_string(),
@@ -2543,8 +2543,17 @@ mod tests {
             );
 
         // Upstream accepts the connection but never responds, so both the
-        // outer watchdog and the inner first-byte timer expire.
-        let app = axum::Router::new().fallback(axum::routing::any(|| async {
+        // outer watchdog and the inner first-byte timer expire. With
+        // stall_runtime the handler busy-spins the single-threaded test
+        // runtime past both 80ms timers, so the inner transport timer is
+        // always observed first; otherwise the outer watchdog usually wins.
+        let app = axum::Router::new().fallback(axum::routing::any(move || async move {
+            if stall_runtime {
+                let spin_started_at = std::time::Instant::now();
+                while spin_started_at.elapsed() < Duration::from_millis(200) {
+                    std::hint::spin_loop();
+                }
+            }
             std::future::pending::<http::StatusCode>().await
         }));
         let listener = crate::test_support::bind_loopback_listener()
@@ -2625,6 +2634,16 @@ mod tests {
             "equal inner/outer first-byte timeouts must produce exactly one health feedback; candidates: {candidates:?}"
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn stream_candidate_watchdog_timeout_applies_health_feedback_exactly_once() {
+        run_watchdog_timeout_health_feedback_scenario(false).await;
+    }
+
+    #[tokio::test]
+    async fn stream_candidate_inner_first_byte_timeout_applies_health_feedback_exactly_once() {
+        run_watchdog_timeout_health_feedback_scenario(true).await;
     }
 
     #[tokio::test]
