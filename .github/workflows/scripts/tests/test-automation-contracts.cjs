@@ -761,6 +761,17 @@ assert(
     syncScript.includes('aeris_bounded_run_deadline 2097152 gh api'),
   'Go-based gh calls must use the deadline runner, which keeps the timeout and file bound without a virtual-memory ceiling',
 );
+const fetchRefMatch = boundedFetchScript.match(
+  /aeris_bounded_fetch_ref\(\) \{[\s\S]*?\n\}/,
+);
+assert(
+  fetchRefMatch &&
+    fetchRefMatch[0].includes('AERIS_FETCH_RECEIVED_EXPANDED_BYTES_TOTAL=0') &&
+    fetchRefMatch[0].includes('AERIS_FETCH_IMPORT_OBJECTS_TOTAL=0') &&
+    fetchRefMatch[0].indexOf('AERIS_FETCH_RECEIVED_EXPANDED_BYTES_TOTAL=0') <
+      fetchRefMatch[0].indexOf('aeris_bounded_read_remote_ref'),
+  'received and import budgets must reset per exact-ref fetch so consecutive full-history fetches keep a single-stage guard',
+);
 assert(
   boundedFetchScript.includes('--no-write-fetch-head') &&
     boundedFetchScript.includes(

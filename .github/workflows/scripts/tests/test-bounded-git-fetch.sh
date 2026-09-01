@@ -180,6 +180,45 @@ git show-ref --verify --quiet refs/aeris/test/unconfigured &&
   fail 'unconfigured-remote rejection imported a destination ref'
 assert_stages_clean
 
+# Consecutive exact-ref fetches (base and upstream, or retries) each stage a
+# complete history whose expanded size can approach the budget. The budgets
+# guard a single stage, so a second call must start with a full budget even
+# though the totals were consumed by the first.
+BIG_SOURCE="${RUN_ROOT}/big-source"
+BIG_REMOTE="${RUN_ROOT}/big-remote.git"
+git init -q "${BIG_SOURCE}"
+cd "${BIG_SOURCE}"
+git config user.name 'Bounded Fetch Fixture'
+git config user.email 'bounded-fetch@example.com'
+git config core.autocrlf false
+for big_index in 1 2 3; do
+  head -c 8388608 /dev/urandom >"big-${big_index}.bin"
+  git add .
+  git commit -qm "big blob ${big_index}"
+done
+BIG_TIP="$(git rev-parse HEAD)"
+git init -q --bare "${BIG_REMOTE}"
+git push -q "${BIG_REMOTE}" "${BIG_TIP}:refs/heads/big"
+BIG_EXPANDED="$(git -C "${BIG_REMOTE}" cat-file --batch-all-objects --batch-check='%(objectsize)' |
+  awk '{ total += $1 } END { print total }')"
+[[ "${BIG_EXPANDED}" =~ ^[0-9]+$ && "${BIG_EXPANDED}" -gt 0 ]] ||
+  fail 'big-blob fixture did not measure its expanded objects'
+
+reset_totals
+AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES=$((BIG_EXPANDED + BIG_EXPANDED / 10))
+RECEIVER_SEQ_ONE="$(new_receiver receiver-seq-one)"
+cd "${RECEIVER_SEQ_ONE}"
+aeris_bounded_fetch_ref "${BIG_REMOTE}" refs/heads/big "${BIG_TIP}" refs/aeris/test/big big-one
+[[ "$(git rev-parse refs/aeris/test/big)" == "${BIG_TIP}" ]] ||
+  fail 'first sequential big fetch missed its tip'
+RECEIVER_SEQ_TWO="$(new_receiver receiver-seq-two)"
+cd "${RECEIVER_SEQ_TWO}"
+aeris_bounded_fetch_ref "${BIG_REMOTE}" refs/heads/big "${BIG_TIP}" refs/aeris/test/big big-two
+[[ "$(git rev-parse refs/aeris/test/big)" == "${BIG_TIP}" ]] ||
+  fail 'second sequential big fetch did not get a fresh stage budget'
+assert_stages_clean
+AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES=1073741824
+
 RECEIVER_EXPANDED="$(new_receiver receiver-expanded)"
 cd "${RECEIVER_EXPANDED}"
 reset_totals

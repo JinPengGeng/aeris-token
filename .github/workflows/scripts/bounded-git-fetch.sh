@@ -670,6 +670,15 @@ aeris_bounded_import_stage() {
 aeris_bounded_fetch_ref() {
   local remote="$1" ref="$2" expected="$3" destination="$4" label="$5"
   local tmp_root stage object_list fetched remote_sha remote_url
+  # Received and import budgets guard one stage at a time. A run fetches
+  # several exact refs (base and upstream, plus retries) whose histories
+  # mostly overlap, so accumulating across calls would double-count shared
+  # objects and exhaust a budget without any single oversized stage.
+  AERIS_FETCH_RECEIVED_BYTES_TOTAL=0
+  AERIS_FETCH_RECEIVED_EXPANDED_BYTES_TOTAL=0
+  AERIS_FETCH_RECEIVED_OBJECTS_TOTAL=0
+  AERIS_FETCH_IMPORT_BYTES_TOTAL=0
+  AERIS_FETCH_IMPORT_OBJECTS_TOTAL=0
   if [[ "${ref}" != refs/heads/* || ! "${expected}" =~ ^[0-9a-f]{40}$ ]]; then
     aeris_bounded_fetch_error "${label} fetch coordinates are invalid"
     return
