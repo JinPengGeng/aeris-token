@@ -1,12 +1,14 @@
 use crate::constants::{
-    CONTROL_EXECUTE_FALLBACK_HEADER, TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER,
+    CONTROL_EXECUTE_FALLBACK_HEADER, GATEWAY_HEADER, TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER,
     TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER, TRUSTED_ADMIN_USER_ROLE_HEADER,
+    TRUSTED_AUTH_ACCESS_ALLOWED_HEADER, TRUSTED_AUTH_API_KEY_ID_HEADER, TRUSTED_AUTH_BALANCE_HEADER,
+    TRUSTED_AUTH_USER_ID_HEADER,
 };
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
 use crate::headers::header_value_str;
 use crate::tunnel::TUNNEL_ROUTE_FAMILY;
-use axum::http::{self, HeaderName};
+use axum::http::{self, HeaderMap, HeaderName};
 use chrono::{SecondsFormat, Utc};
 use url::form_urlencoded;
 
@@ -81,6 +83,33 @@ pub(crate) fn should_strip_forwarded_trusted_admin_header(
             | TRUSTED_ADMIN_SESSION_ID_HEADER
             | TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER
     )
+}
+
+/// Strip platform-asserted identity headers from inbound requests that do not
+/// arrive from an operator-declared trusted ingress source. Tunnel affinity
+/// forwarding legitimately attaches these headers from a peer gateway; every
+/// other client must never be able to inject them, mirroring the strip list
+/// the WebSocket ingress applies unconditionally.
+pub(crate) fn strip_untrusted_ingress_headers(
+    headers: &mut HeaderMap,
+    remote_addr: &std::net::SocketAddr,
+) {
+    if crate::headers::trusted_ingress_source_ip(remote_addr.ip()) {
+        return;
+    }
+    for name in [
+        GATEWAY_HEADER,
+        TRUSTED_AUTH_USER_ID_HEADER,
+        TRUSTED_AUTH_API_KEY_ID_HEADER,
+        TRUSTED_AUTH_BALANCE_HEADER,
+        TRUSTED_AUTH_ACCESS_ALLOWED_HEADER,
+        TRUSTED_ADMIN_USER_ID_HEADER,
+        TRUSTED_ADMIN_USER_ROLE_HEADER,
+        TRUSTED_ADMIN_SESSION_ID_HEADER,
+        TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER,
+    ] {
+        headers.remove(name);
+    }
 }
 
 pub(crate) fn sanitize_upstream_path_and_query(
@@ -524,4 +553,80 @@ pub(crate) fn local_proxy_route_requires_buffered_body(
     admin_proxy_local_requires_buffered_body(request_context)
         || internal_proxy_local_requires_buffered_body(request_context)
         || public_support_local_requires_buffered_body(request_context)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        strip_untrusted_ingress_headers, GATEWAY_HEADER, TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER,
+        TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
+        TRUSTED_ADMIN_USER_ROLE_HEADER, TRUSTED_AUTH_ACCESS_ALLOWED_HEADER,
+        TRUSTED_AUTH_API_KEY_ID_HEADER, TRUSTED_AUTH_BALANCE_HEADER, TRUSTED_AUTH_USER_ID_HEADER,
+    };
+    use axum::http::{HeaderMap, HeaderValue};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn forged_identity_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for name in [
+            GATEWAY_HEADER,
+            TRUSTED_AUTH_USER_ID_HEADER,
+            TRUSTED_AUTH_API_KEY_ID_HEADER,
+            TRUSTED_AUTH_BALANCE_HEADER,
+            TRUSTED_AUTH_ACCESS_ALLOWED_HEADER,
+            TRUSTED_ADMIN_USER_ID_HEADER,
+            TRUSTED_ADMIN_USER_ROLE_HEADER,
+            TRUSTED_ADMIN_SESSION_ID_HEADER,
+            TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER,
+        ] {
+            headers.insert(name, HeaderValue::from_static("forged"));
+        }
+        headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer sk-client"),
+        );
+        headers
+    }
+
+    #[test]
+    fn strips_identity_headers_from_untrusted_ingress_source() {
+        let mut headers = forged_identity_headers();
+        let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 40_000);
+
+        strip_untrusted_ingress_headers(&mut headers, &remote_addr);
+
+        for name in [
+            GATEWAY_HEADER,
+            TRUSTED_AUTH_USER_ID_HEADER,
+            TRUSTED_AUTH_API_KEY_ID_HEADER,
+            TRUSTED_AUTH_BALANCE_HEADER,
+            TRUSTED_AUTH_ACCESS_ALLOWED_HEADER,
+            TRUSTED_ADMIN_USER_ID_HEADER,
+            TRUSTED_ADMIN_USER_ROLE_HEADER,
+            TRUSTED_ADMIN_SESSION_ID_HEADER,
+            TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER,
+        ] {
+            assert!(!headers.contains_key(name), "should strip {name}");
+        }
+        assert!(headers.contains_key(http::header::AUTHORIZATION));
+    }
+
+    #[test]
+    fn keeps_identity_headers_from_trusted_ingress_source() {
+        let mut headers = forged_identity_headers();
+        let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40_000);
+
+        strip_untrusted_ingress_headers(&mut headers, &remote_addr);
+
+        for name in [
+            GATEWAY_HEADER,
+            TRUSTED_AUTH_USER_ID_HEADER,
+            TRUSTED_AUTH_API_KEY_ID_HEADER,
+            TRUSTED_AUTH_ACCESS_ALLOWED_HEADER,
+            TRUSTED_ADMIN_USER_ID_HEADER,
+        ] {
+            assert!(headers.contains_key(name), "should keep {name}");
+        }
+    }
 }

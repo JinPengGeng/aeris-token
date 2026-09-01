@@ -73,11 +73,6 @@ impl IntoResponse for GatewayError {
                 let mut response = (StatusCode::BAD_GATEWAY, body).into_response();
                 let _ =
                     insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, &trace_id);
-                let _ = insert_header_if_missing(
-                    response.headers_mut(),
-                    GATEWAY_HEADER,
-                    "rust-phase3b",
-                );
                 response
             }
             Self::ControlUnavailable { trace_id, message } => {
@@ -91,11 +86,6 @@ impl IntoResponse for GatewayError {
                 let mut response = (StatusCode::BAD_GATEWAY, body).into_response();
                 let _ =
                     insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, &trace_id);
-                let _ = insert_header_if_missing(
-                    response.headers_mut(),
-                    GATEWAY_HEADER,
-                    "rust-phase3b",
-                );
                 response
             }
             Self::LocalExecutionPlanningTimeout {
@@ -118,11 +108,6 @@ impl IntoResponse for GatewayError {
                 let mut response = (StatusCode::GATEWAY_TIMEOUT, body).into_response();
                 let _ =
                     insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, &trace_id);
-                let _ = insert_header_if_missing(
-                    response.headers_mut(),
-                    GATEWAY_HEADER,
-                    "rust-phase3b",
-                );
                 response
             }
             Self::AdmissionTimeout {
@@ -145,11 +130,6 @@ impl IntoResponse for GatewayError {
                 let mut response = (StatusCode::TOO_MANY_REQUESTS, body).into_response();
                 let _ =
                     insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, &trace_id);
-                let _ = insert_header_if_missing(
-                    response.headers_mut(),
-                    GATEWAY_HEADER,
-                    "rust-phase3b",
-                );
                 let _ = insert_header_if_missing(response.headers_mut(), "Retry-After", "1");
                 response
             }
