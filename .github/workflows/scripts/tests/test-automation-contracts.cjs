@@ -956,8 +956,8 @@ assert(
   'workflow validation must exercise bounded Git transport failure fixtures',
 );
 assert(
-  validationStep?.run.includes('test-verify-sync-candidate.sh'),
-  'workflow validation must exercise deterministic candidate verification fixtures',
+  !validationStep?.run.includes('test-verify-sync-candidate.sh'),
+  'candidate verification fixtures run only in required PR CI, not in the sync job preflight',
 );
 assert(
   frontendWorkflow.jobs.automation.steps.some(

@@ -127,8 +127,8 @@ jobs:
             bash .github/workflows/scripts/tests/test-checkpoint-merge.sh
           AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
             bash .github/workflows/scripts/tests/test-prepare-checkpoint-sync.sh
-          AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
-            bash .github/workflows/scripts/tests/test-verify-sync-candidate.sh
+          # 候选验证夹具已由必需 PR CI（frontend-ci.yml）覆盖，不在此重复运行
+          #（其有界 fetch 夹具在托管 runner 上诱发内存压力）。
 
       - name: Build and publish automation branch
         id: sync
