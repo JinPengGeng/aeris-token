@@ -368,6 +368,49 @@ aeris_bounded_run() {
   timeout -k 5s "${AERIS_FETCH_TIMEOUT_SECONDS}s" "$@"
 }
 
+# Go-based CLIs such as gh reserve far more than AERIS_FETCH_MAX_PROCESS_MEMORY_BYTES
+# of virtual address space at startup, so the ulimit -v ceiling that C tools
+# (git, jq, curl) tolerate kills them before main with "failed to reserve page
+# summary memory". This runner enforces the same hard deadline and file-size
+# bound as aeris_bounded_run but leaves virtual memory uncapped; aggregate
+# response-byte checks in the callers still bound the data plane.
+aeris_bounded_run_deadline() {
+  local max_file_bytes="$1"
+  shift
+  local file_blocks kernel require_limits=false
+  file_blocks=$(((max_file_bytes + 1023) / 1024))
+  kernel="$(uname -s 2>/dev/null || true)"
+  if [[ "${kernel}" == Linux || "${GITHUB_ACTIONS:-false}" == true ]]; then
+    require_limits=true
+  fi
+  if ! command -v timeout >/dev/null 2>&1; then
+    aeris_bounded_fetch_error 'the runner cannot enforce the hard process deadline'
+    return 125
+  fi
+  if [[ "${AERIS_BOUNDED_FETCH_TEST_MODE:-false}" == true &&
+        "${AERIS_BOUNDED_FETCH_TEST_FIXTURE:-false}" == true &&
+        "${AERIS_BOUNDED_TEST_DISABLE_LIMITS:-false}" == true ]]; then
+    if [[ "${require_limits}" == true ]]; then
+      aeris_bounded_fetch_error 'the runner cannot enforce the process file-size limit'
+      return 125
+    fi
+  elif (
+    ulimit -f "${file_blocks}" 2>/dev/null
+  ); then
+    (
+      ulimit -f "${file_blocks}"
+      exec timeout -k 5s "${AERIS_FETCH_TIMEOUT_SECONDS}s" "$@"
+    )
+    return
+  elif [[ "${require_limits}" == true ]]; then
+    aeris_bounded_fetch_error 'the runner cannot enforce the process file-size limit'
+    return 125
+  fi
+  # Git for Windows does not implement these POSIX resource limits. Production
+  # is Linux-only; local Windows fixtures retain deadline and aggregate checks.
+  timeout -k 5s "${AERIS_FETCH_TIMEOUT_SECONDS}s" "$@"
+}
+
 aeris_bounded_fetch_network() {
   aeris_bounded_network_git "$@"
 }
