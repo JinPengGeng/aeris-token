@@ -264,7 +264,8 @@ async fn gateway_rejects_unknown_path_locally_and_generates_trace_id() {
             .headers()
             .get(GATEWAY_HEADER)
             .and_then(|value| value.to_str().ok()),
-        Some("rust-phase3b")
+        None,
+        "trust marker must not be echoed on public responses"
     );
     assert_eq!(
         response
