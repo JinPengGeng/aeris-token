@@ -681,7 +681,7 @@ assert(
     syncScript.includes('pr_bot_comments() {') &&
     syncScript.includes('pr_comment_once() {') &&
     syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"') &&
-    syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" aeris_bounded_run') &&
+    syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" aeris_bounded_run_deadline') &&
     syncScript.includes('aeris_bounded_gh api \\\n      --method PATCH') &&
     syncScript.includes('aeris_bounded_gh api --method POST \\\n      "repos/${GITHUB_REPOSITORY}/issues/${number}/comments"'),
   'sync issue inventory uses the workflow token while pending-tip mutations use the bounded Writer token',
@@ -748,6 +748,18 @@ assert(
       'aeris_bounded_run "${MAX_PR_BYTES}" curl -q',
     ),
   'GitHub pagination and public metadata transport must remain page, time, memory, and file bounded',
+);
+const deadlineRunnerMatch = boundedFetchScript.match(
+  /aeris_bounded_run_deadline\(\) \{[\s\S]*?\n\}/,
+);
+assert(
+  deadlineRunnerMatch &&
+    !deadlineRunnerMatch[0].includes('ulimit -v') &&
+    deadlineRunnerMatch[0].includes('ulimit -f "${file_blocks}"') &&
+    deadlineRunnerMatch[0].includes('timeout -k 5s') &&
+    syncScript.includes('aeris_bounded_run_deadline "${GITHUB_API_PAGE_BYTES}" gh "$@"') &&
+    syncScript.includes('aeris_bounded_run_deadline 2097152 gh api'),
+  'Go-based gh calls must use the deadline runner, which keeps the timeout and file bound without a virtual-memory ceiling',
 );
 assert(
   boundedFetchScript.includes('--no-write-fetch-head') &&

@@ -387,6 +387,66 @@ git show-ref --verify --quiet refs/aeris/test/exact &&
   fail 'unenforced runner rejection published a destination ref'
 assert_stages_clean
 
+# Go-based CLIs (gh) must keep the hard deadline and file-size bound without
+# the virtual-memory ceiling their runtime cannot reserve pages under. The
+# stub records the limits it observes so both runners are compared directly.
+FAKE_GH_BIN="${RUN_ROOT}/fake-gh-bin"
+GH_LIMITS_LOG="${RUN_ROOT}/gh-limits.log"
+mkdir -p "${FAKE_GH_BIN}"
+cat >"${FAKE_GH_BIN}/gh" <<EOF
+#!/usr/bin/env bash
+printf 'v=%s f=%s\n' "\$(ulimit -v)" "\$(ulimit -f)" >>"${GH_LIMITS_LOG}"
+printf '{"ok":true}\n'
+EOF
+chmod +x "${FAKE_GH_BIN}/gh"
+
+: >"${GH_LIMITS_LOG}"
+DEADLINE_GH_OUTPUT="$(PATH="${FAKE_GH_BIN}:${PATH}" aeris_bounded_run_deadline 4096 gh api repos/example)"
+[[ "${DEADLINE_GH_OUTPUT}" == '{"ok":true}' ]] ||
+  fail 'deadline runner did not execute the Go CLI fixture'
+DEADLINE_GH_LIMITS="$(tail -n1 "${GH_LIMITS_LOG}")"
+
+: >"${GH_LIMITS_LOG}"
+CAPPED_GH_OUTPUT="$(PATH="${FAKE_GH_BIN}:${PATH}" aeris_bounded_run 4096 gh api repos/example)"
+[[ "${CAPPED_GH_OUTPUT}" == '{"ok":true}' ]] ||
+  fail 'bounded runner did not execute the fixture'
+CAPPED_GH_LIMITS="$(tail -n1 "${GH_LIMITS_LOG}")"
+
+EXPECTED_FILE_BLOCKS=4
+EXPECTED_MEMORY_KIB=$(((AERIS_FETCH_MAX_PROCESS_MEMORY_BYTES + 1023) / 1024))
+if (ulimit -v 1024 && ulimit -f 4) 2>/dev/null; then
+  [[ "${DEADLINE_GH_LIMITS}" == "v=unlimited f=${EXPECTED_FILE_BLOCKS}" ]] ||
+    fail "deadline runner applied a virtual-memory ceiling to a Go CLI: ${DEADLINE_GH_LIMITS}"
+  [[ "${CAPPED_GH_LIMITS}" == "v=${EXPECTED_MEMORY_KIB} f=${EXPECTED_FILE_BLOCKS}" ]] ||
+    fail "bounded runner lost its memory or file-size ceiling: ${CAPPED_GH_LIMITS}"
+fi
+
+# Shadow the ulimit builtin to prove on every platform which ceilings each
+# runner applies: the deadline runner must never touch -v but must set -f,
+# while the bounded runner applies both.
+ULIMIT_CALLS="${RUN_ROOT}/ulimit-calls.log"
+ulimit() {
+  printf '%s\n' "$*" >>"${ULIMIT_CALLS}"
+  builtin ulimit "$@"
+}
+: >"${ULIMIT_CALLS}"
+aeris_bounded_run_deadline 4096 true
+! grep -q -- '^-v ' "${ULIMIT_CALLS}" ||
+  fail 'deadline runner attempted a virtual-memory ceiling'
+grep -q -- "^-f ${EXPECTED_FILE_BLOCKS}\$" "${ULIMIT_CALLS}" ||
+  fail 'deadline runner skipped the file-size bound'
+: >"${ULIMIT_CALLS}"
+aeris_bounded_run 4096 true
+grep -q -- "^-v ${EXPECTED_MEMORY_KIB}\$" "${ULIMIT_CALLS}" ||
+  fail 'bounded runner skipped the virtual-memory ceiling'
+grep -q -- "^-f ${EXPECTED_FILE_BLOCKS}\$" "${ULIMIT_CALLS}" ||
+  fail 'bounded runner skipped the file-size bound'
+unset -f ulimit
+
+AERIS_FETCH_TIMEOUT_SECONDS=1
+expect_rejected 'deadline runner stalled process' aeris_bounded_run_deadline 4096 sleep 5
+AERIS_FETCH_TIMEOUT_SECONDS=90
+
 CORRUPT="${RUN_ROOT}/corrupt.git"
 git clone -q --bare --no-hardlinks "${REMOTE}" "${CORRUPT}"
 PACK="$(find "${CORRUPT}/objects/pack" -type f -name '*.pack' -print -quit)"
