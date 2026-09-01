@@ -132,6 +132,9 @@ struct App {
     config: Config,
     metrics: Arc<Metrics>,
     bind_label: Arc<str>,
+    /// Test-only gate: when set, a truncated stream holds its terminal body error
+    /// until the client confirms it received the response headers.
+    truncate_error_release: Option<Arc<tokio::sync::Notify>>,
 }
 
 struct RequestCompletionGuard {
@@ -188,7 +191,7 @@ async fn serve_listeners(
             .into_iter()
             .next()
             .ok_or_else(|| std::io::Error::other("mock upstream listener set is empty"))?;
-        let app = build_router(config.clone(), Arc::clone(&metrics), bind);
+        let app = build_router(config.clone(), Arc::clone(&metrics), bind, None);
         eprintln!("mock OpenAI upstream listening on http://{bind}");
         axum::serve(listener, app).await?;
         return Ok(());
@@ -196,7 +199,7 @@ async fn serve_listeners(
 
     let mut servers = tokio::task::JoinSet::new();
     for (bind, listener) in listeners {
-        let app = build_router(config.clone(), Arc::clone(&metrics), bind);
+        let app = build_router(config.clone(), Arc::clone(&metrics), bind, None);
         eprintln!("mock OpenAI upstream listening on http://{bind}");
         servers.spawn(async move { axum::serve(listener, app).await });
     }
@@ -209,7 +212,12 @@ async fn serve_listeners(
     Ok(())
 }
 
-fn build_router(config: Config, shared_metrics: Arc<Metrics>, bind: SocketAddr) -> Router {
+fn build_router(
+    config: Config,
+    shared_metrics: Arc<Metrics>,
+    bind: SocketAddr,
+    truncate_error_release: Option<Arc<tokio::sync::Notify>>,
+) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
@@ -221,6 +229,7 @@ fn build_router(config: Config, shared_metrics: Arc<Metrics>, bind: SocketAddr) 
             config,
             metrics: shared_metrics,
             bind_label: Arc::from(bind.to_string()),
+            truncate_error_release,
         })
 }
 
@@ -611,6 +620,7 @@ fn build_chat_sse_response(
 ) -> Response {
     let response_created_at = Instant::now();
     let config = app.config.clone();
+    let truncate_error_release = app.truncate_error_release.clone();
     let mut completion = Some(completion);
     let stream = async_stream::stream! {
         if !profile.first_byte_delay.is_zero() {
@@ -648,6 +658,11 @@ fn build_chat_sse_response(
             {
                 // Force Hyper to flush the successful frame before observing the body error.
                 tokio::task::yield_now().await;
+                // Over H2 the reset can still overtake the flushed headers at the client;
+                // hold the terminal error until the client confirms header receipt.
+                if let Some(release) = &truncate_error_release {
+                    release.notified().await;
+                }
                 record_fault(&app, Fault::TruncateStream);
                 yield Err::<Bytes, std::io::Error>(truncated_stream_error());
                 return;
@@ -671,6 +686,7 @@ fn build_responses_sse_response(
 ) -> Response {
     let response_created_at = Instant::now();
     let config = app.config.clone();
+    let truncate_error_release = app.truncate_error_release.clone();
     let mut completion = Some(completion);
     let stream = async_stream::stream! {
         if !profile.first_byte_delay.is_zero() {
@@ -703,6 +719,11 @@ fn build_responses_sse_response(
             {
                 // Force Hyper to flush the successful frame before observing the body error.
                 tokio::task::yield_now().await;
+                // Over H2 the reset can still overtake the flushed headers at the client;
+                // hold the terminal error until the client confirms header receipt.
+                if let Some(release) = &truncate_error_release {
+                    release.notified().await;
+                }
                 record_fault(&app, Fault::TruncateStream);
                 yield Err::<Bytes, std::io::Error>(truncated_stream_error());
                 return;
@@ -1395,6 +1416,7 @@ mod tests {
             config,
             metrics: Arc::clone(&metrics),
             bind_label: Arc::from(bind.to_string()),
+            truncate_error_release: None,
         };
 
         record_fault(&app, Fault::Status429);
@@ -1423,7 +1445,12 @@ mod tests {
         );
     }
 
-    async fn start_truncating_server() -> (String, Arc<Metrics>, tokio::task::JoinHandle<()>) {
+    async fn start_truncating_server() -> (
+        String,
+        Arc<Metrics>,
+        Arc<tokio::sync::Notify>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test listener should bind");
@@ -1437,13 +1464,24 @@ mod tests {
         config.fault_truncate_stream_bps = BASIS_POINTS;
         config.seed = 0x1234_5678;
         let metrics = Arc::new(Metrics::for_binds(&config.binds));
-        let router = build_router(config, Arc::clone(&metrics), bind);
+        let truncate_error_release = Arc::new(tokio::sync::Notify::new());
+        let router = build_router(
+            config,
+            Arc::clone(&metrics),
+            bind,
+            Some(Arc::clone(&truncate_error_release)),
+        );
         let server = tokio::spawn(async move {
             axum::serve(listener, router)
                 .await
                 .expect("test mock server should run");
         });
-        (format!("http://{bind}"), metrics, server)
+        (
+            format!("http://{bind}"),
+            metrics,
+            truncate_error_release,
+            server,
+        )
     }
 
     async fn assert_truncated_response(
@@ -1451,6 +1489,7 @@ mod tests {
         url: &str,
         expected_version: axum::http::Version,
         completion_marker: &str,
+        truncate_error_release: &tokio::sync::Notify,
     ) {
         let response = client
             .post(url)
@@ -1458,6 +1497,9 @@ mod tests {
             .send()
             .await
             .expect("headers should arrive before the body error");
+        // Headers are in hand; release the mock to fail the body (over H2 this keeps
+        // the terminal reset strictly behind header delivery at the client).
+        truncate_error_release.notify_one();
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(response.version(), expected_version);
         assert!(response.headers().contains_key(REQUEST_SEQUENCE_HEADER));
@@ -1507,7 +1549,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn truncated_sse_is_a_partial_body_error_over_http1() {
-        let (base_url, metrics, server) = start_truncating_server().await;
+        let (base_url, metrics, truncate_error_release, server) = start_truncating_server().await;
         let client = reqwest::Client::builder()
             .http1_only()
             .build()
@@ -1518,6 +1560,7 @@ mod tests {
             &format!("{base_url}/v1/chat/completions"),
             axum::http::Version::HTTP_11,
             "\"finish_reason\":\"stop\"",
+            &truncate_error_release,
         )
         .await;
         assert_truncated_response(
@@ -1525,6 +1568,7 @@ mod tests {
             &format!("{base_url}/v1/responses"),
             axum::http::Version::HTTP_11,
             "response.completed",
+            &truncate_error_release,
         )
         .await;
 
@@ -1544,7 +1588,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn truncated_sse_is_a_partial_body_error_over_h2c() {
-        let (base_url, metrics, server) = start_truncating_server().await;
+        let (base_url, metrics, truncate_error_release, server) = start_truncating_server().await;
         let client = reqwest::Client::builder()
             .http2_prior_knowledge()
             .build()
@@ -1555,6 +1599,7 @@ mod tests {
             &format!("{base_url}/v1/chat/completions"),
             axum::http::Version::HTTP_2,
             "\"finish_reason\":\"stop\"",
+            &truncate_error_release,
         )
         .await;
         assert_truncated_response(
@@ -1562,6 +1607,7 @@ mod tests {
             &format!("{base_url}/v1/responses"),
             axum::http::Version::HTTP_2,
             "response.completed",
+            &truncate_error_release,
         )
         .await;
 
