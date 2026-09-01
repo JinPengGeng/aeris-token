@@ -1,8 +1,8 @@
 use crate::constants::{
     CONTROL_EXECUTE_FALLBACK_HEADER, GATEWAY_HEADER, TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER,
     TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER, TRUSTED_ADMIN_USER_ROLE_HEADER,
-    TRUSTED_AUTH_ACCESS_ALLOWED_HEADER, TRUSTED_AUTH_API_KEY_ID_HEADER, TRUSTED_AUTH_BALANCE_HEADER,
-    TRUSTED_AUTH_USER_ID_HEADER,
+    TRUSTED_AUTH_ACCESS_ALLOWED_HEADER, TRUSTED_AUTH_API_KEY_ID_HEADER,
+    TRUSTED_AUTH_BALANCE_HEADER, TRUSTED_AUTH_USER_ID_HEADER,
 };
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
@@ -554,7 +554,6 @@ pub(crate) fn local_proxy_route_requires_buffered_body(
         || internal_proxy_local_requires_buffered_body(request_context)
         || public_support_local_requires_buffered_body(request_context)
 }
-
 
 #[cfg(test)]
 mod tests {

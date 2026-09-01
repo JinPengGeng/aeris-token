@@ -921,7 +921,6 @@ async fn gateway_locally_denies_disallowed_claude_model_with_anthropic_permissio
     gateway_handle.abort();
 }
 
-
 #[tokio::test]
 async fn gateway_strips_forged_trusted_auth_headers_from_untrusted_ingress() {
     use tower::ServiceExt;
@@ -957,9 +956,10 @@ async fn gateway_strips_forged_trusted_auth_headers_from_untrusted_ingress() {
     let mut request = forged_request();
     request
         .extensions_mut()
-        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(
-            ([203, 0, 113, 7], 40_000),
-        )));
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [203, 0, 113, 7],
+            40_000,
+        ))));
     let response = gateway
         .clone()
         .oneshot(request)
@@ -985,9 +985,10 @@ async fn gateway_strips_forged_trusted_auth_headers_from_untrusted_ingress() {
     let mut request = forged_request();
     request
         .extensions_mut()
-        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(
-            ([127, 0, 0, 1], 40_000),
-        )));
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            40_000,
+        ))));
     let response = gateway
         .oneshot(request)
         .await

@@ -636,12 +636,18 @@ mod tests {
     #[test]
     fn trusted_ingress_source_defaults_to_loopback_only() {
         assert!(trusted_ingress_source_ip(IpAddr::V4(Ipv4Addr::LOCALHOST)));
-        assert!(trusted_ingress_source_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))));
-        assert!(trusted_ingress_source_ip(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
+        assert!(trusted_ingress_source_ip(IpAddr::V4(Ipv4Addr::new(
+            127, 0, 0, 2
+        ))));
+        assert!(trusted_ingress_source_ip(IpAddr::V6(
+            std::net::Ipv6Addr::LOCALHOST
+        )));
         assert!(!trusted_ingress_source_ip(IpAddr::V4(Ipv4Addr::new(
             203, 0, 113, 7
         ))));
-        assert!(!trusted_ingress_source_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8))));
+        assert!(!trusted_ingress_source_ip(IpAddr::V4(Ipv4Addr::new(
+            10, 0, 0, 8
+        ))));
     }
 
     #[test]
