@@ -920,3 +920,85 @@ async fn gateway_locally_denies_disallowed_claude_model_with_anthropic_permissio
 
     gateway_handle.abort();
 }
+
+#[tokio::test]
+async fn gateway_strips_forged_trusted_auth_headers_from_untrusted_ingress() {
+    use tower::ServiceExt;
+
+    let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some("hash-1".to_string()),
+        sample_currently_usable_auth_snapshot("key-123", "user-123"),
+    )]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway state should build")
+            .with_auth_api_key_data_reader_for_tests(repository),
+    );
+
+    let forged_request = || {
+        Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header(GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_AUTH_USER_ID_HEADER, "user-123")
+            .header(TRUSTED_AUTH_API_KEY_ID_HEADER, "key-123")
+            .header(TRUSTED_AUTH_BALANCE_HEADER, "0")
+            .header(TRUSTED_AUTH_ACCESS_ALLOWED_HEADER, "false")
+            .body(Body::from("{\"model\":\"gpt-5\",\"messages\":[]}"))
+            .expect("request should build")
+    };
+
+    // A client connecting directly from an untrusted address must never ride
+    // the trusted-header path: the HTTP ingress strips the forged identity
+    // headers before authentication, so the request proceeds as anonymous
+    // (no auth context) and never reaches the victim key's balance gate.
+    let mut request = forged_request();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [203, 0, 113, 7],
+            40_000,
+        ))));
+    let response = gateway
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("request should complete");
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "forged trusted headers must be stripped, so no auth context resolves"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(GATEWAY_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        None,
+        "trust marker must not be echoed on public responses"
+    );
+
+    // The identical request from a trusted ingress source keeps the headers
+    // and resolves the trusted auth context (here: balance denied). Tunnel
+    // affinity forwarding between gateway instances relies on this path.
+    let mut request = forged_request();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            40_000,
+        ))));
+    let response = gateway
+        .oneshot(request)
+        .await
+        .expect("request should complete");
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get(EXECUTION_PATH_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some(EXECUTION_PATH_LOCAL_AUTH_DENIED)
+    );
+}

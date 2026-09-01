@@ -313,6 +313,42 @@ assert(
   'AI conflict resolution policy must remain narrow, independent, and fail closed',
 );
 const syncSteps = syncWorkflow.jobs.sync.steps;
+const preflightJob = syncWorkflow.jobs.preflight;
+assert(
+  preflightJob,
+  'sync workflow must isolate the script preflight in a dedicated job so publication starts on a clean runner',
+);
+const preflightSteps = preflightJob.steps;
+const syncNeeds = syncWorkflow.jobs.sync.needs;
+assert(
+  Array.isArray(syncNeeds) ? syncNeeds.includes('preflight') : syncNeeds === 'preflight',
+  'sync publication job must wait for the isolated preflight job',
+);
+assert(
+  syncSteps.every((step) => step.name !== 'Validate checkpoint synchronization'),
+  'script preflight checks must run on the preflight runner, not on the publication runner',
+);
+assert(
+  preflightSteps.every((step) => !step.uses?.includes('create-github-app-token')),
+  'preflight must not mint a Writer App token that cannot cross the job boundary',
+);
+assert(
+  preflightJob.environment === undefined,
+  'preflight must not hold the writer Environment secrets',
+);
+assert(
+  JSON.stringify(preflightJob.permissions) === JSON.stringify({ contents: 'read' }),
+  'preflight GITHUB_TOKEN must be limited to reading the trusted checkout',
+);
+const preflightCheckoutStep = preflightSteps.find(
+  (step) => step.name === 'Check out fork default branch',
+);
+assert(
+  preflightCheckoutStep?.with?.token === '${{ github.token }}' &&
+    preflightCheckoutStep.with['persist-credentials'] === false &&
+    preflightCheckoutStep.with['fetch-depth'] === 1,
+  'preflight checkout must use the read-only workflow token without persisted credentials',
+);
 assert(
   syncWorkflow.jobs.sync.env.AERIS_AI_MODEL_CONFLICT_RESOLVER ===
       '${{ vars.AERIS_AI_MODEL_CONFLICT_RESOLVER || vars.AERIS_AI_MODEL_WRITER }}' &&
@@ -460,6 +496,7 @@ assert(
   'Resolver and Reviewer must obtain only the model secret from the agent Environment',
 );
 for (const [job, message] of [
+  [preflightJob, 'preflight checkout must not persist credentials'],
   [resolveConflictJob, 'Resolver checkout must not persist credentials'],
   [publishConflictJob, 'conflict Publisher checkout must not persist credentials'],
   [reviewConflictJob, 'Reviewer checkout must not persist credentials'],
@@ -597,7 +634,7 @@ assert(
 const publishStep = syncSteps.find(
   (step) => step.name === 'Build and publish automation branch',
 );
-const syncValidationStep = syncSteps.find(
+const syncValidationStep = preflightSteps.find(
   (step) => step.name === 'Validate checkpoint synchronization',
 );
 assert(
@@ -644,7 +681,7 @@ assert(
     syncScript.includes('pr_bot_comments() {') &&
     syncScript.includes('pr_comment_once() {') &&
     syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"') &&
-    syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" aeris_bounded_run') &&
+    syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" aeris_bounded_run_deadline') &&
     syncScript.includes('aeris_bounded_gh api \\\n      --method PATCH') &&
     syncScript.includes('aeris_bounded_gh api --method POST \\\n      "repos/${GITHUB_REPOSITORY}/issues/${number}/comments"'),
   'sync issue inventory uses the workflow token while pending-tip mutations use the bounded Writer token',
@@ -711,6 +748,18 @@ assert(
       'aeris_bounded_run "${MAX_PR_BYTES}" curl -q',
     ),
   'GitHub pagination and public metadata transport must remain page, time, memory, and file bounded',
+);
+const deadlineRunnerMatch = boundedFetchScript.match(
+  /aeris_bounded_run_deadline\(\) \{[\s\S]*?\n\}/,
+);
+assert(
+  deadlineRunnerMatch &&
+    !deadlineRunnerMatch[0].includes('ulimit -v') &&
+    deadlineRunnerMatch[0].includes('ulimit -f "${file_blocks}"') &&
+    deadlineRunnerMatch[0].includes('timeout -k 5s') &&
+    syncScript.includes('aeris_bounded_run_deadline "${GITHUB_API_PAGE_BYTES}" gh "$@"') &&
+    syncScript.includes('aeris_bounded_run_deadline 2097152 gh api'),
+  'Go-based gh calls must use the deadline runner, which keeps the timeout and file bound without a virtual-memory ceiling',
 );
 assert(
   boundedFetchScript.includes('--no-write-fetch-head') &&
@@ -808,6 +857,10 @@ assert(
 assert(
   autoMergeScript.includes('api --method PUT') &&
     autoMergeScript.includes('pulls/${PR_NUMBER}/merge') &&
+    autoMergeScript.includes('-f merge_method=merge') &&
+    !autoMergeScript.includes('merge_method=squash') &&
+    autoMergeScript.includes('commit_title=chore: sync ') &&
+    autoMergeScript.includes('Sync-Upstream-Checkpoint: %s->%s') &&
     autoMergeScript.includes('.merged == true') &&
     autoMergeScript.includes('test("^[0-9a-fA-F]{40}$")') &&
     autoMergeScript.includes('pulls/${PR_NUMBER}') &&
@@ -816,15 +869,20 @@ assert(
     autoMergeScript.includes('.merge_commit_sha != .base.sha') &&
     autoMergeScript.includes('commits/${merge_commit_sha}') &&
     autoMergeScript.includes('.sha == $merge_commit_sha') &&
-    autoMergeScript.includes('.parents | type == "array" and length == 1') &&
-    autoMergeScript.includes('requiresStrictStatusChecks') &&
-    autoMergeScript.includes('isAdminEnforced') &&
-    autoMergeScript.includes('bypassPullRequestAllowances') &&
+    autoMergeScript.includes('.parents | type == "array" and length == 2 and') &&
+    autoMergeScript.includes('.[0].sha == $base_sha and .[1].sha == $head_sha') &&
+    autoMergeScript.includes('Sync-Upstream-Checkpoint: " + $checkpoint + "->" + $upstream_sha') &&
+    autoMergeScript.includes('$repository_profile.mergeCommitAllowed == true') &&
     autoMergeScript.includes('rulesets(first:100,includeParents:true,targets:[BRANCH])') &&
+    autoMergeScript.includes('REQUIRED_LINEAR_HISTORY') &&
+    autoMergeScript.includes('strictRequiredStatusChecksPolicy') &&
+    autoMergeScript.includes('repos/${REPOSITORY}/rulesets/21984329') &&
+    autoMergeScript.includes('.actor_id == 4667256') &&
+    autoMergeScript.includes('.bypass_mode == "always"') &&
     autoMergeScript.includes('GH_TOKEN="${AERIS_CHECKS_GH_TOKEN:?AERIS_CHECKS_GH_TOKEN is required}" command gh') &&
     autoMergeScript.includes('set +e') &&
     autoMergeScript.includes('readback_status'),
-  'direct merge must use one REST merge and prove the exact post-merge outcome',
+  'direct merge must use one REST true-merge and prove the exact dual-parent post-merge outcome',
 );
 assert(
   autoMergeScript.includes('repos/${REPOSITORY}/pulls/${PR_NUMBER}') &&
@@ -840,6 +898,11 @@ assert(
     '.parents | type == "array" and length == 2 and .[0].sha == $base_sha and .[1].sha == $upstream_sha',
   ),
   'direct merge must require the exact dual-parent sync commit shape',
+);
+assert(
+  autoMergeScript.includes('sync_checkpoint=') &&
+    autoMergeScript.includes('endswith("->" + $upstream_sha)'),
+  'direct merge must extract the exact checkpoint trailer from the verified head commit',
 );
 assert(
   disarmCallIndex >= 0 && rebuildLoopIndex >= 0 && disarmCallIndex < rebuildLoopIndex,
@@ -932,7 +995,7 @@ const checkDispatchStep = syncSteps.find(
       !/(^|\n)\s*gh\s/.test(checkDispatchScript),
     'check discovery, dispatch, and exact-head success wait must revalidate expiry before every GitHub token use',
   );
-const validationStep = syncSteps.find(
+const validationStep = preflightSteps.find(
   (step) => step.name === 'Validate checkpoint synchronization',
 );
 assert(

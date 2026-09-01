@@ -74,7 +74,9 @@ output() {
 
 aeris_bounded_gh() {
   aeris_require_active_autonomy_window || return
-  aeris_bounded_run "${GITHUB_API_PAGE_BYTES}" gh "$@"
+  # gh is a Go binary: the deadline runner keeps the hard timeout and file
+  # bounds without the virtual-memory ceiling its runtime cannot start under.
+  aeris_bounded_run_deadline "${GITHUB_API_PAGE_BYTES}" gh "$@"
 }
 
 # Writer App credentials are restricted to branch, PR, and pending-tip comment
@@ -87,7 +89,7 @@ aeris_issues_gh() {
 
 aeris_bounded_issues_gh() {
   aeris_require_active_autonomy_window || return
-  GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" aeris_bounded_run "${GITHUB_API_PAGE_BYTES}" gh "$@"
+  GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" aeris_bounded_run_deadline "${GITHUB_API_PAGE_BYTES}" gh "$@"
 }
 
 # Read an authoritative JSON array through explicit, resource-bounded pages.
@@ -515,7 +517,7 @@ aeris_validate_authoritative_published_pr() {
     rm -f -- "${pr_file}"
     return 1
   }
-  if ! aeris_bounded_run 2097152 gh api \
+  if ! aeris_bounded_run_deadline 2097152 gh api \
     "repos/${GITHUB_REPOSITORY}/pulls/${published_pr_number}" >"${pr_file}"; then
     rm -f -- "${pr_file}"
     return 1
@@ -604,7 +606,7 @@ NODE
 aeris_read_bounded_api_json() {
   local endpoint="$1" destination="$2" label="$3" size
   aeris_require_active_autonomy_window || return 1
-  if ! aeris_bounded_run 2097152 gh api "${endpoint}" >"${destination}"; then
+  if ! aeris_bounded_run_deadline 2097152 gh api "${endpoint}" >"${destination}"; then
     echo "Unable to read authoritative ${label}." >&2
     return 1
   fi
