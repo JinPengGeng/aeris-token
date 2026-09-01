@@ -930,6 +930,13 @@ assert(
   'sync must restore HEAD to the validated base after the bounded bootstrap wipe and before checking it',
 );
 assert(
+  prepareScript.includes("printf 'policy_verdict=%s\\n' \"${policy_result}\"") &&
+    syncScript.includes('output policy_verdict "${conflict_policy_verdict}"') &&
+    syncScript.includes("sed -n 's/^policy_verdict=//p'") &&
+    syncScript.includes('output checkpoint_sha "${checkpoint_sha}"'),
+  'the plain-conflict path must emit the evaluated policy verdict and checkpoint instead of leaving run outputs empty',
+);
+assert(
   /aeris_require_active_autonomy_window[\s\S]*now_epoch \+ minimum_remaining_seconds >= expires_epoch/.test(
     autonomyScript,
   ) &&

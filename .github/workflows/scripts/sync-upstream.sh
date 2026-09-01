@@ -1099,6 +1099,12 @@ for attempt in 1 2 3; do
           exit 0
         else
           output state conflict
+          # Surface the verdict prepare evaluated and the validated checkpoint
+          # so the run summary and alert are not left empty.
+          conflict_policy_verdict="$(sed -n 's/^policy_verdict=//p' <<<"${prepare_output}" | tail -n1)"
+          [[ "${conflict_policy_verdict}" =~ ^(eligible|manual_review)$ ]] &&
+            output policy_verdict "${conflict_policy_verdict}"
+          output checkpoint_sha "${checkpoint_sha}"
         fi
         ;;
       2:history_rewrite)
