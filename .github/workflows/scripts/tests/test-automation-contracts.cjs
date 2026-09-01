@@ -845,6 +845,10 @@ assert(
 assert(
   autoMergeScript.includes('api --method PUT') &&
     autoMergeScript.includes('pulls/${PR_NUMBER}/merge') &&
+    autoMergeScript.includes('-f merge_method=merge') &&
+    !autoMergeScript.includes('merge_method=squash') &&
+    autoMergeScript.includes('commit_title=chore: sync ') &&
+    autoMergeScript.includes('Sync-Upstream-Checkpoint: %s->%s') &&
     autoMergeScript.includes('.merged == true') &&
     autoMergeScript.includes('test("^[0-9a-fA-F]{40}$")') &&
     autoMergeScript.includes('pulls/${PR_NUMBER}') &&
@@ -853,15 +857,20 @@ assert(
     autoMergeScript.includes('.merge_commit_sha != .base.sha') &&
     autoMergeScript.includes('commits/${merge_commit_sha}') &&
     autoMergeScript.includes('.sha == $merge_commit_sha') &&
-    autoMergeScript.includes('.parents | type == "array" and length == 1') &&
-    autoMergeScript.includes('requiresStrictStatusChecks') &&
-    autoMergeScript.includes('isAdminEnforced') &&
-    autoMergeScript.includes('bypassPullRequestAllowances') &&
+    autoMergeScript.includes('.parents | type == "array" and length == 2 and') &&
+    autoMergeScript.includes('.[0].sha == $base_sha and .[1].sha == $head_sha') &&
+    autoMergeScript.includes('Sync-Upstream-Checkpoint: " + $checkpoint + "->" + $upstream_sha') &&
+    autoMergeScript.includes('$repository_profile.mergeCommitAllowed == true') &&
     autoMergeScript.includes('rulesets(first:100,includeParents:true,targets:[BRANCH])') &&
+    autoMergeScript.includes('REQUIRED_LINEAR_HISTORY') &&
+    autoMergeScript.includes('strictRequiredStatusChecksPolicy') &&
+    autoMergeScript.includes('repos/${REPOSITORY}/rulesets/21984329') &&
+    autoMergeScript.includes('.actor_id == 4667256') &&
+    autoMergeScript.includes('.bypass_mode == "always"') &&
     autoMergeScript.includes('GH_TOKEN="${AERIS_CHECKS_GH_TOKEN:?AERIS_CHECKS_GH_TOKEN is required}" command gh') &&
     autoMergeScript.includes('set +e') &&
     autoMergeScript.includes('readback_status'),
-  'direct merge must use one REST merge and prove the exact post-merge outcome',
+  'direct merge must use one REST true-merge and prove the exact dual-parent post-merge outcome',
 );
 assert(
   autoMergeScript.includes('repos/${REPOSITORY}/pulls/${PR_NUMBER}') &&
@@ -877,6 +886,11 @@ assert(
     '.parents | type == "array" and length == 2 and .[0].sha == $base_sha and .[1].sha == $upstream_sha',
   ),
   'direct merge must require the exact dual-parent sync commit shape',
+);
+assert(
+  autoMergeScript.includes('sync_checkpoint=') &&
+    autoMergeScript.includes('endswith("->" + $upstream_sha)'),
+  'direct merge must extract the exact checkpoint trailer from the verified head commit',
 );
 assert(
   disarmCallIndex >= 0 && rebuildLoopIndex >= 0 && disarmCallIndex < rebuildLoopIndex,
