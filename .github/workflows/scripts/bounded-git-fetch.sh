@@ -669,7 +669,7 @@ aeris_bounded_import_stage() {
 
 aeris_bounded_fetch_ref() {
   local remote="$1" ref="$2" expected="$3" destination="$4" label="$5"
-  local tmp_root stage object_list fetched remote_sha
+  local tmp_root stage object_list fetched remote_sha remote_url
   if [[ "${ref}" != refs/heads/* || ! "${expected}" =~ ^[0-9a-f]{40}$ ]]; then
     aeris_bounded_fetch_error "${label} fetch coordinates are invalid"
     return
@@ -703,6 +703,19 @@ aeris_bounded_fetch_ref() {
     AERIS_BOUNDED_FETCHED_SHA="${expected}"
     return 0
   fi
+  # The isolated receiver has no remote configuration, so resolve a remote
+  # name through the caller's repository before staging. URLs and paths pass
+  # through unchanged (fixtures and the credentialless verifier use those).
+  remote_url="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" \
+    git config --get "remote.${remote}.url" 2>/dev/null || true)"
+  if [[ -z "${remote_url}" ]]; then
+    if [[ "${remote}" != *[/:\\]* ]]; then
+      aeris_bounded_fetch_error \
+        "${label} remote ${remote} is not configured and is not a URL or path"
+      return
+    fi
+    remote_url="${remote}"
+  fi
   tmp_root="${AERIS_BOUNDED_FETCH_TMP_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}"
   if ! mkdir -p "${tmp_root}"; then
     aeris_bounded_fetch_error 'unable to create the isolated receiver parent'
@@ -725,7 +738,7 @@ aeris_bounded_fetch_ref() {
     -c fetch.unpackLimit=0 \
     -C "${stage}" fetch --quiet --force --no-tags --no-recurse-submodules --refmap= \
     --no-auto-maintenance --no-write-commit-graph \
-    "${remote}" "+${ref}:refs/aeris/incoming"; then
+    "${remote_url}" "+${ref}:refs/aeris/incoming"; then
     rm -rf -- "${stage}"
     aeris_bounded_fetch_error "unable to fetch ${label} within the hard deadline"
     return
