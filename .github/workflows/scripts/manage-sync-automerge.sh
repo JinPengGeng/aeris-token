@@ -133,10 +133,22 @@ case "${ACTION}" in
       (.commit.message | type == "string") and
       ([.commit.message | split("\n")[] | select(. == "Sync-Upstream-Automation: true")] | length == 1) and
       ([.commit.message | split("\n")[] | select(. == ("Sync-Upstream-Source: " + $source))] | length == 1) and
+      ([.commit.message | split("\n")[] | select(length == 108 and
+        startswith("Sync-Upstream-Checkpoint: ") and
+        endswith("->" + $upstream_sha) and
+        (.[26:66] | test("^[0-9a-f]{40}$")))] | length == 1) and
       ([.commit.message | split("\n")[] | select(. == ("Sync-Upstream-Base: " + $base_sha))] | length == 1) and
       ([.commit.message | split("\n")[] | select(. == ("Sync-Upstream-Policy-Verdict: " + $verdict))] | length == 1)
     ' <<<"${head_commit}" >/dev/null ||
       fail 'head commit does not prove the trusted synchronization source, base, verdict, and upstream parent'
+    # The exact checkpoint is re-asserted on the merge commit below, so the
+    # trailer carried forward from the verified head commit stays trusted.
+    sync_checkpoint="$(jq -r '
+      [.commit.message | split("\n")[] |
+       select(startswith("Sync-Upstream-Checkpoint: "))] | .[0][26:66]
+    ' <<<"${head_commit}")"
+    [[ "${sync_checkpoint}" =~ ^[0-9a-f]{40}$ ]] ||
+      fail 'head commit does not carry an exact synchronization checkpoint'
 
     checks="$(aeris_checks_gh api "repos/${REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100")"
     jq -e --arg head_sha "${HEAD_SHA}" --arg actions_prefix "https://github.com/${REPOSITORY}/actions/runs/" '
@@ -157,48 +169,74 @@ case "${ACTION}" in
       fail 'exact-head required checks are missing, duplicated beyond the bounded snapshot, or unsuccessful'
 
     governance="$(aeris_gh api graphql \
-      -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){mergeCommitAllowed rebaseMergeAllowed squashMergeAllowed isArchived isDisabled isLocked branchProtectionRules(first:100){totalCount pageInfo{hasNextPage} nodes{pattern allowsDeletions allowsForcePushes requiresStatusChecks requiresStrictStatusChecks isAdminEnforced requiresConversationResolution requiresLinearHistory bypassPullRequestAllowances(first:100){totalCount pageInfo{hasNextPage}} bypassForcePushAllowances(first:100){totalCount pageInfo{hasNextPage}} requiredStatusChecks{context app{databaseId slug}}}} rulesets(first:100,includeParents:true,targets:[BRANCH]){totalCount pageInfo{hasNextPage} nodes{enforcement target}} pullRequest(number:$number){number state isDraft mergeable mergeStateStatus headRefName headRefOid baseRefName baseRefOid headRepository{nameWithOwner} autoMergeRequest{enabledAt} reviewDecision reviewThreads(first:100){nodes{isResolved} pageInfo{hasNextPage}}}}}' \
+      -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){mergeCommitAllowed rebaseMergeAllowed squashMergeAllowed isArchived isDisabled isLocked branchProtectionRules(first:100){totalCount pageInfo{hasNextPage}} rulesets(first:100,includeParents:true,targets:[BRANCH]){totalCount pageInfo{hasNextPage} nodes{name enforcement target conditions{refName{include exclude}} bypassActors(first:100){totalCount pageInfo{hasNextPage} nodes{bypassMode}} rules(first:100){totalCount pageInfo{hasNextPage} nodes{type parameters{... on RequiredStatusChecksParameters{strictRequiredStatusChecksPolicy doNotEnforceOnCreate requiredStatusChecks{context}} ... on PullRequestParameters{allowedMergeMethods dismissStaleReviewsOnPush requireCodeOwnerReview requireLastPushApproval requiredApprovingReviewCount requiredReviewThreadResolution}}}}}} pullRequest(number:$number){number state isDraft mergeable mergeStateStatus headRefName headRefOid baseRefName baseRefOid headRepository{nameWithOwner} autoMergeRequest{enabledAt} reviewDecision reviewThreads(first:100){nodes{isResolved} pageInfo{hasNextPage}}}}}' \
       -f owner="${REPOSITORY%%/*}" -f name="${REPOSITORY#*/}" -F number="${PR_NUMBER}")"
     jq -e --argjson number "${PR_NUMBER}" --arg head_sha "${HEAD_SHA}" \
       --arg base_sha "${BASE_SHA}" --arg repository "${REPOSITORY}" \
       --arg head_branch "${SYNC_BRANCH:-automation/sync-upstream}" \
       --arg base_branch "${BASE_BRANCH:-main}" '
-      def complete_zero_allowance:
-        type == "object" and .totalCount == 0 and .pageInfo.hasNextPage == false;
+      def complete_connection:
+        type == "object" and (.nodes | type) == "array" and
+        .totalCount == (.nodes | length) and .pageInfo.hasNextPage == false;
       .data.repository as $repository_profile |
-      .data.repository.branchProtectionRules.nodes[0] as $rule |
       .data.repository.pullRequest as $pr |
-      $repository_profile.mergeCommitAllowed == false and
+      ([$repository_profile.rulesets.nodes[] | select(.name == "main-protection")]) as $main_protections |
+      ([$repository_profile.rulesets.nodes[] | select(.name == "main-linear-history")]) as $linear_histories |
+      ([$repository_profile.rulesets.nodes[] | select(.name == "agent-head-fence-v1")]) as $agent_fences |
+      $repository_profile.mergeCommitAllowed == true and
       $repository_profile.rebaseMergeAllowed == false and
       $repository_profile.squashMergeAllowed == true and
       $repository_profile.isArchived == false and
       $repository_profile.isDisabled == false and
       $repository_profile.isLocked == false and
       ($repository_profile.branchProtectionRules | type) == "object" and
-      $repository_profile.branchProtectionRules.totalCount == 1 and
+      $repository_profile.branchProtectionRules.totalCount == 0 and
       $repository_profile.branchProtectionRules.pageInfo.hasNextPage == false and
-      ($repository_profile.branchProtectionRules.nodes | type) == "array" and
-      ($repository_profile.branchProtectionRules.nodes | length) == 1 and
-      $rule.pattern == $base_branch and
-      $rule.allowsDeletions == false and $rule.allowsForcePushes == false and
-      $rule.requiresStatusChecks == true and $rule.requiresStrictStatusChecks == true and
-      $rule.isAdminEnforced == true and $rule.requiresConversationResolution == true and
-      $rule.requiresLinearHistory == true and
-      ($rule.bypassPullRequestAllowances | complete_zero_allowance) and
-      ($rule.bypassForcePushAllowances | complete_zero_allowance) and
-      ($rule.requiredStatusChecks | type) == "array" and
-      ($rule.requiredStatusChecks | length) == 3 and
-      ([ $rule.requiredStatusChecks[].context ] | sort) ==
-        (["Automation Policy / gate", "Frontend CI / check", "Rust CI / check"] | sort) and
-      all($rule.requiredStatusChecks[];
-        .app.databaseId == 15368 and .app.slug == "github-actions") and
-      ($repository_profile.rulesets | type) == "object" and
-      $repository_profile.rulesets.pageInfo.hasNextPage == false and
-      ($repository_profile.rulesets.nodes | type) == "array" and
-      $repository_profile.rulesets.totalCount == ($repository_profile.rulesets.nodes | length) and
+      ($repository_profile.rulesets | complete_connection) and
+      $repository_profile.rulesets.totalCount == 3 and
+      ($main_protections | length) == 1 and
+      ($linear_histories | length) == 1 and
+      ($agent_fences | length) == 1 and
       all($repository_profile.rulesets.nodes[];
-        .target == "BRANCH" and
-        (.enforcement == "DISABLED" or .enforcement == "EVALUATE")) and
+        .target == "BRANCH" and .enforcement == "ACTIVE") and
+      ($main_protections[0] |
+        .conditions.refName.include == ["refs/heads/" + $base_branch] and
+        .conditions.refName.exclude == [] and
+        (.bypassActors | complete_connection) and .bypassActors.totalCount == 0 and
+        (.rules | complete_connection) and .rules.totalCount == 4 and
+        ([.rules.nodes[].type] | sort) ==
+          ["DELETION", "NON_FAST_FORWARD", "PULL_REQUEST", "REQUIRED_STATUS_CHECKS"] and
+        ([.rules.nodes[] | select(.type == "REQUIRED_STATUS_CHECKS") | .parameters] |
+          length == 1 and
+          .[0].strictRequiredStatusChecksPolicy == true and
+          .[0].doNotEnforceOnCreate == false and
+          ([.[0].requiredStatusChecks[].context] | sort) ==
+            (["Automation Policy / gate", "Frontend CI / check", "Rust CI / check"] | sort)) and
+        ([.rules.nodes[] | select(.type == "PULL_REQUEST") | .parameters] |
+          length == 1 and
+          .[0].requiredReviewThreadResolution == true and
+          .[0].dismissStaleReviewsOnPush == true and
+          .[0].requireCodeOwnerReview == false and
+          .[0].requireLastPushApproval == false and
+          .[0].requiredApprovingReviewCount == 0 and
+          (.[0].allowedMergeMethods | sort) == ["MERGE", "REBASE", "SQUASH"])) and
+      ($linear_histories[0] |
+        .conditions.refName.include == ["refs/heads/" + $base_branch] and
+        .conditions.refName.exclude == [] and
+        (.bypassActors | complete_connection) and
+        .bypassActors.totalCount == 1 and
+        .bypassActors.nodes[0].bypassMode == "ALWAYS" and
+        (.rules | complete_connection) and .rules.totalCount == 1 and
+        .rules.nodes[0].type == "REQUIRED_LINEAR_HISTORY") and
+      ($agent_fences[0] |
+        .conditions.refName.include == ["refs/heads/agent/**"] and
+        .conditions.refName.exclude == [] and
+        (.bypassActors | complete_connection) and
+        .bypassActors.totalCount == 1 and
+        .bypassActors.nodes[0].bypassMode == "ALWAYS" and
+        (.rules | complete_connection) and .rules.totalCount == 4 and
+        ([.rules.nodes[].type] | sort) ==
+          ["CREATION", "DELETION", "NON_FAST_FORWARD", "UPDATE"]) and
       $pr.number == $number and $pr.state == "OPEN" and $pr.isDraft == false and
       $pr.mergeable == "MERGEABLE" and $pr.mergeStateStatus == "CLEAN" and
       $pr.headRefName == $head_branch and $pr.headRefOid == $head_sha and
@@ -208,12 +246,35 @@ case "${ACTION}" in
       $pr.reviewThreads.pageInfo.hasNextPage == false and
       ($pr.reviewThreads.nodes | type == "array" and all(.[]; .isResolved == true))
     ' <<<"${governance}" >/dev/null ||
-      fail 'pull request or branch protection governance drifted before merge mutation'
+      fail 'pull request or branch ruleset governance drifted before merge mutation'
 
+    # GraphQL redacts integration bypass actors, so prove through REST that the
+    # sole linear-history bypass is still the Writer App itself.
+    linear_history_ruleset="$(aeris_gh api "repos/${REPOSITORY}/rulesets/21984329")"
+    jq -e --arg repository "${REPOSITORY}" '
+      type == "object" and .id == 21984329 and .name == "main-linear-history" and
+      .source_type == "Repository" and .source == $repository and
+      .target == "branch" and .enforcement == "active" and
+      (.bypass_actors | type == "array" and length == 1 and
+       .[0].actor_id == 4667256 and .[0].actor_type == "Integration" and
+       .[0].bypass_mode == "always")
+    ' <<<"${linear_history_ruleset}" >/dev/null ||
+      fail 'linear-history ruleset bypass no longer names only the Writer App'
+
+    # True merge commit: first parent is the pre-merge base tip, second parent
+    # is the exact synchronization branch tip, so main becomes an ancestor of
+    # the integrated upstream history. The squash path relied on the PR title
+    # and body to carry metadata; a merge commit does not, so the verified
+    # synchronization trailers are passed explicitly.
+    merge_commit_message="$(printf \
+      'Sync-Upstream-Automation: true\nSync-Upstream-Source: %s\nSync-Upstream-Checkpoint: %s->%s\nSync-Upstream-Base: %s\nSync-Upstream-Policy-Verdict: %s\n' \
+      "${SYNC_SOURCE}" "${sync_checkpoint}" "${upstream_sha}" "${BASE_SHA}" "${POLICY_VERDICT}")"
     set +e
     merge_response="$(aeris_gh api --method PUT \
       "repos/${REPOSITORY}/pulls/${PR_NUMBER}/merge" \
-      -f merge_method=squash \
+      -f merge_method=merge \
+      -f "commit_title=chore: sync ${SYNC_SOURCE}" \
+      -f "commit_message=${merge_commit_message}" \
       -f sha="${HEAD_SHA}")"
     merge_status=$?
 
@@ -253,13 +314,24 @@ case "${ACTION}" in
     set -e
     [[ "${readback_status}" -eq 0 ]] || {
       [[ "${readback_status}" -eq 78 ]] && exit 78
-      fail 'unable to read back the squash merge commit'
+      fail 'unable to read back the merge commit'
     }
-    jq -e --arg base_sha "${BASE_SHA}" --arg merge_commit_sha "${merge_commit_sha}" \
+    jq -e --arg base_sha "${BASE_SHA}" --arg head_sha "${HEAD_SHA}" \
+      --arg merge_commit_sha "${merge_commit_sha}" --arg source "${SYNC_SOURCE}" \
+      --arg checkpoint "${sync_checkpoint}" --arg upstream_sha "${upstream_sha}" \
+      --arg verdict "${POLICY_VERDICT}" \
       'type == "object" and .sha == $merge_commit_sha and
-       (.parents | type == "array" and length == 1) and
-       .parents[0].sha == $base_sha' <<<"${merge_commit}" >/dev/null ||
-      fail 'merge commit readback did not prove a single-parent squash outcome'
+       (.parents | type == "array" and length == 2 and
+        .[0].sha == $base_sha and .[1].sha == $head_sha) and
+       (.commit.message | type == "string") and
+       ((.commit.message | split("\n") | .[0]) == ("chore: sync " + $source)) and
+       ([.commit.message | split("\n")[] | select(. == "Sync-Upstream-Automation: true")] | length == 1) and
+       ([.commit.message | split("\n")[] | select(. == ("Sync-Upstream-Source: " + $source))] | length == 1) and
+       ([.commit.message | split("\n")[] | select(. == ("Sync-Upstream-Checkpoint: " + $checkpoint + "->" + $upstream_sha))] | length == 1) and
+       ([.commit.message | split("\n")[] | select(. == ("Sync-Upstream-Base: " + $base_sha))] | length == 1) and
+       ([.commit.message | split("\n")[] | select(. == ("Sync-Upstream-Policy-Verdict: " + $verdict))] | length == 1)
+      ' <<<"${merge_commit}" >/dev/null ||
+      fail 'merge commit readback did not prove a dual-parent merge outcome with synchronization trailers'
     ;;
   disarm)
     [[ $# -eq 3 ]] || usage
