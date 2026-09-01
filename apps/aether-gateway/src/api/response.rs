@@ -124,7 +124,9 @@ where
     mutate_headers(response.headers_mut())?;
     apply_streaming_response_headers(response.headers_mut());
     insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, trace_id)?;
-    insert_header_if_missing(response.headers_mut(), GATEWAY_HEADER, "rust-phase3b")?;
+    // The `x-aether-gateway` trust marker is intentionally not echoed on
+    // public responses: printing it on every response published the value
+    // that gates trusted identity headers.
     if let Some(decision) = control_decision {
         insert_header_if_missing(
             response.headers_mut(),

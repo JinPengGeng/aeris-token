@@ -66,8 +66,8 @@ pub(crate) use self::request_utils::{
     query_param_bool, query_param_optional_bool, query_param_value,
     request_enables_control_execute, rust_auth_terminates_provider_credentials,
     sanitize_upstream_path_and_query, should_strip_forwarded_provider_credential_header,
-    should_strip_forwarded_trusted_admin_header, strip_query_param, unix_ms_to_rfc3339,
-    unix_secs_to_rfc3339,
+    should_strip_forwarded_trusted_admin_header, strip_query_param,
+    strip_untrusted_ingress_headers, unix_ms_to_rfc3339, unix_secs_to_rfc3339,
 };
 pub(crate) use self::system_config_values::{
     module_available_from_env, system_config_bool, system_config_string,

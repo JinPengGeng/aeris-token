@@ -17,6 +17,7 @@ const MAX_REQUEST_BODY_MB_ENV: &str = "AETHER_MAX_REQUEST_BODY_MB";
 const MAX_REDACTED_SYNC_RESPONSE_BODY_MB_ENV: &str = "AETHER_MAX_REDACTED_SYNC_RESPONSE_BODY_MB";
 const MAX_INTERNAL_BUFFERED_BODY_MB_ENV: &str = "AETHER_MAX_INTERNAL_BUFFERED_BODY_MB";
 const TRUSTED_PROXY_CIDRS_ENV: &str = "AETHER_TRUSTED_PROXY_CIDRS";
+const TRUSTED_INGRESS_CIDRS_ENV: &str = "AETHER_GATEWAY_TRUSTED_INGRESS_CIDRS";
 
 /// Optional operator cap applied after Content-Encoding decoding, and to
 /// uncompressed bodies as-is. Unset, zero, or invalid values disable the cap.
@@ -45,6 +46,16 @@ fn body_limit_bytes(value: Option<&str>) -> u64 {
 
 static TRUSTED_PROXY_CIDRS: LazyLock<Vec<String>> = LazyLock::new(|| {
     std::env::var(TRUSTED_PROXY_CIDRS_ENV)
+        .unwrap_or_else(|_| "127.0.0.0/8,::1/128".to_string())
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && valid_ip_or_cidr(value))
+        .map(ToOwned::to_owned)
+        .collect()
+});
+
+static TRUSTED_INGRESS_CIDRS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    std::env::var(TRUSTED_INGRESS_CIDRS_ENV)
         .unwrap_or_else(|_| "127.0.0.0/8,::1/128".to_string())
         .split(',')
         .map(str::trim)
@@ -138,6 +149,20 @@ pub(crate) fn effective_client_ip(headers: &http::HeaderMap, remote_addr: &Socke
 
 fn trusted_proxy_ip(ip: IpAddr) -> bool {
     TRUSTED_PROXY_CIDRS
+        .iter()
+        .any(|pattern| ip_or_cidr_matches(pattern, ip))
+}
+
+/// Ingress sources allowed to present platform-asserted identity headers (the
+/// `x-aether-gateway` marker plus `x-aether-auth-*` / `x-aether-admin-*`).
+/// Tunnel affinity forwarding between gateway instances depends on these
+/// headers, so every peer gateway address must be covered here. All other
+/// clients get the headers stripped at the HTTP ingress, matching what the
+/// WebSocket ingress already does unconditionally. Defaults to loopback only;
+/// set `AETHER_GATEWAY_TRUSTED_INGRESS_CIDRS` to an empty value to disable the
+/// trusted ingress path entirely.
+pub(crate) fn trusted_ingress_source_ip(ip: IpAddr) -> bool {
+    TRUSTED_INGRESS_CIDRS
         .iter()
         .any(|pattern| ip_or_cidr_matches(pattern, ip))
 }
@@ -594,7 +619,8 @@ mod tests {
     use super::{
         decoded_request_body_bytes, effective_client_ip, normalize_request_body_headers_and_bytes,
         request_origin_from_headers, request_origin_from_headers_and_remote_addr,
-        tls_fingerprint_from_headers, RequestBodyNormalizationError, RequestOrigin,
+        tls_fingerprint_from_headers, trusted_ingress_source_ip, RequestBodyNormalizationError,
+        RequestOrigin,
     };
     use flate2::{
         write::{DeflateEncoder, GzEncoder, ZlibEncoder},
@@ -606,6 +632,23 @@ mod tests {
         io::Write,
         net::{IpAddr, Ipv4Addr, SocketAddr},
     };
+
+    #[test]
+    fn trusted_ingress_source_defaults_to_loopback_only() {
+        assert!(trusted_ingress_source_ip(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(trusted_ingress_source_ip(IpAddr::V4(Ipv4Addr::new(
+            127, 0, 0, 2
+        ))));
+        assert!(trusted_ingress_source_ip(IpAddr::V6(
+            std::net::Ipv6Addr::LOCALHOST
+        )));
+        assert!(!trusted_ingress_source_ip(IpAddr::V4(Ipv4Addr::new(
+            203, 0, 113, 7
+        ))));
+        assert!(!trusted_ingress_source_ip(IpAddr::V4(Ipv4Addr::new(
+            10, 0, 0, 8
+        ))));
+    }
 
     #[test]
     fn request_origin_prefers_first_forwarded_for_ip() {

@@ -3153,6 +3153,11 @@ async fn gateway_handles_admin_usage_cache_affinity_interval_timeline_locally_wi
 ) {
     let (upstream_url, upstream_hits, upstream_handle) =
         start_usage_upstream("/api/admin/usage/cache-affinity/interval-timeline").await;
+    // Derive every row timestamp from one captured base: `recent_unix_secs`
+    // calls `Utc::now()` per row, and a second-boundary straddle between the
+    // two calls for one user would change the interval from 300s to 301s and
+    // round `y` to 5.02 instead of 5.0.
+    let fixture_now_unix_secs = chrono::Utc::now().timestamp();
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
         sample_usage_row(
             "usage-1",
@@ -3167,7 +3172,7 @@ async fn gateway_handles_admin_usage_cache_affinity_interval_timeline_locally_wi
             2,
             0.01,
             0.012,
-            recent_unix_secs(55),
+            fixture_now_unix_secs - 55 * 60,
         ),
         sample_usage_row(
             "usage-2",
@@ -3182,7 +3187,7 @@ async fn gateway_handles_admin_usage_cache_affinity_interval_timeline_locally_wi
             3,
             0.01,
             0.012,
-            recent_unix_secs(50),
+            fixture_now_unix_secs - 50 * 60,
         ),
         sample_usage_row(
             "usage-3",
@@ -3197,7 +3202,7 @@ async fn gateway_handles_admin_usage_cache_affinity_interval_timeline_locally_wi
             4,
             0.02,
             0.024,
-            recent_unix_secs(46),
+            fixture_now_unix_secs - 46 * 60,
         ),
         sample_usage_row(
             "usage-4",
@@ -3212,7 +3217,7 @@ async fn gateway_handles_admin_usage_cache_affinity_interval_timeline_locally_wi
             5,
             0.02,
             0.024,
-            recent_unix_secs(41),
+            fixture_now_unix_secs - 41 * 60,
         ),
     ]));
     let user_repository = Arc::new(InMemoryUserReadRepository::seed(vec![
