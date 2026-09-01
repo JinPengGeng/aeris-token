@@ -378,6 +378,7 @@ impl IntoResponse for ExecutionRuntimeAppError {
                 | ExecutionRuntimeTransportError::BrowserClientBuild(_)
                 | ExecutionRuntimeTransportError::BrowserBody(_)
                 | ExecutionRuntimeTransportError::UpstreamRequest(_)
+                | ExecutionRuntimeTransportError::UpstreamFirstByteTimeout(_)
                 | ExecutionRuntimeTransportError::UpstreamResponseTooLarge { .. }
                 | ExecutionRuntimeTransportError::UpstreamResponseDecode { .. }
                 | ExecutionRuntimeTransportError::RelayError(_)
