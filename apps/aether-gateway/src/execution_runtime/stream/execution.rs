@@ -72,6 +72,7 @@ use crate::ai_serving::api::{
     UPSTREAM_IS_STREAM_KEY,
 };
 use crate::ai_serving::is_openai_responses_family_format;
+use crate::ai_serving::record_local_runtime_candidate_skip_reason;
 use crate::api::response::{
     attach_control_metadata_headers, build_client_response, build_client_response_from_parts,
 };
@@ -3998,6 +3999,11 @@ async fn execute_execution_runtime_stream_inner(
         match acquire_provider_pool_execution_guard(state, &plan).await? {
             ProviderPoolInFlightAdmission::Acquired(guard) => guard,
             ProviderPoolInFlightAdmission::Saturated { limit } => {
+                record_local_runtime_candidate_skip_reason(
+                    state,
+                    trace_id,
+                    "provider_key_concurrency_limit_reached",
+                );
                 if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
                     *retry_scope = AiAttemptRetryScope::Candidate;
                 }
@@ -8556,8 +8562,8 @@ mod tests {
         ClientVisibleStreamCompletionTracker, DirectPassthroughFinalizer,
         DirectPassthroughFinalizerCore, DirectPassthroughInlineBodyState, DirectPassthroughMode,
         PostStopFrameReadBudget, PostStopLimitedStreamReader, ProviderStreamErrorInspection,
-        StreamAttemptTerminalGuard, ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES,
-        GEMINI_FILES_DOWNLOAD_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND,
+        ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES, GEMINI_FILES_DOWNLOAD_PLAN_KIND,
+        OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
         POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL,
     };
     use crate::control::GatewayControlDecision;
@@ -8850,7 +8856,7 @@ mod tests {
         .await;
 
         {
-            let _guard = StreamAttemptTerminalGuard::new(
+            let _guard = super::StreamAttemptTerminalGuard::new(
                 &state,
                 &plan,
                 report_context.clone(),
@@ -8923,7 +8929,7 @@ mod tests {
 
         progress
             .scope(async move {
-                let guard = StreamAttemptTerminalGuard::new(
+                let guard = super::StreamAttemptTerminalGuard::new(
                     &state,
                     &plan,
                     report_context.clone(),
