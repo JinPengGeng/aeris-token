@@ -313,6 +313,42 @@ assert(
   'AI conflict resolution policy must remain narrow, independent, and fail closed',
 );
 const syncSteps = syncWorkflow.jobs.sync.steps;
+const preflightJob = syncWorkflow.jobs.preflight;
+assert(
+  preflightJob,
+  'sync workflow must isolate the script preflight in a dedicated job so publication starts on a clean runner',
+);
+const preflightSteps = preflightJob.steps;
+const syncNeeds = syncWorkflow.jobs.sync.needs;
+assert(
+  Array.isArray(syncNeeds) ? syncNeeds.includes('preflight') : syncNeeds === 'preflight',
+  'sync publication job must wait for the isolated preflight job',
+);
+assert(
+  syncSteps.every((step) => step.name !== 'Validate checkpoint synchronization'),
+  'script preflight checks must run on the preflight runner, not on the publication runner',
+);
+assert(
+  preflightSteps.every((step) => !step.uses?.includes('create-github-app-token')),
+  'preflight must not mint a Writer App token that cannot cross the job boundary',
+);
+assert(
+  preflightJob.environment === undefined,
+  'preflight must not hold the writer Environment secrets',
+);
+assert(
+  JSON.stringify(preflightJob.permissions) === JSON.stringify({ contents: 'read' }),
+  'preflight GITHUB_TOKEN must be limited to reading the trusted checkout',
+);
+const preflightCheckoutStep = preflightSteps.find(
+  (step) => step.name === 'Check out fork default branch',
+);
+assert(
+  preflightCheckoutStep?.with?.token === '${{ github.token }}' &&
+    preflightCheckoutStep.with['persist-credentials'] === false &&
+    preflightCheckoutStep.with['fetch-depth'] === 1,
+  'preflight checkout must use the read-only workflow token without persisted credentials',
+);
 assert(
   syncWorkflow.jobs.sync.env.AERIS_AI_MODEL_CONFLICT_RESOLVER ===
       '${{ vars.AERIS_AI_MODEL_CONFLICT_RESOLVER || vars.AERIS_AI_MODEL_WRITER }}' &&
@@ -460,6 +496,7 @@ assert(
   'Resolver and Reviewer must obtain only the model secret from the agent Environment',
 );
 for (const [job, message] of [
+  [preflightJob, 'preflight checkout must not persist credentials'],
   [resolveConflictJob, 'Resolver checkout must not persist credentials'],
   [publishConflictJob, 'conflict Publisher checkout must not persist credentials'],
   [reviewConflictJob, 'Reviewer checkout must not persist credentials'],
@@ -597,7 +634,7 @@ assert(
 const publishStep = syncSteps.find(
   (step) => step.name === 'Build and publish automation branch',
 );
-const syncValidationStep = syncSteps.find(
+const syncValidationStep = preflightSteps.find(
   (step) => step.name === 'Validate checkpoint synchronization',
 );
 assert(
@@ -932,7 +969,7 @@ const checkDispatchStep = syncSteps.find(
       !/(^|\n)\s*gh\s/.test(checkDispatchScript),
     'check discovery, dispatch, and exact-head success wait must revalidate expiry before every GitHub token use',
   );
-const validationStep = syncSteps.find(
+const validationStep = preflightSteps.find(
   (step) => step.name === 'Validate checkpoint synchronization',
 );
 assert(
