@@ -1014,6 +1014,10 @@ for attempt in 1 2 3; do
   fetch_source_refs
   base_sha="${fetched_base_sha}"
   upstream_sha="${fetched_upstream_sha}"
+  # The bounded bootstrap wipe deleted every ref, leaving HEAD dangling.
+  # Re-point the trusted checkout at the base that was just fetched and
+  # validated. Idempotent across rebuild attempts.
+  bounded_tree_git switch --detach "${base_sha}"
   [[ "$(bounded_tree_git rev-parse HEAD)" == "${base_sha}" ]] || {
     echo 'Trusted checkout HEAD no longer equals the fetched base SHA.' >&2
     output state error
