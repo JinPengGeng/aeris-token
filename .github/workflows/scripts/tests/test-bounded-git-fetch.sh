@@ -555,6 +555,14 @@ aeris_bounded_fetch_init /dev/null
 aeris_bounded_fetch_ref "${REMOTE}" refs/heads/exact "${TIP}" refs/aeris/test/bootstrap exact
 git fsck --strict --no-reflogs --no-dangling "${TIP}" >/dev/null ||
   fail 'bounded bootstrap repair did not restore the complete exact-ref graph'
+# The wipe deleted every ref and left HEAD dangling; the trusted checkout must
+# be re-pointed at the validated base before any rev-parse HEAD check.
+if git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  fail 'bootstrap wipe left HEAD resolvable'
+fi
+aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git switch --detach "${TIP}"
+[[ "$(git rev-parse HEAD)" == "${TIP}" ]] ||
+  fail 'bootstrap HEAD restoration did not land on the validated base'
 unset AERIS_BOUNDED_BOOTSTRAP_SHALLOW
 
 cd "${SOURCE}"

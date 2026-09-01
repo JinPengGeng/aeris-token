@@ -919,6 +919,16 @@ assert(
   disarmCallIndex >= 0 && rebuildLoopIndex >= 0 && disarmCallIndex < rebuildLoopIndex,
   'sync must disarm a stale auto-merge before rebuilding its fixed branch',
 );
+const headRestoreIndex = syncScript.indexOf(
+  'bounded_tree_git switch --detach "${base_sha}"',
+);
+const headCheckIndex = syncScript.indexOf('bounded_tree_git rev-parse HEAD');
+assert(
+  rebuildLoopIndex >= 0 &&
+    headRestoreIndex > rebuildLoopIndex &&
+    headCheckIndex > headRestoreIndex,
+  'sync must restore HEAD to the validated base after the bounded bootstrap wipe and before checking it',
+);
 assert(
   /aeris_require_active_autonomy_window[\s\S]*now_epoch \+ minimum_remaining_seconds >= expires_epoch/.test(
     autonomyScript,
