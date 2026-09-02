@@ -40,8 +40,8 @@ pub trait UsageBillingEventEnricher: Send + Sync {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UsageRequestRecordLevel {
-    Basic,
     #[default]
+    Basic,
     Full,
 }
 
@@ -56,7 +56,7 @@ pub struct UsageBodyCapturePolicy {
 impl Default for UsageBodyCapturePolicy {
     fn default() -> Self {
         Self {
-            record_level: UsageRequestRecordLevel::Full,
+            record_level: UsageRequestRecordLevel::Basic,
         }
     }
 }
@@ -6155,8 +6155,8 @@ mod tests {
         preserve_provider_response_facts, preserve_request_facts, LifecycleAdmissionPermit,
         LifecycleEventCoalescer, LifecycleSubmissionDispatcher, LifecycleSubmissionItem,
         LifecycleSubmissionPriority, LifecycleTerminalUsageSeed, UsageBillingEventEnricher,
-        UsageBodyCapturePolicy, UsageEnqueueRetryDispatcher, UsageRequestRecordLevel,
-        UsageRuntimeAccess, UsageWorkerObservation, UsageWorkerSupervisorState,
+        UsageBodyCapturePolicy, UsageEnqueueRetryDispatcher, UsageRuntimeAccess,
+        UsageWorkerObservation, UsageWorkerSupervisorState,
     };
     use crate::worker::ManualProxyNodeCounter;
     use crate::{
@@ -12895,7 +12895,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_request_record_level_strips_body_capture_but_preserves_derived_fields() {
+    fn default_body_capture_policy_strips_body_capture_but_preserves_derived_fields() {
         let mut event = UsageEvent::new(
             UsageEventType::Failed,
             "req-basic-1",
@@ -12937,12 +12937,7 @@ mod tests {
 
         preserve_request_facts(&mut event);
         preserve_provider_response_facts(&mut event);
-        apply_usage_body_capture_policy_to_event(
-            UsageBodyCapturePolicy {
-                record_level: UsageRequestRecordLevel::Basic,
-            },
-            &mut event,
-        );
+        apply_usage_body_capture_policy_to_event(UsageBodyCapturePolicy::default(), &mut event);
 
         assert_eq!(event.data.total_tokens, Some(42));
         assert_eq!(event.data.error_message.as_deref(), Some("upstream failed"));
