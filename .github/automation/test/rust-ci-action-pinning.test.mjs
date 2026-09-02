@@ -12,6 +12,8 @@ const expectedActions = new Map([
   ['rui314/setup-mold', '9c9c13bf4c3f1adef0cc596abc155580bcb04444'],
   ['taiki-e/install-action', 'd5f9268ff7620505a81ada10ddf18cdd72240185'],
   ['dorny/paths-filter', 'de90cc6fb38fc0963ad72b210f1f284cd68cea36'],
+  ['actions/upload-artifact', '330a01c490aca151604b8cf639adc76d48f6c5d4'],
+  ['actions/download-artifact', '018cc2cf5baa6db3ef3c5f8a56943fffe632ef53'],
 ]);
 
 test('Rust CI pins every third-party action to its approved immutable commit', async () => {
