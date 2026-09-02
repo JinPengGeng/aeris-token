@@ -51,6 +51,7 @@ jobs:
           set -euo pipefail
           bash -n .github/workflows/scripts/checkpoint-merge.sh
           bash -n .github/workflows/scripts/bounded-git-fetch.sh
+          bash -n .github/workflows/scripts/fetch-conflict-refs.sh
           bash -n .github/workflows/scripts/ensure-required-checks.sh
           bash -n .github/workflows/scripts/manage-sync-automerge.sh
           bash -n .github/workflows/scripts/github-autonomy.sh
@@ -66,6 +67,8 @@ jobs:
           bash .github/workflows/scripts/tests/test-sync-upstream-alerts.sh
           AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
             bash .github/workflows/scripts/tests/test-bounded-git-fetch.sh
+          AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
+            bash .github/workflows/scripts/tests/test-fetch-conflict-refs.sh
           AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
             bash .github/workflows/scripts/tests/test-checkpoint-merge.sh
           AERIS_TEST_TMP_ROOT="${RUNNER_TEMP}" \
@@ -465,16 +468,14 @@ jobs:
         env:
           HEAD_SHA: ${{ needs.publish_conflict.outputs.head_sha }}
           UPSTREAM_REPOSITORY: ${{ needs.publish_conflict.outputs.parent }}
-          UPSTREAM_SHA: ${{ needs.publish_conflict.outputs.source }}
+          UPSTREAM_BRANCH: ${{ needs.publish_conflict.outputs.upstream_branch }}
+          UPSTREAM_SOURCE: ${{ needs.publish_conflict.outputs.source }}
         shell: bash
         run: |
           set -euo pipefail
-          upstream_sha="${UPSTREAM_SHA#*@}"
-          git fetch --no-tags origin "${HEAD_SHA}"
-          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
-          git fetch --no-tags upstream "${upstream_sha}"
-          git rev-parse --verify "${HEAD_SHA}^{commit}" >/dev/null
-          git rev-parse --verify "${upstream_sha}^{commit}" >/dev/null
+          bash .github/workflows/scripts/fetch-conflict-refs.sh \
+            "${HEAD_SHA}" "${UPSTREAM_REPOSITORY}" "${UPSTREAM_BRANCH}" \
+            "${UPSTREAM_SOURCE#*@}" "${SYNC_BRANCH:-automation/sync-upstream}"
 
       - name: Recreate trusted synthetic conflict commit
         env:
@@ -586,14 +587,14 @@ jobs:
         env:
           HEAD_SHA: ${{ needs.publish_conflict.outputs.head_sha }}
           UPSTREAM_REPOSITORY: ${{ needs.publish_conflict.outputs.parent }}
+          UPSTREAM_BRANCH: ${{ needs.publish_conflict.outputs.upstream_branch }}
           UPSTREAM_SOURCE: ${{ needs.publish_conflict.outputs.source }}
         shell: bash
         run: |
           set -euo pipefail
-          upstream_sha="${UPSTREAM_SOURCE#*@}"
-          git fetch --no-tags origin "${HEAD_SHA}"
-          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
-          git fetch --no-tags upstream "${upstream_sha}"
+          bash .github/workflows/scripts/fetch-conflict-refs.sh \
+            "${HEAD_SHA}" "${UPSTREAM_REPOSITORY}" "${UPSTREAM_BRANCH}" \
+            "${UPSTREAM_SOURCE#*@}" "${SYNC_BRANCH:-automation/sync-upstream}"
 
       - name: Recreate trusted synthetic conflict commit
         env:
