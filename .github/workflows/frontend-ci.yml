@@ -123,6 +123,7 @@ jobs:
             aether-vscodex/web/package-lock.json
       - run: npm ci
       - name: Install aether-vscodex web dependencies
+        if: ${{ hashFiles('aether-vscodex/web/package-lock.json') != '' }}
         working-directory: aether-vscodex/web
         run: npm ci
       - run: npm run build
