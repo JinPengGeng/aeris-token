@@ -48,11 +48,14 @@ fork 修复并验证（急用先落地）
 
 | 补丁 | fork PR | 内容 | 上游化状态 |
 |---|---|---|---|
-| watchdog 熔断计数 + pre-first-byte 取消窗口 | #93 | 流式候选首字节超时计入 Key 熔断 | 待提上游 PR（上游原生缺陷） |
+| watchdog 熔断计数 + pre-first-byte 取消窗口 | #93 | 流式候选首字节超时计入 Key 熔断 | 已报上游 issue #780/#781（2026-09-02）；上游修复后 sync 回销 |
+| watchdog/内层定时器竞态恰好一次 | #135 | 内外层首字节定时器竞态下健康反馈恰好一次 | 已报上游 issue #780（2026-09-02）；上游修复后 sync 回销 |
 | fail-closed 计量准入 + 授权刷新断连 | #107 | live/realtime 会话 usage 不落库拒入、授权刷新失败拒闭 | 待提上游 PR（上游原生缺陷） |
 | Responses SSE 预提交语义错误分支 | #121 | 移植自 ZipperCode/Aether@f86e9941 | 移植自社区；上游 #733 相邻在做，观察 |
 | 模型同步宽限保留 | #119 | 不完整快照不得静默删除可用模型（C-04 契约） | 待提上游 PR |
-| ranking_seed/时间参数拆分 | #120 | 排序种子不得作时间戳用于准入检查 | 待提上游 PR |
+| ranking_seed/时间参数拆分 | #120 | 排序种子不得作时间戳用于准入检查 | 已报上游 issue #782（2026-09-02）；上游修复后 sync 回销 |
+| integration tests RUST_MIN_STACK | #159 | CI 给 integration-tests 测试 bin 设 16MB 栈（trivial） | 移植自上游 fawney19/Aether#706；上游合并后 sync 回销即可丢弃 |
+| Star History 图表域名修复 | #159 | README star-history 图表换用 star-history.dera.page（trivial） | 移植自上游 fawney19/Aether#729；上游合并后 sync 回销即可丢弃 |
 | UUID 校验改用 uuid parser | #163 | 移植自上游 fawney19/Aether#708（AAEE86）：frontdoor request_id 与 kiro machine id 的 UUID 形态校验改用 uuid::Uuid::parse_str | 上游 PR 待合入 |
 
 ## 5. 当前深度定制跟踪表（定制轨道）
