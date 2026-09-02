@@ -7,6 +7,7 @@ import {
   shouldUseStructuredOutput,
 } from './config.mjs';
 import { validateExecutorIdentity } from './ai-executor-contract.mjs';
+import { loadChangeFilters, matchedChangeFilterGroups } from './change-filters.mjs';
 import { GitHubClient } from './github-client.mjs';
 import { buildIssueInput, buildPullInput, inputFingerprint, sourceKey } from './input.mjs';
 import {
@@ -340,6 +341,7 @@ export async function runPreflightPhase({
   contracts = null,
   policySha = null,
   github = null,
+  changeFilters = null,
 }) {
   const loaded = contracts ?? loadContracts(repoRoot);
   const { agents, policy } = loaded;
@@ -360,6 +362,20 @@ export async function runPreflightPhase({
     event.workflow_run?.pull_requests?.length !== 1
   ) {
     decision = { action: 'skip', reason: 'workflow_run_pull_request_ambiguous' };
+  }
+  // Only workflow_run-triggered reviews are path-gated against the shared CI
+  // change filters: a pull request whose files match no filter group has no
+  // reviewable content. Manual commands and dispatches always run because a
+  // human explicitly asked for them. A truncated file list fails open.
+  if (eventName === 'workflow_run' && decision.action === 'analyze') {
+    const changed = await client.listPullFiles(number);
+    const filters = changeFilters ?? loadChangeFilters(repoRoot);
+    const reviewable =
+      changed.truncated ||
+      matchedChangeFilterGroups(filters, changed.files.map((file) => file.filename)).length > 0;
+    if (!reviewable) {
+      decision = { action: 'skip', reason: 'no_reviewable_changes' };
+    }
   }
   if (eventName === 'workflow_run' && decision.action === 'analyze') {
     const headSha = object.head.sha;

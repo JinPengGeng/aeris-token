@@ -2,6 +2,7 @@ use crate::handlers::admin::admin_provider_pool_config;
 use crate::handlers::admin::provider::shared::paths::admin_provider_id_for_keys;
 use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyCreateRequest;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::maintenance::ensure_provider_key_pool_scores_for_keys;
 use crate::provider_key_auth::provider_key_effective_api_formats;
 use crate::{model_fetch::perform_model_fetch_for_key, GatewayError};
@@ -67,20 +68,26 @@ pub(super) async fn maybe_handle(
         return Ok(None);
     };
     let key_id = created.id.clone();
+    let mut model_sync_warning: Option<String> = None;
     let created = if created.auto_fetch_models {
-        let summary =
-            perform_model_fetch_for_key(state.as_ref(), &provider.id, &created.id).await?;
-        if summary.succeeded == 0 {
-            let detail = state
-                .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
-                .await?
-                .into_iter()
-                .next()
-                .and_then(|key| key.last_models_fetch_error)
-                .unwrap_or_else(|| "未获取到可用上游模型".to_string());
-            return Err(GatewayError::Internal(format!(
-                "开启自动获取模型后同步上游模型失败: {detail}"
-            )));
+        match perform_model_fetch_for_key(state.as_ref(), &provider.id, &created.id).await {
+            Ok(summary) if summary.succeeded > 0 => {}
+            Ok(_) => {
+                let detail = state
+                    .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
+                    .await?
+                    .into_iter()
+                    .next()
+                    .and_then(|key| key.last_models_fetch_error)
+                    .unwrap_or_else(|| "未获取到可用上游模型".to_string());
+                model_sync_warning = Some(format!("开启自动获取模型后同步上游模型失败: {detail}"));
+            }
+            Err(err) => {
+                model_sync_warning = Some(format!(
+                    "开启自动获取模型后同步上游模型失败: {}",
+                    err.into_message()
+                ));
+            }
         }
 
         state
@@ -124,15 +131,25 @@ pub(super) async fn maybe_handle(
     let api_formats =
         provider_key_effective_api_formats(&created, &provider.provider_type, &endpoints);
 
-    Ok(Some(
-        Json(state.build_admin_provider_key_response(
-            &created,
-            &provider.provider_type,
-            &api_formats,
-            now_unix_secs,
-        ))
-        .into_response(),
-    ))
+    let mut payload = state.build_admin_provider_key_response(
+        &created,
+        &provider.provider_type,
+        &api_formats,
+        now_unix_secs,
+    );
+    if let Some(warning) = model_sync_warning {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("model_sync_warning".to_string(), json!(warning));
+        }
+    }
+
+    Ok(Some(attach_admin_audit_response(
+        Json(payload).into_response(),
+        "admin_provider_key_created",
+        "create_provider_key",
+        "provider_key",
+        &created.id,
+    )))
 }
 
 fn bad_request_response(detail: impl Into<String>) -> Response<Body> {
