@@ -50,18 +50,9 @@ jobs:
           # API mode would require pull-requests: read on this job.
           token: ''
           base: ${{ github.base_ref }}
-          filters: |
-            frontend:
-              - 'frontend/**'
-              - '.github/workflows/frontend-ci.yml'
-            automation:
-              - '.github/agents.yml'
-              - '.github/ai-executors.json'
-              - '.github/automation-policy.yml'
-              - '.github/automation/**'
-              - '.github/upstream-sync-policy.yml'
-              - '.github/upstream-sync-state.json'
-              - '.github/workflows/**'
+          # Filter groups live in the shared file so the trusted automation
+          # runtime classifies pull request paths against the same definitions.
+          filters: .github/change-filters.yml
 
   lint:
     name: Lint
