@@ -11,6 +11,7 @@ const expectedActions = new Map([
   ['mozilla-actions/sccache-action', 'fc920bf0ec8de6ee65d409111f7ec508035751ba'],
   ['rui314/setup-mold', '9c9c13bf4c3f1adef0cc596abc155580bcb04444'],
   ['taiki-e/install-action', 'd5f9268ff7620505a81ada10ddf18cdd72240185'],
+  ['dorny/paths-filter', 'de90cc6fb38fc0963ad72b210f1f284cd68cea36'],
 ]);
 
 test('Rust CI pins every third-party action to its approved immutable commit', async () => {

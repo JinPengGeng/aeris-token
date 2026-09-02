@@ -27,6 +27,8 @@
 1. 禁止直接推送、强制推送和删除分支。
 2. 要求通过 PR 合并并解决全部 review 讨论。当前仓库只有一名维护者时将审批数设为 0；增加协作者后再启用至少一位审批和 CODEOWNERS review。
 3. 要求状态检查 `Rust CI / check`、`Frontend CI / check` 和 `Automation Policy / gate` 成功后才可合并。该设置由 GitHub 远端治理执行，不由本文或 workflow 文件单独保证；管理员必须在启用或变更保护规则后用 GitHub API 现场回读并记录时间，仓库内 contract test 只能验证 workflow 的触发与 job 契约，不能替代这次现场核对。Writer、Publisher、Finalizer 和 upstream sync 仍由各自的远端开关控制。
+
+   两个 CI 工作流在 PR 上按变更路径选择性执行 job：无相关改动时对应 job 以 `skipped` 结论跳过并视为通过门禁，聚合 check 只将 `failure` 或 `cancelled` 判为失败。推送到 `main` 与手动 `workflow_dispatch` 始终全量执行，作为主干完整性的兜底。
 4. 只允许 Squash merge并在合并后自动删除源分支。增加独立 reviewer 后启用 CODEOWNERS review。
 
 仓库管理员应保留紧急恢复能力，仅用于仓库解锁，并在后续 Issue 中记录原因。
