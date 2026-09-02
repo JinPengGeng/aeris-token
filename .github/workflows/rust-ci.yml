@@ -49,20 +49,9 @@ jobs:
           # API mode would require pull-requests: read on this job.
           token: ''
           base: ${{ github.base_ref }}
-          filters: |
-            rust:
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'rust-toolchain.toml'
-              - 'crates/**'
-              - 'apps/**'
-              - '.github/workflows/rust-ci.yml'
-            data:
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'rust-toolchain.toml'
-              - 'crates/aether-data/**'
-              - '.github/workflows/rust-ci.yml'
+          # Filter groups live in the shared file so the trusted automation
+          # runtime classifies pull request paths against the same definitions.
+          filters: .github/change-filters.yml
 
   fmt:
     name: Format
