@@ -333,6 +333,8 @@ WHERE request_id = 'rebuild-completed';
             created_from_unix_secs: 0,
             created_until_unix_secs: 3_000,
             group_by: UsageAuditAggregationGroupBy::Model,
+            provider_id: None,
+            provider_name: None,
             limit: 10,
             exclude_reserved_provider_labels: false,
         })
