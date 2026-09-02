@@ -60,12 +60,6 @@ fork_owned:
 
 review_required:
   - .github/**
-  - Cargo.toml
-  - Cargo.lock
-  - "**/Cargo.toml"
-  - "**/Cargo.lock"
-  - frontend/package.json
-  - frontend/package-lock.json
   - Dockerfile*
   - docker-compose*.yml
   - deploy.sh
@@ -89,6 +83,11 @@ upstream_owned:
   - docs/**
   - README*.md
   - LICENSE*
+  # Mechanical dependency manifests: validated by CI builds, not human review.
+  - Cargo.toml
+  - Cargo.lock
+  - "**/Cargo.toml"
+  - "**/Cargo.lock"
 
 checkpoint:
   require_repository_match: true
