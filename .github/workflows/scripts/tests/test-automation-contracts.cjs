@@ -33,6 +33,7 @@ const autonomyScript = read('.github/workflows/scripts/github-autonomy.sh');
 const checkDispatchScript = read('.github/workflows/scripts/ensure-required-checks.sh');
 const verifyCandidateScript = read('.github/workflows/scripts/verify-sync-candidate.sh');
 const boundedFetchScript = read('.github/workflows/scripts/bounded-git-fetch.sh');
+const conflictFetchScript = read('.github/workflows/scripts/fetch-conflict-refs.sh');
 const prepareScript = read('.github/workflows/scripts/prepare-checkpoint-sync.sh');
 const checkpointScript = read('.github/workflows/scripts/checkpoint-merge.sh');
 const verifyCandidateMetadata = read(
@@ -577,6 +578,34 @@ assert(
     conflictMergeStep.run.includes('conflict_ai_review'),
   'conflict Finalizer must perform one exact attested merge helper invocation',
 );
+for (const [job, label] of [
+  [reviewConflictJob, 'Reviewer'],
+  [finalizeConflictJob, 'conflict Finalizer'],
+]) {
+  const fetchStep = findStep(job, 'Fetch exact published and upstream commits');
+  assert(
+    fetchStep?.env.HEAD_SHA === '${{ needs.publish_conflict.outputs.head_sha }}' &&
+      fetchStep.env.UPSTREAM_REPOSITORY === '${{ needs.publish_conflict.outputs.parent }}' &&
+      fetchStep.env.UPSTREAM_BRANCH === '${{ needs.publish_conflict.outputs.upstream_branch }}' &&
+      fetchStep.env.UPSTREAM_SOURCE === '${{ needs.publish_conflict.outputs.source }}' &&
+      (fetchStep.run.match(/fetch-conflict-refs\.sh/g) || []).length === 1 &&
+      !fetchStep.run.includes('git fetch'),
+    `${label} must fetch published and upstream objects only through the shared bounded transport`,
+  );
+}
+assert(
+  conflictFetchScript.includes('AERIS_BOUNDED_FETCH_CREDENTIALLESS=true') &&
+    conflictFetchScript.includes('aeris_bounded_fetch_init "${policy_path}"') &&
+    (conflictFetchScript.match(/aeris_bounded_fetch_ref/g) || []).length === 2 &&
+    conflictFetchScript.includes('aeris_bounded_fetch_ref origin "refs/heads/${sync_branch}" "${head_sha}"') &&
+    conflictFetchScript.includes(
+      'aeris_bounded_fetch_ref upstream "refs/heads/${upstream_branch}" "${upstream_sha}"',
+    ) &&
+    conflictFetchScript.includes(
+      'remote add upstream "https://github.com/${upstream_repository}.git"',
+    ),
+  'conflict ref fetch must bounded-fetch the exact published head and re-fence the live upstream tip',
+);
 assert(
   syncWorkflow.jobs.sync.env.AERIS_AUTONOMY_EXPIRES_AT ===
     '${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}',
@@ -1045,6 +1074,11 @@ assert(
 assert(
   validationStep?.run.includes('test-bounded-git-fetch.sh'),
   'workflow validation must exercise bounded Git transport failure fixtures',
+);
+assert(
+  validationStep?.run.includes('bash -n .github/workflows/scripts/fetch-conflict-refs.sh') &&
+    validationStep?.run.includes('test-fetch-conflict-refs.sh'),
+  'workflow validation must exercise conflict-path bounded fetch fences and drift fixtures',
 );
 assert(
   !validationStep?.run.includes('test-verify-sync-candidate.sh'),
