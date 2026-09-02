@@ -131,6 +131,7 @@ impl ProviderCatalogSnapshot {
                 provider_id: key.provider_id.clone(),
                 is_active: key.is_active,
                 upstream_metadata: key.upstream_metadata.clone(),
+                status_snapshot: key.status_snapshot.clone(),
             })
             .collect::<Vec<_>>();
         keys.sort_by(|left, right| {
