@@ -1,6 +1,6 @@
 name: probe3-no-token-base
 on:
-  workflow_dispatch:
+  pull_request:
 
 permissions:
   contents: read

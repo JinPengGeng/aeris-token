@@ -1,6 +1,6 @@
 name: probe2-no-or-fallback
 on:
-  workflow_dispatch:
+  pull_request:
 
 permissions:
   contents: read
