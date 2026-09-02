@@ -1748,6 +1748,22 @@ fn codex_quota_apply_family(
             );
         }
     }
+    // A post-reset observation that proves the account is no longer
+    // exhausted must retire the terminal signal written by an earlier
+    // usage_limit_reached rejection; successful quota responses never carry
+    // these flags, so without this reconciliation they would outlive the
+    // reset forever.
+    if family == CodexQuotaWindowFamily::Account
+        && active_reset_generation > 0
+        && generation_matches
+        && incoming
+            .iter()
+            .filter(|window| window.active())
+            .any(|window| window.used_percent().is_none_or(|percent| percent < 100.0))
+    {
+        merged.remove("limit_reached");
+        merged.remove("allowed");
+    }
 }
 
 fn codex_quota_semantic_metadata(
@@ -4470,6 +4486,95 @@ mod tests {
 
         assert!(!outcome.changed);
         assert_eq!(outcome.metadata, current);
+    }
+
+    #[test]
+    fn codex_quota_merge_clears_stale_exhaustion_signal_after_explicit_reset() {
+        // After an explicit reset credit is consumed (generation 1), a fresh
+        // observation proving usage dropped below 100% must retire the
+        // terminal limit_reached/allowed flags written by the earlier
+        // usage_limit_reached rejection.
+        let current = json!({
+            "primary_used_percent": 0.0,
+            "primary_reset_at": 20_000u64,
+            "primary_window_minutes": 300u64,
+            "account_quota_reset_generation": 1u64,
+            "account_quota_reset_pending": false,
+            "account_quota_reset_pending_generation": 1u64,
+            "limit_reached": true,
+            "allowed": false,
+            "updated_at": 200u64
+        });
+        let incoming = json!({
+            "primary_used_percent": 5.0,
+            "primary_reset_at": 20_000u64,
+            "primary_window_minutes": 300u64
+        });
+
+        let outcome = merge_codex_quota_metadata_snapshot(
+            Some(&current),
+            &incoming,
+            CodexQuotaMergeContext {
+                observed_at_unix_secs: 300,
+                request_started_at_unix_ms: Some(300_000),
+                request_order_id: None,
+                observed_reset_generation: Some(1),
+                authoritative_reset_generation: None,
+                observed_credential_generation: None,
+                account_reset_fence_id: None,
+                coverage: CodexQuotaWindowCoverage::AccountSnapshot,
+            },
+        )
+        .expect("post-reset quota metadata should merge");
+
+        assert!(outcome.changed);
+        assert_eq!(outcome.metadata["primary_used_percent"], json!(5.0));
+        assert!(outcome.metadata.get("limit_reached").is_none());
+        assert!(outcome.metadata.get("allowed").is_none());
+    }
+
+    #[test]
+    fn codex_quota_merge_keeps_exhaustion_signal_on_reset_generation_mismatch() {
+        // The same sub-100% observation must NOT retire the terminal flags
+        // when it was captured before the reset completed: a mismatched
+        // observed generation marks it as a pre-reset observation, so the
+        // stale exhaustion signal must survive untouched.
+        let current = json!({
+            "primary_used_percent": 100.0,
+            "primary_reset_at": 20_000u64,
+            "primary_window_minutes": 300u64,
+            "account_quota_reset_generation": 1u64,
+            "account_quota_reset_pending": false,
+            "account_quota_reset_pending_generation": 1u64,
+            "limit_reached": true,
+            "allowed": false,
+            "updated_at": 200u64
+        });
+        let incoming = json!({
+            "primary_used_percent": 5.0,
+            "primary_reset_at": 20_000u64,
+            "primary_window_minutes": 300u64
+        });
+
+        let outcome = merge_codex_quota_metadata_snapshot(
+            Some(&current),
+            &incoming,
+            CodexQuotaMergeContext {
+                observed_at_unix_secs: 300,
+                request_started_at_unix_ms: Some(300_000),
+                request_order_id: None,
+                observed_reset_generation: Some(0),
+                authoritative_reset_generation: None,
+                observed_credential_generation: None,
+                account_reset_fence_id: None,
+                coverage: CodexQuotaWindowCoverage::AccountSnapshot,
+            },
+        )
+        .expect("pre-reset quota metadata should still merge");
+
+        assert!(!outcome.changed);
+        assert_eq!(outcome.metadata["limit_reached"], json!(true));
+        assert_eq!(outcome.metadata["allowed"], json!(false));
     }
 
     #[test]

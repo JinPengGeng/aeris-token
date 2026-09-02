@@ -661,6 +661,11 @@ pub(crate) async fn complete_codex_account_reset(
                 admin_provider_quota_pure::CODEX_QUOTA_ACCOUNT_RESET_FENCE_ID_KEY.to_string(),
                 serde_json::json!(fence.id),
             );
+            // A consumed reset credit definitively reopens the account, so the
+            // terminal exhaustion signal from an earlier usage_limit_reached
+            // rejection must not outlive it.
+            codex.remove("limit_reached");
+            codex.remove("allowed");
             CodexAccountResetCompleteResult::Activated(fence)
         } else if activates {
             CodexAccountResetCompleteResult::Replay(terminal)
@@ -1908,6 +1913,70 @@ mod tests {
                 json!("reset")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn codex_reset_activation_clears_terminal_exhaustion_signal() {
+        // A consumed reset credit reopens the account, so the terminal
+        // limit_reached/allowed flags from an earlier usage_limit_reached
+        // rejection must not survive the activation.
+        let key_id = "key-codex-reset-clears-exhaustion";
+        let (app, repository, credential) = codex_reset_state_machine_test_state(key_id);
+        let admin_state = AdminAppState::new(&app);
+        assert!(repository
+            .upsert_key_upstream_metadata_namespace(
+                key_id,
+                "codex",
+                &json!({
+                    "credential_generation": "credential-v1",
+                    "limit_reached": true,
+                    "allowed": false,
+                }),
+                None,
+            )
+            .await
+            .expect("exhaustion signal seed should persist"));
+        let reservation = match reserve_codex_account_reset(
+            &admin_state,
+            key_id,
+            "auth-v1",
+            &credential,
+            Some("credential-v1"),
+            "reset-clears-exhaustion",
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        {
+            CodexAccountResetReserveResult::Reserved(value) => value,
+            other => panic!("unexpected reservation: {other:?}"),
+        };
+
+        assert!(matches!(
+            complete_codex_account_reset(
+                &admin_state,
+                key_id,
+                "auth-v1",
+                &credential,
+                &reservation,
+                "reset",
+                200_000,
+            )
+            .await
+            .unwrap(),
+            Some(CodexAccountResetCompleteResult::Activated(_))
+        ));
+
+        let stored = repository
+            .list_keys_by_ids(&[key_id.to_string()])
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let codex = &stored.upstream_metadata.unwrap()["codex"];
+        assert_eq!(codex["account_quota_reset_generation"], json!(1u64));
+        assert!(codex.get("limit_reached").is_none());
+        assert!(codex.get("allowed").is_none());
     }
 
     #[tokio::test]
