@@ -208,6 +208,9 @@ jobs:
       statuses: write
     steps:
       - name: Publish Frontend CI status
+        # This job has no checkout, so it must not inherit the workflow-wide
+        # defaults.run.working-directory (frontend/ does not exist there).
+        working-directory: .
         env:
           GH_TOKEN: ${{ github.token }}
           CHECK_RESULT: ${{ needs.check.result }}
