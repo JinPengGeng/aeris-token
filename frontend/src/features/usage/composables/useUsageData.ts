@@ -28,6 +28,12 @@ export interface UseUsageDataOptions {
 export interface LoadStatsOptions {
   force?: boolean
   preserveOnFailure?: boolean
+  preserveOnEmpty?: boolean
+}
+
+export interface LoadRecordsOptions {
+  preserveOnFailure?: boolean
+  preserveOnEmpty?: boolean
 }
 
 export interface PaginationParams {
@@ -310,8 +316,13 @@ export function useUsageData(options: UseUsageDataOptions) {
       // 用户页面：记录直接从 userData 获取（数量较少）
       // 使用 mergeRecordStatus 保护已有的活跃状态，避免轮询更新被覆盖
       const nextRecords = (userData.records || []) as UsageRecord[]
-      currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
-      totalRecords.value = userData.pagination?.total ?? currentRecords.value.length
+      const shouldApplyUserRecords = !options.preserveOnEmpty ||
+        nextRecords.length > 0 ||
+        currentRecords.value.length === 0
+      if (shouldApplyUserRecords) {
+        currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
+        totalRecords.value = userData.pagination?.total ?? currentRecords.value.length
+      }
 
       // 从记录中提取筛选选项
       const models = new Set<string>()
@@ -351,9 +362,11 @@ export function useUsageData(options: UseUsageDataOptions) {
       if (!isAdminPage.value) {
         stats.value = createDefaultStats()
         modelStats.value = []
-        // 用户页的 records 依赖 stats 一起加载；管理员页的 records 是独立分页，不应被统计失败清空。
-        currentRecords.value = []
-        totalRecords.value = 0
+        // 用户页的 records 依赖 stats 一起加载；后台刷新失败时保留最后成功的记录快照。
+        if (!options.preserveOnFailure) {
+          currentRecords.value = []
+          totalRecords.value = 0
+        }
       }
       return true
     } finally {
@@ -367,7 +380,8 @@ export function useUsageData(options: UseUsageDataOptions) {
   async function loadRecords(
     pagination: PaginationParams,
     filters?: FilterParams,
-    dateRange?: DateRangeParams
+    dateRange?: DateRangeParams,
+    options: LoadRecordsOptions = {}
   ): Promise<void> {
     const requestId = ++loadRecordsRequestId
     isLoadingRecords.value = true
@@ -423,11 +437,16 @@ export function useUsageData(options: UseUsageDataOptions) {
           return
         }
         const nextRecords = (response.records || []) as UsageRecord[]
-        currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
-        const totalKey = buildAdminRecordTotalKey(params)
-        applyAdminRecordTotal(totalKey, response.total ?? 0, response.total_is_estimated === true)
-        if (response.total_is_estimated === true) {
-          void refreshAdminRecordTotal(params, requestId, totalKey)
+        const shouldApplyAdminRecords = !options.preserveOnEmpty ||
+          nextRecords.length > 0 ||
+          currentRecords.value.length === 0
+        if (shouldApplyAdminRecords) {
+          currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
+          const totalKey = buildAdminRecordTotalKey(params)
+          applyAdminRecordTotal(totalKey, response.total ?? 0, response.total_is_estimated === true)
+          if (response.total_is_estimated === true) {
+            void refreshAdminRecordTotal(params, requestId, totalKey)
+          }
         }
       } else {
         // 用户页面：使用用户 API
@@ -436,16 +455,23 @@ export function useUsageData(options: UseUsageDataOptions) {
           return
         }
         const nextRecords = (userData.records || []) as UsageRecord[]
-        currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
-        totalRecords.value = userData.pagination?.total || currentRecords.value.length
+        const shouldApplyUserRecords = !options.preserveOnEmpty ||
+          nextRecords.length > 0 ||
+          currentRecords.value.length === 0
+        if (shouldApplyUserRecords) {
+          currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
+          totalRecords.value = userData.pagination?.total || currentRecords.value.length
+        }
       }
     } catch (error) {
       if (requestId !== loadRecordsRequestId) {
         return
       }
       log.error('加载记录失败:', error)
-      currentRecords.value = []
-      totalRecords.value = 0
+      if (!options.preserveOnFailure || currentRecords.value.length === 0) {
+        currentRecords.value = []
+        totalRecords.value = 0
+      }
     } finally {
       if (requestId === loadRecordsRequestId) {
         isLoadingRecords.value = false
@@ -502,6 +528,27 @@ export function useUsageData(options: UseUsageDataOptions) {
     return undefined
   }
 
+  function recordContentFingerprint(record: UsageRecord): string {
+    // 仅取会渲染到表格/详情的易变字段，避免全量 JSON.stringify 的开销。
+    return [
+      record.status,
+      record.status_code,
+      record.error_message,
+      record.response_time_ms,
+      record.first_byte_time_ms,
+      record.updated_at,
+      record.cost,
+      record.actual_cost,
+      record.input_tokens,
+      record.output_tokens,
+      record.total_tokens,
+      record.provider,
+      record.provider_name,
+      record.target_model,
+      record.is_websocket,
+    ].join('\u0001')
+  }
+
   function mergeRecordStatus(
     current: UsageRecord[],
     next: UsageRecord[]
@@ -517,7 +564,7 @@ export function useUsageData(options: UseUsageDataOptions) {
     const currentById = new Map<string, UsageRecord>(
       current.map(record => [record.id, record])
     )
-    return next.map(record => {
+    const mergedRecords = next.map(record => {
       const existing = currentById.get(record.id)
       if (!existing) return record
 
@@ -595,8 +642,7 @@ export function useUsageData(options: UseUsageDataOptions) {
         { preferNext: nextTimingIsAuthoritative },
       )
 
-      return {
-        ...record,
+      const mergedFields = {
         // 保留详情抽屉/活跃轮询已经拿到的完整指标，避免列表刷新用 0 或空值回退。
         status: mergedStatus,
         provider: statusProgressed
@@ -718,7 +764,24 @@ export function useUsageData(options: UseUsageDataOptions) {
               : null)
           : existing.actual_service_tier
       }
+
+      const mergedRecord: UsageRecord = { ...record, ...mergedFields }
+      // 无任何可见字段变化时复用旧行对象引用，避免自动刷新导致整表重渲。
+      if (existing.updated_at === mergedRecord.updated_at
+        && recordContentFingerprint(existing) === recordContentFingerprint(mergedRecord)) {
+        return existing
+      }
+      return mergedRecord
     })
+
+    // 整表所有行引用都未变化时直接返回原数组，跳过列表 diff。
+    if (
+      mergedRecords.length === current.length
+      && mergedRecords.every((record, index) => record === current[index])
+    ) {
+      return current
+    }
+    return mergedRecords
   }
 
   // 刷新所有数据
