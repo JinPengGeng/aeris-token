@@ -1,5 +1,6 @@
 use super::*;
 use crate::ai_serving::provider_key_pool_score_scope;
+use crate::handlers::admin::shared::attach_admin_audit_response;
 use aether_data_contracts::repository::pool_scores::{
     ListPoolMemberScoresQuery, PoolMemberHardState, POOL_KIND_PROVIDER_KEY_POOL,
 };
@@ -309,26 +310,40 @@ impl<'a> AdminAppState<'a> {
                     continue;
                 }
             };
-            let Some(_) = self.create_provider_catalog_key(&record).await? else {
-                return Ok((
-                    http::StatusCode::SERVICE_UNAVAILABLE,
-                    Json(
-                        json!({ "detail": "Admin pool cleanup requires provider catalog writer" }),
-                    ),
-                )
-                    .into_response());
-            };
+            match self.create_provider_catalog_key(&record).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    errors.push(json!({
+                        "index": index,
+                        "reason": "provider catalog writer 不可用，导入已中止",
+                    }));
+                    break;
+                }
+                Err(err) => {
+                    errors.push(json!({
+                        "index": index,
+                        "reason": format!("密钥写入失败，导入已中止: {}", err.into_message()),
+                    }));
+                    break;
+                }
+            }
             known_names.insert(name.to_string());
             known_api_keys.insert(api_key.to_string());
             imported += 1;
         }
 
-        Ok(Json(
-            admin_provider_pool_pure::build_admin_pool_batch_import_result_payload(
-                imported, skipped, errors,
-            ),
-        )
-        .into_response())
+        Ok(attach_admin_audit_response(
+            Json(
+                admin_provider_pool_pure::build_admin_pool_batch_import_result_payload(
+                    imported, skipped, errors,
+                ),
+            )
+            .into_response(),
+            "admin_provider_keys_batch_imported",
+            "batch_import_provider_keys",
+            "provider",
+            &provider.id,
+        ))
     }
 
     pub(crate) async fn build_admin_pool_cleanup_banned_keys_response(
