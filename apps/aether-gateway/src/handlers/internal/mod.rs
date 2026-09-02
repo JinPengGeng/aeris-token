@@ -6,4 +6,5 @@ pub(crate) use self::gateway_helpers::{
     build_management_token_payload, resolve_local_proxy_execution_path,
 };
 mod gateway;
+pub(crate) use self::gateway::attach_heartbeat_cursor;
 pub(crate) use self::gateway::maybe_build_local_internal_proxy_response_impl;

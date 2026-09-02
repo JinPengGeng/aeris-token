@@ -34,6 +34,7 @@ use super::api::response::{build_client_response, build_local_http_error_respons
 use super::constants::TRACE_ID_HEADER;
 use super::data::GatewayDataState;
 use super::error::GatewayError;
+use super::handlers::internal::attach_heartbeat_cursor;
 use super::headers::{extract_or_generate_trace_id, should_skip_request_header};
 use super::AppState;
 
@@ -78,6 +79,8 @@ pub(crate) async fn send_owner_forward_request(
 #[derive(Debug, Deserialize)]
 struct InternalTunnelHeartbeatRequest {
     node_id: String,
+    #[serde(default)]
+    heartbeat_session_id: Option<String>,
     heartbeat_id: u64,
     #[serde(default)]
     heartbeat_interval: Option<i32>,
@@ -1007,6 +1010,11 @@ async fn apply_embedded_tunnel_heartbeat(
 ) -> Result<Vec<u8>, String> {
     let payload = parse_embedded_tunnel_heartbeat_request(request_body)?;
     let node_id = payload.node_id.trim().to_string();
+    let proxy_metadata = attach_heartbeat_cursor(
+        payload.proxy_metadata,
+        payload.heartbeat_session_id.as_deref(),
+        payload.heartbeat_id,
+    );
     let mutation = ProxyNodeHeartbeatMutation {
         node_id: node_id.clone(),
         heartbeat_interval: payload.heartbeat_interval,
@@ -1016,7 +1024,7 @@ async fn apply_embedded_tunnel_heartbeat(
         failed_requests_delta: payload.window_failed_requests.or(payload.failed_requests),
         dns_failures_delta: payload.window_dns_failures.or(payload.dns_failures),
         stream_errors_delta: payload.window_stream_errors.or(payload.stream_errors),
-        proxy_metadata: payload.proxy_metadata,
+        proxy_metadata,
         proxy_version: payload.proxy_version,
     };
 
@@ -1080,7 +1088,17 @@ fn parse_embedded_tunnel_heartbeat_request(
         .map_err(|_| "invalid heartbeat payload".to_string())?;
 
     let node_id = payload.node_id.trim();
-    if node_id.is_empty() || node_id.len() > 36 || payload.heartbeat_id == 0 {
+    let heartbeat_session_id = payload
+        .heartbeat_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if node_id.is_empty()
+        || node_id.len() > 36
+        || payload.heartbeat_id == 0
+        || payload.heartbeat_session_id.is_some() && heartbeat_session_id.is_none()
+        || heartbeat_session_id.is_some_and(|value| value.len() > 128)
+    {
         return Err("invalid heartbeat payload".to_string());
     }
     if payload
@@ -1290,6 +1308,7 @@ mod tests {
             &data,
             br#"{
                 "node_id": "node-123",
+                "heartbeat_session_id": "process-123",
                 "heartbeat_id": 42,
                 "heartbeat_interval": 45,
                 "active_connections": 5,
@@ -1332,6 +1351,18 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("2.0.0")
         );
+        assert_eq!(
+            node.proxy_metadata
+                .as_ref()
+                .and_then(|value| value.get("heartbeat_session_id")),
+            Some(&json!("process-123"))
+        );
+        assert_eq!(
+            node.proxy_metadata
+                .as_ref()
+                .and_then(|value| value.get("heartbeat_id")),
+            Some(&json!(42))
+        );
     }
 
     #[tokio::test]
@@ -1353,6 +1384,122 @@ mod tests {
         .expect_err("heartbeat without heartbeat_id should fail");
 
         assert_eq!(error, "invalid heartbeat payload");
+    }
+
+    #[tokio::test]
+    async fn embedded_tunnel_heartbeat_rejects_invalid_heartbeat_session_id() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![sample_proxy_node(
+            "node-123",
+        )]));
+        let data = GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&repository));
+
+        let blank_session = br#"{
+            "node_id": "node-123",
+            "heartbeat_session_id": "   ",
+            "heartbeat_id": 1
+        }"#;
+        let oversized_session = format!(
+            r#"{{"node_id": "node-123", "heartbeat_session_id": "{}", "heartbeat_id": 1}}"#,
+            "x".repeat(129)
+        );
+
+        for body in [blank_session.as_slice(), oversized_session.as_bytes()] {
+            let error = apply_embedded_tunnel_heartbeat(&data, body)
+                .await
+                .expect_err("heartbeat with invalid session id should fail");
+
+            assert_eq!(error, "invalid heartbeat payload");
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_tunnel_heartbeat_dedupes_error_events_across_tunnel_instances() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![sample_proxy_node(
+            "node-123",
+        )]));
+        let data = GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&repository));
+
+        let heartbeat =
+            |session_id: &str, heartbeat_id: u64, error_events_total: u64, messages: &[&str]| {
+                let recent_errors = messages
+                    .iter()
+                    .enumerate()
+                    .map(|(index, message)| {
+                        json!({
+                            "timestamp_unix_secs": heartbeat_id * 10 + index as u64,
+                            "category": "ws_write",
+                            "message": message,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                json!({
+                    "node_id": "node-123",
+                    "heartbeat_session_id": session_id,
+                    "heartbeat_id": heartbeat_id,
+                    "heartbeat_interval": 45,
+                    "proxy_metadata": {
+                        "tunnel_metrics": {
+                            "error_events_total": error_events_total,
+                        },
+                        "recent_tunnel_errors": recent_errors,
+                    },
+                })
+                .to_string()
+            };
+
+        // First report from instance A is adopted as the baseline.
+        apply_embedded_tunnel_heartbeat(
+            &data,
+            heartbeat("process-a", 1, 2, &["e1", "e2"]).as_bytes(),
+        )
+        .await
+        .expect("heartbeat should succeed");
+        // Advancing cursor on instance A ingests only the new errors.
+        apply_embedded_tunnel_heartbeat(
+            &data,
+            heartbeat("process-a", 2, 4, &["e1", "e2", "e3", "e4"]).as_bytes(),
+        )
+        .await
+        .expect("heartbeat should succeed");
+        // A second tunnel instance reporting the same node starts a new baseline
+        // instead of double-counting its counters.
+        apply_embedded_tunnel_heartbeat(
+            &data,
+            heartbeat("process-b", 1, 2, &["e1", "e2"]).as_bytes(),
+        )
+        .await
+        .expect("heartbeat should succeed");
+        // Instance A reporting again after instance B is also treated as a new baseline.
+        apply_embedded_tunnel_heartbeat(
+            &data,
+            heartbeat("process-a", 3, 5, &["e3", "e4", "e5"]).as_bytes(),
+        )
+        .await
+        .expect("heartbeat should succeed");
+        apply_embedded_tunnel_heartbeat(
+            &data,
+            heartbeat("process-a", 4, 6, &["e4", "e5", "e6"]).as_bytes(),
+        )
+        .await
+        .expect("heartbeat should succeed");
+
+        let events = repository
+            .list_proxy_node_events("node-123", 20)
+            .await
+            .expect("list events should succeed");
+        let tunnel_error_details = events
+            .iter()
+            .filter(|event| event.event_type == "tunnel_err")
+            .filter_map(|event| event.detail.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tunnel_error_details,
+            vec![
+                "[ws_write] e6".to_string(),
+                "[ws_write] e4".to_string(),
+                "[ws_write] e3".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

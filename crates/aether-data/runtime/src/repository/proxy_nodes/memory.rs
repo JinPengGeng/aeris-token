@@ -1027,6 +1027,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dedupes_tunnel_error_events_across_heartbeat_sessions() {
+        let repository = InMemoryProxyNodeRepository::seed(vec![sample_node()]);
+
+        let heartbeat =
+            |session_id: &str, heartbeat_id: u64, error_events_total: u64, messages: &[&str]| {
+                let recent_errors = messages
+                    .iter()
+                    .enumerate()
+                    .map(|(index, message)| {
+                        json!({
+                            "timestamp_unix_secs": heartbeat_id * 10 + index as u64,
+                            "category": "ws_write",
+                            "message": message,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                ProxyNodeHeartbeatMutation {
+                    node_id: "node-1".to_string(),
+                    heartbeat_interval: Some(45),
+                    active_connections: None,
+                    total_requests_delta: None,
+                    avg_latency_ms: None,
+                    failed_requests_delta: None,
+                    dns_failures_delta: None,
+                    stream_errors_delta: None,
+                    proxy_metadata: Some(json!({
+                        "heartbeat_session_id": session_id,
+                        "heartbeat_id": heartbeat_id,
+                        "tunnel_metrics": {
+                            "error_events_total": error_events_total,
+                        },
+                        "recent_tunnel_errors": recent_errors,
+                    })),
+                    proxy_version: None,
+                }
+            };
+
+        // First report from instance A is adopted as the baseline.
+        repository
+            .apply_heartbeat(&heartbeat("process-a", 1, 2, &["e1", "e2"]))
+            .await
+            .expect("heartbeat should succeed");
+        // Advancing cursor on instance A ingests only the new errors.
+        repository
+            .apply_heartbeat(&heartbeat("process-a", 2, 4, &["e1", "e2", "e3", "e4"]))
+            .await
+            .expect("heartbeat should succeed");
+        // A second tunnel instance reporting the same node starts a new baseline
+        // instead of double-counting its counters.
+        repository
+            .apply_heartbeat(&heartbeat("process-b", 1, 2, &["e1", "e2"]))
+            .await
+            .expect("heartbeat should succeed");
+        // Instance A reporting again after instance B is also treated as a new baseline.
+        repository
+            .apply_heartbeat(&heartbeat("process-a", 3, 5, &["e3", "e4", "e5"]))
+            .await
+            .expect("heartbeat should succeed");
+        repository
+            .apply_heartbeat(&heartbeat("process-a", 4, 6, &["e4", "e5", "e6"]))
+            .await
+            .expect("heartbeat should succeed");
+
+        let events = repository
+            .list_proxy_node_events("node-1", 20)
+            .await
+            .expect("list events should succeed");
+        let tunnel_error_details = events
+            .iter()
+            .filter(|event| event.event_type == "tunnel_err")
+            .filter_map(|event| event.detail.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tunnel_error_details,
+            vec![
+                "[ws_write] e6".to_string(),
+                "[ws_write] e4".to_string(),
+                "[ws_write] e3".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn lists_seeded_proxy_node_events_in_descending_order() {
         let repository = InMemoryProxyNodeRepository::seed_with_events(
             vec![sample_node()],
