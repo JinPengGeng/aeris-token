@@ -58,6 +58,7 @@ fork 修复并验证（急用先落地）
 | Star History 图表域名修复 | #159 | README star-history 图表换用 star-history.dera.page（trivial） | 移植自上游 fawney19/Aether#729；上游合并后 sync 回销即可丢弃 |
 | usage 请求记录默认降为 basic | #162 | 移植自上游 fawney19/Aether#640（Kayphoon）：未配置 request_record_level 时默认 basic，不落请求/响应 body | 上游 PR 待合入 |
 | UUID 校验改用 uuid parser | #163 | 移植自上游 fawney19/Aether#708（AAEE86）：frontdoor request_id 与 kiro machine id 的 UUID 形态校验改用 uuid::Uuid::parse_str | 上游 PR 待合入 |
+| provider 成本归因 | #166 | 移植自上游 fawney19/Aether#638（RWDai）：usage 聚合 provider_id/provider_name 过滤 + GET /api/admin/usage/attribution 用户成本归因 + Cost Analysis 归因 UI | 跟踪上游 fawney19/Aether#638，上游合并后 sync 回销 |
 
 ## 5. 当前深度定制跟踪表（定制轨道）
 
