@@ -708,7 +708,9 @@ async function discoverActiveRequests() {
 
     if (unseenActiveRequestIds.length > 0) {
       unseenActiveRequestIds.forEach(id => discoveredActiveRequestIds.add(id))
-      await refreshData()
+      // 新发现的活跃请求仍需一次列表请求补齐展示字段，但瞬时空响应/失败
+      // 不应清空已渲染的记录快照。
+      await refreshData({ preserveOnFailure: true, preserveOnEmpty: true })
     }
   } catch (error) {
     log.error('发现新活跃请求失败:', error)
@@ -786,7 +788,10 @@ watch(hasActiveRequests, (hasActive) => {
 function startGlobalAutoRefresh() {
   if (!isPageVisible.value) return
   if (globalAutoRefreshTimer) return
-  globalAutoRefreshTimer = setInterval(refreshData, GLOBAL_AUTO_REFRESH_INTERVAL)
+  // 后台定时全量刷新不清空已渲染快照：瞬时空响应/失败保留最后成功数据。
+  globalAutoRefreshTimer = setInterval(() => {
+    void refreshData({ preserveOnFailure: true, preserveOnEmpty: true })
+  }, GLOBAL_AUTO_REFRESH_INTERVAL)
 }
 
 // 停止全局自动刷新
@@ -1063,7 +1068,10 @@ async function handleFilterClientFamilyChange(value: string) {
 }
 
 // 刷新数据
-async function refreshData() {
+async function refreshData(options: {
+  preserveOnFailure?: boolean
+  preserveOnEmpty?: boolean
+} = {}) {
   if (!isPageVisible.value) return
   if (refreshInFlight) return refreshInFlight
 
@@ -1072,12 +1080,13 @@ async function refreshData() {
       await loadRecords(
         { page: currentPage.value, pageSize: pageSize.value },
         getCurrentFilters(),
-        timeRange.value
+        timeRange.value,
+        options
       )
       return
     }
 
-    await loadStats(timeRange.value)
+    await loadStats(timeRange.value, options)
   })()
 
   try {

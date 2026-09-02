@@ -297,6 +297,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+          # Ported from YachDemo/Aether@1c7531db (.github/workflows/build-arm64.yml).
+          # gha cache import failures never fail the build (cold build instead);
+          # ignore-error on cache-to keeps cache export outages from failing the release.
+          cache-from: type=gha,scope=aeris-token-app
+          cache-to: type=gha,mode=max,ignore-error=true,scope=aeris-token-app
+          provenance: mode=max
+          sbom: true
 
       - name: Download release package artifact
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5

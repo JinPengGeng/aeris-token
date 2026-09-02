@@ -1716,8 +1716,11 @@ function scheduleTimelineMount() {
     showTimeline.value = true
     return
   }
+  // 先让抽屉过渡动画完成一帧，再把重量级时间线挂上，避免同帧竞争。
   timelineMountTimer = window.setTimeout(() => {
-    showTimeline.value = true
+    window.requestAnimationFrame(() => {
+      showTimeline.value = true
+    })
   }, TIMELINE_MOUNT_DELAY_MS)
 }
 
