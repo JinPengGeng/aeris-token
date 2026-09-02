@@ -68,7 +68,7 @@ class FakeGitHub {
     this.pullFiles = {
       files: [
         {
-          filename: 'src/request.ts',
+          filename: 'crates/aether-gateway/src/request.ts',
           status: 'modified',
           additions: 2,
           deletions: 1,
@@ -1702,4 +1702,178 @@ test('reservation treats a processed ledger identity as a replay even after curr
   assert.equal(reservation.state, 'terminal');
   assert.deepEqual(reservation.result, { state: 'noop', reason: 'event_replayed', comment_id: null });
   assert.equal(managedMetadata(github).source_key, 'issues:newer-delivery');
+});
+
+function docsOnlyPullFiles(github) {
+  github.pullFiles = {
+    files: [
+      {
+        filename: 'docs/guide.md',
+        status: 'modified',
+        additions: 2,
+        deletions: 1,
+        changes: 3,
+        patch: '@@ -1 +1 @@\n-old\n+new',
+      },
+    ],
+    truncated: false,
+  };
+}
+
+const completedRunEvent = {
+  action: 'completed',
+  sender: { login: 'github-actions[bot]' },
+  workflow_run: {
+    conclusion: 'success',
+    head_sha: 'c'.repeat(40),
+    pull_requests: [{ number: 7 }],
+  },
+};
+
+function reviewerCompletion(calls) {
+  return () => ({
+    async complete() {
+      calls.count += 1;
+      return {
+        content: JSON.stringify({
+          schema_version: 1,
+          agent: 'reviewer',
+          summary: 'No blocking issue found.',
+          verdict: 'ready_for_human_review',
+          findings: [],
+          test_recommendations: [],
+          next_agent: null,
+        }),
+        model: { alias: 'default', id: 'test-model' },
+        executor: TRUSTED_AGENT_EXECUTOR,
+        durationMs: 1,
+        usage: null,
+      };
+    },
+  });
+}
+
+test('workflow_run skips review when the pull request has no reviewable changes', async () => {
+  const github = new FakeGitHub();
+  docsOnlyPullFiles(github);
+  let constructed = false;
+  const result = await runAutomation({
+    kind: 'pull',
+    eventName: 'workflow_run',
+    event: completedRunEvent,
+    environment: environment(),
+    repoRoot,
+    contracts: enabledContracts('reviewer'),
+    policySha,
+    github,
+    aiClientFactory: () => {
+      constructed = true;
+      throw new Error('must not construct');
+    },
+  });
+  assert.deepEqual(result, { state: 'skipped', reason: 'no_reviewable_changes' });
+  assert.equal(constructed, false);
+  assert.equal(github.requiredCheckQueries, 0);
+  assert.equal(github.comments.length, 0);
+});
+
+test('no-code workflow_run preflight flows through the terminal phase contract', async () => {
+  const github = new FakeGitHub();
+  github.pullFiles = { files: [], truncated: false };
+  github.pull.changed_files = 0;
+  const common = {
+    kind: 'pull',
+    eventName: 'workflow_run',
+    event: completedRunEvent,
+    environment: environment(),
+    repoRoot,
+    contracts: enabledContracts('reviewer'),
+    policySha,
+    github,
+  };
+  const preflight = await runPreflightPhase(common);
+  assert.equal(validatePreflightArtifact(preflight).state, 'terminal');
+  assert.deepEqual(preflight.decision, { action: 'skip', reason: 'no_reviewable_changes' });
+  const reservation = await runReservationPhase({ ...common, artifact: preflight });
+  assert.equal(validateReservationArtifact(reservation).state, 'terminal');
+  assert.deepEqual(reservation.result, {
+    state: 'skipped',
+    reason: 'no_reviewable_changes',
+    comment_id: null,
+  });
+  const analysis = await runAnalysisPhase({
+    ...common,
+    artifact: reservation,
+    aiClientFactory: () => {
+      throw new Error('must not construct');
+    },
+  });
+  assert.equal(validateAnalysisArtifact(analysis).state, 'terminal');
+  const publication = await runPublishPhase({ ...common, artifact: analysis });
+  assert.equal(validatePublicationArtifact(publication).state, 'skipped');
+  assert.equal(publication.result.reason, 'no_reviewable_changes');
+  assert.equal(github.comments.length, 0);
+});
+
+test('workflow_run fails open when the pull file list is truncated', async () => {
+  const github = new FakeGitHub();
+  docsOnlyPullFiles(github);
+  github.pullFiles.truncated = true;
+  await assert.rejects(
+    () =>
+      runAutomation({
+        kind: 'pull',
+        eventName: 'workflow_run',
+        event: completedRunEvent,
+        environment: environment(),
+        repoRoot,
+        contracts: enabledContracts('reviewer'),
+        policySha,
+        github,
+      }),
+    /file list is incomplete/,
+  );
+  assert.equal(github.comments.length, 0);
+});
+
+test('/agent review on a no-code pull request still runs the full chain', async () => {
+  const github = new FakeGitHub();
+  docsOnlyPullFiles(github);
+  const calls = { count: 0 };
+  const result = await runAutomation({
+    kind: 'pull',
+    eventName: 'issue_comment',
+    event: {
+      sender: { login: 'maintainer' },
+      issue: { number: 7, pull_request: {} },
+      comment: { id: 51, body: '/agent review', author_association: 'MEMBER' },
+    },
+    environment: environment(),
+    repoRoot,
+    contracts: enabledContracts('reviewer'),
+    policySha,
+    github,
+    aiClientFactory: reviewerCompletion(calls),
+  });
+  assert.equal(result.state, 'published');
+  assert.equal(calls.count, 1);
+});
+
+test('workflow_dispatch on a no-code pull request still runs the full chain', async () => {
+  const github = new FakeGitHub();
+  docsOnlyPullFiles(github);
+  const calls = { count: 0 };
+  const result = await runAutomation({
+    kind: 'pull',
+    eventName: 'workflow_dispatch',
+    event: {},
+    environment: environment({ AERIS_AGENT: 'review', AERIS_PULL_REQUEST_NUMBER: '7' }),
+    repoRoot,
+    contracts: enabledContracts('reviewer'),
+    policySha,
+    github,
+    aiClientFactory: reviewerCompletion(calls),
+  });
+  assert.equal(result.state, 'published');
+  assert.equal(calls.count, 1);
 });

@@ -1,0 +1,33 @@
+# Single source of truth for change classification. The Rust CI and Frontend CI
+# workflows pass this file to dorny/paths-filter, and the trusted automation
+# runtime (.github/automation/src/change-filters.mjs) matches pull request file
+# lists against the same groups to skip reviews of PRs with no reviewable
+# content. Patterns are limited to exact paths and directory-recursive
+# `dir/**` prefixes so both consumers agree on their meaning. The automation
+# group covers this file itself so filter-only changes still run the
+# automation contracts.
+rust:
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'rust-toolchain.toml'
+  - 'crates/**'
+  - 'apps/**'
+  - '.github/workflows/rust-ci.yml'
+data:
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'rust-toolchain.toml'
+  - 'crates/aether-data/**'
+  - '.github/workflows/rust-ci.yml'
+frontend:
+  - 'frontend/**'
+  - '.github/workflows/frontend-ci.yml'
+automation:
+  - '.github/agents.yml'
+  - '.github/ai-executors.json'
+  - '.github/automation-policy.yml'
+  - '.github/change-filters.yml'
+  - '.github/automation/**'
+  - '.github/upstream-sync-policy.yml'
+  - '.github/upstream-sync-state.json'
+  - '.github/workflows/**'

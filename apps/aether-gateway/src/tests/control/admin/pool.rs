@@ -7,8 +7,15 @@ use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data_contracts::repository::pool_scores::{
     PoolMemberHardState, PoolMemberIdentity, PoolMemberProbeStatus, StoredPoolMemberScore,
 };
-use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
+use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogKeyListQuery, ProviderCatalogReadRepository,
+    ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
+    StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
+};
 use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
+use aether_data_contracts::DataLayerError;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::routing::{any, get, post};
 use axum::{extract::Request, Router};
@@ -394,6 +401,434 @@ async fn gateway_handles_admin_pool_batch_import_locally_with_trusted_admin_prin
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+struct FailAfterCreateKeysProviderCatalogRepository {
+    inner: InMemoryProviderCatalogReadRepository,
+    remaining_successful_creates: std::sync::atomic::AtomicUsize,
+}
+
+impl FailAfterCreateKeysProviderCatalogRepository {
+    fn seed(
+        providers: Vec<StoredProviderCatalogProvider>,
+        endpoints: Vec<StoredProviderCatalogEndpoint>,
+        keys: Vec<StoredProviderCatalogKey>,
+        successful_creates_before_failure: usize,
+    ) -> Self {
+        Self {
+            inner: InMemoryProviderCatalogReadRepository::seed(providers, endpoints, keys),
+            remaining_successful_creates: std::sync::atomic::AtomicUsize::new(
+                successful_creates_before_failure,
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderCatalogReadRepository for FailAfterCreateKeysProviderCatalogRepository {
+    async fn list_providers(
+        &self,
+        active_only: bool,
+    ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
+        self.inner.list_providers(active_only).await
+    }
+
+    async fn list_providers_by_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
+        self.inner.list_providers_by_ids(provider_ids).await
+    }
+
+    async fn list_endpoints_by_ids(
+        &self,
+        endpoint_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+        self.inner.list_endpoints_by_ids(endpoint_ids).await
+    }
+
+    async fn list_endpoints_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+        self.inner
+            .list_endpoints_by_provider_ids(provider_ids)
+            .await
+    }
+
+    async fn list_keys_by_ids(
+        &self,
+        key_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        self.inner.list_keys_by_ids(key_ids).await
+    }
+
+    async fn list_keys_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        self.inner.list_keys_by_provider_ids(provider_ids).await
+    }
+
+    async fn list_key_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        self.inner
+            .list_key_summaries_by_provider_ids(provider_ids)
+            .await
+    }
+
+    async fn list_key_maintenance_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKeyMaintenanceSummary>, DataLayerError> {
+        self.inner
+            .list_key_maintenance_summaries_by_provider_ids(provider_ids)
+            .await
+    }
+
+    async fn list_keys_page(
+        &self,
+        query: &ProviderCatalogKeyListQuery,
+    ) -> Result<StoredProviderCatalogKeyPage, DataLayerError> {
+        self.inner.list_keys_page(query).await
+    }
+
+    async fn list_key_stats_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKeyStats>, DataLayerError> {
+        self.inner
+            .list_key_stats_by_provider_ids(provider_ids)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderCatalogWriteRepository for FailAfterCreateKeysProviderCatalogRepository {
+    async fn create_provider(
+        &self,
+        provider: &StoredProviderCatalogProvider,
+        shift_existing_priorities_from: Option<i32>,
+    ) -> Result<StoredProviderCatalogProvider, DataLayerError> {
+        self.inner
+            .create_provider(provider, shift_existing_priorities_from)
+            .await
+    }
+
+    async fn update_provider(
+        &self,
+        provider: &StoredProviderCatalogProvider,
+    ) -> Result<StoredProviderCatalogProvider, DataLayerError> {
+        self.inner.update_provider(provider).await
+    }
+
+    async fn delete_provider(&self, provider_id: &str) -> Result<bool, DataLayerError> {
+        self.inner.delete_provider(provider_id).await
+    }
+
+    async fn cleanup_deleted_provider_refs(
+        &self,
+        provider_id: &str,
+        provider_deleted: bool,
+        endpoint_ids: &[String],
+        key_ids: &[String],
+    ) -> Result<(), DataLayerError> {
+        self.inner
+            .cleanup_deleted_provider_refs(provider_id, provider_deleted, endpoint_ids, key_ids)
+            .await
+    }
+
+    async fn create_endpoint(
+        &self,
+        endpoint: &StoredProviderCatalogEndpoint,
+    ) -> Result<StoredProviderCatalogEndpoint, DataLayerError> {
+        self.inner.create_endpoint(endpoint).await
+    }
+
+    async fn update_endpoint(
+        &self,
+        endpoint: &StoredProviderCatalogEndpoint,
+    ) -> Result<StoredProviderCatalogEndpoint, DataLayerError> {
+        self.inner.update_endpoint(endpoint).await
+    }
+
+    async fn delete_endpoint(&self, endpoint_id: &str) -> Result<bool, DataLayerError> {
+        self.inner.delete_endpoint(endpoint_id).await
+    }
+
+    async fn create_key(
+        &self,
+        key: &StoredProviderCatalogKey,
+    ) -> Result<StoredProviderCatalogKey, DataLayerError> {
+        let within_budget = self
+            .remaining_successful_creates
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok();
+        if !within_budget {
+            return Err(DataLayerError::UnexpectedValue(
+                "injected provider catalog create_key failure".to_string(),
+            ));
+        }
+        self.inner.create_key(key).await
+    }
+
+    async fn update_key(
+        &self,
+        key: &StoredProviderCatalogKey,
+    ) -> Result<StoredProviderCatalogKey, DataLayerError> {
+        self.inner.update_key(key).await
+    }
+
+    async fn update_keys(
+        &self,
+        keys: &[StoredProviderCatalogKey],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        self.inner.update_keys(keys).await
+    }
+
+    async fn update_key_upstream_metadata(
+        &self,
+        key_id: &str,
+        upstream_metadata: Option<&serde_json::Value>,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, DataLayerError> {
+        self.inner
+            .update_key_upstream_metadata(key_id, upstream_metadata, updated_at_unix_secs)
+            .await
+    }
+
+    async fn upsert_key_upstream_metadata_namespace(
+        &self,
+        key_id: &str,
+        namespace: &str,
+        value: &serde_json::Value,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, DataLayerError> {
+        self.inner
+            .upsert_key_upstream_metadata_namespace(key_id, namespace, value, updated_at_unix_secs)
+            .await
+    }
+
+    async fn update_key_model_fetch_state(
+        &self,
+        key_id: &str,
+        allowed_models: Option<&serde_json::Value>,
+        last_models_fetch_at_unix_secs: Option<u64>,
+        last_models_fetch_error: Option<&str>,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, DataLayerError> {
+        self.inner
+            .update_key_model_fetch_state(
+                key_id,
+                allowed_models,
+                last_models_fetch_at_unix_secs,
+                last_models_fetch_error,
+                updated_at_unix_secs,
+            )
+            .await
+    }
+
+    async fn update_key_model_fetch_success(
+        &self,
+        key_id: &str,
+        allowed_models: Option<&serde_json::Value>,
+        last_models_fetch_at_unix_secs: u64,
+        upstream_metadata_updates: &[ProviderCatalogUpstreamMetadataNamespaceUpdate],
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, DataLayerError> {
+        self.inner
+            .update_key_model_fetch_success(
+                key_id,
+                allowed_models,
+                last_models_fetch_at_unix_secs,
+                upstream_metadata_updates,
+                updated_at_unix_secs,
+            )
+            .await
+    }
+
+    async fn delete_key(&self, key_id: &str) -> Result<bool, DataLayerError> {
+        self.inner.delete_key(key_id).await
+    }
+
+    async fn clear_key_oauth_invalid_marker(&self, key_id: &str) -> Result<bool, DataLayerError> {
+        self.inner.clear_key_oauth_invalid_marker(key_id).await
+    }
+
+    async fn update_key_oauth_credentials(
+        &self,
+        key_id: &str,
+        encrypted_api_key: &str,
+        encrypted_auth_config: Option<&str>,
+        expires_at_unix_secs: Option<u64>,
+    ) -> Result<bool, DataLayerError> {
+        self.inner
+            .update_key_oauth_credentials(
+                key_id,
+                encrypted_api_key,
+                encrypted_auth_config,
+                expires_at_unix_secs,
+            )
+            .await
+    }
+
+    async fn update_key_oauth_runtime_state(
+        &self,
+        key_id: &str,
+        oauth_invalid_at_unix_secs: Option<u64>,
+        oauth_invalid_reason: Option<&str>,
+        encrypted_auth_config_update: Option<&str>,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, DataLayerError> {
+        self.inner
+            .update_key_oauth_runtime_state(
+                key_id,
+                oauth_invalid_at_unix_secs,
+                oauth_invalid_reason,
+                encrypted_auth_config_update,
+                updated_at_unix_secs,
+            )
+            .await
+    }
+
+    async fn update_key_health_state(
+        &self,
+        key_id: &str,
+        is_active: bool,
+        health_by_format: Option<&serde_json::Value>,
+        circuit_breaker_by_format: Option<&serde_json::Value>,
+    ) -> Result<bool, DataLayerError> {
+        self.inner
+            .update_key_health_state(
+                key_id,
+                is_active,
+                health_by_format,
+                circuit_breaker_by_format,
+            )
+            .await
+    }
+
+    async fn reset_key_error_count(&self, key_id: &str) -> Result<bool, DataLayerError> {
+        self.inner.reset_key_error_count(key_id).await
+    }
+}
+
+#[tokio::test]
+async fn local_admin_pool_batch_import_attaches_admin_audit() {
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-openai", "openai", 10)],
+        vec![sample_endpoint(
+            "endpoint-openai-chat",
+            "provider-openai",
+            "openai:chat",
+            "https://api.openai.com/v1",
+        )],
+        vec![],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository,
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/batch-import",
+        Some(json!({
+            "keys": [
+                { "name": "audit imported key", "api_key": "sk-audit-imported" }
+            ]
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let audit = response
+        .extensions()
+        .get::<AdminAuditEvent>()
+        .expect("pool batch import should attach admin audit");
+    assert_eq!(audit.event_name, "admin_provider_keys_batch_imported");
+    assert_eq!(audit.action, "batch_import_provider_keys");
+    assert_eq!(audit.target_type, "provider");
+    assert_eq!(audit.target_id, "provider-openai");
+}
+
+#[tokio::test]
+async fn local_admin_pool_batch_import_reports_imported_keys_when_write_fails() {
+    let provider_catalog_repository = Arc::new(FailAfterCreateKeysProviderCatalogRepository::seed(
+        vec![sample_provider("provider-openai", "openai", 10)],
+        vec![sample_endpoint(
+            "endpoint-openai-chat",
+            "provider-openai",
+            "openai:chat",
+            "https://api.openai.com/v1",
+        )],
+        vec![],
+        1,
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository.clone(),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/batch-import",
+        Some(json!({
+            "keys": [
+                { "name": "imported key", "api_key": "sk-imported" },
+                { "name": "failing key", "api_key": "sk-failing" },
+                { "name": "unprocessed key", "api_key": "sk-unprocessed" }
+            ]
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let audit = response
+        .extensions()
+        .get::<AdminAuditEvent>()
+        .expect("pool batch import should attach admin audit even when writes fail mid-loop");
+    assert_eq!(audit.event_name, "admin_provider_keys_batch_imported");
+    let body_bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("json body should parse");
+    assert_eq!(payload["imported"], 1);
+    assert_eq!(payload["skipped"], 0);
+    let errors = payload["errors"]
+        .as_array()
+        .expect("errors should be an array");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0]["index"], 1);
+    let reason = errors[0]["reason"].as_str().expect("reason should be text");
+    assert!(
+        reason.contains("导入已中止"),
+        "abort reason should explain the import stopped, got: {reason}"
+    );
+
+    let keys = provider_catalog_repository
+        .list_keys_by_provider_ids(&["provider-openai".to_string()])
+        .await
+        .expect("keys should read");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].name, "imported key");
 }
 
 #[tokio::test]

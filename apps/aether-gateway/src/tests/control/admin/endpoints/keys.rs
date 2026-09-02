@@ -11,20 +11,23 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
 use aether_data_contracts::DataLayerError;
-use axum::body::Body;
+use axum::body::{to_bytes, Body, Bytes};
 use axum::routing::any;
 use axum::{extract::Request, Json, Router};
-use http::StatusCode;
+use http::{HeaderMap, HeaderValue, StatusCode};
 use serde_json::json;
 
 use super::super::super::{
     build_router_with_state, build_state_with_execution_runtime_override, sample_endpoint,
     sample_key, sample_provider, start_server, AppState,
 };
+use crate::admin_api::{maybe_build_local_admin_response, AdminRouteRequest};
+use crate::audit::AdminAuditEvent;
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
     TRUSTED_ADMIN_USER_ROLE_HEADER,
 };
+use crate::control::resolve_public_request_context;
 use crate::data::GatewayDataState;
 
 const PROVIDER_KEYS_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
@@ -1212,6 +1215,192 @@ async fn gateway_fetches_allowed_models_immediately_when_creating_key_with_auto_
 
     gateway_handle.abort();
     execution_runtime_handle.abort();
+}
+
+#[test]
+fn gateway_returns_created_key_with_model_sync_warning_when_auto_fetch_fails() {
+    run_provider_keys_test(
+        "gateway_returns_created_key_with_model_sync_warning_when_auto_fetch_fails",
+        gateway_returns_created_key_with_model_sync_warning_when_auto_fetch_fails_impl,
+    );
+}
+
+async fn gateway_returns_created_key_with_model_sync_warning_when_auto_fetch_fails_impl() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(|Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.url, "https://api.openai.example/v1/models");
+            Json(json!({
+                "request_id": "req-create-key-auto-fetch-fails",
+                "status_code": 502,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "error": {
+                            "message": "upstream temporarily unavailable"
+                        }
+                    }
+                }
+            }))
+        }),
+    );
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-openai", "openai", 10)],
+        vec![sample_endpoint(
+            "endpoint-openai-chat",
+            "provider-openai",
+            "openai:chat",
+            "https://api.openai.example/v1",
+        )],
+        vec![],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-openai/keys"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "api_formats": ["openai:chat"],
+            "api_key": "sk-created-openai",
+            "name": "created key with failing auto fetch",
+            "auto_fetch_models": true
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["provider_id"], "provider-openai");
+    assert_eq!(payload["name"], "created key with failing auto fetch");
+    assert_eq!(payload["auto_fetch_models"], true);
+    let warning = payload["model_sync_warning"]
+        .as_str()
+        .expect("model_sync_warning should be present");
+    assert!(
+        warning.contains("开启自动获取模型后同步上游模型失败"),
+        "warning should describe the model sync failure, got: {warning}"
+    );
+    assert!(
+        payload["last_models_fetch_error"].is_string(),
+        "last_models_fetch_error should be recorded on the created key"
+    );
+
+    let keys = provider_catalog_repository
+        .list_keys_by_provider_ids(&["provider-openai".to_string()])
+        .await
+        .expect("keys should read");
+    assert_eq!(keys.len(), 1);
+    assert!(keys[0].auto_fetch_models);
+    assert!(keys[0].last_models_fetch_error.is_some());
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn local_admin_provider_key_create_attaches_admin_audit() {
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-openai", "openai", 10)],
+        vec![],
+        vec![],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository,
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(GATEWAY_HEADER, HeaderValue::from_static("rust-phase3b"));
+    headers.insert(
+        TRUSTED_ADMIN_USER_ID_HEADER,
+        HeaderValue::from_static("admin-user-123"),
+    );
+    headers.insert(
+        TRUSTED_ADMIN_USER_ROLE_HEADER,
+        HeaderValue::from_static("admin"),
+    );
+    headers.insert(
+        TRUSTED_ADMIN_SESSION_ID_HEADER,
+        HeaderValue::from_static("session-123"),
+    );
+    let request_context = resolve_public_request_context(
+        &state,
+        &http::Method::POST,
+        &"/api/admin/endpoints/providers/provider-openai/keys"
+            .parse()
+            .expect("uri should parse"),
+        &headers,
+        "trace-123",
+    )
+    .await
+    .expect("request context should resolve");
+    let body = Bytes::from(
+        json!({
+            "api_formats": ["openai:chat"],
+            "api_key": "sk-audit-create",
+            "name": "audit created key"
+        })
+        .to_string(),
+    );
+    let response = maybe_build_local_admin_response(AdminRouteRequest::new(
+        &state,
+        &request_context,
+        &headers,
+        Some(&body),
+    ))
+    .await
+    .expect("local admin response should build")
+    .expect("create key route should resolve locally");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let (event_name, action, target_type, target_id) = {
+        let audit = response
+            .extensions()
+            .get::<AdminAuditEvent>()
+            .expect("provider key create should attach admin audit");
+        (
+            audit.event_name,
+            audit.action,
+            audit.target_type,
+            audit.target_id.clone(),
+        )
+    };
+    assert_eq!(event_name, "admin_provider_key_created");
+    assert_eq!(action, "create_provider_key");
+    assert_eq!(target_type, "provider_key");
+    let body_bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("json body should parse");
+    assert_eq!(
+        target_id,
+        payload["id"].as_str().expect("key id should be present")
+    );
 }
 
 #[tokio::test]

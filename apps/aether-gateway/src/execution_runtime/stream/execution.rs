@@ -13699,6 +13699,10 @@ mod tests {
                 Arc::clone(&request_candidate_repository),
                 Arc::clone(&usage_repository),
             )
+            .with_system_config_values_for_tests([(
+                "request_record_level".to_string(),
+                json!("full"),
+            )])
             .with_provider_catalog_reader(Arc::new(provider_catalog_stop_429_for_plan(&plan)))
             .with_encryption_key_for_tests("development-key"),
         );
@@ -14716,7 +14720,11 @@ mod tests {
                 crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
                     Arc::clone(&request_candidate_repository),
                     Arc::clone(&usage_repository),
-                ),
+                )
+                .with_system_config_values_for_tests([(
+                    "request_record_level".to_string(),
+                    json!("full"),
+                )]),
             )
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
                 enabled: true,
