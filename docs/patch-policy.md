@@ -54,6 +54,7 @@ fork 修复并验证（急用先落地）
 | 模型同步宽限保留 | #119 | 不完整快照不得静默删除可用模型（C-04 契约） | 待提上游 PR |
 | ranking_seed/时间参数拆分 | #120 | 排序种子不得作时间戳用于准入检查 | 待提上游 PR |
 | integration tests RUST_MIN_STACK | #159 | CI 给 integration-tests 测试 bin 设 16MB 栈（trivial） | 移植自上游 fawney19/Aether#706；上游合并后 sync 回销即可丢弃 |
+| Star History 图表域名修复 | #159 | README star-history 图表换用 star-history.dera.page（trivial） | 移植自上游 fawney19/Aether#729；上游合并后 sync 回销即可丢弃 |
 
 ## 5. 当前深度定制跟踪表（定制轨道）
 
