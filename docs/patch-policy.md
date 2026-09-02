@@ -53,6 +53,7 @@ fork 修复并验证（急用先落地）
 | Responses SSE 预提交语义错误分支 | #121 | 移植自 ZipperCode/Aether@f86e9941 | 移植自社区；上游 #733 相邻在做，观察 |
 | 模型同步宽限保留 | #119 | 不完整快照不得静默删除可用模型（C-04 契约） | 待提上游 PR |
 | ranking_seed/时间参数拆分 | #120 | 排序种子不得作时间戳用于准入检查 | 待提上游 PR |
+| UUID 校验改用 uuid parser | #163 | 移植自上游 fawney19/Aether#708（AAEE86）：frontdoor request_id 与 kiro machine id 的 UUID 形态校验改用 uuid::Uuid::parse_str | 上游 PR 待合入 |
 
 ## 5. 当前深度定制跟踪表（定制轨道）
 
