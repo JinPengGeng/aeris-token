@@ -3320,6 +3320,15 @@ fn maybe_build_implicit_sync_finalize_outcome(
         return Ok(None);
     };
 
+    // Only the stream-captured path may hand raw bytes to finalize: there they are an SSE
+    // capture that has to be aggregated. When the provider body already parsed as JSON the
+    // bytes are just its own encoding, and feeding them to the stream aggregators would
+    // fail closed, so the JSON body is the single source of truth.
+    let body_base64 = if body_json.is_some() {
+        None
+    } else {
+        body_base64.clone()
+    };
     let payload = GatewaySyncReportRequest {
         trace_id: trace_id.to_string(),
         report_kind: report_kind.to_string(),
@@ -3328,7 +3337,7 @@ fn maybe_build_implicit_sync_finalize_outcome(
         headers: headers.clone(),
         body_json: body_json.clone(),
         client_body_json: None,
-        body_base64: body_base64.clone(),
+        body_base64,
         telemetry: telemetry.clone(),
     };
     let Some(outcome) = maybe_build_sync_finalize_outcome(trace_id, decision, &payload)? else {
