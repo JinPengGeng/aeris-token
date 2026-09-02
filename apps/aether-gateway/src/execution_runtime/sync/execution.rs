@@ -34,6 +34,7 @@ use crate::ai_serving::api::{
     implicit_sync_finalize_report_kind, maybe_build_sync_finalize_outcome, LocalCoreSyncErrorKind,
     LocalCoreSyncFinalizeOutcome,
 };
+use crate::ai_serving::record_local_runtime_candidate_skip_reason;
 use crate::api::response::{
     attach_control_metadata_headers, build_client_response, build_client_response_from_parts,
     build_client_response_from_parts_with_mutator,
@@ -78,7 +79,9 @@ use crate::orchestration::{
     LocalExecutionEffectContext, LocalHealthFailureEffect, LocalHealthSuccessEffect,
     LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect, LocalPoolErrorEffect,
 };
-use crate::provider_pool_demand::acquire_provider_pool_in_flight_guard;
+use crate::provider_pool_demand::{
+    acquire_provider_pool_execution_guard, ProviderPoolInFlightAdmission,
+};
 use crate::request_candidate_runtime::{
     ensure_execution_request_candidate_slot, record_local_request_candidate_extra_data,
     record_local_request_candidate_status, record_local_request_candidate_status_snapshot,
@@ -1995,6 +1998,37 @@ async fn execute_execution_runtime_sync_impl(
         .unwrap_or_else(|| "-".to_string());
     let candidate_started_at = Instant::now();
     let candidate_started_unix_secs = current_request_candidate_unix_ms();
+    let _provider_pool_in_flight_guard = match acquire_provider_pool_execution_guard(state, &plan)
+        .await?
+    {
+        ProviderPoolInFlightAdmission::Acquired(guard) => guard,
+        ProviderPoolInFlightAdmission::Saturated { limit } => {
+            record_local_runtime_candidate_skip_reason(
+                state,
+                trace_id,
+                "provider_key_concurrency_limit_reached",
+            );
+            if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
+                *retry_scope = AiAttemptRetryScope::Candidate;
+            }
+            record_local_request_candidate_status(
+                state,
+                &plan,
+                report_context.as_ref(),
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Skipped,
+                    status_code: Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
+                    error_type: Some("provider_key_concurrency_limit_reached".to_string()),
+                    error_message: Some(format!("provider key concurrency limit reached: {limit}")),
+                    latency_ms: Some(0),
+                    started_at_unix_ms: Some(candidate_started_unix_secs),
+                    finished_at_unix_ms: Some(candidate_started_unix_secs),
+                },
+            )
+            .await;
+            return Ok(None);
+        }
+    };
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
     let usage_data = state.usage_lifecycle_data_state().as_ref().clone();
     state
@@ -2024,14 +2058,6 @@ async fn execute_execution_runtime_sync_impl(
         candidate_started_at,
     );
     let result = (async {
-    let _provider_pool_in_flight_guard = acquire_provider_pool_in_flight_guard(
-        state.runtime_state.clone(),
-        &plan.provider_id,
-        plan_request_id.as_str(),
-        plan_candidate_id.as_deref(),
-        key_id.as_str(),
-    )
-    .await;
     record_sync_execution_active(
         state,
         &plan,
