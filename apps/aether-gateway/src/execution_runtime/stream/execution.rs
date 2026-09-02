@@ -6467,6 +6467,14 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let prefetch_for_cyber_failover =
         is_openai_responses_family_format(plan.provider_api_format.as_str())
             && cyber_continue_failover_enabled(state).await;
+    // 同格式 Responses SSE 在首个输出边界之前，上游仍可能以 response.failed 宣告语义失败；
+    // 仅见 response.created 不足以提交客户端 HTTP 200，预取必须等到输出边界或失败事件。
+    let same_format_openai_responses = plan
+        .provider_api_format
+        .eq_ignore_ascii_case("openai:responses")
+        && plan
+            .provider_api_format
+            .eq_ignore_ascii_case(&plan.client_api_format);
     let stream_commit_policy = StreamCommitPolicy::for_response(
         direct_stream_finalize_kind.is_some(),
         upstream_content_type,
@@ -7029,7 +7037,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
 
                     if anthropic_commit_ready
                         || (matches!(inspection, StreamPrefetchInspection::NonError)
-                            && (!prefetch_for_cyber_failover
+                            && (!(prefetch_for_cyber_failover || same_format_openai_responses)
                                 || prefetched_openai_responses_body_has_output_boundary(
                                     &prefetched_inspection_body,
                                 )))
@@ -9070,6 +9078,75 @@ mod tests {
         .expect("execution should succeed")
     }
 
+    /// 以给定上游 SSE 片段逐个 Data 帧执行同格式 Responses 流，返回客户端响应。
+    async fn execute_same_format_responses_chunks(
+        request_id: &str,
+        chunks: &[&str],
+    ) -> Option<axum::http::Response<Body>> {
+        let plan = codex_cyber_policy_plan(request_id);
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            "development-key",
+        );
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data_state);
+        let chunks = chunks
+            .iter()
+            .map(|chunk| chunk.to_string())
+            .collect::<Vec<_>>();
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                    response_observation: None,
+                },
+            }));
+            for chunk in chunks {
+                yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                    frame_type: StreamFrameType::Data,
+                    payload: StreamFramePayload::Data {
+                        chunk_b64: None,
+                        text: Some(chunk),
+                    },
+                }));
+            }
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame::eof()));
+        }
+        .boxed();
+
+        execute_stream_from_frame_stream(
+            &state,
+            plan,
+            &format!("trace-{request_id}"),
+            &test_decision(),
+            "openai_responses_stream",
+            Some("openai_responses_stream_success".to_string()),
+            Some(json!({
+                "request_id": request_id,
+                "candidate_id": format!("candidate-{request_id}"),
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "openai:responses",
+                "client_api_format": "openai:responses"
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            RequestStageTrace::from_env(),
+            true,
+            frame_stream,
+            None,
+        )
+        .await
+        .expect("execution should succeed")
+    }
+
     async fn execute_prefetched_transport_failure(
         stop_on_transport_errors: bool,
     ) -> AiAttemptExecutionOutcome<axum::http::Response<Body>> {
@@ -11005,13 +11082,15 @@ mod tests {
         assert_eq!(detected.pointer("/error/param"), Some(&json!("input")));
     }
 
+    /// 回归（#143 P1.2）：默认配置下 response.created 之后才到达的 response.failed 不再
+    /// 以 HTTP 200 透传，而是在提交前改写为结构化错误响应并停止候选重试。
     #[tokio::test]
     async fn prefetched_codex_cyber_policy_violation_stops_failover_by_default() {
         let response = execute_prefetched_codex_cyber_policy_failure(false, false)
             .await
             .expect("default Codex cyber policy handling should return the provider error");
 
-        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.status().as_u16(), 400);
     }
 
     #[tokio::test]
@@ -11033,6 +11112,100 @@ mod tests {
                 .is_none(),
             "bare Responses error should retry before a client response is committed"
         );
+    }
+
+    /// 回归（#143 P1.2）：response.created 之后才到达的 response.failed 属于上游语义失败，
+    /// 必须在提交客户端 HTTP 200 前改写为结构化错误响应。
+    #[tokio::test]
+    async fn same_format_responses_created_then_failed_is_rejected_before_success_commit() {
+        let response = execute_same_format_responses_chunks(
+            "req-responses-created-then-failed",
+            &[
+                "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+                "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"invalid_request\",\"message\":\"cyber policy rejected the request\",\"code\":\"cyber_policy_violation\",\"param\":\"input\"}}}\n\n",
+            ],
+        )
+        .await
+        .expect("created-then-failed should return the structured provider error");
+
+        assert_eq!(response.status().as_u16(), 400);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.contains("application/json"),
+            "semantic failure must not be committed as an SSE stream, got content-type {content_type}"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body_text = String::from_utf8(body.to_vec()).expect("body should be utf8");
+        assert!(body_text.contains("cyber_policy_violation"));
+        assert!(body_text.contains("cyber policy rejected the request"));
+        assert!(
+            !body_text.contains("event: response.created"),
+            "client must not receive the prefetched lifecycle event inside a committed 200 stream"
+        );
+    }
+
+    /// 提交边界：首个输出事件到达即提交 HTTP 200；此后的 response.failed 属于 mid-stream
+    /// 失败，只能以流内事件透传并结构化记录，无法再改写状态码。
+    #[tokio::test]
+    async fn same_format_responses_failed_after_output_boundary_remains_midstream() {
+        let response = execute_same_format_responses_chunks(
+            "req-responses-output-then-failed",
+            &[
+                "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+                "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"message\":\"upstream died mid-stream\",\"code\":\"server_error\"}}}\n\n",
+            ],
+        )
+        .await
+        .expect("output-then-failed should return the committed stream");
+
+        assert_eq!(response.status().as_u16(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body_text = String::from_utf8(body.to_vec()).expect("body should be utf8");
+        assert!(body_text.contains("event: response.created"));
+        assert!(body_text.contains("event: response.output_text.delta"));
+        assert!(body_text.contains("event: response.failed"));
+    }
+
+    /// 正常路径：等待输出边界不会丢弃已预取的生命周期事件，提交后按序转发。
+    #[tokio::test]
+    async fn same_format_responses_success_stream_forwards_prefetched_events_in_order() {
+        let response = execute_same_format_responses_chunks(
+            "req-responses-created-then-output",
+            &[
+                "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+                "data: [DONE]\n\n",
+            ],
+        )
+        .await
+        .expect("success stream should return the committed response");
+
+        assert_eq!(response.status().as_u16(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body_text = String::from_utf8(body.to_vec()).expect("body should be utf8");
+        let created_at = body_text
+            .find("event: response.created")
+            .expect("response.created should be forwarded");
+        let delta_at = body_text
+            .find("event: response.output_text.delta")
+            .expect("output delta should be forwarded");
+        let completed_at = body_text
+            .find("event: response.completed")
+            .expect("response.completed should be forwarded");
+        assert!(created_at < delta_at && delta_at < completed_at);
     }
 
     #[tokio::test]
