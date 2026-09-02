@@ -53,6 +53,7 @@ fork 修复并验证（急用先落地）
 | Responses SSE 预提交语义错误分支 | #121 | 移植自 ZipperCode/Aether@f86e9941 | 移植自社区；上游 #733 相邻在做，观察 |
 | 模型同步宽限保留 | #119 | 不完整快照不得静默删除可用模型（C-04 契约） | 待提上游 PR |
 | ranking_seed/时间参数拆分 | #120 | 排序种子不得作时间戳用于准入检查 | 待提上游 PR |
+| usage 请求记录默认降为 basic | #162 | 移植自上游 fawney19/Aether#640（Kayphoon）：未配置 request_record_level 时默认 basic，不落请求/响应 body | 上游 PR 待合入 |
 
 ## 5. 当前深度定制跟踪表（定制轨道）
 
