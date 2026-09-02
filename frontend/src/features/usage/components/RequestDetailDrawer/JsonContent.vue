@@ -92,7 +92,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, shallowRef, computed, watch } from 'vue'
 import { ChevronRight, ChevronDown } from 'lucide-vue-next'
 import Card from '@/components/ui/card.vue'
 
@@ -156,7 +156,9 @@ const rawResponseContent = computed(() => {
 })
 
 const collapsedBlocks = ref<Set<string>>(new Set())
-const lines = ref<JsonLine[]>([])
+// 大 JSON 解析产物动辄上万行，使用 shallowRef 避免每行对象被深度代理，
+// 折叠/展开与首次解析的渲染开销可降低一个量级。
+const lines = shallowRef<JsonLine[]>([])
 
 const getTokenHtml = (value: string, type: 'key' | 'string' | 'number' | 'boolean' | 'null' | 'bracket' | 'punctuation' | 'ellipsis'): string => {
   const classMap = {
