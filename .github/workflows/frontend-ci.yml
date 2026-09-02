@@ -29,9 +29,45 @@ defaults:
     working-directory: frontend
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend || 'true' }}
+      automation: ${{ steps.filter.outputs.automation || 'true' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          # Local git mode keeps the contents: read-only boundary intact; the
+          # API mode would require pull-requests: read on this job.
+          token: ''
+          base: ${{ github.base_ref }}
+          filters: |
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/frontend-ci.yml'
+            automation:
+              - '.github/agents.yml'
+              - '.github/ai-executors.json'
+              - '.github/automation-policy.yml'
+              - '.github/automation/**'
+              - '.github/upstream-sync-policy.yml'
+              - '.github/upstream-sync-state.json'
+              - '.github/workflows/**'
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -47,6 +83,8 @@ jobs:
   automation:
     name: Automation Contracts
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.automation == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -80,6 +118,8 @@ jobs:
   type_check:
     name: Type Check
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -95,6 +135,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -110,6 +152,8 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -137,12 +181,13 @@ jobs:
     steps:
       - name: Verify required jobs
         working-directory: .
+        # Skipped jobs satisfy the gate: their changes filter did not match.
         run: |
-          if [ "${{ needs.lint.result }}" != "success" ] || \
-             [ "${{ needs.type_check.result }}" != "success" ] || \
-             [ "${{ needs.test.result }}" != "success" ] || \
-             [ "${{ needs.build.result }}" != "success" ] || \
-             [ "${{ needs.automation.result }}" != "success" ]; then
+          if [ "${{ needs.lint.result }}" = "failure" ] || [ "${{ needs.lint.result }}" = "cancelled" ] || \
+             [ "${{ needs.type_check.result }}" = "failure" ] || [ "${{ needs.type_check.result }}" = "cancelled" ] || \
+             [ "${{ needs.test.result }}" = "failure" ] || [ "${{ needs.test.result }}" = "cancelled" ] || \
+             [ "${{ needs.build.result }}" = "failure" ] || [ "${{ needs.build.result }}" = "cancelled" ] || \
+             [ "${{ needs.automation.result }}" = "failure" ] || [ "${{ needs.automation.result }}" = "cancelled" ]; then
             echo "Frontend CI failed"
             exit 1
           fi
