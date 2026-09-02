@@ -851,6 +851,8 @@ async fn dashboard_load_user_counts(
             created_from_unix_secs,
             created_until_unix_secs,
             group_by: UsageAuditAggregationGroupBy::User,
+            provider_id: None,
+            provider_name: None,
             limit: 10_000,
             exclude_reserved_provider_labels: false,
         })
@@ -868,6 +870,8 @@ async fn dashboard_load_online_user_count(
             created_from_unix_secs: now_unix_secs.saturating_sub(DASHBOARD_ONLINE_USER_WINDOW_SECS),
             created_until_unix_secs: now_unix_secs.saturating_add(1),
             group_by: UsageAuditAggregationGroupBy::User,
+            provider_id: None,
+            provider_name: None,
             limit: DASHBOARD_ONLINE_USER_AGGREGATION_LIMIT,
             exclude_reserved_provider_labels: false,
         })
