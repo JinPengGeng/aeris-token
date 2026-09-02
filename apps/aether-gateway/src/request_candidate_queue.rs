@@ -4650,16 +4650,24 @@ mod tests {
             .await
             .expect("bounded lifecycle tail should resume after DB progress")
             .expect("bounded lifecycle tail task should complete");
+        // `pending_current` is decremented inside `flush_compacted_records`
+        // right after the final `upsert_many`, while the worker returns the
+        // lifecycle admission permit a few instructions later at the end of
+        // `flush_batch` on the background runtime. Probe the semaphore count
+        // as well so the assertions below only run once the final flush has
+        // fully completed instead of racing the trailing permit return.
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if runtime.metrics.pending_current.load(Ordering::Acquire) == 0 {
+                if runtime.metrics.pending_current.load(Ordering::Acquire) == 0
+                    && runtime.priority_admission.available_permits() == 2
+                {
                     break;
                 }
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("ordered priority lane should drain after the first DB batch is released");
+        .expect("ordered priority lane should drain and return admission after the first DB batch is released");
 
         let statuses = repository
             .batches
