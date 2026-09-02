@@ -295,7 +295,8 @@ SELECT
   id,
   provider_id,
   is_active,
-  upstream_metadata
+  upstream_metadata,
+  status_snapshot
 FROM provider_api_keys
 WHERE provider_id IN (
 "#;
@@ -3186,6 +3187,10 @@ fn map_key_maintenance_summary_row(
             row.try_get("upstream_metadata").map_sql_err()?,
             "provider_api_keys.upstream_metadata",
         )?,
+        status_snapshot: optional_json_from_string(
+            row.try_get("status_snapshot").map_sql_err()?,
+            "provider_api_keys.status_snapshot",
+        )?,
     })
 }
 
@@ -3395,6 +3400,65 @@ mod tests {
         StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
     use serde_json::json;
+
+    #[tokio::test]
+    async fn sqlite_key_maintenance_summary_includes_status_snapshot() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        let repository = SqliteProviderCatalogReadRepository::new(pool);
+        repository
+            .create_provider(
+                &StoredProviderCatalogProvider::new(
+                    "maintenance-provider".to_string(),
+                    "Maintenance Provider".to_string(),
+                    None,
+                    "codex".to_string(),
+                )
+                .expect("provider should build"),
+                None,
+            )
+            .await
+            .expect("provider should create");
+
+        let mut key = StoredProviderCatalogKey::new(
+            "maintenance-key".to_string(),
+            "maintenance-provider".to_string(),
+            "Maintenance Key".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.upstream_metadata = Some(json!({"codex": {"updated_at": 1_900}}));
+        key.status_snapshot = Some(json!({"quota": {"code": "exhausted", "exhausted": true}}));
+        repository
+            .create_key(&key)
+            .await
+            .expect("key should create");
+
+        let summaries = repository
+            .list_key_maintenance_summaries_by_provider_ids(&["maintenance-provider".to_string()])
+            .await
+            .expect("maintenance summaries should load");
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert_eq!(summary.id, "maintenance-key");
+        assert!(summary.is_active);
+        assert_eq!(
+            summary.upstream_metadata,
+            Some(json!({"codex": {"updated_at": 1_900}}))
+        );
+        assert_eq!(
+            summary.status_snapshot,
+            Some(json!({"quota": {"code": "exhausted", "exhausted": true}}))
+        );
+    }
 
     #[tokio::test]
     async fn sqlite_admin_credential_cas_rotates_codex_namespace_atomically() {

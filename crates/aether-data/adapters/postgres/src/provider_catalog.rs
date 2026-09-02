@@ -338,7 +338,8 @@ SELECT
   id,
   provider_id,
   is_active,
-  upstream_metadata
+  upstream_metadata,
+  status_snapshot
 FROM provider_api_keys
 WHERE provider_id IN (
 "#;
@@ -3317,6 +3318,7 @@ fn map_key_maintenance_summary_row(
         provider_id: row_get(row, "provider_id")?,
         is_active: row_get(row, "is_active")?,
         upstream_metadata: row_get(row, "upstream_metadata")?,
+        status_snapshot: row_get(row, "status_snapshot")?,
     })
 }
 

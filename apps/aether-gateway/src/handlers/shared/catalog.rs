@@ -2244,25 +2244,20 @@ fn windsurf_quota_snapshot_has_stale_cooldown(quota_snapshot: &Map<String, Value
     has_capacity || !exhausted
 }
 
-pub(crate) fn provider_key_status_snapshot_payload(
-    key: &StoredProviderCatalogKey,
+pub(crate) fn provider_key_quota_status_snapshot_payload(
+    status_snapshot: Option<&Value>,
+    upstream_metadata: Option<&Value>,
     provider_type: &str,
 ) -> serde_json::Value {
-    let status_snapshot = key
-        .status_snapshot
-        .as_ref()
-        .filter(|value| value.is_object());
+    let status_snapshot = status_snapshot.filter(|value| value.is_object());
     let quota_snapshot = status_snapshot
         .and_then(Value::as_object)
         .and_then(|snapshot| snapshot.get("quota"))
         .and_then(Value::as_object);
     let refresh_codex_snapshot = provider_type.trim().eq_ignore_ascii_case("codex")
-        && codex_upstream_metadata_is_at_least_as_fresh(
-            quota_snapshot,
-            key.upstream_metadata.as_ref(),
-        );
+        && codex_upstream_metadata_is_at_least_as_fresh(quota_snapshot, upstream_metadata);
 
-    let payload = if quota_snapshot_has_materialized_data(quota_snapshot, provider_type)
+    if quota_snapshot_has_materialized_data(quota_snapshot, provider_type)
         && !refresh_codex_snapshot
     {
         status_snapshot
@@ -2272,12 +2267,23 @@ pub(crate) fn provider_key_status_snapshot_payload(
         sync_provider_key_quota_status_snapshot(
             status_snapshot,
             provider_type,
-            key.upstream_metadata.as_ref(),
+            upstream_metadata,
             "catalog_fallback",
         )
         .or_else(|| status_snapshot.cloned())
         .unwrap_or_else(default_provider_key_status_snapshot)
-    };
+    }
+}
+
+pub(crate) fn provider_key_status_snapshot_payload(
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+) -> serde_json::Value {
+    let payload = provider_key_quota_status_snapshot_payload(
+        key.status_snapshot.as_ref(),
+        key.upstream_metadata.as_ref(),
+        provider_type,
+    );
 
     let mut snapshot = provider_key_status_snapshot_object(Some(&payload))
         .or_else(|| default_provider_key_status_snapshot().as_object().cloned())

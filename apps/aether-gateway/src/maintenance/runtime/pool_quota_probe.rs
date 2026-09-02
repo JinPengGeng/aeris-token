@@ -7,7 +7,8 @@ use aether_data_contracts::repository::pool_scores::{
     StoredPoolMemberScore, POOL_KIND_PROVIDER_KEY_POOL,
 };
 use aether_data_contracts::repository::provider_catalog::{
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogProvider,
 };
 use aether_provider_pool::provider_pool_quota_metadata_updated_at;
 use aether_runtime_state::{RuntimeLockLease, RuntimeState};
@@ -23,6 +24,7 @@ use crate::admin_api::{
 use crate::{AppState, GatewayError};
 
 use crate::ai_serving::provider_key_pool_score_scope;
+use crate::handlers::shared::provider_key_quota_status_snapshot_payload;
 use crate::handlers::shared::provider_pool::{
     admin_provider_pool_quota_probe_active_members_key, AdminProviderPoolConfig,
 };
@@ -155,6 +157,99 @@ fn parse_probe_stamp(raw_value: Option<&str>) -> Option<u64> {
         return None;
     }
     Some(parsed as u64)
+}
+
+fn normalized_unix_seconds(value: &Value) -> Option<u64> {
+    let value = json_u64(value)?;
+    Some(if value > 1_000_000_000_000 {
+        value / 1_000
+    } else {
+        value
+    })
+}
+
+fn quota_reset_at_from_value(value: &Value, fallback_observed_at: Option<u64>) -> Option<u64> {
+    value
+        .get("reset_at")
+        .and_then(normalized_unix_seconds)
+        .or_else(|| {
+            let reset_seconds = value.get("reset_seconds").and_then(json_u64)?;
+            let observed_at = value
+                .get("updated_at")
+                .or_else(|| value.get("observed_at"))
+                .and_then(normalized_unix_seconds)
+                .or(fallback_observed_at)?;
+            Some(observed_at.saturating_add(reset_seconds))
+        })
+}
+
+fn quota_window_is_exhausted(window: &Value) -> bool {
+    if window.get("is_exhausted").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    if window
+        .get("used_ratio")
+        .and_then(Value::as_f64)
+        .is_some_and(|ratio| ratio >= 1.0)
+    {
+        return true;
+    }
+    if window
+        .get("remaining_ratio")
+        .and_then(Value::as_f64)
+        .is_some_and(|ratio| ratio <= 0.0)
+    {
+        return true;
+    }
+
+    let limit = window.get("limit_value").and_then(Value::as_f64);
+    let remaining = window.get("remaining_value").and_then(Value::as_f64);
+    limit.is_some_and(|value| value > 0.0) && remaining.is_some_and(|value| value <= 0.0)
+}
+
+fn quota_reset_due_at(status_snapshot: &Value, now_ts: u64) -> Option<u64> {
+    let quota = status_snapshot.get("quota")?;
+    let observed_at = quota
+        .get("updated_at")
+        .or_else(|| quota.get("observed_at"))
+        .and_then(normalized_unix_seconds);
+    let window_reset_at = quota
+        .get("windows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|window| quota_window_is_exhausted(window))
+        .filter_map(|window| quota_reset_at_from_value(window, observed_at))
+        .filter(|reset_at| *reset_at <= now_ts)
+        .max();
+    if window_reset_at.is_some() {
+        return window_reset_at;
+    }
+
+    let exhausted = quota.get("exhausted").and_then(Value::as_bool) == Some(true)
+        || quota
+            .get("code")
+            .and_then(Value::as_str)
+            .is_some_and(|code| code.eq_ignore_ascii_case("exhausted"));
+    exhausted
+        .then(|| quota_reset_at_from_value(quota, observed_at))
+        .flatten()
+        .filter(|reset_at| *reset_at <= now_ts)
+}
+
+fn quota_reset_due_after_last_probe(
+    summary: &StoredProviderCatalogKeyMaintenanceSummary,
+    provider_type: &str,
+    now_ts: u64,
+    last_probe_ts: Option<u64>,
+) -> Option<u64> {
+    let status_snapshot = provider_key_quota_status_snapshot_payload(
+        summary.status_snapshot.as_ref(),
+        summary.upstream_metadata.as_ref(),
+        provider_type,
+    );
+    quota_reset_due_at(&status_snapshot, now_ts)
+        .filter(|reset_at| last_probe_ts.is_none_or(|last_probe_ts| last_probe_ts < *reset_at))
 }
 
 pub(crate) fn pool_quota_probe_target_count(
@@ -922,9 +1017,48 @@ async fn select_keys_for_provider(
             }
         }
         let probe_stamps = load_probe_timestamps(runtime, &provider.id, &key_ids).await;
+        let mut reset_due_key_ids = summaries
+            .iter()
+            .filter_map(|summary| {
+                let hard_state = scores_by_key
+                    .get(summary.id.as_str())
+                    .map(|score| score.hard_state);
+                if matches!(
+                    hard_state,
+                    Some(
+                        PoolMemberHardState::AuthInvalid
+                            | PoolMemberHardState::Banned
+                            | PoolMemberHardState::Inactive
+                    )
+                ) {
+                    return None;
+                }
+                quota_reset_due_after_last_probe(
+                    summary,
+                    &provider.provider_type,
+                    now_ts,
+                    probe_stamps.get(summary.id.as_str()).copied(),
+                )
+                .map(|reset_at| (reset_at, summary.id.clone()))
+            })
+            .collect::<Vec<_>>();
+        reset_due_key_ids
+            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        let mut selected_ids = reset_due_key_ids
+            .into_iter()
+            .take(selection_limit)
+            .map(|(_, key_id)| key_id)
+            .collect::<Vec<_>>();
+        let selected_due_ids = selected_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
         let probe_eligible_key_ids = key_ids
             .iter()
             .filter(|key_id| {
+                if selected_due_ids.contains(key_id.as_str()) {
+                    return false;
+                }
                 if active_member_ids.contains(key_id.as_str()) {
                     return false;
                 }
@@ -949,14 +1083,16 @@ async fn select_keys_for_provider(
             })
             .cloned()
             .collect::<Vec<_>>();
-        let mut selected_ids = select_pool_quota_probe_ids_for_active_target(
+        let mut projected_active_member_ids = active_member_ids.clone();
+        projected_active_member_ids.extend(selected_ids.iter().cloned());
+        selected_ids.extend(select_pool_quota_probe_ids_for_active_target(
             &probe_eligible_key_ids,
-            &active_member_ids,
+            &projected_active_member_ids,
             &scores_by_key,
             pool_config.account_self_check_enabled,
             target_active_count,
-            selection_limit,
-        );
+            selection_limit.saturating_sub(selected_ids.len()),
+        ));
         if selected_ids.is_empty() {
             return Ok(PoolQuotaProbeSelectionOutcome::Empty);
         }
@@ -1742,6 +1878,75 @@ mod tests {
         .expect("key should build");
         key.upstream_metadata = upstream_metadata;
         key
+    }
+
+    fn maintenance_summary_with_quota(quota: Value) -> StoredProviderCatalogKeyMaintenanceSummary {
+        StoredProviderCatalogKeyMaintenanceSummary {
+            id: "key-reset".to_string(),
+            provider_id: "provider-1".to_string(),
+            is_active: true,
+            upstream_metadata: None,
+            status_snapshot: Some(json!({ "quota": quota })),
+        }
+    }
+
+    #[test]
+    fn exhausted_quota_reset_forces_one_probe_after_reset() {
+        let summary = maintenance_summary_with_quota(json!({
+            "provider_type": "codex",
+            "code": "exhausted",
+            "exhausted": true,
+            "updated_at": 1_900,
+            "windows": [{
+                "code": "monthly",
+                "scope": "account",
+                "used_ratio": 1.0,
+                "reset_at": 2_000
+            }]
+        }));
+
+        assert_eq!(
+            quota_reset_due_after_last_probe(&summary, "codex", 2_000, Some(1_999)),
+            Some(2_000)
+        );
+        assert_eq!(
+            quota_reset_due_after_last_probe(&summary, "codex", 2_000, Some(2_000)),
+            None
+        );
+    }
+
+    #[test]
+    fn exhausted_quota_does_not_probe_before_reset() {
+        let summary = maintenance_summary_with_quota(json!({
+            "provider_type": "codex",
+            "code": "exhausted",
+            "exhausted": true,
+            "updated_at": 1_900,
+            "reset_at": 2_000,
+            "windows": []
+        }));
+
+        assert_eq!(
+            quota_reset_due_after_last_probe(&summary, "codex", 1_999, None),
+            None
+        );
+    }
+
+    #[test]
+    fn exhausted_quota_derives_reset_at_from_observed_countdown() {
+        let summary = maintenance_summary_with_quota(json!({
+            "provider_type": "kiro",
+            "code": "exhausted",
+            "exhausted": true,
+            "observed_at": 1_900,
+            "reset_seconds": 100,
+            "windows": []
+        }));
+
+        assert_eq!(
+            quota_reset_due_after_last_probe(&summary, "kiro", 2_000, None),
+            Some(2_000)
+        );
     }
 
     #[test]
