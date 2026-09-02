@@ -746,7 +746,7 @@ pub struct AllowedModelsReconciliation {
 /// A single `/models` HTTP success only proves the request succeeded; it does
 /// not prove the returned set is a complete authoritative snapshot. To keep a
 /// transient upstream catalog omission from shrinking production routing
-/// capability, removals converge under three rules:
+/// capability, removals converge under four rules:
 ///
 /// - Models that no longer match the key's current include/exclude patterns
 ///   are removed immediately: the filter configuration is explicit local
@@ -758,6 +758,11 @@ pub struct AllowedModelsReconciliation {
 ///   endpoint failed) never apply the missing grace rule: newly discovered
 ///   models are added, re-observed models clear their missing counters, and
 ///   no missing counter advances.
+/// - Bootstrap (no previously persisted whitelist) only adopts complete
+///   snapshots. A partial first snapshot is rejected wholesale: with no
+///   history the key is still unrestricted, and adopting an incomplete
+///   catalog would silently shrink that unrestricted set to whatever the
+///   failed fetch happened to return.
 pub fn reconcile_allowed_models(
     fetched_models: &[String],
     previous_allowed_models: Option<&[String]>,
@@ -776,8 +781,14 @@ pub fn reconcile_allowed_models(
     let removal_grace_count = removal_grace_count.max(1);
 
     let Some(previous_allowed_models) = previous_allowed_models else {
-        // Bootstrap: no previously confirmed whitelist exists, so the snapshot
-        // is adopted verbatim and there is nothing to protect.
+        // Bootstrap: no previously confirmed whitelist exists, so the key is
+        // still unrestricted. Reject a partial snapshot instead of adopting
+        // it verbatim — an incomplete first catalog would otherwise silently
+        // shrink the routable model set. The first complete snapshot defines
+        // the initial whitelist.
+        if !complete_snapshot {
+            return AllowedModelsReconciliation::default();
+        }
         let allowed_models = fetched.into_iter().collect::<Vec<_>>();
         return AllowedModelsReconciliation {
             added: allowed_models.clone(),
@@ -1447,6 +1458,40 @@ mod tests {
         assert_eq!(reconciliation.added, vec!["model-a", "model-b"]);
         assert!(reconciliation.removed.is_empty());
         assert!(reconciliation.pending_removal.is_empty());
+    }
+
+    #[test]
+    fn reconcile_allowed_models_rejects_partial_bootstrap_snapshot() {
+        // No previously persisted whitelist + incomplete first snapshot: the
+        // partial catalog must not become the whitelist. The key stays
+        // unrestricted (an empty result persists as no whitelist) until a
+        // complete snapshot arrives.
+        let reconciliation = reconcile_allowed_models(
+            &["model-a".to_string()],
+            None,
+            &[],
+            &[],
+            Default::default(),
+            2,
+            false,
+        );
+        assert!(reconciliation.allowed_models.is_empty());
+        assert!(reconciliation.added.is_empty());
+        assert!(reconciliation.removed.is_empty());
+        assert!(reconciliation.pending_removal.is_empty());
+
+        // A later complete snapshot still bootstraps the whitelist.
+        let complete = reconcile_allowed_models(
+            &["model-a".to_string(), "model-b".to_string()],
+            None,
+            &[],
+            &[],
+            reconciliation.pending_removal.clone(),
+            2,
+            true,
+        );
+        assert_eq!(complete.allowed_models, vec!["model-a", "model-b"]);
+        assert_eq!(complete.added, vec!["model-a", "model-b"]);
     }
 
     #[test]

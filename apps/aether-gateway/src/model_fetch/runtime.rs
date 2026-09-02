@@ -1478,6 +1478,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_fetch_partial_bootstrap_keeps_key_unrestricted() {
+        let provider = sample_provider("provider-openai", "openai");
+        let chat_endpoint =
+            sample_endpoint("endpoint-openai-chat", "provider-openai", "openai:chat");
+        let claude_endpoint = sample_endpoint(
+            "endpoint-claude-messages",
+            "provider-openai",
+            "claude:messages",
+        );
+        let key = sample_key(
+            "key-openai",
+            "provider-openai",
+            "api_key",
+            &["openai:chat", "claude:messages"],
+        );
+        // No historical snapshot: the key has no persisted whitelist and is
+        // unrestricted until a complete snapshot defines one.
+        assert!(key.allowed_models.is_none());
+        let chat_transport = sample_transport(
+            "openai",
+            "provider-openai",
+            "endpoint-openai-chat",
+            "key-openai",
+            "openai:chat",
+            "api_key",
+            None,
+        );
+        let claude_transport = sample_transport(
+            "openai",
+            "provider-openai",
+            "endpoint-claude-messages",
+            "key-openai",
+            "claude:messages",
+            "api_key",
+            None,
+        );
+        let state = TestState::new(
+            vec![provider],
+            vec![chat_endpoint, claude_endpoint],
+            vec![key],
+            HashMap::from([
+                (
+                    (
+                        "provider-openai".to_string(),
+                        "endpoint-openai-chat".to_string(),
+                        "key-openai".to_string(),
+                    ),
+                    chat_transport,
+                ),
+                (
+                    (
+                        "provider-openai".to_string(),
+                        "endpoint-claude-messages".to_string(),
+                        "key-openai".to_string(),
+                    ),
+                    claude_transport,
+                ),
+            ]),
+            // Only the chat endpoint gets a response; the claude endpoint
+            // fails, making this first-ever snapshot partial.
+            vec![execution_result(json!({
+                "object": "list",
+                "data": [{"id": "model-a", "object": "model"}]
+            }))],
+        );
+
+        let summary = perform_model_fetch_once_with_state(&state)
+            .await
+            .expect("fetch should succeed");
+        assert_eq!(summary.succeeded, 1);
+        let updated = state.key("key-openai");
+        // A partial first snapshot must not shrink the effective whitelist:
+        // the key stays unrestricted instead of adopting the incomplete
+        // catalog as its initial whitelist (issue #143).
+        assert_eq!(updated.allowed_models, None);
+        let sync_metadata = updated
+            .upstream_metadata
+            .as_ref()
+            .and_then(|value| value.get("model_fetch"))
+            .cloned()
+            .expect("model_fetch sync metadata should be recorded");
+        assert_eq!(sync_metadata["complete_snapshot"], json!(false));
+        assert_eq!(sync_metadata["added"], json!([]));
+        assert_eq!(sync_metadata["removed"], json!([]));
+        assert_eq!(sync_metadata["pending_removal"], json!({}));
+
+        // The first complete snapshot still bootstraps the whitelist.
+        state
+            .execution_results
+            .lock()
+            .expect("execution result mutex")
+            .extend([
+                execution_result(json!({
+                    "object": "list",
+                    "data": [{"id": "model-a", "object": "model"}]
+                })),
+                execution_result(json!({
+                    "object": "list",
+                    "data": [{"id": "model-b", "object": "model"}]
+                })),
+            ]);
+        let summary = perform_model_fetch_once_with_state(&state)
+            .await
+            .expect("second fetch should succeed");
+        assert_eq!(summary.succeeded, 1);
+        let updated = state.key("key-openai");
+        assert_eq!(updated.allowed_models, Some(json!(["model-a", "model-b"])));
+        let sync_metadata = updated
+            .upstream_metadata
+            .as_ref()
+            .and_then(|value| value.get("model_fetch"))
+            .cloned()
+            .expect("model_fetch sync metadata should be recorded");
+        assert_eq!(sync_metadata["complete_snapshot"], json!(true));
+        assert_eq!(sync_metadata["added"], json!(["model-a", "model-b"]));
+    }
+
+    #[tokio::test]
     async fn model_fetch_failure_keeps_existing_allowed_models() {
         let provider = sample_provider("provider-openai", "openai");
         let endpoint = sample_endpoint(
