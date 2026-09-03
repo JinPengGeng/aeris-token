@@ -271,11 +271,6 @@ const props = defineProps<{
   getQuotaUsedColorClass: (provider: ProviderWithEndpointsSummary) => string
 }>()
 
-function formatBalanceAmount(amount: number, currency: string): string {
-  const symbol = currency === 'USD' ? '$' : `${currency} `
-  return `${symbol}${amount.toFixed(2)}`
-}
-
 const emit = defineEmits<{
   'viewDetail': [providerId: string]
   'editProvider': [provider: ProviderWithEndpointsSummary]
@@ -286,6 +281,11 @@ const emit = defineEmits<{
   'saveDescription': [event: Event, provider: ProviderWithEndpointsSummary, value: string]
   'cancelEditDescription': [event?: Event]
 }>()
+
+function formatBalanceAmount(amount: number, currency: string): string {
+  const symbol = currency === 'USD' ? '$' : `${currency} `
+  return `${symbol}${amount.toFixed(2)}`
+}
 
 const vAutoFocus = {
   mounted: (el: HTMLElement) => el.focus(),
