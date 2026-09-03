@@ -63,6 +63,7 @@ fork 修复并验证（急用先落地）
 | tunnel 心跳游标去重 | #165 | 移植自上游 fawney19/Aether#673（zbsdsb）：多 tunnel 实例心跳时代理节点指标与错误事件按会话游标去重入库（fork 补 embedded 控制面路径） | tracking upstream fawney19/Aether#673（上游 PR 待合入，合并后 sync 回销） |
 | provider 成本归因 | #166 | 移植自上游 fawney19/Aether#638（RWDai）：usage 聚合 provider_id/provider_name 过滤 + GET /api/admin/usage/attribution 用户成本归因 + Cost Analysis 归因 UI | 跟踪上游 fawney19/Aether#638，上游合并后 sync 回销 |
 | API Key 计费倍率 | #178 | 移植自上游 fawney19/Aether#634（Hao-IANWY）：api_keys.billing_multiplier（默认 1.0），actual_total_cost_usd = provider 倍率 × Key 倍率，billing metadata 记录三级倍率；含三库迁移 | 跟踪上游 fawney19/Aether#634，上游合并后 sync 回销 |
+| 钱包套餐分组与 Key 级扣费来源 | #186 | 移植自上游 fawney19/Aether#607（zhiqicloud）：Key 级 feature_settings.billing_source（auto/wallet/package）准入分流、每日额度结转（carry_over_days/carry_over_limit_multiplier）、自助重置每日额度端点、钱包运营概览；无 schema 迁移 | 跟踪上游 fawney19/Aether#607，上游合并后 sync 回销 |
 
 ## 5. 当前深度定制跟踪表（定制轨道）
 
