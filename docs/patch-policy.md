@@ -64,6 +64,7 @@ fork 修复并验证（急用先落地）
 | provider 成本归因 | #166 | 移植自上游 fawney19/Aether#638（RWDai）：usage 聚合 provider_id/provider_name 过滤 + GET /api/admin/usage/attribution 用户成本归因 + Cost Analysis 归因 UI | 跟踪上游 fawney19/Aether#638，上游合并后 sync 回销 |
 | API Key 计费倍率 | #178 | 移植自上游 fawney19/Aether#634（Hao-IANWY）：api_keys.billing_multiplier（默认 1.0），actual_total_cost_usd = provider 倍率 × Key 倍率，billing metadata 记录三级倍率；含三库迁移 | 跟踪上游 fawney19/Aether#634，上游合并后 sync 回销 |
 | 钱包套餐分组与 Key 级扣费来源 | #186 | 移植自上游 fawney19/Aether#607（zhiqicloud）：Key 级 feature_settings.billing_source（auto/wallet/package）准入分流、每日额度结转（carry_over_days/carry_over_limit_multiplier）、自助重置每日额度端点、钱包运营概览；无 schema 迁移 | 跟踪上游 fawney19/Aether#607，上游合并后 sync 回销 |
+| 每日美元用量限额 | #188 | 移植自上游 fawney19/Aether#714（YorhaL）：daily_usage_limit_usd 第四道闸（系统设置 0=不限；用户组 inherit/system/custom；普通 Key 收窄；独立 Key null 跟随/0 不限/正数自定义），达限 429 + daily_usage_limit_exceeded + Retry-After 至下个本地午夜，actual_total_cost_usd 计量，热路径纯 Redis + fail-open 懒恢复，管理 API + 前端四级配置 + rate-limit-status 嵌套 daily_usage，三库迁移（postgres 空库快照折入 200_daily_usage_limits.sql），APP_TIMEZONE 自然日 | 跟踪上游 fawney19/Aether#714，上游合并后 sync 回销 |
 
 ## 5. 当前深度定制跟踪表（定制轨道）
 
