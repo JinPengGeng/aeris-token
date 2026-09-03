@@ -101,7 +101,7 @@ conflicts:
     required_pre_conflict_verdict: eligible
     allowed_type: modify_modify_utf8_text
     allowed_mode: "100644"
-    maximum_files: 4
+    maximum_files: 16
     maximum_bytes_per_file: 16384
     maximum_total_input_bytes: 65536
     resolver_model_variable: AERIS_AI_MODEL_CONFLICT_RESOLVER

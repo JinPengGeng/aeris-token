@@ -12,6 +12,7 @@ import {
   validateExecutorRegistry,
 } from './ai-executor-contract.mjs';
 import {
+  MAX_CONFLICT_FILES,
   SYNC_CONFLICT_PROFILE,
   SYNC_CONFLICT_SCHEMA_VERSION,
   artifactSha,
@@ -379,7 +380,7 @@ const resolverResponseFormat = Object.freeze({
         verdict: { type: 'string', enum: ['resolved', 'unresolved'] },
         summary: { type: 'string', maxLength: 2000 },
         resolutions: {
-          type: 'array', maxItems: 4,
+          type: 'array', maxItems: MAX_CONFLICT_FILES,
           items: {
             type: 'object', additionalProperties: false, required: ['path', 'content'],
             properties: { path: { type: 'string', maxLength: 1024 }, content: { type: 'string', maxLength: 16384 } },

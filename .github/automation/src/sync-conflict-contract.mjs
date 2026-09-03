@@ -4,7 +4,7 @@ import { validateExecutorIdentity } from './ai-executor-contract.mjs';
 
 export const SYNC_CONFLICT_SCHEMA_VERSION = 2;
 export const SYNC_CONFLICT_PROFILE = 'aeris-sync-conflict-v2';
-export const MAX_CONFLICT_FILES = 4;
+export const MAX_CONFLICT_FILES = 16;
 export const MAX_CONFLICT_FILE_BYTES = 16_384;
 export const MAX_CONFLICT_INPUT_BYTES = 65_536;
 
