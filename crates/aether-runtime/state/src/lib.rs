@@ -1822,10 +1822,17 @@ mod tests {
         let permit = gate.try_acquire().await.expect("permit should acquire");
         assert!(aether_runtime::AdmissionPermitHealth::is_healthy(&permit));
 
+        // Block the single-threaded runtime so the renew task cannot run and the
+        // 20ms lease expires; then barrier on the health flag instead of hoping a
+        // fixed 10ms yield window is enough for the renew task to be polled.
         std::thread::sleep(Duration::from_millis(30));
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        assert!(!aether_runtime::AdmissionPermitHealth::is_healthy(&permit));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while aether_runtime::AdmissionPermitHealth::is_healthy(&permit) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("renew task should observe the expired lease once the runtime resumes");
     }
 
     #[tokio::test]
