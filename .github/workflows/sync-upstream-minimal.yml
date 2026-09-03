@@ -1,0 +1,62 @@
+name: Sync upstream (minimal)
+
+# Automation v2 Phase 0 (#175): the minimal upstream synchronization loop,
+# running in parallel with the legacy sync-upstream.yml during the two-week
+# observation window. Both workflows share the sync-upstream-main concurrency
+# group with cancel-in-progress: false, so a legacy run and a minimal run can
+# never execute at the same time.
+#
+# Identity: GITHUB_TOKEN only. No Writer App, no AI, no attestation, no
+# checkpoint state machine — progress is the git DAG (merge-base).
+#
+# Merge-method discipline (patch-policy §3): the managed sync PR MUST land as
+# a merge commit so upstream/main stays ancestor-connected to main. Never
+# squash or rebase it. After the auto-merge lands, the loop re-fetches
+# origin/main and requires `git rev-list --count origin/main..upstream/main`
+# to be 0 and the merge commit to have exactly two parents; any drift opens a
+# merge-discipline alert and the loop stops.
+
+on:
+  schedule:
+    # 03:17 UTC daily (11:17 Asia/Shanghai). Deliberately off the round hour.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync upstream / minimal loop
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (vars.AERIS_UPSTREAM_SYNC_ENABLED == 'true' || vars.AERIS_UPSTREAM_SYNC_ENABLED == '1')
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    permissions:
+      contents: write       # push the fixed sync/upstream branch
+      pull-requests: write  # maintain the single sync PR and arm native auto-merge
+      issues: write         # idempotent alert issues
+      # Dispatch the required-check workflows: a GITHUB_TOKEN-created PR emits
+      # no pull_request event (GitHub platform behavior), so rust-ci and
+      # frontend-ci must be dispatched explicitly onto the sync branch.
+      actions: write
+    steps:
+      - name: Check out fork default branch
+        timeout-minutes: 5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          fetch-depth: 1
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      - name: Run the minimal synchronization loop
+        timeout-minutes: 78
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPOSITORY: fawney19/Aether
+          AERIS_BOUNDED_BOOTSTRAP_SHALLOW: 'true'
+        shell: bash
+        run: bash .github/workflows/scripts/sync-upstream-minimal.sh
