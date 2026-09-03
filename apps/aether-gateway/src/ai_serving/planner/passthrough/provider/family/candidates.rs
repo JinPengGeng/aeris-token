@@ -26,6 +26,7 @@ use crate::ai_serving::{
 };
 use crate::client_session_affinity::client_session_affinity_from_api_request;
 use crate::clock::current_unix_secs;
+use crate::scheduler::config::SchedulerOrderingConfig;
 use crate::{AppState, GatewayError};
 
 use super::{
@@ -141,6 +142,10 @@ pub(crate) async fn materialize_local_same_format_provider_candidate_attempts(
             current_unix_secs(),
             false,
             spec.operation.map(|operation| operation.as_str()),
+            input
+                .routing_policy
+                .as_ref()
+                .map(SchedulerOrderingConfig::from_routing_policy),
         )
         .await?;
     let outcome = materialize_local_execution_candidates_with_serving(
@@ -248,6 +253,10 @@ pub(crate) async fn build_local_same_format_provider_candidate_attempt_source<'a
             current_unix_secs(),
             false,
             spec.operation.map(|operation| operation.as_str()),
+            input
+                .routing_policy
+                .as_ref()
+                .map(SchedulerOrderingConfig::from_routing_policy),
         )
         .await?;
 
