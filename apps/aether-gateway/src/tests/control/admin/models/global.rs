@@ -2,8 +2,12 @@ use std::sync::{Arc, Mutex};
 
 use aether_data::repository::global_models::InMemoryGlobalModelReadRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+use aether_data::repository::routing_profiles::InMemoryRoutingGroupRepository;
 use aether_data_contracts::repository::global_models::{
     AdminProviderModelListQuery, GlobalModelReadRepository,
+};
+use aether_data_contracts::repository::routing_profiles::{
+    StoredRoutingGroup, StoredRoutingGroupBinding, StoredRoutingGroupVersion,
 };
 use axum::body::Body;
 use axum::routing::any;
@@ -842,6 +846,31 @@ async fn gateway_handles_admin_global_model_routing_locally_with_trusted_admin_p
     );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
+    // 上游 2cb4d554a 起该视图改为报告系统默认调度策略组（handler 注释：
+    // "The admin view reports the system-default routing strategy"），legacy
+    // system-config 键不再驱动视图；测试经策略组通道配置同一组期望值。
+    let routing_group_repository = Arc::new(InMemoryRoutingGroupRepository::seed(
+        [StoredRoutingGroup {
+            id: "system-default".to_string(),
+            name: "system-default".to_string(),
+            description: Some("test system default routing strategy".to_string()),
+            enabled: true,
+            is_system_default: true,
+            sort_order: 0,
+            config_json: json!({
+                "default_policy": {
+                    "priority_mode": "global_key",
+                    "scheduling_mode": "fixed_order"
+                }
+            }),
+            version: 1,
+            created_at: 1,
+            updated_at: 1,
+            published_at: Some(1),
+        }],
+        std::iter::empty::<StoredRoutingGroupBinding>(),
+        std::iter::empty::<StoredRoutingGroupVersion>(),
+    ));
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
@@ -850,6 +879,7 @@ async fn gateway_handles_admin_global_model_routing_locally_with_trusted_admin_p
                     provider_catalog_repository,
                 )
                 .with_global_model_repository_for_tests(global_model_repository)
+                .with_routing_group_repository_for_tests(routing_group_repository)
                 .with_system_config_values_for_tests(vec![
                     ("scheduling_mode".to_string(), json!("fixed_order")),
                     ("provider_priority_mode".to_string(), json!("global_key")),

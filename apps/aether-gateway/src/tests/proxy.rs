@@ -648,8 +648,21 @@ async fn gateway_forwards_public_request_to_remote_tunnel_owner_before_fallback_
         .expect("test client should build");
     state.client = short_timeout_client.clone();
     state.owner_forward_client = short_timeout_client;
+    // 上游 2cb4d554a 后隧道亲和转发要求路由策略上下文，亲和缓存键带策略组
+    // scope（system-default v1 来自测试数据态的默认补种）。
+    let affinity_cache_key = aether_scheduler_core::build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+        "api-key-affinity-1",
+        "openai:chat",
+        "gpt-4.1",
+        None,
+        Some(&aether_scheduler_core::SchedulerAffinityScope::new(
+            "system-default",
+            Some(1),
+        )),
+    )
+    .expect("scoped affinity cache key should build");
     state.remember_scheduler_affinity_target(
-        "scheduler_affinity:api-key-affinity-1:openai:chat:gpt-4.1",
+        &affinity_cache_key,
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-owner".to_string(),
             endpoint_id: "endpoint-owner".to_string(),
@@ -869,8 +882,21 @@ async fn gateway_aggregates_sync_sse_from_remote_tunnel_owner_before_returning_t
     state = state
         .with_data_state_for_tests(data_state)
         .with_tunnel_identity_for_tests("gateway-a", Some("http://gateway-a:8080"));
+    // 上游 2cb4d554a 后隧道亲和转发要求路由策略上下文，亲和缓存键带策略组
+    // scope（system-default v1 来自测试数据态的默认补种）。
+    let affinity_cache_key = aether_scheduler_core::build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+        "api-key-affinity-cli-1",
+        "openai:responses",
+        "gpt-5.4",
+        None,
+        Some(&aether_scheduler_core::SchedulerAffinityScope::new(
+            "system-default",
+            Some(1),
+        )),
+    )
+    .expect("scoped affinity cache key should build");
     state.remember_scheduler_affinity_target(
-        "scheduler_affinity:api-key-affinity-cli-1:openai:responses:gpt-5.4",
+        &affinity_cache_key,
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-cli-owner".to_string(),
             endpoint_id: "endpoint-cli-owner".to_string(),
@@ -1120,8 +1146,21 @@ async fn gateway_streamifies_sync_json_from_remote_tunnel_owner_before_returning
         .timeout(Duration::from_millis(10))
         .build()
         .expect("short shared client should build");
+    // 上游 2cb4d554a 后隧道亲和转发要求路由策略上下文，亲和缓存键带策略组
+    // scope（system-default v1 来自测试数据态的默认补种）。
+    let affinity_cache_key = aether_scheduler_core::build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+        "api-key-affinity-cli-1",
+        "openai:responses",
+        "gpt-5.4",
+        None,
+        Some(&aether_scheduler_core::SchedulerAffinityScope::new(
+            "system-default",
+            Some(1),
+        )),
+    )
+    .expect("scoped affinity cache key should build");
     state.remember_scheduler_affinity_target(
-        "scheduler_affinity:api-key-affinity-cli-1:openai:responses:gpt-5.4",
+        &affinity_cache_key,
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-cli-owner".to_string(),
             endpoint_id: "endpoint-cli-owner".to_string(),

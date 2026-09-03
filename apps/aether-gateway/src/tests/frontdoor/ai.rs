@@ -3498,7 +3498,12 @@ async fn gateway_does_not_locally_reject_image_model_name_on_chat_completions() 
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            .with_auth_api_key_data_reader_for_tests(auth_repository),
+            // 上游 2cb4d554a 起路由策略是请求路径的强制前提；走
+            // with_data_state_for_tests 让测试数据态补种系统默认策略组，
+            // 请求才能穿过策略解析进入候选缺失的 local_execution_runtime_miss 路径。
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository),
+            ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 

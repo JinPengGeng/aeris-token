@@ -1301,7 +1301,11 @@ async fn gateway_returns_internal_gateway_decision_sync_fallback_with_resolved_a
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            .with_auth_api_key_data_reader_for_tests(auth_repository),
+            // 同上：请求路径要求已配置的默认调度策略（上游 2cb4d554a），
+            // 经 with_data_state_for_tests 补种系统默认策略组。
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository),
+            ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 

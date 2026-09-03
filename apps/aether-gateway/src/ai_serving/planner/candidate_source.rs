@@ -175,8 +175,9 @@ impl AiCandidatePreselectionPort for GatewayLocalCandidatePreselectionPort<'_> {
                 self.ranking_seed,
                 false,
                 self.request_operation,
-                self.routing_policy
-                    .map(SchedulerOrderingConfig::from_routing_policy),
+                super::candidate_ranking::scheduler_ordering_config_for_routing_policy(
+                    self.routing_policy,
+                ),
             )
             .await?;
 
@@ -430,18 +431,9 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         );
 
         let ranking_seed = request_distribution_seed();
-        let (generation, ordering_config) = loop {
-            let generation = state.app().scheduler_affinity_epoch();
-            let ordering_config =
-                super::candidate_ranking::scheduler_ordering_config_for_routing_policy(
-                    state,
-                    routing_policy,
-                )
-                .await;
-            if state.app().scheduler_affinity_epoch() == generation {
-                break (generation, ordering_config);
-            }
-        };
+        let generation = state.app().scheduler_affinity_epoch();
+        let ordering_config =
+            super::candidate_ranking::scheduler_ordering_config_for_routing_policy(routing_policy);
 
         Self {
             state,
@@ -1327,9 +1319,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                     .flatten(),
                 current_unix_secs(),
                 self.scheduling_snapshot.ranking_seed(),
-                self.routing_policy
-                    .as_ref()
-                    .map(SchedulerOrderingConfig::from_routing_policy),
+                self.ordering_config,
             )
             .await?;
         let skipped_candidates = skipped_candidates
@@ -2079,6 +2069,7 @@ mod tests {
             scheduling_mode: aether_routing_core::RoutingSchedulingMode::FixedOrder,
             keep_priority_on_conversion: false,
             sticky_key_attempts: aether_routing_core::DEFAULT_STICKY_KEY_ATTEMPTS,
+            execution_policy: Default::default(),
             ranking_overlay: Default::default(),
             mutation_plan: Default::default(),
             pool_policy_overrides: Default::default(),
@@ -2143,6 +2134,7 @@ mod tests {
             scheduling_mode: aether_routing_core::RoutingSchedulingMode::FixedOrder,
             keep_priority_on_conversion: false,
             sticky_key_attempts: aether_routing_core::DEFAULT_STICKY_KEY_ATTEMPTS,
+            execution_policy: Default::default(),
             ranking_overlay: Default::default(),
             mutation_plan: Default::default(),
             pool_policy_overrides: Default::default(),
@@ -2881,6 +2873,7 @@ mod tests {
             scheduling_mode: aether_routing_core::RoutingSchedulingMode::FixedOrder,
             keep_priority_on_conversion: true,
             sticky_key_attempts: aether_routing_core::DEFAULT_STICKY_KEY_ATTEMPTS,
+            execution_policy: Default::default(),
             ranking_overlay: Default::default(),
             mutation_plan: Default::default(),
             pool_policy_overrides: Default::default(),

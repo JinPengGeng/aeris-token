@@ -12,9 +12,8 @@ use crate::scheduler::config::SchedulerOrderingConfig;
 use crate::GatewayError;
 
 impl<'a> PlannerAppState<'a> {
-    /// `ordering_config` is the request's routing-policy derived scheduler
-    /// config (see `SchedulerOrderingConfig::from_routing_policy`). `None`
-    /// falls back to the runtime default.
+    /// `ordering_config` is the immutable scheduler snapshot derived from the
+    /// request's resolved routing policy.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn list_selectable_candidates(
         self,
@@ -27,7 +26,7 @@ impl<'a> PlannerAppState<'a> {
         now_unix_secs: u64,
         ranking_seed: u64,
         enable_model_directives: bool,
-        ordering_config: Option<SchedulerOrderingConfig>,
+        ordering_config: SchedulerOrderingConfig,
     ) -> Result<Vec<SchedulerMinimalCandidateSelectionCandidate>, GatewayError> {
         crate::scheduler::candidate::list_selectable_candidates(
             self.app().data.as_ref(),
@@ -58,7 +57,7 @@ impl<'a> PlannerAppState<'a> {
         now_unix_secs: u64,
         ranking_seed: u64,
         enable_model_directives: bool,
-        ordering_config: Option<SchedulerOrderingConfig>,
+        ordering_config: SchedulerOrderingConfig,
     ) -> Result<
         (
             Vec<SchedulerMinimalCandidateSelectionCandidate>,
@@ -95,7 +94,7 @@ impl<'a> PlannerAppState<'a> {
         ranking_seed: u64,
         enable_model_directives: bool,
         request_operation: Option<&str>,
-        ordering_config: Option<SchedulerOrderingConfig>,
+        ordering_config: SchedulerOrderingConfig,
     ) -> Result<
         (
             Vec<SchedulerMinimalCandidateSelectionCandidate>,
@@ -153,7 +152,7 @@ impl<'a> PlannerAppState<'a> {
         client_session_affinity: Option<&ClientSessionAffinity>,
         now_unix_secs: u64,
         ranking_seed: u64,
-        ordering_config: Option<SchedulerOrderingConfig>,
+        ordering_config: SchedulerOrderingConfig,
     ) -> Result<
         (
             Vec<SchedulerMinimalCandidateSelectionCandidate>,
@@ -186,7 +185,7 @@ impl<'a> PlannerAppState<'a> {
         client_session_affinity: Option<&ClientSessionAffinity>,
         now_unix_secs: u64,
         ranking_seed: u64,
-        ordering_config: Option<SchedulerOrderingConfig>,
+        ordering_config: SchedulerOrderingConfig,
     ) -> Result<Vec<SchedulerMinimalCandidateSelectionCandidate>, GatewayError> {
         let wait_timeout = Duration::from_millis(API_KEY_CONCURRENCY_WAIT_TIMEOUT_MS);
         let wait_interval = Duration::from_millis(API_KEY_CONCURRENCY_WAIT_POLL_INTERVAL_MS.max(1));

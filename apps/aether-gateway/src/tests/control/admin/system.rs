@@ -1950,11 +1950,11 @@ async fn gateway_validates_chat_pii_redaction_system_config_locally_with_trusted
 }
 
 #[tokio::test]
-async fn gateway_handles_admin_system_provider_priority_mode_locally_with_bearer_admin_session() {
+async fn gateway_handles_admin_system_config_default_value_locally_with_bearer_admin_session() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
-        "/api/admin/system/configs/provider_priority_mode",
+        "/api/admin/system/configs/enable_format_conversion",
         any(move |_request: Request| {
             let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
             async move {
@@ -1972,7 +1972,7 @@ async fn gateway_handles_admin_system_provider_priority_mode_locally_with_bearer
 
     let response = reqwest::Client::new()
         .get(format!(
-            "{gateway_url}/api/admin/system/configs/provider_priority_mode"
+            "{gateway_url}/api/admin/system/configs/enable_format_conversion"
         ))
         .header("authorization", format!("Bearer {access_token}"))
         .header("x-client-device-id", "device-admin-config")
@@ -1982,8 +1982,8 @@ async fn gateway_handles_admin_system_provider_priority_mode_locally_with_bearer
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["key"], "provider_priority_mode");
-    assert_eq!(payload["value"], "provider");
+    assert_eq!(payload["key"], "enable_format_conversion");
+    assert_eq!(payload["value"], false);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
