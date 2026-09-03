@@ -184,14 +184,16 @@ test('shared total timeout prevents another fallback request after the deadline'
   assert.equal(calls.length, 2);
 });
 
-test('absolute deadline is not extended when completion starts later', async () => {
+test('absolute deadline is not extended when completion starts later', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
   const calls = [];
   const api = client(
     [jsonResponse({ data: [{ id: 'fast-model' }, { id: 'strong-model' }] })],
     calls,
     { timeoutMs: 200, deadlineAtMs: Date.now() + 5 },
   );
-  await new Promise((resolve) => setTimeout(resolve, 15));
+  // Advance the mocked clock past the deadline instead of sleeping real time.
+  t.mock.timers.tick(15);
 
   await assert.rejects(
     () => api.complete({ candidates, messages: [] }),
