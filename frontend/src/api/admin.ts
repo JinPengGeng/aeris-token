@@ -138,6 +138,8 @@ export interface UserGroupExport {
   allowed_models_mode?: 'inherit' | 'unrestricted' | 'specific' | 'deny_all'
   rate_limit?: number | null
   rate_limit_mode?: 'inherit' | 'system' | 'custom'
+  daily_usage_limit_usd?: number | null
+  daily_usage_limit_mode?: 'inherit' | 'system' | 'custom'
 }
 
 export interface UserExport {
@@ -179,6 +181,7 @@ export interface UserApiKeyExport {
   allowed_models?: string[] | null
   ip_rules?: string[] | null
   rate_limit?: number | null  // legacy/null 兼容；1.3+ standalone null = 跟随系统默认
+  daily_usage_limit_usd?: number | null
   concurrent_limit?: number | null
   force_capabilities?: Record<string, boolean>
   feature_settings?: Record<string, unknown> | null
@@ -660,6 +663,7 @@ export interface AdminApiKey {
   total_cost_usd?: number
   billing_multiplier?: number
   rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
+  daily_usage_limit_usd?: number | null  // null = 跟随系统，0 = 明确不限制
   concurrent_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   allowed_providers?: string[] | null  // 允许的提供商列表
   allowed_api_formats?: string[] | null  // 允许的 API 格式列表
@@ -681,6 +685,7 @@ export interface CreateStandaloneApiKeyRequest {
   allowed_models?: string[] | null
   ip_rules?: string[] | null
   rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
+  daily_usage_limit_usd?: number | null  // null = 跟随系统，0 = 明确不限制
   concurrent_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   billing_multiplier?: number
   expires_at?: string | null  // RFC3339 时间，null = 永不过期
