@@ -300,7 +300,7 @@ assert(
     sync.conflicts.ai_resolution.required_pre_conflict_verdict === 'eligible' &&
     sync.conflicts.ai_resolution.allowed_type === 'modify_modify_utf8_text' &&
     sync.conflicts.ai_resolution.allowed_mode === '100644' &&
-    sync.conflicts.ai_resolution.maximum_files === 4 &&
+    sync.conflicts.ai_resolution.maximum_files === 16 &&
     sync.conflicts.ai_resolution.maximum_bytes_per_file === 16384 &&
     sync.conflicts.ai_resolution.maximum_total_input_bytes === 65536 &&
     sync.conflicts.ai_resolution.resolver_model_variable === 'AERIS_AI_MODEL_CONFLICT_RESOLVER' &&
