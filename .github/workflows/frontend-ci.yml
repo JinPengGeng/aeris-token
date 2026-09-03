@@ -101,6 +101,8 @@ jobs:
         working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-sync-upstream-alerts.sh
         working-directory: .github/automation
+      - run: bash ../workflows/scripts/tests/test-sync-minimal-alerts.sh
+        working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-bounded-git-fetch.sh
         working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-verify-sync-candidate.sh
