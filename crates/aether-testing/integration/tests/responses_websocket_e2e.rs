@@ -1587,6 +1587,7 @@ async fn seed_client_api_key(backends: &DataBackends, user_id: &str) -> Result<(
             allowed_models: Some(vec![PUBLIC_MODEL.to_string()]),
             ip_rules: None,
             rate_limit: Some(0),
+            daily_usage_limit_usd: None,
             concurrent_limit: None,
             force_capabilities: None,
             is_active: true,

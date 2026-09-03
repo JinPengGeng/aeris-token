@@ -1214,6 +1214,7 @@ function editApiKey(apiKey: AdminApiKey) {
     unlimited_balance: isApiKeyUnlimited(apiKey),
     expires_at: expiresAt,
     rate_limit: apiKey.rate_limit ?? undefined,
+    daily_usage_limit_usd: apiKey.daily_usage_limit_usd ?? undefined,
     concurrent_limit: apiKey.concurrent_limit ?? undefined,
     billing_multiplier: apiKey.billing_multiplier ?? 1,
     auto_delete_on_expiry: apiKey.auto_delete_on_expiry || false,
@@ -1431,6 +1432,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         name: data.name || undefined,
         unlimited_balance: Boolean(data.unlimited_balance),
         rate_limit: data.rate_limit ?? null,  // undefined = 跟随系统默认，显式传 null
+        daily_usage_limit_usd: data.daily_usage_limit_usd ?? null,
         concurrent_limit: data.concurrent_limit ?? null,
         billing_multiplier: data.billing_multiplier ?? 1,
         expires_at: serializeExpiryDate(data.expires_at),
@@ -1464,6 +1466,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         name: data.name || undefined,
         initial_balance_usd: isUnlimited ? null : (data.initial_balance_usd as number),
         rate_limit: data.rate_limit ?? null,  // undefined = 跟随系统默认，显式传 null
+        daily_usage_limit_usd: data.daily_usage_limit_usd ?? null,
         concurrent_limit: data.concurrent_limit ?? null,
         billing_multiplier: data.billing_multiplier ?? 1,
         expires_at: serializeExpiryDate(data.expires_at),

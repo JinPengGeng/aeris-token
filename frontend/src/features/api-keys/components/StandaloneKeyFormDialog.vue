@@ -275,6 +275,36 @@
 
               <div class="space-y-2">
                 <Label
+                  for="form-daily-usage-limit"
+                  class="text-sm font-medium"
+                >额度限制 (美元/日)</Label>
+                <div class="flex items-center gap-3">
+                  <div class="flex-1 min-w-0">
+                    <Input
+                      v-if="!form.daily_usage_limit_inherited"
+                      id="form-daily-usage-limit"
+                      :model-value="form.daily_usage_limit_usd ?? ''"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="0 = 明确不限制"
+                      class="h-10"
+                      @update:model-value="(v) => form.daily_usage_limit_usd = parseNumberInput(v, { allowFloat: true, min: 0 })"
+                    />
+                    <span
+                      v-else
+                      class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
+                    >跟随系统</span>
+                  </div>
+                  <Switch
+                    v-model="form.daily_usage_limit_inherited"
+                    class="shrink-0"
+                  />
+                </div>
+              </div>
+
+              <div class="space-y-2">
+                <Label
                   for="form-billing-multiplier"
                   class="text-sm font-medium"
                 >计费倍率</Label>
@@ -398,6 +428,7 @@ export interface StandaloneKeyFormData {
   unlimited_balance?: boolean
   expires_at?: string  // ISO 日期字符串，如 "2025-12-31"，undefined = 永不过期
   rate_limit?: number | null
+  daily_usage_limit_usd?: number | null
   concurrent_limit?: number | null
   billing_multiplier?: number
   auto_delete_on_expiry: boolean
@@ -417,6 +448,8 @@ interface StandaloneKeyFormState {
   expires_at?: string
   rate_limit_inherited: boolean
   rate_limit?: number
+  daily_usage_limit_inherited: boolean
+  daily_usage_limit_usd?: number
   concurrent_limit_inherited: boolean
   concurrent_limit?: number
   billing_multiplier: number
@@ -479,6 +512,8 @@ const form = ref<StandaloneKeyFormState>({
   expires_at: undefined,
   rate_limit_inherited: true,
   rate_limit: undefined,
+  daily_usage_limit_inherited: true,
+  daily_usage_limit_usd: undefined,
   concurrent_limit_inherited: true,
   concurrent_limit: undefined,
   billing_multiplier: 1,
@@ -529,6 +564,8 @@ function resetForm() {
     expires_at: undefined,
     rate_limit_inherited: true,
     rate_limit: undefined,
+    daily_usage_limit_inherited: true,
+    daily_usage_limit_usd: undefined,
     concurrent_limit_inherited: true,
     concurrent_limit: undefined,
     billing_multiplier: 1,
@@ -557,6 +594,8 @@ function loadKeyData() {
     expires_at: props.apiKey.expires_at,
     rate_limit_inherited: props.apiKey.rate_limit == null,
     rate_limit: props.apiKey.rate_limit ?? undefined,
+    daily_usage_limit_inherited: props.apiKey.daily_usage_limit_usd == null,
+    daily_usage_limit_usd: props.apiKey.daily_usage_limit_usd ?? undefined,
     concurrent_limit_inherited: props.apiKey.concurrent_limit == null,
     concurrent_limit: props.apiKey.concurrent_limit ?? undefined,
     billing_multiplier: props.apiKey.billing_multiplier ?? 1,
@@ -613,6 +652,9 @@ function handleSubmit() {
     unlimited_balance: form.value.unlimited_balance,
     expires_at: form.value.expires_at,
     rate_limit: form.value.rate_limit_inherited ? null : (form.value.rate_limit ?? 0),
+    daily_usage_limit_usd: form.value.daily_usage_limit_inherited
+      ? null
+      : (form.value.daily_usage_limit_usd ?? 0),
     concurrent_limit: form.value.concurrent_limit_inherited ? null : (form.value.concurrent_limit ?? 0),
     billing_multiplier: form.value.billing_multiplier ?? 1,
     auto_delete_on_expiry: form.value.auto_delete_on_expiry,

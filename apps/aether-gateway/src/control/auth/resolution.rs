@@ -86,9 +86,15 @@ pub(crate) struct GatewayControlAuthContext {
     #[serde(skip)]
     pub(crate) api_key_rate_limit: Option<i32>,
     #[serde(skip)]
+    pub(crate) user_daily_usage_limit_usd: Option<f64>,
+    #[serde(skip)]
+    pub(crate) api_key_daily_usage_limit_usd: Option<f64>,
+    #[serde(skip)]
     pub(crate) api_key_is_standalone: bool,
     #[serde(skip)]
     pub(crate) admin_bypass_limits: bool,
+    #[serde(skip)]
+    pub(crate) ip_bypass_limits: bool,
     #[serde(skip)]
     pub(crate) local_rejection: Option<GatewayLocalAuthRejection>,
     #[serde(skip)]
@@ -957,8 +963,11 @@ pub(super) async fn resolve_data_backed_auth_context(
                     access_allowed: false,
                     user_rate_limit: None,
                     api_key_rate_limit: None,
+                    user_daily_usage_limit_usd: None,
+                    api_key_daily_usage_limit_usd: None,
                     api_key_is_standalone: false,
                     admin_bypass_limits: false,
+                    ip_bypass_limits: false,
                     local_rejection: Some(GatewayLocalAuthRejection::InvalidApiKey),
                     allowed_models: None,
                     ip_rules: None,
@@ -1071,8 +1080,11 @@ async fn resolve_antigravity_bearer_bridge_auth_context(
             access_allowed: false,
             user_rate_limit: None,
             api_key_rate_limit: None,
+            user_daily_usage_limit_usd: None,
+            api_key_daily_usage_limit_usd: None,
             api_key_is_standalone: false,
             admin_bypass_limits: false,
+            ip_bypass_limits: false,
             local_rejection: Some(GatewayLocalAuthRejection::InvalidApiKey),
             allowed_models: None,
             ip_rules: None,
@@ -1131,8 +1143,11 @@ async fn resolve_trusted_auth_context(
             access_allowed: false,
             user_rate_limit: None,
             api_key_rate_limit: None,
+            user_daily_usage_limit_usd: None,
+            api_key_daily_usage_limit_usd: None,
             api_key_is_standalone: false,
             admin_bypass_limits: false,
+            ip_bypass_limits: false,
             local_rejection: Some(GatewayLocalAuthRejection::InvalidApiKey),
             allowed_models: None,
             ip_rules: None,
@@ -1229,9 +1244,12 @@ async fn build_data_backed_auth_context(
         access_allowed: key_access_allowed && local_rejection.is_none(),
         user_rate_limit: snapshot.user_rate_limit,
         api_key_rate_limit: snapshot.api_key_rate_limit,
+        user_daily_usage_limit_usd: snapshot.user_daily_usage_limit_usd,
+        api_key_daily_usage_limit_usd: snapshot.api_key_daily_usage_limit_usd,
         api_key_is_standalone: snapshot.api_key_is_standalone,
         admin_bypass_limits: snapshot.user_role.eq_ignore_ascii_case("admin")
             && !snapshot.api_key_is_standalone,
+        ip_bypass_limits: false,
         local_rejection,
         allowed_models,
         ip_rules: snapshot.api_key_ip_rules,

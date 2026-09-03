@@ -1,6 +1,8 @@
 use super::ADMIN_USERS_DATA_UNAVAILABLE_DETAIL;
 use crate::handlers::admin::shared::AdminTypedObjectPatch;
-use crate::handlers::shared::{deserialize_optional_string_list_patch, normalize_ip_rules};
+use crate::handlers::shared::{
+    deserialize_optional_f64_patch, deserialize_optional_string_list_patch, normalize_ip_rules,
+};
 use axum::{
     body::Body,
     http,
@@ -24,6 +26,8 @@ pub(super) struct AdminCreateUserApiKeyRequest {
     pub(super) ip_rules: Option<Vec<String>>,
     #[serde(default)]
     pub(super) rate_limit: Option<i32>,
+    #[serde(default)]
+    pub(super) daily_usage_limit_usd: Option<f64>,
     #[serde(default)]
     pub(super) concurrent_limit: Option<i32>,
     #[serde(default)]
@@ -50,6 +54,8 @@ pub(super) struct AdminUpdateUserApiKeyRequest {
     pub(super) name: Option<String>,
     #[serde(default)]
     pub(super) rate_limit: Option<i32>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64_patch")]
+    pub(super) daily_usage_limit_usd: Option<Option<f64>>,
     #[serde(default)]
     pub(super) concurrent_limit: Option<i32>,
     #[serde(default)]
