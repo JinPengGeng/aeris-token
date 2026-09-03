@@ -68,6 +68,12 @@
                   >
                     {{ legacyT(formatConcurrentLimit(apiKey.concurrent_limit)) }}
                   </Badge>
+                  <Badge
+                    variant="secondary"
+                    class="text-xs"
+                  >
+                    {{ legacyT(formatBillingMultiplier(apiKey.billing_multiplier)) }}
+                  </Badge>
                 </div>
                 <div class="mt-0.5 flex items-center gap-1">
                   <code class="font-mono text-xs text-muted-foreground">
@@ -184,6 +190,7 @@ defineProps<{
   creating: boolean
   formatRateLimit: (rateLimit?: number | null) => string
   formatConcurrentLimit: (concurrentLimit?: number | null) => string
+  formatBillingMultiplier: (multiplier?: number | null) => string
   formatIpRules: (ipRules?: string[] | null) => string
 }>()
 

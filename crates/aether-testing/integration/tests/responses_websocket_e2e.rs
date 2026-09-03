@@ -1595,6 +1595,7 @@ async fn seed_client_api_key(backends: &DataBackends, user_id: &str) -> Result<(
             total_requests: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
+            billing_multiplier: 1.0,
         })
         .await?;
     backends

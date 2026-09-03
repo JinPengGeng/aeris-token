@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     total_requests INTEGER NOT NULL DEFAULT 0,
     total_tokens INTEGER NOT NULL DEFAULT 0,
     total_cost_usd REAL NOT NULL DEFAULT 0,
+    billing_multiplier REAL NOT NULL DEFAULT 1,
     metadata TEXT,
     expires_at INTEGER,
     last_used_at INTEGER,

@@ -356,9 +356,29 @@ fn apply_billing_computation(
     pricing: &BillingModelPricingSnapshot,
     computation: BillingComputation,
 ) -> Result<(), DataLayerError> {
+    let provider_rate_multiplier = computation.rate_multiplier;
+    let api_key_billing_multiplier = event
+        .data
+        .api_key_billing_multiplier
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(1.0);
+    let combined_rate_multiplier = provider_rate_multiplier * api_key_billing_multiplier;
+    let actual_total_cost = if computation.is_free_tier {
+        0.0
+    } else {
+        crate::quantize_cost(computation.cost_result.cost * combined_rate_multiplier)
+    };
     event.data.total_cost_usd = Some(computation.cost_result.cost);
-    event.data.actual_total_cost_usd = Some(computation.actual_total_cost);
-    merge_billing_snapshot_metadata(&mut event.data.request_metadata, pricing, &computation)
+    event.data.actual_total_cost_usd = Some(actual_total_cost);
+    merge_billing_snapshot_metadata(
+        &mut event.data.request_metadata,
+        pricing,
+        &computation,
+        actual_total_cost,
+        provider_rate_multiplier,
+        api_key_billing_multiplier,
+        combined_rate_multiplier,
+    )
 }
 
 fn map_pricing_context(context: StoredBillingModelContext) -> BillingModelPricingSnapshot {
@@ -369,12 +389,23 @@ fn merge_billing_snapshot_metadata(
     request_metadata: &mut Option<Value>,
     pricing: &BillingModelPricingSnapshot,
     computation: &BillingComputation,
+    actual_total_cost: f64,
+    provider_rate_multiplier: f64,
+    api_key_billing_multiplier: f64,
+    rate_multiplier: f64,
 ) -> Result<(), DataLayerError> {
     let snapshot = &computation.cost_result.snapshot;
     let billing_snapshot = serde_json::to_value(snapshot).map_err(|err| {
         DataLayerError::UnexpectedValue(format!("failed to serialize billing snapshot: {err}"))
     })?;
-    let settlement_snapshot = build_settlement_snapshot(pricing, computation);
+    let settlement_snapshot = build_settlement_snapshot(
+        pricing,
+        computation,
+        actual_total_cost,
+        provider_rate_multiplier,
+        api_key_billing_multiplier,
+        rate_multiplier,
+    );
 
     let mut metadata = match request_metadata.take() {
         Some(Value::Object(object)) => object,
@@ -390,9 +421,14 @@ fn merge_billing_snapshot_metadata(
         "billing_dimensions".to_string(),
         Value::Object(snapshot.resolved_dimensions.clone().into_iter().collect()),
     );
+    metadata.insert("rate_multiplier".to_string(), Value::from(rate_multiplier));
     metadata.insert(
-        "rate_multiplier".to_string(),
-        Value::from(computation.rate_multiplier),
+        "provider_rate_multiplier".to_string(),
+        Value::from(provider_rate_multiplier),
+    );
+    metadata.insert(
+        "api_key_billing_multiplier".to_string(),
+        Value::from(api_key_billing_multiplier),
     );
     metadata.insert(
         "is_free_tier".to_string(),
@@ -405,6 +441,10 @@ fn merge_billing_snapshot_metadata(
 fn build_settlement_snapshot(
     pricing: &BillingModelPricingSnapshot,
     computation: &BillingComputation,
+    actual_total_cost: f64,
+    provider_rate_multiplier: f64,
+    api_key_billing_multiplier: f64,
+    rate_multiplier: f64,
 ) -> Value {
     let snapshot = &computation.cost_result.snapshot;
     let resolution = &computation.pricing_resolution;
@@ -427,7 +467,9 @@ fn build_settlement_snapshot(
             "price_per_request_source": resolution.price_per_request_source.map(|source| source.as_str()),
             "tiered_pricing": resolution.tiered_pricing,
             "price_per_request": resolution.price_per_request,
-            "rate_multiplier": computation.rate_multiplier,
+            "rate_multiplier": rate_multiplier,
+            "provider_rate_multiplier": provider_rate_multiplier,
+            "api_key_billing_multiplier": api_key_billing_multiplier,
             "is_free_tier": computation.is_free_tier,
         },
         "billing_plan_snapshot": {
@@ -441,7 +483,7 @@ fn build_settlement_snapshot(
         "resolved_variables": snapshot.resolved_variables.clone(),
         "cost_breakdown": snapshot.cost_breakdown.clone(),
         "total_cost": snapshot.total_cost,
-        "actual_total_cost": computation.actual_total_cost,
+        "actual_total_cost": actual_total_cost,
         "status": snapshot.status,
         "calculated_at": snapshot.calculated_at.clone(),
     })
@@ -1090,6 +1132,182 @@ mod tests {
                 .pointer("/billing_snapshot/cost_breakdown/request_cost")
                 .and_then(Value::as_f64),
             Some(0.04)
+        );
+    }
+
+    #[tokio::test]
+    async fn applies_api_key_billing_multiplier_after_provider_rate_multiplier() {
+        let lookup = TestLookup {
+            name_context: Some(
+                StoredBillingModelContext::new(
+                    "provider-1".to_string(),
+                    Some("pay_as_you_go".to_string()),
+                    Some("key-1".to_string()),
+                    Some(json!({"openai:chat": 1.25})),
+                    None,
+                    "global-model-1".to_string(),
+                    "gpt-5".to_string(),
+                    None,
+                    Some(0.2),
+                    None,
+                    Some("model-1".to_string()),
+                    Some("gpt-5-upstream".to_string()),
+                    None,
+                    None,
+                    None,
+                )
+                .expect("billing context should build"),
+            ),
+            model_id_context: None,
+        };
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "req-billing-multiplier-1",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                provider_id: Some("provider-1".to_string()),
+                provider_api_key_id: Some("key-1".to_string()),
+                request_type: Some("chat".to_string()),
+                api_format: Some("openai:chat".to_string()),
+                endpoint_api_format: Some("openai:chat".to_string()),
+                api_key_billing_multiplier: Some(2.0),
+                status_code: Some(200),
+                ..UsageEventData::default()
+            },
+        );
+
+        enrich_usage_event_with_billing(&lookup, &mut event)
+            .await
+            .expect("billing should succeed");
+
+        assert_eq!(event.data.total_cost_usd, Some(0.2));
+        assert_eq!(event.data.actual_total_cost_usd, Some(0.5));
+        let metadata = event.data.request_metadata.as_ref().expect("metadata");
+        assert_eq!(
+            metadata
+                .get("provider_rate_multiplier")
+                .and_then(Value::as_f64),
+            Some(1.25)
+        );
+        assert_eq!(
+            metadata
+                .get("api_key_billing_multiplier")
+                .and_then(Value::as_f64),
+            Some(2.0)
+        );
+        assert_eq!(
+            metadata.get("rate_multiplier").and_then(Value::as_f64),
+            Some(2.5)
+        );
+    }
+
+    #[tokio::test]
+    async fn api_key_zero_multiplier_makes_actual_cost_zero() {
+        let lookup = TestLookup {
+            name_context: Some(
+                StoredBillingModelContext::new(
+                    "provider-1".to_string(),
+                    Some("pay_as_you_go".to_string()),
+                    Some("key-1".to_string()),
+                    Some(json!({"openai:chat": 1.25})),
+                    None,
+                    "global-model-1".to_string(),
+                    "gpt-5".to_string(),
+                    None,
+                    Some(0.2),
+                    None,
+                    Some("model-1".to_string()),
+                    Some("gpt-5-upstream".to_string()),
+                    None,
+                    None,
+                    None,
+                )
+                .expect("billing context should build"),
+            ),
+            model_id_context: None,
+        };
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "req-billing-zero-multiplier-1",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                provider_id: Some("provider-1".to_string()),
+                provider_api_key_id: Some("key-1".to_string()),
+                request_type: Some("chat".to_string()),
+                api_format: Some("openai:chat".to_string()),
+                endpoint_api_format: Some("openai:chat".to_string()),
+                api_key_billing_multiplier: Some(0.0),
+                status_code: Some(200),
+                ..UsageEventData::default()
+            },
+        );
+
+        enrich_usage_event_with_billing(&lookup, &mut event)
+            .await
+            .expect("billing should succeed");
+
+        assert_eq!(event.data.total_cost_usd, Some(0.2));
+        assert_eq!(event.data.actual_total_cost_usd, Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn free_tier_keeps_actual_cost_zero_with_api_key_multiplier() {
+        let lookup = TestLookup {
+            name_context: Some(
+                StoredBillingModelContext::new(
+                    "provider-1".to_string(),
+                    Some("free_tier".to_string()),
+                    Some("key-1".to_string()),
+                    Some(json!({"openai:chat": 1.25})),
+                    None,
+                    "global-model-1".to_string(),
+                    "gpt-5".to_string(),
+                    None,
+                    Some(0.2),
+                    None,
+                    Some("model-1".to_string()),
+                    Some("gpt-5-upstream".to_string()),
+                    None,
+                    None,
+                    None,
+                )
+                .expect("billing context should build"),
+            ),
+            model_id_context: None,
+        };
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "req-billing-free-tier-multiplier-1",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                provider_id: Some("provider-1".to_string()),
+                provider_api_key_id: Some("key-1".to_string()),
+                request_type: Some("chat".to_string()),
+                api_format: Some("openai:chat".to_string()),
+                endpoint_api_format: Some("openai:chat".to_string()),
+                api_key_billing_multiplier: Some(2.0),
+                status_code: Some(200),
+                ..UsageEventData::default()
+            },
+        );
+
+        enrich_usage_event_with_billing(&lookup, &mut event)
+            .await
+            .expect("billing should succeed");
+
+        assert_eq!(event.data.total_cost_usd, Some(0.2));
+        assert_eq!(event.data.actual_total_cost_usd, Some(0.0));
+        assert_eq!(
+            event
+                .data
+                .request_metadata
+                .as_ref()
+                .and_then(|value| value.get("is_free_tier"))
+                .and_then(Value::as_bool),
+            Some(true)
         );
     }
 

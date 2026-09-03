@@ -85,6 +85,25 @@
 
       <div class="space-y-2">
         <Label
+          for="admin-user-key-billing-multiplier"
+          class="text-sm font-medium"
+        >
+          {{ legacyT('计费倍率') }}
+        </Label>
+        <Input
+          id="admin-user-key-billing-multiplier"
+          :model-value="form.billing_multiplier"
+          type="number"
+          min="0"
+          max="1000"
+          step="0.01"
+          class="h-10"
+          @update:model-value="updateField('billing_multiplier', parseNumberInput($event, { allowFloat: true, min: 0, max: 1000 }) ?? 1)"
+        />
+      </div>
+
+      <div class="space-y-2">
+        <Label
           for="admin-user-key-ip-rules"
           class="text-sm font-medium"
         >
@@ -187,6 +206,7 @@ export interface UserApiKeyFormState {
   name: string
   rate_limit?: number
   concurrent_limit?: number
+  billing_multiplier: number
   ip_rules_text: string
   chat_pii_redaction_mode: 'inherit' | 'custom'
   chat_pii_redaction_enabled: boolean

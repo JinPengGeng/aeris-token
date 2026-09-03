@@ -325,6 +325,7 @@ mod tests {
             api_key_id: TEST_API_KEY_ID.to_string(),
             username: Some("ws".to_string()),
             api_key_name: Some("ws".to_string()),
+            api_key_billing_multiplier: 1.0,
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,

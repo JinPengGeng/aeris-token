@@ -53,7 +53,8 @@ use self::shared::{
     legacy_admin_list_policy_mode, legacy_admin_rate_limit_policy_mode,
     normalize_admin_optional_user_email, normalize_admin_user_group_ids, normalize_admin_user_role,
     normalize_admin_username, validate_admin_user_password, AdminCreateUserApiKeyRequest,
-    AdminCreateUserRequest, AdminToggleUserApiKeyLockRequest, AdminUpdateUserApiKeyRequest,
+    AdminCreateUserRequest, AdminToggleUserApiKeyLockRequest, AdminUpdateUserApiKeyPatch,
+    AdminUpdateUserApiKeyRequest,
 };
 pub(crate) use self::shared::{
     normalize_admin_list_policy_mode, normalize_admin_rate_limit_policy_mode,

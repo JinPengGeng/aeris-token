@@ -395,6 +395,11 @@ type = "float64"
 default = 0
 
 [[table.api_keys.columns]]
+name = "billing_multiplier"
+type = "float64"
+default = 1
+
+[[table.api_keys.columns]]
 name = "metadata"
 type = "json"
 nullable = true

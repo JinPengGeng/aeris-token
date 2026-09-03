@@ -515,6 +515,7 @@ async fn seed_api_key(
                 total_requests: 0,
                 total_tokens: 0,
                 total_cost_usd: 0.0,
+                billing_multiplier: 1.0,
             })
             .await?;
     } else {
@@ -535,6 +536,8 @@ async fn seed_api_key(
                     expires_at_unix_secs: None,
                     auto_delete_on_expiry_present: true,
                     auto_delete_on_expiry: false,
+                    billing_multiplier_present: false,
+                    billing_multiplier: None,
                 },
             )
             .await?;
