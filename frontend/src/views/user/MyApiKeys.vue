@@ -184,6 +184,13 @@
                     {{ formatConcurrentLimitSimple(apiKey.concurrent_limit) }}
                   </Badge>
                   <Badge
+                    v-if="apiKey.daily_usage_limit_usd != null && apiKey.daily_usage_limit_usd > 0"
+                    variant="secondary"
+                    class="h-5 px-2 py-0 text-[10px] font-medium"
+                  >
+                    {{ formatDailyUsageLimitSimple(apiKey.daily_usage_limit_usd) }}
+                  </Badge>
+                  <Badge
                     variant="secondary"
                     class="h-5 px-2 py-0 text-[10px] font-medium"
                   >
@@ -486,6 +493,26 @@
           />
           <p class="text-xs text-muted-foreground">
             {{ editingApiKey ? '留空表示保持当前值，填 0 表示不限并发' : '留空表示不限并发，填 0 也表示不限并发' }}
+          </p>
+        </div>
+
+        <div class="space-y-2">
+          <Label
+            for="key-daily-usage-limit"
+            class="text-sm font-semibold"
+          >额度限制 (美元/日)</Label>
+          <Input
+            id="key-daily-usage-limit"
+            :model-value="newKeyDailyUsageLimitUsd ?? ''"
+            type="number"
+            min="0"
+            step="0.01"
+            placeholder="留空不增加 Key 级限制"
+            class="h-11 border-border/60"
+            @update:model-value="(v) => newKeyDailyUsageLimitUsd = parseNumberInput(v, { allowFloat: true, min: 0 })"
+          />
+          <p class="text-xs text-muted-foreground">
+            正数会进一步收窄账户额度限制；0 或留空不增加 Key 级限制。
           </p>
         </div>
 
@@ -1047,6 +1074,7 @@ const showCcSwitchDialog = ref(false)
 
 const newKeyName = ref('')
 const newKeyRateLimit = ref<number | undefined>(undefined)
+const newKeyDailyUsageLimitUsd = ref<number | undefined>(undefined)
 const newKeyConcurrentLimit = ref<number | undefined>(undefined)
 const newKeyIpRulesText = ref('')
 const keyRedactionMode = ref<'inherit' | 'custom'>('inherit')
@@ -1191,6 +1219,7 @@ function openEditApiKeyDialog(apiKey: ApiKey) {
   editingApiKey.value = apiKey
   newKeyName.value = apiKey.name || ''
   newKeyRateLimit.value = apiKey.rate_limit ?? undefined
+  newKeyDailyUsageLimitUsd.value = apiKey.daily_usage_limit_usd ?? undefined
   newKeyConcurrentLimit.value = apiKey.concurrent_limit ?? undefined
   newKeyIpRulesText.value = apiKey.ip_rules?.join(', ') ?? ''
   keyRedactionMode.value = hasRedactionFeature ? 'custom' : 'inherit'
@@ -1205,6 +1234,7 @@ function openCreateApiKeyDialog() {
   createdApiKey.value = null
   newKeyName.value = ''
   newKeyRateLimit.value = undefined
+  newKeyDailyUsageLimitUsd.value = undefined
   newKeyConcurrentLimit.value = undefined
   newKeyIpRulesText.value = ''
   keyRedactionMode.value = 'inherit'
@@ -1489,6 +1519,7 @@ function closeApiKeyDialog() {
   }
   newKeyName.value = ''
   newKeyRateLimit.value = undefined
+  newKeyDailyUsageLimitUsd.value = undefined
   newKeyConcurrentLimit.value = undefined
   newKeyIpRulesText.value = ''
   keyRedactionMode.value = 'inherit'
@@ -1518,6 +1549,7 @@ async function saveApiKey() {
       await meApi.updateApiKey(editingApiKey.value.id, {
         name: newKeyName.value,
         rate_limit: newKeyRateLimit.value ?? 0,
+        daily_usage_limit_usd: newKeyDailyUsageLimitUsd.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
         ip_rules: ipRules,
         feature_settings: featureSettings,
@@ -1527,6 +1559,7 @@ async function saveApiKey() {
       const newKey = await meApi.createApiKey({
         name: newKeyName.value,
         rate_limit: newKeyRateLimit.value ?? 0,
+        daily_usage_limit_usd: newKeyDailyUsageLimitUsd.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
         ip_rules: ipRules,
         feature_settings: featureSettings,
@@ -1677,6 +1710,10 @@ function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
     return '不限并发'
   }
   return `${concurrentLimit} 并发`
+}
+
+function formatDailyUsageLimitSimple(limit?: number | null): string {
+  return limit == null || limit === 0 ? '无日上限' : `$${limit.toFixed(2)}/日`
 }
 
 function formatBillingMultiplier(multiplier?: number | null): string {

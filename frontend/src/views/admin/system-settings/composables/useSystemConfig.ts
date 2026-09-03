@@ -13,6 +13,7 @@ export interface SystemConfig {
   // 基础配置
   default_user_initial_gift_usd: number
   rate_limit_per_minute: number
+  daily_usage_limit_usd: number
   enable_registration: boolean
   password_policy_level: string
   turnstile_enabled: boolean
@@ -64,6 +65,7 @@ const CONFIG_KEYS = [
   // 基础配置
   'default_user_initial_gift_usd',
   'rate_limit_per_minute',
+  'daily_usage_limit_usd',
   'enable_registration',
   'password_policy_level',
   'turnstile_enabled',
@@ -115,6 +117,7 @@ function createDefaultConfig(): SystemConfig {
     // 基础配置
     default_user_initial_gift_usd: 10.0,
     rate_limit_per_minute: 0,
+    daily_usage_limit_usd: 0,
     enable_registration: false,
     password_policy_level: 'weak',
     turnstile_enabled: false,
@@ -196,6 +199,7 @@ export function useSystemConfig() {
     return (
       systemConfig.value.default_user_initial_gift_usd !== originalConfig.value.default_user_initial_gift_usd ||
       systemConfig.value.rate_limit_per_minute !== originalConfig.value.rate_limit_per_minute ||
+      systemConfig.value.daily_usage_limit_usd !== originalConfig.value.daily_usage_limit_usd ||
       systemConfig.value.enable_registration !== originalConfig.value.enable_registration ||
       systemConfig.value.password_policy_level !== originalConfig.value.password_policy_level ||
       systemConfig.value.turnstile_enabled !== originalConfig.value.turnstile_enabled ||
@@ -387,6 +391,11 @@ export function useSystemConfig() {
           description: '每分钟请求限制',
         },
         {
+          key: 'daily_usage_limit_usd',
+          value: systemConfig.value.daily_usage_limit_usd,
+          description: '默认额度限制（美元/日，0 表示不限制）',
+        },
+        {
           key: 'enable_registration',
           value: systemConfig.value.enable_registration,
           description: '是否开放用户注册',
@@ -484,6 +493,7 @@ export function useSystemConfig() {
       if (originalConfig.value) {
         originalConfig.value.default_user_initial_gift_usd = systemConfig.value.default_user_initial_gift_usd
         originalConfig.value.rate_limit_per_minute = systemConfig.value.rate_limit_per_minute
+        originalConfig.value.daily_usage_limit_usd = systemConfig.value.daily_usage_limit_usd
         originalConfig.value.enable_registration = systemConfig.value.enable_registration
         originalConfig.value.password_policy_level = systemConfig.value.password_policy_level
         originalConfig.value.turnstile_enabled = systemConfig.value.turnstile_enabled

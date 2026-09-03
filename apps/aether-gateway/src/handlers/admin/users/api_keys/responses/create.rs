@@ -75,7 +75,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
     {
         return Ok((
             http::StatusCode::BAD_REQUEST,
-            Json(json!({ "detail": "当前仅支持 name、rate_limit、concurrent_limit、billing_multiplier、allowed_providers、ip_rules 字段" })),
+            Json(json!({ "detail": "当前仅支持 name、rate_limit、daily_usage_limit_usd、concurrent_limit、billing_multiplier、allowed_providers、ip_rules 字段" })),
         )
             .into_response());
     }
@@ -129,6 +129,16 @@ pub(crate) async fn build_admin_create_user_api_key_response(
         )
             .into_response());
     }
+    if payload
+        .daily_usage_limit_usd
+        .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return Ok((
+            http::StatusCode::BAD_REQUEST,
+            Json(json!({ "detail": "daily_usage_limit_usd 必须是大于等于 0 的有限数值" })),
+        )
+            .into_response());
+    }
     let concurrent_limit =
         match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit) {
             Ok(value) => value,
@@ -173,6 +183,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
             allowed_models: None,
             ip_rules,
             rate_limit,
+            daily_usage_limit_usd: payload.daily_usage_limit_usd,
             concurrent_limit,
             force_capabilities: None,
             is_active: true,
@@ -226,6 +237,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
             "name": created.name,
             "key_display": masked_user_api_key_display(state, created.key_encrypted.as_deref()),
             "rate_limit": created.rate_limit,
+            "daily_usage_limit_usd": created.daily_usage_limit_usd,
             "concurrent_limit": created.concurrent_limit,
             "billing_multiplier": created.billing_multiplier,
             "ip_rules": created.ip_rules,

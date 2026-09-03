@@ -13,6 +13,7 @@ pub struct StoredAuthApiKeySnapshot {
     pub user_is_active: bool,
     pub user_is_deleted: bool,
     pub user_rate_limit: Option<i32>,
+    pub user_daily_usage_limit_usd: Option<f64>,
     pub user_allowed_providers: Option<Vec<String>>,
     pub user_allowed_api_formats: Option<Vec<String>>,
     pub user_allowed_models: Option<Vec<String>>,
@@ -22,6 +23,7 @@ pub struct StoredAuthApiKeySnapshot {
     pub api_key_is_locked: bool,
     pub api_key_is_standalone: bool,
     pub api_key_rate_limit: Option<i32>,
+    pub api_key_daily_usage_limit_usd: Option<f64>,
     pub api_key_concurrent_limit: Option<i32>,
     pub api_key_expires_at_unix_secs: Option<u64>,
     pub api_key_allowed_providers: Option<Vec<String>>,
@@ -65,6 +67,7 @@ impl StoredAuthApiKeySnapshot {
             user_is_active,
             user_is_deleted,
             user_rate_limit: None,
+            user_daily_usage_limit_usd: None,
             user_allowed_providers: parse_string_list(
                 user_allowed_providers,
                 "users.allowed_providers",
@@ -80,6 +83,7 @@ impl StoredAuthApiKeySnapshot {
             api_key_is_locked,
             api_key_is_standalone,
             api_key_rate_limit,
+            api_key_daily_usage_limit_usd: None,
             api_key_concurrent_limit,
             api_key_expires_at_unix_secs: api_key_expires_at_unix_secs
                 .map(|value| {
@@ -145,6 +149,16 @@ impl StoredAuthApiKeySnapshot {
         self.user_rate_limit = user_rate_limit;
         self
     }
+
+    pub fn with_daily_usage_limits(
+        mut self,
+        user_daily_usage_limit_usd: Option<f64>,
+        api_key_daily_usage_limit_usd: Option<f64>,
+    ) -> Self {
+        self.user_daily_usage_limit_usd = user_daily_usage_limit_usd;
+        self.api_key_daily_usage_limit_usd = api_key_daily_usage_limit_usd;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -157,6 +171,7 @@ pub struct ResolvedAuthApiKeySnapshot {
     pub user_is_active: bool,
     pub user_is_deleted: bool,
     pub user_rate_limit: Option<i32>,
+    pub user_daily_usage_limit_usd: Option<f64>,
     pub user_allowed_providers: Option<Vec<String>>,
     pub user_allowed_api_formats: Option<Vec<String>>,
     pub user_allowed_models: Option<Vec<String>>,
@@ -166,6 +181,7 @@ pub struct ResolvedAuthApiKeySnapshot {
     pub api_key_is_locked: bool,
     pub api_key_is_standalone: bool,
     pub api_key_rate_limit: Option<i32>,
+    pub api_key_daily_usage_limit_usd: Option<f64>,
     pub api_key_concurrent_limit: Option<i32>,
     pub api_key_expires_at_unix_secs: Option<u64>,
     pub api_key_allowed_providers: Option<Vec<String>>,
@@ -188,6 +204,7 @@ impl ResolvedAuthApiKeySnapshot {
             user_is_active: snapshot.user_is_active,
             user_is_deleted: snapshot.user_is_deleted,
             user_rate_limit: snapshot.user_rate_limit,
+            user_daily_usage_limit_usd: snapshot.user_daily_usage_limit_usd,
             user_allowed_providers: snapshot.user_allowed_providers,
             user_allowed_api_formats: snapshot.user_allowed_api_formats,
             user_allowed_models: snapshot.user_allowed_models,
@@ -197,6 +214,7 @@ impl ResolvedAuthApiKeySnapshot {
             api_key_is_locked: snapshot.api_key_is_locked,
             api_key_is_standalone: snapshot.api_key_is_standalone,
             api_key_rate_limit: snapshot.api_key_rate_limit,
+            api_key_daily_usage_limit_usd: snapshot.api_key_daily_usage_limit_usd,
             api_key_concurrent_limit: snapshot.api_key_concurrent_limit,
             api_key_expires_at_unix_secs: snapshot.api_key_expires_at_unix_secs,
             api_key_allowed_providers: snapshot.api_key_allowed_providers,
@@ -246,11 +264,13 @@ impl ResolvedAuthApiKeySnapshot {
         allowed_api_formats: Option<Vec<String>>,
         allowed_models: Option<Vec<String>>,
         rate_limit: Option<i32>,
+        daily_usage_limit_usd: Option<f64>,
     ) {
         self.user_allowed_providers = allowed_providers;
         self.user_allowed_api_formats = allowed_api_formats;
         self.user_allowed_models = allowed_models;
         self.user_rate_limit = rate_limit;
+        self.user_daily_usage_limit_usd = daily_usage_limit_usd;
         self.constrain_non_standalone_api_key_policy_to_user_policy();
     }
 
@@ -377,6 +397,7 @@ pub struct StoredAuthApiKeyExportRecord {
     pub allowed_models: Option<Vec<String>>,
     pub ip_rules: Option<Vec<String>>,
     pub rate_limit: Option<i32>,
+    pub daily_usage_limit_usd: Option<f64>,
     pub concurrent_limit: Option<i32>,
     pub force_capabilities: Option<serde_json::Value>,
     pub feature_settings: Option<serde_json::Value>,
@@ -450,6 +471,7 @@ impl StoredAuthApiKeyExportRecord {
             allowed_models: parse_string_list(allowed_models, "api_keys.allowed_models")?,
             ip_rules: None,
             rate_limit,
+            daily_usage_limit_usd: None,
             concurrent_limit,
             force_capabilities,
             feature_settings: None,
@@ -500,6 +522,11 @@ impl StoredAuthApiKeyExportRecord {
         self
     }
 
+    pub fn with_daily_usage_limit(mut self, daily_usage_limit_usd: Option<f64>) -> Self {
+        self.daily_usage_limit_usd = daily_usage_limit_usd;
+        self
+    }
+
     pub fn with_ip_rules(
         mut self,
         ip_rules: Option<serde_json::Value>,
@@ -534,6 +561,7 @@ pub struct CreateUserApiKeyRecord {
     pub allowed_models: Option<Vec<String>>,
     pub ip_rules: Option<Vec<String>>,
     pub rate_limit: i32,
+    pub daily_usage_limit_usd: Option<f64>,
     pub concurrent_limit: Option<i32>,
     pub force_capabilities: Option<serde_json::Value>,
     pub is_active: bool,
@@ -551,6 +579,8 @@ pub struct UpdateUserApiKeyBasicRecord {
     pub api_key_id: String,
     pub name: Option<String>,
     pub rate_limit: Option<i32>,
+    pub daily_usage_limit_present: bool,
+    pub daily_usage_limit_usd: Option<f64>,
     pub concurrent_limit: Option<i32>,
     pub ip_rules: Option<Option<Vec<String>>>,
     pub billing_multiplier_present: bool,
@@ -569,6 +599,7 @@ pub struct CreateStandaloneApiKeyRecord {
     pub allowed_models: Option<Vec<String>>,
     pub ip_rules: Option<Vec<String>>,
     pub rate_limit: Option<i32>,
+    pub daily_usage_limit_usd: Option<f64>,
     pub concurrent_limit: Option<i32>,
     pub force_capabilities: Option<serde_json::Value>,
     pub is_active: bool,
@@ -586,6 +617,8 @@ pub struct UpdateStandaloneApiKeyBasicRecord {
     pub name: Option<String>,
     pub rate_limit_present: bool,
     pub rate_limit: Option<i32>,
+    pub daily_usage_limit_present: bool,
+    pub daily_usage_limit_usd: Option<f64>,
     pub concurrent_limit_present: bool,
     pub concurrent_limit: Option<i32>,
     pub allowed_providers: Option<Option<Vec<String>>>,
@@ -1105,6 +1138,7 @@ mod tests {
             Some(vec!["openai:chat".to_string()]),
             Some(vec!["gpt-5".to_string()]),
             Some(60),
+            Some(12.5),
         );
 
         assert_eq!(
@@ -1116,6 +1150,7 @@ mod tests {
             Some(&["openai:chat".to_string()][..])
         );
         assert_eq!(resolved.effective_allowed_models(), Some(&[][..]));
+        assert_eq!(resolved.user_daily_usage_limit_usd, Some(12.5));
     }
 
     #[test]

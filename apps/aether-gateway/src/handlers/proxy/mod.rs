@@ -204,6 +204,21 @@ fn local_execution_outcome_label(outcome: &LocalExecutionRequestOutcome) -> &'st
     }
 }
 
+fn local_execution_response_path(
+    response: &Response<Body>,
+    default_path: &'static str,
+) -> &'static str {
+    if response
+        .extensions()
+        .get::<crate::daily_usage_limit::DailyUsageLimitedResponse>()
+        .is_some()
+    {
+        EXECUTION_PATH_LOCAL_RATE_LIMITED
+    } else {
+        default_path
+    }
+}
+
 fn request_hits_execution_loop_guard(parts: &http::request::Parts) -> bool {
     request_has_execution_runtime_loop_guard(&parts.headers)
         && frontdoor_self_loop_public_ai_path(parts.uri.path())
@@ -1495,7 +1510,7 @@ async fn proxy_request_inner(
         }
     }
 
-    let rpm_started_at = Instant::now();
+    let mut limits_control_decision = None;
     let ip_whitelist_applies =
         control_decision.and_then(|decision| decision.route_class.as_deref()) == Some("ai_public");
     let ip_whitelisted = if ip_whitelist_applies {
@@ -1503,14 +1518,17 @@ async fn proxy_request_inner(
     } else {
         Ok(false)
     };
-    let rate_limit_outcome = match ip_whitelisted {
-        Ok(true) => FrontdoorUserRpmOutcome::NotApplicable,
-        Ok(false) => {
-            state
-                .frontdoor_user_rpm()
-                .check_and_consume(&state, control_decision)
-                .await?
+    match ip_whitelisted {
+        Ok(true) => {
+            limits_control_decision = control_decision.cloned();
+            if let Some(auth) = limits_control_decision
+                .as_mut()
+                .and_then(|decision| decision.auth_context.as_mut())
+            {
+                auth.ip_bypass_limits = true;
+            }
         }
+        Ok(false) => {}
         Err(err) => {
             warn!(
                 event_name = "frontdoor_ip_whitelist_check_failed",
@@ -1520,11 +1538,21 @@ async fn proxy_request_inner(
                 error = ?err,
                 "gateway continued with rate limiting after IP whitelist check error"
             );
-            state
-                .frontdoor_user_rpm()
-                .check_and_consume(&state, control_decision)
-                .await?
         }
+    }
+    let control_decision = limits_control_decision.as_ref().or(control_decision);
+
+    let rpm_started_at = Instant::now();
+    let rate_limit_outcome = if control_decision
+        .and_then(|decision| decision.auth_context.as_ref())
+        .is_some_and(|auth| auth.ip_bypass_limits)
+    {
+        FrontdoorUserRpmOutcome::NotApplicable
+    } else {
+        state
+            .frontdoor_user_rpm()
+            .check_and_consume(&state, control_decision)
+            .await?
     };
     observe_gateway_stage_ms("frontdoor_rpm", rpm_started_at.elapsed().as_millis() as u64);
     if let FrontdoorUserRpmOutcome::Rejected(rejection) = &rate_limit_outcome {
@@ -1690,13 +1718,17 @@ async fn proxy_request_inner(
                         execution_runtime_response,
                         &redaction_slot,
                     )?;
+                    let execution_path = local_execution_response_path(
+                        &execution_runtime_response,
+                        EXECUTION_PATH_EXECUTION_RUNTIME_STREAM,
+                    );
                     state.clear_local_execution_runtime_miss_diagnostic(&trace_id);
                     return Ok(finalize_gateway_response_with_context(
                         &state,
                         execution_runtime_response,
                         &remote_addr,
                         &request_context,
-                        EXECUTION_PATH_EXECUTION_RUNTIME_STREAM,
+                        execution_path,
                         &started_at,
                         request_permit.take(),
                     ));
@@ -1750,13 +1782,17 @@ async fn proxy_request_inner(
                     &redaction_slot,
                 )
                 .await?;
+                let execution_path = local_execution_response_path(
+                    &execution_runtime_response,
+                    EXECUTION_PATH_EXECUTION_RUNTIME_SYNC,
+                );
                 state.clear_local_execution_runtime_miss_diagnostic(&trace_id);
                 return Ok(finalize_gateway_response_with_context(
                     &state,
                     execution_runtime_response,
                     &remote_addr,
                     &request_context,
-                    EXECUTION_PATH_EXECUTION_RUNTIME_SYNC,
+                    execution_path,
                     &started_at,
                     request_permit.take(),
                 ));
@@ -1810,13 +1846,17 @@ async fn proxy_request_inner(
                         execution_runtime_response,
                         &redaction_slot,
                     )?;
+                    let execution_path = local_execution_response_path(
+                        &execution_runtime_response,
+                        EXECUTION_PATH_EXECUTION_RUNTIME_STREAM,
+                    );
                     state.clear_local_execution_runtime_miss_diagnostic(&trace_id);
                     return Ok(finalize_gateway_response_with_context(
                         &state,
                         execution_runtime_response,
                         &remote_addr,
                         &request_context,
-                        EXECUTION_PATH_EXECUTION_RUNTIME_STREAM,
+                        execution_path,
                         &started_at,
                         request_permit.take(),
                     ));
