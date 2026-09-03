@@ -89,9 +89,16 @@ cap_text() {
 # Idempotent: one open issue per (kind, key), identified by title plus an HTML
 # marker; a repeat failure adds exactly one marker-guarded comment. <raw> is
 # mandatory and must carry the original failing output / exit code.
+#
+# This function is the last-resort channel: a failure of its own gh calls can
+# itself only surface in the run log. Every internal call therefore carries an
+# explicit `--method` (gh api defaults to POST when -f fields are present — a
+# missing `--method GET` turned reads into create attempts, see #180 first-run
+# 422) and is guarded so the raw diagnostic always reaches stderr before the
+# function fails.
 report_sync_alert() {
   local kind="$1" key="$2" summary="$3" raw="$4"
-  local title marker comment_marker body existing comments
+  local title marker comment_marker body existing comments gh_error
   [[ -n "${raw}" ]] || {
     echo 'error: report_sync_alert requires the raw error detail' >&2
     return 1
@@ -107,24 +114,35 @@ ${summary}
 \`\`\`
 $(cap_text "${raw}" 8000)
 \`\`\`"
-  existing="$(bounded_gh issue list \
+  if ! existing="$(bounded_gh issue list \
     --repo "${GITHUB_REPOSITORY}" \
     --state open \
     --limit 100 \
     --search "\"${title}\" in:title" \
     --json number,title,body \
-    --jq ".[] | select(.title == \"${title}\" and ((.body // \"\") | contains(\"${marker}\"))) | .number" | head -n1)"
+    --jq ".[] | select(.title == \"${title}\" and ((.body // \"\") | contains(\"${marker}\"))) | .number" 2>&1)"; then
+    printf 'error: alert issue inventory failed for %s\n%s\n' "'${title}'" "${existing}" >&2
+    return 1
+  fi
+  existing="$(head -n1 <<<"${existing}")"
   if [[ -z "${existing}" ]]; then
-    bounded_gh issue create \
+    if ! gh_error="$(bounded_gh issue create \
       --repo "${GITHUB_REPOSITORY}" \
       --title "${title}" \
-      --body "${body}" >/dev/null
+      --body "${body}" 2>&1 >/dev/null)"; then
+      printf 'error: alert issue create failed for %s\n%s\n' "'${title}'" "${gh_error}" >&2
+      return 1
+    fi
     return 0
   fi
-  comments="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/issues/${existing}/comments" \
-    -f per_page=100 --jq '.[].body')"
+  if ! comments="$(bounded_gh api --method GET \
+    "repos/${GITHUB_REPOSITORY}/issues/${existing}/comments" \
+    -f per_page=100 --jq '.[].body' 2>&1)"; then
+    printf 'error: alert comment inventory failed for issue %s\n%s\n' "${existing}" "${comments}" >&2
+    return 1
+  fi
   if [[ "${comments}" != *"${comment_marker}"* ]]; then
-    bounded_gh api --method POST \
+    if ! gh_error="$(bounded_gh api --method POST \
       "repos/${GITHUB_REPOSITORY}/issues/${existing}/comments" \
       -f body="${comment_marker}
 ${summary}
@@ -133,7 +151,10 @@ ${summary}
 
 \`\`\`
 $(cap_text "${raw}" 8000)
-\`\`\`" >/dev/null
+\`\`\`" 2>&1 >/dev/null)"; then
+      printf 'error: alert comment create failed for issue %s\n%s\n' "${existing}" "${gh_error}" >&2
+      return 1
+    fi
   fi
 }
 
@@ -330,14 +351,17 @@ if bounded_git merge-base --is-ancestor "${upstream_sha}" "${base_sha}"; then
   exit 0
 fi
 
-# Inventory every PR for the fixed head/base pair, newest first.
-if ! pulls_json="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/pulls" \
+# Inventory every PR for the fixed head/base pair, newest first. `--method GET`
+# is explicit: gh api otherwise defaults to POST when -f fields are present,
+# which turned this read into a pull-request creation attempt (#180 first run).
+if ! pulls_json="$(bounded_gh api --method GET "repos/${GITHUB_REPOSITORY}/pulls" \
     -f state=all -f "base=${BASE_BRANCH}" -f "head=${REPO_OWNER}:${SYNC_BRANCH}" \
     -f sort=updated -f direction=desc -f per_page=100 \
     --jq '[.[] | {number, state, merged_at, body, head: .head.sha, url: .html_url}]' 2>&1)" ||
    ! jq -e 'type == "array"' <<<"${pulls_json}" >/dev/null 2>&1; then
   summary_msg="Unable to inventory synchronization pull requests for ${SYNC_BRANCH} → ${BASE_BRANCH}."
   raw="${pulls_json}"
+  raw="${raw:-no diagnostic output}"
   report_sync_alert invalid-state "${alert_key}" "${summary_msg}" "${raw}"
   output state error
   exit 1
@@ -395,7 +419,17 @@ fi
 # Fetch the current remote sync branch tip when it exists. The branch is
 # deleted automatically when its PR merges (delete_branch_on_merge), so its
 # absence is the normal post-merge state and simply means "rebuild".
-remote_sync_tip="$(fetch_exact "${ORIGIN_URL}" "${SYNC_BRANCH}" refs/aeris/sync-branch 'sync branch' true)"
+fetch_err="$(mktemp)"
+if ! remote_sync_tip="$(fetch_exact "${ORIGIN_URL}" "${SYNC_BRANCH}" refs/aeris/sync-branch 'sync branch' true 2>"${fetch_err}")"; then
+  summary_msg="Bounded fetch of the ${SYNC_BRANCH} branch tip failed."
+  raw="$(cat "${fetch_err}")"
+  raw="${raw:-no diagnostic output}"
+  rm -f -- "${fetch_err}"
+  report_sync_alert fetch "${SYNC_BRANCH}" "${summary_msg}" "${raw}"
+  output state error
+  exit 1
+fi
+rm -f -- "${fetch_err}"
 
 if [[ -n "${open_pr_number}" ]]; then
   # An open PR's head branch must exist and match the remote tip exactly.
@@ -485,7 +519,17 @@ ${push_output}"
       exit 1
     fi
   fi
-  confirmed_tip="$(fetch_exact "${ORIGIN_URL}" "${SYNC_BRANCH}" refs/aeris/sync-branch-confirm 'sync branch' true)"
+  confirmed_err="$(mktemp)"
+  if ! confirmed_tip="$(fetch_exact "${ORIGIN_URL}" "${SYNC_BRANCH}" refs/aeris/sync-branch-confirm 'sync branch' true 2>"${confirmed_err}")"; then
+    summary_msg="Unable to re-read ${SYNC_BRANCH} after publishing ${head_sha}."
+    raw="$(cat "${confirmed_err}")"
+    raw="${raw:-no diagnostic output}"
+    rm -f -- "${confirmed_err}"
+    report_sync_alert publication "${alert_key}" "${summary_msg}" "${raw}"
+    output state error
+    exit 1
+  fi
+  rm -f -- "${confirmed_err}"
   if [[ "${confirmed_tip}" != "${head_sha}" ]]; then
     summary_msg="${SYNC_BRANCH} moved to '${confirmed_tip:-absent}' immediately after publication of ${head_sha}."
     raw="expected=${head_sha}
@@ -522,10 +566,19 @@ ${edit_output}"
     set -e
     if ((create_rc != 0)); then
       # A concurrent run may have created the PR; adopt it when it is the
-      # single managed open PR for this head/base pair.
-      adopt_json="$(bounded_gh api "repos/${GITHUB_REPOSITORY}/pulls" \
+      # single managed open PR for this head/base pair. `--method GET` is
+      # explicit: gh api otherwise defaults to POST when -f fields are present.
+      if ! adopt_json="$(bounded_gh api --method GET "repos/${GITHUB_REPOSITORY}/pulls" \
         -f state=open -f "base=${BASE_BRANCH}" -f "head=${REPO_OWNER}:${SYNC_BRANCH}" \
-        -f per_page=100 --jq '[.[] | {number, body, url}]')"
+        -f per_page=100 --jq '[.[] | {number, body, url}]' 2>&1)"; then
+        summary_msg="Unable to re-inventory pull requests after PR creation failed for ${head_sha}."
+        raw="gh pr create exit=${create_rc}
+${create_output}
+adopt inventory: ${adopt_json}"
+        report_sync_alert publication "${alert_key}" "${summary_msg}" "${raw}"
+        output state error
+        exit 1
+      fi
       adopt_count="$(jq '[.[] | select((.body // "") | contains("'"${MANAGED_MARKER}"'"))] | length' <<<"${adopt_json}")"
       if [[ "${adopt_count}" == 1 ]]; then
         pr_number="$(jq -r '[.[] | select((.body // "") | contains("'"${MANAGED_MARKER}"'"))][0].number' <<<"${adopt_json}")"
@@ -545,8 +598,15 @@ ${create_output}"
   fi
 
   # Prove the published PR identity before any merge machinery touches it.
-  pr_view="$(bounded_gh pr view "${pr_number}" --repo "${GITHUB_REPOSITORY}" \
-    --json state,isDraft,headRefOid,headRefName,headRepository,baseRefName)"
+  if ! pr_view="$(bounded_gh pr view "${pr_number}" --repo "${GITHUB_REPOSITORY}" \
+    --json state,isDraft,headRefOid,headRefName,headRepository,baseRefName 2>&1)"; then
+    summary_msg="Unable to re-read sync PR #${pr_number} after publication of ${head_sha}."
+    raw="${pr_view}"
+    raw="${raw:-no diagnostic output}"
+    report_sync_alert invalid-state "${alert_key}" "${summary_msg}" "${raw}"
+    output state error
+    exit 1
+  fi
   if ! jq -e --arg head_sha "${head_sha}" --arg head_branch "${SYNC_BRANCH}" \
       --arg repository "${GITHUB_REPOSITORY}" --arg base_branch "${BASE_BRANCH}" '
       type == "object" and .state == "OPEN" and .isDraft == false and
@@ -592,8 +652,15 @@ ensure_check_dispatch frontend-ci.yml "Frontend CI / check"
 
 # Arm GitHub native auto-merge with the merge method. This is the only merge
 # machinery in the loop; it fires only after every required check passes.
-pr_auto_merge="$(bounded_gh pr view "${pr_number}" --repo "${GITHUB_REPOSITORY}" \
-  --json autoMergeRequest --jq '.autoMergeRequest == null')"
+if ! pr_auto_merge="$(bounded_gh pr view "${pr_number}" --repo "${GITHUB_REPOSITORY}" \
+    --json autoMergeRequest --jq '.autoMergeRequest == null' 2>&1)"; then
+  summary_msg="Unable to read the auto-merge state of sync PR #${pr_number}."
+  raw="${pr_auto_merge}"
+  raw="${raw:-no diagnostic output}"
+  report_sync_alert automerge "${alert_key}" "${summary_msg}" "${raw}"
+  output state error
+  exit 1
+fi
 if [[ "${pr_auto_merge}" == true ]]; then
   set +e
   automerge_output="$(bounded_gh pr merge --auto --merge "${pr_number}" \

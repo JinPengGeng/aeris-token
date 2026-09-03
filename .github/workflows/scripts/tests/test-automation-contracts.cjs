@@ -1303,6 +1303,52 @@ const minimalScriptMode = execFileSync(
 ).split(' ')[0];
 assert(minimalScriptMode === '100755', 'sync-upstream-minimal.sh must be executable');
 
+// gh api defaults to POST when -f/-F fields are present. A read without an
+// explicit --method became a pull-request creation attempt and turned the
+// alert comment lookup into a bodiless POST (HTTP 422, #180 first run), and
+// the alert path died unguarded. Pin the method discipline across every
+// bounded gh api call in the loop script.
+const minimalLogicalLines = [];
+{
+  let pendingLine = '';
+  for (const line of minimalSyncScript.split('\n')) {
+    pendingLine = pendingLine === '' ? line : `${pendingLine} ${line.trim()}`;
+    if (!pendingLine.endsWith('\\')) {
+      minimalLogicalLines.push(pendingLine);
+      pendingLine = '';
+    } else {
+      pendingLine = pendingLine.slice(0, -1);
+    }
+  }
+  if (pendingLine !== '') minimalLogicalLines.push(pendingLine);
+}
+const minimalFieldedApiCalls = minimalLogicalLines.filter(
+  (line) => line.includes('bounded_gh api ') && /\s-[fF]\s/.test(line),
+);
+assert(
+  minimalFieldedApiCalls.length >= 4 &&
+    minimalFieldedApiCalls.every((line) => /--method (GET|POST|PATCH|PUT|DELETE)\b/.test(line)),
+  'every bounded gh api call with -f/-F fields must pin an explicit --method (gh defaults to POST)',
+);
+assert(
+  minimalSyncScript.includes('alert comment inventory failed') &&
+    minimalSyncScript.includes('alert issue create failed') &&
+    minimalSyncScript.includes('alert issue inventory failed'),
+  'the minimal sync alert helper must fail loudly to stderr when its own gh calls fail',
+);
+assert(
+  frontendWorkflow.jobs.automation.steps.some(
+    (step) => step.run === 'bash ../workflows/scripts/tests/test-sync-minimal-alerts.sh',
+  ),
+  'required CI must execute the minimal sync alert method-discipline regression test',
+);
+const minimalAlertTestMode = execFileSync(
+  'git',
+  ['ls-files', '--stage', '--', '.github/workflows/scripts/tests/test-sync-minimal-alerts.sh'],
+  { cwd: repoRoot, encoding: 'utf8' },
+).split(' ')[0];
+assert(minimalAlertTestMode === '100755', 'test-sync-minimal-alerts.sh must be executable');
+
 console.log(
   JSON.stringify({
     agents: expectedAgents.length,
