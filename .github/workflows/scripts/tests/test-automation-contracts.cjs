@@ -40,6 +40,9 @@ const verifyCandidateMetadata = read(
   '.github/workflows/scripts/validate-sync-candidate-metadata.cjs',
 );
 const state = JSON.parse(read('.github/upstream-sync-state.json'));
+const minimalSyncWorkflow = loadYaml('.github/workflows/sync-upstream-minimal.yml');
+const minimalSyncWorkflowSource = read('.github/workflows/sync-upstream-minimal.yml');
+const minimalSyncScript = read('.github/workflows/scripts/sync-upstream-minimal.sh');
 
 for (const [name, workflow, context] of [
   ['frontend', frontendWorkflow, 'Frontend CI / check'],
@@ -1151,6 +1154,154 @@ const modesByPath = new Map(
 for (const script of directlyExecutedScripts) {
   assert(modesByPath.get(script) === '100755', `${script} must be executable`);
 }
+
+// --- Minimal upstream sync loop (#175, automation v2 Phase 0) ---
+// Runs in parallel with the legacy sync-upstream.yml; both must share one
+// concurrency group so they can never execute at the same time.
+assert(
+  minimalSyncWorkflow.concurrency?.group === 'sync-upstream-main' &&
+    minimalSyncWorkflow.concurrency['cancel-in-progress'] === false &&
+    syncWorkflow.concurrency?.group === 'sync-upstream-main' &&
+    syncWorkflow.concurrency['cancel-in-progress'] === false,
+  'minimal and legacy sync workflows must share the sync-upstream-main mutex with cancel-in-progress: false',
+);
+assert(
+  Array.isArray(minimalSyncWorkflow.on.schedule) &&
+    minimalSyncWorkflow.on.schedule.length === 1 &&
+    typeof minimalSyncWorkflow.on.schedule[0].cron === 'string' &&
+    ![0, 30].includes(Number(minimalSyncWorkflow.on.schedule[0].cron.split(' ')[0])) &&
+    minimalSyncWorkflow.on.workflow_dispatch !== undefined,
+  'minimal sync must run daily off the round hour and support manual dispatch',
+);
+const minimalSyncJob = minimalSyncWorkflow.jobs.sync;
+assert(
+  JSON.stringify(minimalSyncJob.permissions) ===
+    JSON.stringify({
+      contents: 'write',
+      'pull-requests': 'write',
+      issues: 'write',
+      actions: 'write',
+    }),
+  'minimal sync GITHUB_TOKEN permissions must be exactly contents/pull-requests/issues/actions write',
+);
+assert(
+  !/secrets\.|create-github-app-token|AERIS_AI_|AERIS_WRITER_APP|environment:/.test(
+    minimalSyncWorkflowSource,
+  ),
+  'minimal sync must use GITHUB_TOKEN only: no secrets, Writer App, AI configuration, or environments',
+);
+assert(
+  minimalSyncJob.if.includes("vars.AERIS_UPSTREAM_SYNC_ENABLED == 'true'") &&
+    minimalSyncJob.if.includes("vars.AERIS_UPSTREAM_SYNC_ENABLED == '1'") &&
+    minimalSyncJob.if.includes('github.event.repository.default_branch'),
+  'minimal sync must run only on the default branch with the upstream-sync lane enabled',
+);
+const minimalCheckout = minimalSyncJob.steps.find((step) =>
+  String(step.uses).startsWith('actions/checkout@'),
+);
+assert(
+  minimalCheckout?.with?.['persist-credentials'] === false &&
+    minimalCheckout.with['fetch-depth'] === 1 &&
+    minimalCheckout.with.token === '${{ github.token }}',
+  'minimal sync checkout must use the workflow token without persisted credentials',
+);
+assert(
+  minimalSyncJob.steps.some(
+    (step) =>
+      step.run === 'bash .github/workflows/scripts/sync-upstream-minimal.sh' &&
+      step.env?.GH_TOKEN === '${{ github.token }}',
+  ),
+  'minimal sync must execute the loop script with the workflow job token',
+);
+
+// Every network git transfer must go through the shared bounded helper; bare
+// fetch/ls-remote/push is forbidden in the loop script.
+assert(
+  minimalSyncScript.includes('source "${SCRIPT_DIR}/bounded-git-fetch.sh"') &&
+    minimalSyncScript.includes('aeris_bounded_fetch_init "${SYNC_POLICY_FILE}"') &&
+    (minimalSyncScript.match(/aeris_bounded_fetch_ref /g) ?? []).length >= 1 &&
+    !/\bgit\s+(fetch|ls-remote|push)\b/.test(minimalSyncScript) &&
+    minimalSyncScript.includes('bounded_git_push push'),
+  'minimal sync must route all git transport through bounded-git-fetch.sh and the bounded push helper',
+);
+assert(
+  minimalSyncScript.includes('SYNC_BRANCH="${SYNC_BRANCH:-sync/upstream}"') &&
+    syncWorkflow.jobs.sync.env.SYNC_BRANCH === 'automation/sync-upstream',
+  'minimal and legacy sync must use distinct fixed synchronization branches',
+);
+
+// Idempotent PR reuse: fixed head/base inventory plus an upstream-SHA marker.
+assert(
+  minimalSyncScript.includes('head=${REPO_OWNER}:${SYNC_BRANCH}') &&
+    minimalSyncScript.includes('<!-- upstream-sync-minimal-upstream:') &&
+    minimalSyncScript.includes('<!-- upstream-sync-minimal-managed -->'),
+  'minimal sync PR reuse key must be the fixed head/base pair plus the upstream SHA marker',
+);
+
+// Fail-closed alerts must pass the raw error output through into the issue
+// body (#172 lesson). The fourth argument is mandatory and every call site
+// follows one uniform shape.
+assert(
+  /report_sync_alert\(\) \{[\s\S]*?\[\[ -n "\$\{raw\}" \]\]/.test(minimalSyncScript) &&
+    minimalSyncScript.includes('### Raw error'),
+  'minimal sync alert helper must require and publish the raw error detail',
+);
+const minimalAlertCalls = minimalSyncScript.match(/^[ \t]+report_sync_alert [a-z-]+ [^\n]*$/gm) ?? [];
+assert(
+  minimalAlertCalls.length >= 5 &&
+    minimalAlertCalls.every((call) =>
+      /^[ \t]+report_sync_alert [a-z-]+ "\$\{[^}]+\}" "\$\{summary_msg\}" "\$\{raw\}"$/.test(call),
+    ),
+  'every minimal sync alert call site must pass summary plus raw error detail',
+);
+
+// Auto-merge is armed exactly once, with the merge method, and only after the
+// conflict and .github/** drift paths have already failed closed.
+const minimalAutoMergeIndex = minimalSyncScript.indexOf('--auto --merge');
+assert(
+  minimalAutoMergeIndex > -1 &&
+    minimalSyncScript.indexOf('--auto --merge') ===
+      minimalSyncScript.lastIndexOf('--auto --merge') &&
+    !/pr merge[^\n]*(--squash|--rebase)/.test(minimalSyncScript) &&
+    minimalSyncScript.indexOf('report_sync_alert conflict ') > -1 &&
+    minimalSyncScript.indexOf('report_sync_alert conflict ') < minimalAutoMergeIndex &&
+    minimalSyncScript.indexOf('report_sync_alert workflow-drift ') > -1 &&
+    minimalSyncScript.indexOf('report_sync_alert workflow-drift ') < minimalAutoMergeIndex &&
+    minimalSyncScript.indexOf('exit 1', minimalSyncScript.indexOf('report_sync_alert conflict ')) <
+      minimalAutoMergeIndex,
+  'minimal sync must arm auto-merge (merge method) only on the conflict-free, drift-free path',
+);
+
+// Merge-commit discipline: true merge (ancestor connectivity), verified after
+// the auto-merge lands; the workflow file itself documents the discipline.
+assert(
+  minimalSyncScript.includes('--no-ff') &&
+    minimalSyncScript.includes('rev-list --count') &&
+    minimalSyncScript.includes('"${behind}" != 0') &&
+    /grep -c '\^parent '/.test(minimalSyncScript) &&
+    minimalSyncScript.includes('report_sync_alert merge-discipline '),
+  'minimal sync must verify behind==0 and a two-parent merge commit after the auto-merge lands',
+);
+assert(
+  /merge commit/i.test(minimalSyncWorkflowSource) &&
+    minimalSyncWorkflowSource.includes('rev-list --count'),
+  'minimal sync workflow must document the merge-commit discipline in a comment',
+);
+
+// The GITHUB_TOKEN event-suppression gap must surface as an alert instead of
+// an eternal auto-merge wait.
+assert(
+  minimalSyncScript.includes('report_sync_alert missing-required-check '),
+  'minimal sync must fail closed when a required check context can never appear',
+);
+
+// The loop script follows the executable-bit convention of the other scripts.
+const minimalScriptMode = execFileSync(
+  'git',
+  ['ls-files', '--stage', '--', '.github/workflows/scripts/sync-upstream-minimal.sh'],
+  { cwd: repoRoot, encoding: 'utf8' },
+).split(' ')[0];
+assert(minimalScriptMode === '100755', 'sync-upstream-minimal.sh must be executable');
 
 console.log(
   JSON.stringify({

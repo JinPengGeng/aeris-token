@@ -41,7 +41,8 @@ fork 修复并验证（急用先落地）
 ## 3. 同步纪律
 
 - 同步方式为**真合并**（merge commit，祖先连通）：每次 sync 按定制点做三方合并，冲突显式暴露；禁止整树覆盖式快照吞掉定制语义。
-- `.github/upstream-sync-state.json` 的 `last_integrated_sha` 是同步点的唯一权威记录；GitHub 的 ahead/behind 显示仅供参考。
+- `.github/upstream-sync-state.json` 的 `last_integrated_sha` 是旧 checkpoint 体系同步点的唯一权威记录；GitHub 的 ahead/behind 显示仅供参考。新最小闭环（`sync-upstream-minimal.yml`，#175 并行观察期）以 `git merge-base` 为进度，不读 state.json。
+- 合并方法纪律：sync/\* 分支的同步 PR 只允许 merge commit，其余 PR 一律 squash。`main-linear-history` ruleset 移除后（#175 决策候选②），该纪律由评审约定、automation 契约测试 pin、以及合并后 `git rev-list --count origin/main..upstream/main == 0` 校验共同约束。
 - 冲突解决原则：以上游为基座，逐定制点重新落位；语义冲突时以上游为准重设计定制。
 
 ## 4. 当前补丁跟踪表（补丁轨道）
