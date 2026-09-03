@@ -7,11 +7,13 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  MAX_CONFLICT_FILES,
   SYNC_CONFLICT_PROFILE,
   SYNC_CONFLICT_SCHEMA_VERSION,
   artifactSha,
   canonicalJson,
   conflictGeneration,
+  conflictManifestSha,
   reviewGeneration,
   validateConflictBundle,
   validateConflictCandidate,
@@ -452,4 +454,113 @@ test('contracts reject shared resolver/reviewer models, stale candidates, marker
     profile: SYNC_CONFLICT_PROFILE,
   }, input, bundle, candidate), /fields are invalid/);
   assert.ok(canonicalJson(bundle).length > 0);
+});
+
+// Regression for the run 33692512876 failure: a legitimate modify/modify merge
+// with more than four conflicted files died in conflictManifestSha with
+// "conflict manifest file count is invalid" before any resource budget was
+// evaluated, so no conflict bundle (and no sync PR) was ever produced.
+test('conflict manifest contract accepts a five-file conflict within the count ceiling', async (t) => {
+  const entrySha = (seed) => seed.toString(16).padStart(2, '0').repeat(20);
+  const manifestEntry = (index) => ({
+    path: `src/conflict-${String(index).padStart(2, '0')}.rs`,
+    mode: '100644',
+    base_blob_sha: entrySha(index * 4 + 1),
+    ours_blob_sha: entrySha(index * 4 + 2),
+    theirs_blob_sha: entrySha(index * 4 + 3),
+    base_content: `base ${index}\n`,
+    ours_content: `ours ${index}\n`,
+    theirs_content: `theirs ${index}\n`,
+    marker_content: `<<<<<<< ours\nours ${index}\n=======\ntheirs ${index}\n>>>>>>> theirs\n`,
+  });
+  const five = Array.from({ length: 5 }, (_, index) => manifestEntry(index));
+  assert.match(conflictManifestSha(five), /^[0-9a-f]{64}$/);
+  assert.throws(() => conflictManifestSha([]), /file count is invalid/);
+  const overLimit = Array.from({ length: MAX_CONFLICT_FILES + 1 }, (_, index) => manifestEntry(index));
+  assert.throws(() => conflictManifestSha(overLimit), /file count is invalid/);
+
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'aeris-sync-conflict-five-'));
+  const previous = process.cwd();
+  process.chdir(repo);
+  t.after(() => {
+    process.chdir(previous);
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+  git(repo, ['init', '-b', 'main']);
+  git(repo, ['config', 'user.name', 'test']);
+  git(repo, ['config', 'user.email', 'test@example.invalid']);
+  const conflictPaths = Array.from({ length: 5 }, (_, index) => `src/conflict-${String(index).padStart(2, '0')}.rs`);
+  for (const [index, conflictPath] of conflictPaths.entries()) write(repo, conflictPath, `base ${index}\n`);
+  write(repo, '.github/upstream-sync-policy.yml', 'version: 1\n');
+  write(repo, '.github/ai-executors.json', `${JSON.stringify({
+    schema_version: 1,
+    executors: [
+      { id: 'openai-chat-v1', kind: 'completion', protocol: 'openai-chat-completions-v1' },
+      { id: 'openai-responses-v1', kind: 'completion', protocol: 'openai-responses-v1' },
+      {
+        id: 'codex-action-v1', kind: 'workspace_candidate', protocol: 'aeris-workspace-candidate-v1',
+        action_sha: '52fe01ec70a42f454c9d2ebd47598f9fd6893d56', tool_version: '0.148.0',
+      },
+    ],
+    routes: {
+      agent_analysis: 'openai-chat-v1',
+      sync_conflict_resolver: 'openai-chat-v1',
+      sync_conflict_reviewer: 'openai-chat-v1',
+      candidate: 'codex-action-v1',
+    },
+  })}\n`);
+  write(repo, '.github/upstream-sync-state.json', `${JSON.stringify({ last_integrated_sha: '0'.repeat(40) })}\n`);
+  const checkpoint = commit(repo, 'checkpoint');
+  write(repo, '.github/upstream-sync-state.json', `${JSON.stringify({ last_integrated_sha: checkpoint })}\n`);
+  const stateCommit = commit(repo, 'bind checkpoint state');
+
+  git(repo, ['switch', '-c', 'upstream', stateCommit]);
+  for (const [index, conflictPath] of conflictPaths.entries()) write(repo, conflictPath, `upstream ${index}\n`);
+  const upstream = commit(repo, 'upstream change');
+
+  git(repo, ['switch', '-c', 'fork', stateCommit]);
+  for (const [index, conflictPath] of conflictPaths.entries()) write(repo, conflictPath, `fork ${index}\n`);
+  const base = commit(repo, 'fork change');
+
+  const environment = {
+    ...process.env,
+    GITHUB_REPOSITORY: 'example/aeris-token',
+    GITHUB_REPOSITORY_ID: '123',
+    BASE_BRANCH: 'main',
+    SYNC_BRANCH: 'automation/sync-upstream',
+    AERIS_CONFLICT_BASE_SHA: base,
+    AERIS_CONFLICT_CHECKPOINT_SHA: stateCommit,
+    AERIS_CONFLICT_UPSTREAM_REPOSITORY: 'upstream/aether',
+    AERIS_CONFLICT_UPSTREAM_REF: 'main',
+    AERIS_CONFLICT_UPSTREAM_SHA: upstream,
+    AERIS_CONFLICT_SYNTHETIC_COMMIT_SHA: upstream,
+    AERIS_CONFLICT_POLICY_PATH: '.github/upstream-sync-policy.yml',
+    AERIS_CONFLICT_STATE_PATH: '.github/upstream-sync-state.json',
+    AERIS_SYNC_POLICY_VERDICT: 'eligible',
+    AERIS_AI_MODEL_CONFLICT_RESOLVER: 'resolver-model',
+    AERIS_AI_MODEL_CONFLICT_REVIEWER: 'reviewer-model',
+    AERIS_ARTIFACT_ROOT: repo,
+    GITHUB_RUN_ID: '456',
+    GITHUB_RUN_ATTEMPT: '2',
+  };
+
+  const bundle = buildConflictBundle({ environment });
+  assert.equal(bundle.conflicts.length, 5);
+  assert.deepEqual(bundle.conflicts.map((entry) => entry.path), conflictPaths);
+  assert.equal(bundle.merge.manifest_sha, conflictManifestSha(bundle.conflicts));
+
+  const candidate = await resolveConflict({
+    bundle,
+    environment,
+    client: fakeClient({
+      schema_version: 1,
+      verdict: 'resolved',
+      summary: 'Preserve both sides of every conflict in a deterministic order.',
+      resolutions: conflictPaths.map((conflictPath, index) => ({
+        path: conflictPath,
+        content: `fork ${index}\nupstream ${index}\n`,
+      })),
+    }, { alias: 'conflict-resolver', id: 'resolver-model' }, TRUSTED_SYNC_EXECUTOR),
+  });
+  assert.equal(candidate.output.resolutions.length, 5);
 });
