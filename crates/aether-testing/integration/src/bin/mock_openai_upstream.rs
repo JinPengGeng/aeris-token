@@ -1539,12 +1539,19 @@ mod tests {
     }
 
     async fn wait_for_completed(metrics: &Metrics, expected: u64) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while metrics.completed_total.load(Ordering::Acquire) < expected
-            && tokio::time::Instant::now() < deadline
-        {
-            tokio::task::yield_now().await;
-        }
+        // The completion guard increments `completed_total` one instruction before
+        // decrementing `in_flight`, so probe both; a fixed 2s spin deadline can also
+        // lapse on a loaded runner, silently falling through to confusing assert_eq
+        // failures. Barrier on the metrics with a generous loud timeout instead.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while metrics.completed_total.load(Ordering::Acquire) < expected
+                || metrics.in_flight.load(Ordering::Acquire) != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("truncated requests should complete and release their in-flight slots");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

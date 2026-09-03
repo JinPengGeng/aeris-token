@@ -3035,6 +3035,28 @@ mod tests {
         }
     }
 
+    // Waits until the queue has fully drained: `pending_current` reaches zero
+    // and the lane admission semaphore has returned every permit. The worker
+    // returns the final permit a few instructions after the metric hits zero,
+    // so probing only one of the two would race the trailing permit return.
+    async fn wait_for_lane_drain(
+        runtime: &RequestCandidateQueueRuntime,
+        admission: &Semaphore,
+        capacity: usize,
+        context: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runtime.metrics.pending_current.load(Ordering::Acquire) != 0
+                || admission.available_permits() != capacity
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect(context);
+        assert_eq!(admission.available_permits(), capacity);
+    }
+
     struct EnvGuard {
         key: &'static str,
         previous: Option<String>,
@@ -4805,16 +4827,13 @@ mod tests {
             .await
             .expect("overflow should resume after repository recovery")
             .expect("overflow task should complete");
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while runtime.metrics.pending_current.load(Ordering::Acquire) != 0
-                || runtime.priority_admission.available_permits() != 2
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("bounded lifecycle retries should fully drain after recovery");
-        assert_eq!(runtime.priority_admission.available_permits(), 2);
+        wait_for_lane_drain(
+            &runtime,
+            &runtime.priority_admission,
+            2,
+            "bounded lifecycle retries should fully drain after recovery",
+        )
+        .await;
         for request_id in ["outage-bounded-1", "outage-bounded-2", "outage-bounded-3"] {
             assert_eq!(
                 repository
@@ -4891,16 +4910,13 @@ mod tests {
         assert!(attempts_during_outage >= 2);
 
         repository.failing.store(false, Ordering::Release);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while runtime.metrics.pending_current.load(Ordering::Acquire) != 0
-                || runtime.normal_admission.available_permits() != 2
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("bounded normal retries should fully drain after recovery");
-        assert_eq!(runtime.normal_admission.available_permits(), 2);
+        wait_for_lane_drain(
+            &runtime,
+            &runtime.normal_admission,
+            2,
+            "bounded normal retries should fully drain after recovery",
+        )
+        .await;
         for request_id in ["normal-outage-bounded-1", "normal-outage-bounded-2"] {
             assert_eq!(
                 repository
