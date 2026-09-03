@@ -10906,21 +10906,23 @@ mod tests {
         let supervisor = runtime
             .spawn_worker_supervisor(Arc::new(store))
             .expect("supervisor should spawn");
-        for _ in 0..100 {
-            let snapshot = runtime.metrics_snapshot();
-            if snapshot.worker_desired_count > 1 {
-                supervisor.abort();
-                return;
+        // Scale-up is driven by the 10ms scale interval observing full reads, so
+        // barrier on the desired count with a generous loud timeout; a fixed
+        // 100x10ms poll budget can lapse on a loaded runner before the interval
+        // tick and the telemetry observation line up.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while runtime.metrics_snapshot().worker_desired_count <= 1 {
+                sleep(Duration::from_millis(10)).await;
             }
-            sleep(Duration::from_millis(10)).await;
-        }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            let snapshot = runtime.metrics_snapshot();
+            panic!(
+                "usage worker supervisor should scale up after repeated full reads: {snapshot:?}"
+            )
+        });
         supervisor.abort();
-
-        let snapshot = runtime.metrics_snapshot();
-        assert!(
-            snapshot.worker_desired_count > 1,
-            "usage worker supervisor should scale up after repeated full reads: {snapshot:?}"
-        );
     }
 
     #[tokio::test]
