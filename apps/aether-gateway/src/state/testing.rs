@@ -17,6 +17,16 @@ use crate::{provider_transport, usage};
 #[cfg(test)]
 impl AppState {
     pub(crate) fn with_data_state_for_tests(mut self, data_state: GatewayDataState) -> Self {
+        // 上游 2cb4d554a（routing 策略整合）起，请求路径要求存在已配置的默认调度
+        // 策略，否则 NoDefault→503；生产启动由 main.rs 的
+        // `ensure_system_default_routing_group` 兜底。测试数据态镜像该 bootstrap：
+        // 未显式提供 routing group repository 时补种系统默认策略组；显式提供的测试
+        // （含调度器自身的 routing 用例）不受影响。
+        let data_state = if data_state.routing_group_read_repository().is_none() {
+            data_state.with_system_default_routing_group_for_tests()
+        } else {
+            data_state
+        };
         self.replace_data_state(Arc::new(data_state));
         self.request_candidate_queue = None;
         self

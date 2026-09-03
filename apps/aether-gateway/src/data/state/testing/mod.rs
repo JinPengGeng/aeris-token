@@ -1,10 +1,15 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use aether_data::repository::routing_profiles::InMemoryRoutingGroupRepository;
 use aether_data_contracts::repository::candidates::RequestCandidateRepository;
 use aether_data_contracts::repository::pool_scores::PoolMemberScoreRepository;
 use aether_data_contracts::repository::quota::ProviderQuotaRepository;
+use aether_data_contracts::repository::routing_profiles::{
+    StoredRoutingGroup, StoredRoutingGroupBinding, StoredRoutingGroupVersion,
+};
 use aether_data_contracts::repository::usage::UsageRepository;
+use aether_routing_core::RoutingGroupConfig;
 
 use super::{
     AnnouncementReadRepository, AnnouncementWriteRepository, AuthApiKeyReadRepository,
@@ -887,6 +892,34 @@ impl GatewayDataState {
         self.routing_group_reader = Some(repository.clone());
         self.routing_group_writer = Some(repository);
         self
+    }
+
+    // 与上游 d672ba206（test(gateway): seed routing strategy for antigravity
+    // flows，4291a91dc 之后）同形的测试夹具；本 fork 另在
+    // `with_data_state_for_tests` 里默认补种（见 state/testing.rs），下次 sync
+    // 基座越过 d672ba206 后该 helper 与上游版本自然重合。
+    #[cfg(test)]
+    pub(crate) fn with_system_default_routing_group_for_tests(self) -> Self {
+        let now = 1;
+        let repository = Arc::new(InMemoryRoutingGroupRepository::seed(
+            [StoredRoutingGroup {
+                id: "system-default".to_string(),
+                name: "system-default".to_string(),
+                description: Some("test system default routing strategy".to_string()),
+                enabled: true,
+                is_system_default: true,
+                sort_order: 0,
+                config_json: serde_json::to_value(RoutingGroupConfig::default())
+                    .expect("default routing config should serialize"),
+                version: 1,
+                created_at: now,
+                updated_at: now,
+                published_at: Some(now),
+            }],
+            std::iter::empty::<StoredRoutingGroupBinding>(),
+            std::iter::empty::<StoredRoutingGroupVersion>(),
+        ));
+        self.with_routing_group_repository_for_tests(repository)
     }
 
     #[cfg(test)]

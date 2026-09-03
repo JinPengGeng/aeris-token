@@ -64,6 +64,7 @@ fork 修复并验证（急用先落地）
 | provider 成本归因 | #166 | 移植自上游 fawney19/Aether#638（RWDai）：usage 聚合 provider_id/provider_name 过滤 + GET /api/admin/usage/attribution 用户成本归因 + Cost Analysis 归因 UI | 跟踪上游 fawney19/Aether#638，上游合并后 sync 回销 |
 | API Key 计费倍率 | #178 | 移植自上游 fawney19/Aether#634（Hao-IANWY）：api_keys.billing_multiplier（默认 1.0），actual_total_cost_usd = provider 倍率 × Key 倍率，billing metadata 记录三级倍率；含三库迁移 | 跟踪上游 fawney19/Aether#634，上游合并后 sync 回销；2026-09-03 sync 4291a91dc：fork 迁移版本号 20260903000000 与上游新增 `add_routing_group_sort_order` 三库撞车（sqlx 版本唯一性校验失败），三库迁移重编号至 `20260903010000_add_api_key_billing_multiplier`，`EMPTY_DATABASE_SNAPSHOT_CUTOFF_VERSION` 与迁移版本清单簿记随动（#187 修复提交） |
 | 钱包套餐分组与 Key 级扣费来源 | #186 | 移植自上游 fawney19/Aether#607（zhiqicloud）：Key 级 feature_settings.billing_source（auto/wallet/package）准入分流、每日额度结转（carry_over_days/carry_over_limit_multiplier）、自助重置每日额度端点、钱包运营概览；无 schema 迁移 | 跟踪上游 fawney19/Aether#607，上游合并后 sync 回销 |
+| 测试数据态补种默认调度策略组 | #187 | 上游 2cb4d554a 起请求路径强制要求默认调度策略（NoDefault→503），上游自身 CI 在 4291a91dc 红（finalize_local 等 ai_execute 家族）；`with_data_state_for_tests` 对未显式提供 routing group repository 的测试补种系统默认组（helper 形态移植自上游 d672ba206），镜像生产 `ensure_system_default_routing_group` bootstrap | 仅测试基础设施，不改上游逻辑；sync 基座越过上游测试夹具修复（d672ba206 及后续）后 helper 与上游重合、默认补种逻辑重评回销 |
 
 ## 5. 当前深度定制跟踪表（定制轨道）
 

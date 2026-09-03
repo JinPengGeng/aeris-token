@@ -241,9 +241,13 @@ mod tests {
         let with_disabled_group = AppState::new().unwrap().with_data_state_for_tests(
             GatewayDataState::disabled().with_routing_group_repository_for_tests(repository),
         );
-        let without_repository = AppState::new()
-            .unwrap()
-            .with_data_state_for_tests(GatewayDataState::disabled());
+        // with_data_state_for_tests 会对无 routing 仓储的数据态补种系统默认组
+        // （镜像生产 bootstrap）；本测试要覆盖「无可用默认组」语义，须显式给空仓储。
+        let without_repository = AppState::new().unwrap().with_data_state_for_tests(
+            GatewayDataState::disabled().with_routing_group_repository_for_tests(Arc::new(
+                InMemoryRoutingGroupRepository::default(),
+            )),
+        );
 
         for state in [with_disabled_group, without_repository] {
             let config = read_system_default_routing_ordering_config(&state)
