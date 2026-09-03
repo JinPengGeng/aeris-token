@@ -139,6 +139,7 @@
       :creating="creatingApiKey"
       :format-rate-limit="formatRateLimitSimple"
       :format-concurrent-limit="formatConcurrentLimitSimple"
+      :format-billing-multiplier="formatBillingMultiplier"
       :format-ip-rules="formatIpRules"
       @close="closeApiKeysDialog"
       @create-key="openCreateUserApiKeyDialog"
@@ -294,6 +295,7 @@ const userApiKeyForm = ref<UserApiKeyFormState>({
   name: '',
   rate_limit: undefined,
   concurrent_limit: undefined,
+  billing_multiplier: 1,
   ip_rules_text: '',
   chat_pii_redaction_mode: 'inherit',
   chat_pii_redaction_enabled: false,
@@ -660,6 +662,11 @@ function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
   return locale.value === 'en-US' ? `${concurrentLimit} concurrent` : `${concurrentLimit} 并发`
 }
 
+function formatBillingMultiplier(multiplier?: number | null): string {
+  const value = typeof multiplier === 'number' && Number.isFinite(multiplier) ? multiplier : 1
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: 4 })}x`
+}
+
 function formatIpRules(ipRules?: string[] | null): string {
   return ipRules && ipRules.length > 0 ? ipRules.join(', ') : legacyT('不限制')
 }
@@ -942,6 +949,7 @@ function openCreateUserApiKeyDialog() {
     name: `Key-${new Date().toISOString().split('T')[0]}`,
     rate_limit: undefined,
     concurrent_limit: undefined,
+    billing_multiplier: 1,
     ip_rules_text: '',
     chat_pii_redaction_mode: redactionFeature.mode,
     chat_pii_redaction_enabled: redactionFeature.enabled,
@@ -961,6 +969,7 @@ function openEditUserApiKeyDialog(apiKey: ApiKey) {
     name: apiKey.name || '',
     rate_limit: apiKey.rate_limit ?? undefined,
     concurrent_limit: apiKey.concurrent_limit ?? undefined,
+    billing_multiplier: apiKey.billing_multiplier ?? 1,
     ip_rules_text: apiKey.ip_rules?.join(', ') ?? '',
     chat_pii_redaction_mode: redactionFeature.mode,
     chat_pii_redaction_enabled: redactionFeature.enabled,
@@ -980,6 +989,7 @@ function closeUserApiKeyFormDialog() {
     name: '',
     rate_limit: undefined,
     concurrent_limit: undefined,
+    billing_multiplier: 1,
     ip_rules_text: '',
     chat_pii_redaction_mode: 'inherit',
     chat_pii_redaction_enabled: false,
@@ -1021,6 +1031,7 @@ async function submitUserApiKeyForm() {
         name: form.name,
         rate_limit: form.rate_limit ?? 0,
         concurrent_limit: form.concurrent_limit,
+        billing_multiplier: form.billing_multiplier,
         ip_rules: ipRules,
         ...featureSettingsPatch,
       })
@@ -1031,6 +1042,7 @@ async function submitUserApiKeyForm() {
         name: form.name,
         rate_limit: form.rate_limit ?? 0,
         concurrent_limit: form.concurrent_limit,
+        billing_multiplier: form.billing_multiplier,
         ip_rules: ipRules,
         ...featureSettingsPatch,
       })

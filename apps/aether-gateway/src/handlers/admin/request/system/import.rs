@@ -756,6 +756,14 @@ fn imported_optional_f64(value: Option<&Value>, field_name: &str) -> Result<Opti
     }
 }
 
+fn imported_api_key_billing_multiplier(value: Option<&Value>) -> Result<f64, String> {
+    aether_data::repository::auth::normalize_api_key_billing_multiplier(imported_optional_f64(
+        value,
+        "billing_multiplier",
+    )?)
+    .map_err(|_| "billing_multiplier 必须在 0 到 1000 之间".to_string())
+}
+
 fn imported_optional_json_object(
     value: Option<&Value>,
     field_name: &str,
@@ -2996,6 +3004,9 @@ impl<'a> AdminAppState<'a> {
                     "total_cost_usd"
                 ));
                 let total_cost_usd = imported_total_cost_usd.unwrap_or(0.0);
+                let billing_multiplier = invalid_value!(imported_api_key_billing_multiplier(
+                    key.get("billing_multiplier")
+                ));
                 let feature_settings = invalid_value!(imported_optional_json_object(
                     key.get("feature_settings"),
                     "feature_settings"
@@ -3028,6 +3039,9 @@ impl<'a> AdminAppState<'a> {
                                         },
                                         ip_rules: imported_ip_rules_present(key)
                                             .then(|| ip_rules.clone()),
+                                        billing_multiplier_present: key
+                                            .contains_key("billing_multiplier"),
+                                        billing_multiplier: Some(billing_multiplier),
                                     },
                                 )
                                 .await?;
@@ -3128,6 +3142,7 @@ impl<'a> AdminAppState<'a> {
                         total_requests,
                         total_tokens,
                         total_cost_usd,
+                        billing_multiplier,
                     })
                     .await?;
                 let Some(created) = created else {
@@ -3252,6 +3267,9 @@ impl<'a> AdminAppState<'a> {
                     "total_cost_usd"
                 ));
                 let total_cost_usd = imported_total_cost_usd.unwrap_or(0.0);
+                let billing_multiplier = invalid_value!(imported_api_key_billing_multiplier(
+                    key.get("billing_multiplier")
+                ));
                 let feature_settings = invalid_value!(imported_optional_json_object(
                     key.get("feature_settings"),
                     "feature_settings"
@@ -3294,6 +3312,9 @@ impl<'a> AdminAppState<'a> {
                                     expires_at_unix_secs: None,
                                     auto_delete_on_expiry_present: false,
                                     auto_delete_on_expiry: false,
+                                    billing_multiplier_present: key
+                                        .contains_key("billing_multiplier"),
+                                    billing_multiplier: Some(billing_multiplier),
                                 },
                             )
                             .await?;
@@ -3383,6 +3404,7 @@ impl<'a> AdminAppState<'a> {
                             total_requests,
                             total_tokens,
                             total_cost_usd,
+                            billing_multiplier,
                         },
                     )
                     .await?;

@@ -134,7 +134,18 @@ async fn execution_plan_balance_capacity_rejection_inner(
         validate_execution_plan_pricing_configuration_for_plan(state, plan, report_context).await?;
         return Ok(None);
     };
-    match estimate_execution_plan_cost_upper_bound_usd(state, plan, report_context).await? {
+    let api_key_billing_multiplier = auth_context.api_key_billing_multiplier;
+    let api_key_billing_multiplier =
+        if api_key_billing_multiplier.is_finite() && api_key_billing_multiplier >= 0.0 {
+            api_key_billing_multiplier
+        } else {
+            1.0
+        };
+    match estimate_execution_plan_cost_upper_bound_usd(state, plan, report_context)
+        .await?
+        .map(|value| value * api_key_billing_multiplier)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+    {
         Some(estimated_cost_usd)
             if estimated_cost_usd <= available_usd + DAILY_QUOTA_EPSILON_USD =>
         {
@@ -916,6 +927,7 @@ mod tests {
             api_key_id: "api-key-1".to_string(),
             username: None,
             api_key_name: None,
+            api_key_billing_multiplier: 1.0,
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,

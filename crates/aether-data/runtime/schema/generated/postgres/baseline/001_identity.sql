@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS public.api_keys (
     total_requests bigint DEFAULT 0 NOT NULL,
     total_tokens bigint DEFAULT 0 NOT NULL,
     total_cost_usd double precision DEFAULT 0 NOT NULL,
+    billing_multiplier double precision DEFAULT 1 NOT NULL,
     metadata jsonb,
     expires_at bigint,
     last_used_at bigint,

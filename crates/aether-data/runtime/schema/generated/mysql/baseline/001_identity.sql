@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     `total_requests` BIGINT NOT NULL DEFAULT 0,
     `total_tokens` BIGINT NOT NULL DEFAULT 0,
     `total_cost_usd` DOUBLE NOT NULL DEFAULT 0,
+    `billing_multiplier` DOUBLE NOT NULL DEFAULT 1,
     `metadata` JSON,
     `expires_at` BIGINT,
     `last_used_at` BIGINT,

@@ -81,6 +81,7 @@ pub struct LifecycleUsageSeed {
     pub api_key_id: Option<String>,
     pub username: Option<String>,
     pub api_key_name: Option<String>,
+    pub api_key_billing_multiplier: Option<f64>,
     pub provider_name: String,
     pub model: String,
     pub target_model: Option<String>,
@@ -119,6 +120,7 @@ pub struct TerminalUsageContextSeed {
     pub api_key_id: Option<String>,
     pub username: Option<String>,
     pub api_key_name: Option<String>,
+    pub api_key_billing_multiplier: Option<f64>,
     pub provider_name: String,
     pub model: String,
     pub target_model: Option<String>,
@@ -185,6 +187,7 @@ pub struct TerminalUsageSeed {
     pub api_key_id: Option<String>,
     pub username: Option<String>,
     pub api_key_name: Option<String>,
+    pub api_key_billing_multiplier: Option<f64>,
     pub provider_name: String,
     pub model: String,
     pub target_model: Option<String>,
@@ -289,6 +292,7 @@ pub fn build_lifecycle_usage_seed(
         api_key_id: context_string(context, "api_key_id"),
         username: context_string(context, "username"),
         api_key_name: context_string(context, "api_key_name"),
+        api_key_billing_multiplier: context_f64(context, "api_key_billing_multiplier"),
         provider_name,
         model,
         target_model: context_string(context, "mapped_model"),
@@ -644,6 +648,7 @@ fn build_terminal_usage_event_from_seed_impl(
         api_key_id,
         username,
         api_key_name,
+        api_key_billing_multiplier,
         provider_name,
         model,
         target_model,
@@ -716,6 +721,7 @@ fn build_terminal_usage_event_from_seed_impl(
         api_key_id,
         username,
         api_key_name,
+        api_key_billing_multiplier,
         provider_name,
         model,
         target_model,
@@ -833,6 +839,7 @@ pub fn build_terminal_usage_context_seed(
         api_key_id: context_string(context, "api_key_id"),
         username: context_string(context, "username"),
         api_key_name: context_string(context, "api_key_name"),
+        api_key_billing_multiplier: context_f64(context, "api_key_billing_multiplier"),
         provider_name: context_string(context, "provider_name")
             .or_else(|| non_empty_str(plan.provider_name.as_deref()))
             .unwrap_or_else(|| "unknown".to_string()),
@@ -1042,6 +1049,7 @@ pub fn build_sync_terminal_usage_seed(
         api_key_id: context_seed.api_key_id,
         username: context_seed.username,
         api_key_name: context_seed.api_key_name,
+        api_key_billing_multiplier: context_seed.api_key_billing_multiplier,
         provider_name: context_seed.provider_name,
         model: context_seed.model,
         target_model: context_seed.target_model,
@@ -1226,6 +1234,7 @@ pub fn build_stream_terminal_usage_seed(
         api_key_id: context_seed.api_key_id,
         username: context_seed.username,
         api_key_name: context_seed.api_key_name,
+        api_key_billing_multiplier: context_seed.api_key_billing_multiplier,
         provider_name: context_seed.provider_name,
         model: context_seed.model,
         target_model: context_seed.target_model,
@@ -1749,6 +1758,7 @@ fn build_usage_event_data_seed_with_detail(
         api_key_id: context_string(context, "api_key_id"),
         username: context_string(context, "username"),
         api_key_name: context_string(context, "api_key_name"),
+        api_key_billing_multiplier: context_f64(context, "api_key_billing_multiplier"),
         provider_name,
         model,
         target_model: context_string(context, "mapped_model"),
@@ -1921,6 +1931,13 @@ fn context_u64(context: Option<&Map<String, Value>>, key: &str) -> Option<u64> {
                 .or_else(|| raw.as_i64().and_then(|number| u64::try_from(number).ok()))
         })
     })
+}
+
+fn context_f64(context: Option<&Map<String, Value>>, key: &str) -> Option<f64> {
+    context?
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
 }
 
 fn routing_u64_from_metadata(value: Option<&Value>, key: &str) -> Option<u64> {
@@ -6554,6 +6571,7 @@ mod tests {
             api_key_id: Some("key-1".to_string()),
             username: Some("alice".to_string()),
             api_key_name: Some("primary".to_string()),
+            api_key_billing_multiplier: None,
             provider_name: "OpenAI".to_string(),
             model: "gpt-5".to_string(),
             target_model: None,
@@ -6681,6 +6699,7 @@ mod tests {
                 api_key_id: Some("key-1".to_string()),
                 username: Some("alice".to_string()),
                 api_key_name: Some("primary".to_string()),
+                api_key_billing_multiplier: None,
                 provider_name: "OpenAI".to_string(),
                 model: "gpt-5".to_string(),
                 target_model: None,
