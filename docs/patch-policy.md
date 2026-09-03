@@ -54,7 +54,7 @@ fork 修复并验证（急用先落地）
 | fail-closed 计量准入 + 授权刷新断连 | #107 | live/realtime 会话 usage 不落库拒入、授权刷新失败拒闭 | 待提上游 PR（上游原生缺陷） |
 | Responses SSE 预提交语义错误分支 | #121 | 移植自 ZipperCode/Aether@f86e9941 | 移植自社区；上游 #733 相邻在做，观察 |
 | 模型同步宽限保留 | #119 | 不完整快照不得静默删除可用模型（C-04 契约） | 待提上游 PR |
-| ranking_seed/时间参数拆分 | #120 | 排序种子不得作时间戳用于准入检查 | 已报上游 issue #782（2026-09-02）；2026-09-03 sync cae9aa413 核对：上游 routing-profiles 重构（415b2da81/7323d41fb）未覆盖该缺陷（cae9aa413 的 candidate_source.rs 两处调用点仍把 ranking_seed 传入 now_unix_secs 形参，rank_scheduler_candidates 仍 `load_balance_seed: now_unix_secs`），补丁已在 routing-profiles 基座上重落位（参数链并入上游新增 ordering_config）；上游修复后 sync 回销 |
+| ranking_seed/时间参数拆分 | #120 | 排序种子不得作时间戳用于准入检查 | 已报上游 issue #782（2026-09-02）；2026-09-03 sync cae9aa413 核对：上游 routing-profiles 重构（415b2da81/7323d41fb）未覆盖该缺陷（cae9aa413 的 candidate_source.rs 两处调用点仍把 ranking_seed 传入 now_unix_secs 形参，rank_scheduler_candidates 仍 `load_balance_seed: now_unix_secs`），补丁已在 routing-profiles 基座上重落位（参数链并入上游新增 ordering_config）；2026-09-03 sync 4291a91dc：上游将 ordering_config 解析改为同步非 Option（`scheduler_ordering_config_for_routing_policy` 去除 state/.await，各调用点预解析），now_unix_secs 单参数缺陷仍在（上游调用点仍把 ranking_seed 当时间戳传入），补丁随新签名重落位（调度函数链保留独立 ranking_seed 形参；cursor 构造的 epoch 一致性循环因上游同步化简化为单次读取），两条 huge_ranking_seed 回归测试保留；上游修复后 sync 回销 |
 | integration tests RUST_MIN_STACK | #159 | CI 给 integration-tests 测试 bin 设 16MB 栈（trivial） | 移植自上游 fawney19/Aether#706；上游合并后 sync 回销即可丢弃 |
 | Star History 图表域名修复 | #159 | README star-history 图表换用 star-history.dera.page（trivial） | 移植自上游 fawney19/Aether#729；上游合并后 sync 回销即可丢弃 |
 | usage 请求记录默认降为 basic | #162 | 移植自上游 fawney19/Aether#640（Kayphoon）：未配置 request_record_level 时默认 basic，不落请求/响应 body | 上游 PR 待合入 |

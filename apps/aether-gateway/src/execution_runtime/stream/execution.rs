@@ -119,8 +119,7 @@ use crate::execution_runtime::{
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
     apply_local_execution_effect, build_local_error_flow_metadata, classify_failure_disposition,
-    cyber_continue_failover_enabled, spawn_local_oauth_success_effect,
-    trace_upstream_response_body, with_error_flow_report_context,
+    spawn_local_oauth_success_effect, trace_upstream_response_body, with_error_flow_report_context,
     with_upstream_response_report_context, FailureDisposition, FailureTokenAction,
     LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
     LocalExecutionEffect, LocalExecutionEffectContext, LocalFailoverAnalysis,
@@ -6466,7 +6465,10 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     }
     let prefetch_for_cyber_failover =
         is_openai_responses_family_format(plan.provider_api_format.as_str())
-            && cyber_continue_failover_enabled(state).await;
+            && crate::orchestration::routing_execution_policy_from_report_context(
+                report_context.as_ref(),
+            )
+            .is_some_and(|policy| policy.cyber_continue_failover);
     // 同格式 Responses SSE 在首个输出边界之前，上游仍可能以 response.failed 宣告语义失败；
     // 仅见 response.created 不足以提交客户端 HTTP 200，预取必须等到输出边界或失败事件。
     let same_format_openai_responses = plan
@@ -9003,14 +9005,6 @@ mod tests {
             Arc::new(provider_catalog),
             "development-key",
         );
-        let data_state = if continue_failover {
-            data_state.with_system_config_values_for_tests([(
-                crate::orchestration::CYBER_CONTINUE_FAILOVER_CONFIG_KEY.to_string(),
-                json!(true),
-            )])
-        } else {
-            data_state
-        };
         let state = AppState::new()
             .expect("app state should build")
             .with_data_state_for_tests(data_state);
@@ -9065,7 +9059,10 @@ mod tests {
                 "candidate_index": 0,
                 "retry_index": 0,
                 "provider_api_format": "openai:responses",
-                "client_api_format": "openai:responses"
+                "client_api_format": "openai:responses",
+                "routing_execution_policy": {
+                    "cyber_continue_failover": continue_failover
+                }
             })),
             crate::clock::current_unix_ms(),
             Instant::now(),
@@ -11094,7 +11091,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prefetched_codex_cyber_policy_violation_retries_when_system_setting_is_enabled() {
+    async fn prefetched_codex_cyber_policy_violation_retries_when_routing_strategy_is_enabled() {
         assert!(
             execute_prefetched_codex_cyber_policy_failure(true, false)
                 .await

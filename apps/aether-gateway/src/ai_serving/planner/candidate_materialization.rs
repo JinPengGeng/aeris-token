@@ -9,7 +9,7 @@ use aether_ai_serving::{
 use aether_dispatch_core::{DispatchSequence, DispatchSequenceItem};
 use aether_routing_core::{
     rank_vector_for_candidate, CandidateKind, ResolvedRoutingPolicy, RoutingCandidateFacts,
-    RoutingCandidateTrace, RoutingDecisionTrace,
+    RoutingCandidateTrace, RoutingDecisionTrace, RoutingExecutionPolicy,
 };
 use aether_scheduler_core::{
     ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate, SchedulerPageId,
@@ -79,6 +79,13 @@ type DecorateSkippedCandidateFn<'a> = Arc<
 #[async_trait]
 pub(crate) trait LocalExecutionAttemptSource<T>: Send {
     async fn next_execution_attempt(&mut self) -> Result<Option<T>, GatewayError>;
+
+    /// Returns the request-scoped execution behaviour selected by routing.
+    /// Execution wrappers use this snapshot before consuming the first
+    /// attempt, avoiding a second lookup against mutable system settings.
+    fn routing_execution_policy(&self) -> Option<RoutingExecutionPolicy> {
+        None
+    }
 
     async fn drain_execution_attempts(&mut self) -> Result<Vec<T>, GatewayError>;
 
@@ -1247,9 +1254,7 @@ async fn scheduler_cache_affinity_enabled(
     state: PlannerAppState<'_>,
     routing_policy: Option<&ResolvedRoutingPolicy>,
 ) -> bool {
-    scheduler_ordering_config_for_routing_policy(state, routing_policy)
-        .await
-        .scheduling_mode
+    scheduler_ordering_config_for_routing_policy(routing_policy).scheduling_mode
         == SchedulerSchedulingMode::CacheAffinity
 }
 
@@ -2503,14 +2508,23 @@ mod tests {
 
         assert!(should_cache_resolved_candidate_page(&cursor));
 
-        let fixed_order_app = AppState::new()
-            .expect("state should build")
-            .with_data_state_for_tests(
-                GatewayDataState::disabled().with_system_config_values_for_tests([(
-                    "scheduling_mode".to_string(),
-                    json!("fixed_order"),
-                )]),
-            );
+        let fixed_order_app = AppState::new().expect("state should build");
+        let fixed_order_policy = ResolvedRoutingPolicy {
+            group_id: Some("routing-group-fixed-order".to_string()),
+            group_version: Some(1),
+            selection_source: "test".to_string(),
+            requested_model: "gpt-5".to_string(),
+            resolved_model: "gpt-5".to_string(),
+            priority_mode: aether_routing_core::RoutingSetPriorityMode::Provider,
+            scheduling_mode: aether_routing_core::RoutingSchedulingMode::FixedOrder,
+            keep_priority_on_conversion: false,
+            sticky_key_attempts: aether_routing_core::DEFAULT_STICKY_KEY_ATTEMPTS,
+            execution_policy: Default::default(),
+            ranking_overlay: Default::default(),
+            mutation_plan: Default::default(),
+            pool_policy_overrides: Default::default(),
+            matched_rules: Vec::new(),
+        };
         let mut page_cursor = LocalCandidatePreselectionPageCursor::new(
             PlannerAppState::new(&fixed_order_app),
             &model_directive_policy,
@@ -2520,7 +2534,7 @@ mod tests {
             true,
             None,
             &auth_snapshot,
-            None,
+            Some(&fixed_order_policy),
             None,
             None,
             false,
@@ -2538,7 +2552,7 @@ mod tests {
             auth_snapshot,
             client_session_affinity: None,
             required_capabilities: None,
-            routing_policy: None,
+            routing_policy: Some(fixed_order_policy),
             sticky_session_token: None,
             request_auth_channel: None,
             skipped_user_id: "user-1".to_string(),
