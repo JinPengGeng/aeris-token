@@ -39,8 +39,9 @@ jobs:
       pull-requests: write  # maintain the single sync PR and arm native auto-merge
       issues: write         # idempotent alert issues
       # Dispatch the required-check workflows: a GITHUB_TOKEN-created PR emits
-      # no pull_request event (GitHub platform behavior), so rust-ci and
-      # frontend-ci must be dispatched explicitly onto the sync branch.
+      # no pull_request event (GitHub platform behavior), so rust-ci,
+      # frontend-ci, and automation-policy must be dispatched explicitly onto
+      # the sync branch.
       actions: write
     steps:
       - name: Check out fork default branch

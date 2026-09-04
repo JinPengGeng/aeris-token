@@ -1,8 +1,42 @@
 name: Automation Policy
 
+# Two trigger modes run the exact same deterministic policy evaluation and
+# publish the exact same job check run (the check context is the job name):
+#
+#   pull_request — the ordinary lane. Every policy-relevant pull request event
+#     re-runs the gate and the check attaches to the PR head through the event.
+#
+#   workflow_dispatch — the upstream-sync lane (#181). A pull request created
+#     by GITHUB_TOKEN emits no pull_request event (GitHub platform behavior),
+#     so the managed sync PR never produces this required check on its own.
+#     The minimal sync loop dispatches this workflow onto the sync branch with
+#     the exact pull request number and the trusted policy SHA it already
+#     validated; the gate job check run then lands on the sync branch tip.
+#
+# The dispatch inputs pin the evaluation target. run-autonomy-policy.mjs
+# re-validates every one of them against the live API — pull request number
+# against head SHA, policy SHA against the current default-branch tip and the
+# PR base — and fails closed on any drift, so a hand-crafted dispatch cannot
+# mint a green check for an unrelated commit. Permissions stay read-only in
+# both modes: the evaluation never executes pull request content.
+
 on:
   pull_request:
     types: [opened, reopened, synchronize, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch whose tip is evaluated; must equal the ref this workflow is dispatched on
+        required: true
+        type: string
+      pull_number:
+        description: Open pull request number the policy is evaluated against
+        required: true
+        type: number
+      policy_sha:
+        description: Trusted policy revision — the current default-branch tip and pull request base SHA
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -10,7 +44,7 @@ permissions:
 
 concurrency:
   # Label delivery is event-driven and can lag; serialize each PR so an older run cannot finish after a newer run.
-  group: automation-policy-${{ github.event.pull_request.number }}
+  group: automation-policy-${{ github.event.pull_request.number || inputs.pull_number }}
   cancel-in-progress: false
 
 jobs:
@@ -22,7 +56,10 @@ jobs:
       - name: Check out trusted policy revision
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # pull_request: the event base SHA. workflow_dispatch: the policy_sha
+          # input. Both name the default-branch tip — never the evaluated head —
+          # so the policy runtime is always sourced from the trusted revision.
+          ref: ${{ github.event.pull_request.base.sha || inputs.policy_sha }}
           fetch-depth: 1
           persist-credentials: false
 
@@ -35,14 +72,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_ID: ${{ github.event.repository.id }}
-          AERIS_PULL_NUMBER: ${{ github.event.pull_request.number }}
-          AERIS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          AERIS_PULL_NUMBER: ${{ github.event.pull_request.number || inputs.pull_number }}
+          AERIS_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           AERIS_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          AERIS_POLICY_REF: ${{ github.event.pull_request.base.ref }}
-          AERIS_POLICY_SHA: ${{ github.event.pull_request.base.sha }}
+          AERIS_POLICY_REF: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          AERIS_POLICY_SHA: ${{ github.event.pull_request.base.sha || inputs.policy_sha }}
+          AERIS_DISPATCH_REF: ${{ inputs.ref }}
           AERIS_WRITER_ENABLED: ${{ vars.AERIS_WRITER_ENABLED }}
           AERIS_WRITER_APP_SLUG: ${{ vars.AERIS_WRITER_APP_SLUG }}
         run: |
+          # A dispatch must evaluate exactly the ref it was created on: the job
+          # check run attaches to the dispatched ref tip, so a mismatched ref
+          # input would publish the verdict onto the wrong commit.
+          if [ "${GITHUB_EVENT_NAME}" = 'workflow_dispatch' ] && [ "${AERIS_DISPATCH_REF}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error title=Dispatch target mismatch::The ref input must equal the dispatched ref (${GITHUB_REF_NAME})."
+            exit 1
+          fi
           if [ ! -f .github/automation/src/run-autonomy-policy.mjs ]; then
             echo "::error title=Automation policy runtime missing::Trusted base revision does not contain the policy runtime."
             exit 1
