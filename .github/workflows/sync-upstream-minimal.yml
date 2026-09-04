@@ -1,10 +1,10 @@
 name: Sync upstream (minimal)
 
-# Automation v2 Phase 0 (#175): the minimal upstream synchronization loop,
-# running in parallel with the legacy sync-upstream.yml during the two-week
-# observation window. Both workflows share the sync-upstream-main concurrency
-# group with cancel-in-progress: false, so a legacy run and a minimal run can
-# never execute at the same time.
+# Automation v2 (#175): the minimal upstream synchronization loop. The legacy
+# sync-upstream.yml was retired in #179 Phase 1b after the parallel observation
+# window closed; this workflow is now the sole upstream sync path. It keeps the
+# sync-upstream-main concurrency group with cancel-in-progress: false so two
+# runs of the loop itself can never execute at the same time.
 #
 # Identity: GITHUB_TOKEN only. No Writer App, no AI, no attestation, no
 # checkpoint state machine — progress is the git DAG (merge-base).

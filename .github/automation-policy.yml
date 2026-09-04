@@ -9,7 +9,6 @@ trusted_source:
     - .github/automation-policy.yml
     - .github/automation/**
     - .github/upstream-sync-policy.yml
-    - .github/upstream-sync-state.json
     - .github/CODEOWNERS
     - .github/workflows/**
     - CODEOWNERS
