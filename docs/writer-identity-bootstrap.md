@@ -1,6 +1,8 @@
-# Writer App identity bootstrap
+# 历史归档：Writer App identity bootstrap
 
-This is a one-time recovery procedure for discovering the immutable GitHub App node ID and owner database ID that the normal Writer attestation must treat as trusted configuration. It does not weaken the normal attestation when either variable is absent.
+> 状态：**未部署、不可执行**。Writer App、identity bootstrap workflow、writer Environment 及下文变量均已删除或从未部署；本文仅保留历史审计内容。当前运维规范请参阅 [automation-architecture.md](automation-architecture.md)，不得按本文配置或运行任何步骤。
+
+This is a historical, non-deployed design for discovering the immutable GitHub App node ID and owner database ID that the former Writer attestation would have treated as trusted configuration. It is retained for audit only.
 
 ## Safety boundary
 

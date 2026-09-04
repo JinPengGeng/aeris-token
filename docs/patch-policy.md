@@ -41,7 +41,7 @@ fork 修复并验证（急用先落地）
 ## 3. 同步纪律
 
 - 同步方式为**真合并**（merge commit，祖先连通）：每次 sync 按定制点做三方合并，冲突显式暴露；禁止整树覆盖式快照吞掉定制语义。
-- `.github/upstream-sync-state.json` 的 `last_integrated_sha` 是旧 checkpoint 体系同步点的唯一权威记录；GitHub 的 ahead/behind 显示仅供参考。新最小闭环（`sync-upstream-minimal.yml`，#175 并行观察期）以 `git merge-base` 为进度，不读 state.json。
+- 当前唯一同步入口是 `.github/workflows/sync-upstream-minimal.yml`，以 `git merge-base`/真实 Git DAG 为进度，不读取 checkpoint 或 state 文件。同步 PR 使用 merge commit；普通 PR 仍使用 squash。
 - 合并方法纪律：sync/\* 分支的同步 PR 只允许 merge commit，其余 PR 一律 squash。`main-linear-history` ruleset 移除后（#175 决策候选②），该纪律由评审约定、automation 契约测试 pin、以及合并后 `git rev-list --count origin/main..upstream/main == 0` 校验共同约束。
 - 冲突解决原则：以上游为基座，逐定制点重新落位；语义冲突时以上游为准重设计定制。
 
@@ -82,4 +82,4 @@ fork 修复并验证（急用先落地）
 
 - 特性 PR 一律 squash，保持线性历史。
 - 上游同步 PR 由自动化用 merge 合入（祖先连通，GitHub ahead/behind 如实）。
-- 线性历史规则对同步自动化（Writer App）单独豁免，其余角色无例外。
+- `main-protection` 对同步 PR 的 merge-commit 例外由同步 contract 和合并后祖先校验约束，其余角色无例外。

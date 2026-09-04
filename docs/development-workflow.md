@@ -26,7 +26,7 @@
 
 1. 禁止直接推送、强制推送和删除分支。
 2. 要求通过 PR 合并并解决全部 review 讨论。当前仓库只有一名维护者时将审批数设为 0；增加协作者后再启用至少一位审批和 CODEOWNERS review。
-3. 要求状态检查 `Rust CI / check`、`Frontend CI / check` 和 `Automation Policy / gate` 成功后才可合并。该设置由 GitHub 远端治理执行，不由本文或 workflow 文件单独保证；管理员必须在启用或变更保护规则后用 GitHub API 现场回读并记录时间，仓库内 contract test 只能验证 workflow 的触发与 job 契约，不能替代这次现场核对。Writer、Publisher、Finalizer 和 upstream sync 仍由各自的远端开关控制。
+3. 要求状态检查 `Rust CI / check`、`Frontend CI / check` 和 `Automation Policy / gate` 成功后才可合并。该设置由 GitHub 远端治理执行；`main` 当前使用 `main-protection` ruleset。
 
    两个 CI 工作流在 PR 上按变更路径选择性执行 job：无相关改动时对应 job 以 `skipped` 结论跳过并视为通过门禁，聚合 check 只将 `failure` 或 `cancelled` 判为失败。推送到 `main` 与手动 `workflow_dispatch` 始终全量执行，作为主干完整性的兜底。
 4. 只允许 Squash merge并在合并后自动删除源分支。增加独立 reviewer 后启用 CODEOWNERS review。
@@ -39,27 +39,25 @@
 
 为发布创建受保护且需要人工审批的 `release` Environment。发布凭据只放入该 Environment；Issue 或外部 PR 的文本不得在可访问 secrets 的工作流中执行。不要以 `pull_request_target` checkout 外部 PR 代码。
 
-单 Writer 上线时另建两个 Environment：`agent` 不设人工审批，只暴露模型凭据，绝不包含 GitHub 写凭据、Writer App 私钥或 release secret；`writer` 保存 Writer App ID/私钥，并用于 Publisher、Finalizer 和同步。这里是管理员待完成的远端设置清单，仓库文件本身不能证明已经配置。
+当前只读 AI 使用 `agent` Environment（不得包含写入或 release secret）；`release` Environment 保留人工审批。历史 Writer Environment/凭据设计已归档，不要创建或配置。
 
 ### Fork 上游同步
 
-`.github/workflows/sync-upstream.yml` 每天中国时间 05:00 检查 `fawney19/Aether` 的默认分支；发现上游新提交时，从受保护 `main@SHA` 的 `.github/upstream-sync-state.json` 读取上次已合并 checkpoint，只计算 checkpoint 之后的上游增量。工作流始终复用固定的 `automation/sync-upstream` 分支和唯一的开放同步 PR，不会因每日运行而重复创建 PR。维护者手工关闭该 PR 后，定时同步会持续暂停；只有手工运行工作流并设置 `resume=true` 才会尝试重新打开原 PR，无法重新打开时仅允许该次显式运行创建一个替代 PR。
+唯一入口是 `.github/workflows/sync-upstream-minimal.yml`，每日运行或手动 dispatch，使用 `GITHUB_TOKEN` 和 `sync-upstream-main` concurrency group。它不读取 checkpoint/state 文件，不使用 AI、Writer 或 Finalizer；以 `git merge-base`/真实 Git DAG 判断进度，将 `upstream/main` 真合并到固定 `sync/upstream` 分支，并复用或创建唯一同步 PR。
 
-同步不会绕过 PR 直接写入 `main`。`.github/upstream-sync-policy.yml` 中的 fork-owned 路径在三方合并前被过滤并保留 fork 版本；auth/migrations/security 与未知路径发布为人工审查 PR，`.gitmodules`、`.pem`、`.key`、`.p12` 等敏感文件 fail closed。`Automation Policy / gate` 对同步只证明 required-check health，不是 eligibility attestation；只有 trusted prepare 输出为 `eligible` 或经过冲突 final attestation 的 `conflict_ai_review`、精确 commit trailer 和 merge helper 再次校验全部通过时才允许 direct merge。唯一的冲突例外是逐个满足 UTF-8、普通文件 mode `100644` 和 modify/modify 的上游文本冲突：无 GitHub 写凭据的 AI Resolver 生成实际 candidate artifact，不同 model ID 的独立 AI Reviewer 审查；trusted deterministic verifier 重新物化结果并将 artifact 链、当前 head/tree、base、checkpoint、upstream SHA 与 policy 精确绑定到 final attestation。干净生成的 managed 同步 PR 只会在精确 head/base 的 required checks 成功，且 merge helper 重新证明 branch protection 为 strict、admin-enforced、零 bypass、无 active branch ruleset 后，使用一次 `PUT /repos/{owner}/{repo}/pulls/{number}/merge`、`merge_method=squash` 和该 SHA 执行 server-side direct squash；不会启用 GitHub native auto-merge。无论 mutation 的响应成功、失败或不确定，工作流都只独立回读一次，且必须证明同一 PR 由 Writer App bot 合并、head/base 一致、`auto_merge=null`，以及 merge commit 是以 base 为唯一 parent 的 squash commit，才记为成功。检查未成功或超时、治理证明漂移、mutation/readback 失败，以及其他冲突、二进制、编码或 mode 不符、Reviewer model-ID 不独立、artifact/attestation 或任一绑定漂移、上游历史重写、非法 state/policy 和无法识别的同步分支 tip 均 fail closed，不会推进 checkpoint 或覆盖远端分支；固定分支和开放 PR 会被保留，供后续同步复用。重建固定分支前仍会 disarm 历史遗留的 native auto-merge，避免旧授权残留。人工解决这些冲突时，应使用普通维护者 PR 同时提交解决结果和新的 `last_integrated_sha`。
-
-并行观察期内（自动化体系 v2 Phase 0，#175），新最小闭环 `.github/workflows/sync-upstream-minimal.yml` 每日 03:17 UTC 运行，与旧体系共用 concurrency group `sync-upstream-main` 互斥（不取消在跑运行）。它只用 `GITHUB_TOKEN`（无 Writer App / AI / attestation / checkpoint 状态机），以 `git merge-base` 为同步进度：把 upstream/main 真合并到固定分支 `sync/upstream`（被自动删除则重建），复用或创建唯一 sync PR（复用键 = 正文 upstream SHA 标记 + 固定 head/base）；干净且无 `.github/**` 漂移时对 PR 启用 GitHub 原生 auto-merge（**merge commit**，禁止 squash），合并后校验 `git rev-list --count origin/main..upstream/main == 0` 且 merge commit 恰有两个 parent。冲突、`.github/**` 漂移或任何异常均 fail-closed 并建幂等告警 issue（同 title+marker 的 open issue 只评论一次，正文必含原始错误输出）。两周并行观察通过前，旧体系的 checkpoint 语义仍以 `.github/upstream-sync-state.json` 为准。
+同步 PR 是普通 PR 的唯一合并例外：必须使用 **merge commit**，禁止 squash/rebase，以保持 upstream/main 与 fork main 的祖先连通。干净且无 `.github/**` 漂移时才启用 native auto-merge（merge commit）；合并后检查 `git rev-list --count origin/main..upstream/main == 0` 且提交恰有两个 parent。冲突、漂移、检查失败或任何异常均 fail closed，并创建幂等告警 issue；不会自动解决冲突或写入 `main`。普通开发 PR 仍一律 squash。
 
 ## 2. Issue 到 PR
 
 1. 从 Issue Form 创建 Bug、Feature、Scheduler/Failover 或 Config 变更。提交后均进入 `status:triage`。
 2. 维护者补齐优先级、领域、验收标准和目标版本。可执行开发的 Issue 标为 `status:ready`。
-3. 只有维护者添加 `agent-ready` 后，AI Agent 才能创建分支和 Draft PR。Agent 不得直接写入 `main`、修改 Ruleset 或读取发布 secrets。
+3. 只读 Agent 只能提供分析和 managed comment；它不能创建分支、写代码、修改 Ruleset 或读取发布 secrets。
 4. 从 Issue 创建短生命周期分支，PR 描述使用 `Closes #<issue-number>`。PR 模板中的风险、回滚和验证项必须完成。
 5. CI、CODEOWNERS 审查和所有讨论通过后，以 Squash merge 合入。GitHub 自动关闭被 `Closes` 引用的 Issue，Project 将其移到 `Done`。
 
-Agent 的模型路由、权限隔离、事件幂等、上游同步 checkpoint 和自动合并门禁见 [GitHub 自动化与 Agent 架构](automation-architecture.md)。该架构默认关闭新 Agent；只有对应阶段的 workflow、测试和仓库设置全部完成后才可启用。
+Agent 的模型路由、权限隔离、事件幂等和上游同步门禁见 [GitHub 自动化与 Agent 架构](automation-architecture.md)。该架构默认关闭新 Agent；只有对应阶段的 workflow、测试和仓库设置全部完成后才可启用。
 
-仓库中的只读 Agent registry 与开关应分别审计；远端实际启用状态必须以 GitHub Variables、Actions run 和 managed comment 现场证据为准。启用只读阶段不等于授权 Candidate、Publisher 或 Finalizer；`Automation Policy / gate` 作为 `main` 的 required check 独立运行。单 Writer production flags 仍需在全部 PoC、撤销演练和稳定观察后才可启用。
+仓库中的只读 Agent registry 与开关应分别审计；远端实际状态以 GitHub Variables、Actions run 和 managed comment 现场证据为准。当前不启用 Candidate、Publisher、Writer 或 Finalizer。
 
 Scheduler、重试、路由、池、额度或故障转移变更必须说明状态转换、确定性选择规则、依赖失败行为和回滚，并覆盖失败与恢复测试。
 
