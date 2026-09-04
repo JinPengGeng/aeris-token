@@ -1,9 +1,12 @@
-# 单 Writer App 自主开发实施规格
+# 历史归档：单 Writer App 自主开发实施规格
 
-> 状态：`implementation-in-progress / production-disabled`
-> 日期：2026-08-20
-> 目标仓库：`JinPengGeng/aeris-token`
-> 设计依据：`docs/research/github-autonomous-automation-architecture-research-2026-08-20.md`
+> 状态：**历史归档 / 未部署设计 / 不可执行**
+>
+> 归档原因：该设计已被 v2 终态取代；其中的 Writer、Publisher、Candidate、Finalizer、AI 冲突处理、旧同步链、变量和部署步骤均已删除或从未部署，不能作为当前运维规范执行。当前替代文档：[GitHub 自动化与 Agent 架构](automation-architecture.md)。
+>
+> 下文仅为历史审计记录。文中所有 workflow、Environment、变量、权限、ruleset、token、canary、部署和回滚步骤均不可执行、不可恢复，也不代表远端现状；与替代文档冲突时以替代文档和仓库实际 workflow 为准。
+
+> 原始档案元数据（仅历史记录）：2026-08-20，目标仓库 `JinPengGeng/aeris-token`，设计依据为 `docs/research/github-autonomous-automation-architecture-research-2026-08-20.md`。
 
 ## 1. 目标与完成定义
 
