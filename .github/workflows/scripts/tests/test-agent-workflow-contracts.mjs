@@ -17,16 +17,22 @@ const yamlPath = yamlCandidates.find((candidate) => fs.existsSync(candidate));
 assert.ok(yamlPath, 'js-yaml is not installed in an approved workspace');
 const yaml = require(yamlPath);
 
+// issue-triage runs the merged two-job shape (#179 Phase 2): prepare assembles
+// trigger context and the reservation without any AI secret, analyze holds the
+// AI key for exactly one step and then publishes through the same trusted
+// phase runner. agent-pr-review keeps the four phase-isolated jobs.
 const workflowSpecs = [
   {
     path: '.github/workflows/issue-triage.yml',
     commentPermission: 'issues',
     usesWorkflowRun: false,
+    shape: 'merged',
   },
   {
     path: '.github/workflows/agent-pr-review.yml',
     commentPermission: 'pull-requests',
     usesWorkflowRun: true,
+    shape: 'phased',
   },
 ];
 
@@ -39,6 +45,8 @@ const serialize = (value) => JSON.stringify(value);
 const hasAiKey = (value) => /AERIS_AI_API_KEY/i.test(serialize(value));
 const hasSecretReference = (value) => /\$\{\{\s*secrets\./i.test(serialize(value));
 const directAiSecretPattern = /\$\{\{\s*secrets\.AERIS_AI_API_KEY\s*\}\}/;
+const retiredModelVariablePattern =
+  /AERIS_AI_MODEL_(TRIAGE|PLANNER|WRITER|SECURITY|FALLBACK|CONFLICT_RESOLVER|CONFLICT_REVIEWER)/;
 
 const assertReadOnlyPermissions = (permissions, description) => {
   assert.equal(typeof permissions, 'object', `${description} permissions must be explicit`);
@@ -113,13 +121,304 @@ const assertPreflightKillSwitchException = (job, description) => {
   const condition = String(job.if ?? '');
   assert.match(
     condition,
-    /vars\.AERIS_AGENTS_ENABLED\s*==\s*['"]true['"]\s*\|\|\s*vars\.AERIS_AGENTS_ENABLED\s*==\s*['"]1['"]/, 
+    /vars\.AERIS_AGENTS_ENABLED\s*==\s*['"]true['"]\s*\|\|\s*vars\.AERIS_AGENTS_ENABLED\s*==\s*['"]1['"]/,
     `${description} must gate ordinary invocations with the agent kill switch`,
   );
   assert.match(
     condition,
-    /github\.event_name\s*==\s*['"]issue_comment['"][\s\S]*github\.event\.comment\.body\s*==\s*['"]\/agent status['"][\s\S]*github\.event\.comment\.body\s*==\s*['"]\/agent cancel['"]/, 
+    /github\.event_name\s*==\s*['"]issue_comment['"][\s\S]*github\.event\.comment\.body\s*==\s*['"]\/agent status['"][\s\S]*github\.event\.comment\.body\s*==\s*['"]\/agent cancel['"]/,
     `${description} must allow /agent status and /agent cancel through preflight when disabled`,
+  );
+};
+
+const assertKeyPresenceInspectionOnly = (job, description) => {
+  assert.equal(
+    directAiSecretPattern.test(serialize(job)),
+    false,
+    `${description} must not receive the AI API key value`,
+  );
+  assert.match(
+    serialize(job),
+    /AERIS_AI_API_KEY_PRESENT[^}]*secrets\.AERIS_AI_API_KEY\s*!=\s*''/,
+    `${description} may inspect only whether the AI API key is configured`,
+  );
+  const withoutPresenceCheck = serialize(job).replaceAll("secrets.AERIS_AI_API_KEY != ''", '');
+  assert.equal(
+    hasSecretReference(withoutPresenceCheck),
+    false,
+    `${description} must not reference secrets beyond the key presence check`,
+  );
+};
+
+const assertReservedAnalysisStep = (analyze, description) => {
+  const analyzeSteps = analyze.steps ?? [];
+  const secretSteps = analyzeSteps.filter((step) => directAiSecretPattern.test(serialize(step)));
+  assert.equal(secretSteps.length, 1, `${description} must have one AI-secret step`);
+  assert.match(
+    String(secretSteps[0].if ?? ''),
+    /read_reservation\.outputs\.state\s*==\s*['"]reserved['"]/,
+    `${description} must inject the AI key only for a reserved analysis`,
+  );
+  assert.equal(
+    secretSteps[0].env?.AERIS_AGENTS_ENABLED,
+    '${{ vars.AERIS_AGENTS_ENABLED }}',
+    `${description} reserved analyze must receive the kill switch`,
+  );
+  const passthrough = analyzeSteps.find((step) => /Pass through terminal reservation/i.test(step.name ?? ''));
+  assert.ok(passthrough, `${description} must pass terminal reservations without AI secrets`);
+  assert.equal(hasSecretReference(passthrough), false, `${description} terminal passthrough must not receive secrets`);
+  assert.equal(
+    passthrough.run,
+    'node .github/automation/src/run-phase.mjs analyze',
+    `${description} terminal passthrough must use the trusted analyze phase runner`,
+  );
+};
+
+const assertObjectWriteLock = (job, description) => {
+  assert.ok(
+    job.concurrency && typeof job.concurrency === 'object',
+    `${description} must define an object write lock`,
+  );
+  assert.equal(
+    job.concurrency['cancel-in-progress'],
+    false,
+    `${description} object write lock must not cancel an active writer`,
+  );
+  assert.match(
+    String(job.concurrency.group),
+    /(?:issue|pull_request|workflow_run|inputs)[.\w{} $|'-]*number/i,
+    `${description} object write lock must be keyed by the target number`,
+  );
+};
+
+const assertPhasedShape = (spec, document) => {
+  const jobs = document.jobs ?? {};
+  for (const phase of ['preflight', 'reserve', 'analyze', 'publish']) {
+    assert.ok(jobs[phase], `${spec.path} must define a ${phase} job`);
+  }
+
+  assert.equal(jobs.preflight.environment, 'agent', `${spec.path} preflight must load the agent environment`);
+  assert.equal(jobs.analyze.environment, 'agent', `${spec.path} analyze must load the agent environment`);
+
+  const preflightPermissions = jobs.preflight.permissions ?? document.permissions;
+  assertReadOnlyPermissions(preflightPermissions, `${spec.path} preflight`);
+  if (spec.usesWorkflowRun) {
+    assert.equal(preflightPermissions.checks, 'read', `${spec.path} preflight must read check runs`);
+    assert.equal(preflightPermissions.statuses, 'read', `${spec.path} preflight must read commit statuses`);
+  }
+  assertPreflightKillSwitchException(jobs.preflight, `${spec.path} preflight`);
+  assertPhaseRunner(jobs.preflight, 'preflight', `${spec.path} preflight`);
+  assertKeyPresenceInspectionOnly(jobs.preflight, `${spec.path} preflight`);
+
+  const analyzePermissions = jobs.analyze.permissions ?? document.permissions;
+  assertReadOnlyPermissions(analyzePermissions, `${spec.path} analyze`);
+  if (spec.usesWorkflowRun) {
+    assert.equal(analyzePermissions.checks, 'read', `${spec.path} analyze must recheck check runs`);
+    assert.equal(analyzePermissions.statuses, 'read', `${spec.path} analyze must recheck commit statuses`);
+  }
+  assert.notEqual(
+    analyzePermissions.issues,
+    'write',
+    `${spec.path} analyze must not grant issues: write`,
+  );
+  assert.notEqual(
+    analyzePermissions['pull-requests'],
+    'write',
+    `${spec.path} analyze must not grant pull-requests: write`,
+  );
+  assert.ok(hasAiKey(jobs.analyze), `${spec.path} analyze must receive the AI API key`);
+  assert.match(
+    serialize(jobs.analyze),
+    directAiSecretPattern,
+    `${spec.path} analyze must source the AI API key from its secret`,
+  );
+  assert.equal(
+    hasSecretReference({
+      ...jobs.analyze,
+      env: Object.fromEntries(
+        Object.entries(jobs.analyze.env ?? {}).filter(([name]) => name !== 'AERIS_AI_API_KEY'),
+      ),
+      steps: (jobs.analyze.steps ?? []).map((step) => ({
+        ...step,
+        env: Object.fromEntries(
+          Object.entries(step.env ?? {}).filter(([name]) => name !== 'AERIS_AI_API_KEY'),
+        ),
+      })),
+    }),
+    false,
+    `${spec.path} analyze must not receive non-AI secrets`,
+  );
+  assertReservedAnalysisStep(jobs.analyze, spec.path);
+
+  for (const [jobName, job] of Object.entries(jobs)) {
+    if (jobName !== 'analyze' && jobName !== 'preflight') {
+      assert.equal(
+        hasAiKey(job),
+        false,
+        `${spec.path} ${jobName} must not receive the AI API key`,
+      );
+      assert.equal(
+        hasSecretReference(job),
+        false,
+        `${spec.path} ${jobName} must not reference secrets`,
+      );
+    }
+  }
+
+  for (const phase of ['reserve', 'publish']) {
+    assertPhaseRunner(jobs[phase], phase, `${spec.path} ${phase}`);
+    assertCommentWriterPermissions(
+      jobs[phase],
+      spec.commentPermission,
+      `${spec.path} ${phase}`,
+    );
+    assert.equal(
+      hasAiKey(jobs[phase]),
+      false,
+      `${spec.path} ${phase} must not receive the AI API key`,
+    );
+  }
+  if (spec.usesWorkflowRun) {
+    assert.equal(jobs.publish.permissions.checks, 'read', `${spec.path} publish must recheck check runs`);
+    assert.equal(jobs.publish.permissions.statuses, 'read', `${spec.path} publish must recheck commit statuses`);
+  }
+  assertObjectWriteLock(jobs.reserve, `${spec.path} reserve`);
+  assert.deepEqual(
+    jobs.reserve.concurrency,
+    jobs.publish.concurrency,
+    `${spec.path} reserve and publish must share the same object write lock`,
+  );
+  for (const [jobName, dependency] of [['reserve', 'preflight'], ['analyze', 'reserve'], ['publish', 'analyze']]) {
+    const condition = String(jobs[jobName].if ?? '');
+    assert.match(condition, /always\(\)/, `${spec.path} ${jobName} must propagate terminal artifacts`);
+    assert.match(condition, new RegExp(`needs\\.${dependency}\\.result\\s*==\\s*['"]success['"]`));
+  }
+};
+
+const assertMergedShape = (spec, document) => {
+  const jobs = document.jobs ?? {};
+  assert.deepEqual(
+    Object.keys(jobs).sort(),
+    ['analyze', 'prepare'],
+    `${spec.path} must define exactly the prepare and analyze jobs`,
+  );
+  const prepare = jobs.prepare;
+  const analyze = jobs.analyze;
+
+  assert.equal(prepare.environment, 'agent', `${spec.path} prepare must load the agent environment`);
+  assert.equal(analyze.environment, 'agent', `${spec.path} analyze must load the agent environment`);
+
+  // prepare assembles the trigger context and the reservation. It may write
+  // comments and labels but must never see the AI API key value.
+  assertCommentWriterPermissions(prepare, spec.commentPermission, `${spec.path} prepare`);
+  assertPreflightKillSwitchException(prepare, `${spec.path} prepare`);
+  assertKeyPresenceInspectionOnly(prepare, `${spec.path} prepare`);
+
+  const labelStep = (prepare.steps ?? []).find(
+    (step) => typeof step.uses === 'string' && step.uses.startsWith('actions/github-script@'),
+  );
+  assert.ok(labelStep, `${spec.path} prepare must apply the triage status label`);
+  assert.match(
+    String(labelStep.if ?? ''),
+    /github\.event_name\s*==\s*['"]issues['"]\s*&&\s*github\.event\.action\s*==\s*['"]opened['"]/,
+    `${spec.path} label step must run only for a newly opened issue`,
+  );
+  assert.match(
+    String(labelStep.with?.script ?? ''),
+    /status:triage/,
+    `${spec.path} label step must apply the status:triage label`,
+  );
+
+  const preflightStep = assertPhaseRunner(prepare, 'preflight', `${spec.path} prepare`);
+  const reserveStep = assertPhaseRunner(prepare, 'reserve', `${spec.path} prepare`);
+  assert.ok(
+    prepare.steps.indexOf(preflightStep) < prepare.steps.indexOf(reserveStep),
+    `${spec.path} prepare must run preflight before reserve`,
+  );
+  assert.equal(
+    reserveStep.env?.AERIS_INPUT_PATH,
+    preflightStep.env?.AERIS_OUTPUT_PATH,
+    `${spec.path} reserve must consume the preflight artifact from the same runner`,
+  );
+
+  const uploadStep = (prepare.steps ?? []).find(
+    (step) => typeof step.uses === 'string' && step.uses.startsWith('actions/upload-artifact@'),
+  );
+  assert.ok(uploadStep, `${spec.path} prepare must publish the reservation artifact`);
+  assert.match(
+    String(uploadStep.with?.name ?? ''),
+    /^issue-reservation-/,
+    `${spec.path} prepare must upload the reservation artifact`,
+  );
+
+  // analyze holds the AI key for exactly one reserved-analysis step and then
+  // publishes through the same trusted phase runner without any secret.
+  assertCommentWriterPermissions(analyze, spec.commentPermission, `${spec.path} analyze`);
+  const needs = Array.isArray(analyze.needs) ? analyze.needs : [analyze.needs];
+  assert.deepEqual(needs, ['prepare'], `${spec.path} analyze must wait for prepare`);
+  const analyzeCondition = String(analyze.if ?? '');
+  assert.match(analyzeCondition, /always\(\)/, `${spec.path} analyze must propagate terminal artifacts`);
+  assert.match(
+    analyzeCondition,
+    /needs\.prepare\.result\s*==\s*['"]success['"]/,
+    `${spec.path} analyze must require a successful prepare`,
+  );
+
+  const downloadStep = (analyze.steps ?? []).find(
+    (step) => typeof step.uses === 'string' && step.uses.startsWith('actions/download-artifact@'),
+  );
+  assert.ok(downloadStep, `${spec.path} analyze must fetch the reservation artifact`);
+  assert.equal(
+    downloadStep.with?.name,
+    uploadStep.with?.name,
+    `${spec.path} analyze must download the exact reservation artifact prepare uploaded`,
+  );
+
+  assertReservedAnalysisStep(analyze, spec.path);
+  assert.equal(
+    hasSecretReference({
+      ...analyze,
+      env: Object.fromEntries(
+        Object.entries(analyze.env ?? {}).filter(([name]) => name !== 'AERIS_AI_API_KEY'),
+      ),
+      steps: (analyze.steps ?? []).map((step) => ({
+        ...step,
+        env: Object.fromEntries(
+          Object.entries(step.env ?? {}).filter(([name]) => name !== 'AERIS_AI_API_KEY'),
+        ),
+      })),
+    }),
+    false,
+    `${spec.path} analyze must not receive non-AI secrets`,
+  );
+
+  const publishStep = assertPhaseRunner(analyze, 'publish', `${spec.path} analyze`);
+  assert.equal(
+    hasSecretReference(publishStep),
+    false,
+    `${spec.path} publish must not receive secrets`,
+  );
+  assert.equal(
+    hasAiKey(publishStep),
+    false,
+    `${spec.path} publish must not receive the AI API key`,
+  );
+  const analyzeStep = findPhaseStep(analyze, 'analyze');
+  assert.ok(
+    analyze.steps.indexOf(analyzeStep) < analyze.steps.indexOf(publishStep),
+    `${spec.path} analyze must run analysis before publish`,
+  );
+  assert.equal(
+    publishStep.env?.AERIS_INPUT_PATH,
+    analyzeStep.env?.AERIS_OUTPUT_PATH,
+    `${spec.path} publish must consume the analysis artifact from the same runner`,
+  );
+
+  assertObjectWriteLock(prepare, `${spec.path} prepare`);
+  assert.deepEqual(
+    analyze.concurrency,
+    prepare.concurrency,
+    `${spec.path} prepare and analyze must share the same object write lock`,
   );
 };
 
@@ -128,149 +427,15 @@ for (const spec of workflowSpecs) {
     const { document } = readWorkflow(spec.path);
 
     assertReadOnlyPermissions(document.permissions, `${spec.path} top level`);
-
-    const jobs = document.jobs ?? {};
-    for (const phase of ['preflight', 'reserve', 'analyze', 'publish']) {
-      assert.ok(jobs[phase], `${spec.path} must define a ${phase} job`);
-    }
-
-    assert.equal(jobs.preflight.environment, 'agent', `${spec.path} preflight must load the agent environment`);
-    assert.equal(jobs.analyze.environment, 'agent', `${spec.path} analyze must load the agent environment`);
-
-    const preflightPermissions = jobs.preflight.permissions ?? document.permissions;
-    assertReadOnlyPermissions(preflightPermissions, `${spec.path} preflight`);
-    if (spec.usesWorkflowRun) {
-      assert.equal(preflightPermissions.checks, 'read', `${spec.path} preflight must read check runs`);
-      assert.equal(preflightPermissions.statuses, 'read', `${spec.path} preflight must read commit statuses`);
-    }
-    assertPreflightKillSwitchException(jobs.preflight, `${spec.path} preflight`);
-    assertPhaseRunner(jobs.preflight, 'preflight', `${spec.path} preflight`);
-    assert.equal(
-      directAiSecretPattern.test(serialize(jobs.preflight)),
-      false,
-      `${spec.path} preflight must not receive the AI API key value`,
+    assert.doesNotMatch(
+      serialize(document.jobs),
+      retiredModelVariablePattern,
+      `${spec.path} must not read retired per-role or fallback model variables`,
     );
-    assert.match(
-      serialize(jobs.preflight),
-      /AERIS_AI_API_KEY_PRESENT[^}]*secrets\.AERIS_AI_API_KEY\s*!=\s*''/,
-      `${spec.path} preflight may inspect only whether the AI API key is configured`,
-    );
-
-    const analyzePermissions = jobs.analyze.permissions ?? document.permissions;
-    assertReadOnlyPermissions(analyzePermissions, `${spec.path} analyze`);
-    if (spec.usesWorkflowRun) {
-      assert.equal(analyzePermissions.checks, 'read', `${spec.path} analyze must recheck check runs`);
-      assert.equal(analyzePermissions.statuses, 'read', `${spec.path} analyze must recheck commit statuses`);
-    }
-    assert.notEqual(
-      analyzePermissions.issues,
-      'write',
-      `${spec.path} analyze must not grant issues: write`,
-    );
-    assert.notEqual(
-      analyzePermissions['pull-requests'],
-      'write',
-      `${spec.path} analyze must not grant pull-requests: write`,
-    );
-    assert.ok(hasAiKey(jobs.analyze), `${spec.path} analyze must receive the AI API key`);
-    assert.match(
-      serialize(jobs.analyze),
-      directAiSecretPattern,
-      `${spec.path} analyze must source the AI API key from its secret`,
-    );
-    assert.equal(
-      hasSecretReference({
-        ...jobs.analyze,
-        env: Object.fromEntries(
-          Object.entries(jobs.analyze.env ?? {}).filter(([name]) => name !== 'AERIS_AI_API_KEY'),
-        ),
-        steps: (jobs.analyze.steps ?? []).map((step) => ({
-          ...step,
-          env: Object.fromEntries(
-            Object.entries(step.env ?? {}).filter(([name]) => name !== 'AERIS_AI_API_KEY'),
-          ),
-        })),
-      }),
-      false,
-      `${spec.path} analyze must not receive non-AI secrets`,
-    );
-    const analyzeSteps = jobs.analyze.steps ?? [];
-    const secretSteps = analyzeSteps.filter((step) => directAiSecretPattern.test(serialize(step)));
-    assert.equal(secretSteps.length, 1, `${spec.path} analyze must have one AI-secret step`);
-    assert.match(
-      String(secretSteps[0].if ?? ''),
-      /read_reservation\.outputs\.state\s*==\s*['"]reserved['"]/,
-      `${spec.path} must inject the AI key only for a reserved analysis`,
-    );
-    assert.equal(
-      secretSteps[0].env?.AERIS_AGENTS_ENABLED,
-      '${{ vars.AERIS_AGENTS_ENABLED }}',
-      `${spec.path} reserved analyze must receive the kill switch`,
-    );
-    const passthrough = analyzeSteps.find((step) => /Pass through terminal reservation/i.test(step.name ?? ''));
-    assert.ok(passthrough, `${spec.path} must pass terminal reservations without AI secrets`);
-    assert.equal(hasSecretReference(passthrough), false, `${spec.path} terminal passthrough must not receive secrets`);
-    assert.equal(
-      passthrough.run,
-      'node .github/automation/src/run-phase.mjs analyze',
-      `${spec.path} terminal passthrough must use the trusted analyze phase runner`,
-    );
-
-    for (const [jobName, job] of Object.entries(jobs)) {
-      if (jobName !== 'analyze' && jobName !== 'preflight') {
-        assert.equal(
-          hasAiKey(job),
-          false,
-          `${spec.path} ${jobName} must not receive the AI API key`,
-        );
-        assert.equal(
-          hasSecretReference(job),
-          false,
-          `${spec.path} ${jobName} must not reference secrets`,
-        );
-      }
-    }
-
-    for (const phase of ['reserve', 'publish']) {
-      assertPhaseRunner(jobs[phase], phase, `${spec.path} ${phase}`);
-      assertCommentWriterPermissions(
-        jobs[phase],
-        spec.commentPermission,
-        `${spec.path} ${phase}`,
-      );
-      assert.equal(
-        hasAiKey(jobs[phase]),
-        false,
-        `${spec.path} ${phase} must not receive the AI API key`,
-      );
-    }
-    if (spec.usesWorkflowRun) {
-      assert.equal(jobs.publish.permissions.checks, 'read', `${spec.path} publish must recheck check runs`);
-      assert.equal(jobs.publish.permissions.statuses, 'read', `${spec.path} publish must recheck commit statuses`);
-    }
-    assert.ok(
-      jobs.reserve.concurrency && typeof jobs.reserve.concurrency === 'object',
-      `${spec.path} reserve must define an object write lock`,
-    );
-    assert.deepEqual(
-      jobs.reserve.concurrency,
-      jobs.publish.concurrency,
-      `${spec.path} reserve and publish must share the same object write lock`,
-    );
-    assert.equal(
-      jobs.reserve.concurrency['cancel-in-progress'],
-      false,
-      `${spec.path} object write lock must not cancel an active writer`,
-    );
-    assert.match(
-      String(jobs.reserve.concurrency.group),
-      /(?:issue|pull_request|workflow_run|inputs)[.\w{} $|'-]*number/i,
-      `${spec.path} object write lock must be keyed by the target number`,
-    );
-    for (const [jobName, dependency] of [['reserve', 'preflight'], ['analyze', 'reserve'], ['publish', 'analyze']]) {
-      const condition = String(jobs[jobName].if ?? '');
-      assert.match(condition, /always\(\)/, `${spec.path} ${jobName} must propagate terminal artifacts`);
-      assert.match(condition, new RegExp(`needs\\.${dependency}\\.result\\s*==\\s*['"]success['"]`));
+    if (spec.shape === 'merged') {
+      assertMergedShape(spec, document);
+    } else {
+      assertPhasedShape(spec, document);
     }
   });
 

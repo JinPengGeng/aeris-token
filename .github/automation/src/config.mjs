@@ -44,12 +44,6 @@ function validateAgent(name, agent, allowedModelVariables, knownAgents) {
       `${name} model variable is outside the allowlist`,
     );
   }
-  if (agent.fallback_model_variable !== undefined) {
-    requireCondition(
-      allowedModelVariables.has(agent.fallback_model_variable),
-      `${name} fallback model variable is outside the allowlist`,
-    );
-  }
 }
 
 function validateReviewerLimits(limits) {
@@ -117,15 +111,7 @@ export function validateContracts(agents, policy) {
     'reviewer request timeout must not be shorter than the shared request timeout',
   );
 
-  const expectedAgents = new Set([
-    'triage',
-    'planner',
-    'reviewer',
-    'writer',
-    'tester',
-    'security',
-    'policy',
-  ]);
+  const expectedAgents = new Set(['triage', 'planner', 'reviewer']);
   const knownAgents = new Set(Object.keys(agents.agents ?? {}));
   requireCondition(
     knownAgents.size === expectedAgents.size && [...expectedAgents].every((name) => knownAgents.has(name)),
@@ -154,17 +140,9 @@ export function validateContracts(agents, policy) {
   for (const [name, agent] of Object.entries(agents.agents)) {
     validateAgent(name, agent, allowedModelVariables, knownAgents);
   }
-  for (const name of ['tester', 'policy']) {
-    requireCondition(agents.agents[name].mode === 'deterministic', `${name} must be deterministic`);
-    requireCondition(agents.agents[name].model_variable === null, `${name} must not select a model`);
-  }
   requireCondition(
-    agents.agents.policy.handoff_to.length === 0,
-    'policy must terminate in the deterministic gate; Finalizer owns direct merge execution',
-  );
-  requireCondition(
-    !agents.agents.reviewer.handoff_to.includes('writer'),
-    'reviewer must not authorize writer',
+    agents.agents.reviewer.handoff_to.length === 0,
+    'reviewer terminates the read-only chain; retired handoff targets must not return',
   );
 
   const retryableStatuses = agents.model_policy?.retryable_http_statuses ?? [];
@@ -228,7 +206,6 @@ export function resolveModelCandidates(agentName, agent, environment) {
 
   append('role', agent.model_variable);
   append('default', 'AERIS_AI_MODEL');
-  append('fallback', agent.fallback_model_variable ?? 'AERIS_AI_MODEL_FALLBACK');
   if (candidates.length === 0) {
     throw new ContractError(`no model is configured for ${agentName}`);
   }

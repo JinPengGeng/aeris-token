@@ -80,7 +80,7 @@ test('response formats encode each agent provider contract', () => {
   }
 
   const reviewer = responseFormatForAgent('reviewer').json_schema.schema;
-  assert.deepEqual(reviewer.properties.next_agent.enum, ['security', null]);
+  assert.deepEqual(reviewer.properties.next_agent.enum, [null]);
   assert.match(reviewer.properties.findings.description, /At most 20 items/);
   assert.equal(reviewer.properties.findings.items.additionalProperties, false);
   assert.match(reviewer.properties.findings.items.properties.title.description, /at most 200 characters/);

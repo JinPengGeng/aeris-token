@@ -9,32 +9,13 @@ trusted_source:
 runtime:
   enabled_variable: AERIS_AGENTS_ENABLED
   default_enabled: false
-  execution:
-    mode: github_actions
-    preflight_job: preflight
-    best_effort_reservation_job: reserve
-    analysis_job: analyze
-    deterministic_writeback_job: publish
-    result_artifact:
-      format: json
-      maximum_bytes: 1048576
-      secrets_allowed: false
-      raw_model_input_copied: false
-      authoritative_state: false
-      usable_as_lock: false
   api:
-    base_url_variable: AERIS_AI_BASE_URL
-    api_key_secret: AERIS_AI_API_KEY
     endpoint: /chat/completions
-    default_model_variable: AERIS_AI_MODEL
-    fallback_model_variable: AERIS_AI_MODEL_FALLBACK
     connect_timeout_seconds: 120
     request_timeout_seconds: 120
     maximum_response_bytes: 1048576
   limits:
     maximum_input_characters: 24000
-    maximum_handoffs: 4
-    maximum_fix_cycles: 2
     maximum_concurrent_runs_per_object: 1
     maximum_output_tokens: 4000
   reviewer_limits:
@@ -43,24 +24,21 @@ runtime:
     maximum_input_characters: 262144
     maximum_patch_characters_per_file: 65536
     # Large, complete PR patches can require longer inference than issue
-    # analysis. The engine separately caps the whole fallback sequence to the
-    # remaining reservation lease with publication headroom.
+    # analysis. The engine separately caps the whole request to the remaining
+    # reservation lease with publication headroom.
     request_timeout_seconds: 300
 
 model_policy:
-  # Values are GitHub Actions variable names. Their resolved model IDs form the
-  # allowlist; an issue or comment cannot supply an arbitrary model ID.
+  # Model routing converges on exactly two repository variables (#179 Phase 2):
+  # AERIS_AI_MODEL is the default for every agent, AERIS_AI_MODEL_REVIEWER
+  # overrides the review role only. Values are GitHub Actions variable names
+  # whose resolved model IDs form the allowlist; an issue or comment cannot
+  # supply an arbitrary model ID.
   allowed_model_variables:
     - AERIS_AI_MODEL
-    - AERIS_AI_MODEL_TRIAGE
-    - AERIS_AI_MODEL_PLANNER
     - AERIS_AI_MODEL_REVIEWER
-    - AERIS_AI_MODEL_WRITER
-    - AERIS_AI_MODEL_SECURITY
-    - AERIS_AI_MODEL_FALLBACK
   retryable_http_statuses: [408, 429, 500, 502, 503, 504]
   retryable_failures: [connect_error, timeout]
-  non_retryable_http_statuses: [400, 401, 403, 404, 405, 409, 413, 422]
   structured_output:
     canary_agents: [planner]
     approved_model_ids: [gpt-5.6-sol]
@@ -68,10 +46,8 @@ model_policy:
 agents:
   triage:
     enabled: true
-    phase: "2.1"
     mode: read_only
-    model_variable: AERIS_AI_MODEL_TRIAGE
-    fallback_model_variable: AERIS_AI_MODEL_FALLBACK
+    model_variable: null
     triggers: [issue_opened, issue_reopened, command_triage]
     tools: []
     effects: [propose_labels, update_managed_comment]
@@ -79,10 +55,8 @@ agents:
 
   planner:
     enabled: true
-    phase: "2.1"
     mode: read_only
-    model_variable: AERIS_AI_MODEL_PLANNER
-    fallback_model_variable: AERIS_AI_MODEL_FALLBACK
+    model_variable: null
     triggers: [command_plan, triage_handoff]
     tools: []
     effects: [update_managed_comment]
@@ -90,58 +64,9 @@ agents:
 
   reviewer:
     enabled: true
-    phase: "2.1"
     mode: read_only
     model_variable: AERIS_AI_MODEL_REVIEWER
-    fallback_model_variable: AERIS_AI_MODEL_FALLBACK
     triggers: [pull_request_opened, pull_request_synchronize, command_review]
     tools: [repository_read]
     effects: [update_managed_comment]
-    handoff_to: [security]
-
-  writer:
-    enabled: false
-    phase: 3
-    mode: credentialless_candidate
-    model_variable: AERIS_AI_MODEL_WRITER
-    fallback_model_variable: AERIS_AI_MODEL_FALLBACK
-    triggers: [maintainer_command_implement, authorized_fix_cycle]
-    required_issue_labels: [agent-ready]
-    allowed_branch_prefixes: [agent/issue-]
-    tools: [repository_read, workspace_write]
-    effects: [publish_candidate_artifact]
-    denied_paths:
-      - .github/**
-      - CODEOWNERS
-    handoff_to: [reviewer, tester, security]
-
-  tester:
-    enabled: false
-    phase: 3
-    mode: deterministic
-    model_variable: null
-    triggers: [writer_handoff, command_test]
-    tools: [repository_read, ci_dispatch, ci_read]
-    effects: [publish_advisory_check]
-    handoff_to: [reviewer]
-
-  security:
-    enabled: false
-    phase: 3
-    mode: read_only
-    model_variable: AERIS_AI_MODEL_SECURITY
-    fallback_model_variable: AERIS_AI_MODEL_FALLBACK
-    triggers: [sensitive_path_changed, reviewer_handoff]
-    tools: [repository_read, dependency_metadata_read]
-    effects: [publish_advisory_check]
-    handoff_to: [policy]
-
-  policy:
-    enabled: false
-    phase: 4
-    mode: deterministic
-    model_variable: null
-    triggers: [pull_request_changed, required_checks_completed]
-    tools: [repository_read, pull_request_metadata_read]
-    effects: [github_actions_job_conclusion]
     handoff_to: []

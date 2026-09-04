@@ -163,7 +163,7 @@ export function validateAgentOutput(agent, value, repositoryLabels = []) {
       'reviewer_verdict_enum',
     );
     requireCondition(
-      value.next_agent === null || value.next_agent === 'security',
+      value.next_agent === null,
       'reviewer next_agent invalid',
       'reviewer_next_agent_enum',
     );

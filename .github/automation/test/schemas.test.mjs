@@ -99,18 +99,22 @@ test('planner validation reports stable shape, enum, and bounds diagnostics', ()
   );
 });
 
-test('reviewer output cannot hand off to writer', () => {
-  assert.throws(() =>
-    validateAgentOutput('reviewer', {
-      schema_version: 1,
-      agent: 'reviewer',
-      summary: 'Summary',
-      verdict: 'needs_human_decision',
-      findings: [],
-      test_recommendations: [],
-      next_agent: 'writer',
-    }),
-  );
+test('reviewer output cannot hand off to a retired or unknown agent', () => {
+  for (const nextAgent of ['writer', 'security']) {
+    assertDiagnostic(
+      () =>
+        validateAgentOutput('reviewer', {
+          schema_version: 1,
+          agent: 'reviewer',
+          summary: 'Summary',
+          verdict: 'needs_human_decision',
+          findings: [],
+          test_recommendations: [],
+          next_agent: nextAgent,
+        }),
+      'reviewer_next_agent_enum',
+    );
+  }
 });
 
 test('reviewer finding is strictly bounded and structured', () => {
@@ -129,8 +133,8 @@ test('reviewer finding is strictly bounded and structured', () => {
       },
     ],
     test_recommendations: ['Add an unauthorized actor test.'],
-    next_agent: 'security',
+    next_agent: null,
   });
   assert.equal(output.findings[0].line, 42);
-  assert.equal(output.next_agent, 'security');
+  assert.equal(output.next_agent, null);
 });

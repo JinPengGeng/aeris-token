@@ -23,30 +23,9 @@ permissions:
   contents: read
 
 jobs:
-  label:
-    name: Apply triage status
-    if: github.event_name == 'issues' && github.event.action == 'opened'
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-    steps:
-      - name: Add status label
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        with:
-          script: |
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              labels: ['status:triage'],
-            });
-
-  preflight:
-    name: Validate Issue invocation
-    needs: [label]
+  prepare:
+    name: Prepare Issue analysis
     if: >-
-      always() &&
-      (needs.label.result == 'success' || needs.label.result == 'skipped') &&
       ((vars.AERIS_AGENTS_ENABLED == 'true' || vars.AERIS_AGENTS_ENABLED == '1') ||
        (github.event_name == 'issue_comment' &&
         (github.event.comment.body == '/agent status' ||
@@ -60,58 +39,6 @@ jobs:
       (github.event_name != 'issues' || github.event.action != 'labeled' || github.event.label.name == 'agent-analyze')
     runs-on: ubuntu-latest
     environment: agent
-    permissions:
-      contents: read
-      issues: read
-    steps:
-      - name: Check out trusted default branch
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: .github/automation/package-lock.json
-
-      - name: Install trusted automation runtime
-        working-directory: .github/automation
-        run: npm ci --ignore-scripts
-
-      - name: Run preflight
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          AERIS_PHASE: preflight
-          AERIS_OBJECT_KIND: issue
-          AERIS_ISSUE_NUMBER: ${{ inputs.issue_number || '' }}
-          AERIS_AGENT: ${{ inputs.agent || '' }}
-          AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
-          AERIS_AI_API_KEY_PRESENT: ${{ secrets.AERIS_AI_API_KEY != '' && 'true' || 'false' }}
-          AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
-          AERIS_AI_MODEL: ${{ vars.AERIS_AI_MODEL }}
-          AERIS_AI_MODEL_TRIAGE: ${{ vars.AERIS_AI_MODEL_TRIAGE }}
-          AERIS_AI_MODEL_PLANNER: ${{ vars.AERIS_AI_MODEL_PLANNER }}
-          AERIS_AI_MODEL_FALLBACK: ${{ vars.AERIS_AI_MODEL_FALLBACK }}
-          AERIS_OUTPUT_PATH: ${{ runner.temp }}/aeris-preflight/preflight.json
-        run: node .github/automation/src/run-phase.mjs preflight
-
-      - name: Upload preflight artifact
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
-        with:
-          name: issue-preflight-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/aeris-preflight/preflight.json
-          if-no-files-found: error
-          retention-days: 1
-
-  reserve:
-    name: Reserve Issue analysis
-    needs: [preflight]
-    if: always() && needs.preflight.result == 'success'
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
@@ -137,14 +64,33 @@ jobs:
         working-directory: .github/automation
         run: npm ci --ignore-scripts
 
-      - name: Download preflight artifact
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+      - name: Add status label
+        if: github.event_name == 'issues' && github.event.action == 'opened'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
-          name: issue-preflight-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/aeris-preflight
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['status:triage'],
+            });
+
+      - name: Run preflight
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AERIS_PHASE: preflight
+          AERIS_OBJECT_KIND: issue
+          AERIS_ISSUE_NUMBER: ${{ inputs.issue_number || '' }}
+          AERIS_AGENT: ${{ inputs.agent || '' }}
+          AERIS_AGENTS_ENABLED: ${{ vars.AERIS_AGENTS_ENABLED }}
+          AERIS_AI_API_KEY_PRESENT: ${{ secrets.AERIS_AI_API_KEY != '' && 'true' || 'false' }}
+          AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
+          AERIS_AI_MODEL: ${{ vars.AERIS_AI_MODEL }}
+          AERIS_OUTPUT_PATH: ${{ runner.temp }}/aeris-preflight/preflight.json
+        run: node .github/automation/src/run-phase.mjs preflight
 
       - name: Reserve managed comment
-        id: reserve_phase
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AERIS_PHASE: reserve
@@ -163,13 +109,16 @@ jobs:
 
   analyze:
     name: Analyze Issue
-    needs: [reserve]
-    if: always() && needs.reserve.result == 'success'
+    needs: [prepare]
+    if: always() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     environment: agent
     permissions:
       contents: read
-      issues: read
+      issues: write
+    concurrency:
+      group: agent-issue-${{ github.event.issue.number || inputs.issue_number || github.run_id }}
+      cancel-in-progress: false
     steps:
       - name: Check out trusted default branch
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -215,9 +164,6 @@ jobs:
           AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
           AERIS_AI_API_KEY: ${{ secrets.AERIS_AI_API_KEY }}
           AERIS_AI_MODEL: ${{ vars.AERIS_AI_MODEL }}
-          AERIS_AI_MODEL_TRIAGE: ${{ vars.AERIS_AI_MODEL_TRIAGE }}
-          AERIS_AI_MODEL_PLANNER: ${{ vars.AERIS_AI_MODEL_PLANNER }}
-          AERIS_AI_MODEL_FALLBACK: ${{ vars.AERIS_AI_MODEL_FALLBACK }}
         run: node .github/automation/src/run-phase.mjs analyze
 
       - name: Pass through terminal reservation
@@ -228,50 +174,6 @@ jobs:
           AERIS_INPUT_PATH: ${{ runner.temp }}/aeris-reservation/reservation.json
           AERIS_OUTPUT_PATH: ${{ runner.temp }}/aeris-analysis/analysis.json
         run: node .github/automation/src/run-phase.mjs analyze
-
-      - name: Upload analysis artifact
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
-        with:
-          name: issue-analysis-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/aeris-analysis/analysis.json
-          if-no-files-found: error
-          retention-days: 1
-
-  publish:
-    name: Publish Issue analysis
-    needs: [analyze]
-    if: always() && needs.analyze.result == 'success'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
-    concurrency:
-      group: agent-issue-${{ github.event.issue.number || inputs.issue_number || github.run_id }}
-      cancel-in-progress: false
-    steps:
-      - name: Check out trusted default branch
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: .github/automation/package-lock.json
-
-      - name: Install trusted automation runtime
-        working-directory: .github/automation
-        run: npm ci --ignore-scripts
-
-      - name: Download analysis artifact
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
-        with:
-          name: issue-analysis-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/aeris-analysis
 
       - name: Publish managed comment
         env:

@@ -34,15 +34,15 @@ test('trusted contracts load with only enabled agents declared', () => {
     'triage',
     'planner',
     'reviewer',
-    'writer',
-    'tester',
-    'security',
-    'policy',
   ]);
   const enabled = Object.entries(contracts.agents.agents)
     .filter(([, agent]) => agent.enabled)
     .map(([name]) => name);
   assert.deepEqual(enabled, ['triage', 'planner', 'reviewer']);
+  assert.deepEqual(contracts.agents.model_policy.allowed_model_variables, [
+    'AERIS_AI_MODEL',
+    'AERIS_AI_MODEL_REVIEWER',
+  ]);
   assert.deepEqual(contracts.agents.model_policy.structured_output, {
     canary_agents: ['planner'],
     approved_model_ids: ['gpt-5.6-sol'],
@@ -150,16 +150,29 @@ test('contract validation requires bounded exact reviewer limits', () => {
   assert.throws(() => validateContracts(agents, contracts.policy), ContractError);
 });
 
-test('model candidates follow role, default, fallback order and deduplicate IDs', () => {
-  const candidates = resolveModelCandidates('triage', contracts.agents.agents.triage, {
-    AERIS_AI_MODEL_TRIAGE: 'fast-model',
-    AERIS_AI_MODEL: 'fast-model',
-    AERIS_AI_MODEL_FALLBACK: 'strong-model',
+test('model candidates follow role then default order and deduplicate IDs', () => {
+  const candidates = resolveModelCandidates('reviewer', contracts.agents.agents.reviewer, {
+    AERIS_AI_MODEL_REVIEWER: 'fast-model',
+    AERIS_AI_MODEL: 'strong-model',
   });
   assert.deepEqual(candidates, [
-    { alias: 'role', id: 'fast-model', variable: 'AERIS_AI_MODEL_TRIAGE' },
-    { alias: 'fallback', id: 'strong-model', variable: 'AERIS_AI_MODEL_FALLBACK' },
+    { alias: 'role', id: 'fast-model', variable: 'AERIS_AI_MODEL_REVIEWER' },
+    { alias: 'default', id: 'strong-model', variable: 'AERIS_AI_MODEL' },
   ]);
+});
+
+test('agents without a role variable resolve only the default model', () => {
+  const candidates = resolveModelCandidates('triage', contracts.agents.agents.triage, {
+    AERIS_AI_MODEL: 'test-model',
+    AERIS_AI_MODEL_REVIEWER: 'ignored-for-triage',
+  });
+  assert.deepEqual(candidates, [
+    { alias: 'default', id: 'test-model', variable: 'AERIS_AI_MODEL' },
+  ]);
+  assert.throws(
+    () => resolveModelCandidates('triage', contracts.agents.agents.triage, { AERIS_AI_MODEL: '' }),
+    ContractError,
+  );
 });
 
 test('command parser requires one exact command and ignores managed content', () => {

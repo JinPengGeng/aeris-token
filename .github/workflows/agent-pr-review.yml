@@ -85,7 +85,6 @@ jobs:
           AERIS_AI_BASE_URL: ${{ vars.AERIS_AI_BASE_URL }}
           AERIS_AI_MODEL: ${{ vars.AERIS_AI_MODEL }}
           AERIS_AI_MODEL_REVIEWER: ${{ vars.AERIS_AI_MODEL_REVIEWER }}
-          AERIS_AI_MODEL_FALLBACK: ${{ vars.AERIS_AI_MODEL_FALLBACK }}
           AERIS_OUTPUT_PATH: ${{ runner.temp }}/aeris-preflight/preflight.json
         run: node .github/automation/src/run-phase.mjs preflight
 
@@ -207,7 +206,6 @@ jobs:
           AERIS_AI_API_KEY: ${{ secrets.AERIS_AI_API_KEY }}
           AERIS_AI_MODEL: ${{ vars.AERIS_AI_MODEL }}
           AERIS_AI_MODEL_REVIEWER: ${{ vars.AERIS_AI_MODEL_REVIEWER }}
-          AERIS_AI_MODEL_FALLBACK: ${{ vars.AERIS_AI_MODEL_FALLBACK }}
         run: node .github/automation/src/run-phase.mjs analyze
 
       - name: Pass through terminal reservation
