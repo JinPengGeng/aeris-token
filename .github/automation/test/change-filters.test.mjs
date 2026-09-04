@@ -41,7 +41,6 @@ const EXPECTED_GROUPS = {
     '.github/change-filters.yml',
     '.github/automation/**',
     '.github/upstream-sync-policy.yml',
-    '.github/upstream-sync-state.json',
     '.github/workflows/**',
   ],
 };
