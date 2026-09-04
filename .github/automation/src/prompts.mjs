@@ -98,7 +98,7 @@ const AGENT_SCHEMAS = Object.freeze({
         ),
       },
       test_recommendations: boundedStringArray(),
-      next_agent: { type: ['string', 'null'], enum: ['security', null] },
+      next_agent: { type: ['string', 'null'], enum: [null] },
     },
     ['schema_version', 'agent', 'summary', 'verdict', 'findings', 'test_recommendations', 'next_agent'],
   ),

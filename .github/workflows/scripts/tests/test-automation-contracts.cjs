@@ -112,10 +112,6 @@ const expectedAgents = [
   'triage',
   'planner',
   'reviewer',
-  'writer',
-  'tester',
-  'security',
-  'policy',
 ];
 assert(
   sameMembers(Object.keys(agents.agents), expectedAgents),
@@ -132,12 +128,18 @@ assert(
 );
 assert(agents.runtime.default_enabled === false, 'agent runtime must default off');
 assert(
-  Object.entries(agents.agents).every(([name, agent]) =>
-    name === 'triage' || name === 'planner' || name === 'reviewer'
-      ? agent.enabled === true
-      : agent.enabled === false,
-  ),
-  'only the triage, planner, and reviewer agents may be enabled; every other agent must default off',
+  Object.entries(agents.agents).every(([, agent]) => agent.enabled === true),
+  'only the triage, planner, and reviewer agents remain and they must stay enabled',
+);
+assert(
+  sameMembers(agents.model_policy.allowed_model_variables, [
+    'AERIS_AI_MODEL',
+    'AERIS_AI_MODEL_REVIEWER',
+  ]) &&
+    agents.agents.triage.model_variable === null &&
+    agents.agents.planner.model_variable === null &&
+    agents.agents.reviewer.model_variable === 'AERIS_AI_MODEL_REVIEWER',
+  'model routing must converge on the default and reviewer model variables only',
 );
 assert(
   agents.model_policy.retryable_http_statuses.every(
@@ -162,23 +164,9 @@ for (const [name, agent] of Object.entries(agents.agents)) {
     assert(expectedAgents.includes(target), `${name} hands off to an unknown agent`);
   }
 }
-for (const name of ['tester', 'policy']) {
-  assert(agents.agents[name].mode === 'deterministic', `${name} must be deterministic`);
-  assert(agents.agents[name].model_variable === null, `${name} must not select a model`);
-}
 assert(
-  agents.agents.policy.handoff_to.length === 0,
-  'policy must terminate in the deterministic gate; Finalizer owns direct merge execution',
-);
-assert(
-  agents.agents.writer.mode === 'credentialless_candidate' &&
-    agents.agents.writer.effects.includes('publish_candidate_artifact') &&
-    agents.agents.writer.denied_paths.includes('.github/**'),
-  'Agent writer must remain credentialless and deny .github',
-);
-assert(
-  !agents.agents.reviewer.handoff_to.includes('writer'),
-  'reviewer must not authorize a new writer run',
+  agents.agents.reviewer.handoff_to.length === 0,
+  'reviewer terminates the read-only chain; retired handoff targets must not return',
 );
 
 assert(automation.kill_switch.default_enabled === false, 'kill switch must default off');

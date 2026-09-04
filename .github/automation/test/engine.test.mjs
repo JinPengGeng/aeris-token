@@ -403,7 +403,7 @@ test('invalid AI configuration fails before writing a reservation', async () => 
   for (const overrides of [
     { AERIS_AI_API_KEY: '', AERIS_AI_API_KEY_PRESENT: 'false' },
     { AERIS_AI_BASE_URL: 'http://ai.example.test/v1', AERIS_AI_API_KEY_PRESENT: 'true' },
-    { AERIS_AI_MODEL: '', AERIS_AI_MODEL_TRIAGE: '', AERIS_AI_MODEL_FALLBACK: '', AERIS_AI_API_KEY_PRESENT: 'true' },
+    { AERIS_AI_MODEL: '', AERIS_AI_API_KEY_PRESENT: 'true' },
   ]) {
     const github = new FakeGitHub();
     await assert.rejects(
