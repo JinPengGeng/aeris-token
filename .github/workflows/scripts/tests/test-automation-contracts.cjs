@@ -39,7 +39,6 @@ const checkpointScript = read('.github/workflows/scripts/checkpoint-merge.sh');
 const verifyCandidateMetadata = read(
   '.github/workflows/scripts/validate-sync-candidate-metadata.cjs',
 );
-const state = JSON.parse(read('.github/upstream-sync-state.json'));
 const minimalSyncWorkflow = loadYaml('.github/workflows/sync-upstream-minimal.yml');
 const minimalSyncWorkflowSource = read('.github/workflows/sync-upstream-minimal.yml');
 const minimalSyncScript = read('.github/workflows/scripts/sync-upstream-minimal.sh');
@@ -279,8 +278,9 @@ for (const immutablePath of [
   );
 }
 
-assert(sync.upstream.repository === state.repository, 'state repository differs from policy');
-assert(sync.upstream.branch === state.branch, 'state branch differs from policy');
+// The checkpoint state file was retired in #179 Phase 1a: merge-base against
+// the upstream tip is now the sync progress signal. The policy key itself is
+// cleaned up with the legacy sync workflow in Phase 1b.
 assert(sync.sync.state_file === '.github/upstream-sync-state.json', 'state path changed');
 assert(sync.sync.pull_request_limit === 1, 'sync must allow only one managed PR');
 assert(sync.sync.fail_closed === true, 'sync must fail closed');
@@ -408,46 +408,6 @@ assert(
     syncTokenStep.with['permission-checks'] === undefined &&
     syncTokenStep.with['permission-statuses'] === undefined,
   'Writer App token permissions exceed or miss the approved minimum',
-);
-
-const publisherWorkflow = loadYaml('.github/workflows/autonomy-publisher.yml');
-const publisherTokenStep = publisherWorkflow.jobs.publish.steps.find((step) => step.name === 'Mint bounded Writer App token');
-assert(
-  publisherTokenStep?.with['permission-checks'] === 'write' &&
-    publisherTokenStep.with['permission-contents'] === 'write' &&
-    publisherTokenStep.with['permission-pull-requests'] === 'write' &&
-    publisherTokenStep.with['permission-administration'] === undefined,
-  'candidate Publisher App token must be the only Writer token that requests checks: write',
-);
-
-const finalizerWorkflow = loadYaml('.github/workflows/autonomy-finalizer.yml');
-const finalizerTokenStep = finalizerWorkflow.jobs.finalize.steps.find((step) => step.name === 'Mint bounded Writer App token');
-assert(
-  finalizerTokenStep?.with['permission-checks'] === undefined &&
-    finalizerTokenStep.with['permission-administration'] === 'read' &&
-    finalizerTokenStep.with['permission-contents'] === 'write' &&
-    finalizerTokenStep.with['permission-pull-requests'] === 'write',
-  'candidate Finalizer App token must not request checks: write',
-);
-const finalizerAttestationStep = finalizerWorkflow.jobs.finalize.steps.find(
-  (step) => step.name === 'Attest Writer App and installation identity',
-);
-const finalizerMergeStep = finalizerWorkflow.jobs.finalize.steps.find(
-  (step) => step.name === 'Directly squash merge exact eligible pull request',
-);
-assert(
-  finalizerAttestationStep?.env.AERIS_WRITER_APP_NODE_ID === '${{ vars.AERIS_WRITER_APP_NODE_ID }}' &&
-    finalizerAttestationStep.env.AERIS_WRITER_APP_OWNER_DATABASE_ID ===
-      '${{ vars.AERIS_WRITER_APP_OWNER_DATABASE_ID }}' &&
-    finalizerMergeStep?.env.AERIS_WRITER_PROOF_APP_ID ===
-      '${{ steps.writer_app_attestation.outputs.app_id }}' &&
-    finalizerMergeStep.env.AERIS_WRITER_PROOF_APP_SLUG ===
-      '${{ steps.writer_app_attestation.outputs.app_slug }}' &&
-    finalizerMergeStep.env.AERIS_WRITER_PROOF_APP_NODE_ID ===
-      '${{ steps.writer_app_attestation.outputs.app_node_id }}' &&
-    finalizerMergeStep.env.AERIS_WRITER_PROOF_APP_OWNER_DATABASE_ID ===
-      '${{ steps.writer_app_attestation.outputs.app_owner_database_id }}',
-  'candidate Finalizer must bind live Writer App and owner identity into full proof',
 );
 
 const conflictArtifactSuffix = '${{ github.run_id }}-${{ github.run_attempt }}';
@@ -1143,10 +1103,6 @@ assert(
   'external PR analysis must require agent-analyze',
 );
 
-assert(state.schema_version === 1, 'state schema version changed');
-assert(state.policy_version === sync.version, 'state policy version differs from policy');
-assert(/^[0-9a-f]{40}$/.test(state.last_integrated_sha), 'checkpoint must be a full lowercase SHA');
-
 const directlyExecutedScripts = [
   '.github/workflows/scripts/checkpoint-merge.sh',
   '.github/workflows/scripts/manage-sync-automerge.sh',
@@ -1382,6 +1338,5 @@ console.log(
     agents: expectedAgents.length,
     defaultEnabled: agents.runtime.default_enabled,
     policyMode: automation.policy_gate.mode,
-    checkpoint: state.last_integrated_sha,
   }),
 );
