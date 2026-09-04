@@ -240,7 +240,16 @@ fn merge_upstream_metadata(
         .unwrap_or_default();
     if let Some(update_object) = updates.as_object() {
         for (key, value) in update_object {
-            merged.insert(key.clone(), value.clone());
+            let mut next = value.clone();
+            if let (Some(current_namespace), Some(next_namespace)) = (
+                merged.get(key).and_then(serde_json::Value::as_object),
+                next.as_object_mut(),
+            ) {
+                let mut combined = current_namespace.clone();
+                combined.extend(next_namespace.clone());
+                next = serde_json::Value::Object(combined);
+            }
+            merged.insert(key.clone(), next);
         }
     }
     serde_json::Value::Object(merged)
@@ -561,6 +570,50 @@ pub(crate) async fn reserve_codex_account_reset(
     Ok(None)
 }
 
+fn record_locally_consumed_codex_reset_credit(
+    codex: &mut serde_json::Map<String, serde_json::Value>,
+    observed_at_unix_secs: u64,
+) {
+    let Some(reset_credits) = codex
+        .get_mut("reset_credits")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(available_count) = reset_credits
+        .get("available_count")
+        .and_then(admin_provider_quota_pure::coerce_json_u64)
+    else {
+        return;
+    };
+
+    reset_credits.insert(
+        "available_count".to_string(),
+        serde_json::json!(available_count.saturating_sub(1)),
+    );
+    reset_credits.insert(
+        "updated_at".to_string(),
+        serde_json::json!(observed_at_unix_secs),
+    );
+    reset_credits.insert(
+        "detail_source".to_string(),
+        serde_json::json!("local_consume"),
+    );
+    reset_credits.insert(
+        "detail_status".to_string(),
+        serde_json::json!("pending_refresh"),
+    );
+    reset_credits.remove("detail_error");
+    if let Some(credits) = reset_credits
+        .get_mut("credits")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        if !credits.is_empty() {
+            credits.remove(0);
+        }
+    }
+}
+
 pub(crate) async fn complete_codex_account_reset(
     state: &AdminAppState<'_>,
     key_id: &str,
@@ -626,6 +679,9 @@ pub(crate) async fn complete_codex_account_reset(
             generation: reservation.generation,
             outcome: outcome.to_string(),
         };
+        if outcome == "reset" {
+            record_locally_consumed_codex_reset_credit(&mut codex, fence_unix_ms / 1_000);
+        }
         codex_reset_write_bounded_history(&mut codex, &terminal);
         if codex_reset_reservation_from_object(&codex).as_ref() == Some(reservation) {
             codex.remove(admin_provider_quota_pure::CODEX_QUOTA_ACCOUNT_RESET_RESERVATION_KEY);
@@ -1311,7 +1367,8 @@ where
     F: std::future::Future<Output = ()>,
 {
     let Some(mut latest_key) = state
-        .read_provider_catalog_keys_by_ids(&[key_id.to_string()])
+        .app()
+        .list_provider_catalog_keys_by_ids_strong(&[key_id.to_string()])
         .await?
         .into_iter()
         .next()
@@ -1355,9 +1412,18 @@ where
     let metadata_updates = metadata_update
         .and_then(serde_json::Value::as_object)
         .map(|updates| {
+            let merged = latest_key
+                .upstream_metadata
+                .as_ref()
+                .and_then(serde_json::Value::as_object);
             updates
-                .iter()
-                .map(|(namespace, value)| (namespace.clone(), value.clone()))
+                .keys()
+                .filter_map(|namespace| {
+                    merged
+                        .and_then(|metadata| metadata.get(namespace))
+                        .cloned()
+                        .map(|value| (namespace.clone(), value))
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -1389,7 +1455,7 @@ where
         } else {
             serde_json::json!({})
         };
-        let mut expected = observed_upstream_metadata
+        let expected = observed_upstream_metadata
             .as_ref()
             .and_then(serde_json::Value::as_object)
             .and_then(|metadata| metadata.get(namespace))
@@ -1657,7 +1723,19 @@ mod tests {
         .expect("key should build");
         key.encrypted_auth_config = Some("auth-v1".to_string());
         key.upstream_metadata = Some(json!({
-            "codex": {"credential_generation": "credential-v1"}
+            "codex": {
+                "credential_generation": "credential-v1",
+                "reset_credits": {
+                    "available_count": 2,
+                    "updated_at": 100u64,
+                    "detail_source": "wham_readonly",
+                    "detail_status": "available",
+                    "credits": [
+                        {"id": "credit-1", "expires_at": 20_000u64},
+                        {"id": "credit-2", "expires_at": 30_000u64}
+                    ]
+                }
+            }
         }));
         let credential = ProviderCatalogKeyOAuthCredentialFence {
             encrypted_api_key: None,
@@ -1751,6 +1829,13 @@ mod tests {
         let key_id = "key-codex-reset-credential-generation";
         let (app, repository, credential) = codex_reset_state_machine_test_state(key_id);
         let admin_state = AdminAppState::new(&app);
+        let original_metadata = repository
+            .list_keys_by_ids(&[key_id.to_string()])
+            .await
+            .expect("key should load before reservation")
+            .pop()
+            .expect("key should exist before reservation")
+            .upstream_metadata;
 
         let result = reserve_codex_account_reset(
             &admin_state,
@@ -1774,10 +1859,7 @@ mod tests {
             .expect("key should reload")
             .pop()
             .expect("key should exist");
-        assert_eq!(
-            stored.upstream_metadata.unwrap()["codex"],
-            json!({"credential_generation":"credential-v1"})
-        );
+        assert_eq!(stored.upstream_metadata, original_metadata);
     }
 
     #[tokio::test]
@@ -1911,6 +1993,11 @@ mod tests {
             assert_eq!(
                 codex["account_quota_reset_history"][0]["outcome"],
                 json!("reset")
+            );
+            assert_eq!(codex["reset_credits"]["available_count"], json!(1u64));
+            assert_eq!(
+                codex["reset_credits"]["credits"],
+                json!([{"id": "credit-2", "expires_at": 30_000u64}])
             );
         }
     }
@@ -2874,6 +2961,123 @@ mod tests {
         assert_eq!(
             stored.upstream_metadata.as_ref().unwrap()["codex"],
             json!({"remaining":4})
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_refresh_strong_read_bypasses_stale_provider_catalog_cache() {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-antigravity-stale-cache".to_string(),
+            "provider-antigravity-stale-cache".to_string(),
+            "Antigravity stale cache".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.upstream_metadata = Some(json!({
+            "antigravity": {
+                "project_id": "project-1",
+                "quota_by_model": {
+                    "gemini-3.7-flash-tiered": {"remaining_fraction": 0.9}
+                }
+            }
+        }));
+
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![],
+            vec![],
+            vec![key],
+        ));
+        let data =
+            GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(&repository))
+                .with_cached_provider_catalog_reader_for_tests(Arc::clone(&repository));
+        let app = AppState::new()
+            .expect("app should build")
+            .with_data_state_for_tests(data);
+        let admin_state = AdminAppState::new(&app);
+        let key_ids = ["key-antigravity-stale-cache".to_string()];
+
+        let cached = app
+            .read_provider_catalog_keys_by_ids(&key_ids)
+            .await
+            .expect("initial cached read should succeed");
+        assert_eq!(
+            cached[0].upstream_metadata.as_ref().unwrap()["antigravity"]["quota_by_model"]
+                ["gemini-3.7-flash-tiered"]["remaining_fraction"],
+            json!(0.9)
+        );
+
+        let current_namespace = json!({
+            "project_id": "project-1",
+            "model_fetch_revision": 2,
+            "quota_by_model": {
+                "gemini-3.7-flash-tiered": {"remaining_fraction": 0.7}
+            }
+        });
+        assert!(repository
+            .upsert_key_upstream_metadata_namespace(
+                "key-antigravity-stale-cache",
+                "antigravity",
+                &current_namespace,
+                None,
+            )
+            .await
+            .expect("out-of-band metadata update should succeed"));
+        let still_cached = app
+            .read_provider_catalog_keys_by_ids(&key_ids)
+            .await
+            .expect("stale cached read should succeed");
+        assert_eq!(
+            still_cached[0].upstream_metadata.as_ref().unwrap()["antigravity"]["quota_by_model"]
+                ["gemini-3.7-flash-tiered"]["remaining_fraction"],
+            json!(0.9),
+            "regression setup must keep the ordinary read stale"
+        );
+
+        let metadata_update = json!({
+            "antigravity": {
+                "project_id": "project-1",
+                "quota_by_model": {
+                    "gemini-3.7-flash-tiered": {"remaining_fraction": 0.6}
+                },
+                "quota_groups": [{
+                    "display_name": "Gemini models",
+                    "buckets": [{"bucket_id": "gemini-weekly", "window": "weekly"}]
+                }]
+            }
+        });
+        assert!(persist_provider_quota_refresh_state(
+            &admin_state,
+            "key-antigravity-stale-cache",
+            Some(&metadata_update),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("quota refresh persistence should not error"));
+
+        let stored = repository
+            .list_keys_by_ids(&key_ids)
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(
+            stored.upstream_metadata.as_ref().unwrap()["antigravity"]["quota_groups"][0]["buckets"]
+                [0]["bucket_id"],
+            json!("gemini-weekly")
+        );
+        assert_eq!(
+            stored.upstream_metadata.as_ref().unwrap()["antigravity"]["model_fetch_revision"],
+            json!(2),
+            "quota refresh must preserve fields written by another Antigravity metadata producer"
+        );
+        assert_eq!(
+            stored.upstream_metadata.as_ref().unwrap()["antigravity"]["quota_by_model"]
+                ["gemini-3.7-flash-tiered"]["remaining_fraction"],
+            json!(0.6)
         );
     }
 }
