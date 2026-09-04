@@ -11,7 +11,8 @@
 #     marker in the PR body + fixed head/base; rerunning at the same upstream
 #     SHA never creates a duplicate PR)
 #   → dispatch the required-check workflows (GITHUB_TOKEN-created PRs emit no
-#     pull_request event, so rust-ci/frontend-ci need an explicit dispatch)
+#     pull_request event, so rust-ci/frontend-ci/automation-policy need an
+#     explicit dispatch onto the sync branch)
 #   → arm GitHub native auto-merge (merge method) on the conflict-free PR
 #   → bounded wait, then verify the merge landed correctly.
 #
@@ -250,11 +251,16 @@ context_state() {
 }
 
 # GITHUB_TOKEN-created PRs emit no pull_request event, so the required check
-# contexts would never appear on their own. rust-ci.yml and frontend-ci.yml
-# accept workflow_dispatch and publish their aggregate context onto the head
-# SHA; dispatch them only when no active or successful result exists yet.
+# contexts would never appear on their own. rust-ci.yml, frontend-ci.yml, and
+# automation-policy.yml accept workflow_dispatch and publish their context onto
+# the head SHA; dispatch them only when no active or successful result exists
+# yet. Extra arguments are passed through to `gh workflow run` as workflow
+# inputs: the policy gate pins the exact pull request number and the trusted
+# policy SHA (the current main tip this run already validated), and its
+# evaluation re-validates both against the live API and fails closed on drift.
 ensure_check_dispatch() {
   local workflow="$1" context="$2" attempt state dispatch_output
+  shift 2
   for ((attempt = 1; attempt <= 6; attempt += 1)); do
     state="$(context_state "${head_sha}" "${context}")"
     if [[ "${state}" == success || "${state}" == pending ]]; then
@@ -268,7 +274,7 @@ ensure_check_dispatch() {
     ((attempt == 6)) || sleep 5
   done
   if ! dispatch_output="$(bounded_gh workflow run --repo "${GITHUB_REPOSITORY}" \
-      "${workflow}" --ref "${SYNC_BRANCH}" 2>&1)"; then
+      "${workflow}" --ref "${SYNC_BRANCH}" "$@" 2>&1)"; then
     summary_msg="Unable to dispatch ${workflow} for ${SYNC_BRANCH}@${head_sha}. Auto-merge cannot proceed without the required check."
     raw="context=${context}
 ${dispatch_output}"
@@ -649,6 +655,10 @@ fi
 
 ensure_check_dispatch rust-ci.yml "Rust CI / check"
 ensure_check_dispatch frontend-ci.yml "Frontend CI / check"
+# The gate evaluates the sync PR against the trusted policy at the current
+# main tip; both were validated earlier in this run and are pinned as inputs.
+ensure_check_dispatch automation-policy.yml "Automation Policy / gate" \
+  -f "ref=${SYNC_BRANCH}" -f "pull_number=${pr_number}" -f "policy_sha=${base_sha}"
 
 # Arm GitHub native auto-merge with the merge method. This is the only merge
 # machinery in the loop; it fires only after every required check passes.
@@ -736,10 +746,11 @@ failed=${failed_context}"
     output state error
     exit 1
   fi
-  # The Automation Policy gate is triggered by pull_request events only, and a
-  # GITHUB_TOKEN-created PR emits none. Once both dispatchable checks are
-  # green and the gate context is still absent on several consecutive polls,
-  # it will never arrive on its own: stop instead of waiting forever.
+  # The gate is dispatched onto the sync branch above, so its check normally
+  # appears within one poll. Once both CI checks are green and the gate
+  # context is still absent on several consecutive polls, the dispatched run
+  # never published its check (a stuck queue or a skipped run): stop instead
+  # of waiting forever.
   if [[ "${rust_state}" == success && "${frontend_state}" == success &&
         "${gate_state}" == absent ]]; then
     gate_gap_polls=$((gate_gap_polls + 1))
@@ -747,7 +758,7 @@ failed=${failed_context}"
     gate_gap_polls=0
   fi
   if ((gate_gap_polls >= 3)); then
-    summary_msg="PR #${pr_number} is green on both dispatchable required checks, but 'Automation Policy / gate' never appeared on head ${head_sha}. The gate workflow triggers on pull_request events only, and GITHUB_TOKEN-created PRs emit no such event (GitHub platform behavior), so auto-merge would wait forever. Owner action required: give the gate a dispatch path (or merge this PR manually with a merge commit)."
+    summary_msg="PR #${pr_number} is green on both CI required checks, but 'Automation Policy / gate' never appeared on head ${head_sha} even though automation-policy.yml was dispatched onto ${SYNC_BRANCH}. The dispatched gate run is stuck or was skipped: inspect the Automation Policy runs for ${SYNC_BRANCH} (or merge this PR manually with a merge commit)."
     raw="rust=${rust_state} frontend=${frontend_state} gate=${gate_state} (3 consecutive polls)"
     report_sync_alert missing-required-check "${alert_key}" "${summary_msg}" "${raw}"
     output state error

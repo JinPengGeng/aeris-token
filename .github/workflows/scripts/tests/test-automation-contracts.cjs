@@ -214,6 +214,21 @@ assert(
     JSON.stringify(['opened', 'reopened', 'synchronize', 'labeled', 'unlabeled']),
   'policy workflow must remain event-driven for every policy-relevant pull request event',
 );
+// The dispatch lane (#181) exists for GITHUB_TOKEN-created sync PRs, which
+// emit no pull_request event. It must pin the exact evaluation target so the
+// gate cannot be pointed at an unrelated commit.
+assert(
+  sameMembers(Object.keys(automationPolicyWorkflow.on.workflow_dispatch?.inputs ?? {}), [
+    'ref',
+    'pull_number',
+    'policy_sha',
+  ]) &&
+    automationPolicyWorkflow.on.workflow_dispatch.inputs.ref.required === true &&
+    automationPolicyWorkflow.on.workflow_dispatch.inputs.pull_number.required === true &&
+    automationPolicyWorkflow.on.workflow_dispatch.inputs.policy_sha.required === true &&
+    automationPolicyWorkflow.on.workflow_dispatch.inputs.pull_number.type === 'number',
+  'policy workflow dispatch must take exactly the ref, pull request number, and trusted policy SHA',
+);
 assert(
   automationPolicyWorkflow.jobs.gate.if === undefined,
   'policy workflow scheduling must not be disabled by the policy gate or mutation flags',
@@ -1293,6 +1308,19 @@ assert(
 assert(
   minimalSyncScript.includes('report_sync_alert missing-required-check '),
   'minimal sync must fail closed when a required check context can never appear',
+);
+
+// All three required contexts are dispatched onto the sync branch (#181); the
+// gate dispatch pins the exact PR number and the validated main tip so the
+// policy evaluation re-validates them against the live API and fails closed.
+assert(
+  minimalSyncScript.includes('ensure_check_dispatch rust-ci.yml "Rust CI / check"') &&
+    minimalSyncScript.includes('ensure_check_dispatch frontend-ci.yml "Frontend CI / check"') &&
+    minimalSyncScript.includes('ensure_check_dispatch automation-policy.yml "Automation Policy / gate"') &&
+    minimalSyncScript.includes('-f "ref=${SYNC_BRANCH}"') &&
+    minimalSyncScript.includes('-f "pull_number=${pr_number}"') &&
+    minimalSyncScript.includes('-f "policy_sha=${base_sha}"'),
+  'minimal sync must dispatch all three required checks, pinning the PR number and policy SHA for the gate',
 );
 
 // The loop script follows the executable-bit convention of the other scripts.
