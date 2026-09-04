@@ -1042,7 +1042,7 @@ test('model and schema failures replace the reservation with failed metadata', a
 test('analysis rejects missing, mismatched, or non-exact completion executor identities', async () => {
   const cases = [
     ['missing', undefined],
-    ['mismatched', { id: 'openai-responses-v1', protocol: 'openai-responses-v1' }],
+    ['mismatched', { id: 'external-v1', protocol: 'external-completions-v1' }],
     ['non-exact', { ...TRUSTED_AGENT_EXECUTOR, untrusted: true }],
   ];
   for (const [name, executor] of cases) {

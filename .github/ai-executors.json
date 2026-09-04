@@ -5,24 +5,9 @@
       "id": "openai-chat-v1",
       "kind": "completion",
       "protocol": "openai-chat-completions-v1"
-    },
-    {
-      "id": "openai-responses-v1",
-      "kind": "completion",
-      "protocol": "openai-responses-v1"
-    },
-    {
-      "id": "codex-action-v1",
-      "kind": "workspace_candidate",
-      "protocol": "aeris-workspace-candidate-v1",
-      "action_sha": "52fe01ec70a42f454c9d2ebd47598f9fd6893d56",
-      "tool_version": "0.148.0"
     }
   ],
   "routes": {
-    "agent_analysis": "openai-chat-v1",
-    "sync_conflict_resolver": "openai-chat-v1",
-    "sync_conflict_reviewer": "openai-chat-v1",
-    "candidate": "codex-action-v1"
+    "agent_analysis": "openai-chat-v1"
   }
 }

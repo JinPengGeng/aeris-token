@@ -3,7 +3,6 @@ import path from 'node:path';
 
 import { executorForRoute, validateExecutorRegistry } from './ai-executor-contract.mjs';
 import { createOpenAiChatExecutor } from './ai-executors/openai-chat-v1.mjs';
-import { createOpenAiResponsesExecutor } from './ai-executors/openai-responses-v1.mjs';
 
 const EXECUTOR_PATH = '.github/ai-executors.json';
 
@@ -23,9 +22,6 @@ export function loadExecutorRegistry(repoRoot) {
 export function createAiExecutorFromIdentity({ identity, ...options }) {
   if (identity.id === 'openai-chat-v1' && identity.protocol === 'openai-chat-completions-v1') {
     return createOpenAiChatExecutor(options, identity);
-  }
-  if (identity.id === 'openai-responses-v1' && identity.protocol === 'openai-responses-v1') {
-    return createOpenAiResponsesExecutor(options, identity);
   }
   throw new Error(`AI executor ${identity.id} has no trusted factory implementation`);
 }
