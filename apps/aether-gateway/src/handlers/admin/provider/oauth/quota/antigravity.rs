@@ -5,17 +5,80 @@ use super::shared::{
     quota_key_auto_removed, quota_refresh_success_invalid_state,
     resolve_provider_quota_execution_timeouts, ProviderQuotaExecutionOutcome,
 };
+use crate::handlers::admin::provider::shared::payloads::AdminImportProviderModelsRequest;
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::GatewayError;
-use aether_admin::provider::quota::parse_antigravity_usage_response;
+use aether_admin::provider::quota::{
+    parse_antigravity_quota_summary_response, parse_antigravity_usage_response,
+};
 use aether_contracts::ProxySnapshot;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
-use aether_provider_pool::build_antigravity_pool_quota_request;
+use aether_provider_pool::{
+    build_antigravity_pool_quota_request, build_antigravity_pool_quota_summary_request,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
+
+fn antigravity_discovered_model_ids(metadata_update: Option<&serde_json::Value>) -> Vec<String> {
+    metadata_update
+        .and_then(|value| value.pointer("/antigravity/quota_by_model"))
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|models| models.keys())
+        .map(String::as_str)
+        .filter(|model_id| aether_model_fetch::antigravity_model_id_is_routable(model_id))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+async fn sync_antigravity_discovered_models(
+    state: &AdminAppState<'_>,
+    provider_id: &str,
+    metadata_update: Option<&serde_json::Value>,
+) {
+    if !state.has_global_model_data_reader() || !state.has_global_model_data_writer() {
+        return;
+    }
+    let model_ids = antigravity_discovered_model_ids(metadata_update);
+    if model_ids.is_empty() {
+        return;
+    }
+
+    let result = state
+        .build_admin_import_provider_models_payload(
+            provider_id,
+            AdminImportProviderModelsRequest {
+                model_ids,
+                tiered_pricing: None,
+                price_per_request: None,
+            },
+        )
+        .await;
+    match result {
+        Ok(payload) => {
+            let errors = payload
+                .get("errors")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            if errors > 0 {
+                warn!(
+                    provider_id,
+                    errors, "Antigravity discovered-model catalog sync completed with item errors"
+                );
+            }
+        }
+        Err(error) => warn!(
+            provider_id,
+            error = %error,
+            "Antigravity discovered-model catalog sync failed"
+        ),
+    }
+}
 
 async fn execute_antigravity_quota_plan(
     state: &AdminAppState<'_>,
@@ -53,6 +116,79 @@ async fn execute_antigravity_quota_plan(
     );
 
     execute_provider_quota_plan(state, transport, plan, "antigravity").await
+}
+
+async fn fetch_antigravity_quota_summary_best_effort(
+    state: &AdminAppState<'_>,
+    transport: &AdminGatewayProviderTransportSnapshot,
+    authorization: (String, String),
+    project_id: &str,
+    identity_headers: BTreeMap<String, String>,
+    proxy_override: Option<&ProxySnapshot>,
+) -> Option<serde_json::Value> {
+    let mut request_project_id = Some(project_id);
+
+    loop {
+        let proxy = match proxy_override {
+            Some(proxy) => Some(proxy.clone()),
+            None => {
+                state
+                    .resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
+                    .await
+            }
+        };
+        let timeouts = Some(resolve_provider_quota_execution_timeouts(
+            state.resolve_transport_execution_timeouts(transport),
+            proxy.as_ref(),
+        ));
+        let spec = build_antigravity_pool_quota_summary_request(
+            &transport.key.id,
+            &transport.endpoint.base_url,
+            authorization.clone(),
+            request_project_id,
+            identity_headers.clone(),
+        );
+        let plan = build_provider_quota_execution_plan(
+            transport,
+            spec,
+            proxy,
+            state.resolve_transport_profile(transport),
+            timeouts,
+        );
+        let outcome = match execute_provider_quota_plan(state, transport, plan, "antigravity").await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                warn!(error = ?error, "Antigravity grouped quota request failed");
+                return None;
+            }
+        };
+        let result = match outcome {
+            ProviderQuotaExecutionOutcome::Response(result) => result,
+            ProviderQuotaExecutionOutcome::Failure(detail) => {
+                warn!(detail = %detail, "Antigravity grouped quota execution failed");
+                return None;
+            }
+        };
+
+        if result.status_code == 200 {
+            return result
+                .body
+                .as_ref()
+                .and_then(|body| body.json_body.as_ref())
+                .and_then(parse_antigravity_quota_summary_response);
+        }
+        if result.status_code == 403 && request_project_id.is_some() {
+            request_project_id = None;
+            continue;
+        }
+
+        warn!(
+            status_code = result.status_code,
+            "Antigravity grouped quota request returned a non-success status"
+        );
+        return None;
+    }
 }
 
 pub(crate) async fn refresh_antigravity_provider_quota_locally(
@@ -130,9 +266,9 @@ pub(crate) async fn refresh_antigravity_provider_quota_locally(
         let result = match execute_antigravity_quota_plan(
             state,
             &transport,
-            authorization,
+            authorization.clone(),
             &project_id,
-            identity_headers,
+            identity_headers.clone(),
             proxy_override.as_ref(),
         )
         .await?
@@ -168,9 +304,31 @@ pub(crate) async fn refresh_antigravity_provider_quota_locally(
                 .as_ref()
                 .and_then(|body| body.json_body.as_ref())
             {
-                metadata_update = parse_antigravity_usage_response(body_json, now_unix_secs)
-                    .map(|metadata| json!({ "antigravity": metadata }));
-                if metadata_update.is_some() {
+                if let Some(mut metadata) =
+                    parse_antigravity_usage_response(body_json, now_unix_secs)
+                {
+                    if let Some(metadata) = metadata.as_object_mut() {
+                        metadata.insert("project_id".to_string(), json!(project_id));
+                    }
+                    if let Some(quota_groups) = fetch_antigravity_quota_summary_best_effort(
+                        state,
+                        &transport,
+                        authorization,
+                        &project_id,
+                        identity_headers,
+                        proxy_override.as_ref(),
+                    )
+                    .await
+                    {
+                        if let Some(metadata) = metadata.as_object_mut() {
+                            metadata.insert("quota_groups".to_string(), quota_groups);
+                            metadata.insert(
+                                "quota_groups_updated_at".to_string(),
+                                json!(now_unix_secs),
+                            );
+                        }
+                    }
+                    metadata_update = Some(json!({ "antigravity": metadata }));
                     status = "success".to_string();
                 } else {
                     status = "no_metadata".to_string();
@@ -228,6 +386,10 @@ pub(crate) async fn refresh_antigravity_provider_quota_locally(
                 "message": "Key 状态写入失败",
             }));
             continue;
+        }
+
+        if status == "success" {
+            sync_antigravity_discovered_models(state, &provider.id, metadata_update.as_ref()).await;
         }
 
         if status == "success" {

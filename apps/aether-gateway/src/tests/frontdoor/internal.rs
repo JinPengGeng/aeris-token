@@ -5,6 +5,7 @@ use super::{
     InMemoryProviderCatalogReadRepository, InMemoryRequestCandidateRepository,
     DEVELOPMENT_ENCRYPTION_KEY,
 };
+use crate::data::GatewayDataState;
 use crate::tests::{
     any, build_router, build_router_with_state, build_state_with_execution_runtime_override, json,
     start_server, strip_sse_keepalive_comments, AppState, Arc, Body, HeaderValue, Json, Mutex,
@@ -1301,10 +1302,9 @@ async fn gateway_returns_internal_gateway_decision_sync_fallback_with_resolved_a
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            // 同上：请求路径要求已配置的默认调度策略（上游 2cb4d554a），
-            // 经 with_data_state_for_tests 补种系统默认策略组。
             .with_data_state_for_tests(
-                crate::data::GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository),
+                GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository)
+                    .with_system_default_routing_group_for_tests(),
             ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;

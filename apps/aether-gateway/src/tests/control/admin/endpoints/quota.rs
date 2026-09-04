@@ -4,8 +4,12 @@ use std::sync::{Arc, Mutex};
 use aether_crypto::{
     decrypt_python_fernet_ciphertext, encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY,
 };
+use aether_data::repository::global_models::InMemoryGlobalModelReadRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::proxy_nodes::InMemoryProxyNodeRepository;
+use aether_data_contracts::repository::global_models::{
+    AdminProviderModelListQuery, GlobalModelReadRepository,
+};
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogReadRepository, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
@@ -2264,6 +2268,8 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_tru
     struct SeenExecutionRuntimeRequest {
         url: String,
         authorization: String,
+        user_agent: String,
+        x_client_version: String,
         provider_api_format: String,
         request_body: Option<serde_json::Value>,
     }
@@ -2281,7 +2287,7 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_tru
         }),
     );
 
-    let seen_execution_runtime = Arc::new(Mutex::new(None::<SeenExecutionRuntimeRequest>));
+    let seen_execution_runtime = Arc::new(Mutex::new(Vec::<SeenExecutionRuntimeRequest>::new()));
     let seen_execution_runtime_clone = Arc::clone(&seen_execution_runtime);
     let execution_runtime = Router::new().route(
         "/v1/execute/sync",
@@ -2294,26 +2300,30 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_tru
                         .expect("body should read"),
                 )
                 .expect("plan should parse");
-                *seen_execution_runtime_inner
+                let request_body = plan.body.json_body.clone();
+                seen_execution_runtime_inner
                     .lock()
-                    .expect("mutex should lock") = Some(SeenExecutionRuntimeRequest {
-                    url: plan.url.clone(),
-                    authorization: plan
-                        .headers
-                        .get("authorization")
-                        .cloned()
-                        .unwrap_or_default(),
-                    provider_api_format: plan.provider_api_format.clone(),
-                    request_body: plan.body.json_body.clone(),
-                });
-                let result = aether_contracts::ExecutionResult {
-                    request_id: plan.request_id,
-                    candidate_id: None,
-                    status_code: 200,
-                    headers: BTreeMap::new(),
-                    response_observation: None,
-                    body: Some(aether_contracts::ResponseBody {
-                        json_body: Some(json!({
+                    .expect("mutex should lock")
+                    .push(SeenExecutionRuntimeRequest {
+                        url: plan.url.clone(),
+                        authorization: plan
+                            .headers
+                            .get("authorization")
+                            .cloned()
+                            .unwrap_or_default(),
+                        user_agent: plan.headers.get("user-agent").cloned().unwrap_or_default(),
+                        x_client_version: plan
+                            .headers
+                            .get("x-client-version")
+                            .cloned()
+                            .unwrap_or_default(),
+                        provider_api_format: plan.provider_api_format.clone(),
+                        request_body: request_body.clone(),
+                    });
+                let (status_code, json_body) = match plan.provider_api_format.as_str() {
+                    "antigravity:fetch_available_models" => (
+                        200,
+                        json!({
                             "models": {
                                 "claude-sonnet-4": {
                                     "displayName": "Claude Sonnet 4",
@@ -2324,9 +2334,55 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_tru
                                 },
                                 "gemini-2.5-pro": {
                                     "displayName": "Gemini 2.5 Pro"
+                                },
+                                "gemini-3.7-flash-tiered": {
+                                    "displayName": "Gemini 3.7 Flash"
+                                },
+                                "chat_23310": {
+                                    "displayName": "Internal Chat"
                                 }
                             }
-                        })),
+                        }),
+                    ),
+                    "antigravity:retrieve_user_quota_summary"
+                        if request_body
+                            .as_ref()
+                            .and_then(|body| body.get("project"))
+                            .is_some() =>
+                    {
+                        (403, json!({"error": {"message": "project not accepted"}}))
+                    }
+                    "antigravity:retrieve_user_quota_summary" => (
+                        200,
+                        json!({
+                            "groups": [{
+                                "displayName": "Claude and GPT models",
+                                "description": "Shared quota",
+                                "buckets": [{
+                                    "bucketId": "3p-5h",
+                                    "window": "5h",
+                                    "remainingFraction": 0.25,
+                                    "resetTime": "2026-05-05T05:00:00Z",
+                                    "displayName": "5 hour"
+                                }, {
+                                    "bucketId": "3p-weekly",
+                                    "window": "weekly",
+                                    "remainingFraction": 0.8,
+                                    "resetTime": "2026-05-11T00:00:00Z"
+                                }]
+                            }]
+                        }),
+                    ),
+                    unexpected => panic!("unexpected quota request format: {unexpected}"),
+                };
+                let result = aether_contracts::ExecutionResult {
+                    request_id: plan.request_id,
+                    candidate_id: None,
+                    status_code,
+                    headers: BTreeMap::new(),
+                    response_observation: None,
+                    body: Some(aether_contracts::ResponseBody {
+                        json_body: Some(json_body),
                         body_bytes_b64: None,
                     }),
                     telemetry: None,
@@ -2385,6 +2441,7 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_tru
         )],
         vec![key],
     ));
+    let global_model_repository = Arc::new(InMemoryGlobalModelReadRepository::default());
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
@@ -2394,6 +2451,7 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_tru
                 GatewayDataState::with_provider_catalog_repository_for_tests(
                     provider_catalog_repository.clone(),
                 )
+                .with_global_model_repository_for_tests(global_model_repository.clone())
                 .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             ),
     );
@@ -2429,31 +2487,55 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_tru
         payload["results"][0]["quota_snapshot"]["windows"]
             .as_array()
             .map(Vec::len),
-        Some(1usize)
+        Some(3usize)
     );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
-    let seen_execution_runtime_request = seen_execution_runtime
+    let seen_execution_runtime_requests = seen_execution_runtime
         .lock()
         .expect("mutex should lock")
-        .clone()
-        .expect("execution runtime request should be captured");
+        .clone();
+    assert_eq!(seen_execution_runtime_requests.len(), 3);
+    let fetch_models_request = &seen_execution_runtime_requests[0];
     assert_eq!(
-        seen_execution_runtime_request.url,
+        fetch_models_request.url,
         "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
     );
+    assert_eq!(fetch_models_request.authorization, "Bearer ya29.ant-token");
     assert_eq!(
-        seen_execution_runtime_request.authorization,
-        "Bearer ya29.ant-token"
+        fetch_models_request.user_agent,
+        "vscode/1.X.X (Antigravity/4.3.0)"
     );
+    assert_eq!(fetch_models_request.x_client_version, "4.3.0");
     assert_eq!(
-        seen_execution_runtime_request.provider_api_format,
+        fetch_models_request.provider_api_format,
         "antigravity:fetch_available_models"
     );
     assert_eq!(
-        seen_execution_runtime_request.request_body,
+        fetch_models_request.request_body,
         Some(json!({ "project": "project-ant-123" }))
     );
+    let grouped_with_project = &seen_execution_runtime_requests[1];
+    let grouped_without_project = &seen_execution_runtime_requests[2];
+    assert_eq!(
+        grouped_with_project.url,
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+    );
+    assert_eq!(
+        grouped_with_project.provider_api_format,
+        "antigravity:retrieve_user_quota_summary"
+    );
+    assert_eq!(
+        grouped_with_project.request_body,
+        Some(json!({"project": "project-ant-123"}))
+    );
+    assert_eq!(grouped_without_project.url, grouped_with_project.url);
+    assert_eq!(grouped_without_project.request_body, Some(json!({})));
+    assert!(seen_execution_runtime_requests.iter().all(|request| {
+        request.authorization == "Bearer ya29.ant-token"
+            && request.user_agent == "vscode/1.X.X (Antigravity/4.3.0)"
+            && request.x_client_version == "4.3.0"
+    }));
 
     let reloaded = provider_catalog_repository
         .list_keys_by_ids(&["key-antigravity-a".to_string()])
@@ -2466,21 +2548,58 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_tru
             .upstream_metadata
             .as_ref()
             .and_then(|value| value.get("antigravity"))
-            .and_then(|value| value.get("models"))
+            .and_then(|value| value.get("quota_by_model"))
             .and_then(|value| value.get("claude-sonnet-4"))
             .and_then(|value| value.get("remaining_fraction")),
         Some(&json!(0.25))
     );
+    let imported_provider_models = global_model_repository
+        .list_admin_provider_models(&AdminProviderModelListQuery {
+            provider_id: "provider-antigravity".to_string(),
+            is_active: None,
+            offset: 0,
+            limit: 100,
+        })
+        .await
+        .expect("imported Antigravity provider models should read");
+    let imported_model_names = imported_provider_models
+        .iter()
+        .map(|model| model.provider_model_name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(imported_model_names.contains("claude-sonnet-4"));
+    assert!(imported_model_names.contains("gemini-2.5-pro"));
+    assert!(imported_model_names.contains("gemini-3.7-flash-tiered"));
+    assert!(!imported_model_names.contains("chat_23310"));
     assert_eq!(
         reloaded[0]
             .upstream_metadata
             .as_ref()
             .and_then(|value| value.get("antigravity"))
-            .and_then(|value| value.get("models"))
+            .and_then(|value| value.get("quota_by_model"))
             .and_then(|value| value.get("claude-sonnet-4"))
             .and_then(|value| value.get("used_percent")),
         Some(&json!(75.0))
     );
+    assert_eq!(
+        reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(|value| value.pointer("/antigravity/quota_groups/0/buckets/0/bucket_id")),
+        Some(&json!("3p-5h"))
+    );
+    assert_eq!(
+        reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(|value| value.pointer("/antigravity/project_id")),
+        Some(&json!("project-ant-123"))
+    );
+    assert!(reloaded[0]
+        .upstream_metadata
+        .as_ref()
+        .and_then(|value| value.pointer("/antigravity/quota_groups_updated_at"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some());
     assert_eq!(
         reloaded[0]
             .status_snapshot
@@ -2505,7 +2624,19 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_tru
             .and_then(|value| value.get("windows"))
             .and_then(|value| value.as_array())
             .map(Vec::len),
-        Some(1usize)
+        Some(3usize)
+    );
+    assert_eq!(
+        reloaded[0]
+            .status_snapshot
+            .as_ref()
+            .and_then(|value| value.pointer("/quota/windows"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|windows| windows
+                .iter()
+                .find(|window| window["code"] == "group:0:3p-5h"))
+            .and_then(|window| window.get("remaining_ratio")),
+        Some(&json!(0.25))
     );
 
     gateway_handle.abort();
