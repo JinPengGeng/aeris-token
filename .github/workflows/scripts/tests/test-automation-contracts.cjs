@@ -24,21 +24,9 @@ const agents = loadYaml('.github/agents.yml');
 const automation = loadYaml('.github/automation-policy.yml');
 const automationPolicyWorkflow = loadYaml('.github/workflows/automation-policy.yml');
 const sync = loadYaml('.github/upstream-sync-policy.yml');
-const syncWorkflow = loadYaml('.github/workflows/sync-upstream.yml');
 const frontendWorkflow = loadYaml('.github/workflows/frontend-ci.yml');
 const rustWorkflow = loadYaml('.github/workflows/rust-ci.yml');
-const syncScript = read('.github/workflows/scripts/sync-upstream.sh');
-const autoMergeScript = read('.github/workflows/scripts/manage-sync-automerge.sh');
-const autonomyScript = read('.github/workflows/scripts/github-autonomy.sh');
-const checkDispatchScript = read('.github/workflows/scripts/ensure-required-checks.sh');
-const verifyCandidateScript = read('.github/workflows/scripts/verify-sync-candidate.sh');
 const boundedFetchScript = read('.github/workflows/scripts/bounded-git-fetch.sh');
-const conflictFetchScript = read('.github/workflows/scripts/fetch-conflict-refs.sh');
-const prepareScript = read('.github/workflows/scripts/prepare-checkpoint-sync.sh');
-const checkpointScript = read('.github/workflows/scripts/checkpoint-merge.sh');
-const verifyCandidateMetadata = read(
-  '.github/workflows/scripts/validate-sync-candidate-metadata.cjs',
-);
 const minimalSyncWorkflow = loadYaml('.github/workflows/sync-upstream-minimal.yml');
 const minimalSyncWorkflowSource = read('.github/workflows/sync-upstream-minimal.yml');
 const minimalSyncScript = read('.github/workflows/scripts/sync-upstream-minimal.sh');
@@ -264,7 +252,6 @@ for (const immutablePath of [
   '.github/automation-policy.yml',
   '.github/automation/**',
   '.github/upstream-sync-policy.yml',
-  '.github/upstream-sync-state.json',
   '.github/workflows/**',
   'CODEOWNERS',
   'Cargo.toml',
@@ -278,10 +265,10 @@ for (const immutablePath of [
   );
 }
 
-// The checkpoint state file was retired in #179 Phase 1a: merge-base against
-// the upstream tip is now the sync progress signal. The policy key itself is
-// cleaned up with the legacy sync workflow in Phase 1b.
-assert(sync.sync.state_file === '.github/upstream-sync-state.json', 'state path changed');
+// The checkpoint state file was retired in #179 Phase 1a and the legacy sync
+// chain in Phase 1b: merge-base against the upstream tip is the sync progress
+// signal, so the state_file policy key is removed here as well.
+assert(sync.sync.state_file === undefined, 'the retired state_file policy key must stay removed');
 assert(sync.sync.pull_request_limit === 1, 'sync must allow only one managed PR');
 assert(sync.sync.fail_closed === true, 'sync must fail closed');
 assert(sync.matching.default === 'review_required', 'unknown paths must require review');
@@ -300,7 +287,6 @@ assert(
   'sensitive path contract changed',
 );
 for (const protectedPath of [
-  '.github/upstream-sync-state.json',
   '.github/upstream-sync-policy.yml',
   '.github/workflows/**',
 ]) {
@@ -331,411 +317,12 @@ assert(
     sync.conflicts.ai_resolution.allow_binary_rename_delete_mode_or_case_ambiguity === false,
   'AI conflict resolution policy must remain narrow, independent, and fail closed',
 );
-const syncSteps = syncWorkflow.jobs.sync.steps;
-const preflightJob = syncWorkflow.jobs.preflight;
-assert(
-  preflightJob,
-  'sync workflow must isolate the script preflight in a dedicated job so publication starts on a clean runner',
-);
-const preflightSteps = preflightJob.steps;
-const syncNeeds = syncWorkflow.jobs.sync.needs;
-assert(
-  Array.isArray(syncNeeds) ? syncNeeds.includes('preflight') : syncNeeds === 'preflight',
-  'sync publication job must wait for the isolated preflight job',
-);
-assert(
-  syncSteps.every((step) => step.name !== 'Validate checkpoint synchronization'),
-  'script preflight checks must run on the preflight runner, not on the publication runner',
-);
-assert(
-  preflightSteps.every((step) => !step.uses?.includes('create-github-app-token')),
-  'preflight must not mint a Writer App token that cannot cross the job boundary',
-);
-assert(
-  preflightJob.environment === undefined,
-  'preflight must not hold the writer Environment secrets',
-);
-assert(
-  JSON.stringify(preflightJob.permissions) === JSON.stringify({ contents: 'read' }),
-  'preflight GITHUB_TOKEN must be limited to reading the trusted checkout',
-);
-const preflightCheckoutStep = preflightSteps.find(
-  (step) => step.name === 'Check out fork default branch',
-);
-assert(
-  preflightCheckoutStep?.with?.token === '${{ github.token }}' &&
-    preflightCheckoutStep.with['persist-credentials'] === false &&
-    preflightCheckoutStep.with['fetch-depth'] === 1,
-  'preflight checkout must use the read-only workflow token without persisted credentials',
-);
-assert(
-  syncWorkflow.jobs.sync.env.AERIS_AI_MODEL_CONFLICT_RESOLVER ===
-      '${{ vars.AERIS_AI_MODEL_CONFLICT_RESOLVER || vars.AERIS_AI_MODEL_WRITER }}' &&
-    syncWorkflow.jobs.sync.env.AERIS_AI_MODEL_CONFLICT_REVIEWER ===
-      '${{ vars.AERIS_AI_MODEL_CONFLICT_REVIEWER || vars.AERIS_AI_MODEL_REVIEWER }}',
-  'trusted conflict generation must bind the configured Resolver and Reviewer model IDs',
-);
-assert(syncWorkflow.jobs.sync.environment === 'writer', 'sync must use the shared writer environment');
-assert(
-  syncWorkflow.jobs.sync.if.includes("vars.AERIS_WRITER_ENABLED == 'true'") &&
-    syncWorkflow.jobs.sync.if.includes("vars.AERIS_WRITER_ENABLED == '1'") &&
-    syncWorkflow.jobs.sync.if.includes("vars.AERIS_UPSTREAM_SYNC_ENABLED == 'true'") &&
-    syncWorkflow.jobs.sync.if.includes("vars.AERIS_UPSTREAM_SYNC_ENABLED == '1'") &&
-    syncWorkflow.jobs.sync.if.includes("vars.AERIS_AGENTS_ENABLED == 'true'") &&
-    syncWorkflow.jobs.sync.if.includes("vars.AERIS_AGENTS_ENABLED == '1'"),
-  'sync must remain disabled unless both the shared Writer identity and upstream-sync lane are enabled',
-);
-assert(
-  syncWorkflow.jobs.sync.permissions.contents === 'read' &&
-    syncWorkflow.jobs.sync.permissions['pull-requests'] === 'read' &&
-    syncWorkflow.jobs.sync.permissions.actions === 'write' &&
-    syncWorkflow.jobs.sync.permissions.issues === 'write' &&
-    syncWorkflow.jobs.sync.permissions.checks === 'read' &&
-    syncWorkflow.jobs.sync.permissions.statuses === undefined,
-  'sync GITHUB_TOKEN permissions must be limited to issue writes, check reads, and required dispatch',
-);
-const syncTokenStep = syncSteps.find((step) => step.name === 'Mint bounded Writer App token');
-assert(syncTokenStep && syncTokenStep.uses.includes('create-github-app-token@'), 'sync must mint a bounded Writer App token');
-assert(
-  syncTokenStep['timeout-minutes'] === 2,
-  'App token mint must remain within the reserved autonomy margin',
-);
-assert(
-  syncTokenStep.with['permission-contents'] === 'write' &&
-    syncTokenStep.with['permission-pull-requests'] === 'write' &&
-    syncTokenStep.with['permission-administration'] === 'read' &&
-    syncTokenStep.with['permission-issues'] === undefined &&
-    syncTokenStep.with['permission-checks'] === undefined &&
-    syncTokenStep.with['permission-statuses'] === undefined,
-  'Writer App token permissions exceed or miss the approved minimum',
-);
 
-const conflictArtifactSuffix = '${{ github.run_id }}-${{ github.run_attempt }}';
-const expectedPermissions = (actual, expected, message) => {
-  assert(
-    JSON.stringify(actual) === JSON.stringify(expected),
-    message,
-  );
-};
-const findStep = (job, name) => job.steps.find((step) => step.name === name);
-const assertTrustedCheckouts = (job, message) => {
-  const checkouts = job.steps.filter((step) => step.uses?.startsWith('actions/checkout@'));
-  assert(
-    checkouts.length > 0 && checkouts.every((step) => step.with?.['persist-credentials'] === false),
-    message,
-  );
-};
-const resolveConflictJob = syncWorkflow.jobs.resolve_conflict;
-const publishConflictJob = syncWorkflow.jobs.publish_conflict;
-const reviewConflictJob = syncWorkflow.jobs.review_conflict;
-const finalizeConflictJob = syncWorkflow.jobs.finalize_conflict;
+// --- Shared bounded Git transport (bounded-git-fetch.sh) ---
+// The legacy sync producer/verifier/conflict chain was retired in #179 Phase
+// 1b; the minimal loop is the surviving consumer of this helper.
 assert(
-  resolveConflictJob && publishConflictJob && reviewConflictJob && finalizeConflictJob,
-  'sync conflict workflow must keep all four isolated phases',
-);
-for (const [jobName, job] of Object.entries(syncWorkflow.jobs)) {
-  assert(
-    Object.values(job.env ?? {}).every(
-      (value) => typeof value !== 'string' || !value.includes('${{ runner.'),
-    ),
-    `${jobName} job-level env must not use the unavailable runner context`,
-  );
-}
-expectedPermissions(
-  resolveConflictJob.permissions,
-  { actions: 'read', contents: 'read' },
-  'Resolver job permissions changed',
-);
-expectedPermissions(
-  publishConflictJob.permissions,
-  { actions: 'read', checks: 'read', contents: 'read', issues: 'write', 'pull-requests': 'read' },
-  'conflict Publisher GITHUB_TOKEN permissions changed',
-);
-expectedPermissions(
-  reviewConflictJob.permissions,
-  { actions: 'read', checks: 'read', contents: 'read', 'pull-requests': 'read' },
-  'Reviewer job permissions changed',
-);
-expectedPermissions(
-  finalizeConflictJob.permissions,
-  { actions: 'write', checks: 'read', contents: 'read', 'pull-requests': 'read' },
-  'conflict Finalizer GITHUB_TOKEN permissions changed',
-);
-assert(
-  publishConflictJob.environment === 'writer' &&
-    finalizeConflictJob.environment === 'writer' &&
-    publishConflictJob.concurrency.group === 'aeris-writer-mutation' &&
-    finalizeConflictJob.concurrency.group === 'aeris-writer-mutation' &&
-    publishConflictJob.concurrency['cancel-in-progress'] === false &&
-    finalizeConflictJob.concurrency['cancel-in-progress'] === false,
-  'only serialized Publisher and Finalizer jobs may use the writer Environment',
-);
-assert(
-  resolveConflictJob.environment === 'agent' && reviewConflictJob.environment === 'agent',
-  'Resolver and Reviewer must obtain only the model secret from the agent Environment',
-);
-for (const [job, message] of [
-  [preflightJob, 'preflight checkout must not persist credentials'],
-  [resolveConflictJob, 'Resolver checkout must not persist credentials'],
-  [publishConflictJob, 'conflict Publisher checkout must not persist credentials'],
-  [reviewConflictJob, 'Reviewer checkout must not persist credentials'],
-  [finalizeConflictJob, 'conflict Finalizer checkout must not persist credentials'],
-]) {
-  assertTrustedCheckouts(job, message);
-}
-const resolverStep = findStep(resolveConflictJob, 'Generate credentialless resolution candidate');
-const reviewerStep = findStep(reviewConflictJob, 'Run independent credentialless Reviewer');
-const collectReviewStep = findStep(reviewConflictJob, 'Collect exact published review input');
-assert(
-  resolverStep?.env.GITHUB_TOKEN === '' && resolverStep.env.GH_TOKEN === '' &&
-    resolverStep.env.AERIS_AI_API_KEY === '${{ secrets.AERIS_AI_API_KEY }}' &&
-    resolverStep.run === 'node .github/automation/src/sync-conflict-review.mjs resolve',
-  'Resolver model step must be credentialless and produce only a candidate artifact',
-);
-assert(
-  reviewerStep?.env.GITHUB_TOKEN === '' && reviewerStep.env.GH_TOKEN === '' &&
-    reviewerStep.env.AERIS_AI_API_KEY === '${{ secrets.AERIS_AI_API_KEY }}' &&
-    reviewerStep.run === 'node .github/automation/src/sync-conflict-review.mjs review',
-  'Reviewer model step must be credentialless and independent from publication',
-);
-assert(
-  collectReviewStep?.id === 'collect' &&
-    reviewConflictJob.outputs.input_sha === '${{ steps.collect.outputs.conflict_review_input_sha }}' &&
-    reviewConflictJob.outputs.receipt_sha === '${{ steps.review.outputs.conflict_review_receipt_sha }}',
-  'Reviewer must expose exact input and receipt hashes to the Finalizer',
-);
-const expectedArtifacts = [
-  [syncWorkflow.jobs.sync, 'Upload exact conflict bundle', `sync-conflict-bundle-${conflictArtifactSuffix}`],
-  [resolveConflictJob, 'Download exact conflict bundle', `sync-conflict-bundle-${conflictArtifactSuffix}`],
-  [resolveConflictJob, 'Upload exact resolution candidate', `sync-conflict-candidate-${conflictArtifactSuffix}`],
-  [publishConflictJob, 'Download exact conflict bundle', `sync-conflict-bundle-${conflictArtifactSuffix}`],
-  [publishConflictJob, 'Download exact resolution candidate', `sync-conflict-candidate-${conflictArtifactSuffix}`],
-  [reviewConflictJob, 'Download exact conflict bundle', `sync-conflict-bundle-${conflictArtifactSuffix}`],
-  [reviewConflictJob, 'Download exact resolution candidate', `sync-conflict-candidate-${conflictArtifactSuffix}`],
-  [reviewConflictJob, 'Upload exact independent review', `sync-conflict-review-${conflictArtifactSuffix}`],
-  [finalizeConflictJob, 'Download exact conflict bundle', `sync-conflict-bundle-${conflictArtifactSuffix}`],
-  [finalizeConflictJob, 'Download exact resolution candidate', `sync-conflict-candidate-${conflictArtifactSuffix}`],
-  [finalizeConflictJob, 'Download exact independent review', `sync-conflict-review-${conflictArtifactSuffix}`],
-  [finalizeConflictJob, 'Upload final conflict attestation', `sync-conflict-attestation-${conflictArtifactSuffix}`],
-];
-for (const [job, name, artifactName] of expectedArtifacts) {
-  assert(findStep(job, name)?.with?.name === artifactName, `${name} must select the exact run-attempt artifact`);
-}
-const publishConflictToken = findStep(publishConflictJob, 'Mint bounded Writer App token');
-const finalizeConflictToken = findStep(finalizeConflictJob, 'Mint bounded Writer App token');
-assert(
-  publishConflictToken?.with['permission-contents'] === 'write' &&
-    publishConflictToken.with['permission-pull-requests'] === 'write' &&
-    publishConflictToken.with['permission-checks'] === undefined &&
-    publishConflictToken.with['permission-administration'] === undefined,
-  'conflict Publisher App token must keep its minimal write scope',
-);
-assert(
-  finalizeConflictToken?.with['permission-administration'] === 'read' &&
-    finalizeConflictToken.with['permission-contents'] === 'write' &&
-    finalizeConflictToken.with['permission-pull-requests'] === 'write' &&
-    finalizeConflictToken.with['permission-checks'] === undefined,
-  'conflict Finalizer App token must include only merge and governance proof permissions',
-);
-const conflictMergeStep = findStep(finalizeConflictJob, 'Perform one exact server-side squash');
-assert(
-  conflictMergeStep?.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}' &&
-    conflictMergeStep.env.AERIS_CHECKS_GH_TOKEN === '${{ github.token }}' &&
-    conflictMergeStep.env.SYNCED_SHA === '${{ needs.publish_conflict.outputs.head_sha }}' &&
-    conflictMergeStep.env.EXPECTED_BASE_SHA === '${{ needs.publish_conflict.outputs.base_sha }}' &&
-    conflictMergeStep.env.CONFLICT_ATTESTATION_SHA === '${{ steps.attest.outputs.conflict_attestation_sha }}' &&
-    conflictMergeStep.env.AERIS_CONFLICT_BUNDLE_PATH === '${{ runner.temp }}/aeris-sync-conflict/bundle.json' &&
-    conflictMergeStep.env.AERIS_CONFLICT_CANDIDATE_PATH === '${{ runner.temp }}/aeris-sync-resolution/candidate.json' &&
-    conflictMergeStep.env.AERIS_CONFLICT_REVIEW_INPUT_PATH === '${{ runner.temp }}/aeris-sync-review/input.json' &&
-    conflictMergeStep.env.AERIS_CONFLICT_REVIEW_RECEIPT_PATH === '${{ runner.temp }}/aeris-sync-review/receipt.json' &&
-    conflictMergeStep.env.AERIS_CONFLICT_BUNDLE_SHA === '${{ needs.publish_conflict.outputs.bundle_sha }}' &&
-    conflictMergeStep.env.AERIS_CONFLICT_CANDIDATE_SHA === '${{ needs.publish_conflict.outputs.candidate_sha }}' &&
-    conflictMergeStep.env.AERIS_CONFLICT_REVIEW_INPUT_SHA === '${{ needs.review_conflict.outputs.input_sha }}' &&
-    conflictMergeStep.env.AERIS_CONFLICT_REVIEW_RECEIPT_SHA === '${{ needs.review_conflict.outputs.receipt_sha }}' &&
-    (conflictMergeStep.run.match(/manage-sync-automerge\.sh/g) || []).length === 1 &&
-    conflictMergeStep.run.includes('conflict_ai_review'),
-  'conflict Finalizer must perform one exact attested merge helper invocation',
-);
-for (const [job, label] of [
-  [reviewConflictJob, 'Reviewer'],
-  [finalizeConflictJob, 'conflict Finalizer'],
-]) {
-  const fetchStep = findStep(job, 'Fetch exact published and upstream commits');
-  assert(
-    fetchStep?.env.HEAD_SHA === '${{ needs.publish_conflict.outputs.head_sha }}' &&
-      fetchStep.env.UPSTREAM_REPOSITORY === '${{ needs.publish_conflict.outputs.parent }}' &&
-      fetchStep.env.UPSTREAM_BRANCH === '${{ needs.publish_conflict.outputs.upstream_branch }}' &&
-      fetchStep.env.UPSTREAM_SOURCE === '${{ needs.publish_conflict.outputs.source }}' &&
-      (fetchStep.run.match(/fetch-conflict-refs\.sh/g) || []).length === 1 &&
-      !fetchStep.run.includes('git fetch'),
-    `${label} must fetch published and upstream objects only through the shared bounded transport`,
-  );
-}
-assert(
-  conflictFetchScript.includes('AERIS_BOUNDED_FETCH_CREDENTIALLESS=true') &&
-    conflictFetchScript.includes('aeris_bounded_fetch_init "${policy_path}"') &&
-    (conflictFetchScript.match(/aeris_bounded_fetch_ref/g) || []).length === 2 &&
-    conflictFetchScript.includes('aeris_bounded_fetch_ref origin "refs/heads/${sync_branch}" "${head_sha}"') &&
-    conflictFetchScript.includes(
-      'aeris_bounded_fetch_ref upstream "refs/heads/${upstream_branch}" "${upstream_sha}"',
-    ) &&
-    conflictFetchScript.includes(
-      'remote add upstream "https://github.com/${upstream_repository}.git"',
-    ),
-  'conflict ref fetch must bounded-fetch the exact published head and re-fence the live upstream tip',
-);
-assert(
-  syncWorkflow.jobs.sync.env.AERIS_AUTONOMY_EXPIRES_AT ===
-    '${{ vars.AERIS_AUTONOMY_EXPIRES_AT }}',
-  'every sync phase must receive the bounded autonomy expiry',
-);
-assert(
-  syncWorkflow.jobs.sync.env.AERIS_WRITER_APP_SLUG === '${{ vars.AERIS_WRITER_APP_SLUG }}',
-  'sync must receive the shared Writer App slug for actor identity migration',
-);
-assert(
-  syncWorkflow.jobs.sync.env.AERIS_AUTONOMY_MIN_REMAINING_SECONDS === 3600,
-  'unguarded token actions must stop one hour before the autonomy expiry boundary',
-);
-const tokenStepIndex = syncSteps.indexOf(syncTokenStep);
-const preMintExpiryStep = syncSteps[tokenStepIndex - 1];
-assert(
-  preMintExpiryStep?.name === 'Validate autonomy before token mint' &&
-    typeof preMintExpiryStep.run === 'string' &&
-    preMintExpiryStep.run.includes('AERIS_AUTONOMY_EXPIRES_AT') &&
-    preMintExpiryStep.run.includes('AERIS_WRITER_APP_SLUG') &&
-    preMintExpiryStep.run.includes(
-      'now_epoch + AERIS_AUTONOMY_MIN_REMAINING_SECONDS',
-    ),
-  'sync must fail closed immediately before minting the App token',
-);
-const checkoutStep = syncSteps.find((step) => step.name === 'Check out fork default branch');
-assert(checkoutStep?.with?.token === '${{ steps.sync_token.outputs.token }}', 'sync checkout must use the Writer App token');
-assert(
-  checkoutStep?.with?.['fetch-depth'] === 1,
-  'bootstrap checkout must not perform an unbounded full-history fetch',
-);
-assert(
-  checkoutStep['timeout-minutes'] === 5,
-  'authenticated checkout must remain within the reserved autonomy margin',
-);
-const checkoutStepIndex = syncSteps.indexOf(checkoutStep);
-assert(
-  syncSteps[checkoutStepIndex - 1]?.name === 'Validate autonomy before checkout',
-  'sync must revalidate expiry immediately before checkout uses the App token',
-);
-assert(
-  syncSteps[checkoutStepIndex - 1].run.includes(
-    'now_epoch + AERIS_AUTONOMY_MIN_REMAINING_SECONDS',
-  ),
-  'checkout must reserve the conservative autonomy margin before using the App token',
-);
-const nodeSetupStep = syncSteps.find((step) => step.name === 'Set up Node.js 22');
-assert(
-  nodeSetupStep?.uses ===
-      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' &&
-    nodeSetupStep?.with?.['node-version'] === '22' &&
-    syncSteps.indexOf(nodeSetupStep) === checkoutStepIndex + 1,
-  'sync must pin Node.js 22 immediately after the bounded checkout',
-);
-const publishStep = syncSteps.find(
-  (step) => step.name === 'Build and publish automation branch',
-);
-const syncValidationStep = preflightSteps.find(
-  (step) => step.name === 'Validate checkpoint synchronization',
-);
-assert(
-  publishStep?.['timeout-minutes'] === 15,
-  'sync publication must have a hard workflow-step deadline',
-);
-assert(
-  publishStep?.env.AERIS_BOUNDED_BOOTSTRAP_SHALLOW === 'true',
-  'sync must explicitly convert the one-commit bootstrap before bounded exact-ref fetches',
-);
-assert(
-  syncValidationStep?.run.includes(
-    'bash .github/workflows/scripts/tests/test-sync-upstream-git-auth.sh',
-  ),
-  'sync workflow must exercise the ephemeral Writer Git credential contract before publication',
-);
-assert(
-  publishStep?.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}' &&
-    publishStep.env.AERIS_WRITER_TOKEN === '${{ steps.sync_token.outputs.token }}',
-  'sync publication must use the bounded Writer App token',
-);
-assert(
-  checkoutStep.with['persist-credentials'] === false &&
-    syncScript.includes('aeris_writer_git_push() {') &&
-    syncScript.includes(
-      ': "${AERIS_WRITER_TOKEN:?AERIS_WRITER_TOKEN is required for Writer Git publication}"',
-    ) &&
-    syncScript.includes('GIT_ASKPASS="${askpass}" GIT_ASKPASS_REQUIRE=force GIT_TERMINAL_PROMPT=0') &&
-    syncScript.includes(
-      'aeris_git_network -c credential.helper= -c http.https://github.com/.extraheader= "$@"',
-    ) &&
-    /aeris_writer_git_push push \\\r?\n\s+--force-with-lease=/.test(syncScript) &&
-    syncScript.includes('"https://github.com/${GITHUB_REPOSITORY}.git"') &&
-    !syncScript.includes('x-access-token@') &&
-    !syncScript.includes('remote set-url'),
-  'sync Git publication must inject the Writer token only through ephemeral askpass with an exact lease',
-);
-assert(
-  publishStep?.env.AERIS_ISSUES_GH_TOKEN === '${{ github.token }}' &&
-    syncScript.includes(': "${AERIS_ISSUES_GH_TOKEN:?AERIS_ISSUES_GH_TOKEN is required}"') &&
-    syncScript.includes('aeris_issues_gh()') &&
-    syncScript.includes('aeris_bounded_issues_gh()') &&
-    syncScript.includes('issue_bot_comments() {') &&
-    syncScript.includes('pr_bot_comments() {') &&
-    syncScript.includes('pr_comment_once() {') &&
-    syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" command gh "$@"') &&
-    syncScript.includes('GH_TOKEN="${AERIS_ISSUES_GH_TOKEN}" aeris_bounded_run_deadline') &&
-    syncScript.includes('aeris_bounded_gh api \\\n      --method PATCH') &&
-    syncScript.includes('aeris_bounded_gh api --method POST \\\n      "repos/${GITHUB_REPOSITORY}/issues/${number}/comments"'),
-  'sync issue inventory uses the workflow token while pending-tip mutations use the bounded Writer token',
-);
-const verifyCandidateStep = syncSteps.find(
-  (step) => step.name === 'Verify managed synchronization candidate',
-);
-const mergeStep = syncSteps.find((step) => step.name === 'Merge synchronization PR');
-const disarmCallIndex = syncScript.search(/^disarm_tracked_pr$/m);
-const rebuildLoopIndex = syncScript.search(/^for attempt in 1 2 3; do$/m);
-const producerBoundIndex = syncScript.indexOf(
-  'if ! aeris_enforce_change_bounds "${checkpoint_sha}" "${upstream_sha}"',
-);
-const producerPrepareIndex = syncScript.indexOf(
-  'prepare_output="$(aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}"',
-);
-assert(verifyCandidateStep, 'sync workflow must verify the published candidate tree');
-assert(
-  verifyCandidateStep.env.GH_TOKEN === undefined &&
-    verifyCandidateStep.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
-    verifyCandidateStep.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}' &&
-    verifyCandidateStep.run.includes('verify-sync-candidate.sh'),
-  'candidate verification must bind the App-authored PR URL and exact published head',
-);
-assert(
-  verifyCandidateStep['timeout-minutes'] === 10,
-  'candidate verification must have a hard workflow runtime bound',
-);
-assert(
-  verifyCandidateScript.includes('"${expected_tree}" == "${actual_tree}"') &&
-    verifyCandidateScript.includes('git merge-base --is-ancestor "${checkpoint}" "${upstream_tip}"') &&
-    verifyCandidateScript.includes('"${upstream_tip}" == "${upstream_current}"') &&
-    !verifyCandidateScript.includes('--paginate'),
-  'candidate verification must regenerate the exact tree without trusting paginated metadata',
-);
-assert(
-  verifyCandidateScript.includes('second_parent="${parents[2]:-') &&
-    verifyCandidateScript.includes('"${parent_count}" "${actual_parent}" "${second_parent}"') &&
-    verifyCandidateMetadata.includes("parentCount !== '2'") &&
-    verifyCandidateMetadata.includes('secondParent !== upstreamTip'),
-  'candidate verification must require the advertised upstream tip as the second parent',
-);
-assert(
-  syncScript.includes('aeris_bounded_fetch_ref') &&
-    verifyCandidateScript.includes('aeris_bounded_fetch_ref') &&
-    syncScript.includes('AERIS_BOUNDED_FETCH_CREDENTIALLESS=true') &&
-    boundedFetchScript.includes('fetch.fsckObjects=true') &&
+  boundedFetchScript.includes('fetch.fsckObjects=true') &&
     boundedFetchScript.includes('fetch.unpackLimit=0') &&
     boundedFetchScript.includes('ulimit -f "${file_blocks}"') &&
     boundedFetchScript.includes('ulimit -v "${memory_kib}"') &&
@@ -744,18 +331,9 @@ assert(
     boundedFetchScript.includes('aeris_enforce_change_bounds') &&
     boundedFetchScript.includes('export GIT_NO_LAZY_FETCH=1') &&
     !boundedFetchScript.includes('>"${stage}/objects/info/alternates"'),
-  'producer and verifier must share the exact-ref bounded and fsck-verified fetch path',
+  'the shared bounded fetch helper must remain exact-ref, resource-bounded, and fsck-verified',
 );
-assert(
-  syncScript.includes('GITHUB_API_MAX_PAGES=10') &&
-    syncScript.includes('aeris_read_bounded_api_array_pages') &&
-    syncScript.includes('aeris_bounded_gh') &&
-    !syncScript.includes('--paginate') &&
-    verifyCandidateScript.includes(
-      'aeris_bounded_run "${MAX_PR_BYTES}" curl -q',
-    ),
-  'GitHub pagination and public metadata transport must remain page, time, memory, and file bounded',
-);
+
 const deadlineRunnerMatch = boundedFetchScript.match(
   /aeris_bounded_run_deadline\(\) \{[\s\S]*?\n\}/,
 );
@@ -763,10 +341,8 @@ assert(
   deadlineRunnerMatch &&
     !deadlineRunnerMatch[0].includes('ulimit -v') &&
     deadlineRunnerMatch[0].includes('ulimit -f "${file_blocks}"') &&
-    deadlineRunnerMatch[0].includes('timeout -k 5s') &&
-    syncScript.includes('aeris_bounded_run_deadline "${GITHUB_API_PAGE_BYTES}" gh "$@"') &&
-    syncScript.includes('aeris_bounded_run_deadline 2097152 gh api'),
-  'Go-based gh calls must use the deadline runner, which keeps the timeout and file bound without a virtual-memory ceiling',
+    deadlineRunnerMatch[0].includes('timeout -k 5s'),
+  'the deadline runner must keep the timeout and file bound without the virtual-memory ceiling Go binaries cannot start under',
 );
 const fetchRefMatch = boundedFetchScript.match(
   /aeris_bounded_fetch_ref\(\) \{[\s\S]*?\n\}/,
@@ -790,17 +366,7 @@ assert(
     !boundedFetchScript.includes('caller-objects-before'),
   'validated objects must publish through an exact-ref CAS without shared-object rollback',
 );
-assert(
-  prepareScript.includes('source "${BOUNDED_FETCH_HELPER}"') &&
-    prepareScript.includes('bounded_tree_git diff') &&
-    prepareScript.includes('bounded_tree_git read-tree') &&
-    prepareScript.includes('bounded_tree_git write-tree') &&
-    prepareScript.includes('bounded_tree_git commit-tree') &&
-    checkpointScript.includes('source "${BOUNDED_FETCH_HELPER}"') &&
-    checkpointScript.includes('bounded_tree_git merge-tree') &&
-    syncScript.includes('aeris_writer_git_push push'),
-  'all untrusted-tree preparation stages must use the fail-closed runner and publication must use the Writer credential channel',
-);
+
 assert(
   boundedFetchScript.includes('git rev-parse --absolute-git-dir') &&
     boundedFetchScript.includes('git rev-parse --git-common-dir') &&
@@ -808,184 +374,13 @@ assert(
     boundedFetchScript.includes('repositories with linked worktrees are forbidden'),
   'bootstrap conversion must reject linked or shared worktrees before object deletion',
 );
+
 assert(
-  syncScript.includes('aeris_assert_publication_refs_exact') &&
-    syncScript.includes('"${base_sha}" "${upstream_sha}" "${published_sha}"') &&
-    verifyCandidateScript.includes('AERIS_VERIFY_BEFORE_FINAL_FENCE_HOOK') &&
-    verifyCandidateScript.includes("fail 'upstream branch drifted during verification'"),
-  'producer and verifier must re-fence exact refs immediately before successful completion',
-);
-assert(
-  syncScript.includes('git commit-tree "${prepared_tree}"') &&
-    syncScript.includes('-p "${base_sha}"') &&
-    syncScript.includes('-p "${upstream_sha}"') &&
-    syncScript.includes('git reset --hard "${local_sha}"') &&
-    !syncScript.includes('git commit "${commit_arguments[@]}"'),
-  'sync commits must be dual-parent commit-tree snapshots linked to the exact upstream tip',
-);
-assert(
-  producerBoundIndex >= 0 &&
-    producerPrepareIndex >= 0 &&
-    producerBoundIndex < producerPrepareIndex,
-  'producer must bound the untrusted upstream tree before candidate preparation',
-);
-assert(
-  !verifyCandidateScript.includes('GH_TOKEN') &&
-    verifyCandidateScript.includes("--max-filesize \"${MAX_PR_BYTES}\"") &&
-    boundedFetchScript.includes('-c credential.helper=') &&
+  boundedFetchScript.includes('-c credential.helper=') &&
     boundedFetchScript.includes('-c http.https://github.com/.extraheader='),
-  'candidate verification reads must be credentialless and resource-bounded',
+  'bounded Git transport must strip inherited credentials and authentication headers',
 );
-assert(
-  verifyCandidateMetadata.includes('`${syncAppSlug}[bot]`') &&
-    verifyCandidateMetadata.includes("pr.user.type !== expectedAuthorType") &&
-    !verifyCandidateMetadata.includes("'github-actions[bot]'") &&
-    !verifyCandidateMetadata.includes("'app/github-actions'"),
-  'managed sync PR identity must be the exact configured Writer App bot without legacy fallback',
-);
-assert(mergeStep, 'sync workflow must expose the direct synchronization merge step');
-assert(
-  mergeStep.if.includes("steps.sync.outputs.has_changes == 'true'") &&
-    mergeStep.if.includes("steps.verify.outputs.verified == 'true'") &&
-    mergeStep.if.includes("steps.sync.outputs.autonomous_eligible == 'true'") &&
-    mergeStep.if.includes("steps.sync.outputs.policy_verdict == 'eligible'"),
-  'direct merge must require a verified published synchronization change',
-);
-assert(
-  mergeStep.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
-    mergeStep.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}' &&
-    mergeStep.env.EXPECTED_BASE_SHA === '${{ steps.sync.outputs.expected_base_sha }}' &&
-    mergeStep.env.SYNCED_SOURCE === '${{ steps.sync.outputs.synced_source }}' &&
-    mergeStep.env.SYNC_POLICY_VERDICT === '${{ steps.sync.outputs.policy_verdict }}' &&
-    mergeStep.env.GH_TOKEN === '${{ steps.sync_token.outputs.token }}' &&
-    mergeStep.env.AERIS_CHECKS_GH_TOKEN === '${{ github.token }}',
-  'direct merge must bind the published PR URL and exact head SHA',
-);
-assert(
-  typeof mergeStep.run === 'string' &&
-    mergeStep.run.includes('manage-sync-automerge.sh') &&
-    mergeStep.run.includes(' merge ') &&
-    !mergeStep.run.includes(' arm '),
-  'direct merge must use the managed helper merge action',
-);
-assert(
-  !autoMergeScript.includes('--auto'),
-  'sync merge helper must not create persistent native auto-merge requests',
-);
-assert(
-  autoMergeScript.includes('api --method PUT') &&
-    autoMergeScript.includes('pulls/${PR_NUMBER}/merge') &&
-    autoMergeScript.includes('-f merge_method=merge') &&
-    !autoMergeScript.includes('merge_method=squash') &&
-    autoMergeScript.includes('commit_title=chore: sync ') &&
-    autoMergeScript.includes('Sync-Upstream-Checkpoint: %s->%s') &&
-    autoMergeScript.includes('.merged == true') &&
-    autoMergeScript.includes('test("^[0-9a-fA-F]{40}$")') &&
-    autoMergeScript.includes('pulls/${PR_NUMBER}') &&
-    autoMergeScript.includes('merged_by.login') &&
-    autoMergeScript.includes('merge_commit_sha') &&
-    autoMergeScript.includes('.merge_commit_sha != .base.sha') &&
-    autoMergeScript.includes('commits/${merge_commit_sha}') &&
-    autoMergeScript.includes('.sha == $merge_commit_sha') &&
-    autoMergeScript.includes('.parents | type == "array" and length == 2 and') &&
-    autoMergeScript.includes('.[0].sha == $base_sha and .[1].sha == $head_sha') &&
-    autoMergeScript.includes('Sync-Upstream-Checkpoint: " + $checkpoint + "->" + $upstream_sha') &&
-    autoMergeScript.includes('$repository_profile.mergeCommitAllowed == true') &&
-    autoMergeScript.includes('rulesets(first:100,includeParents:true,targets:[BRANCH])') &&
-    autoMergeScript.includes('REQUIRED_LINEAR_HISTORY') &&
-    autoMergeScript.includes('strictRequiredStatusChecksPolicy') &&
-    autoMergeScript.includes('repos/${REPOSITORY}/rulesets/21984329') &&
-    autoMergeScript.includes('.actor_id == 4667256') &&
-    autoMergeScript.includes('.bypass_mode == "always"') &&
-    autoMergeScript.includes('GH_TOKEN="${AERIS_CHECKS_GH_TOKEN:?AERIS_CHECKS_GH_TOKEN is required}" command gh') &&
-    autoMergeScript.includes('set +e') &&
-    autoMergeScript.includes('readback_status'),
-  'direct merge must use one REST true-merge and prove the exact dual-parent post-merge outcome',
-);
-assert(
-  autoMergeScript.includes('repos/${REPOSITORY}/pulls/${PR_NUMBER}') &&
-    autoMergeScript.includes('.auto_merge == null') &&
-    autoMergeScript.includes('Sync-Upstream-Policy-Verdict') &&
-    autoMergeScript.includes('.head.sha == $head_sha') &&
-    autoMergeScript.includes('.base.sha == $base_sha') &&
-    autoMergeScript.includes("fail 'pull request drifted before merge mutation'"),
-  'direct merge must revalidate the exact managed PR snapshot before mutation',
-);
-assert(
-  autoMergeScript.includes(
-    '.parents | type == "array" and length == 2 and .[0].sha == $base_sha and .[1].sha == $upstream_sha',
-  ),
-  'direct merge must require the exact dual-parent sync commit shape',
-);
-assert(
-  autoMergeScript.includes('sync_checkpoint=') &&
-    autoMergeScript.includes('endswith("->" + $upstream_sha)'),
-  'direct merge must extract the exact checkpoint trailer from the verified head commit',
-);
-assert(
-  disarmCallIndex >= 0 && rebuildLoopIndex >= 0 && disarmCallIndex < rebuildLoopIndex,
-  'sync must disarm a stale auto-merge before rebuilding its fixed branch',
-);
-const headRestoreIndex = syncScript.indexOf(
-  'bounded_tree_git switch --detach "${base_sha}"',
-);
-const headCheckIndex = syncScript.indexOf('bounded_tree_git rev-parse HEAD');
-assert(
-  rebuildLoopIndex >= 0 &&
-    headRestoreIndex > rebuildLoopIndex &&
-    headCheckIndex > headRestoreIndex,
-  'sync must restore HEAD to the validated base after the bounded bootstrap wipe and before checking it',
-);
-assert(
-  prepareScript.includes("printf 'policy_verdict=%s\\n' \"${policy_result}\"") &&
-    syncScript.includes('output policy_verdict "${conflict_policy_verdict}"') &&
-    syncScript.includes("sed -n 's/^policy_verdict=//p'") &&
-    syncScript.includes('output checkpoint_sha "${checkpoint_sha}"'),
-  'the plain-conflict path must emit the evaluated policy verdict and checkpoint instead of leaving run outputs empty',
-);
-assert(
-  /aeris_require_active_autonomy_window[\s\S]*now_epoch \+ minimum_remaining_seconds >= expires_epoch/.test(
-    autonomyScript,
-  ) &&
-    autonomyScript.includes('aeris_require_active_autonomy_window || return'),
-  'GitHub wrappers must revalidate the exact UTC expiry before every invocation',
-);
-assert(
-  !/(^|\n)\s*gh\s/.test(syncScript) &&
-    !/(^|\n)\s*gh\s/.test(autoMergeScript) &&
-    syncScript.includes('source "${SCRIPT_DIR}/github-autonomy.sh"') &&
-    autoMergeScript.includes('source "${SCRIPT_DIR}/github-autonomy.sh"'),
-  'sync and auto-merge must not bypass the expiry-guarded GitHub wrapper',
-);
-assert(
-  syncScript.includes('WRITER_APP_BOT_LOGIN="${AERIS_WRITER_APP_SLUG}[bot]"') &&
-    syncScript.includes("LEGACY_BOT_LOGIN='github-actions[bot]'") &&
-    syncScript.includes('.user.login == $sync or .user.login == $legacy') &&
-    syncScript.includes('is_sync_automation_login'),
-  'comment and PR identity checks must accept the Writer App bot and migrate legacy Actions state',
-);
-assert(
-  syncScript.includes('git rev-parse HEAD') &&
-    syncScript.includes('Trusted checkout HEAD no longer equals the fetched base SHA'),
-  'sync must bind the trusted checkout HEAD to the fetched base before classification or publication',
-);
-assert(
-  !/(^|\n)\s*git\s+(fetch|push|ls-remote)\b/.test(syncScript),
-  'authenticated Git network operations must not bypass expiry revalidation',
-);
-for (const [name, script] of [
-  ['sync-upstream.sh', syncScript],
-  ['verify-sync-candidate.sh', verifyCandidateScript],
-]) {
-  assert(
-    !/execFileSync\(\s*['"]git['"]/.test(script),
-    `${name} must not spawn an unbounded Git history read from Node`,
-  );
-  assert(
-    !/(^|\n)\s*git\s+(show|rev-parse|rev-list|cat-file|ls-tree|verify-pack)\b/.test(script),
-    `${name} history and tree reads must use bounded_tree_git`,
-  );
-}
+
 assert(
   boundedFetchScript.includes('aeris_bounded_assert_credentialless_transport') &&
     boundedFetchScript.includes('GIT_SSH_COMMAND') &&
@@ -1002,139 +397,20 @@ assert(
     boundedFetchScript.includes('metadata_limit=$((current * 128 + 1))'),
   'verify-pack and cat-file aggregation must be generated inside bounded pipelines',
 );
-const checkDispatchStep = syncSteps.find(
-  (step) => step.name === 'Ensure required checks are dispatched',
-);
-  assert(
-    syncWorkflow.jobs.sync.permissions.actions === 'write' &&
-      syncWorkflow.jobs.sync.permissions.checks === 'read' &&
-      checkDispatchStep?.env.GH_TOKEN === '${{ github.token }}' &&
-      checkDispatchStep?.env.PR_URL === '${{ steps.sync.outputs.pr_url }}' &&
-      checkDispatchStep?.env.SYNCED_SHA === '${{ steps.sync.outputs.synced_sha }}' &&
-      checkDispatchStep?.env.EXPECTED_BASE_SHA === '${{ steps.sync.outputs.expected_base_sha }}' &&
-      checkDispatchStep?.['timeout-minutes'] === 35,
-    'fallback dispatch and bounded required-check wait must use the exact PR and head',
-  );
-  assert(
-    checkDispatchStep?.run === 'bash .github/workflows/scripts/ensure-required-checks.sh' &&
-      checkDispatchScript.includes('source "${SCRIPT_DIR}/github-autonomy.sh"') &&
-      checkDispatchScript.includes('aeris_gh workflow run') &&
-      checkDispatchScript.includes('wait_for_required_checks') &&
-      checkDispatchScript.includes('Automation Policy / gate') &&
-      checkDispatchScript.includes('Frontend CI / check') &&
-      checkDispatchScript.includes('Rust CI / check') &&
-      checkDispatchScript.includes('.app.id == 15368') &&
-      checkDispatchScript.includes('.app.slug == "github-actions"') &&
-      checkDispatchScript.includes('.headRefOid == $head_sha') &&
-      checkDispatchScript.includes('.autoMergeRequest == null') &&
-      !/(^|\n)\s*gh\s/.test(checkDispatchScript),
-    'check discovery, dispatch, and exact-head success wait must revalidate expiry before every GitHub token use',
-  );
-const validationStep = preflightSteps.find(
-  (step) => step.name === 'Validate checkpoint synchronization',
-);
-assert(
-  validationStep?.run.includes('test-github-autonomy.sh'),
-  'workflow validation must exercise expiry crossing between planning and mutation',
-);
-assert(
-  validationStep?.run.includes('test-ensure-required-checks.sh'),
-  'workflow validation must exercise fallback dispatch with the explicit job token',
-);
-assert(
-  validationStep?.run.includes('test-sync-upstream-identity.sh'),
-  'workflow validation must exercise Writer App comment identity migration',
-);
-assert(
-  validationStep?.run.includes('test-sync-upstream-alerts.sh'),
-  'workflow validation must exercise Writer App sync alert identity migration',
-);
-assert(
-  validationStep?.run.includes('test-bounded-git-fetch.sh'),
-  'workflow validation must exercise bounded Git transport failure fixtures',
-);
-assert(
-  validationStep?.run.includes('bash -n .github/workflows/scripts/fetch-conflict-refs.sh') &&
-    validationStep?.run.includes('test-fetch-conflict-refs.sh'),
-  'workflow validation must exercise conflict-path bounded fetch fences and drift fixtures',
-);
-assert(
-  !validationStep?.run.includes('test-verify-sync-candidate.sh'),
-  'candidate verification fixtures run only in required PR CI, not in the sync job preflight',
-);
-assert(
-  frontendWorkflow.jobs.automation.steps.some(
-    (step) => step.run === 'bash ../workflows/scripts/tests/test-github-autonomy.sh',
-  ),
-  'required CI must execute the fake-clock autonomy integration test',
-);
-assert(
-  frontendWorkflow.jobs.automation.steps.some(
-    (step) => step.run === 'bash ../workflows/scripts/tests/test-verify-sync-candidate.sh',
-  ),
-  'required CI must execute candidate tamper and replay fixtures',
-);
-assert(
-  frontendWorkflow.jobs.automation.steps.some(
-    (step) => step.run === 'bash ../workflows/scripts/tests/test-ensure-required-checks.sh',
-  ),
-  'required CI must execute the workflow job-token dispatch integration test',
-);
-assert(
-  frontendWorkflow.jobs.automation.steps.some(
-    (step) => step.run === 'bash ../workflows/scripts/tests/test-sync-upstream-git-auth.sh',
-  ),
-  'required CI must execute the ephemeral Writer Git credential integration test',
-);
-assert(
-  frontendWorkflow.jobs.automation.steps.some(
-    (step) => step.run === 'bash ../workflows/scripts/tests/test-sync-upstream-identity.sh',
-  ),
-  'required CI must execute the Writer App comment identity integration test',
-);
-assert(
-  frontendWorkflow.jobs.automation.steps.some(
-    (step) => step.run === 'bash ../workflows/scripts/tests/test-sync-upstream-alerts.sh',
-  ),
-  'required CI must execute the Writer App alert identity integration test',
-);
+
 assert(
   automation.authorization.external_pull_request_analysis_requires_label === 'agent-analyze',
   'external PR analysis must require agent-analyze',
 );
 
-const directlyExecutedScripts = [
-  '.github/workflows/scripts/checkpoint-merge.sh',
-  '.github/workflows/scripts/manage-sync-automerge.sh',
-  '.github/workflows/scripts/prepare-checkpoint-sync.sh',
-];
-const trackedModes = execFileSync('git', ['ls-files', '--stage', '--', ...directlyExecutedScripts], {
-  cwd: repoRoot,
-  encoding: 'utf8',
-});
-const modesByPath = new Map(
-  trackedModes
-    .trim()
-    .split('\n')
-    .filter(Boolean)
-    .map((entry) => {
-      const [metadata, file] = entry.split('\t');
-      return [file, metadata.split(' ')[0]];
-    }),
-);
-for (const script of directlyExecutedScripts) {
-  assert(modesByPath.get(script) === '100755', `${script} must be executable`);
-}
-
-// --- Minimal upstream sync loop (#175, automation v2 Phase 0) ---
-// Runs in parallel with the legacy sync-upstream.yml; both must share one
-// concurrency group so they can never execute at the same time.
+// --- Minimal upstream sync loop (#175; sole sync path since #179 Phase 1b) ---
+// The legacy sync-upstream.yml is retired; the minimal loop is now the only
+// consumer of the sync-upstream-main concurrency group, which still must not
+// cancel an in-progress run.
 assert(
   minimalSyncWorkflow.concurrency?.group === 'sync-upstream-main' &&
-    minimalSyncWorkflow.concurrency['cancel-in-progress'] === false &&
-    syncWorkflow.concurrency?.group === 'sync-upstream-main' &&
-    syncWorkflow.concurrency['cancel-in-progress'] === false,
-  'minimal and legacy sync workflows must share the sync-upstream-main mutex with cancel-in-progress: false',
+    minimalSyncWorkflow.concurrency['cancel-in-progress'] === false,
+  'the minimal sync workflow must keep the sync-upstream-main mutex with cancel-in-progress: false',
 );
 assert(
   Array.isArray(minimalSyncWorkflow.on.schedule) &&
@@ -1196,9 +472,8 @@ assert(
   'minimal sync must route all git transport through bounded-git-fetch.sh and the bounded push helper',
 );
 assert(
-  minimalSyncScript.includes('SYNC_BRANCH="${SYNC_BRANCH:-sync/upstream}"') &&
-    syncWorkflow.jobs.sync.env.SYNC_BRANCH === 'automation/sync-upstream',
-  'minimal and legacy sync must use distinct fixed synchronization branches',
+  minimalSyncScript.includes('SYNC_BRANCH="${SYNC_BRANCH:-sync/upstream}"'),
+  'the minimal sync loop must publish through its fixed synchronization branch',
 );
 
 // Idempotent PR reuse: fixed head/base inventory plus an upstream-SHA marker.

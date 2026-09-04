@@ -90,21 +90,9 @@ jobs:
         working-directory: .github/automation
       - run: node ../workflows/scripts/tests/test-automation-contracts.cjs
         working-directory: .github/automation
-      - run: bash ../workflows/scripts/tests/test-github-autonomy.sh
-        working-directory: .github/automation
-      - run: bash ../workflows/scripts/tests/test-ensure-required-checks.sh
-        working-directory: .github/automation
-      - run: bash ../workflows/scripts/tests/test-sync-upstream-git-auth.sh
-        working-directory: .github/automation
-      - run: bash ../workflows/scripts/tests/test-sync-upstream-identity.sh
-        working-directory: .github/automation
-      - run: bash ../workflows/scripts/tests/test-sync-upstream-alerts.sh
-        working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-sync-minimal-alerts.sh
         working-directory: .github/automation
       - run: bash ../workflows/scripts/tests/test-bounded-git-fetch.sh
-        working-directory: .github/automation
-      - run: bash ../workflows/scripts/tests/test-verify-sync-candidate.sh
         working-directory: .github/automation
 
   type_check:

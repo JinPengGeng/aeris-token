@@ -1,5 +1,7 @@
-# Path ownership contract for checkpoint-based upstream sync. Rules use the
-# deliberately small aeris-glob-v1 matcher implemented by the sync runtime.
+# Path ownership and resource-bound contract for upstream sync. The minimal
+# sync loop (sync-upstream-minimal.yml) enforces the resource_bounds ceilings
+# via bounded-git-fetch.sh; the ownership rules below remain the reviewed
+# contract for classifying upstream changes.
 version: 1
 
 upstream:
@@ -9,7 +11,6 @@ upstream:
 sync:
   base_branch: main
   branch: automation/sync-upstream
-  state_file: .github/upstream-sync-state.json
   pull_request_limit: 1
   fail_closed: true
   autonomous_merge: eligible
@@ -48,7 +49,6 @@ fork_owned:
   - .github/automation-policy.yml
   - .github/automation/**
   - .github/upstream-sync-policy.yml
-  - .github/upstream-sync-state.json
   - .github/CODEOWNERS
   - .github/ISSUE_TEMPLATE/**
   - .github/dependabot.yml
