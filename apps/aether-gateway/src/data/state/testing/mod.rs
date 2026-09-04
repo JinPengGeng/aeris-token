@@ -222,6 +222,21 @@ impl GatewayDataState {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_cached_provider_catalog_reader_for_tests<T>(
+        mut self,
+        repository: Arc<T>,
+    ) -> Self
+    where
+        T: ProviderCatalogReadRepository + 'static,
+    {
+        let inner: Arc<dyn ProviderCatalogReadRepository> = repository;
+        self.provider_catalog_reader = Some(Arc::new(
+            super::provider_catalog_cache::CachedProviderCatalogReadRepository::new(inner),
+        ));
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_request_candidate_reader(
         mut self,
         repository: Arc<dyn RequestCandidateReadRepository>,
@@ -906,10 +921,6 @@ impl GatewayDataState {
         self
     }
 
-    // 与上游 d672ba206（test(gateway): seed routing strategy for antigravity
-    // flows，4291a91dc 之后）同形的测试夹具；本 fork 另在
-    // `with_data_state_for_tests` 里默认补种（见 state/testing.rs），下次 sync
-    // 基座越过 d672ba206 后该 helper 与上游版本自然重合。
     #[cfg(test)]
     pub(crate) fn with_system_default_routing_group_for_tests(self) -> Self {
         let now = 1;

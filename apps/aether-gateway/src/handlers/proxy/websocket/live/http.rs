@@ -1086,6 +1086,7 @@ mod tests {
             request_query_string: None,
             request_content_type: None,
             host_header: None,
+            client_ip: None,
             control_decision: None,
         };
         let (parts, _) = http::Request::builder()
@@ -1121,6 +1122,7 @@ mod tests {
             request_query_string: None,
             request_content_type: Some("application/sdp".to_string()),
             host_header: None,
+            client_ip: None,
             control_decision: Some(decision),
         };
         let (parts, _) = http::Request::builder()
@@ -1178,6 +1180,7 @@ mod tests {
             request_query_string: Some("intent=quicksilver&architecture=avas".to_string()),
             request_content_type: Some("multipart/form-data".to_string()),
             host_header: None,
+            client_ip: None,
             control_decision: Some(decision),
         };
         let (content_type, body) = build_live_multipart(
@@ -1246,6 +1249,7 @@ mod tests {
             request_query_string: None,
             request_content_type: None,
             host_header: None,
+            client_ip: None,
             control_decision: Some(decision),
         };
         let (parts, _) = http::Request::builder()
@@ -1303,6 +1307,7 @@ mod tests {
             request_query_string: None,
             request_content_type: None,
             host_header: None,
+            client_ip: None,
             control_decision: Some(decision),
         }
     }
@@ -1409,6 +1414,7 @@ mod tests {
             request_query_string: None,
             request_content_type: Some("multipart/form-data".to_string()),
             host_header: None,
+            client_ip: None,
             control_decision: Some(decision),
         };
         let (content_type, body) = build_live_multipart(
