@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
 use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
@@ -183,6 +184,21 @@ fn provider_key_with_concurrent_limit(
     let mut key = sample_key(key_id, provider_id, Some(10));
     key.concurrent_limit = concurrent_limit;
     key
+}
+
+fn sealed_kiro_auth_config() -> String {
+    let credential_state = AppState::new()
+        .expect("credential state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::disabled().with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    credential_state
+        .seal_provider_catalog_key_auth_config(
+            "provider-kiro",
+            "key-kiro",
+            r#"{"refresh_token":"refreshable-session"}"#,
+        )
+        .expect("auth config should encrypt")
 }
 
 fn active_provider_key_candidate(
@@ -2393,7 +2409,7 @@ async fn keeps_refreshable_kiro_candidate_selectable_with_runtime_oauth_invalid_
         vec![{
             let mut key = sample_key("key-kiro", "provider-kiro", Some(10));
             key.auth_type = "oauth".to_string();
-            key.encrypted_auth_config = Some("encrypted-refreshable-session".to_string());
+            key.encrypted_auth_config = Some(sealed_kiro_auth_config());
             key.oauth_invalid_at_unix_secs = Some(1_710_000_000);
             key.oauth_invalid_reason = Some("Kiro Token 无效或已过期".to_string());
             key
@@ -2409,7 +2425,8 @@ async fn keeps_refreshable_kiro_candidate_selectable_with_runtime_oauth_invalid_
                 provider_catalog,
                 quotas,
                 request_candidates,
-            ),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
         );
 
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
@@ -2453,7 +2470,7 @@ async fn keeps_refreshable_kiro_candidate_selectable_when_oauth_token_expired() 
         vec![{
             let mut key = sample_key("key-kiro", "provider-kiro", Some(10));
             key.auth_type = "oauth".to_string();
-            key.encrypted_auth_config = Some("encrypted-refreshable-session".to_string());
+            key.encrypted_auth_config = Some(sealed_kiro_auth_config());
             key.expires_at_unix_secs = Some(1_710_000_000);
             key
         }],
@@ -2468,7 +2485,8 @@ async fn keeps_refreshable_kiro_candidate_selectable_when_oauth_token_expired() 
                 provider_catalog,
                 quotas,
                 request_candidates,
-            ),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
         );
 
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
@@ -2512,7 +2530,7 @@ async fn keeps_kiro_candidate_selectable_after_refresh_token_failure_until_acces
         vec![{
             let mut key = sample_key("key-kiro", "provider-kiro", Some(10));
             key.auth_type = "oauth".to_string();
-            key.encrypted_auth_config = Some("encrypted-refreshable-session".to_string());
+            key.encrypted_auth_config = Some(sealed_kiro_auth_config());
             key.expires_at_unix_secs = Some(1_710_000_200);
             key.oauth_invalid_at_unix_secs = Some(1_710_000_000);
             key.oauth_invalid_reason = Some(
@@ -2532,7 +2550,8 @@ async fn keeps_kiro_candidate_selectable_after_refresh_token_failure_until_acces
                 provider_catalog,
                 quotas,
                 request_candidates,
-            ),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
         );
 
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
@@ -2576,7 +2595,7 @@ async fn skips_kiro_candidate_after_refresh_token_failure_and_access_token_expir
         vec![{
             let mut key = sample_key("key-kiro", "provider-kiro", Some(10));
             key.auth_type = "oauth".to_string();
-            key.encrypted_auth_config = Some("encrypted-refreshable-session".to_string());
+            key.encrypted_auth_config = Some(sealed_kiro_auth_config());
             key.expires_at_unix_secs = Some(1_710_000_000);
             key.oauth_invalid_at_unix_secs = Some(1_710_000_000);
             key.oauth_invalid_reason = Some(
@@ -2596,7 +2615,8 @@ async fn skips_kiro_candidate_after_refresh_token_failure_and_access_token_expir
                 provider_catalog,
                 quotas,
                 request_candidates,
-            ),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
         );
 
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
@@ -2641,7 +2661,7 @@ async fn skips_refreshable_kiro_candidate_when_oauth_marker_is_account_block() {
         vec![{
             let mut key = sample_key("key-kiro", "provider-kiro", Some(10));
             key.auth_type = "oauth".to_string();
-            key.encrypted_auth_config = Some("encrypted-refreshable-session".to_string());
+            key.encrypted_auth_config = Some(sealed_kiro_auth_config());
             key.oauth_invalid_at_unix_secs = Some(1_710_000_000);
             key.oauth_invalid_reason = Some("账户已封禁: account banned".to_string());
             key
@@ -2657,7 +2677,8 @@ async fn skips_refreshable_kiro_candidate_when_oauth_marker_is_account_block() {
                 provider_catalog,
                 quotas,
                 request_candidates,
-            ),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
         );
 
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(

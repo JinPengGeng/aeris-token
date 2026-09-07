@@ -23,7 +23,7 @@ use aether_ai_formats::{
 };
 use serde_json::{json, Map, Value};
 
-use super::AiSurfaceFinalizeError;
+use super::{decode_sync_report_body_base64, AiSurfaceFinalizeError};
 use crate::formats::claude::messages::stream::ClaudeProviderState;
 use crate::formats::gemini::generate_content::stream::GeminiProviderState;
 use crate::formats::openai::chat::stream::{OpenAIChatProviderState, OpenAIResponsesProviderState};
@@ -79,7 +79,7 @@ pub fn maybe_build_standard_cross_format_sync_product_from_normalized_payload(
 
     let (aggregated_stream_body, aggregated_stream_api_format) = match body_base64 {
         Some(body_base64) => {
-            let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+            let body_bytes = decode_sync_report_body_base64(body_base64)?;
             let provider_stream_event_api_format =
                 provider_stream_event_api_format_for_report_context(
                     report_context,
@@ -471,18 +471,9 @@ pub fn maybe_build_standard_sync_finalize_product_from_normalized_payload(
     };
     let body_base64 = body_base64.or(capture_stream_body_base64.as_deref());
 
-    // Raw bytes reach finalize as an SSE capture that still has to be aggregated, and they take
-    // precedence over a parsed body on purpose: that is how an explicit stream body stays
-    // authoritative over a capture envelope. A cross-format attempt can also arrive with bytes
-    // that are no stream at all — the plan forced upstream streaming and the provider answered
-    // with a plain JSON body anyway, or the body already parsed and the bytes are only its own
-    // encoding. Handing those to the stream aggregators fails closed on OpenAI Responses and
-    // yields no product at all on every other format, so the client gets a 500 or the provider's
-    // own shape instead of a converted response. A complete JSON object is never SSE framing, so
-    // parsing the capture is proof it never was a stream.
-    //
-    // Same-format attempts keep both fields verbatim: there the bytes already are the response the
-    // client asked for.
+    // Cross-format sync attempts can contain raw bytes because the plan requested a stream even
+    // though the provider returned one complete JSON response. Do not feed that response into an
+    // SSE aggregator. Capture envelopes and same-format responses retain their existing precedence.
     let non_stream_capture_body_json =
         if capture_envelope_used || !sync_finalize_needs_conversion(report_context) {
             None
@@ -621,7 +612,7 @@ pub fn maybe_build_embedding_cross_format_sync_product_from_normalized_payload(
 
     let provider_body_json = match body_base64 {
         Some(body_base64) => {
-            let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+            let body_bytes = decode_sync_report_body_base64(body_base64)?;
             serde_json::from_slice::<Value>(&body_bytes).ok()
         }
         None => body_json.cloned(),
@@ -766,7 +757,7 @@ fn maybe_build_standard_same_format_stream_sync_body(
     let Some(body_base64) = body_base64 else {
         return Ok(None);
     };
-    let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+    let body_bytes = decode_sync_report_body_base64(body_base64)?;
     let provider_stream_event_api_format =
         provider_stream_event_api_format_for_report_context(report_context, &provider_api_format);
     let Some(mut body) = try_aggregate_standard_chat_stream_sync_response(
@@ -915,7 +906,7 @@ fn maybe_build_openai_responses_same_family_stream_sync_body(
     let Some(body_base64) = body_base64 else {
         return Ok(None);
     };
-    let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+    let body_bytes = decode_sync_report_body_base64(body_base64)?;
     // Same-family clients retain the authoritative terminal body verbatim, including future
     // output item fields, but unknown intermediate event types still fail closed.
     ensure_no_unknown_openai_responses_stream_events(&body_bytes, true)?;
@@ -1007,7 +998,7 @@ fn maybe_build_openai_cross_format_provider_body_from_normalized_payload(
 ) -> Result<Option<OpenAiCrossFormatProviderBody>, AiSurfaceFinalizeError> {
     let aggregated_stream_body = match body_base64 {
         Some(body_base64) => {
-            let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+            let body_bytes = decode_sync_report_body_base64(body_base64)?;
             let normalized_provider_api_format =
                 normalize_openai_responses_family_api_format(provider_api_format);
             match normalized_provider_api_format.as_str() {
@@ -1041,7 +1032,6 @@ fn sync_finalize_needs_conversion(report_context: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
-/// Decodes a capture that turns out to be a single complete JSON object rather than a stream.
 fn decode_non_stream_sync_capture_body(body_base64: &str) -> Option<Value> {
     let body_bytes = base64::engine::general_purpose::STANDARD
         .decode(body_base64)
@@ -1052,15 +1042,8 @@ fn decode_non_stream_sync_capture_body(body_base64: &str) -> Option<Value> {
         .filter(|body_json| !is_stream_event_object(body_json))
 }
 
-/// Whether a complete JSON object is a single stream event rather than a provider response body.
-///
-/// `parse_stream_json_events` accepts unframed JSON lines on purpose, so a capture holding one
-/// event parses as a complete object just like a non-streaming body does. Those still belong to
-/// the aggregators, which know how to unwrap the response the event carries.
-///
-/// Provider response bodies never match: OpenAI Responses and Chat carry no top-level `type`,
-/// Gemini carries neither, and an Anthropic Messages body is `"type": "message"` with its payload
-/// under `content` rather than nested beside the event name.
+/// Unframed JSON events are accepted by the stream parsers and must not be mistaken for complete
+/// provider response bodies merely because the entire capture parses as one JSON object.
 fn is_stream_event_object(value: &Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
@@ -1072,12 +1055,11 @@ fn is_stream_event_object(value: &Value) -> bool {
     {
         return true;
     }
+
     object
         .get("type")
         .and_then(Value::as_str)
         .is_some_and(|event_type| {
-            // OpenAI Responses names its events `response.*`; the other formats nest the payload
-            // the event carries beside the event name.
             event_type.contains('.')
                 || ["response", "message", "item", "delta", "content_block"]
                     .iter()
@@ -4603,7 +4585,7 @@ mod tests {
     }
 
     #[test]
-    fn a_single_unframed_stream_event_is_not_mistaken_for_a_provider_body() {
+    fn unframed_stream_events_are_not_mistaken_for_provider_bodies() {
         for event in [
             json!({"type": "response.completed", "response": {"status": "completed"}}),
             json!({"type": "response.output_text.delta", "delta": "hi"}),
@@ -4621,7 +4603,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_response_bodies_are_still_recovered_from_a_capture() {
+    fn complete_provider_bodies_are_recovered_from_cross_format_captures() {
         for body in [
             json!({"id": "resp_1", "object": "response", "status": "completed", "output": []}),
             json!({"id": "chatcmpl_1", "object": "chat.completion", "choices": []}),
@@ -4629,7 +4611,7 @@ mod tests {
             json!({"candidates": [], "modelVersion": "probe-model"}),
         ] {
             let body_base64 = base64::engine::general_purpose::STANDARD
-                .encode(serde_json::to_vec(&body).expect("serialize body"));
+                .encode(serde_json::to_vec(&body).expect("serialize provider body"));
             assert_eq!(
                 decode_non_stream_sync_capture_body(&body_base64),
                 Some(body.clone()),
@@ -4639,7 +4621,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_a_cross_format_capture_that_is_a_complete_json_body() {
+    fn recovers_cross_format_capture_that_is_a_complete_json_body() {
         let report_context = json!({
             "provider_api_format": "openai:responses",
             "client_api_format": "claude:messages",
@@ -4656,9 +4638,9 @@ mod tests {
                 "type": "message",
                 "role": "assistant",
                 "status": "completed",
-                "content": [{ "type": "output_text", "text": "hello" }]
+                "content": [{"type": "output_text", "text": "hello"}]
             }],
-            "usage": { "input_tokens": 5, "output_tokens": 7, "total_tokens": 12 }
+            "usage": {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12}
         });
         let body_base64 = base64::engine::general_purpose::STANDARD
             .encode(serde_json::to_vec(&provider_body_json).expect("serialize provider body"));
@@ -4670,49 +4652,62 @@ mod tests {
             None,
             Some(&body_base64),
         )
-        .expect("a non-streaming provider body must not fail the stream aggregator")
+        .expect("a complete provider body must not fail the stream aggregator")
         .expect("product should exist");
 
         let StandardSyncFinalizeNormalizedProduct::CrossFormat(product) = product else {
             panic!("cross-format attempt should produce a cross-format product");
         };
         assert_eq!(product.provider_body_json, provider_body_json);
-        assert_eq!(
-            product.client_body_json.get("type"),
-            Some(&json!("message"))
-        );
+        assert_eq!(product.client_body_json["type"], "message");
+        assert_eq!(product.client_body_json["content"][0]["text"], "hello");
     }
 
     #[test]
-    fn keeps_a_cross_format_stream_capture_on_the_aggregation_path() {
-        let body = concat!(
-            "event: response.completed\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"probe-model\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":5,\"output_tokens\":7,\"total_tokens\":12}}}\n\n",
-        );
+    fn keeps_unframed_stream_event_on_the_aggregation_path() {
         let report_context = json!({
             "provider_api_format": "openai:responses",
             "client_api_format": "claude:messages",
             "needs_conversion": true,
             "upstream_is_stream": true,
         });
+        let provider_body_json = json!({
+            "id": "resp_1",
+            "object": "response",
+            "status": "completed",
+            "model": "probe-model",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "hello"}]
+            }],
+            "usage": {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12}
+        });
+        let event = json!({
+            "type": "response.completed",
+            "response": provider_body_json.clone(),
+        });
+        let body_base64 = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&event).expect("serialize stream event"));
 
         let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
             "claude_chat_sync_finalize",
             200,
             Some(&report_context),
             None,
-            Some(&base64::engine::general_purpose::STANDARD.encode(body)),
+            Some(&body_base64),
         )
-        .expect("stream capture should aggregate")
+        .expect("unframed stream event should aggregate")
         .expect("product should exist");
 
         let StandardSyncFinalizeNormalizedProduct::CrossFormat(product) = product else {
             panic!("cross-format attempt should produce a cross-format product");
         };
-        assert_eq!(
-            product.client_body_json.get("content"),
-            Some(&json!([{ "type": "text", "text": "hello" }]))
-        );
+        assert_eq!(product.provider_body_json["id"], provider_body_json["id"]);
+        assert_eq!(product.provider_body_json["object"], "response");
+        assert!(product.provider_body_json.get("response").is_none());
+        assert_eq!(product.client_body_json["type"], "message");
     }
 
     #[test]

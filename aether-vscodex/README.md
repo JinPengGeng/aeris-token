@@ -92,7 +92,7 @@ npm --prefix aether-vscodex/web run build
 `vscodex_data`，短期配对码、60 秒一次性浏览器票据和在线房间保存在内存。不要在未引入
 共享连接目录前横向扩容 sidecar。
 
-登录 Aether 后打开“Codex 远程控制”，生成一次性配对码。然后在 VS Code 命令面板执行
+登录 Aether 后打开“远程控制”，生成一次性配对码。然后在 VS Code 命令面板执行
 **Codex Remote: Pair with Aether**，填写 Aether 地址和配对码。插件会把设备凭据写入
 VS Code SecretStorage，并同时保持本机控制台连接。
 

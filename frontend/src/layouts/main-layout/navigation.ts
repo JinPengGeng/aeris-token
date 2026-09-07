@@ -51,6 +51,7 @@ const moduleIconMap: Record<string, LucideIcon> = {
   Server,
   Send,
   SlidersHorizontal,
+  SquareTerminal,
   CreditCard,
   Gift,
 }
@@ -117,12 +118,12 @@ export function buildNavigation(options: {
       title: t('nav.group.overview'),
       items: [
         { name: t('nav.dashboard'), href: '/admin/dashboard', icon: Home },
-        { name: t('nav.vscodex'), href: '/dashboard/vscodex', icon: SquareTerminal },
         { name: t('nav.operations'), href: '/admin/operations', icon: Activity },
         { name: t('nav.healthMonitor'), href: '/admin/health-monitor', icon: Activity },
         { name: t('nav.userStats'), href: '/admin/user-stats', icon: BarChart3 },
         { name: t('nav.costAnalysis'), href: '/admin/cost-analysis', icon: Gauge },
         { name: t('nav.performanceAnalysis'), href: '/admin/performance-analysis', icon: Activity },
+        ...activeModuleItems(modules, 'overview'),
       ]
     },
     {

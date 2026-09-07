@@ -46,7 +46,7 @@ use super::protocol::{
     LEGACY_LIVE_CALL_PATH, REALTIME_SIDEBAND_PATH,
 };
 use super::registry::{
-    LiveCallBinding, LiveCallLookup, LiveCallRegistry, LiveCallRegistryError, LiveSidebandLease,
+    LiveCallLookup, LiveCallRecord, LiveCallRegistry, LiveCallRegistryError, LiveSidebandLease,
     LiveSidebandLeaseLoss,
 };
 
@@ -100,6 +100,9 @@ impl LiveRelayAdmissionError {
                 StatusCode::TOO_MANY_REQUESTS
             }
             Self::DurableAdmissionRejected => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Gateway(GatewayError::PlanUsageLimited(_)) => StatusCode::TOO_MANY_REQUESTS,
+            Self::Gateway(GatewayError::LastActiveAdminUpdateDenied)
+            | Self::Gateway(GatewayError::LastActiveAdminDeleteDenied) => StatusCode::BAD_REQUEST,
             Self::Gateway(GatewayError::Client { status, .. }) => *status,
             Self::Gateway(GatewayError::LocalExecutionPlanningTimeout { .. }) => {
                 StatusCode::GATEWAY_TIMEOUT
@@ -122,6 +125,13 @@ impl LiveRelayAdmissionError {
             Self::Gateway(GatewayError::AdmissionTimeout { .. }) => {
                 "Gateway capacity is busy; retry this Live connection"
             }
+            Self::Gateway(GatewayError::PlanUsageLimited(_)) => {
+                "Subscription plan usage limit reached"
+            }
+            Self::Gateway(GatewayError::LastActiveAdminUpdateDenied)
+            | Self::Gateway(GatewayError::LastActiveAdminDeleteDenied) => {
+                "Codex Live request was not allowed"
+            }
             Self::Gateway(GatewayError::Client { .. }) => "Codex Live request was not allowed",
             Self::Gateway(GatewayError::LocalExecutionPlanningTimeout { .. }) => {
                 "Codex Live admission planning timed out"
@@ -136,6 +146,9 @@ impl LiveRelayAdmissionError {
             Self::BalanceRejected => "balance_rejected",
             Self::DurableAdmissionRejected => "durable_admission_rejected",
             Self::Gateway(GatewayError::AdmissionTimeout { .. }) => "admission_timeout",
+            Self::Gateway(GatewayError::PlanUsageLimited(_)) => "plan_usage_limited",
+            Self::Gateway(GatewayError::LastActiveAdminUpdateDenied) => "last_admin_update_denied",
+            Self::Gateway(GatewayError::LastActiveAdminDeleteDenied) => "last_admin_delete_denied",
             Self::Gateway(GatewayError::Client { .. }) => "request_rejected",
             Self::Gateway(GatewayError::LocalExecutionPlanningTimeout { .. }) => {
                 "admission_planning_timeout"
@@ -311,8 +324,8 @@ pub(super) async fn prepare_live_websocket(
         ),
     )
     .await;
-    let binding = match lookup {
-        Ok(Ok(LiveCallLookup::Found(binding))) => binding,
+    let record = match lookup {
+        Ok(Ok(LiveCallLookup::Found(record))) => record,
         Ok(Ok(LiveCallLookup::Missing)) => {
             info!(
                 target: LIVE_LOG_TARGET,
@@ -369,7 +382,7 @@ pub(super) async fn prepare_live_websocket(
             ));
         }
     };
-    prepare_sideband_live_websocket(state, context, call_id, binding, dialect)
+    prepare_sideband_live_websocket(state, context, call_id, record, dialect)
         .await
         .map(PreparedLiveWebSocket::Sideband)
 }
@@ -389,6 +402,7 @@ async fn prepare_direct_live_websocket(
         &context.remote_addr,
         client_model,
         dialect,
+        None,
         None,
     )
     .await
@@ -566,10 +580,11 @@ async fn prepare_sideband_live_websocket(
     state: &AppState,
     context: &WebSocketRequestContext,
     call_id: String,
-    binding: LiveCallBinding,
+    record: LiveCallRecord,
     dialect: LiveRouteDialect,
 ) -> Result<PreparedLiveSideband, LiveWebSocketPreflightRejection> {
     let started_at = Instant::now();
+    let binding = record.binding();
     let Some(auth) = context.decision.auth_context.as_ref() else {
         return Err(preflight_rejection(
             context,
@@ -663,6 +678,7 @@ async fn prepare_sideband_live_websocket(
             binding.client_model(),
             dialect,
             Some(binding.pinned_candidate()),
+            record.provider_outbound_context(),
         ),
     )
     .await;
@@ -680,7 +696,7 @@ async fn prepare_sideband_live_websocket(
         Ok(Ok(LiveCandidatePlanningOutcome {
             candidate: Some(candidate),
             ..
-        })) if binding.matches_candidate(&candidate) => candidate,
+        })) if record.matches_candidate(&candidate) => candidate,
         Ok(Ok(LiveCandidatePlanningOutcome {
             candidate: Some(candidate),
             ..
@@ -1269,6 +1285,9 @@ fn gateway_error_kind(error: &GatewayError) -> &'static str {
         GatewayError::ControlUnavailable { .. } => "control_unavailable",
         GatewayError::LocalExecutionPlanningTimeout { .. } => "planning_timeout",
         GatewayError::AdmissionTimeout { .. } => "admission_timeout",
+        GatewayError::PlanUsageLimited(_) => "plan_usage_limited",
+        GatewayError::LastActiveAdminUpdateDenied => "last_admin_update_denied",
+        GatewayError::LastActiveAdminDeleteDenied => "last_admin_delete_denied",
         GatewayError::Client { .. } => "client_error",
         GatewayError::Internal(_) => "internal_error",
     }
@@ -1281,6 +1300,10 @@ fn gateway_error_status(error: &GatewayError) -> StatusCode {
         }
         GatewayError::LocalExecutionPlanningTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
         GatewayError::AdmissionTimeout { .. } => StatusCode::TOO_MANY_REQUESTS,
+        GatewayError::PlanUsageLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+        GatewayError::LastActiveAdminUpdateDenied | GatewayError::LastActiveAdminDeleteDenied => {
+            StatusCode::BAD_REQUEST
+        }
         GatewayError::Client { status, .. } => *status,
         GatewayError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -2082,6 +2105,7 @@ mod tests {
             local_rejection: None,
             allowed_models: Some(vec!["gpt-live".to_string()]),
             ip_rules: Some(vec!["192.0.2.10/32".to_string()]),
+            verified_api_key_hash: None,
         }
     }
 

@@ -11,7 +11,11 @@ use aether_data_contracts::repository::candidates::DecisionTrace;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
-use aether_data_contracts::repository::settlement::{StoredUsageSettlement, UsageSettlementInput};
+use aether_data_contracts::repository::proxy_nodes::ProxyNodeTrafficMutation;
+use aether_data_contracts::repository::settlement::{
+    ReconcileUsagePolicyCostInput, StoredUsagePolicyCostReservation, StoredUsageSettlement,
+    UsageSettlementInput,
+};
 use aether_data_contracts::repository::usage::{
     ProxyNodeCounterDelta, StoredRequestUsageAudit, UpsertUsageRecord, UsageWriteRepository,
 };
@@ -46,7 +50,9 @@ fn usage_request_record_level_from_value(value: Option<&Value>) -> UsageRequestR
     {
         UsageRequestRecordLevel::Basic
     } else {
-        UsageRequestRecordLevel::Full
+        // Raw HTTP payload capture is disabled at the runtime boundary. The setting remains
+        // accepted for compatibility, but no longer authorizes collecting request/response data.
+        UsageRequestRecordLevel::Basic
     }
 }
 
@@ -95,6 +101,14 @@ impl StoredVideoTaskReadSide for GatewayDataState {
         key: VideoTaskLookupKey<'_>,
     ) -> Result<Option<StoredVideoTask>, DataLayerError> {
         GatewayDataState::find_video_task(self, key).await
+    }
+
+    async fn find_stored_video_task_for_user(
+        &self,
+        key: VideoTaskLookupKey<'_>,
+        user_id: &str,
+    ) -> Result<Option<StoredVideoTask>, DataLayerError> {
+        GatewayDataState::find_video_task_for_user(self, key, user_id).await
     }
 }
 
@@ -220,6 +234,13 @@ impl UsageSettlementWriter for GatewayDataState {
         GatewayDataState::has_settlement_writer(self)
     }
 
+    async fn reconcile_usage_policy_cost(
+        &self,
+        input: ReconcileUsagePolicyCostInput,
+    ) -> Result<Option<StoredUsagePolicyCostReservation>, DataLayerError> {
+        GatewayDataState::reconcile_usage_policy_cost(self, input).await
+    }
+
     async fn settle_usage(
         &self,
         input: UsageSettlementInput,
@@ -286,10 +307,26 @@ impl aether_usage_runtime::ManualProxyNodeCounter for GatewayDataState {
         failed_delta: i64,
         latency_ms: Option<i64>,
     ) -> Result<(), DataLayerError> {
+        // This API predates incarnation fences and only receives a node id. Read
+        // the selected node first so every durable path can bind the delta to
+        // the observed generation. If the node disappeared, fail closed rather
+        // than allowing a bare id to target a replacement node.
+        let Some(node) = self.find_proxy_node(node_id).await? else {
+            return Ok(());
+        };
+        if !node.is_manual {
+            return Ok(());
+        }
+        let expected_tunnel_generation = node.tunnel_generation.trim().to_string();
+        if expected_tunnel_generation.is_empty() {
+            return Ok(());
+        }
+
         if let Some(repository) = &self.usage_writer {
             let enqueued = repository
                 .enqueue_proxy_node_counter_delta(ProxyNodeCounterDelta {
                     node_id: node_id.to_string(),
+                    expected_tunnel_generation: Some(expected_tunnel_generation.clone()),
                     total_requests_delta: total_delta,
                     failed_requests_delta: failed_delta,
                     dns_failures_delta: 0,
@@ -301,14 +338,25 @@ impl aether_usage_runtime::ManualProxyNodeCounter for GatewayDataState {
             }
         }
 
-        match &self.proxy_node_writer {
-            Some(repository) => {
-                repository
-                    .increment_manual_node_requests(node_id, total_delta, failed_delta, latency_ms)
-                    .await
-            }
-            None => Ok(()),
+        // The legacy increment method has no generation argument and would
+        // re-read the current row, which is vulnerable to an id reuse between
+        // the read above and the write. Use the fenced traffic mutation as the
+        // only fallback. It intentionally omits the legacy latency-only field;
+        // preserving counters safely is more important than an unfenced write.
+        if let Some(repository) = &self.proxy_node_writer {
+            let _ = repository
+                .record_traffic(&ProxyNodeTrafficMutation {
+                    node_id: node_id.to_string(),
+                    expected_tunnel_generation: Some(expected_tunnel_generation),
+                    total_requests_delta: total_delta,
+                    failed_requests_delta: failed_delta,
+                    dns_failures_delta: 0,
+                    stream_errors_delta: 0,
+                })
+                .await?;
         }
+        let _ = latency_ms;
+        Ok(())
     }
 }
 
@@ -472,6 +520,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn usage_runtime_access_disables_full_http_capture() {
+        let state = GatewayDataState::disabled().with_system_config_values_for_tests([(
+            "request_record_level".to_string(),
+            json!("full"),
+        )]);
+
+        let level = UsageRuntimeAccess::request_record_level(&state)
+            .await
+            .expect("request record level should read");
+
+        assert_eq!(level, UsageRequestRecordLevel::Basic);
+    }
+
+    #[tokio::test]
     async fn usage_runtime_access_falls_back_to_legacy_request_log_level_alias() {
         let state = GatewayDataState::disabled().with_system_config_values_for_tests([(
             "request_log_level".to_string(),
@@ -508,5 +570,19 @@ mod tests {
             .expect("body capture policy should read");
 
         assert_eq!(policy.record_level, UsageRequestRecordLevel::Basic);
+    }
+
+    #[tokio::test]
+    async fn usage_runtime_access_fails_closed_for_unknown_record_level() {
+        let state = GatewayDataState::disabled().with_system_config_values_for_tests([(
+            "request_record_level".to_string(),
+            json!("everything"),
+        )]);
+
+        let level = UsageRuntimeAccess::request_record_level(&state)
+            .await
+            .expect("request record level should read");
+
+        assert_eq!(level, UsageRequestRecordLevel::Basic);
     }
 }

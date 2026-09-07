@@ -731,7 +731,7 @@
                     v-if="shouldPaginateKeys"
                     class="px-4 py-2 flex items-center justify-between text-xs text-muted-foreground mt-auto"
                   >
-                    <span>{{ legacyT('共') }} {{ allKeys.length }} {{ legacyT('个') }}{{ legacyT(isKeyManagedProviderType(provider.provider_type) ? '密钥' : '账号') }}</span>
+                    <span>{{ legacyT('共') }} {{ providerKeysTotal }} {{ legacyT('个') }}{{ legacyT(isKeyManagedProviderType(provider.provider_type) ? '密钥' : '账号') }}</span>
                     <div class="flex items-center gap-1.5">
                       <Button
                         variant="ghost"
@@ -940,7 +940,7 @@ import {
 } from 'lucide-vue-next'
 import { parseApiError } from '@/utils/errorParser'
 import { useEscapeKey } from '@/composables/useEscapeKey'
-import { useI18n } from '@/i18n'
+import { getI18nLocale, useI18n } from '@/i18n'
 import Button from '@/components/ui/button.vue'
 import Card from '@/components/ui/card.vue'
 import { useToast } from '@/composables/useToast'
@@ -980,6 +980,7 @@ import ProviderQuotaProgressRow from '@/features/providers/components/ProviderQu
 import ProviderQuotaSectionHeader from '@/features/providers/components/ProviderQuotaSectionHeader.vue'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import { resolveAntigravityQuotaGroupLabel } from '@/features/providers/utils/antigravityQuota'
+import { refreshQuotaInBackground } from '@/features/providers/utils/refreshQuotaInBackground'
 import {
   deleteEndpointKey,
   recoverKeyHealth,
@@ -2476,7 +2477,7 @@ function isKiroBannedKey(key: EndpointAPIKey): boolean {
 function formatBanTimestamp(timestamp: number | undefined): string {
   if (!timestamp) return ''
   const date = new Date(timestamp * 1000)
-  return date.toLocaleString('zh-CN', {
+  return date.toLocaleString(getI18nLocale(), {
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
@@ -2862,15 +2863,21 @@ async function autoRefreshQuotaInBackground(): Promise<boolean> {
   }
 
   refreshingQuota.value = true
+  const isCurrent = () => props.open && props.providerId === providerId
   try {
-    const result = await refreshProviderQuota(providerId)
+    const result = await refreshQuotaInBackground({
+      refresh: () => refreshProviderQuota(providerId),
+      isCurrent,
+      retryInitialEmptyQuota: providerType === 'antigravity' && !hadCachedQuota,
+    })
+    if (!result) return false
     const applied = applyQuotaResults(result.results)
     if (result.success <= 0 && applied === 0 && !hadCachedQuota && providerType === 'antigravity') {
-      showError(legacyT('没有获取到配额信息（请检查账号是否已授权、project_id 是否存在）'), legacyT('提示'))
+      showWarning(legacyT('配额暂未就绪，请稍后刷新'), legacyT('提示'))
     }
     return applied > 0
   } catch (err: unknown) {
-    if (!hadCachedQuota && providerType === 'antigravity') {
+    if (isCurrent() && !hadCachedQuota && providerType === 'antigravity') {
       showError(localizedApiError(err, '后台刷新配额失败'), legacyT('错误'))
     }
     return false

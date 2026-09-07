@@ -3,17 +3,17 @@
     <canvas ref="chartRef" />
     <div
       v-if="crosshairStats"
-      class="absolute top-2 right-2 bg-gray-800/90 text-gray-100 px-3 py-2 rounded-lg text-sm shadow-lg border border-gray-600"
+      class="absolute top-2 right-2 max-w-[calc(100%-1rem)] break-words bg-gray-800/90 text-gray-100 px-3 py-2 rounded-lg text-sm shadow-lg border border-gray-600"
     >
       <div class="font-medium text-yellow-400">
-        Y = {{ crosshairStats.yValue.toFixed(1) }} 分钟
+        {{ t('chart.crosshairValue', { value: crosshairStats.yValue.toFixed(1) }) }}
       </div>
       <!-- 单个 dataset 时显示简单统计 -->
       <div
         v-if="crosshairStats.datasets.length === 1"
         class="mt-1"
       >
-        <span class="text-green-400">{{ crosshairStats.datasets[0].belowCount }}</span> / {{ crosshairStats.datasets[0].totalCount }} 点在横线以下
+        <span class="text-green-400">{{ crosshairStats.datasets[0].belowCount }}</span> / {{ crosshairStats.datasets[0].totalCount }} {{ t('chart.pointsBelow') }}
         <span class="ml-2 text-blue-400">({{ crosshairStats.datasets[0].belowPercent.toFixed(1) }}%)</span>
       </div>
       <!-- 多个 dataset 时按模型分别显示 -->
@@ -36,7 +36,7 @@
         </div>
         <!-- 总计 -->
         <div class="flex items-center gap-2 pt-1 border-t border-gray-600 mt-1">
-          <span class="text-gray-300">总计:</span>
+          <span class="text-gray-300">{{ t('chart.total') }}:</span>
           <span class="text-green-400">{{ crosshairStats.totalBelowCount }}</span>/<span class="text-gray-400">{{ crosshairStats.totalCount }}</span>
           <span class="text-blue-400">({{ crosshairStats.totalBelowPercent.toFixed(1) }}%)</span>
         </div>
@@ -46,6 +46,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale, useI18n } from '@/i18n'
 import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
 import {
   Chart as ChartJS,
@@ -62,6 +63,7 @@ import {
   type Scale
 } from 'chart.js'
 import 'chartjs-adapter-date-fns'
+import { enUS, zhCN } from 'date-fns/locale'
 
 const props = withDefaults(defineProps<Props>(), {
   height: 300,
@@ -114,6 +116,7 @@ interface GapInfo {
 }
 
 const chartRef = ref<HTMLCanvasElement>()
+const { locale, t } = useI18n()
 let chart: ChartJS<'scatter'> | null = null
 
 const crosshairY = ref<number | null>(null)
@@ -151,7 +154,7 @@ const crosshairStats = computed<CrosshairStats | null>(() => {
 
     if (dsTotal > 0) {
       datasetStats.push({
-        label: dataset.label || 'Unknown',
+        label: dataset.label || t('chart.unknown'),
         color: (dataset.backgroundColor as string) || 'rgba(59, 130, 246, 0.7)',
         belowCount,
         totalCount: dsTotal,
@@ -325,7 +328,8 @@ function formatDuration(ms: number): string {
   return `${minutes}m`
 }
 
-const defaultOptions: ChartOptions<'scatter'> = {
+const defaultOptions = computed<ChartOptions<'scatter'>>(() => ({
+  locale: locale.value,
   responsive: true,
   maintainAspectRatio: false,
   interaction: {
@@ -335,6 +339,9 @@ const defaultOptions: ChartOptions<'scatter'> = {
   scales: {
     x: {
       type: 'time',
+      adapters: {
+        date: { locale: locale.value === 'zh-CN' ? zhCN : enUS }
+      },
       time: {
         displayFormats: {
           hour: 'HH:mm'
@@ -378,7 +385,7 @@ const defaultOptions: ChartOptions<'scatter'> = {
       },
       title: {
         display: true,
-        text: '间隔 (分钟)',
+        text: t('chart.intervalAxis'),
         color: 'rgb(107, 114, 128)'
       },
       afterBuildTicks(scale: Scale) {
@@ -407,7 +414,7 @@ const defaultOptions: ChartOptions<'scatter'> = {
           const point = contexts[0].raw as { x: string; _originalX?: string }
           const timeStr = point._originalX || point.x
           const date = new Date(timeStr)
-          return date.toLocaleString('zh-CN', {
+          return date.toLocaleString(getI18nLocale(), {
             month: 'numeric',
             day: 'numeric',
             hour: '2-digit',
@@ -417,7 +424,7 @@ const defaultOptions: ChartOptions<'scatter'> = {
         label: (context) => {
           const point = context.raw as { x: string; y: number; _originalY?: number }
           const realY = point._originalY ?? toRealValue(point.y)
-          return `间隔: ${realY.toFixed(1)} 分钟`
+          return t('chart.intervalTooltip', { value: realY.toFixed(1) })
         }
       }
     }
@@ -451,7 +458,7 @@ const defaultOptions: ChartOptions<'scatter'> = {
 
     chartInstance.draw()
   }
-}
+}))
 
 // 修改 crosshairPlugin 使用显示值
 const crosshairPluginWithTransform: Plugin<'scatter'> = {
@@ -544,7 +551,7 @@ function createChart() {
     type: 'scatter',
     data: chartData,
     options: {
-      ...defaultOptions,
+      ...defaultOptions.value,
       ...props.options
     },
     plugins: [crosshairPluginWithTransform, gapMarkerPlugin]
@@ -586,10 +593,10 @@ watch(
   ],
   updateChart
 )
-watch(() => props.options, () => {
+watch([() => props.options, defaultOptions], () => {
   if (chart) {
     chart.options = {
-      ...defaultOptions,
+      ...defaultOptions.value,
       ...props.options
     }
     chart.update('none')

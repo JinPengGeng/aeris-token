@@ -121,8 +121,8 @@
                   />
                   <span class="title-text">{{ currentGroupTitle }}</span>
                   <a
-                    v-if="currentAttempt.provider_website"
-                    :href="currentAttempt.provider_website"
+                    v-if="currentAttemptProviderWebsite"
+                    :href="currentAttemptProviderWebsite"
                     target="_blank"
                     rel="noopener noreferrer"
                     class="provider-link"
@@ -478,6 +478,18 @@
                     </span>
                   </div>
                   <div
+                    v-if="currentAttemptRequestError.upstreamStatusCode != null && currentAttemptRequestError.upstreamStatusCode !== currentAttemptRequestError.statusCode"
+                    class="error-upstream-status text-xs text-muted-foreground mb-1"
+                  >
+                    上游响应状态：HTTP {{ currentAttemptRequestError.upstreamStatusCode }}（本次尝试状态见上方）
+                  </div>
+                  <div
+                    v-if="currentAttemptRequestError.finalStatusCode != null"
+                    class="error-final-status text-xs text-muted-foreground mb-1"
+                  >
+                    请求最终状态：HTTP {{ currentAttemptRequestError.finalStatusCode }}（与本次尝试状态不同）
+                  </div>
+                  <div
                     v-if="currentAttemptRequestError.message"
                     class="error-msg"
                   >
@@ -544,6 +556,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import { isAxiosError } from 'axios'
 import Card from '@/components/ui/card.vue'
@@ -553,6 +566,7 @@ import JsonContentPanel from './JsonContentPanel.vue'
 import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-vue-next'
 import { requestTraceApi, type RequestTrace, type CandidateRecord, type ImageProgress } from '@/api/requestTrace'
 import { log } from '@/utils/logger'
+import { safeExternalWebUrl } from '@/utils/navigationSecurity'
 import { parseApiError } from '@/utils/errorParser'
 import { formatTokens } from '@/utils/format'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
@@ -1078,6 +1092,10 @@ const currentAttempt = computed(() => {
   if (!selectedGroup.value) return null
   return selectedGroup.value.allAttempts[selectedAttemptIndex.value] || selectedGroup.value.primary
 })
+
+const currentAttemptProviderWebsite = computed(() =>
+  safeExternalWebUrl(currentAttempt.value?.provider_website),
+)
 
 const currentAttemptTimeRange = computed<AttemptTimeRange | null>(() => {
   return resolveAttemptTimeRange(currentAttempt.value)
@@ -1624,21 +1642,19 @@ const shouldShowAttemptMessageWithUpstreamResponse = (
   rawMessage: string,
   upstreamResponse: Record<string, unknown> | null,
 ): boolean => {
-  if (!upstreamResponse) return true
+  if (!upstreamResponse || !hasRenderableValue(upstreamResponse.body)) return true
   const normalized = rawMessage.trim()
   if (!normalized) return false
   if (isLocalSyncFinalizeDiagnostic(normalized)) return true
   if (isConversionDiagnosticMessage(normalized)) return true
-  if (isGenericExecutionRuntimeStatusMessage(normalized)) return false
-
-  const hasBody = hasRenderableValue(upstreamResponse.body)
-  const bodyState = (readStringField(upstreamResponse, 'body_state') ?? '').toLowerCase()
-  return !hasBody && bodyState === 'disabled'
+  return false
 }
 
 const currentAttemptRequestError = computed<{
   message: string
   statusCode?: number
+  upstreamStatusCode?: number
+  finalStatusCode?: number
   upstreamResponse: Record<string, unknown> | null
   diagnostic: Record<string, unknown> | null
 } | null>(() => {
@@ -1648,11 +1664,16 @@ const currentAttemptRequestError = computed<{
   const extra = extractObject(attempt.extra_data)
   const upstreamResponse = extractObject(extra?.upstream_response)
   const errorFlow = extractObject(extra?.error_flow)
-  const statusCode = readNumberField(upstreamResponse ?? {}, 'status_code')
+  const upstreamStatusCode = readNumberField(upstreamResponse ?? {}, 'status_code')
     ?? readNumberField(upstreamResponse ?? {}, 'statusCode')
+  const statusCode = attempt.status_code
+    ?? upstreamStatusCode
     ?? readNumberField(errorFlow ?? {}, 'status_code')
     ?? readNumberField(errorFlow ?? {}, 'statusCode')
-    ?? attempt.status_code
+  const finalStatusCode = !['pending', 'streaming'].includes(computedFinalStatus.value)
+    && props.overrideStatusCode != null && props.overrideStatusCode !== statusCode
+    ? props.overrideStatusCode
+    : undefined
   const flowMessage = errorFlow
     ? readStringField(errorFlow, 'message')
     : ''
@@ -1665,6 +1686,7 @@ const currentAttemptRequestError = computed<{
   const diagnosticMessage = extractVisibleDiagnosticMessage(extra)
   const rawMessage = chooseAttemptRawErrorMessage(flowMessage || '', fallbackMessage, diagnosticMessage)
   const message = formatAttemptErrorMessage(rawMessage, statusCode) || fallbackType
+    || '本次尝试失败，链路追踪未包含详细错误内容。'
   const upstreamResponseDisplay = normalizeUpstreamResponseDisplay(extra?.upstream_response)
   const visibleDiagnosticObjects = extractVisibleDiagnosticObjects(extra)
   const shouldAttachDiagnostic = Boolean(
@@ -1689,20 +1711,16 @@ const currentAttemptRequestError = computed<{
   const response = Object.keys(upstreamResponseData).length > 0
     ? upstreamResponseData
     : null
-  if (
-    !message
-    && statusCode == null
-    && !response
-    && !diagnostic
-  ) return null
   const showMessage = shouldShowAttemptMessageWithUpstreamResponse(
     rawMessage || fallbackType,
     upstreamResponseDisplay,
   )
 
   return {
-    message: showMessage ? (message || '未知错误') : '',
+    message: showMessage ? message : '',
     statusCode,
+    upstreamStatusCode,
+    finalStatusCode,
     upstreamResponse: response,
     diagnostic,
   }
@@ -2289,7 +2307,7 @@ const resolveAttemptTimeRange = (attempt: CandidateRecord | null | undefined): A
 // 格式化时间（详细）
 const formatTime = (dateStr: string) => {
   const date = new Date(dateStr)
-  const timeStr = date.toLocaleTimeString('zh-CN', {
+  const timeStr = date.toLocaleTimeString(getI18nLocale(), {
     hour12: false,
     hour: '2-digit',
     minute: '2-digit',

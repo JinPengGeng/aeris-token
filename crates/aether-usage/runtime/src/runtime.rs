@@ -28,9 +28,9 @@ use crate::{
     apply_usage_body_capture_policy_to_event, build_pending_usage_record_from_seed,
     build_stream_terminal_usage_seed, build_sync_terminal_usage_seed,
     build_terminal_usage_event_from_seed, build_upsert_usage_record_from_event,
-    settle_usage_if_needed, LifecycleUsageSeed, StreamTerminalUsagePayloadSeed,
-    SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed, UsageEvent, UsageQueue,
-    UsageRecordWriter, UsageRuntimeConfig, UsageSettlementWriter,
+    reconcile_usage_policy_cost_for_event, settle_usage_if_needed, LifecycleUsageSeed,
+    StreamTerminalUsagePayloadSeed, SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed,
+    UsageEvent, UsageQueue, UsageRecordWriter, UsageRuntimeConfig, UsageSettlementWriter,
 };
 
 #[async_trait]
@@ -4187,9 +4187,9 @@ impl UsageRuntime {
                     event_name = "usage_body_capture_policy_read_failed",
                     log_type = "event",
                     request_id = %event.request_id,
-                    fallback = "default",
+                    fallback = "basic",
                     error = %err,
-                    "usage runtime failed to read body capture policy; keeping default capture"
+                    "usage runtime failed to read body capture policy; disabling body capture"
                 );
                 apply_usage_body_capture_policy_to_event(UsageBodyCapturePolicy::default(), event);
             }
@@ -4822,6 +4822,17 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
+        if let Err(err) = reconcile_usage_policy_cost_for_event(data, event).await {
+            warn!(
+                event_name = "usage_event_cost_reconciliation_failed",
+                log_type = "event",
+                usage_event_type = ?event.event_type,
+                request_id = %event.request_id,
+                error = %err,
+                "usage runtime failed to reconcile plan cost before direct usage upsert"
+            );
+            return false;
+        }
         match build_upsert_usage_record_from_event(event) {
             Ok(record) => match catch_usage_writer_panic(
                 "direct usage upsert",

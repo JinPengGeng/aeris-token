@@ -36,8 +36,8 @@ const CODEX_OPENAI_RESPONSES_COMPACT_BODY_FIELDS: &[&str] = &[
     "prompt_cache_key",
     "text",
 ];
-pub const CODEX_CLIENT_VERSION: &str = "0.144.1";
-pub const CODEX_CLIENT_USER_AGENT: &str = "codex_cli_rs/0.144.1";
+pub const CODEX_CLIENT_VERSION: &str = "0.153.4";
+pub const CODEX_CLIENT_USER_AGENT: &str = "codex_cli_rs/0.153.4";
 pub const CODEX_CLIENT_ORIGINATOR: &str = "codex_cli_rs";
 pub const CODEX_OPENAI_IMAGE_INTERNAL_MODEL: &str = "gpt-5.4-mini";
 pub const CODEX_OPENAI_IMAGE_DEFAULT_MODEL: &str = "gpt-image-2";
@@ -2194,10 +2194,18 @@ mod tests {
         parse_codex_auth_identity, project_codex_catalog_model_card,
         resolve_codex_responses_model_capabilities,
         validate_codex_openai_responses_compact_request_contract, CODEX_CLIENT_ORIGINATOR,
-        CODEX_CLIENT_USER_AGENT, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
+        CODEX_CLIENT_USER_AGENT, CODEX_CLIENT_VERSION, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
         CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS, CODEX_RESPONSES_LITE_HEADER,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn codex_client_user_agent_matches_originator_and_version() {
+        assert_eq!(
+            CODEX_CLIENT_USER_AGENT,
+            format!("{CODEX_CLIENT_ORIGINATOR}/{CODEX_CLIENT_VERSION}")
+        );
+    }
 
     #[test]
     fn model_card_drives_unknown_codex_model_body_and_header_contracts() {

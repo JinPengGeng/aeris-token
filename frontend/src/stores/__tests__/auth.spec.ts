@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
-const { logoutMock, getTokenMock, getCurrentUserMock } = vi.hoisted(() => ({
+const { logoutMock, getTokenMock, getCurrentUserMock, restoreSessionMock, clearAuthMock } = vi.hoisted(() => ({
   logoutMock: vi.fn(),
   getTokenMock: vi.fn(() => null),
   getCurrentUserMock: vi.fn(),
+  restoreSessionMock: vi.fn(),
+  clearAuthMock: vi.fn(),
 }))
 
 vi.mock('@/api/auth', () => ({
@@ -17,6 +19,8 @@ vi.mock('@/api/auth', () => ({
 vi.mock('@/api/client', () => ({
   default: {
     getToken: getTokenMock,
+    restoreSession: restoreSessionMock,
+    clearAuth: clearAuthMock,
   },
 }))
 
@@ -28,7 +32,10 @@ describe('auth store logout', () => {
     logoutMock.mockReset()
     getTokenMock.mockReset()
     getCurrentUserMock.mockReset()
+    restoreSessionMock.mockReset()
+    clearAuthMock.mockReset()
     getTokenMock.mockReturnValue(null)
+    restoreSessionMock.mockRejectedValue(new Error('no refresh session'))
   })
 
   it('waits for backend logout before resolving', async () => {
@@ -66,6 +73,87 @@ describe('auth store logout', () => {
     await logoutPromise
 
     expect(settled).toBe(true)
+  })
+
+  it('restores the access token from the HttpOnly refresh session only once', async () => {
+    restoreSessionMock.mockImplementation(async () => {
+      getTokenMock.mockReturnValue('restored-access-token')
+      return 'restored-access-token'
+    })
+    getTokenMock.mockReturnValue(null)
+    const store = useAuthStore()
+
+    await expect(store.restoreSession()).resolves.toBe(true)
+    await expect(store.restoreSession()).resolves.toBe(true)
+
+    expect(store.token).toBe('restored-access-token')
+    expect(restoreSessionMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not repeatedly probe a missing refresh session', async () => {
+    const store = useAuthStore()
+
+    await expect(store.restoreSession()).resolves.toBe(false)
+    await expect(store.restoreSession()).resolves.toBe(false)
+
+    expect(restoreSessionMock).toHaveBeenCalledTimes(1)
+    expect(clearAuthMock).toHaveBeenCalledWith(false, false)
+  })
+
+  it.each(['synchronous', 'asynchronous'] as const)(
+    'allows a forced retry after a %s restore failure',
+    async (failureMode) => {
+      const failure = new Error('temporary refresh failure')
+      if (failureMode === 'synchronous') {
+        restoreSessionMock.mockImplementationOnce(() => {
+          throw failure
+        })
+      } else {
+        restoreSessionMock.mockRejectedValueOnce(failure)
+      }
+      restoreSessionMock.mockResolvedValueOnce('retry-access-token')
+      const store = useAuthStore()
+
+      await expect(store.restoreSession()).resolves.toBe(false)
+      expect(clearAuthMock).toHaveBeenCalledWith(false, false)
+
+      await expect(store.restoreSession(true)).resolves.toBe(true)
+      expect(store.token).toBe('retry-access-token')
+      expect(restoreSessionMock).toHaveBeenCalledTimes(2)
+    },
+  )
+
+  it('deduplicates in-flight restores and allows a refresh after completion', async () => {
+    let resolveRestore!: (token: string) => void
+    const pendingRestore = new Promise<string>((resolve) => {
+      resolveRestore = resolve
+    })
+    restoreSessionMock.mockReturnValueOnce(pendingRestore)
+    const store = useAuthStore()
+
+    const firstRestore = store.restoreSession()
+    const secondRestore = store.restoreSession()
+    expect(restoreSessionMock).toHaveBeenCalledTimes(1)
+
+    resolveRestore('restored-access-token')
+    await expect(Promise.all([firstRestore, secondRestore])).resolves.toEqual([true, true])
+    expect(store.token).toBe('restored-access-token')
+
+    restoreSessionMock.mockResolvedValueOnce('refreshed-access-token')
+    await expect(store.restoreSession(true)).resolves.toBe(true)
+    expect(store.token).toBe('refreshed-access-token')
+    expect(restoreSessionMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves an existing access token when a forced restore fails', async () => {
+    getTokenMock.mockReturnValue('still-valid-access-token')
+    restoreSessionMock.mockRejectedValue(new Error('temporary refresh conflict'))
+    const store = useAuthStore()
+
+    await expect(store.restoreSession(true)).resolves.toBe(false)
+
+    expect(store.token).toBe('still-valid-access-token')
+    expect(clearAuthMock).not.toHaveBeenCalled()
   })
 
   it('clears local auth state for external logout without calling backend', () => {

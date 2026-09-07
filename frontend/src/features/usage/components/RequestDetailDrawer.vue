@@ -873,6 +873,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { ref, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import Button from '@/components/ui/button.vue'
 import { useEscapeKey } from '@/composables/useEscapeKey'
@@ -2851,7 +2852,7 @@ onBeforeUnmount(() => {
 function formatDateTime(dateStr: string | null | undefined): string {
   if (!dateStr) return 'N/A'
   const date = new Date(dateStr)
-  return date.toLocaleString('zh-CN', {
+  return date.toLocaleString(getI18nLocale(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

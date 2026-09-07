@@ -1,4 +1,4 @@
-name: Release aeris-token
+name: Release Aether
 
 on:
   push:
@@ -12,10 +12,11 @@ on:
         default: false
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: release-aeris-token-${{ github.ref }}
+  group: release-aether-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -111,7 +112,15 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: |
+            frontend/package-lock.json
+            aether-vscodex/web/package-lock.json
+
+      - name: Build aether-vscodex web
+        working-directory: aether-vscodex/web
+        run: |
+          npm ci
+          npm run build
 
       - name: Install & build
         working-directory: frontend
@@ -126,6 +135,74 @@ jobs:
           path: frontend/dist/
           if-no-files-found: error
           retention-days: 1
+
+  vscodex:
+    name: Build VS Code Codex extension
+    needs: preflight
+    if: inputs.release_approval_canary != true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            aether-vscodex/package-lock.json
+            aether-vscodex/web/package-lock.json
+            aether-vscodex/vscode-extension/package-lock.json
+
+      - name: Install module test dependencies
+        working-directory: aether-vscodex
+        run: npm ci
+
+      - name: Build the embedded Web UI
+        working-directory: aether-vscodex/web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install extension dependencies
+        working-directory: aether-vscodex/vscode-extension
+        run: npm ci
+
+      - name: Check and compile the extension
+        working-directory: aether-vscodex/vscode-extension
+        run: |
+          npm run check
+          npm run build
+
+      - name: Run module tests
+        working-directory: aether-vscodex
+        run: npm test
+
+      - name: Run Web UI tests
+        working-directory: aether-vscodex/web
+        run: npm test
+
+      - name: Package VSIX
+        working-directory: aether-vscodex/vscode-extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          npx --yes @vscode/vsce package --no-update-package-json --allow-missing-repository
+          source_vsix="codex-remote-collab-${version}.vsix"
+          test -f "${source_vsix}"
+          mv "${source_vsix}" "aether-vscodex-${version}.vsix"
+          unzip -l "aether-vscodex-${version}.vsix" | grep 'extension/node_modules/ws/index.js' >/dev/null
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: aether-vscodex-vsix
+          path: aether-vscodex/vscode-extension/aether-vscodex-*.vsix
+          if-no-files-found: error
+          retention-days: 7
 
   build:
     name: Build ${{ matrix.name }}
@@ -171,14 +248,14 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           shared-key: release-${{ matrix.target }}
           workspaces: . -> target
 
       - name: Install cross
         if: matrix.use_cross
-        uses: taiki-e/install-action@7a74ec2e18628d3a08d2fd4b55aea54cd5de1cfd # cross
+        uses: taiki-e/install-action@1ae7257be536a92d9218a6b343dc6e6ba650f7e1 # cross
 
       - name: Build
         env:
@@ -201,17 +278,20 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  publish:
-    name: Publish images and release assets
-    environment: release
-    permissions:
-      contents: write
-      packages: write
-    needs: [preflight, frontend, build, package]
+  docker:
+    name: Docker multi-arch
+    needs: [preflight, frontend, build]
     if: >-
       inputs.release_approval_canary != true &&
       needs.preflight.outputs.publish == 'true'
+    environment: release
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -226,7 +306,6 @@ jobs:
         run: |
           set -euo pipefail
           echo "publish=false" >> "${GITHUB_OUTPUT}"
-          # Keep metadata-action input valid even when Docker Hub is disabled.
           echo "image=${DOCKERHUB_IMAGE:-disabled/aeris-token}" >> "${GITHUB_OUTPUT}"
 
           if [[ -z "${DOCKERHUB_IMAGE}" ]]; then
@@ -289,6 +368,7 @@ jobs:
             latest=false
 
       - name: Build and push
+        id: push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -297,57 +377,34 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
-          # Ported from YachDemo/Aether@1c7531db (.github/workflows/build-arm64.yml).
-          # gha cache import failures never fail the build (cold build instead);
-          # ignore-error on cache-to keeps cache export outages from failing the release.
-          cache-from: type=gha,scope=aeris-token-app
-          cache-to: type=gha,mode=max,ignore-error=true,scope=aeris-token-app
-          provenance: mode=max
-          sbom: true
 
-      - name: Download release package artifact
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      - name: Attest GHCR image provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          name: release-assets
-          path: release-assets
+          subject-name: ${{ env.REGISTRY }}/${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
 
-      - name: Delete stale draft releases for tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          REPOSITORY: ${{ github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          draft_ids="$(gh api "repos/${REPOSITORY}/releases" --paginate --jq '.[] | select(.tag_name == env.RELEASE_TAG and .draft == true) | .id')"
-
-          if [[ -z "${draft_ids}" ]]; then
-            echo "No stale draft releases for ${RELEASE_TAG}"
-            exit 0
-          fi
-
-          while IFS= read -r release_id; do
-            [[ -z "${release_id}" ]] && continue
-            echo "Deleting stale draft release ${release_id} for ${RELEASE_TAG}"
-            gh api -X DELETE "repos/${REPOSITORY}/releases/${release_id}"
-          done <<< "${draft_ids}"
-
-      - name: Publish GitHub Release assets
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - name: Attest Docker Hub image provenance
+        if: steps.registry.outputs.publish == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          generate_release_notes: true
-          prerelease: ${{ needs.preflight.outputs.prerelease }}
-          make_latest: ${{ needs.preflight.outputs.make_latest }}
-          files: |
-            release-assets/*.tar.gz
-            release-assets/SHA256SUMS
-            release-assets/install.sh
+          subject-name: docker.io/${{ steps.registry.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
 
   package:
     name: Release tarballs
     needs: [preflight, frontend, build]
     if: inputs.release_approval_canary != true
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -404,6 +461,22 @@ jobs:
           chmod +x release-assets/install.sh
           (cd release-assets && sha256sum *.tar.gz > SHA256SUMS)
 
+      - name: Attest release package provenance
+        id: attest-release
+        if: needs.preflight.outputs.publish == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            release-assets/*.tar.gz
+            release-assets/install.sh
+            release-assets/SHA256SUMS
+
+      - name: Bundle release package provenance
+        if: needs.preflight.outputs.publish == 'true'
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.attest-release.outputs.bundle-path }}
+        run: install -m 0644 "${ATTESTATION_BUNDLE}" release-assets/AETHER_RELEASE_PROVENANCE.sigstore.json
+
       - name: Upload release package artifact
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
@@ -412,3 +485,58 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  github-release:
+    name: GitHub Release assets
+    needs: [preflight, docker, package, vscodex]
+    if: needs.preflight.outputs.publish == 'true'
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download release package artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Download VSIX artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: aether-vscodex-vsix
+          path: release-assets
+
+      - name: Delete stale draft releases for tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          draft_ids="$(gh api "repos/${REPOSITORY}/releases" --paginate --jq '.[] | select(.tag_name == env.RELEASE_TAG and .draft == true) | .id')"
+
+          if [[ -z "${draft_ids}" ]]; then
+            echo "No stale draft releases for ${RELEASE_TAG}"
+            exit 0
+          fi
+
+          while IFS= read -r release_id; do
+            [[ -z "${release_id}" ]] && continue
+            echo "Deleting stale draft release ${release_id} for ${RELEASE_TAG}"
+            gh api -X DELETE "repos/${REPOSITORY}/releases/${release_id}"
+          done <<< "${draft_ids}"
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ needs.preflight.outputs.prerelease }}
+          make_latest: ${{ needs.preflight.outputs.make_latest }}
+          files: |
+            release-assets/*.tar.gz
+            release-assets/AETHER_RELEASE_PROVENANCE.sigstore.json
+            release-assets/SHA256SUMS
+            release-assets/install.sh
+            release-assets/*.vsix

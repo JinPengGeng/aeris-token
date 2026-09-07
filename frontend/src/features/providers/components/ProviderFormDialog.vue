@@ -26,7 +26,7 @@
           />
         </div>
 
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div class="space-y-1.5">
             <Label>{{ legacyT('提供商类型') }}</Label>
             <Select
@@ -130,7 +130,7 @@
         </h3>
 
         <!-- 超时配置 -->
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div class="space-y-1.5">
             <Label>
               {{ legacyT('流式首字节超时') }}
@@ -164,11 +164,11 @@
         </div>
 
         <!-- 提供商内转移限制 -->
-        <div class="grid grid-cols-2 gap-2 sm:gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div class="min-w-0 space-y-1.5">
             <Label
               for="max-transfer-count"
-              class="whitespace-nowrap text-xs sm:text-sm"
+              class="text-xs sm:text-sm"
             >
               {{ legacyT('最大转移次数') }}
             </Label>
@@ -185,7 +185,7 @@
           <div class="min-w-0 space-y-1.5">
             <Label
               for="max-transfer-timeout-seconds"
-              class="whitespace-nowrap text-xs sm:text-sm"
+              class="text-xs sm:text-sm"
             >
               {{ legacyT('最大转移超时') }}
               <span class="text-xs text-muted-foreground">{{ legacyT('(秒)') }}</span>

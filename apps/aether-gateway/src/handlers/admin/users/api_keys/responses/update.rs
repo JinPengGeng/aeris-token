@@ -140,19 +140,28 @@ pub(crate) async fn build_admin_update_user_api_key_response(
                     .into_response());
             }
         };
+    let name_present = name.is_some();
+    let rate_limit_present = payload.rate_limit.is_some();
+    let concurrent_limit_present = concurrent_limit.is_some();
 
     let Some(updated) = state
         .update_user_api_key_basic(aether_data::repository::auth::UpdateUserApiKeyBasicRecord {
             user_id: user_id.clone(),
             api_key_id: api_key_id.clone(),
+            key_encrypted: None,
+            key_encrypted_present: false,
             name,
+            name_present,
             rate_limit: payload.rate_limit,
             daily_usage_limit_present: payload.daily_usage_limit_usd.is_some(),
             daily_usage_limit_usd: payload.daily_usage_limit_usd.flatten(),
+            rate_limit_present,
             concurrent_limit,
+            concurrent_limit_present,
             ip_rules,
             billing_multiplier_present: field_presence.contains("billing_multiplier"),
             billing_multiplier: Some(billing_multiplier),
+            feature_settings,
         })
         .await?
     else {
@@ -161,14 +170,6 @@ pub(crate) async fn build_admin_update_user_api_key_response(
             Json(json!({ "detail": "API Key不存在或不属于该用户" })),
         )
             .into_response());
-    };
-    let updated = if let Some(feature_settings) = feature_settings {
-        state
-            .set_user_api_key_feature_settings(&user_id, &api_key_id, feature_settings)
-            .await?
-            .unwrap_or(updated)
-    } else {
-        updated
     };
 
     let is_locked = state

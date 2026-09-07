@@ -403,82 +403,82 @@
               </p>
             </div>
             <div class="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
-                <div
-                  class="order-1 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
-                  data-testid="keep-priority-on-conversion"
-                >
-                  <div class="flex min-w-0 items-center gap-1.5">
-                    <span class="font-medium">格式转换保持优先级</span>
-                    <HelpHint
-                      label="格式转换保持优先级"
-                      text="开启后，跨 API 格式转换的候选不会被降级到同格式候选之后；Provider 自身的同名开关仍单独生效。"
-                    />
-                  </div>
-                  <Switch
-                    :model-value="keepPriorityOnConversion"
-                    :disabled="saving"
-                    aria-label="格式转换保持优先级"
-                    @update:model-value="updateKeepPriorityOnConversion"
+              <div
+                class="order-1 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
+                data-testid="keep-priority-on-conversion"
+              >
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span class="font-medium">格式转换保持优先级</span>
+                  <HelpHint
+                    label="格式转换保持优先级"
+                    text="开启后，跨 API 格式转换的候选不会被降级到同格式候选之后；Provider 自身的同名开关仍单独生效。"
                   />
                 </div>
-                <div
-                  class="order-4 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
-                  data-testid="sticky-key-attempts"
-                >
-                  <div class="flex min-w-0 items-center gap-1.5">
-                    <span class="font-medium">错误重试次数</span>
-                    <HelpHint
-                      label="错误重试次数"
-                      text="首个候选（缓存亲和命中的 Key）的总尝试次数。2 表示失败后同 Key 重试 1 次再转移；0 或 1 表示不重试。"
-                    />
-                  </div>
-                  <Input
-                    :model-value="stickyKeyAttempts"
-                    type="number"
-                    min="0"
-                    max="99"
-                    class="w-20 shrink-0"
-                    :disabled="saving"
-                    aria-label="错误重试次数"
-                    @update:model-value="updateStickyKeyAttempts"
+                <Switch
+                  :model-value="keepPriorityOnConversion"
+                  :disabled="saving"
+                  aria-label="格式转换保持优先级"
+                  @update:model-value="updateKeepPriorityOnConversion"
+                />
+              </div>
+              <div
+                class="order-4 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
+                data-testid="sticky-key-attempts"
+              >
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span class="font-medium">错误重试次数</span>
+                  <HelpHint
+                    label="错误重试次数"
+                    text="首个候选（缓存亲和命中的 Key）的总尝试次数。2 表示失败后同 Key 重试 1 次再转移；0 或 1 表示不重试。"
                   />
                 </div>
-                <div
-                  class="order-3 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
-                  data-testid="cf-heartbeat"
-                >
-                  <div class="flex min-w-0 items-center gap-1.5">
-                    <span class="font-medium">CF保持心跳</span>
-                    <HelpHint
-                      label="CF保持心跳"
-                      text="同步生图和标准文本非流式失败时保持外层 HTTP 状态为 200，并在响应体中返回错误。"
-                    />
-                  </div>
-                  <Switch
-                    :model-value="cfHeartbeat"
-                    :disabled="saving"
-                    aria-label="CF保持心跳"
-                    @update:model-value="updateExecutionPolicy('enable_cf_heartbeat', $event)"
+                <Input
+                  :model-value="stickyKeyAttempts"
+                  type="number"
+                  min="0"
+                  max="99"
+                  class="w-20 shrink-0"
+                  :disabled="saving"
+                  aria-label="错误重试次数"
+                  @update:model-value="updateStickyKeyAttempts"
+                />
+              </div>
+              <div
+                class="order-3 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
+                data-testid="cf-heartbeat"
+              >
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span class="font-medium">CF保持心跳</span>
+                  <HelpHint
+                    label="CF保持心跳"
+                    text="同步生图和标准文本非流式失败时保持外层 HTTP 状态为 200，并在响应体中返回错误。"
                   />
                 </div>
-                <div
-                  class="order-2 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
-                  data-testid="cyber-continue-failover"
-                >
-                  <div class="flex min-w-0 items-center gap-1.5">
-                    <span class="font-medium">Cyber继续转移</span>
-                    <HelpHint
-                      label="Cyber继续转移"
-                      text="响应开始前遇到 Cyber Policy 错误时继续故障转移。"
-                    />
-                  </div>
-                  <Switch
-                    :model-value="cyberContinueFailover"
-                    :disabled="saving"
-                    aria-label="Cyber继续转移"
-                    @update:model-value="updateExecutionPolicy('cyber_continue_failover', $event)"
+                <Switch
+                  :model-value="cfHeartbeat"
+                  :disabled="saving"
+                  aria-label="CF保持心跳"
+                  @update:model-value="updateExecutionPolicy('enable_cf_heartbeat', $event)"
+                />
+              </div>
+              <div
+                class="order-2 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
+                data-testid="cyber-continue-failover"
+              >
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span class="font-medium">Cyber继续转移</span>
+                  <HelpHint
+                    label="Cyber继续转移"
+                    text="响应开始前遇到 Cyber Policy 错误时继续故障转移。"
                   />
                 </div>
+                <Switch
+                  :model-value="cyberContinueFailover"
+                  :disabled="saving"
+                  aria-label="Cyber继续转移"
+                  @update:model-value="updateExecutionPolicy('cyber_continue_failover', $event)"
+                />
+              </div>
             </div>
           </section>
 
@@ -574,191 +574,192 @@
               请先在下方选择一个模型，再配置该模型的优先级模式和调度策略。
             </p>
 
-          <section
-            v-if="sortingScope === 'unified'"
-            class="space-y-4"
-          >
-            <RoutingPriorityPolicyEditor
-              :config="draft.config_json"
-              :model="DEFAULT_ROUTING_POLICY_MODEL"
-              :show-priority-mode="false"
-              :show-scheduling-mode="false"
-              subtitle="统一作用于当前策略的所有模型"
-              @update:config="updateDraftConfig"
-            />
-          </section>
+            <section
+              v-if="sortingScope === 'unified'"
+              class="space-y-4"
+            >
+              <RoutingPriorityPolicyEditor
+                :config="draft.config_json"
+                :model="DEFAULT_ROUTING_POLICY_MODEL"
+                :show-priority-mode="false"
+                :show-scheduling-mode="false"
+                subtitle="统一作用于当前策略的所有模型"
+                @update:config="updateDraftConfig"
+              />
+            </section>
 
-          <section v-else>
-            <div class="mb-3">
-              <h3 class="text-sm font-medium">
-                按模型配置
-              </h3>
-              <p class="mt-1 text-xs text-muted-foreground">
-                选择模型后，在下方配置该模型的提供商排序。
-              </p>
-            </div>
-            <div class="flex max-h-[560px] flex-col gap-3 overflow-hidden rounded-lg border border-border/60 p-3">
-              <div class="grid grid-cols-2 gap-3">
-                <Input
-                  v-model="globalModelSearch"
-                  placeholder="搜索模型"
-                  class="w-full"
-                />
-                <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/40 p-1 text-xs">
-                  <button
-                    v-for="filter in modelFilters"
-                    :key="filter.value"
-                    type="button"
-                    class="h-9 rounded-md px-3 font-medium transition-colors"
-                    :class="modelFilter === filter.value
-                      ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
-                      : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
-                    @click="modelFilter = filter.value"
-                  >
-                    {{ filter.label }}
-                  </button>
+            <section v-else>
+              <div class="mb-3">
+                <h3 class="text-sm font-medium">
+                  按模型配置
+                </h3>
+                <p class="mt-1 text-xs text-muted-foreground">
+                  选择模型后，在下方配置该模型的提供商排序。
+                </p>
+              </div>
+              <div class="flex max-h-[560px] flex-col gap-3 overflow-hidden rounded-lg border border-border/60 p-3">
+                <div class="grid grid-cols-2 gap-3">
+                  <Input
+                    v-model="globalModelSearch"
+                    placeholder="搜索模型"
+                    class="w-full"
+                  />
+                  <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/40 p-1 text-xs">
+                    <button
+                      v-for="filter in modelFilters"
+                      :key="filter.value"
+                      type="button"
+                      class="h-9 rounded-md px-3 font-medium transition-colors"
+                      :class="modelFilter === filter.value
+                        ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
+                        : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
+                      @click="modelFilter = filter.value"
+                    >
+                      {{ filter.label }}
+                    </button>
+                  </div>
                 </div>
-              </div>
 
-              <div
-                v-if="loadingGlobalModels"
-                class="rounded-md border border-dashed border-border/70 px-3 py-6 text-center text-xs text-muted-foreground"
-              >
-                正在加载模型
-              </div>
-              <div
-                v-else-if="globalModelsError"
-                class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
-              >
-                {{ globalModelsError }}
-              </div>
-              <div
-                v-else-if="modelRows.length === 0"
-                class="rounded-md border border-dashed border-border/70 px-3 py-6 text-center text-xs text-muted-foreground"
-              >
-                {{ globalModelSearch.trim() ? '未匹配到模型' : modelFilter === 'configured' ? '暂无已配置模型' : '暂无未配置模型' }}
-              </div>
-              <div
-                v-else
-                class="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1"
-              >
                 <div
-                  v-for="row in modelRows"
-                  :key="row.name"
-                  class="rounded-lg border transition-colors"
-                  :class="selectedPerModelName === row.name
-                    ? 'border-primary/50 bg-primary/5'
-                    : 'border-border/60'"
+                  v-if="loadingGlobalModels"
+                  class="rounded-md border border-dashed border-border/70 px-3 py-6 text-center text-xs text-muted-foreground"
                 >
-                  <div class="flex w-full items-center gap-3 px-4 py-3">
-                    <button
-                      type="button"
-                      class="flex min-w-0 flex-1 items-center gap-3 text-left text-sm"
-                      @click="selectGlobalModel(row.name)"
-                    >
-                      <span
-                        v-if="row.configured"
-                        class="h-2 w-2 shrink-0 rounded-full bg-primary"
-                        aria-hidden="true"
-                      />
-                      <Plus
-                        v-else
-                        class="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-                        aria-hidden="true"
-                      />
-                      <span class="min-w-0 flex-1">
-                        <span class="block truncate font-medium">{{ row.displayName }}</span>
-                        <span class="block truncate text-xs text-muted-foreground">{{ row.name }}</span>
-                      </span>
-                    </button>
-                    <template v-if="selectedPerModelName === row.name && activePerModelPolicy">
-                      <DropdownMenu>
-                        <DropdownMenuTrigger as-child>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            class="h-8 w-8 shrink-0 text-muted-foreground/70 hover:text-foreground"
-                            :disabled="copySourceCandidates.length === 0"
-                            title="加载其他模型配置"
-                          >
-                            <Copy class="h-4 w-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent
-                          align="end"
-                          class="max-h-[320px] overflow-y-auto"
-                        >
-                          <DropdownMenuItem
-                            v-for="source in copySourceCandidates"
-                            :key="source.model"
-                            @select="copyModelConfig(source.model)"
-                          >
-                            <span class="min-w-0">
-                              <span class="block truncate text-sm font-medium">{{ source.label }}</span>
-                              <span class="block truncate text-xs text-muted-foreground">{{ source.model }}</span>
-                            </span>
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        class="h-8 w-8 shrink-0 text-muted-foreground/70 hover:text-foreground"
-                        :disabled="!canSaveCurrentModel"
-                        title="保存到草稿"
-                        @click="saveCurrentModel"
-                      >
-                        <Save class="h-4 w-4" />
-                      </Button>
-                      <Button
-                        v-if="hasModelPolicy(activePerModelPolicy.model)"
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        class="h-8 w-8 shrink-0"
-                        :class="canRemoveCurrentModel ? 'text-muted-foreground/70 hover:text-destructive' : 'text-muted-foreground/30'"
-                        :disabled="!canRemoveCurrentModel"
-                        :title="canRemoveCurrentModel ? '移除当前模型排序' : '当前有未保存改动，不能移除'"
-                        @click="removePerModelPolicy(activePerModelPolicy.model)"
-                      >
-                        <Trash2 class="h-4 w-4" />
-                      </Button>
-                    </template>
-                    <button
-                      type="button"
-                      class="shrink-0"
-                      @click="selectGlobalModel(row.name)"
-                    >
-                      <ChevronDown
-                        class="h-4 w-4 text-muted-foreground transition-transform"
-                        :class="selectedPerModelName === row.name ? 'rotate-180' : ''"
-                      />
-                    </button>
-                  </div>
-
+                  正在加载模型
+                </div>
+                <div
+                  v-else-if="globalModelsError"
+                  class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+                >
+                  {{ globalModelsError }}
+                </div>
+                <div
+                  v-else-if="modelRows.length === 0"
+                  class="rounded-md border border-dashed border-border/70 px-3 py-6 text-center text-xs text-muted-foreground"
+                >
+                  {{ globalModelSearch.trim() ? '未匹配到模型' : modelFilter === 'configured' ? '暂无已配置模型' : '暂无未配置模型' }}
+                </div>
+                <div
+                  v-else
+                  class="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1"
+                >
                   <div
-                    v-if="selectedPerModelName === row.name && activePerModelPolicy"
-                    class="border-t border-border/60 p-4"
+                    v-for="row in modelRows"
+                    :key="row.name"
+                    class="rounded-lg border transition-colors"
+                    :class="selectedPerModelName === row.name
+                      ? 'border-primary/50 bg-primary/5'
+                      : 'border-border/60'"
                   >
-                    <RoutingPriorityPolicyEditor
-                      :config="activeConfigForReading"
-                      :model="activePerModelPolicy.model"
-                      :priority-mode="modelPriorityMode(activePerModelPolicy.model)"
-                      :scheduling-mode="modelSchedulingMode(activePerModelPolicy.model)"
-                      :show-priority-mode="false"
-                      :show-scheduling-mode="false"
-                      :subtitle="`仅作用于 ${activePerModelPolicy.model}`"
-                      @update:config="updateEditingConfig"
-                      @update:priority-mode="mode => updateModelPriorityMode(activePerModelPolicy.model, mode)"
-                      @update:scheduling-mode="mode => updateModelSchedulingMode(activePerModelPolicy.model, mode)"
-                    />
+                    <div class="flex w-full items-center gap-3 px-4 py-3">
+                      <button
+                        type="button"
+                        class="flex min-w-0 flex-1 items-center gap-3 text-left text-sm"
+                        @click="selectGlobalModel(row.name)"
+                      >
+                        <span
+                          v-if="row.configured"
+                          class="h-2 w-2 shrink-0 rounded-full bg-primary"
+                          aria-hidden="true"
+                        />
+                        <Plus
+                          v-else
+                          class="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                          aria-hidden="true"
+                        />
+                        <span class="min-w-0 flex-1">
+                          <span class="block truncate font-medium">{{ row.displayName }}</span>
+                          <span class="block truncate text-xs text-muted-foreground">{{ row.name }}</span>
+                        </span>
+                      </button>
+                      <template v-if="selectedPerModelName === row.name && activePerModelPolicy">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger as-child>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              class="h-8 w-8 shrink-0 text-muted-foreground/70 hover:text-foreground"
+                              :disabled="copySourceCandidates.length === 0"
+                              title="加载其他模型配置"
+                            >
+                              <Copy class="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent
+                            align="end"
+                            class="max-h-[320px] overflow-y-auto"
+                          >
+                            <DropdownMenuItem
+                              v-for="source in copySourceCandidates"
+                              :key="source.model"
+                              @select="copyModelConfig(source.model)"
+                            >
+                              <span class="min-w-0">
+                                <span class="block truncate text-sm font-medium">{{ source.label }}</span>
+                                <span class="block truncate text-xs text-muted-foreground">{{ source.model }}</span>
+                              </span>
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          class="h-8 w-8 shrink-0 text-muted-foreground/70 hover:text-foreground"
+                          :disabled="!canSaveCurrentModel"
+                          title="保存到草稿"
+                          @click="saveCurrentModel"
+                        >
+                          <Save class="h-4 w-4" />
+                        </Button>
+                        <Button
+                          v-if="hasModelPolicy(activePerModelPolicy.model)"
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          class="h-8 w-8 shrink-0"
+                          :class="canRemoveCurrentModel ? 'text-muted-foreground/70 hover:text-destructive' : 'text-muted-foreground/30'"
+                          :disabled="!canRemoveCurrentModel"
+                          :title="canRemoveCurrentModel ? '移除当前模型排序' : '当前有未保存改动，不能移除'"
+                          @click="removePerModelPolicy(activePerModelPolicy.model)"
+                        >
+                          <Trash2 class="h-4 w-4" />
+                        </Button>
+                      </template>
+                      <button
+                        type="button"
+                        class="shrink-0"
+                        @click="selectGlobalModel(row.name)"
+                      >
+                        <ChevronDown
+                          class="h-4 w-4 text-muted-foreground transition-transform"
+                          :class="selectedPerModelName === row.name ? 'rotate-180' : ''"
+                        />
+                      </button>
+                    </div>
+
+                    <div
+                      v-if="selectedPerModelName === row.name && activePerModelPolicy"
+                      class="border-t border-border/60 p-4"
+                    >
+                      <RoutingPriorityPolicyEditor
+                        :config="activeConfigForReading"
+                        :model="activePerModelPolicy.model"
+                        :model-id="globalModelIdFor(activePerModelPolicy.model)"
+                        :priority-mode="modelPriorityMode(activePerModelPolicy.model)"
+                        :scheduling-mode="modelSchedulingMode(activePerModelPolicy.model)"
+                        :show-priority-mode="false"
+                        :show-scheduling-mode="false"
+                        :subtitle="`仅作用于 ${activePerModelPolicy.model}`"
+                        @update:config="updateEditingConfig"
+                        @update:priority-mode="mode => updateModelPriorityMode(activePerModelPolicy.model, mode)"
+                        @update:scheduling-mode="mode => updateModelSchedulingMode(activePerModelPolicy.model, mode)"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          </section>
+            </section>
           </section>
         </div>
       </Card>
@@ -807,6 +808,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -1458,6 +1460,11 @@ function globalModelLabel(modelName: string): string {
   return `${model.display_name} (${model.name})`
 }
 
+function globalModelIdFor(modelName: string): string | undefined {
+  const normalizedName = modelName.trim()
+  return globalModels.value.find(item => item.name.trim() === normalizedName)?.id
+}
+
 function replaceGroup(group: RoutingGroupRecord, select = true): void {
   const normalized = normalizeRecord(group)
   const index = groups.value.findIndex(item => item.id === normalized.id)
@@ -1728,7 +1735,7 @@ async function confirmDeleteDraft(): Promise<void> {
 
 function formatUnixSeconds(value?: number | null): string {
   if (!value) return '-'
-  return new Date(value * 1000).toLocaleString('zh-CN')
+  return new Date(value * 1000).toLocaleString(getI18nLocale())
 }
 
 onMounted(() => {

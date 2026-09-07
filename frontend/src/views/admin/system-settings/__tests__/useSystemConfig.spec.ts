@@ -76,8 +76,27 @@ describe('useSystemConfig', () => {
     const state = useSystemConfig()
     await state.loadSystemConfig()
 
-    expect(state.systemConfig.value.request_record_level).toBe('full')
+    expect(state.systemConfig.value.request_record_level).toBe('basic')
     expect(state.systemConfig.value).not.toHaveProperty('max_request_body_size')
     expect(state.systemConfig.value).not.toHaveProperty('max_response_body_size')
+  })
+
+  it('saves only the proxy node and ignores retired DNS allowlist settings', async () => {
+    getAllSystemConfigsMock.mockResolvedValue([
+      { key: 'system_proxy_node_id', value: 'node-1' },
+      { key: 'execution_extra_trusted_dns_hosts', value: ['custom.example.com'] },
+    ])
+    updateSystemConfigMock.mockResolvedValue(undefined)
+    const state = useSystemConfig()
+    await state.loadSystemConfig()
+    expect(state.systemConfig.value).not.toHaveProperty('execution_extra_trusted_dns_hosts')
+    state.systemConfig.value.system_proxy_node_id = 'node-2'
+    expect(state.hasProxyConfigChanges.value).toBe(true)
+    await state.saveProxyConfig()
+    expect(updateSystemConfigMock).toHaveBeenCalledTimes(1)
+    expect(updateSystemConfigMock).toHaveBeenCalledWith(
+      'system_proxy_node_id', 'node-2', '系统默认代理节点 ID'
+    )
+    expect(state.hasProxyConfigChanges.value).toBe(false)
   })
 })

@@ -1,6 +1,6 @@
 //! Responses WebSocket end-to-end coverage.
 //!
-//! Every test starts a protocol-aware mock upstream, seeds a throwaway SQLite
+//! Every test starts a protocol-aware mock upstream, seeds a throwaway PostgreSQL
 //! store, mounts the real gateway router, and drives the public
 //! `/v1/responses` WebSocket the way a client would.
 //!
@@ -9,13 +9,12 @@
 //! `response.completed` is not evidence that the turn was ever accounted for —
 //! only the row is.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
-use aether_data::repository::auth::CreateStandaloneApiKeyRecord;
+use aether_data::repository::auth::{CreateStandaloneApiKeyRecord, CreateUserApiKeyRecord};
 use aether_data::repository::wallet::WalletLookupKey;
 use aether_data::{
     DataBackends, DataLayerConfig, DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig,
@@ -28,7 +27,7 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageAuditListQuery};
 use aether_gateway::{build_router_with_state, AppState, GatewayDataConfig, UsageRuntimeConfig};
-use aether_testkit::SpawnedServer;
+use aether_testkit::{ManagedPostgresServer, SpawnedServer};
 use axum::extract::ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{HeaderMap, Uri};
@@ -159,6 +158,38 @@ async fn continuation_reuses_one_upstream_connection_and_bills_both_turns() -> R
         "each turn gets its own logical request identity"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn weekly_plan_request_limit_counts_turns_but_not_the_websocket_upgrade(
+) -> Result<(), BoxError> {
+    let harness = Harness::start_with_weekly_request_limit(1).await?;
+    let mut client = harness.connect().await?;
+
+    client
+        .send(response_create(json!({"input": "allowed turn"})))
+        .await?;
+    receive_event(&mut client, "response.completed").await?;
+
+    client
+        .send(response_create(json!({"input": "rejected turn"})))
+        .await?;
+    let rejected = receive_error_or_close(&mut client)
+        .await?
+        .ok_or("gateway closed without a plan-limit error event")?;
+    assert_eq!(rejected["status"], json!(429));
+    assert_eq!(
+        rejected.pointer("/error/code"),
+        Some(&json!("plan_usage_limit_exceeded"))
+    );
+    assert_eq!(
+        harness.upstream.observed_events().await.len(),
+        1,
+        "the rejected logical turn must never reach the upstream"
+    );
+
+    client.close(None).await?;
     Ok(())
 }
 
@@ -717,9 +748,9 @@ fn is_billed(audit: &StoredRequestUsageAudit) -> bool {
 // ---------------------------------------------------------------------------
 
 /// A live gateway wired to a mock Responses WebSocket upstream over a throwaway
-/// SQLite store.
+/// PostgreSQL store.
 struct Harness {
-    database: TemporarySqlite,
+    database: TemporaryPostgres,
     upstream: Arc<MockUpstreamState>,
     websocket_url: String,
     _upstream_server: SpawnedServer,
@@ -793,6 +824,28 @@ impl Harness {
         .await
     }
 
+    async fn start_with_weekly_request_limit(limit: u64) -> Result<Self, BoxError> {
+        let mut harness = Self::start(UpstreamBehavior::CompleteEveryTurn).await?;
+        seed_weekly_request_limit(&harness.database.config, limit).await?;
+        // The gateway may have cached the pre-entitlement auth context during
+        // startup, so restart it after seeding the user-owned key and plan.
+        let data_config = GatewayDataConfig::from_database_config(harness.database.config.clone())
+            .with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY);
+        let state = AppState::new()?
+            .with_data_config_and_background_isolation(data_config, false)?
+            .with_usage_runtime_config(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            })?;
+        let gateway_server = SpawnedServer::start(build_router_with_state(state)).await?;
+        harness.websocket_url = format!(
+            "{}/v1/responses",
+            gateway_server.base_url().replacen("http://", "ws://", 1)
+        );
+        harness._gateway_server = gateway_server;
+        Ok(harness)
+    }
+
     async fn start_with(
         behavior: UpstreamBehavior,
         fixture: ProviderFixture,
@@ -802,7 +855,7 @@ impl Harness {
         let upstream_server =
             SpawnedServer::start(mock_upstream_router(Arc::clone(&upstream))).await?;
 
-        let database = TemporarySqlite::new();
+        let database = TemporaryPostgres::new().await?;
         prepare_and_seed_database(
             &database.config,
             upstream_server.base_url(),
@@ -907,7 +960,7 @@ impl Harness {
     /// Reads the persisted audit rows, oldest first.
     ///
     /// Opens its own handle per call rather than holding one for the lifetime of
-    /// the harness: the gateway keeps its own pool on the same SQLite file for
+    /// the harness: the gateway keeps its own pool on the same database for
     /// the whole test, and an idle second pool only adds contention.
     async fn usage_audits(&self) -> Result<Vec<StoredRequestUsageAudit>, BoxError> {
         let backends = DataBackends::from_config(DataLayerConfig::from_database(
@@ -1305,24 +1358,20 @@ async fn send_mock_event(socket: &mut WebSocket, event: Value) -> Result<(), axu
 // Seeded data store
 // ---------------------------------------------------------------------------
 
-struct TemporarySqlite {
-    directory: PathBuf,
+struct TemporaryPostgres {
+    _server: ManagedPostgresServer,
     config: SqlDatabaseConfig,
 }
 
-impl TemporarySqlite {
-    fn new() -> Self {
-        let directory = std::env::temp_dir().join(format!(
-            "aether-responses-ws-e2e-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let database_path = directory.join("aether.db");
-        Self {
-            directory,
+impl TemporaryPostgres {
+    async fn new() -> Result<Self, BoxError> {
+        let server = ManagedPostgresServer::start().await?;
+        let database_url = server.database_url().to_string();
+        Ok(Self {
+            _server: server,
             config: SqlDatabaseConfig {
-                driver: DatabaseDriver::Sqlite,
-                url: format!("sqlite://{}", database_path.display()),
+                driver: DatabaseDriver::Postgres,
+                url: database_url,
                 pool: SqlPoolConfig {
                     min_connections: 1,
                     max_connections: 4,
@@ -1333,13 +1382,7 @@ impl TemporarySqlite {
                     require_ssl: false,
                 },
             },
-        }
-    }
-}
-
-impl Drop for TemporarySqlite {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.directory);
+        })
     }
 }
 
@@ -1616,6 +1659,150 @@ async fn seed_client_api_key(backends: &DataBackends, user_id: &str) -> Result<(
     {
         return Err("failed to initialize E2E API key wallet".into());
     }
+    Ok(())
+}
+
+async fn seed_weekly_request_limit(
+    database: &SqlDatabaseConfig,
+    limit: u64,
+) -> Result<(), BoxError> {
+    let backends = DataBackends::from_config(DataLayerConfig::from_database(database.clone()))?;
+    let user_id = backends
+        .read()
+        .users()
+        .ok_or("user reader unavailable")?
+        .find_user_auth_by_username("responses-ws-e2e")
+        .await?
+        .ok_or("seeded E2E user unavailable")?
+        .id;
+    backends
+        .write()
+        .auth_api_keys()
+        .ok_or("auth API key writer unavailable")?
+        .delete_standalone_api_key(API_KEY_ID)
+        .await?;
+    backends
+        .write()
+        .auth_api_keys()
+        .ok_or("auth API key writer unavailable")?
+        .create_user_api_key(CreateUserApiKeyRecord {
+            user_id: user_id.clone(),
+            api_key_id: API_KEY_ID.to_string(),
+            key_hash: sha256_hex(CLIENT_API_KEY),
+            key_encrypted: Some(CLIENT_API_KEY.to_string()),
+            name: Some("Responses WebSocket plan-policy E2E".to_string()),
+            allowed_providers: Some(vec![PROVIDER_ID.to_string()]),
+            allowed_api_formats: Some(vec!["openai:responses".to_string()]),
+            allowed_models: Some(vec![PUBLIC_MODEL.to_string()]),
+            ip_rules: None,
+            rate_limit: 0,
+            concurrent_limit: None,
+            force_capabilities: None,
+            feature_settings: None,
+            is_active: true,
+            expires_at_unix_secs: None,
+            auto_delete_on_expiry: false,
+            total_requests: 0,
+            total_tokens: 0,
+            total_cost_usd: 0.0,
+        })
+        .await?;
+
+    let wallet_id = backends
+        .read()
+        .wallets()
+        .ok_or("wallet reader unavailable")?
+        .find(WalletLookupKey::UserId(&user_id))
+        .await?
+        .ok_or("seeded E2E user wallet unavailable")?
+        .id;
+
+    let pool = backends
+        .postgres()
+        .ok_or("PostgreSQL backend unavailable")?
+        .pool();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs()
+        .min(i64::MAX as u64) as i64;
+    sqlx::query(
+        r#"
+INSERT INTO billing_plans (
+  id, title, description, price_amount, price_currency, duration_unit,
+  duration_value, enabled, sort_order, max_active_per_user,
+  purchase_limit_scope, entitlements_json, created_at, updated_at
+) VALUES ($1, 'WS weekly policy', NULL, 0, 'USD', 'month', 1, true, 0, 1,
+          'active_period', $2::text::jsonb,
+          TO_TIMESTAMP($3::bigint::double precision), TO_TIMESTAMP($4::bigint::double precision))
+"#,
+    )
+    .bind("plan-responses-ws-weekly")
+    .bind(
+        json!([{
+            "type": "usage_policy",
+            "rules": [{
+                "metric": "request_count",
+                "window": {"kind": "calendar_week"},
+                "limit": limit
+            }]
+        }])
+        .to_string(),
+    )
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+INSERT INTO payment_orders (
+  id, order_no, wallet_id, user_id, amount_usd, pay_currency, status,
+  payment_method, created_at, paid_at, credited_at, expires_at
+) VALUES ($1, $2, $3, $4, 0, 'USD', 'paid', 'test',
+          TO_TIMESTAMP($5::bigint::double precision), TO_TIMESTAMP($6::bigint::double precision),
+          TO_TIMESTAMP($7::bigint::double precision), TO_TIMESTAMP($8::bigint::double precision))
+"#,
+    )
+    .bind("order-responses-ws-weekly")
+    .bind("order-no-responses-ws-weekly")
+    .bind(&wallet_id)
+    .bind(&user_id)
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .bind(now + 86_400)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+INSERT INTO user_plan_entitlements (
+  id, user_id, plan_id, payment_order_id, status, starts_at, expires_at,
+  entitlements_snapshot, created_at, updated_at
+) VALUES ($1, $2, $3, $4, 'active',
+          TO_TIMESTAMP($5::bigint::double precision), TO_TIMESTAMP($6::bigint::double precision),
+          $7::text::jsonb, TO_TIMESTAMP($8::bigint::double precision), TO_TIMESTAMP($9::bigint::double precision))
+"#,
+    )
+    .bind("entitlement-responses-ws-weekly")
+    .bind(&user_id)
+    .bind("plan-responses-ws-weekly")
+    .bind("order-responses-ws-weekly")
+    .bind(now - 1)
+    .bind(now + 86_400)
+    .bind(
+        json!([{
+            "type": "usage_policy",
+            "rules": [{
+                "metric": "request_count",
+                "window": {"kind": "calendar_week"},
+                "limit": limit
+            }]
+        }])
+        .to_string(),
+    )
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

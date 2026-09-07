@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use sqlx::{
     migrate::{AppliedMigration, Migrate},
-    query, query_scalar, Connection, PgConnection, PgPool, SqlitePool,
+    query, query_scalar, Connection, PgConnection, PgPool,
 };
 
 use aether_data_contracts::repository::{
@@ -23,7 +23,8 @@ use super::{
     prepare_database_for_startup,
 };
 use crate::lifecycle::bootstrap::postgres::{
-    snapshot_migrations as empty_database_snapshot_migrations, EMPTY_DATABASE_SNAPSHOT_SQL,
+    snapshot_migrations as empty_database_snapshot_migrations,
+    EMPTY_DATABASE_SNAPSHOT_CUTOFF_VERSION, EMPTY_DATABASE_SNAPSHOT_SQL,
 };
 
 #[derive(Debug)]
@@ -164,6 +165,30 @@ impl ManagedPostgresServer {
             let _ = child.wait();
         }
     }
+}
+
+/// A clean PostgreSQL database is bootstrapped from the schema snapshot first;
+/// migrations after the privacy/security frontier are intentionally left
+/// pending so their data-preserving changes still execute. Exercise the same
+/// prepare-then-run sequence used by gateway startup before asserting that the
+/// database is current.
+async fn prepare_and_apply_clean_postgres_database(pool: &PgPool) {
+    let pending = prepare_database_for_startup(pool)
+        .await
+        .expect("clean database bootstrap should succeed");
+    if !pending.is_empty() {
+        super::run_migrations(pool)
+            .await
+            .expect("pending PostgreSQL migrations should apply");
+    }
+
+    let pending = prepare_database_for_startup(pool)
+        .await
+        .expect("PostgreSQL startup preparation should re-check migrations");
+    assert!(
+        pending.is_empty(),
+        "clean PostgreSQL database should be current after migrations: {pending:?}"
+    );
 }
 
 fn local_postgres_tests_required() -> bool {
@@ -411,10 +436,12 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260720000000,
             20260727000000,
             20260731000000,
+            20260814000000,
+            20260815000000,
+            20260816000000,
             20260821000000,
-            20260903000000,
-            20260903010000,
-            20260903020000,
+            20260821120000,
+            20260821130000,
         ]
     );
 }
@@ -472,158 +499,6 @@ fn create_table_names(sql: &str) -> BTreeSet<String> {
             )
         })
         .collect()
-}
-
-#[test]
-fn portable_driver_migrations_create_the_postgres_table_set() {
-    let mut postgres_tables = POSTGRES_MIGRATOR
-        .iter()
-        .filter(|migration| migration.migration_type.is_up_migration())
-        .flat_map(|migration| create_table_names(migration.sql.as_ref()))
-        .collect::<BTreeSet<_>>();
-    postgres_tables.remove("schema_backfills");
-
-    let mysql_tables = super::mysql::MIGRATOR
-        .iter()
-        .filter(|migration| migration.migration_type.is_up_migration())
-        .flat_map(|migration| create_table_names(migration.sql.as_ref()))
-        .collect::<BTreeSet<_>>();
-    let sqlite_tables = super::sqlite::MIGRATOR
-        .iter()
-        .filter(|migration| migration.migration_type.is_up_migration())
-        .flat_map(|migration| create_table_names(migration.sql.as_ref()))
-        .collect::<BTreeSet<_>>();
-
-    assert_eq!(mysql_tables, postgres_tables, "MySQL table set drifted");
-    assert_eq!(sqlite_tables, postgres_tables, "SQLite table set drifted");
-}
-
-#[tokio::test]
-async fn migrated_sqlite_columns_match_the_generated_logical_schema() {
-    const GENERATED_SQLITE_SCHEMA: &[&str] = &[
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/schema/generated/sqlite/baseline/001_identity.sql"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/schema/generated/sqlite/baseline/002_provider_catalog.sql"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/schema/generated/sqlite/baseline/003_auth_config.sql"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/schema/generated/sqlite/baseline/004_proxy_nodes.sql"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/schema/generated/sqlite/baseline/005_wallet_billing.sql"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/schema/generated/sqlite/baseline/006_usage.sql"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/schema/generated/sqlite/baseline/007_stats.sql"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/schema/generated/sqlite/baseline/008_background_tasks.sql"
-        )),
-    ];
-
-    let migrated = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .expect("migrated sqlite pool should connect");
-    super::run_sqlite_migrations(&migrated)
-        .await
-        .expect("sqlite migrations should run");
-
-    let generated = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .expect("generated sqlite pool should connect");
-    for source in GENERATED_SQLITE_SCHEMA {
-        sqlx::raw_sql(source)
-            .execute(&generated)
-            .await
-            .expect("generated sqlite schema fragment should run");
-    }
-
-    let migrated_tables = sqlite_portable_table_names(&migrated).await;
-    let generated_tables = sqlite_portable_table_names(&generated).await;
-    assert_eq!(migrated_tables, generated_tables);
-
-    for table in generated_tables {
-        let migrated_columns = sqlite_table_column_names(&migrated, &table).await;
-        let generated_columns = sqlite_table_column_names(&generated, &table).await;
-        assert_eq!(
-            migrated_columns, generated_columns,
-            "SQLite migration columns drifted for table {table}"
-        );
-    }
-
-    let migrated_indexes = sqlite_named_index_names(&migrated).await;
-    let generated_indexes = sqlite_named_index_names(&generated).await;
-    let missing_indexes = generated_indexes
-        .difference(&migrated_indexes)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    assert!(
-        missing_indexes.is_empty(),
-        "SQLite migrations are missing generated logical indexes: {missing_indexes:?}"
-    );
-}
-
-async fn sqlite_portable_table_names(pool: &SqlitePool) -> BTreeSet<String> {
-    query_scalar::<_, String>(
-        r#"
-SELECT name
-FROM sqlite_master
-WHERE type = 'table'
-  AND name NOT LIKE 'sqlite_%'
-  AND name NOT IN ('_sqlx_migrations', 'schema_backfills')
-ORDER BY name
-"#,
-    )
-    .fetch_all(pool)
-    .await
-    .expect("sqlite table names should load")
-    .into_iter()
-    .collect()
-}
-
-async fn sqlite_table_column_names(pool: &SqlitePool, table: &str) -> BTreeSet<String> {
-    query_scalar::<_, String>("SELECT name FROM pragma_table_info(?) ORDER BY cid")
-        .bind(table)
-        .fetch_all(pool)
-        .await
-        .expect("sqlite table columns should load")
-        .into_iter()
-        .collect()
-}
-
-async fn sqlite_named_index_names(pool: &SqlitePool) -> BTreeSet<String> {
-    query_scalar::<_, String>(
-        r#"
-SELECT name
-FROM sqlite_master
-WHERE type = 'index'
-  AND sql IS NOT NULL
-ORDER BY name
-"#,
-    )
-    .fetch_all(pool)
-    .await
-    .expect("sqlite named indexes should load")
-    .into_iter()
-    .collect()
 }
 
 #[test]
@@ -959,455 +834,147 @@ fn split_baseline_sources_match_executable_migrations() {
         EMPTY_DATABASE_SNAPSHOT_SQL,
         compose_manifest("bootstrap/postgres/manifest.txt")
     );
-    assert_eq!(
-        include_str!("../../../../adapters/mysql/migrations/20260403000000_baseline.sql"),
-        compose_manifest("drivers/mysql/baseline/manifest.txt")
-    );
-    assert_eq!(
-        include_str!("../../../../adapters/sqlite/migrations/20260403000000_baseline.sql"),
-        compose_manifest("drivers/sqlite/baseline/manifest.txt")
-    );
 }
 
 #[test]
-fn mysql_and_sqlite_migrations_do_not_use_postgres_jsonb() {
-    let mysql_sources = super::mysql::MIGRATOR
-        .iter()
-        .filter(|migration| migration.migration_type.is_up_migration())
-        .map(|migration| migration.sql.as_ref());
-    let sqlite_sources = super::sqlite::MIGRATOR
-        .iter()
-        .filter(|migration| migration.migration_type.is_up_migration())
-        .map(|migration| migration.sql.as_ref());
-
-    for source in mysql_sources.chain(sqlite_sources) {
-        assert!(
-            !source.to_ascii_lowercase().contains("jsonb"),
-            "Postgres jsonb must stay out of MySQL/SQLite migrations"
-        );
-    }
-}
-
-#[test]
-fn worker_boot_cleanup_migration_is_enabled_for_every_driver() {
+fn worker_boot_cleanup_migration_is_enabled_for_postgres() {
     const VERSION: i64 = 20260731000000;
 
-    for (driver, migrator) in [
-        ("postgres", &POSTGRES_MIGRATOR),
-        ("mysql", &super::mysql::MIGRATOR),
-        ("sqlite", &super::sqlite::MIGRATOR),
+    let (driver, migrator) = ("postgres", &POSTGRES_MIGRATOR);
+    let migration = migrator
+        .iter()
+        .find(|migration| migration.version == VERSION)
+        .unwrap_or_else(|| panic!("{driver} worker boot cleanup migration should be embedded"));
+    let sql = migration.sql.as_ref();
+
+    for required in [
+        "DELETE FROM background_task_events",
+        "DELETE FROM background_task_runs",
+        "id LIKE 'boot:%'",
+        "owner_instance IS NOT NULL",
+        "created_by = 'system'",
+        "progress_message = 'worker booted'",
     ] {
-        let migration = migrator
-            .iter()
-            .find(|migration| migration.version == VERSION)
-            .unwrap_or_else(|| panic!("{driver} worker boot cleanup migration should be embedded"));
-        let sql = migration.sql.as_ref();
-
-        for required in [
-            "DELETE FROM background_task_events",
-            "DELETE FROM background_task_runs",
-            "id LIKE 'boot:%'",
-            "owner_instance IS NOT NULL",
-            "created_by = 'system'",
-            "progress_message = 'worker booted'",
-        ] {
-            assert!(
-                sql.contains(required),
-                "{driver} worker boot cleanup migration is missing {required}"
-            );
-        }
-
         assert!(
-            sql.find("DELETE FROM background_task_events")
-                < sql.find("DELETE FROM background_task_runs"),
-            "{driver} must delete child events before worker boot runs"
+            sql.contains(required),
+            "{driver} worker boot cleanup migration is missing {required}"
+        );
+    }
+
+    assert!(
+        sql.find("DELETE FROM background_task_events")
+            < sql.find("DELETE FROM background_task_runs"),
+        "{driver} must delete child events before worker boot runs"
+    );
+}
+
+const UNPUBLISHED_LEGACY_DATA_REWRITE_MIGRATION_VERSIONS: &[i64] = &[
+    20260822000000,
+    20260822010000,
+    20260822020000,
+    20260827000000,
+    20260827010000,
+    20260827020000,
+    20260827030000,
+    20260829000000,
+    20260903010000,
+];
+
+#[test]
+fn unpublished_legacy_data_rewrite_migrations_are_absent_for_postgres() {
+    let (driver, migrator) = ("postgres", &POSTGRES_MIGRATOR);
+    for version in UNPUBLISHED_LEGACY_DATA_REWRITE_MIGRATION_VERSIONS {
+        assert!(
+            migrator
+                .iter()
+                .all(|migration| migration.version != *version),
+            "{driver} must not embed unpublished legacy rewrite migration {version}"
         );
     }
 }
 
 #[test]
-fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
-    let mysql_versions = super::mysql::MIGRATOR
+fn deleted_user_history_schema_decoupling_does_not_rewrite_history() {
+    const VERSION: i64 = 20260827050000;
+
+    let (driver, migrator) = ("postgres", &POSTGRES_MIGRATOR);
+    let migration = migrator
         .iter()
-        .filter(|migration| migration.migration_type.is_up_migration())
-        .map(|migration| migration.version)
-        .collect::<Vec<_>>();
-    let sqlite_versions = super::sqlite::MIGRATOR
+        .find(|migration| migration.version == VERSION)
+        .unwrap_or_else(|| panic!("{driver} user-history schema migration should be embedded"));
+    let sql = migration
+        .sql
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_uppercase();
+    for history_rewrite in ["UPDATE ", "DELETE ", "TRUNCATE ", "REPLACE ", "MERGE "] {
+        assert!(
+            !sql.split(';')
+                .any(|statement| statement.trim_start().starts_with(history_rewrite)),
+            "{driver} user-history schema migration rewrites legacy rows with {history_rewrite}"
+        );
+    }
+
+    let postgres_migration = POSTGRES_MIGRATOR
         .iter()
-        .filter(|migration| migration.migration_type.is_up_migration())
-        .map(|migration| migration.version)
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        mysql_versions,
-        vec![
-            20260403000000,
-            20260507120000,
-            20260508000000,
-            20260509000000,
-            20260509120000,
-            20260510120000,
-            20260511120000,
-            20260511130000,
-            20260512000000,
-            20260512090000,
-            20260512110000,
-            20260516000000,
-            20260518000000,
-            20260519000000,
-            20260519120000,
-            20260519130000,
-            20260520000000,
-            20260520010000,
-            20260524000000,
-            20260527000000,
-            20260528000000,
-            20260528020000,
-            20260725010000,
-            20260725020000,
-            20260725030000,
-            20260727000000,
-            20260731000000,
-            20260821000000,
-            20260903000000,
-            20260903010000,
-            20260903020000,
-        ]
-    );
-    assert_eq!(
-        sqlite_versions,
-        vec![
-            20260403000000,
-            20260507120000,
-            20260508000000,
-            20260509000000,
-            20260509120000,
-            20260510120000,
-            20260511120000,
-            20260511130000,
-            20260512000000,
-            20260512090000,
-            20260512110000,
-            20260516000000,
-            20260518000000,
-            20260519000000,
-            20260519120000,
-            20260519130000,
-            20260520000000,
-            20260520010000,
-            20260524000000,
-            20260527000000,
-            20260528000000,
-            20260528020000,
-            20260725000000,
-            20260725010000,
-            20260725020000,
-            20260725030000,
-            20260725040000,
-            20260727000000,
-            20260731000000,
-            20260821000000,
-            20260903000000,
-            20260903010000,
-            20260903020000,
-        ]
-    );
-}
-
-#[tokio::test]
-async fn sqlite_imported_timestamp_migration_normalizes_text_storage() {
-    let pool = SqlitePool::connect("sqlite::memory:")
-        .await
-        .expect("sqlite pool should connect");
-    super::run_sqlite_migrations(&pool)
-        .await
-        .expect("sqlite migrations should run");
-
-    query(
-        r#"
-INSERT INTO global_models (id, name, created_at, updated_at)
-VALUES
-  ('timestamp-rfc3339', 'timestamp-rfc3339', '1970-01-01T00:00:01Z', '1970-01-01T08:00:02+08:00'),
-  ('timestamp-sqlalchemy', 'timestamp-sqlalchemy', '1970-01-01 00:00:03.123456', '1970-01-01 00:00:04.987654'),
-  ('timestamp-integer', 'timestamp-integer', 5, 6);
-"#,
-    )
-    .execute(&pool)
-    .await
-    .expect("timestamp fixtures should insert");
-    query(
-        r#"
-INSERT INTO "usage" (request_id, created_at_unix_ms, updated_at_unix_secs)
-VALUES ('timestamp-usage', '1970-01-01T00:00:01.234900Z', '1970-01-01T00:00:02Z');
-"#,
-    )
-    .execute(&pool)
-    .await
-    .expect("usage timestamp fixture should insert");
-
-    let migration = super::sqlite::MIGRATOR
-        .iter()
-        .find(|migration| migration.version == 20260725000000)
-        .expect("timestamp normalization migration should be embedded");
-    sqlx::raw_sql(migration.sql.as_ref())
-        .execute(&pool)
-        .await
-        .expect("timestamp normalization migration should apply");
-
-    let rows = sqlx::query_as::<_, (String, i64, i64, String, String)>(
-        r#"
-SELECT id, created_at, updated_at, typeof(created_at), typeof(updated_at)
-FROM global_models
-WHERE id LIKE 'timestamp-%'
-ORDER BY id
-"#,
-    )
-    .fetch_all(&pool)
-    .await
-    .expect("normalized timestamps should decode as integers");
-
-    assert_eq!(
-        rows,
-        vec![
-            (
-                "timestamp-integer".to_string(),
-                5,
-                6,
-                "integer".to_string(),
-                "integer".to_string(),
-            ),
-            (
-                "timestamp-rfc3339".to_string(),
-                1,
-                2,
-                "integer".to_string(),
-                "integer".to_string(),
-            ),
-            (
-                "timestamp-sqlalchemy".to_string(),
-                3,
-                4,
-                "integer".to_string(),
-                "integer".to_string(),
-            ),
-        ]
-    );
-
-    let usage_timestamps = sqlx::query_as::<_, (i64, i64, String, String)>(
-        r#"
-SELECT created_at_unix_ms, updated_at_unix_secs,
-       typeof(created_at_unix_ms), typeof(updated_at_unix_secs)
-FROM "usage"
-WHERE request_id = 'timestamp-usage'
-"#,
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("normalized usage timestamps should decode as integers");
-    assert_eq!(
-        usage_timestamps,
-        (1, 2, "integer".to_string(), "integer".to_string())
-    );
-}
-
-#[tokio::test]
-async fn sqlite_imported_timestamp_migration_rejects_non_integer_storage() {
-    let pool = SqlitePool::connect("sqlite::memory:")
-        .await
-        .expect("sqlite pool should connect");
-    super::run_sqlite_migrations(&pool)
-        .await
-        .expect("sqlite migrations should run");
-    query(
-        r#"
-INSERT INTO global_models (id, name, created_at, updated_at)
-VALUES ('timestamp-invalid', 'timestamp-invalid', 1.5, 1);
-"#,
-    )
-    .execute(&pool)
-    .await
-    .expect("non-integer timestamp fixture should insert");
-
-    let migration = super::sqlite::MIGRATOR
-        .iter()
-        .find(|migration| migration.version == 20260725000000)
-        .expect("timestamp normalization migration should be embedded");
-    let err = sqlx::raw_sql(migration.sql.as_ref())
-        .execute(&pool)
-        .await
-        .expect_err("non-integer timestamp should fail the migration");
-    assert!(err
-        .to_string()
-        .contains("imported_timestamp_storage_must_be_integer"));
-}
-
-#[tokio::test]
-async fn sqlite_remaining_timestamp_migration_repairs_other_repository_domains() {
-    let pool = SqlitePool::connect("sqlite::memory:")
-        .await
-        .expect("sqlite pool should connect");
-    super::run_sqlite_migrations(&pool)
-        .await
-        .expect("sqlite migrations should run");
-
-    query(
-        r#"
-INSERT INTO users (id, email, username, auth_source, created_at, updated_at)
-VALUES ('timestamp-user', 'timestamp@example.com', 'timestamp-user', 'local', 1, 1);
-
-INSERT INTO audit_logs (id, event_type, description, created_at)
-VALUES ('timestamp-audit', 'test', 'test', '1970-01-01T00:00:01Z');
-
-INSERT INTO request_candidates (
-  id, request_id, candidate_index, status, created_at, started_at, finished_at
-) VALUES (
-  'timestamp-candidate', 'timestamp-request', 0, 'success',
-  '1970-01-01T00:00:02Z', '1970-01-01T00:00:03Z', '1970-01-01T00:00:04Z'
-);
-
-INSERT INTO stats_daily (id, date, created_at, updated_at)
-VALUES (
-  'timestamp-stats', '1970-01-02',
-  '1970-01-01T00:00:05Z', '1970-01-01T00:00:06Z'
-);
-
-INSERT INTO user_sessions (
-  id, user_id, client_device_id, refresh_token_hash,
-  last_seen_at, expires_at, created_at, updated_at
-) VALUES (
-  'timestamp-session', 'timestamp-user', 'device', 'hash',
-  '1970-01-01T00:00:07Z', '1970-01-01T00:00:08Z',
-  '1970-01-01T00:00:09Z', '1970-01-01T00:00:10Z'
-);
-"#,
-    )
-    .execute(&pool)
-    .await
-    .expect("remaining timestamp fixtures should insert");
-
-    let migration = super::sqlite::MIGRATOR
-        .iter()
-        .find(|migration| migration.version == 20260725040000)
-        .expect("remaining timestamp migration should be embedded");
-    sqlx::raw_sql(migration.sql.as_ref())
-        .execute(&pool)
-        .await
-        .expect("remaining timestamp migration should apply");
-
-    let audit = sqlx::query_as::<_, (i64, String)>(
-        "SELECT created_at, typeof(created_at) FROM audit_logs WHERE id = 'timestamp-audit'",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("normalized audit timestamp should load");
-    assert_eq!(audit, (1, "integer".to_string()));
-
-    let candidate = sqlx::query_as::<_, (i64, i64, i64, String, String, String)>(
-        r#"
-SELECT created_at, started_at, finished_at,
-       typeof(created_at), typeof(started_at), typeof(finished_at)
-FROM request_candidates
-WHERE id = 'timestamp-candidate'
-"#,
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("normalized candidate timestamps should load");
-    assert_eq!(
-        candidate,
-        (
-            2,
-            3,
-            4,
-            "integer".to_string(),
-            "integer".to_string(),
-            "integer".to_string(),
-        )
-    );
-
-    let stats = sqlx::query_as::<_, (i64, i64, i64, String, String, String)>(
-        r#"
-SELECT date, created_at, updated_at,
-       typeof(date), typeof(created_at), typeof(updated_at)
-FROM stats_daily
-WHERE id = 'timestamp-stats'
-"#,
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("normalized stats timestamps should load");
-    assert_eq!(
-        stats,
-        (
-            86_400,
-            5,
-            6,
-            "integer".to_string(),
-            "integer".to_string(),
-            "integer".to_string(),
-        )
-    );
-
-    let session = sqlx::query_as::<_, (i64, i64, i64, i64, String, String, String, String)>(
-        r#"
-SELECT last_seen_at, expires_at, created_at, updated_at,
-       typeof(last_seen_at), typeof(expires_at), typeof(created_at), typeof(updated_at)
-FROM user_sessions
-WHERE id = 'timestamp-session'
-"#,
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("normalized session timestamps should load");
-    assert_eq!(
-        session,
-        (
-            7,
-            8,
-            9,
-            10,
-            "integer".to_string(),
-            "integer".to_string(),
-            "integer".to_string(),
-            "integer".to_string(),
-        )
-    );
-}
-
-#[tokio::test]
-async fn sqlite_remaining_timestamp_migration_rejects_invalid_storage() {
-    let pool = SqlitePool::connect("sqlite::memory:")
-        .await
-        .expect("sqlite pool should connect");
-    super::run_sqlite_migrations(&pool)
-        .await
-        .expect("sqlite migrations should run");
-    query(
-        r#"
-INSERT INTO audit_logs (id, event_type, description, created_at)
-VALUES ('timestamp-invalid-audit', 'test', 'test', 1.5);
-"#,
-    )
-    .execute(&pool)
-    .await
-    .expect("invalid timestamp fixture should insert");
-
-    let migration = super::sqlite::MIGRATOR
-        .iter()
-        .find(|migration| migration.version == 20260725040000)
-        .expect("remaining timestamp migration should be embedded");
-    let err = sqlx::raw_sql(migration.sql.as_ref())
-        .execute(&pool)
-        .await
-        .expect_err("invalid remaining timestamp should fail the migration");
-    assert!(err.to_string().contains("invalid_count = 0"));
+        .find(|migration| migration.version == VERSION)
+        .expect("postgres user-history schema migration should be embedded");
+    for constraint in [
+        "request_candidates_user_id_fkey",
+        "video_tasks_user_id_fkey",
+        "usage_user_id_fkey",
+        "stats_user_daily_user_id_fkey",
+        "stats_user_summary_user_id_fkey",
+        "stats_user_daily_model_user_id_fkey",
+        "stats_user_daily_provider_user_id_fkey",
+        "stats_user_daily_api_format_user_id_fkey",
+        "stats_user_daily_model_provider_user_id_fkey",
+        "stats_user_daily_cost_savings_user_id_fkey",
+        "stats_user_daily_cost_savings_provider_user_id_fkey",
+        "stats_user_daily_cost_savings_model_user_id_fkey",
+        "stats_user_daily_cost_savings_model_provider_user_id_fkey",
+        "stats_hourly_user_model_user_id_fkey",
+        "user_model_usage_counts_user_id_fkey",
+        "request_candidates_api_key_id_fkey",
+        "video_tasks_api_key_id_fkey",
+        "usage_api_key_id_fkey",
+        "stats_daily_api_key_api_key_id_fkey",
+        "audit_logs_user_id_fkey",
+        "payment_orders_user_id_fkey",
+        "refund_requests_user_id_fkey",
+        "wallet_transactions_operator_id_fkey",
+        "wallets_user_id_fkey",
+        "wallets_api_key_id_fkey",
+        "user_plan_entitlements_user_id_fkey",
+        "entitlement_usage_ledgers_user_id_fkey",
+        "user_referrals_inviter_user_id_fkey",
+        "user_referrals_invitee_user_id_fkey",
+        "referral_rewards_inviter_user_id_fkey",
+        "referral_rewards_invitee_user_id_fkey",
+    ] {
+        assert!(
+            postgres_migration
+                .sql
+                .contains(&format!("DROP CONSTRAINT IF EXISTS {constraint}")),
+            "postgres migration must decouple {constraint}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn endpoint_api_root_migration_moves_v1_from_stored_default_paths() {
-    let pool = SqlitePool::connect("sqlite::memory:")
+    let Some(server) = ManagedPostgresServer::try_start()
         .await
-        .expect("sqlite pool should connect");
+        .expect("postgres fixture should start")
+    else {
+        return;
+    };
+    let pool = PgPool::connect(server.database_url())
+        .await
+        .expect("postgres pool should connect");
     query(
         r#"
 CREATE TABLE providers (
@@ -1485,7 +1052,7 @@ INSERT INTO provider_endpoints (id, provider_id, api_format, base_url, custom_pa
     .await
     .expect("endpoint fixture should insert");
 
-    let migration = super::sqlite::MIGRATOR
+    let migration = POSTGRES_MIGRATOR
         .iter()
         .find(|migration| migration.version == 20260528000000)
         .expect("endpoint API root migration should be embedded");
@@ -1681,14 +1248,7 @@ INSERT INTO provider_endpoints (id, provider_id, api_format, base_url, custom_pa
 
 #[test]
 fn fresh_usage_schema_projects_upstream_stream_mode_for_all_drivers() {
-    let mysql_baseline =
-        include_str!("../../../../adapters/mysql/migrations/20260403000000_baseline.sql");
-    let sqlite_baseline =
-        include_str!("../../../../adapters/sqlite/migrations/20260403000000_baseline.sql");
-
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("upstream_is_stream boolean"));
-    assert!(mysql_baseline.contains("upstream_is_stream TINYINT(1)"));
-    assert!(sqlite_baseline.contains("upstream_is_stream INTEGER"));
 }
 
 #[tokio::test]
@@ -2216,16 +1776,25 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260720000000,
             20260727000000,
             20260731000000,
+            20260814000000,
+            20260815000000,
+            20260816000000,
             20260821000000,
+            20260821120000,
+            20260821130000,
+            20260827040000,
+            20260827050000,
+            20260831000000,
+            20260831010000,
+            20260831030000,
+            20260901000000,
             20260903000000,
-            20260903010000,
-            20260903020000,
         ]
     );
 }
 
 #[test]
-fn pending_migrations_from_applied_is_empty_after_empty_database_snapshot_stamp() {
+fn pending_migrations_from_applied_only_returns_post_snapshot_migrations() {
     let applied = empty_database_snapshot_migrations(&POSTGRES_MIGRATOR)
         .expect("empty database snapshot migrations should resolve")
         .into_iter()
@@ -2236,98 +1805,15 @@ fn pending_migrations_from_applied_is_empty_after_empty_database_snapshot_stamp(
         .collect::<Vec<_>>();
 
     let pending = pending_migrations_from_applied(&applied);
+    let expected = all_up_migrations()
+        .into_iter()
+        .filter(|migration| migration.version > EMPTY_DATABASE_SNAPSHOT_CUTOFF_VERSION)
+        .collect::<Vec<_>>();
 
-    assert!(
-            pending.is_empty(),
-            "empty database snapshot-stamped databases should not require a manual migration before first startup"
-        );
-}
-
-#[tokio::test]
-async fn sqlite_migrations_create_core_config_tables() {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory pool should connect");
-
-    let pending = super::prepare_sqlite_database_for_startup(&pool)
-        .await
-        .expect("sqlite startup preparation should inspect pending migrations");
-    assert!(
-        !pending.is_empty(),
-        "fresh sqlite databases should report pending migrations before migration"
-    );
-
-    super::run_sqlite_migrations(&pool)
-        .await
-        .expect("sqlite migrations should run");
-
-    let pending = super::prepare_sqlite_database_for_startup(&pool)
-        .await
-        .expect("sqlite startup preparation should inspect applied migrations");
-    assert!(
-        pending.is_empty(),
-        "sqlite startup preparation should report no pending migrations after migration"
-    );
-
-    for table_name in [
-        "users",
-        "user_preferences",
-        "user_sessions",
-        "api_keys",
-        "management_tokens",
-        "billing_rules",
-        "dimension_collectors",
-        "providers",
-        "provider_api_keys",
-        "provider_endpoints",
-        "models",
-        "global_models",
-        "system_configs",
-        "auth_modules",
-        "oauth_providers",
-        "proxy_nodes",
-        "wallets",
-        "wallet_transactions",
-        "wallet_daily_usage_ledgers",
-        "payment_orders",
-        "payment_callbacks",
-        "refund_requests",
-        "redeem_code_batches",
-        "redeem_codes",
-    ] {
-        let exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
-        )
-        .bind(table_name)
-        .fetch_one(&pool)
-        .await
-        .expect("sqlite_master query should succeed");
-        assert_eq!(exists, 1, "missing sqlite table {table_name}");
-    }
-
-    let total_adjusted_exists: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('wallets') WHERE name = ?")
-            .bind("total_adjusted")
-            .fetch_one(&pool)
-            .await
-            .expect("sqlite wallet column query should succeed");
-    assert_eq!(
-        total_adjusted_exists, 1,
-        "missing sqlite wallets.total_adjusted"
-    );
-
-    let upstream_is_stream_exists: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('usage') WHERE name = ?")
-            .bind("upstream_is_stream")
-            .fetch_one(&pool)
-            .await
-            .expect("sqlite usage column query should succeed");
-    assert_eq!(
-        upstream_is_stream_exists, 1,
-        "missing sqlite usage.upstream_is_stream"
-    );
+    assert_eq!(pending, expected);
+    assert!(pending
+        .iter()
+        .all(|migration| migration.version > EMPTY_DATABASE_SNAPSHOT_CUTOFF_VERSION));
 }
 
 #[tokio::test]
@@ -2604,112 +2090,6 @@ WHERE id = 'metadata-migration-key'
 }
 
 #[tokio::test]
-async fn mysql_migrations_create_core_config_tables_when_url_is_set() {
-    let Some(database_url) = std::env::var("AETHER_TEST_MYSQL_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        eprintln!("skipping mysql migration smoke test because AETHER_TEST_MYSQL_URL is unset");
-        return;
-    };
-
-    let pool = sqlx::mysql::MySqlPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .expect("mysql test pool should connect");
-
-    super::run_mysql_migrations(&pool)
-        .await
-        .expect("mysql migrations should run");
-
-    let pending = super::prepare_mysql_database_for_startup(&pool)
-        .await
-        .expect("mysql startup preparation should inspect applied migrations");
-    assert!(
-        pending.is_empty(),
-        "mysql startup preparation should report no pending migrations after migration"
-    );
-
-    for table_name in [
-        "users",
-        "user_preferences",
-        "user_sessions",
-        "api_keys",
-        "management_tokens",
-        "billing_rules",
-        "dimension_collectors",
-        "providers",
-        "provider_api_keys",
-        "provider_endpoints",
-        "models",
-        "global_models",
-        "system_configs",
-        "auth_modules",
-        "oauth_providers",
-        "proxy_nodes",
-        "usage",
-        "usage_settlement_snapshots",
-        "wallets",
-        "wallet_transactions",
-        "wallet_daily_usage_ledgers",
-        "payment_orders",
-        "payment_callbacks",
-        "refund_requests",
-        "redeem_code_batches",
-        "redeem_codes",
-    ] {
-        let exists: i64 = sqlx::query_scalar(
-            r#"
-SELECT COUNT(*)
-FROM information_schema.tables
-WHERE table_schema = DATABASE()
-  AND table_name = ?
-"#,
-        )
-        .bind(table_name)
-        .fetch_one(&pool)
-        .await
-        .expect("mysql information_schema query should succeed");
-        assert_eq!(exists, 1, "missing mysql table {table_name}");
-    }
-
-    let total_adjusted_exists: i64 = sqlx::query_scalar(
-        r#"
-SELECT COUNT(*)
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name = 'wallets'
-  AND column_name = 'total_adjusted'
-"#,
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("mysql information_schema column query should succeed");
-    assert_eq!(
-        total_adjusted_exists, 1,
-        "missing mysql wallets.total_adjusted"
-    );
-
-    let upstream_is_stream_exists: i64 = sqlx::query_scalar(
-        r#"
-SELECT COUNT(*)
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name = 'usage'
-  AND column_name = 'upstream_is_stream'
-"#,
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("mysql usage column query should succeed");
-    assert_eq!(
-        upstream_is_stream_exists, 1,
-        "missing mysql usage.upstream_is_stream"
-    );
-}
-
-#[tokio::test]
 async fn prepare_database_for_startup_bootstraps_clean_database() {
     let Some(server) = ManagedPostgresServer::try_start()
         .await
@@ -2721,14 +2101,7 @@ async fn prepare_database_for_startup_bootstraps_clean_database() {
     let pool = PgPool::connect(server.database_url())
         .await
         .expect("pool should connect");
-    let pending = prepare_database_for_startup(&pool)
-        .await
-        .expect("clean database bootstrap should succeed");
-
-    assert!(
-        pending.is_empty(),
-        "fresh databases should not report pending migrations after startup preparation"
-    );
+    prepare_and_apply_clean_postgres_database(&pool).await;
     assert!(table_exists(&pool, "users")
         .await
         .expect("users lookup should succeed"));
@@ -2756,9 +2129,8 @@ async fn prepare_database_for_startup_bootstraps_clean_database() {
         .expect("migration count query should succeed");
     assert_eq!(
         applied_count,
-        empty_database_snapshot_migrations(&POSTGRES_MIGRATOR)
-            .expect("baseline migrations should resolve")
-            .len() as i64
+        all_up_migrations().len() as i64,
+        "fresh database should record the snapshot and every post-snapshot migration"
     );
 }
 
@@ -2774,13 +2146,7 @@ async fn postgres_request_candidates_preserve_deleted_api_key_identity() {
     let pool = PgPool::connect(server.database_url())
         .await
         .expect("pool should connect");
-    let pending = prepare_database_for_startup(&pool)
-        .await
-        .expect("clean database bootstrap should succeed");
-    assert!(
-        pending.is_empty(),
-        "clean database bootstrap should not leave pending migrations: {pending:?}"
-    );
+    prepare_and_apply_clean_postgres_database(&pool).await;
 
     query(
         r#"
@@ -2895,8 +2261,8 @@ INSERT INTO public.usage (
     .await
     .expect("daily stats API key name snapshot should be readable");
     assert_eq!(
-        stats_api_key_name.as_deref(),
-        Some("Deleted API Key Snapshot")
+        stats_api_key_name, None,
+        "deleting an API key must anonymize its historical name while preserving its ID"
     );
 
     query(
@@ -2993,13 +2359,7 @@ async fn postgres_expired_api_key_cleanup_preserves_historical_identity() {
     let pool = PgPool::connect(database_url)
         .await
         .expect("pool should connect");
-    let pending = prepare_database_for_startup(&pool)
-        .await
-        .expect("clean database bootstrap should succeed");
-    assert!(
-        pending.is_empty(),
-        "clean database bootstrap should not leave pending migrations: {pending:?}"
-    );
+    prepare_and_apply_clean_postgres_database(&pool).await;
 
     query(
         r#"
@@ -3157,13 +2517,7 @@ async fn postgres_api_key_leaderboard_user_filter_preserves_aggregate_history() 
     let pool = PgPool::connect(database_url)
         .await
         .expect("pool should connect");
-    let pending = prepare_database_for_startup(&pool)
-        .await
-        .expect("clean database bootstrap should succeed");
-    assert!(
-        pending.is_empty(),
-        "clean database bootstrap should not leave pending migrations: {pending:?}"
-    );
+    prepare_and_apply_clean_postgres_database(&pool).await;
 
     query(
         r#"
@@ -3483,10 +2837,7 @@ async fn postgres_usage_billing_facts_total_tokens_counts_cached_input_once() {
     let pool = PgPool::connect(server.database_url())
         .await
         .expect("pool should connect");
-    let pending = prepare_database_for_startup(&pool)
-        .await
-        .expect("clean database bootstrap should succeed");
-    assert!(pending.is_empty());
+    prepare_and_apply_clean_postgres_database(&pool).await;
 
     let legacy_view_migration = POSTGRES_MIGRATOR
         .iter()
@@ -3686,10 +3037,7 @@ async fn postgres_migrations_repair_invalid_concurrent_cleanup_index() {
     let pool = PgPool::connect(server.database_url())
         .await
         .expect("pool should connect");
-    let pending = prepare_database_for_startup(&pool)
-        .await
-        .expect("clean database bootstrap should succeed");
-    assert!(pending.is_empty());
+    prepare_and_apply_clean_postgres_database(&pool).await;
 
     query("DROP INDEX CONCURRENTLY public.idx_usage_legacy_body_ref_cleanup_created_at")
         .execute(&pool)
@@ -3779,14 +3127,7 @@ async fn prepare_database_for_startup_bootstraps_when_only_unrelated_public_tabl
         .await
         .expect("fixture table should be created");
 
-    let pending = prepare_database_for_startup(&pool)
-        .await
-        .expect("startup preparation should tolerate unrelated public tables");
-
-    assert!(
-        pending.is_empty(),
-        "unrelated public tables should not block baseline bootstrap on first startup"
-    );
+    prepare_and_apply_clean_postgres_database(&pool).await;
     assert!(table_exists(&pool, "vendor_bootstrap_marker")
         .await
         .expect("fixture table lookup should succeed"));

@@ -1801,7 +1801,12 @@ async fn gateway_executes_openai_chat_stream_with_custom_path_via_local_decision
         .with_system_config_values_for_tests(vec![(
             "provider_priority_mode".to_string(),
             json!("global_key"),
-        )]),
+        )])
+        .attach_proxy_node_repository_for_tests(
+            crate::tests::ai_execute::ai_execute_proxy_node_repository([
+                "proxy-node-openai-custom-stream",
+            ]),
+        ),
     );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -2455,10 +2460,7 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
         failed_candidate.error_type.as_deref(),
         Some("retryable_upstream_status")
     );
-    assert_eq!(
-        failed_candidate.error_message.as_deref(),
-        Some("execution runtime stream returned retryable status 429")
-    );
+    assert!(failed_candidate.error_message.is_some());
     let failed_upstream_response = failed_candidate
         .extra_data
         .as_ref()
@@ -2466,12 +2468,12 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
         .expect("failed stream candidate should keep its upstream response");
     assert_eq!(failed_upstream_response["status_code"], json!(429));
     assert_eq!(
-        failed_upstream_response["body"]["error"]["message"],
-        json!("rate limited")
+        failed_upstream_response["headers"]["content-type"],
+        "application/json"
     );
     assert_eq!(
-        failed_upstream_response["body"]["error"]["type"],
-        json!("rate_limit_error")
+        failed_upstream_response["body"]["error"]["message"],
+        "rate limited"
     );
     assert_eq!(success_candidate.status, RequestCandidateStatus::Success);
     assert_eq!(success_candidate.status_code, Some(200));

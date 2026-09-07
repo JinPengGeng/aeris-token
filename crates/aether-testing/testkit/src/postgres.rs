@@ -97,6 +97,8 @@ impl ManagedPostgresServer {
             .arg(self.port.to_string())
             .arg("-F")
             .arg("-c")
+            .arg("unix_socket_directories=")
+            .arg("-c")
             .arg("fsync=off")
             .arg("-c")
             .arg("synchronous_commit=off")
