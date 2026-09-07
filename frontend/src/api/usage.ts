@@ -2,6 +2,7 @@ import apiClient from './client'
 import { cachedRequest, dedupedRequest, buildCacheKey } from '@/utils/cache'
 import type { ActivityHeatmap } from '@/types/activity'
 import type { ImageProgress } from './requestTrace'
+import type { UsageRecord as UsageListRecord } from './usageRecords'
 
 const ACTIVITY_HEATMAP_CACHE_TTL_MS = 30 * 60 * 1000
 const USAGE_ANALYTICS_CACHE_TTL_MS = 30 * 1000
@@ -58,6 +59,12 @@ export interface UsageStats {
   avg_response_time: number
   error_count?: number
   error_rate?: number
+  cache_stats?: {
+    cache_creation_tokens: number
+    cache_read_tokens: number
+    cache_creation_cost: number
+    cache_read_cost: number
+  }
   today?: {
     requests: number
     tokens: number
@@ -67,6 +74,7 @@ export interface UsageStats {
 }
 
 export interface UsageByModel {
+  actual_cost?: number
   model: string
   request_count: number
   total_tokens: number
@@ -197,14 +205,6 @@ type UsageListResponse = {
   total?: unknown
   limit?: unknown
   offset?: unknown
-}
-
-type AdminUsageRecordsResponse = {
-  records: Array<Record<string, unknown>>
-  total: number
-  limit: number
-  offset: number
-  total_is_estimated?: boolean
 }
 
 type ActiveUsageRequestsResponse = {
@@ -630,10 +630,22 @@ export const usageApi = {
     total_only?: boolean
     limit?: number
     offset?: number
-  }): Promise<AdminUsageRecordsResponse> {
+  }): Promise<{
+    records: UsageListRecord[]
+    total: number
+    limit: number
+    offset: number
+    total_is_estimated?: boolean
+  }> {
     const key = buildCacheKey('usage:records', params as Record<string, unknown> | undefined)
-    return dedupedRequest<AdminUsageRecordsResponse>(key, async () => {
-      const response = await apiClient.get<AdminUsageRecordsResponse>('/api/admin/usage/records', { params })
+    return dedupedRequest(key, async () => {
+      const response = await apiClient.get<{
+        records: UsageListRecord[]
+        total: number
+        limit: number
+        offset: number
+        total_is_estimated?: boolean
+      }>('/api/admin/usage/records', { params })
       return response.data
     })
   },

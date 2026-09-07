@@ -2411,7 +2411,7 @@ function pendingOrderWarningLabel(warning: PendingOrderWarning): string {
   return '即将到期'
 }
 
-function pendingOrderWarningVariant(warning: PendingOrderWarning): string {
+function pendingOrderWarningVariant(warning: PendingOrderWarning): 'destructive' | 'warning' {
   return warning.reason === 'missing_expiry' ? 'destructive' : 'warning'
 }
 

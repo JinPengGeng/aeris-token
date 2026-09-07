@@ -1377,8 +1377,8 @@ WHERE u.request_id = ANY($1)
 "#;
 const UPSERT_USAGE_ROUTING_SNAPSHOT_SQL: &str =
     include_str!("queries/upsert_usage_routing_snapshot_sql.sql");
-#[cfg(test)]
 const UPSERT_USAGE_HTTP_AUDIT_SQL: &str = include_str!("queries/upsert_usage_http_audit_sql.sql");
+const UPSERT_USAGE_BODY_BLOB_SQL: &str = include_str!("queries/upsert_usage_body_blob_sql.sql");
 const UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL: &str =
     include_str!("queries/upsert_usage_settlement_pricing_snapshot_sql.sql");
 
@@ -13455,19 +13455,36 @@ async fn sync_usage_body_blob_storage<'e, E>(
     executor: E,
     request_id: &str,
     field: UsageBodyField,
-    _value: Option<&Value>,
-    _storage: &UsageBodyStorage,
-    _clear_existing: bool,
+    value: Option<&Value>,
+    storage: &UsageBodyStorage,
+    clear_existing: bool,
 ) -> Result<(), DataLayerError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
     let body_ref = usage_body_ref(request_id, field);
-    sqlx::query(DELETE_USAGE_BODY_BLOB_SQL)
-        .bind(&body_ref)
-        .execute(executor)
-        .await
-        .map_postgres_err()?;
+    if clear_existing {
+        sqlx::query(DELETE_USAGE_BODY_BLOB_SQL)
+            .bind(&body_ref)
+            .execute(executor)
+            .await
+            .map_postgres_err()?;
+    } else if let Some(payload_gzip) = storage.detached_blob_bytes.as_ref() {
+        sqlx::query(UPSERT_USAGE_BODY_BLOB_SQL)
+            .bind(&body_ref)
+            .bind(request_id)
+            .bind(field.as_storage_field())
+            .bind(payload_gzip)
+            .execute(executor)
+            .await
+            .map_postgres_err()?;
+    } else if value.is_some() {
+        sqlx::query(DELETE_USAGE_BODY_BLOB_SQL)
+            .bind(&body_ref)
+            .execute(executor)
+            .await
+            .map_postgres_err()?;
+    }
     Ok(())
 }
 
@@ -13476,43 +13493,46 @@ async fn sync_usage_http_audit_storage<'e, E>(
     request_id: &str,
     headers: &UsageHttpAuditHeaders<'_>,
     refs: &UsageHttpAuditRefs,
-    _states: &UsageHttpAuditStates,
+    states: &UsageHttpAuditStates,
     body_capture_mode: &str,
 ) -> Result<(), DataLayerError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    if headers.any_present() || refs.any_present() || body_capture_mode != "none" {
-        return Err(DataLayerError::InvalidInput(
-            "usage HTTP capture persistence is disabled".to_string(),
-        ));
+    if !headers.any_present()
+        && !refs.any_present()
+        && !states.any_present()
+        && body_capture_mode == "none"
+    {
+        return Ok(());
     }
 
-    sqlx::query(
-        r#"
-WITH deleted_audit AS (
-  DELETE FROM usage_http_audits WHERE request_id = $1
-)
-UPDATE usage
-SET request_headers = NULL,
-    request_body = NULL,
-    provider_request_headers = NULL,
-    provider_request_body = NULL,
-    response_headers = NULL,
-    response_body = NULL,
-    client_response_headers = NULL,
-    client_response_body = NULL,
-    request_body_compressed = NULL,
-    provider_request_body_compressed = NULL,
-    response_body_compressed = NULL,
-    client_response_body_compressed = NULL
-WHERE request_id = $1
-"#,
-    )
-    .bind(request_id)
-    .execute(executor)
-    .await
-    .map_postgres_err()?;
+    sqlx::query(UPSERT_USAGE_HTTP_AUDIT_SQL)
+        .bind(request_id)
+        .bind(headers.request_headers_json)
+        .bind(headers.provider_request_headers_json)
+        .bind(headers.response_headers_json)
+        .bind(headers.client_response_headers_json)
+        .bind(refs.request_body_ref.as_deref())
+        .bind(refs.provider_request_body_ref.as_deref())
+        .bind(refs.response_body_ref.as_deref())
+        .bind(refs.client_response_body_ref.as_deref())
+        .bind(usage_body_capture_state_bind_text(
+            states.request_body_state,
+        ))
+        .bind(usage_body_capture_state_bind_text(
+            states.provider_request_body_state,
+        ))
+        .bind(usage_body_capture_state_bind_text(
+            states.response_body_state,
+        ))
+        .bind(usage_body_capture_state_bind_text(
+            states.client_response_body_state,
+        ))
+        .bind(body_capture_mode)
+        .execute(executor)
+        .await
+        .map_postgres_err()?;
 
     Ok(())
 }

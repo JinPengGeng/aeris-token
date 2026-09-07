@@ -244,6 +244,7 @@ import Card from '@/components/ui/card.vue'
 import ProviderBalanceCell from './ProviderBalanceCell.vue'
 import { formatApiFormatShort, type ProviderWithEndpointsSummary } from '@/api/endpoints'
 import type { BalanceExtraItem } from '@/features/providers/auth-templates'
+import type { ProviderBalanceBreakdown } from '@/features/providers/composables/useProviderBalance'
 import {
   sortEndpoints,
   getEndpointHealthLabel,
@@ -261,7 +262,7 @@ const props = defineProps<{
   editingDescriptionId: string | null
   isBalanceLoading: (providerId: string) => boolean
   getProviderBalance: (providerId: string) => { available: number | null; currency: string } | null
-  getProviderBalanceBreakdown: (providerId: string) => { balance: number; points: number; currency: string } | null
+  getProviderBalanceBreakdown: (providerId: string) => ProviderBalanceBreakdown | null
   getProviderBalanceError: (providerId: string) => { status: string; message: string } | null
   getProviderCheckin: (providerId: string) => { success: boolean | null; message: string } | null
   getProviderCookieExpired: (providerId: string) => { expired: boolean; message: string } | null

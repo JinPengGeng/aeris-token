@@ -278,14 +278,14 @@ export interface RequestDetail {
   end_to_end_first_byte_time_ms?: number | null
   created_at: string
   updated_at?: string | null
-  request_headers?: Record<string, unknown>
-  request_body?: Record<string, unknown>
-  provider_request_headers?: Record<string, unknown>
-  provider_request_body?: Record<string, unknown>
-  response_headers?: Record<string, unknown>
-  client_response_headers?: Record<string, unknown>
-  response_body?: Record<string, unknown>
-  client_response_body?: Record<string, unknown>
+  request_headers?: Record<string, unknown> | null
+  request_body?: Record<string, unknown> | null
+  provider_request_headers?: Record<string, unknown> | null
+  provider_request_body?: Record<string, unknown> | null
+  response_headers?: Record<string, unknown> | null
+  client_response_headers?: Record<string, unknown> | null
+  response_body?: Record<string, unknown> | null
+  client_response_body?: Record<string, unknown> | null
   has_request_body?: boolean
   has_provider_request_body?: boolean
   has_response_body?: boolean

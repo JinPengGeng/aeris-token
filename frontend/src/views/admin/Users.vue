@@ -782,7 +782,7 @@ function editUser(user: User) {
   editingUser.value = {
     id: user.id,
     username: user.username,
-    email: user.email,
+    email: user.email ?? '',
     unlimited: user.unlimited,
     role: user.role,
     is_active: user.is_active,
@@ -1173,6 +1173,8 @@ async function closeNewApiKeyDialog() {
 }
 
 async function deleteApiKey(apiKey: ApiKey) {
+  const user = selectedUser.value
+  if (!user) return
   const confirmed = await confirmDanger(
     locale.value === 'en-US'
       ? `Delete this API key?\n\n${apiKey.key_display || '****'}\n\nThis action cannot be undone.`
@@ -1183,8 +1185,8 @@ async function deleteApiKey(apiKey: ApiKey) {
   if (!confirmed) return
 
   try {
-    await usersStore.deleteApiKey(selectedUser.value.id, apiKey.id)
-    await loadUserApiKeys(selectedUser.value.id)
+    await usersStore.deleteApiKey(user.id, apiKey.id)
+    if (selectedUser.value?.id === user.id) await loadUserApiKeys(user.id)
     success(legacyT('API Key已删除'))
   } catch (err: unknown) {
     error(localizedApiError(err, '未知错误'), legacyT('删除 API Key 失败'))
