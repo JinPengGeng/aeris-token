@@ -2120,7 +2120,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
     assert!(stored_usage.request_body_ref.is_none());
     assert_eq!(
         stored_usage.request_body_state,
-            Some(UsageBodyCaptureState::Inline)
+        Some(UsageBodyCaptureState::Inline)
     );
     assert!(stored_usage.provider_request_body.is_none());
     assert_eq!(
@@ -2390,7 +2390,7 @@ fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_claude
         assert_eq!(stored_usage.status, "failed");
         assert_eq!(
             stored_usage.request_body_state,
-        Some(UsageBodyCaptureState::Inline)
+            Some(UsageBodyCaptureState::Inline)
         );
         assert!(stored_usage.request_body.is_some());
         assert!(stored_usage.request_body_ref.is_none());
