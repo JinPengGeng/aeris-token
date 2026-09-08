@@ -184,6 +184,7 @@ export class CrossTabRefreshCoordinator {
         // We can prove that this attempt lost the best-effort lock race. Do
         // not emit a failure for a request that another tab superseded; wait
         // for that request's outcome after the finally block releases ours.
+        this.releaseLock(lock)
         return Promise.resolve().then(() => this.waitForRefreshResult(
           currentLock.requestId,
           executor,
@@ -209,6 +210,10 @@ export class CrossTabRefreshCoordinator {
       // A failure is a hint, never a cross-tab verdict. Give a concurrent
       // winner a bounded opportunity to publish success before returning the
       // local error. If one does, retry using this tab's shared HttpOnly cookie.
+      // Release the local lock before waiting. A peer cannot acquire the lock
+      // while this promise remains pending, which would deadlock the retry
+      // path when the peer is the tab that can verify the rotated session.
+      this.releaseLock(lock)
       return Promise.resolve().then(async () => {
         const concurrentSuccess = await this.waitForConcurrentSuccess(
           attemptStartedAt,
