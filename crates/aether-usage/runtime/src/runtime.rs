@@ -8965,6 +8965,13 @@ mod tests {
             2,
             "the later direct caller should receive its own bounded write attempt"
         );
+        timeout(Duration::from_secs(1), async {
+            while runtime.metrics_snapshot().lifecycle_submission_pending != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the later lifecycle submission should be fully accounted");
         let snapshot = runtime.metrics_snapshot();
         assert_eq!(snapshot.terminal_submission_pending, 0);
         assert_eq!(snapshot.ordered_lifecycle_pending, 0);

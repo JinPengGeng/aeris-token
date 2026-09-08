@@ -13607,10 +13607,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_stream_from_frame_stream_cancels_upstream_when_client_drops_body() {
-        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
-        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
-        let state = AppState::new()
+    async fn execute_stream_from_frame_stream_honors_client_disconnect_policy() {
+        for cancel_on_client_disconnect in [false, true] {
+            let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+            let request_candidate_repository =
+                Arc::new(InMemoryRequestCandidateRepository::default());
+            let state = AppState::new()
             .expect("app state should build")
             .with_data_state_for_tests(
                 crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
@@ -13622,39 +13624,39 @@ mod tests {
                 enabled: true,
                 ..UsageRuntimeConfig::default()
             });
-        let plan = ExecutionPlan {
-            request_id: "req-client-drop-cancels-upstream".into(),
-            candidate_id: Some("cand-client-drop-cancels-upstream".into()),
-            provider_name: Some("openai".into()),
-            provider_id: "prov-1".into(),
-            endpoint_id: "ep-1".into(),
-            key_id: "key-1".into(),
-            method: "POST".into(),
-            url: "https://example.com/v1/chat/completions".into(),
-            headers: BTreeMap::from([
-                ("content-type".into(), "application/json".into()),
-                ("accept".into(), "text/event-stream".into()),
-            ]),
-            content_type: Some("application/json".into()),
-            content_encoding: None,
-            body: RequestBody::from_json(json!({
-                "model": "gpt-5.4",
-                "messages": [],
-                "stream": true
-            })),
-            stream: true,
-            client_api_format: "openai:chat".into(),
-            provider_api_format: "openai:chat".into(),
-            model_name: Some("gpt-5.4".into()),
-            proxy: None,
-            transport_profile: None,
-            timeouts: None,
-        };
-        let release_terminal = Arc::new(Notify::new());
-        let terminal_frame_drained = Arc::new(Notify::new());
-        let release_terminal_for_stream = Arc::clone(&release_terminal);
-        let terminal_frame_drained_for_stream = Arc::clone(&terminal_frame_drained);
-        let frame_stream = stream! {
+            let plan = ExecutionPlan {
+                request_id: "req-client-drop-cancels-upstream".into(),
+                candidate_id: Some("cand-client-drop-cancels-upstream".into()),
+                provider_name: Some("openai".into()),
+                provider_id: "prov-1".into(),
+                endpoint_id: "ep-1".into(),
+                key_id: "key-1".into(),
+                method: "POST".into(),
+                url: "https://example.com/v1/chat/completions".into(),
+                headers: BTreeMap::from([
+                    ("content-type".into(), "application/json".into()),
+                    ("accept".into(), "text/event-stream".into()),
+                ]),
+                content_type: Some("application/json".into()),
+                content_encoding: None,
+                body: RequestBody::from_json(json!({
+                    "model": "gpt-5.4",
+                    "messages": [],
+                    "stream": true
+                })),
+                stream: true,
+                client_api_format: "openai:chat".into(),
+                provider_api_format: "openai:chat".into(),
+                model_name: Some("gpt-5.4".into()),
+                proxy: None,
+                transport_profile: None,
+                timeouts: None,
+            };
+            let release_terminal = Arc::new(Notify::new());
+            let terminal_frame_drained = Arc::new(Notify::new());
+            let release_terminal_for_stream = Arc::clone(&release_terminal);
+            let terminal_frame_drained_for_stream = Arc::clone(&terminal_frame_drained);
+            let frame_stream = stream! {
             yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
                 b"{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
             ));
@@ -13669,119 +13671,157 @@ mod tests {
         }
         .boxed();
 
-        let response = execute_stream_from_frame_stream(
-            &state,
-            plan,
-            "trace-client-drop-cancels-upstream",
-            &test_decision(),
-            "openai_chat_stream",
-            None,
-            Some(json!({
-                "request_id": "req-client-drop-cancels-upstream",
-                "candidate_id": "cand-client-drop-cancels-upstream",
-                "candidate_index": 0,
-                "retry_index": 0,
-                "provider_api_format": "openai:chat",
-                "client_api_format": "openai:chat"
-            })),
-            crate::clock::current_unix_ms(),
-            Instant::now(),
-            RequestStageTrace::from_env(),
-            true,
-            frame_stream,
-            None,
-        )
-        .await
-        .expect("execution should succeed")
-        .expect("execution should return a client response");
+            let response = crate::request_lifecycle::run_request(async move {
+                crate::request_lifecycle::configure_client_disconnect(
+                    aether_routing_core::RoutingExecutionPolicy {
+                        cancel_on_client_disconnect,
+                        ..Default::default()
+                    },
+                );
+                execute_stream_from_frame_stream(
+                    &state,
+                    plan,
+                    "trace-client-drop-cancels-upstream",
+                    &test_decision(),
+                    "openai_chat_stream",
+                    None,
+                    Some(json!({
+                        "request_id": "req-client-drop-cancels-upstream",
+                        "candidate_id": "cand-client-drop-cancels-upstream",
+                        "candidate_index": 0,
+                        "retry_index": 0,
+                        "provider_api_format": "openai:chat",
+                        "client_api_format": "openai:chat"
+                    })),
+                    crate::clock::current_unix_ms(),
+                    Instant::now(),
+                    RequestStageTrace::from_env(),
+                    true,
+                    frame_stream,
+                    None,
+                )
+                .await
+                .map(|response| response.expect("execution should return a client response"))
+            })
+            .await
+            .expect("execution should succeed");
 
-        let mut body_stream = response.into_body().into_data_stream();
-        let first = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let chunk = body_stream
-                    .next()
-                    .await
-                    .expect("body should yield first chunk")
-                    .expect("first chunk should be ok");
-                if chunk.as_ref() != b": aether-keepalive\n\n" {
-                    break chunk;
+            let mut body_stream = response.into_body().into_data_stream();
+            let first = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let chunk = body_stream
+                        .next()
+                        .await
+                        .expect("body should yield first chunk")
+                        .expect("first chunk should be ok");
+                    if chunk.as_ref() != b": aether-keepalive\n\n" {
+                        break chunk;
+                    }
                 }
-            }
-        })
-        .await
-        .expect("first business chunk should arrive");
-        assert_eq!(
+            })
+            .await
+            .expect("first business chunk should arrive");
+            assert_eq!(
             first.as_ref(),
             b"data: {\"id\":\"first\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n"
         );
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        drop(body_stream);
-        let candidates = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let candidates = request_candidate_repository
-                    .list_by_request_id("req-client-drop-cancels-upstream")
-                    .await
-                    .expect("request candidates should read");
-                if candidates
-                    .first()
-                    .is_some_and(|candidate| candidate.status == RequestCandidateStatus::Cancelled)
-                {
-                    break candidates;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(body_stream);
+            if !cancel_on_client_disconnect {
+                release_terminal.notify_one();
             }
-        })
-        .await
-        .expect("candidate should be marked cancelled");
-        assert_eq!(candidates[0].status_code, Some(499));
-        assert_eq!(
-            candidates[0].error_type.as_deref(),
-            Some("downstream_disconnect")
-        );
-
-        let stored_usage = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let usage = usage_repository
-                    .find_by_request_id("req-client-drop-cancels-upstream")
-                    .await
-                    .expect("usage should read");
-                if usage
-                    .as_ref()
-                    .is_some_and(|usage| usage.status == "cancelled")
-                {
-                    break usage.expect("cancelled usage should exist");
+            let expected_candidate_status = if cancel_on_client_disconnect {
+                RequestCandidateStatus::Cancelled
+            } else {
+                RequestCandidateStatus::Success
+            };
+            let expected_usage_status = if cancel_on_client_disconnect {
+                "cancelled"
+            } else {
+                "completed"
+            };
+            let candidates = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let candidates = request_candidate_repository
+                        .list_by_request_id("req-client-drop-cancels-upstream")
+                        .await
+                        .expect("request candidates should read");
+                    if candidates
+                        .first()
+                        .is_some_and(|candidate| candidate.status == expected_candidate_status)
+                    {
+                        break candidates;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("usage should be marked cancelled");
-        assert_eq!(stored_usage.billing_status, "void");
-        assert_eq!(stored_usage.status_code, Some(499));
-        assert_eq!(stored_usage.input_tokens, 0);
-        assert_eq!(stored_usage.output_tokens, 0);
-        assert_eq!(stored_usage.total_tokens, 0);
-        let first_byte_time_ms = stored_usage
-            .first_byte_time_ms
-            .expect("cancelled stream should retain first byte time");
-        let response_time_ms = stored_usage
-            .response_time_ms
-            .expect("cancelled stream should record terminal duration");
-        assert!(
-            response_time_ms > first_byte_time_ms,
-            "terminal duration should include time after the first byte"
-        );
-
-        release_terminal.notify_one();
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(100),
-                terminal_frame_drained.notified()
-            )
+            })
             .await
-            .is_err(),
-            "upstream frame stream should stop when the client disconnects"
-        );
+            .expect("candidate should be marked cancelled");
+            assert_eq!(
+                candidates[0].status_code,
+                Some(if cancel_on_client_disconnect {
+                    499
+                } else {
+                    200
+                })
+            );
+            assert_eq!(
+                candidates[0].error_type.as_deref(),
+                cancel_on_client_disconnect.then_some("downstream_disconnect")
+            );
+
+            let stored_usage = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let usage = usage_repository
+                        .find_by_request_id("req-client-drop-cancels-upstream")
+                        .await
+                        .expect("usage should read");
+                    if usage
+                        .as_ref()
+                        .is_some_and(|usage| usage.status == expected_usage_status)
+                    {
+                        break usage.expect("cancelled usage should exist");
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("usage should be marked cancelled");
+            if !cancel_on_client_disconnect {
+                assert_ne!(stored_usage.billing_status, "void");
+                assert_eq!(stored_usage.status_code, Some(200));
+                assert_eq!(stored_usage.input_tokens, 7);
+                assert_eq!(stored_usage.output_tokens, 11);
+                assert_eq!(stored_usage.total_tokens, 18);
+                continue;
+            }
+            assert_eq!(stored_usage.billing_status, "void");
+            assert_eq!(stored_usage.status_code, Some(499));
+            assert_eq!(stored_usage.input_tokens, 0);
+            assert_eq!(stored_usage.output_tokens, 0);
+            assert_eq!(stored_usage.total_tokens, 0);
+            let first_byte_time_ms = stored_usage
+                .first_byte_time_ms
+                .expect("cancelled stream should retain first byte time");
+            let response_time_ms = stored_usage
+                .response_time_ms
+                .expect("cancelled stream should record terminal duration");
+            assert!(
+                response_time_ms > first_byte_time_ms,
+                "terminal duration should include time after the first byte"
+            );
+
+            release_terminal.notify_one();
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(100),
+                    terminal_frame_drained.notified()
+                )
+                .await
+                .is_err(),
+                "upstream frame stream should stop when the client disconnects"
+            );
+        }
     }
 
     #[tokio::test]

@@ -57,7 +57,7 @@ pub(crate) fn resolve_gateway_routing_policy(
 
     let config = serde_json::from_value::<RoutingGroupConfig>(input.group_config_json.clone())
         .map_err(|_| invalid_routing_group_config())?;
-    resolve_routing_policy(
+    let policy = resolve_routing_policy(
         &config,
         RoutingPolicyInput {
             group_id: input.group_id,
@@ -73,7 +73,9 @@ pub(crate) fn resolve_gateway_routing_policy(
             phase: input.phase,
         },
     )
-    .map_err(routing_policy_error)
+    .map_err(routing_policy_error)?;
+    crate::request_lifecycle::configure_client_disconnect(policy.execution_policy);
+    Ok(policy)
 }
 
 pub(crate) fn resolve_gateway_static_default_routing_policy(
@@ -82,6 +84,7 @@ pub(crate) fn resolve_gateway_static_default_routing_policy(
     let Some(default_policy) = static_default_policy_fields(input.group_config_json)? else {
         return Ok(None);
     };
+    crate::request_lifecycle::configure_client_disconnect(default_policy.execution_policy);
 
     Ok(Some(ResolvedRoutingPolicy {
         group_id: input.group_id.map(str::to_string),
@@ -163,6 +166,10 @@ fn static_default_policy_fields(
             default_policy.get("cyber_continue_failover"),
             "cyber_continue_failover",
         )?,
+        cancel_on_client_disconnect: routing_bool_field(
+            default_policy.get("cancel_on_client_disconnect"),
+            "cancel_on_client_disconnect",
+        )?,
     };
 
     Ok(Some(RoutingDefaultPolicy {
@@ -238,7 +245,8 @@ mod tests {
             "default_policy": {
                 "priority_mode": "global_key",
                 "scheduling_mode": "load_balance",
-                "keep_priority_on_conversion": true
+                "keep_priority_on_conversion": true,
+                "cancel_on_client_disconnect": true
             },
             "allowed_models": ["legacy-model"],
             "model_policies": [],

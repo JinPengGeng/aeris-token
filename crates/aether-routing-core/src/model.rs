@@ -39,6 +39,8 @@ pub struct RoutingExecutionPolicy {
     pub enable_cf_heartbeat: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub cyber_continue_failover: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cancel_on_client_disconnect: bool,
 }
 
 impl<'de> Deserialize<'de> for RoutingExecutionPolicy {
@@ -56,6 +58,8 @@ impl<'de> Deserialize<'de> for RoutingExecutionPolicy {
             enable_standard_text_sync_heartbeat: bool,
             #[serde(default)]
             cyber_continue_failover: bool,
+            #[serde(default)]
+            cancel_on_client_disconnect: bool,
         }
 
         let value = LegacyCompatibleExecutionPolicy::deserialize(deserializer)?;
@@ -64,6 +68,7 @@ impl<'de> Deserialize<'de> for RoutingExecutionPolicy {
                 || value.enable_openai_image_sync_heartbeat
                 || value.enable_standard_text_sync_heartbeat,
             cyber_continue_failover: value.cyber_continue_failover,
+            cancel_on_client_disconnect: value.cancel_on_client_disconnect,
         })
     }
 }
@@ -105,6 +110,36 @@ fn default_sticky_key_attempts() -> u32 {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+#[cfg(test)]
+mod execution_policy_tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_defaults_off_and_round_trips_with_legacy_heartbeat() {
+        let default: RoutingDefaultPolicy = serde_json::from_str("{}").unwrap();
+        assert!(!default.execution_policy.cancel_on_client_disconnect);
+        let policy: RoutingDefaultPolicy = serde_json::from_value(serde_json::json!({
+            "cancel_on_client_disconnect": true,
+            "enable_standard_text_sync_heartbeat": true
+        }))
+        .unwrap();
+        assert!(policy.execution_policy.cancel_on_client_disconnect);
+        assert!(policy.execution_policy.enable_cf_heartbeat);
+        let encoded = serde_json::to_value(&policy).unwrap();
+        assert_eq!(encoded["cancel_on_client_disconnect"], true);
+        assert_eq!(
+            serde_json::from_value::<RoutingDefaultPolicy>(encoded).unwrap(),
+            policy
+        );
+        assert!(
+            serde_json::from_value::<RoutingDefaultPolicy>(serde_json::json!({
+                "cancel_on_client_disconnect": "true"
+            }))
+            .is_err()
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

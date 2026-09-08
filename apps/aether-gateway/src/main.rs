@@ -2639,10 +2639,10 @@ fn write_atomic_private_export(path: &Path, bytes: &[u8], overwrite: bool) -> io
     #[cfg(not(unix))]
     {
         let _ = (path, bytes, overwrite);
-        return Err(io::Error::new(
+        Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "private atomic database exports currently require Unix filesystem checks",
-        ));
+        ))
     }
 
     #[cfg(unix)]

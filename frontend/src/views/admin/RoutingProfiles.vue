@@ -402,7 +402,7 @@
                 这些选项作用于当前调度策略。
               </p>
             </div>
-            <div class="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <div class="grid auto-rows-fr grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
               <div
                 class="order-1 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
                 data-testid="keep-priority-on-conversion"
@@ -477,6 +477,24 @@
                   :disabled="saving"
                   aria-label="Cyber继续转移"
                   @update:model-value="updateExecutionPolicy('cyber_continue_failover', $event)"
+                />
+              </div>
+              <div
+                class="order-5 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
+                data-testid="cancel-on-client-disconnect"
+              >
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span class="font-medium">取消请求立即打断</span>
+                  <HelpHint
+                    label="取消请求立即打断"
+                    text="默认关闭：客户端取消或断开后，服务端继续等待请求完成并正常计费。开启后立即打断且不计费，按次计费的请求仍收取单次请求费用。仅作用于当前调度策略。"
+                  />
+                </div>
+                <Switch
+                  :model-value="cancelOnClientDisconnect"
+                  :disabled="saving"
+                  aria-label="取消请求立即打断"
+                  @update:model-value="updateExecutionPolicy('cancel_on_client_disconnect', $event)"
                 />
               </div>
             </div>
@@ -970,6 +988,9 @@ const cfHeartbeat = computed<boolean>(() => (
 const cyberContinueFailover = computed<boolean>(() => (
   draft.value?.config_json.default_policy.cyber_continue_failover ?? false
 ))
+const cancelOnClientDisconnect = computed<boolean>(() => (
+  draft.value?.config_json.default_policy.cancel_on_client_disconnect ?? false
+))
 interface ModelRow {
   name: string
   displayName: string
@@ -1306,7 +1327,7 @@ function updateKeepPriorityOnConversion(value: boolean): void {
 }
 
 function updateExecutionPolicy(
-  field: 'enable_cf_heartbeat' | 'cyber_continue_failover',
+  field: 'enable_cf_heartbeat' | 'cyber_continue_failover' | 'cancel_on_client_disconnect',
   value: boolean,
 ): void {
   if (!draft.value) return

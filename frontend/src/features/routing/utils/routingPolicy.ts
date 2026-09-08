@@ -12,6 +12,7 @@ export interface RoutingDefaultPolicy {
   keep_priority_on_conversion: boolean
   enable_cf_heartbeat: boolean
   cyber_continue_failover: boolean
+  cancel_on_client_disconnect: boolean
   /** 首个候选的总尝试次数；后续候选始终只尝试 1 次。0 或 1 表示不重试 */
   sticky_key_attempts: number
 }
@@ -78,6 +79,7 @@ export function createEmptyRoutingGroupConfig(): RoutingGroupConfig {
       keep_priority_on_conversion: false,
       enable_cf_heartbeat: false,
       cyber_continue_failover: false,
+      cancel_on_client_disconnect: false,
       sticky_key_attempts: DEFAULT_STICKY_KEY_ATTEMPTS,
     },
     model_policies: [],
@@ -374,6 +376,7 @@ export function getModelScheduling(
     keep_priority_on_conversion: normalized.default_policy.keep_priority_on_conversion,
     enable_cf_heartbeat: normalized.default_policy.enable_cf_heartbeat,
     cyber_continue_failover: normalized.default_policy.cyber_continue_failover,
+    cancel_on_client_disconnect: normalized.default_policy.cancel_on_client_disconnect,
     sticky_key_attempts: action?.sticky_key_attempts ?? normalized.default_policy.sticky_key_attempts,
   }
 }

@@ -601,7 +601,7 @@ async fn prepare_sideband_live_websocket(
             auth.user_id.as_str(),
             auth.api_key_id.as_str(),
             call_id.as_str(),
-            &binding,
+            binding,
         ),
     )
     .await
