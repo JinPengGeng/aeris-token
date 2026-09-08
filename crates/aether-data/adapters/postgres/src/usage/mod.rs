@@ -1,26 +1,26 @@
 use aether_data_contracts::repository::usage::{
     canonical_usage_body_ref_for, parse_usage_body_ref, read_decompressed_usage_json,
     usage_body_ref, ApiKeyLastUsedDelta, ManagementTokenCounterDelta, ProxyNodeCounterDelta,
-    StoredUsageAuditAggregation, StoredUsageAuditSummary, StoredUsageBreakdownSummaryRow,
-    StoredUsageCacheAffinityHitSummary, StoredUsageCacheAffinityIntervalRow,
-    StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary, StoredUsageDailyActualCostRollup,
-    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
-    StoredUsageDashboardStatsSummary, StoredUsageDashboardSummary, StoredUsageErrorDistributionRow,
-    StoredUsageLeaderboardSummary, StoredUsagePerformancePercentilesRow,
-    StoredUsageProviderPerformance, StoredUsageProviderPerformanceProviderRow,
-    StoredUsageProviderPerformanceSummary, StoredUsageProviderPerformanceTimelineRow,
-    StoredUsageSettledCostSummary, StoredUsageTimeSeriesBucket, StoredUsageUserTotals,
-    UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery,
-    UsageAuditSummaryQuery, UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy,
-    UsageBreakdownSummaryQuery, UsageCacheAffinityHitSummaryQuery,
-    UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery,
-    UsageCleanupExecutionMode, UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow,
-    UsageCostSavingsSummaryQuery, UsageDailyActualCostRollupQuery,
-    UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
-    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
-    UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
-    UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery, UsageSettledCostSummaryQuery,
-    UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    StoredUsageAuditAggregation, StoredUsageAuditSummary, StoredUsageBodyPayload,
+    StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
+    StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
+    StoredUsageDailyActualCostRollup, StoredUsageDashboardDailyBreakdownRow,
+    StoredUsageDashboardProviderCount, StoredUsageDashboardStatsSummary,
+    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
+    StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
+    StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
+    StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
+    StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UsageAuditAggregationGroupBy,
+    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery,
+    UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
+    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCleanupExecutionMode,
+    UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow, UsageCostSavingsSummaryQuery,
+    UsageDailyActualCostRollupQuery, UsageDashboardDailyBreakdownQuery,
+    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
+    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
+    UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery,
+    UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -64,8 +64,25 @@ pub mod cleanup;
 // newly captured bodies always spill to usage_body_blobs and resolve through usage_http_audits.
 const MAX_INLINE_USAGE_BODY_BYTES: usize = 0;
 const MAX_SUPPORTED_UNIX_SECS: u64 = 253_402_300_799;
-const FIND_USAGE_BODY_BLOB_BY_REF_SQL: &str = r#"SELECT payload_gzip FROM usage_body_blobs WHERE body_ref = $1 AND request_id = $2 AND body_field = $3 LIMIT 1"#;
+const FIND_USAGE_BODY_BLOB_BY_REF_SQL: &str = r#"SELECT CASE WHEN octet_length(payload_gzip) <= $4 THEN payload_gzip END AS payload_gzip FROM usage_body_blobs WHERE body_ref = $1 AND request_id = $2 AND body_field = $3 LIMIT 1"#;
 const DELETE_USAGE_BODY_BLOB_SQL: &str = include_str!("queries/delete_usage_body_blob_sql.sql");
+static USAGE_BODY_DECODE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+async fn decode_usage_body_in_background(
+    decode: impl FnOnce() -> Result<Option<Value>, DataLayerError> + Send + 'static,
+) -> Result<Option<Value>, DataLayerError> {
+    let permit = USAGE_BODY_DECODE_SLOTS.acquire().await.map_err(|error| {
+        DataLayerError::UnexpectedValue(format!("usage body decoder unavailable: {error}"))
+    })?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        decode()
+    })
+    .await
+    .map_err(|error| {
+        DataLayerError::UnexpectedValue(format!("usage body decoder failed: {error}"))
+    })?
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct AggregateRangeSplit {
@@ -2865,36 +2882,82 @@ ORDER BY request_count DESC, "usage".provider_name ASC
         Ok(items)
     }
 
-    pub async fn resolve_body_ref(&self, body_ref: &str) -> Result<Option<Value>, DataLayerError> {
+    pub async fn read_body_payload(
+        &self,
+        body_ref: &str,
+    ) -> Result<Option<StoredUsageBodyPayload>, DataLayerError> {
+        let json_limit =
+            aether_data_contracts::repository::usage::MAX_DECOMPRESSED_USAGE_JSON_BYTES as i64;
+        let encoded_limit = json_limit + 1024 * 1024;
         let Some((request_id, field)) = parse_usage_body_ref(body_ref) else {
             return Ok(None);
         };
         let canonical_ref = usage_body_ref(&request_id, field);
-        let blob_row = sqlx::query(FIND_USAGE_BODY_BLOB_BY_REF_SQL)
+        let row = sqlx::query(FIND_USAGE_BODY_BLOB_BY_REF_SQL)
             .bind(&canonical_ref)
             .bind(&request_id)
             .bind(field.as_storage_field())
+            .bind(encoded_limit)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
-        if let Some(row) = blob_row.as_ref() {
-            let payload_gzip = row
-                .try_get::<Vec<u8>, _>("payload_gzip")
-                .map_postgres_err()?;
-            return inflate_usage_json_value(&payload_gzip).map(Some);
+        if let Some(row) = row {
+            return row
+                .try_get::<Option<Vec<u8>>, _>("payload_gzip")
+                .map_postgres_err()?
+                .map(|bytes| Some(StoredUsageBodyPayload::Gzip(bytes)))
+                .ok_or_else(|| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "encoded usage json exceeds {encoded_limit} bytes"
+                    ))
+                });
         }
         let (inline_column, compressed_column) = usage_body_sql_columns(field);
         let row = sqlx::query(&format!(
-            "SELECT {inline_column} AS inline_body, {compressed_column} AS compressed_body FROM \"usage\" WHERE request_id = $1 LIMIT 1"
+            "SELECT CASE WHEN octet_length({inline_column}::text) <= $2 THEN {inline_column}::text END AS inline_body, CASE WHEN octet_length({compressed_column}) <= $3 THEN {compressed_column} END AS compressed_body, (COALESCE(octet_length({inline_column}::text) > $2, false) OR ({inline_column} IS NULL AND COALESCE(octet_length({compressed_column}) > $3, false))) AS too_large FROM \"usage\" WHERE request_id = $1 LIMIT 1"
         ))
         .bind(request_id)
+        .bind(json_limit)
+        .bind(encoded_limit)
         .fetch_optional(&self.pool)
         .await
         .map_postgres_err()?;
-        row.as_ref()
-            .map(|row| usage_json_column(row, "inline_body", "compressed_body", true))
-            .transpose()
-            .map(|value| value.and_then(|column| column.value))
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.try_get::<bool, _>("too_large").map_postgres_err()? {
+            return Err(DataLayerError::UnexpectedValue(
+                "encoded usage json exceeds preview limit".to_string(),
+            ));
+        }
+        if let Some(body) = row
+            .try_get::<Option<String>, _>("inline_body")
+            .map_postgres_err()?
+        {
+            return Ok(Some(StoredUsageBodyPayload::Json(body.into_bytes())));
+        }
+        Ok(row
+            .try_get::<Option<Vec<u8>>, _>("compressed_body")
+            .map_postgres_err()?
+            .map(StoredUsageBodyPayload::Gzip))
+    }
+
+    pub async fn resolve_body_ref(&self, body_ref: &str) -> Result<Option<Value>, DataLayerError> {
+        let Some(payload) = self.read_body_payload(body_ref).await? else {
+            return Ok(None);
+        };
+        decode_usage_body_in_background(move || match payload {
+            StoredUsageBodyPayload::Gzip(bytes) => inflate_usage_json_value(&bytes).map(Some),
+            StoredUsageBodyPayload::Json(bytes) => {
+                let bytes = read_decompressed_usage_json(std::io::Cursor::new(bytes))?;
+                serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "failed to parse decompressed usage json: {error}"
+                    ))
+                })
+            }
+        })
+        .await
     }
 
     async fn hydrate_usage_body_refs(
@@ -10349,6 +10412,13 @@ impl UsageReadRepository for SqlxUsageReadRepository {
 
     async fn resolve_body_ref(&self, body_ref: &str) -> Result<Option<Value>, DataLayerError> {
         Self::resolve_body_ref(self, body_ref).await
+    }
+
+    async fn read_body_payload(
+        &self,
+        body_ref: &str,
+    ) -> Result<Option<StoredUsageBodyPayload>, DataLayerError> {
+        Self::read_body_payload(self, body_ref).await
     }
 
     async fn list_usage_audits(

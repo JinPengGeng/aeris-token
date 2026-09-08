@@ -283,11 +283,11 @@ async fn live_full_http_capture_round_trips_for_direct_and_batch_writes() {
             .unwrap();
         assert_eq!(
             stored.request_headers,
-            Some(json!({"content-type": "application/json", "authorization": "[redacted]"}))
+            Some(json!({"content-type": "application/json", "authorization": "Bearer private"}))
         );
         assert_eq!(
             stored.response_headers,
-            Some(json!({"content-type": "text/event-stream", "set-cookie": "[redacted]"}))
+            Some(json!({"content-type": "text/event-stream", "set-cookie": "private"}))
         );
         for (field, expected) in [
             (UsageBodyField::RequestBody, pending.request_body.as_ref()),
@@ -704,7 +704,7 @@ async fn live_pending_batch_persists_auxiliary_state_and_preserves_terminal_conf
         .unwrap();
     assert_eq!(
         captured.request_headers,
-        Some(json!({"x-request": "[redacted]"}))
+        Some(json!({"x-request": "request-value"}))
     );
     assert_eq!(
         repository
@@ -4272,6 +4272,38 @@ fn prepare_usage_body_storage_detaches_small_payloads_into_blob_storage() {
         inflate_usage_json_value(compressed).expect("payload should inflate"),
         payload
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn usage_body_decode_does_not_block_the_async_runtime_thread() {
+    let runtime_thread = std::thread::current().id();
+    let payload = json!({"message": "background decoding"});
+    let compressed = prepare_usage_body_storage(Some(&payload))
+        .expect("body should compress")
+        .detached_blob_bytes
+        .expect("body should be detached");
+
+    let decoded = super::decode_usage_body_in_background(move || {
+        assert_ne!(std::thread::current().id(), runtime_thread);
+        inflate_usage_json_value(&compressed).map(Some)
+    })
+    .await
+    .expect("body should decode");
+
+    assert_eq!(decoded, Some(payload));
+}
+
+#[tokio::test]
+async fn usage_body_decode_preserves_storage_decode_errors() {
+    let error = super::decode_usage_body_in_background(|| {
+        inflate_usage_json_value(b"invalid gzip").map(Some)
+    })
+    .await
+    .expect_err("corrupt bodies should fail");
+
+    assert!(error
+        .to_string()
+        .contains("failed to decompress usage json:"));
 }
 
 #[test]

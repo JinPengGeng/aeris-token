@@ -2723,6 +2723,8 @@ mod tests {
             allowed_models_mode: "specific".to_string(),
             rate_limit: Some(10),
             rate_limit_mode: "custom".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         }
     }
 

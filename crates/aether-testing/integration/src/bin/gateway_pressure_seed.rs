@@ -512,6 +512,7 @@ async fn seed_api_key(
                 ip_rules: None,
                 rate_limit: Some(0),
                 daily_usage_limit_usd: None,
+                daily_usage_limit_present: true,
                 concurrent_limit: None,
                 force_capabilities: None,
                 is_active: true,

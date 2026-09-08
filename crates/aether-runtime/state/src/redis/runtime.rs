@@ -204,7 +204,7 @@ impl RedisRuntimeRunner {
                 }
             }
             let cur = self
-                .kv_get_many(&[entry.key_key.clone()])
+                .kv_get_many(std::slice::from_ref(&entry.key_key))
                 .await?
                 .first()
                 .and_then(Option::as_deref)

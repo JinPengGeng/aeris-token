@@ -1639,6 +1639,7 @@ mod tests {
             ip_rules: None,
             rate_limit: 0,
             concurrent_limit: None,
+            daily_usage_limit_usd: None,
             force_capabilities: None,
             feature_settings: None,
             is_active: true,
@@ -1647,6 +1648,7 @@ mod tests {
             total_requests: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
+            billing_multiplier: 1.0,
         }
     }
 
@@ -2019,8 +2021,12 @@ mod tests {
                 rate_limit_present: false,
                 concurrent_limit: None,
                 concurrent_limit_present: false,
+                daily_usage_limit_present: false,
+                daily_usage_limit_usd: None,
                 ip_rules: None,
                 feature_settings: Some(Some(serde_json::json!({"must_not_change": true}))),
+                billing_multiplier_present: false,
+                billing_multiplier: None,
             })
             .await
             .expect("locked basic update should resolve")
@@ -2086,8 +2092,12 @@ mod tests {
                 rate_limit_present: false,
                 concurrent_limit: None,
                 concurrent_limit_present: false,
+                daily_usage_limit_present: false,
+                daily_usage_limit_usd: None,
                 ip_rules: None,
                 feature_settings: Some(Some(serde_json::json!({"admin": true}))),
+                billing_multiplier_present: false,
+                billing_multiplier: None,
             })
             .await
             .expect("administrator update should resolve")
@@ -2330,8 +2340,12 @@ mod tests {
                 rate_limit_present: false,
                 concurrent_limit: Some(11),
                 concurrent_limit_present: true,
+                daily_usage_limit_present: false,
+                daily_usage_limit_usd: None,
                 ip_rules: None,
                 feature_settings: None,
+                billing_multiplier_present: false,
+                billing_multiplier: None,
             })
             .await
             .expect("update should succeed")
@@ -2365,8 +2379,12 @@ mod tests {
                 rate_limit_present: true,
                 concurrent_limit: None,
                 concurrent_limit_present: true,
+                daily_usage_limit_present: false,
+                daily_usage_limit_usd: None,
                 ip_rules: None,
                 feature_settings: None,
+                billing_multiplier_present: false,
+                billing_multiplier: None,
             })
             .await
             .expect("nullable values should clear")
@@ -2387,8 +2405,12 @@ mod tests {
                 rate_limit_present: true,
                 concurrent_limit: None,
                 concurrent_limit_present: false,
+                daily_usage_limit_present: false,
+                daily_usage_limit_usd: None,
                 ip_rules: None,
                 feature_settings: None,
+                billing_multiplier_present: false,
+                billing_multiplier: None,
             })
             .await
             .expect("zero rate limit should persist")
@@ -2417,6 +2439,8 @@ mod tests {
                 rate_limit: None,
                 concurrent_limit_present: true,
                 concurrent_limit: Some(13),
+                daily_usage_limit_present: false,
+                daily_usage_limit_usd: None,
                 allowed_providers: None,
                 allowed_api_formats: None,
                 allowed_models: None,
@@ -2425,6 +2449,8 @@ mod tests {
                 expires_at_unix_secs: None,
                 auto_delete_on_expiry_present: false,
                 auto_delete_on_expiry: false,
+                billing_multiplier_present: false,
+                billing_multiplier: None,
             })
             .await
             .expect("update should succeed")
@@ -2485,6 +2511,8 @@ mod tests {
                 rate_limit: Some(99),
                 concurrent_limit_present: true,
                 concurrent_limit: Some(8),
+                daily_usage_limit_present: false,
+                daily_usage_limit_usd: None,
                 allowed_providers: Some(Some(vec!["anthropic".to_string()])),
                 allowed_api_formats: None,
                 allowed_models: None,
@@ -2493,6 +2521,8 @@ mod tests {
                 expires_at_unix_secs: None,
                 auto_delete_on_expiry_present: false,
                 auto_delete_on_expiry: false,
+                billing_multiplier_present: false,
+                billing_multiplier: None,
             })
             .await
             .expect("after update should succeed")
@@ -2522,6 +2552,8 @@ mod tests {
                 rate_limit: None,
                 concurrent_limit_present: false,
                 concurrent_limit: None,
+                daily_usage_limit_present: false,
+                daily_usage_limit_usd: None,
                 allowed_providers: None,
                 allowed_api_formats: None,
                 allowed_models: None,
@@ -2530,6 +2562,8 @@ mod tests {
                 expires_at_unix_secs: None,
                 auto_delete_on_expiry_present: false,
                 auto_delete_on_expiry: false,
+                billing_multiplier_present: false,
+                billing_multiplier: None,
             })
             .await
             .expect("concurrent update should succeed")

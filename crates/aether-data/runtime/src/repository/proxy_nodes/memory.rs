@@ -1175,6 +1175,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 ProxyNodeHeartbeatMutation {
                     node_id: "node-1".to_string(),
+                    expected_tunnel_generation: None,
                     heartbeat_interval: Some(45),
                     active_connections: None,
                     total_requests_delta: None,

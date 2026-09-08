@@ -1632,6 +1632,7 @@ async fn seed_client_api_key(backends: &DataBackends, user_id: &str) -> Result<(
             ip_rules: None,
             rate_limit: Some(0),
             daily_usage_limit_usd: None,
+            daily_usage_limit_present: true,
             concurrent_limit: None,
             force_capabilities: None,
             is_active: true,
@@ -1697,6 +1698,7 @@ async fn seed_weekly_request_limit(
             ip_rules: None,
             rate_limit: 0,
             concurrent_limit: None,
+            daily_usage_limit_usd: None,
             force_capabilities: None,
             feature_settings: None,
             is_active: true,
@@ -1705,6 +1707,7 @@ async fn seed_weekly_request_limit(
             total_requests: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
+            billing_multiplier: 1.0,
         })
         .await?;
 

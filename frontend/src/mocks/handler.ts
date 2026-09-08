@@ -30,6 +30,41 @@ import {
 // 当前登录用户的 token（用于判断角色）
 let currentUserToken: string | null = null
 
+const UINT32_RANGE = 0x1_0000_0000
+const SECURE_RANDOM_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'
+
+function secureRandomIndex(length: number): number {
+  if (!Number.isSafeInteger(length) || length <= 0 || length > UINT32_RANGE) {
+    throw new RangeError('安全随机索引范围无效')
+  }
+
+  const cryptoSource = globalThis.crypto
+  if (!cryptoSource || typeof cryptoSource.getRandomValues !== 'function') {
+    throw new Error('当前环境不支持安全随机数，无法生成安全相关的 Mock 数据')
+  }
+
+  const values = new Uint32Array(1)
+  const unbiasedLimit = UINT32_RANGE - (UINT32_RANGE % length)
+  let value: number
+  do {
+    cryptoSource.getRandomValues(values)
+    value = values[0]
+  } while (value >= unbiasedLimit)
+
+  return value % length
+}
+
+function secureRandomElement<T>(values: readonly T[]): T {
+  return values[secureRandomIndex(values.length)]
+}
+
+function secureRandomString(length: number): string {
+  return Array.from(
+    { length },
+    () => SECURE_RANDOM_ALPHABET[secureRandomIndex(SECURE_RANDOM_ALPHABET.length)]
+  ).join('')
+}
+
 // 模拟网络延迟
 function delay(ms: number = 150): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms + Math.random() * 200))
@@ -802,8 +837,8 @@ function generateMockUsageRecords(count: number = 100) {
   const statusOptions: Array<'completed' | 'failed' | 'streaming'> = ['completed', 'completed', 'completed', 'completed', 'failed', 'streaming']
 
   for (let i = 0; i < count; i++) {
-    const model = models[Math.floor(Math.random() * models.length)]
-    const user = users[Math.floor(Math.random() * users.length)]
+    const model = secureRandomElement(models)
+    const user = secureRandomElement(users)
     const status = statusOptions[Math.floor(Math.random() * statusOptions.length)]
 
     // 根据模型类型选择 API 格式
@@ -842,12 +877,12 @@ function generateMockUsageRecords(count: number = 100) {
       username: user.username,
       user_email: user.email,
       api_key: {
-        id: `key-${user.id}-${Math.ceil(Math.random() * 2)}`,
-        name: `${user.username} Key ${Math.ceil(Math.random() * 3)}`,
-        display: `sk-ae...${String(1000 + Math.floor(Math.random() * 9000))}`
+        id: `key-${user.id}-${secureRandomIndex(2) + 1}`,
+        name: `${user.username} Key ${secureRandomIndex(3) + 1}`,
+        display: `sk-ae...${String(1000 + secureRandomIndex(9000))}`
       },
       provider: model.provider,
-      api_key_name: `${model.provider}-key-${Math.ceil(Math.random() * 3)}`,
+      api_key_name: `${model.provider}-key-${secureRandomIndex(3) + 1}`,
       rate_multiplier: 1.0,
       model: model.name,
       target_model: model.name,
@@ -2408,7 +2443,7 @@ function generateMockKeysForProvider(providerId: string, count: number = 2) {
       id: `key-${providerId}-${i + 1}`,
       provider_id: providerId,
       api_formats: i === 0 ? formats : formats.slice(0, 1),
-      api_key_masked: `sk-***...${Math.random().toString(36).substring(2, 6)}`,
+      api_key_masked: `sk-***...${secureRandomString(4)}`,
       name: i === 0 ? 'Primary Key' : `Backup Key ${i}`,
       ...oauthFields,
       rate_multiplier: 1.0,
@@ -4494,7 +4529,7 @@ function generateIntervalTimelineData(
 
     if (includeUserInfo) {
       // 管理员视图：添加用户信息
-      const user = users[Math.floor(Math.random() * users.length)]
+      const user = secureRandomElement(users)
       point.user_id = user.id
     }
 
