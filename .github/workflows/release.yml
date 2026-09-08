@@ -278,9 +278,81 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  docker:
-    name: Docker multi-arch
+  package:
+    name: Release tarballs
     needs: [preflight, frontend, build]
+    if: inputs.release_approval_canary != true
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          path: artifacts
+
+      - name: Build release packages
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+            SOURCE_REF="${GITHUB_REF_NAME}"
+          else
+            VERSION="snapshot-${GITHUB_SHA::7}"
+            SOURCE_REF="${GITHUB_SHA}"
+          fi
+
+          mkdir -p package release-assets
+          for platform in linux macos; do
+            for arch in amd64 arm64; do
+              bundle="aether-${VERSION}-${platform}-${arch}"
+              root="package/${bundle}"
+              mkdir -p \
+                "${root}/bin" \
+                "${root}/frontend"
+
+              install -m 0755 "artifacts/aether-gateway-${platform}-${arch}/aether-gateway" "${root}/bin/aether-gateway"
+              cp -R artifacts/frontend-dist/. "${root}/frontend/"
+              sed \
+                -e "s/^SOURCE_REF=\"\${AETHER_SOURCE_REF:-main}\"/SOURCE_REF=\"\${AETHER_SOURCE_REF:-${SOURCE_REF}}\"/" \
+                -e "s/^VERSION=\"\${AETHER_VERSION:-}\"/VERSION=\"\${AETHER_VERSION:-${VERSION}}\"/" \
+                install.sh > "${root}/install.sh"
+              chmod 0755 "${root}/install.sh"
+              install -m 0755 update.sh "${root}/update.sh"
+              install -m 0644 docker-compose.yml "${root}/docker-compose.yml"
+              install -m 0644 docker-compose.single-node.yml "${root}/docker-compose.single-node.yml"
+              install -m 0644 .env.example "${root}/.env.example"
+              install -m 0755 generate_keys.sh "${root}/generate_keys.sh"
+              install -m 0644 README.md "${root}/README.md"
+              install -m 0644 LICENSE "${root}/LICENSE"
+
+              tar -C package -czf "release-assets/${bundle}.tar.gz" "${bundle}"
+            done
+          done
+
+          sed \
+            -e "s/^SOURCE_REF=\"\${AETHER_SOURCE_REF:-main}\"/SOURCE_REF=\"\${AETHER_SOURCE_REF:-${SOURCE_REF}}\"/" \
+            -e "s/^VERSION=\"\${AETHER_VERSION:-}\"/VERSION=\"\${AETHER_VERSION:-${VERSION}}\"/" \
+            install.sh > release-assets/install.sh
+          chmod +x release-assets/install.sh
+          (cd release-assets && sha256sum *.tar.gz > SHA256SUMS)
+
+      - name: Upload release package artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-assets
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: [preflight, frontend, build, package, vscodex]
     if: >-
       inputs.release_approval_canary != true &&
       needs.preflight.outputs.publish == 'true'
@@ -289,7 +361,7 @@ jobs:
     permissions:
       actions: read
       attestations: write
-      contents: read
+      contents: write
       id-token: write
       packages: write
     steps:
@@ -394,72 +466,17 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
-
-  package:
-    name: Release tarballs
-    needs: [preflight, frontend, build]
-    if: inputs.release_approval_canary != true
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      attestations: write
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-
-      - name: Download all artifacts
+      - name: Download release package artifact
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          path: artifacts
+          name: release-assets
+          path: release-assets
 
-      - name: Build release packages
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            VERSION="${GITHUB_REF_NAME}"
-            SOURCE_REF="${GITHUB_REF_NAME}"
-          else
-            VERSION="snapshot-${GITHUB_SHA::7}"
-            SOURCE_REF="${GITHUB_SHA}"
-          fi
-
-          mkdir -p package release-assets
-          for platform in linux macos; do
-            for arch in amd64 arm64; do
-              bundle="aether-${VERSION}-${platform}-${arch}"
-              root="package/${bundle}"
-              mkdir -p \
-                "${root}/bin" \
-                "${root}/frontend"
-
-              install -m 0755 "artifacts/aether-gateway-${platform}-${arch}/aether-gateway" "${root}/bin/aether-gateway"
-              cp -R artifacts/frontend-dist/. "${root}/frontend/"
-              sed \
-                -e "s/^SOURCE_REF=\"\${AETHER_SOURCE_REF:-main}\"/SOURCE_REF=\"\${AETHER_SOURCE_REF:-${SOURCE_REF}}\"/" \
-                -e "s/^VERSION=\"\${AETHER_VERSION:-}\"/VERSION=\"\${AETHER_VERSION:-${VERSION}}\"/" \
-                install.sh > "${root}/install.sh"
-              chmod 0755 "${root}/install.sh"
-              install -m 0755 update.sh "${root}/update.sh"
-              install -m 0644 docker-compose.yml "${root}/docker-compose.yml"
-              install -m 0644 docker-compose.single-node.yml "${root}/docker-compose.single-node.yml"
-              install -m 0644 .env.example "${root}/.env.example"
-              install -m 0755 generate_keys.sh "${root}/generate_keys.sh"
-              install -m 0644 README.md "${root}/README.md"
-              install -m 0644 LICENSE "${root}/LICENSE"
-
-              tar -C package -czf "release-assets/${bundle}.tar.gz" "${bundle}"
-            done
-          done
-
-          sed \
-            -e "s/^SOURCE_REF=\"\${AETHER_SOURCE_REF:-main}\"/SOURCE_REF=\"\${AETHER_SOURCE_REF:-${SOURCE_REF}}\"/" \
-            -e "s/^VERSION=\"\${AETHER_VERSION:-}\"/VERSION=\"\${AETHER_VERSION:-${VERSION}}\"/" \
-            install.sh > release-assets/install.sh
-          chmod +x release-assets/install.sh
-          (cd release-assets && sha256sum *.tar.gz > SHA256SUMS)
+      - name: Download VSIX artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: aether-vscodex-vsix
+          path: release-assets
 
       - name: Attest release package provenance
         id: attest-release
@@ -476,36 +493,6 @@ jobs:
         env:
           ATTESTATION_BUNDLE: ${{ steps.attest-release.outputs.bundle-path }}
         run: install -m 0644 "${ATTESTATION_BUNDLE}" release-assets/AETHER_RELEASE_PROVENANCE.sigstore.json
-
-      - name: Upload release package artifact
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
-        with:
-          name: release-assets
-          path: release-assets/*
-          if-no-files-found: error
-          retention-days: 7
-
-  github-release:
-    name: GitHub Release assets
-    needs: [preflight, docker, package, vscodex]
-    if: needs.preflight.outputs.publish == 'true'
-    environment: release
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: write
-    steps:
-      - name: Download release package artifact
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: release-assets
-          path: release-assets
-
-      - name: Download VSIX artifact
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: aether-vscodex-vsix
-          path: release-assets
 
       - name: Delete stale draft releases for tag
         env:

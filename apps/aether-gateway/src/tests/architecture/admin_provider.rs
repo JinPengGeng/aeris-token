@@ -647,8 +647,7 @@ fn admin_provider_query_and_strategy_use_specific_local_owners() {
     let query_routes =
         read_workspace_file("apps/aether-gateway/src/handlers/admin/provider/query/routes.rs");
     assert!(
-        query_routes.contains("state\n        .maybe_build_admin_provider_query_route_response(")
-            || query_routes.contains("state.maybe_build_admin_provider_query_route_response("),
+        query_routes.contains("maybe_build_local_admin_provider_query_response("),
         "handlers/admin/provider/query/routes.rs should delegate to request/provider route owner"
     );
 
@@ -668,10 +667,7 @@ fn admin_provider_query_and_strategy_use_specific_local_owners() {
     let strategy_routes =
         read_workspace_file("apps/aether-gateway/src/handlers/admin/provider/strategy/routes.rs");
     assert!(
-        strategy_routes
-            .contains("state\n        .maybe_build_admin_provider_strategy_route_response(")
-            || strategy_routes
-                .contains("state.maybe_build_admin_provider_strategy_route_response("),
+        strategy_routes.contains("maybe_build_local_admin_provider_strategy_response("),
         "handlers/admin/provider/strategy/routes.rs should delegate to request/provider route owner"
     );
     assert!(

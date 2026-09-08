@@ -953,17 +953,17 @@ async fn gateway_records_failed_usage_when_all_local_openai_chat_candidates_exha
             .and_then(|value| value.as_str()),
         Some("trace-openai-chat-local-report-sync-failure-123")
     );
-    assert!(stored_usage.response_body.is_none());
+    assert!(stored_usage.response_body.is_some());
     assert!(stored_usage.response_body_ref.is_none());
     assert_eq!(
         stored_usage.response_body_state,
-        Some(UsageBodyCaptureState::Disabled)
+        Some(UsageBodyCaptureState::Inline)
     );
-    assert!(stored_usage.client_response_body.is_none());
+    assert!(stored_usage.client_response_body.is_some());
     assert!(stored_usage.client_response_body_ref.is_none());
     assert_eq!(
         stored_usage.client_response_body_state,
-        Some(UsageBodyCaptureState::Disabled)
+        Some(UsageBodyCaptureState::Inline)
     );
 
     let stored_candidates = request_candidate_repository
@@ -1068,11 +1068,11 @@ async fn gateway_records_failed_usage_when_sync_runtime_transport_is_unavailable
     assert_eq!(stored_usage.status, "failed");
     assert_eq!(stored_usage.billing_status, "void");
     assert_eq!(stored_usage.status_code, Some(503));
-    assert!(stored_usage.response_body.is_none());
+    assert!(stored_usage.response_body.is_some());
     assert!(stored_usage.response_body_ref.is_none());
     assert_eq!(
         stored_usage.response_body_state,
-        Some(UsageBodyCaptureState::Disabled)
+        Some(UsageBodyCaptureState::Inline)
     );
 
     let stored_candidates = request_candidate_repository
@@ -1417,11 +1417,11 @@ async fn gateway_records_failed_usage_for_claude_runtime_miss_without_execution_
             .and_then(|value| value.as_str()),
         Some("trace-claude-runtime-miss-usage-123")
     );
-    assert!(stored_usage.client_response_body.is_none());
+    assert!(stored_usage.client_response_body.is_some());
     assert!(stored_usage.client_response_body_ref.is_none());
     assert_eq!(
         stored_usage.client_response_body_state,
-        Some(UsageBodyCaptureState::Disabled)
+        Some(UsageBodyCaptureState::Inline)
     );
     assert!(stored_usage.error_message.is_none());
 
@@ -2116,11 +2116,11 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
         stored_usage.request_headers.as_ref().unwrap()["authorization"],
         "[redacted]"
     );
-    assert!(stored_usage.request_body.is_none());
+    assert!(stored_usage.request_body.is_some());
     assert!(stored_usage.request_body_ref.is_none());
     assert_eq!(
         stored_usage.request_body_state,
-        Some(UsageBodyCaptureState::Disabled)
+            Some(UsageBodyCaptureState::Inline)
     );
     assert!(stored_usage.provider_request_body.is_none());
     assert_eq!(
@@ -2390,9 +2390,9 @@ fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_claude
         assert_eq!(stored_usage.status, "failed");
         assert_eq!(
             stored_usage.request_body_state,
-            Some(UsageBodyCaptureState::Disabled)
+        Some(UsageBodyCaptureState::Inline)
         );
-        assert!(stored_usage.request_body.is_none());
+        assert!(stored_usage.request_body.is_some());
         assert!(stored_usage.request_body_ref.is_none());
         assert!(stored_usage.provider_request_body.is_none());
         assert_eq!(

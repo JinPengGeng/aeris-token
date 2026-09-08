@@ -7,13 +7,11 @@ const workflowPath = fileURLToPath(new URL('../../workflows/rust-ci.yml', import
 const expectedActions = new Map([
   ['actions/checkout', 'fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09'],
   ['dtolnay/rust-toolchain', '4360b52568e2003a75bf9bc1d59f33a8e3fc893c'],
-  ['Swatinem/rust-cache', '6323deb102c322ba6fcbdcafc7e3dddab59af2b6'],
-  ['mozilla-actions/sccache-action', 'fc920bf0ec8de6ee65d409111f7ec508035751ba'],
-  ['rui314/setup-mold', '9c9c13bf4c3f1adef0cc596abc155580bcb04444'],
+  ['Swatinem/rust-cache', '49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c'],
+  ['mozilla-actions/sccache-action', '7d986dd989559c6ecdb630a3fd2557667be217ad'],
+  ['rui314/setup-mold', '7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3'],
   ['taiki-e/install-action', 'd5f9268ff7620505a81ada10ddf18cdd72240185'],
   ['dorny/paths-filter', 'de90cc6fb38fc0963ad72b210f1f284cd68cea36'],
-  ['actions/upload-artifact', '330a01c490aca151604b8cf639adc76d48f6c5d4'],
-  ['actions/download-artifact', '018cc2cf5baa6db3ef3c5f8a56943fffe632ef53'],
 ]);
 
 test('Rust CI pins every third-party action to its approved immutable commit', async () => {

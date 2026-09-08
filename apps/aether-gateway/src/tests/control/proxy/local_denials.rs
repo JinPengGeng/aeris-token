@@ -1176,7 +1176,7 @@ async fn gateway_strips_forged_trusted_auth_headers_from_untrusted_ingress() {
         .oneshot(request)
         .await
         .expect("request should complete");
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(
         response
             .headers()

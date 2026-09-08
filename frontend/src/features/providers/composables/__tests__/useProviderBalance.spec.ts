@@ -97,7 +97,13 @@ describe('provider balance refresh', () => {
     })
     await balance.loadBalances([{ id: 'provider-1', ops_configured: true }])
 
-    expect(balance.getProviderBalanceBreakdown('provider-1')).toEqual({ balance: 0, points: 0, currency: 'USD' })
+    expect(balance.getProviderBalanceBreakdown('provider-1')).toEqual({
+      currency: 'USD',
+      lines: [
+        { key: 'balance', label: '余额', amount: 0 },
+        { key: 'points', label: '积分', amount: 0 },
+      ],
+    })
     expect(balance.getProviderCheckin('provider-1')).toEqual({ success: false, message: 'try again' })
   })
 })

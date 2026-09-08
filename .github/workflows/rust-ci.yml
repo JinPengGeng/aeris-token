@@ -2,6 +2,7 @@ name: Rust CI
 
 on:
   workflow_call:
+  workflow_dispatch:
   push:
     branches:
       - master
@@ -33,32 +34,6 @@ on:
       - ".github/workflows/release.yml"
       - ".github/workflows/rust-ci.yml"
   pull_request:
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**"
-      - "apps/**"
-      - "install.sh"
-      - "deploy.sh"
-      - "update.sh"
-      - "generate_keys.sh"
-      - ".env.example"
-      - "README.md"
-      - "Dockerfile.app"
-      - "docker-compose.yml"
-      - "docker-compose.single-node.yml"
-      - "docker-compose.local.yml"
-      - "docker-compose.release-local.yml"
-      - "tests/compose_database_config_test.py"
-      - "tests/install_*_test.sh"
-      - "tests/deploy_*_test.sh"
-      - "tests/update_*_test.sh"
-      - "tests/release_supply_chain_test.sh"
-      - "tests/tunnel_installer_config_security_test.sh"
-      - ".github/workflows/build-tunnel.yml"
-      - ".github/workflows/deploy-pages.yml"
-      - ".github/workflows/release.yml"
-      - ".github/workflows/rust-ci.yml"
 
 concurrency:
   group: rust-ci-${{ github.event_name }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -74,6 +49,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust || 'true' }}
+      data: ${{ steps.filter.outputs.data || 'true' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          token: ''
+          base: ${{ github.base_ref }}
+          filters: .github/change-filters.yml
+
   shell_security:
     name: Shell security fixtures
     runs-on: ubuntu-latest
@@ -536,6 +531,8 @@ jobs:
           --health-retries=20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -611,8 +608,11 @@ jobs:
 
   check:
     name: Rust CI / check
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs:
+      - changes
       - fmt
       - clippy
       - test
@@ -622,7 +622,8 @@ jobs:
     steps:
       - name: Verify required jobs
         run: |
-          if [ "${{ needs.fmt.result }}" != "success" ] || \
+          if [ "${{ needs.changes.result }}" != "success" ] || \
+             [ "${{ needs.fmt.result }}" != "success" ] || \
              [ "${{ needs.clippy.result }}" != "success" ] || \
              [ "${{ needs.test.result }}" != "success" ] || \
              [ "${{ needs.data_db_smoke.result }}" != "success" ] || \
@@ -630,3 +631,30 @@ jobs:
             echo "Rust CI failed"
             exit 1
           fi
+
+  publish_dispatch_status:
+    name: Publish dispatch status
+    runs-on: ubuntu-latest
+    needs: check
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - name: Publish Rust CI status
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_RESULT: ${{ needs.check.result }}
+        run: |
+          result=success
+          if [ "${CHECK_RESULT}" != "success" ]; then
+            result=failure
+          fi
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state="${result}" \
+            -f context="Rust CI / check" \
+            -f description="Rust CI ${result}" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"

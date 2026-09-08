@@ -16,8 +16,9 @@ const expectedActions = new Map([
   ['actions/setup-node', '49933ea5288caeca8642d1e84afbd3f7d6820020'],
   ['actions/upload-artifact', '330a01c490aca151604b8cf639adc76d48f6c5d4'],
   ['dtolnay/rust-toolchain', '4360b52568e2003a75bf9bc1d59f33a8e3fc893c'],
-  ['Swatinem/rust-cache', '6323deb102c322ba6fcbdcafc7e3dddab59af2b6'],
-  ['taiki-e/install-action', '7a74ec2e18628d3a08d2fd4b55aea54cd5de1cfd'],
+  ['Swatinem/rust-cache', '49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c'],
+  ['taiki-e/install-action', '1ae7257be536a92d9218a6b343dc6e6ba650f7e1'],
+  ['actions/attest', '1e69f48acb82d1966a394da916b4c1698aa569d6'],
   ['actions/download-artifact', '634f93cb2916e3fdff6788551b99b062d0335ce0'],
   ['docker/setup-qemu-action', 'c7c53464625b32c7a7e944ae62b3e17d2b600130'],
   ['docker/setup-buildx-action', '8d2750c68a42422c14e847fe6c8ac0403b4cbd6f'],
@@ -40,9 +41,11 @@ function actionRefs(document) {
 
 test('release writes exist only in the single protected publish job', () => {
   const document = workflow();
-  assert.deepEqual(document.permissions, { contents: 'read' });
+  assert.deepEqual(document.permissions, { actions: 'read', contents: 'read' });
   assert.equal(document.jobs.publish.environment, 'release');
-  assert.deepEqual(document.jobs.publish.permissions, { contents: 'write', packages: 'write' });
+  assert.deepEqual(document.jobs.publish.permissions, {
+    actions: 'read', attestations: 'write', contents: 'write', 'id-token': 'write', packages: 'write',
+  });
   assert.ok(document.jobs.publish.needs.includes('package'));
   assert.ok(!document.jobs.publish.needs.includes('release-approval-canary'));
   assert.equal(document.jobs['github-release'], undefined);
@@ -81,7 +84,7 @@ test('release approval canary is explicit, default-branch-only, and read-only', 
   assert.equal(canary.steps.length, 1);
   assert.equal(canary.steps[0].uses, undefined);
   assert.doesNotMatch(JSON.stringify(canary.steps), /publish|release-assets|gh api/i);
-  for (const name of ['frontend', 'build', 'package', 'publish']) {
+  for (const name of ['frontend', 'vscodex', 'build', 'package', 'publish']) {
     assert.match(document.jobs[name].if, /inputs\.release_approval_canary != true/);
   }
 });

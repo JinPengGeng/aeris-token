@@ -1156,13 +1156,7 @@ async fn gateway_forwards_public_request_to_remote_tunnel_owner_before_fallback_
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(GATEWAY_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some("rust-phase3b")
-    );
+    assert!(response.headers().get(GATEWAY_HEADER).is_none());
     assert_eq!(
         response
             .headers()
@@ -1448,13 +1442,7 @@ async fn gateway_aggregates_sync_sse_from_remote_tunnel_owner_before_returning_t
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(GATEWAY_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some("rust-phase3b")
-    );
+    assert!(response.headers().get(GATEWAY_HEADER).is_none());
     assert_eq!(
         response
             .headers()
@@ -1710,13 +1698,7 @@ async fn gateway_streamifies_sync_json_from_remote_tunnel_owner_before_returning
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(GATEWAY_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some("rust-phase3b")
-    );
+    assert!(response.headers().get(GATEWAY_HEADER).is_none());
     assert_eq!(
         response
             .headers()

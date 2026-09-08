@@ -500,7 +500,7 @@ async fn gateway_handles_internal_tunnel_heartbeat_locally_with_loopback() {
         node.proxy_metadata
             .as_ref()
             .and_then(|value| value.get("heartbeat_session_id")),
-        Some(&json!("process-123"))
+        Some(&json!("session-77"))
     );
     assert_eq!(
         node.proxy_metadata

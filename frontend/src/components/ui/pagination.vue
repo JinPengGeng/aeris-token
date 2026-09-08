@@ -2,7 +2,7 @@
   <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 border-t border-border/60 px-4 sm:px-6 py-3 sm:py-4 bg-muted/20">
     <!-- 左侧：记录范围和每页数量 -->
     <div class="flex items-center justify-between sm:justify-start gap-3 text-sm text-muted-foreground">
-      <span class="font-medium whitespace-nowrap">
+      <span class="font-medium whitespace-nowrap" aria-live="polite">
         {{ rangeSummary }}
       </span>
       <Select
@@ -40,6 +40,8 @@
           size="sm"
           class="h-9 min-w-[36px] px-2"
           :class="page === current ? 'shadow-sm' : ''"
+          :aria-current="page === current ? 'page' : undefined"
+          :aria-label="locale === 'en-US' ? `Page ${page}` : `第 ${page} 页`"
           @click="handlePageChange(page)"
         >
           {{ page }}
@@ -61,6 +63,7 @@
           type="text"
           inputmode="numeric"
           pattern="[0-9]*"
+          :aria-label="locale === 'en-US' ? 'Go to page' : '跳至页码'"
           class="w-12 h-9 px-2 text-center text-sm border border-border/60 rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary/60"
           @keydown.enter="handleJumpPage"
           @blur="handleJumpPage"
@@ -116,10 +119,11 @@ const recordRange = computed(() => {
 })
 
 const rangeSummary = computed(() => {
+  const total = new Intl.NumberFormat(locale.value).format(props.total)
   if (locale.value === 'en-US') {
-    return `Showing ${recordRange.value.start}-${recordRange.value.end} of ${props.total} items`
+    return `Showing ${recordRange.value.start}-${recordRange.value.end} of ${total} items`
   }
-  return `显示 ${recordRange.value.start}-${recordRange.value.end} 条，共 ${props.total} 条`
+  return `显示 ${recordRange.value.start}-${recordRange.value.end} 条，共 ${total} 条`
 })
 
 const jumpToLabel = computed(() => locale.value === 'en-US' ? 'Go to' : '跳至')
