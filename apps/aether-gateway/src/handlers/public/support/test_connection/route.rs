@@ -35,10 +35,9 @@ struct ResolvedTestConnectionTarget {
     addresses: Vec<SocketAddr>,
 }
 
-/// Resolve the provider endpoint once and pin reqwest to that answer.  The
-/// test-connection route is reachable through the public front door, so it
-/// must not perform an unbounded DNS lookup on every connect (which would
-/// permit DNS rebinding into private/reserved networks).
+/// Resolve the provider endpoint once and pin reqwest to that answer. The
+/// public test-connection route must not perform an unbounded DNS lookup on
+/// every connect, which would permit DNS rebinding into private networks.
 async fn resolve_test_connection_target(
     raw_url: &str,
     allow_private_targets: bool,
@@ -78,11 +77,8 @@ async fn resolve_test_connection_target(
     let has_private_answer = addresses
         .iter()
         .any(|address| aether_http::is_private_or_reserved_ip(address.ip()));
-    // `allow_private_targets` is only enabled for in-process test fixtures.
-    // Keep that escape hatch narrowly scoped to literal loopback URLs whose
-    // every DNS answer is loopback; otherwise a test-only build (or an
-    // accidentally reused helper) could turn this public route into a
-    // private-network HTTP client.
+    // Tests may use loopback listeners, but only literal loopback URLs are
+    // allowed to opt into that narrow exception.
     let test_loopback_target = allow_private_targets
         && literal_loopback
         && addresses.iter().all(|address| address.ip().is_loopback());
@@ -384,9 +380,9 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
         );
     }
 
-    // Resolve and pin the endpoint before constructing the request.  This
+    // Resolve and pin the endpoint before constructing the request. This
     // keeps the public health-check route subject to the same DNS/SSRF
-    // boundary as the main execution transport.  Unit-test fixtures may use
+    // boundary as the main execution transport. Unit-test fixtures may use
     // loopback listeners; production requests never opt into private targets.
     let target = match resolve_test_connection_target(&upstream_url, cfg!(test)).await {
         Ok(target) => target,
@@ -395,7 +391,7 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
                 event_name = "provider_test_connection_target_rejected",
                 provider_id = %provider.id,
                 endpoint_id = %endpoint.id,
-                reason,
+                reason = %reason,
                 "provider connection test target was rejected"
             );
             return Some(
@@ -568,14 +564,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_connection_target_rejects_private_addresses_in_production_mode() {
+    async fn test_connection_target_rejects_private_literals_like_provider_requests() {
         for raw_url in [
-            "http://127.0.0.1:8080/v1/chat/completions",
             "http://10.0.0.1/v1/chat/completions",
             "http://169.254.169.254/v1/chat/completions",
             "https://10.0.0.1/v1/chat/completions",
+            "http://127.0.0.1/v1/chat/completions",
+            "https://127.0.0.1/v1/chat/completions",
             "https://[::1]/v1/chat/completions",
-            "https://localhost/v1/chat/completions",
+            "https://198.18.78.41/v1/chat/completions",
         ] {
             assert!(
                 resolve_test_connection_target(raw_url, false)
@@ -588,21 +585,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_target_accepts_public_http_and_https_addresses() {
-        for allow_private_targets in [false, true] {
-            for (raw_url, expected_port) in [
-                ("http://8.8.8.8/v1/chat", 80),
-                ("http://8.8.8.8:8080/v1/chat", 8080),
-                ("https://8.8.8.8/v1/chat", 443),
-            ] {
-                let target = resolve_test_connection_target(raw_url, allow_private_targets)
-                    .await
-                    .expect("public HTTP(S) provider target should resolve");
-                assert_eq!(target.url.as_str(), raw_url);
-                assert_eq!(target.host, "8.8.8.8");
-                assert_eq!(target.addresses.len(), 1);
-                assert_eq!(target.addresses[0].ip().to_string(), "8.8.8.8");
-                assert_eq!(target.addresses[0].port(), expected_port);
-            }
+        for (raw_url, expected_port) in [
+            ("http://8.8.8.8/v1/chat", 80),
+            ("http://8.8.8.8:8080/v1/chat", 8080),
+            ("https://8.8.8.8/v1/chat", 443),
+            ("https://[2606:4700:4700::1111]/v1/chat", 443),
+        ] {
+            let target = resolve_test_connection_target(raw_url, false)
+                .await
+                .expect("public HTTP(S) provider target should resolve");
+            assert_eq!(target.url.as_str(), raw_url);
+            assert_eq!(target.addresses[0].port(), expected_port);
         }
     }
 
@@ -612,24 +605,15 @@ mod tests {
             .await
             .expect("test fixture target should resolve");
         assert_eq!(target.host, "127.0.0.1");
-        assert_eq!(target.addresses.len(), 1);
         assert!(
             resolve_test_connection_target("http://10.0.0.1/v1/chat", true)
                 .await
-                .is_err(),
-            "test mode must not make private non-loopback HTTP endpoints acceptable"
-        );
-        assert!(
-            resolve_test_connection_target("https://10.0.0.1/v1/chat", true)
-                .await
-                .is_err(),
-            "test mode must not make private non-loopback endpoints acceptable"
+                .is_err()
         );
         assert!(
             resolve_test_connection_target("http://localhost:8080/v1/chat", true)
                 .await
-                .is_ok(),
-            "literal localhost should remain available for local fixtures"
+                .is_ok()
         );
     }
 

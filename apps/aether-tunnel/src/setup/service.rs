@@ -665,7 +665,11 @@ fn journalctl_bin() -> &'static str {
 }
 
 fn validate_service_unit_path(value: &str, label: &str) -> anyhow::Result<()> {
-    if !Path::new(value).is_absolute() {
+    // systemd/OpenRC consume POSIX paths even when this module is compiled on
+    // another host (the renderer is also covered by cross-platform tests).
+    // `Path::is_absolute()` follows the build host's path syntax and would
+    // reject valid `/opt/...` service paths on Windows.
+    if !value.starts_with('/') {
         anyhow::bail!("{} path must be absolute", label);
     }
     if value.chars().any(char::is_control) || value.contains(['%', '$']) {
