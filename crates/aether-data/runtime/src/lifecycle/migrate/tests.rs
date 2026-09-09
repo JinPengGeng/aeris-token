@@ -653,27 +653,37 @@ fn worker_boot_cleanup_migration_is_enabled_for_postgres() {
     );
 }
 
-const UNPUBLISHED_LEGACY_DATA_REWRITE_MIGRATION_VERSIONS: &[i64] = &[
-    20260822000000,
-    20260822010000,
-    20260822020000,
-    20260827000000,
-    20260827010000,
-    20260827020000,
-    20260827030000,
-    20260829000000,
-    20260903010000,
+const UNPUBLISHED_LEGACY_DATA_REWRITE_MIGRATIONS: &[(i64, &str)] = &[
+    (
+        20260822000000,
+        "purge request candidate sensitive diagnostics",
+    ),
+    (
+        20260822010000,
+        "purge usage and video task sensitive diagnostics",
+    ),
+    (
+        20260822020000,
+        "purge background task sensitive diagnostics",
+    ),
+    (20260827000000, "purge plaintext stripe client secrets"),
+    (20260827010000, "purge legacy payment callback payloads"),
+    (20260827020000, "purge video task prompts"),
+    (20260827030000, "purge identity oauth raw userinfo"),
+    (20260829000000, "harden deleted user history anonymization"),
+    (20260903010000, "reset legacy oauth email verification"),
 ];
 
 #[test]
 fn unpublished_legacy_data_rewrite_migrations_are_absent_for_postgres() {
     let (driver, migrator) = ("postgres", &POSTGRES_MIGRATOR);
-    for version in UNPUBLISHED_LEGACY_DATA_REWRITE_MIGRATION_VERSIONS {
+    for (version, description) in UNPUBLISHED_LEGACY_DATA_REWRITE_MIGRATIONS {
         assert!(
             migrator
                 .iter()
-                .all(|migration| migration.version != *version),
-            "{driver} must not embed unpublished legacy rewrite migration {version}"
+                .all(|migration| migration.version != *version
+                    || migration.description.as_ref() != *description),
+            "{driver} must not embed unpublished legacy rewrite migration {version}_{description}"
         );
     }
 }
