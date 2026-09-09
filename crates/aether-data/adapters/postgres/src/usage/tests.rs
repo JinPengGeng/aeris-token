@@ -189,6 +189,302 @@ async fn pending_batch_is_opt_in_and_rejects_non_pending_before_connecting() {
 
 #[tokio::test]
 #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+async fn live_full_http_capture_round_trips_for_direct_and_batch_writes() {
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url: std::env::var("AETHER_TEST_DATABASE_URL").unwrap(),
+        min_connections: 1,
+        max_connections: 2,
+        acquire_timeout_ms: 10_000,
+        idle_timeout_ms: 30_000,
+        max_lifetime_ms: 60_000,
+        statement_cache_capacity: 64,
+        require_ssl: false,
+    })
+    .unwrap();
+    let repository = SqlxUsageReadRepository::new(factory.connect_lazy().unwrap());
+    crate::run_migrations(repository.pool()).await.unwrap();
+
+    for batch in [false, true] {
+        let request_id = format!("req-full-capture-{}", uuid::Uuid::new_v4().simple());
+        let now_unix_secs = Utc::now().timestamp() as u64;
+        let mut pending = fast_clear_usage_record(
+            &request_id,
+            "full-capture-test",
+            now_unix_secs,
+            false,
+            UsageBodyCaptureState::Inline,
+            None,
+        );
+        pending.request_headers =
+            Some(json!({"content-type": "application/json", "authorization": "Bearer private"}));
+        pending.request_body =
+            Some(json!({"messages": [{"role": "user", "content": "original request"}]}));
+        pending.request_body_state = Some(UsageBodyCaptureState::Inline);
+        pending.provider_request_body = Some(json!({"input": "provider request"}));
+        pending.response_body = Some(json!("pending response"));
+        pending.response_body_state = Some(UsageBodyCaptureState::Inline);
+        pending.client_response_body = Some(json!("pending client response"));
+        pending.client_response_body_state = Some(UsageBodyCaptureState::Inline);
+        if batch {
+            repository
+                .upsert_pending_many(vec![pending.clone()])
+                .await
+                .unwrap();
+        } else {
+            repository.upsert(pending.clone()).await.unwrap();
+        }
+        for (field, expected) in [
+            (UsageBodyField::RequestBody, pending.request_body.as_ref()),
+            (
+                UsageBodyField::ProviderRequestBody,
+                pending.provider_request_body.as_ref(),
+            ),
+            (UsageBodyField::ResponseBody, pending.response_body.as_ref()),
+            (
+                UsageBodyField::ClientResponseBody,
+                pending.client_response_body.as_ref(),
+            ),
+        ] {
+            assert_eq!(
+                repository
+                    .resolve_body_ref(&usage_body_ref(&request_id, field))
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                expected,
+                "batch={batch}, field={field:?}"
+            );
+        }
+
+        let mut terminal = fast_clear_usage_record(
+            &request_id,
+            "full-capture-test",
+            now_unix_secs,
+            true,
+            UsageBodyCaptureState::None,
+            None,
+        );
+        terminal.provider_request_body_state = None;
+        terminal.response_headers =
+            Some(json!({"content-type": "text/event-stream", "set-cookie": "private"}));
+        terminal.response_body = Some(json!(format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            "streamed text".repeat(8192)
+        )));
+        terminal.response_body_state = Some(UsageBodyCaptureState::Inline);
+        terminal.client_response_body = Some(json!({"output": "final response"}));
+        terminal.client_response_body_state = Some(UsageBodyCaptureState::Inline);
+        repository.upsert(terminal.clone()).await.unwrap();
+
+        let stored = repository
+            .find_by_request_id_shallow(&request_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.request_headers,
+            Some(json!({"content-type": "application/json", "authorization": "Bearer private"}))
+        );
+        assert_eq!(
+            stored.response_headers,
+            Some(json!({"content-type": "text/event-stream", "set-cookie": "private"}))
+        );
+        for (field, expected) in [
+            (UsageBodyField::RequestBody, pending.request_body.as_ref()),
+            (
+                UsageBodyField::ProviderRequestBody,
+                pending.provider_request_body.as_ref(),
+            ),
+            (
+                UsageBodyField::ResponseBody,
+                terminal.response_body.as_ref(),
+            ),
+            (
+                UsageBodyField::ClientResponseBody,
+                terminal.client_response_body.as_ref(),
+            ),
+        ] {
+            assert_eq!(
+                stored.body_state(field),
+                Some(UsageBodyCaptureState::Reference)
+            );
+            assert_eq!(
+                stored.body_ref(field),
+                Some(usage_body_ref(&request_id, field).as_str())
+            );
+            assert_eq!(
+                repository
+                    .resolve_body_ref(stored.body_ref(field).unwrap())
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                expected,
+                "batch={batch}, field={field:?}"
+            );
+        }
+        let legacy_content_present: bool = sqlx::query_scalar("SELECT request_body IS NOT NULL OR request_headers IS NOT NULL OR response_body IS NOT NULL FROM usage WHERE request_id = $1")
+            .bind(&request_id).fetch_one(repository.pool()).await.unwrap();
+        assert!(!legacy_content_present);
+        sqlx::query("DELETE FROM usage WHERE request_id = $1")
+            .bind(&request_id)
+            .execute(repository.pool())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+async fn live_stale_terminal_event_is_a_full_transaction_noop() {
+    let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+        .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url,
+        min_connections: 1,
+        max_connections: 2,
+        acquire_timeout_ms: 10_000,
+        idle_timeout_ms: 30_000,
+        max_lifetime_ms: 60_000,
+        statement_cache_capacity: 64,
+        require_ssl: false,
+    })
+    .expect("factory should build");
+    let repository =
+        SqlxUsageReadRepository::new(factory.connect_lazy().expect("lazy pool should build"));
+    crate::run_migrations(repository.pool())
+        .await
+        .expect("test database migrations should succeed");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let request_id = format!("req-stale-terminal-{suffix}");
+    let provider_name = format!("stale-provider-{suffix}");
+    let now_unix_secs = Utc::now().timestamp().max(2) as u64;
+    let mut newer = fast_clear_usage_record(
+        &request_id,
+        &provider_name,
+        now_unix_secs,
+        true,
+        UsageBodyCaptureState::None,
+        None,
+    );
+    newer.candidate_id = Some("candidate-new".to_string());
+    newer.route_kind = Some("route-new".to_string());
+    newer.total_cost_usd = Some(0.5);
+    newer.actual_total_cost_usd = Some(0.4);
+    repository
+        .upsert(newer)
+        .await
+        .expect("newer terminal usage should upsert");
+
+    let counter_rows_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM usage_counter_deltas WHERE request_id = $1",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("counter rows should count");
+    let routing_before = sqlx::query(
+        "SELECT candidate_id, route_kind FROM usage_routing_snapshots WHERE request_id = $1",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("routing snapshot should load");
+    let routing_before = (
+        routing_before
+            .try_get::<Option<String>, _>("candidate_id")
+            .unwrap(),
+        routing_before
+            .try_get::<Option<String>, _>("route_kind")
+            .unwrap(),
+    );
+    let settlement_before = sqlx::query(
+        "SELECT billing_status, billing_total_cost_usd::DOUBLE PRECISION AS billing_total_cost_usd FROM usage_settlement_snapshots WHERE request_id = $1",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("settlement snapshot should load");
+    let settlement_before = (
+        settlement_before
+            .try_get::<String, _>("billing_status")
+            .unwrap(),
+        settlement_before
+            .try_get::<Option<f64>, _>("billing_total_cost_usd")
+            .unwrap(),
+    );
+
+    let mut stale = fast_clear_usage_record(
+        &request_id,
+        &provider_name,
+        now_unix_secs - 2,
+        true,
+        UsageBodyCaptureState::None,
+        None,
+    );
+    stale.status = "failed".to_string();
+    stale.billing_status = "void".to_string();
+    stale.status_code = Some(503);
+    stale.total_cost_usd = Some(99.0);
+    stale.actual_total_cost_usd = Some(98.0);
+    stale.candidate_id = Some("candidate-stale".to_string());
+    stale.route_kind = Some("route-stale".to_string());
+    let stored = repository
+        .upsert(stale)
+        .await
+        .expect("stale terminal usage should be ignored");
+
+    assert_eq!(stored.status, "completed");
+    assert_eq!(stored.billing_status, "pending");
+    assert_eq!(stored.status_code, Some(200));
+    assert_eq!(stored.total_cost_usd, 0.5);
+    assert_eq!(stored.routing_candidate_id(), Some("candidate-new"));
+    assert_eq!(stored.routing_route_kind(), Some("route-new"));
+
+    let counter_rows_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM usage_counter_deltas WHERE request_id = $1",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("counter rows should count");
+    let routing_after = sqlx::query(
+        "SELECT candidate_id, route_kind FROM usage_routing_snapshots WHERE request_id = $1",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("routing snapshot should load");
+    let routing_after = (
+        routing_after
+            .try_get::<Option<String>, _>("candidate_id")
+            .unwrap(),
+        routing_after
+            .try_get::<Option<String>, _>("route_kind")
+            .unwrap(),
+    );
+    let settlement_after = sqlx::query(
+        "SELECT billing_status, billing_total_cost_usd::DOUBLE PRECISION AS billing_total_cost_usd FROM usage_settlement_snapshots WHERE request_id = $1",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("settlement snapshot should load");
+    let settlement_after = (
+        settlement_after
+            .try_get::<String, _>("billing_status")
+            .unwrap(),
+        settlement_after
+            .try_get::<Option<f64>, _>("billing_total_cost_usd")
+            .unwrap(),
+    );
+    assert_eq!(counter_rows_after, counter_rows_before);
+    assert_eq!(routing_after, routing_before);
+    assert_eq!(settlement_after, settlement_before);
+}
+
+#[tokio::test]
+#[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
 async fn live_pending_batch_persists_auxiliary_state_and_preserves_terminal_conflicts() {
     let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
         .expect("AETHER_TEST_DATABASE_URL must point at the test database");
@@ -385,37 +681,14 @@ async fn live_pending_batch_persists_auxiliary_state_and_preserves_terminal_conf
         "late pending must not clear the first-byte observation"
     );
 
-    let http = sqlx::query(
-        "SELECT request_headers, provider_request_headers, response_headers, client_response_headers, request_body_ref, provider_request_body_ref, response_body_ref, client_response_body_ref, request_body_state, provider_request_body_state, response_body_state, client_response_body_state FROM usage_http_audits WHERE request_id = $1",
+    let http_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM usage_http_audits WHERE request_id = $1",
     )
     .bind(&rich_request_id)
     .fetch_one(repository.pool())
     .await
-    .expect("rich HTTP audit should exist");
-    assert_eq!(
-        http.try_get::<serde_json::Value, _>("request_headers")
-            .unwrap(),
-        json!({"x-request": "request-value"})
-    );
-    for field in [
-        "request_body_ref",
-        "provider_request_body_ref",
-        "response_body_ref",
-        "client_response_body_ref",
-    ] {
-        assert!(http.try_get::<Option<String>, _>(field).unwrap().is_some());
-    }
-    for field in [
-        "request_body_state",
-        "provider_request_body_state",
-        "response_body_state",
-        "client_response_body_state",
-    ] {
-        assert_eq!(
-            http.try_get::<Option<String>, _>(field).unwrap().as_deref(),
-            Some("reference")
-        );
-    }
+    .expect("HTTP audit count should be readable");
+    assert_eq!(http_count, 1);
     let blob_count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::BIGINT FROM usage_body_blobs WHERE request_id = $1",
     )
@@ -424,6 +697,22 @@ async fn live_pending_batch_persists_auxiliary_state_and_preserves_terminal_conf
     .await
     .expect("body blob count should be readable");
     assert_eq!(blob_count, 4);
+    let captured = repository
+        .find_by_request_id_shallow(&rich_request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        captured.request_headers,
+        Some(json!({"x-request": "request-value"}))
+    );
+    assert_eq!(
+        repository
+            .resolve_body_ref(captured.body_ref(UsageBodyField::RequestBody).unwrap())
+            .await
+            .unwrap(),
+        Some(json!({"messages": [{"role": "user", "content": "hello"}]}))
+    );
 
     let routing = sqlx::query(
         "SELECT candidate_id, candidate_index, selected_provider_api_key_id FROM usage_routing_snapshots WHERE request_id = $1",
@@ -540,7 +829,7 @@ async fn live_pending_batch_and_terminal_upserts_count_each_provider_request_onc
 
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let provider_name = format!("pending-terminal-race-provider-{suffix}");
-    let provider_key_id = format!("pending-terminal-race-key-{suffix}");
+    let provider_key_id = uuid::Uuid::new_v4().to_string();
     let now_unix_secs = Utc::now().timestamp().max(0) as u64;
     let request_ids = (0..REQUESTS)
         .map(|index| format!("req-pending-terminal-race-{index}-{suffix}"))
@@ -666,7 +955,7 @@ async fn live_first_byte_fast_path_is_atomic_and_preserves_terminal_state() {
     let existing_request_id = format!("req-first-byte-existing-{suffix}");
     let metadata_fill_request_id = format!("req-first-byte-metadata-fill-{suffix}");
     let provider_name = format!("first-byte-fast-{suffix}");
-    let missing_provider_key_id = format!("key-first-byte-missing-{suffix}");
+    let missing_provider_key_id = uuid::Uuid::new_v4().to_string();
     let now_unix_secs = Utc::now().timestamp().max(0) as u64;
 
     let mut missing_first_byte = first_byte_usage_record(
@@ -937,7 +1226,7 @@ async fn live_first_byte_reads_provider_contribution_after_waiting_for_canonical
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let request_id = format!("req-first-byte-lock-snapshot-{suffix}");
     let provider_name = format!("first-byte-lock-snapshot-{suffix}");
-    let provider_key_id = format!("key-first-byte-lock-snapshot-{suffix}");
+    let provider_key_id = uuid::Uuid::new_v4().to_string();
     let now_unix_secs = Utc::now().timestamp().max(0) as u64;
     let mut pending = first_byte_usage_record(
         &request_id,
@@ -1082,14 +1371,14 @@ async fn live_first_byte_batch_preserves_duplicate_order_and_terminal_guards() {
     let request_b = format!("req-first-byte-batch-b-{suffix}");
     let request_missing = format!("req-first-byte-batch-missing-{suffix}");
     let request_terminal = format!("req-first-byte-batch-terminal-{suffix}");
-    let missing_provider_key_id = format!("key-first-byte-batch-missing-{suffix}");
+    let missing_provider_key_id = uuid::Uuid::new_v4().to_string();
     let now_unix_secs = Utc::now().timestamp().max(0) as u64;
 
     let mut pending_a = first_byte_usage_record(
         &request_a,
         &provider_name,
         now_unix_secs,
-        Some(json!({"seed": "a"})),
+        Some(json!({"trace_id": "seed-a"})),
     );
     pending_a.status = "pending".to_string();
     pending_a.first_byte_time_ms = None;
@@ -1114,7 +1403,7 @@ async fn live_first_byte_batch_preserves_duplicate_order_and_terminal_guards() {
     );
     terminal.is_stream = Some(true);
     terminal.first_byte_time_ms = Some(44);
-    terminal.request_metadata = Some(json!({"terminal": true}));
+    terminal.request_metadata = Some(json!({"trace_id": "terminal"}));
 
     repository
         .upsert(pending_a)
@@ -1133,7 +1422,7 @@ async fn live_first_byte_batch_preserves_duplicate_order_and_terminal_guards() {
         &request_a,
         &provider_name,
         now_unix_secs + 1,
-        Some(json!({"incoming": "a"})),
+        Some(json!({"trace_id": "incoming-a"})),
     );
     first_a.first_byte_time_ms = Some(30);
     first_a.has_format_conversion = None;
@@ -1145,7 +1434,7 @@ async fn live_first_byte_batch_preserves_duplicate_order_and_terminal_guards() {
         &request_b,
         &provider_name,
         now_unix_secs + 1,
-        Some(json!({"incoming": "b"})),
+        Some(json!({"trace_id": "incoming-b"})),
     );
     first_b.has_format_conversion = Some(true);
 
@@ -1153,7 +1442,7 @@ async fn live_first_byte_batch_preserves_duplicate_order_and_terminal_guards() {
         &request_terminal,
         &provider_name,
         now_unix_secs + 2,
-        Some(json!({"late": true})),
+        Some(json!({"trace_id": "late"})),
     );
     late_terminal.first_byte_time_ms = Some(3);
     late_terminal.has_format_conversion = None;
@@ -1161,7 +1450,7 @@ async fn live_first_byte_batch_preserves_duplicate_order_and_terminal_guards() {
         &request_missing,
         &provider_name,
         now_unix_secs + 1,
-        Some(json!({"incoming": "missing"})),
+        Some(json!({"trace_id": "incoming-missing"})),
     );
     first_missing.provider_api_key_id = Some(missing_provider_key_id.clone());
 
@@ -1218,7 +1507,7 @@ async fn live_first_byte_batch_preserves_duplicate_order_and_terminal_guards() {
         row_a
             .try_get::<Option<serde_json::Value>, _>("request_metadata")
             .unwrap(),
-        Some(json!({"seed": "a"})),
+        Some(json!({"trace_id": "seed-a"})),
         "existing metadata remains authoritative"
     );
 
@@ -1237,7 +1526,7 @@ async fn live_first_byte_batch_preserves_duplicate_order_and_terminal_guards() {
         row_b
             .try_get::<Option<serde_json::Value>, _>("request_metadata")
             .unwrap(),
-        Some(json!({"incoming": "b"}))
+        Some(json!({"trace_id": "incoming-b"}))
     );
 
     let row_terminal = rows
@@ -1917,7 +2206,7 @@ async fn live_provider_performance_grouping_sets_matches_separate_queries() {
 }
 
 #[tokio::test]
-#[ignore = "requires AETHER_TEST_DATABASE_URL and a populated PostgreSQL database"]
+#[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
 async fn live_dashboard_daily_breakdown_uses_canonical_covering_read_path() {
     let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
         .expect("AETHER_TEST_DATABASE_URL must point at the test database");
@@ -1935,6 +2224,20 @@ async fn live_dashboard_daily_breakdown_uses_canonical_covering_read_path() {
     let repository =
         SqlxUsageReadRepository::new(factory.connect_lazy().expect("lazy pool should build"));
     let until = Utc::now().timestamp().max(0) as u64;
+    crate::run_migrations(repository.pool()).await.unwrap();
+    let request_id = format!("daily-breakdown-{}", uuid::Uuid::new_v4().simple());
+    let provider_name = format!("daily-provider-{}", uuid::Uuid::new_v4().simple());
+    repository
+        .upsert(fast_clear_usage_record(
+            &request_id,
+            &provider_name,
+            until.saturating_sub(60),
+            true,
+            UsageBodyCaptureState::None,
+            None,
+        ))
+        .await
+        .unwrap();
     let started = std::time::Instant::now();
     let rows = repository
         .list_dashboard_daily_breakdown(&UsageDashboardDailyBreakdownQuery {
@@ -1950,7 +2253,17 @@ async fn live_dashboard_daily_breakdown_uses_canonical_covering_read_path() {
         started.elapsed(),
         rows.len()
     );
-    assert!(!rows.is_empty());
+    let seeded = rows
+        .iter()
+        .find(|row| row.provider == provider_name)
+        .unwrap();
+    assert_eq!(seeded.requests, 1);
+    assert_eq!(seeded.total_tokens, 2);
+    sqlx::query("DELETE FROM \"usage\" WHERE request_id = $1")
+        .bind(&request_id)
+        .execute(repository.pool())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2262,6 +2575,22 @@ fn usage_sql_does_not_require_updated_at_column() {
     assert!(!super::LIST_USAGE_AUDITS_PREFIX.contains("COALESCE(updated_at, created_at)"));
     assert!(!super::UPSERT_SQL.contains("\n  updated_at\n"));
     assert!(!super::UPSERT_SQL.contains("updated_at = CASE"));
+}
+
+#[test]
+fn usage_sql_preserves_nonzero_lifecycle_updated_revision() {
+    for sql in [
+        super::FIND_BY_REQUEST_ID_SQL,
+        super::FIND_BY_ID_SQL,
+        super::LIST_USAGE_AUDITS_PREFIX,
+        super::LIST_RECENT_USAGE_AUDITS_PREFIX,
+    ] {
+        assert!(sql
+            .contains("COALESCE(\n    NULLIF(\"usage\".updated_at_unix_secs, 0),\n    GREATEST("));
+        assert!(
+            !sql.contains("GREATEST(\n    COALESCE(NULLIF(\"usage\".updated_at_unix_secs, 0), 0),")
+        );
+    }
 }
 
 #[test]
@@ -3586,6 +3915,7 @@ fn usage_sql_clears_stale_failure_fields_for_non_failed_status_updates() {
 fn stale_cleanup_failed_candidate_sql_orders_by_effective_timestamp() {
     let sql = super::SELECT_LATEST_FAILED_CANDIDATE_FOR_STALE_REQUESTS_SQL;
     assert!(sql.contains("COALESCE(finished_at, started_at, created_at) DESC"));
+    assert!(!sql.contains("error_message"));
     assert!(!sql.contains("finished_at DESC NULLS LAST"));
     assert!(!sql.contains("started_at DESC NULLS LAST"));
 }
@@ -3609,6 +3939,10 @@ fn usage_sql_does_not_allow_streaming_to_regress_back_to_pending() {
 #[test]
 fn first_byte_upsert_sql_is_single_row_guarded_and_preserves_existing_metadata() {
     let sql = normalize_newlines(super::UPSERT_FIRST_BYTE_SQL);
+    let revision_guard = r#"AND EXCLUDED.updated_at_unix_secs >= COALESCE(
+    NULLIF("usage".updated_at_unix_secs, 0),
+    CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT)
+  )"#;
     assert_eq!(sql.matches("INSERT INTO").count(), 1);
     assert!(!sql.contains("usage_http_audits"));
     assert!(!sql.contains("usage_routing_snapshots"));
@@ -3619,6 +3953,8 @@ fn first_byte_upsert_sql_is_single_row_guarded_and_preserves_existing_metadata()
     assert!(sql.contains("WHERE \"usage\".billing_status = 'pending'"));
     assert!(sql.contains("\"usage\".status IN ('pending', 'streaming')"));
     assert!(sql.contains("\"usage\".finalized_at IS NULL"));
+    assert!(sql.contains(revision_guard));
+    assert!(normalize_newlines(include_str!("mod.rs")).contains(revision_guard));
     assert!(sql.contains("$22::json->>'upstream_is_stream'"));
     assert!(sql.contains("\"usage\".upstream_is_stream"));
 
@@ -3788,6 +4124,7 @@ fn first_byte_provider_counter_batch_prepares_all_columns_before_query_building(
         request_id: "  req-counter-prepared  ",
         kind: "provider_api_key",
         target_id: "  key-counter-prepared  ",
+        target_tunnel_generation: None,
         request_count_delta: 1,
         total_requests_delta: 2,
         success_count_delta: 3,
@@ -3841,6 +4178,7 @@ fn first_byte_provider_counter_batch_prepares_all_columns_before_query_building(
         request_id: "req-counter-out-of-range",
         kind: "provider_api_key",
         target_id: "key-counter-out-of-range",
+        target_tunnel_generation: None,
         request_count_delta: 0,
         total_requests_delta: 0,
         success_count_delta: 0,
@@ -3934,6 +4272,38 @@ fn prepare_usage_body_storage_detaches_small_payloads_into_blob_storage() {
         inflate_usage_json_value(compressed).expect("payload should inflate"),
         payload
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn usage_body_decode_does_not_block_the_async_runtime_thread() {
+    let runtime_thread = std::thread::current().id();
+    let payload = json!({"message": "background decoding"});
+    let compressed = prepare_usage_body_storage(Some(&payload))
+        .expect("body should compress")
+        .detached_blob_bytes
+        .expect("body should be detached");
+
+    let decoded = super::decode_usage_body_in_background(move || {
+        assert_ne!(std::thread::current().id(), runtime_thread);
+        inflate_usage_json_value(&compressed).map(Some)
+    })
+    .await
+    .expect("body should decode");
+
+    assert_eq!(decoded, Some(payload));
+}
+
+#[tokio::test]
+async fn usage_body_decode_preserves_storage_decode_errors() {
+    let error = super::decode_usage_body_in_background(|| {
+        inflate_usage_json_value(b"invalid gzip").map(Some)
+    })
+    .await
+    .expect_err("corrupt bodies should fail");
+
+    assert!(error
+        .to_string()
+        .contains("failed to decompress usage json:"));
 }
 
 #[test]
@@ -4284,6 +4654,39 @@ fn resolved_read_usage_body_ref_prefers_typed_then_http_audit_then_compressed_th
         ),
         Some("usage://request/req-123/client_response_body".to_string())
     );
+    assert_eq!(
+        resolved_read_usage_body_ref(
+            Some("usage://request/req-other/request_body"),
+            None,
+            "req-123",
+            UsageBodyField::RequestBody,
+            false,
+            Some("usage://request/req-123/request_body"),
+        ),
+        Some(usage_body_ref("req-123", UsageBodyField::RequestBody))
+    );
+    assert_eq!(
+        resolved_read_usage_body_ref(
+            None,
+            None,
+            "req-123",
+            UsageBodyField::RequestBody,
+            false,
+            Some("usage://request/req-other/request_body"),
+        ),
+        None
+    );
+    assert_eq!(
+        resolved_read_usage_body_ref(
+            None,
+            None,
+            "req-123",
+            UsageBodyField::RequestBody,
+            false,
+            Some("usage://request/req-123/response_body"),
+        ),
+        None
+    );
 }
 
 #[test]
@@ -4321,6 +4724,26 @@ fn resolved_write_usage_body_ref_ignores_metadata_compatibility_keys() {
             Some("usage://request/req-123/client_response_body"),
         ),
         Some("usage://request/req-123/client_response_body".to_string())
+    );
+    assert_eq!(
+        resolved_write_usage_body_ref(
+            Some("usage://request/req-other/request_body"),
+            "req-123",
+            UsageBodyField::RequestBody,
+            false,
+            Some("usage://request/req-123/request_body"),
+        ),
+        Some(usage_body_ref("req-123", UsageBodyField::RequestBody))
+    );
+    assert_eq!(
+        resolved_write_usage_body_ref(
+            Some("usage://request/req-123/response_body"),
+            "req-123",
+            UsageBodyField::RequestBody,
+            false,
+            Some("usage://request/req-other/request_body"),
+        ),
+        None
     );
 }
 

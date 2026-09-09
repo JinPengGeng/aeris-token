@@ -1,13 +1,17 @@
 use aether_routing_core::{
     resolve_routing_policy, MutationPlan, RankingOverlay, ResolvedRoutingPolicy,
-    RoutingDefaultPolicy, RoutingGroupConfig, RoutingPolicyInput, RoutingRulePhase,
-    RoutingSchedulingMode, RoutingSetPriorityMode, DEFAULT_STICKY_KEY_ATTEMPTS,
+    RoutingDefaultPolicy, RoutingGroupConfig, RoutingPolicyError, RoutingPolicyInput,
+    RoutingRulePhase, RoutingSchedulingMode, RoutingSetPriorityMode, DEFAULT_STICKY_KEY_ATTEMPTS,
 };
 use http::StatusCode;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::GatewayError;
+
+const INVALID_ROUTING_GROUP_CONFIG_MESSAGE: &str = "invalid routing group config";
+const INVALID_ROUTING_MUTATION_MESSAGE: &str = "invalid routing mutation";
+const ROUTING_MODEL_NOT_ALLOWED_MESSAGE: &str = "requested model is not allowed by routing policy";
 
 #[derive(Debug, Clone)]
 pub(crate) struct GatewayRoutingPolicyInput<'a> {
@@ -52,11 +56,8 @@ pub(crate) fn resolve_gateway_routing_policy(
     }
 
     let config = serde_json::from_value::<RoutingGroupConfig>(input.group_config_json.clone())
-        .map_err(|err| GatewayError::Client {
-            status: StatusCode::BAD_REQUEST,
-            message: format!("invalid routing group config: {err}"),
-        })?;
-    resolve_routing_policy(
+        .map_err(|_| invalid_routing_group_config())?;
+    let policy = resolve_routing_policy(
         &config,
         RoutingPolicyInput {
             group_id: input.group_id,
@@ -72,10 +73,9 @@ pub(crate) fn resolve_gateway_routing_policy(
             phase: input.phase,
         },
     )
-    .map_err(|err| GatewayError::Client {
-        status: StatusCode::BAD_REQUEST,
-        message: err.to_string(),
-    })
+    .map_err(routing_policy_error)?;
+    crate::request_lifecycle::configure_client_disconnect(policy.execution_policy.clone());
+    Ok(policy)
 }
 
 pub(crate) fn resolve_gateway_static_default_routing_policy(
@@ -84,6 +84,7 @@ pub(crate) fn resolve_gateway_static_default_routing_policy(
     let Some(default_policy) = static_default_policy_fields(input.group_config_json)? else {
         return Ok(None);
     };
+    crate::request_lifecycle::configure_client_disconnect(default_policy.execution_policy.clone());
 
     Ok(Some(ResolvedRoutingPolicy {
         group_id: input.group_id.map(str::to_string),
@@ -134,42 +135,21 @@ fn static_default_policy_fields(
         RoutingSchedulingMode::default,
     )?;
     let keep_priority_on_conversion = match default_policy.get("keep_priority_on_conversion") {
-        Some(value) => value.as_bool().ok_or_else(|| {
-            invalid_routing_group_config("keep_priority_on_conversion must be a boolean")
-        })?,
+        Some(value) => value.as_bool().ok_or_else(invalid_routing_group_config)?,
         None => false,
     };
     let sticky_key_attempts = match default_policy.get("sticky_key_attempts") {
         Some(value) => value
             .as_u64()
             .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| {
-                invalid_routing_group_config("sticky_key_attempts must be a non-negative integer")
-            })?,
+            .ok_or_else(invalid_routing_group_config)?,
         None => DEFAULT_STICKY_KEY_ATTEMPTS,
     };
-    let enable_cf_heartbeat = routing_bool_field(
-        default_policy.get("enable_cf_heartbeat"),
-        "enable_cf_heartbeat",
-    )?;
-    // Older strategies stored separate image/text heartbeat flags. Treat
-    // either legacy flag as enabling the unified CF heartbeat setting while
-    // allowing newly saved strategies to use only the canonical key.
-    let legacy_image_heartbeat = routing_bool_field(
-        default_policy.get("enable_openai_image_sync_heartbeat"),
-        "enable_openai_image_sync_heartbeat",
-    )?;
-    let legacy_text_heartbeat = routing_bool_field(
-        default_policy.get("enable_standard_text_sync_heartbeat"),
-        "enable_standard_text_sync_heartbeat",
-    )?;
-    let execution_policy = aether_routing_core::RoutingExecutionPolicy {
-        enable_cf_heartbeat: enable_cf_heartbeat || legacy_image_heartbeat || legacy_text_heartbeat,
-        cyber_continue_failover: routing_bool_field(
-            default_policy.get("cyber_continue_failover"),
-            "cyber_continue_failover",
-        )?,
-    };
+    let execution_policy: aether_routing_core::RoutingExecutionPolicy =
+        serde_json::from_value(Value::Object(default_policy.clone()))
+            .map_err(|_| invalid_routing_group_config())?;
+    aether_routing_core::validate_routing_failover_rules(&execution_policy.failover_rules)
+        .map_err(|_| invalid_routing_group_config())?;
 
     Ok(Some(RoutingDefaultPolicy {
         priority_mode,
@@ -178,15 +158,6 @@ fn static_default_policy_fields(
         sticky_key_attempts,
         execution_policy,
     }))
-}
-
-fn routing_bool_field(value: Option<&Value>, field: &str) -> Result<bool, GatewayError> {
-    match value {
-        Some(value) => value
-            .as_bool()
-            .ok_or_else(|| invalid_routing_group_config(format!("{field} must be a boolean"))),
-        None => Ok(false),
-    }
 }
 
 fn routing_array_field_is_missing_or_empty(
@@ -208,17 +179,29 @@ where
     T: serde::de::DeserializeOwned,
 {
     match value {
-        Some(value) => serde_json::from_value(value.clone()).map_err(|err| {
-            invalid_routing_group_config(format!("invalid default routing policy: {err}"))
-        }),
+        Some(value) => {
+            serde_json::from_value(value.clone()).map_err(|_| invalid_routing_group_config())
+        }
         None => Ok(default()),
     }
 }
 
-fn invalid_routing_group_config(message: impl Into<String>) -> GatewayError {
+fn routing_policy_error(error: RoutingPolicyError) -> GatewayError {
+    let message = match error {
+        RoutingPolicyError::InvalidConfig(_) => INVALID_ROUTING_GROUP_CONFIG_MESSAGE,
+        RoutingPolicyError::InvalidMutation(_) => INVALID_ROUTING_MUTATION_MESSAGE,
+        RoutingPolicyError::ModelNotAllowed(_) => ROUTING_MODEL_NOT_ALLOWED_MESSAGE,
+    };
     GatewayError::Client {
         status: StatusCode::BAD_REQUEST,
-        message: format!("invalid routing group config: {}", message.into()),
+        message: message.to_string(),
+    }
+}
+
+fn invalid_routing_group_config() -> GatewayError {
+    GatewayError::Client {
+        status: StatusCode::BAD_REQUEST,
+        message: INVALID_ROUTING_GROUP_CONFIG_MESSAGE.to_string(),
     }
 }
 
@@ -234,7 +217,14 @@ mod tests {
             "default_policy": {
                 "priority_mode": "global_key",
                 "scheduling_mode": "load_balance",
-                "keep_priority_on_conversion": true
+                "keep_priority_on_conversion": true,
+                "cancel_on_client_disconnect": true,
+                "max_transfer_count": 3,
+                "max_transfer_timeout_seconds": 90,
+                "failover_rules": {
+                    "success_failover_patterns": [{"pattern": "(?i)capacity.*exhausted"}],
+                    "error_stop_patterns": [{"status_codes": [400]}]
+                }
             },
             "allowed_models": ["legacy-model"],
             "model_policies": [],
@@ -270,6 +260,19 @@ mod tests {
         .expect("full policy should resolve");
 
         assert_eq!(static_policy, full_policy);
+        assert_eq!(static_policy.execution_policy.max_transfer_count, 3);
+        assert_eq!(
+            static_policy.execution_policy.max_transfer_timeout_seconds,
+            90
+        );
+        assert_eq!(
+            static_policy
+                .execution_policy
+                .failover_rules
+                .error_stop_patterns
+                .len(),
+            1
+        );
         assert_eq!(
             static_policy.priority_mode,
             RoutingSetPriorityMode::GlobalKey
@@ -308,5 +311,73 @@ mod tests {
             .expect("dynamic config should not fail static detection");
 
         assert!(policy.is_none());
+    }
+
+    #[test]
+    fn routing_config_errors_do_not_echo_config_values() {
+        let secret = "https://internal.example/?token=Bearer-secret";
+        let config = json!({
+            "default_policy": {
+                "priority_mode": secret
+            }
+        });
+
+        let error =
+            resolve_gateway_static_default_routing_policy(GatewayStaticRoutingPolicyInput {
+                group_id: Some("group-1"),
+                group_version: Some(1),
+                group_config_json: &config,
+                selection_source: "system_default",
+                requested_model: "mock-model",
+                resolved_model: "mock-model",
+            })
+            .expect_err("invalid config should fail");
+
+        assert!(matches!(
+            error,
+            GatewayError::Client {
+                status: StatusCode::BAD_REQUEST,
+                ref message,
+            } if message == INVALID_ROUTING_GROUP_CONFIG_MESSAGE && !message.contains(secret)
+        ));
+    }
+
+    #[test]
+    fn routing_policy_errors_do_not_echo_requested_model() {
+        let secret = "model?token=Bearer-secret";
+        let config = json!({
+            "rules": [{
+                "id": "restrict-model",
+                "conditions": {},
+                "actions": [{
+                    "type": "restrict_models",
+                    "models": ["allowed-model"]
+                }]
+            }]
+        });
+
+        let error = resolve_gateway_routing_policy(GatewayRoutingPolicyInput {
+            group_id: Some("group-1"),
+            group_version: Some(1),
+            group_config_json: &config,
+            selection_source: "system_default",
+            requested_model: secret,
+            resolved_model: secret,
+            api_format: "openai:chat",
+            user_id: Some("user-1"),
+            api_key_id: Some("key-1"),
+            headers: &json!({}),
+            body: &json!({"model": secret}),
+            phase: RoutingRulePhase::ClientRequest,
+        })
+        .expect_err("disallowed model should fail");
+
+        assert!(matches!(
+            error,
+            GatewayError::Client {
+                status: StatusCode::BAD_REQUEST,
+                ref message,
+            } if message == ROUTING_MODEL_NOT_ALLOWED_MESSAGE && !message.contains(secret)
+        ));
     }
 }

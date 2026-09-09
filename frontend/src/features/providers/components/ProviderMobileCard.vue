@@ -5,16 +5,17 @@
   >
     <!-- 第一行：名称 + 状态 + 操作 -->
     <div class="flex items-start justify-between gap-3">
+      <slot name="drag-handle" />
       <div class="flex-1 min-w-0 space-y-0.5">
         <div class="flex items-center gap-1.5">
           <span class="font-medium text-foreground truncate">{{ provider.name }}</span>
           <a
-            v-if="provider.website"
-            :href="provider.website"
+            v-if="safeProviderWebsite"
+            :href="safeProviderWebsite"
             target="_blank"
             rel="noopener noreferrer"
             class="text-muted-foreground hover:text-primary transition-colors shrink-0"
-            :title="provider.website"
+            :title="safeProviderWebsite"
             @click.stop
           >
             <ExternalLink class="w-3.5 h-3.5" />
@@ -134,43 +135,29 @@
         {{ legacyT('加载中...') }}
       </span>
       <!-- 余额（从上游 API 查询） -->
-      <div
+      <span
         v-else-if="provider.ops_configured && getProviderBalance(provider.id)"
-        class="space-y-0.5 text-muted-foreground"
+        class="text-muted-foreground"
       >
-        <template v-if="getProviderBalanceBreakdown(provider.id)?.lines.length">
-          <div
-            v-for="line in getProviderBalanceBreakdown(provider.id)?.lines || []"
-            :key="line.key"
-            class="flex items-baseline gap-1.5"
-          >
-            <span class="text-[10px] text-muted-foreground/60">{{ line.label }}</span>
-            <span class="font-semibold text-foreground/90">{{ formatBalanceAmount(line.amount, getProviderBalance(provider.id)?.currency || 'USD') }}</span>
-          </div>
-        </template>
-        <div v-else>
-          {{ legacyT('余额') }} <span class="font-semibold text-foreground/90">{{ formatBalanceDisplay(getProviderBalance(provider.id)) }}</span>
-        </div>
-        <div class="flex flex-wrap items-center gap-1.5">
-          <!-- Cookie 失效警告 -->
-          <span
-            v-if="getProviderCookieExpired(provider.id)"
-            class="text-[10px] text-amber-600 dark:text-amber-500"
-            :title="getProviderCookieExpired(provider.id)?.message"
-          >{{ legacyT('签到 Cookie 已失效') }}</span>
-          <!-- 签到状态显示 -->
-          <span
-            v-else-if="getProviderCheckin(provider.id) && getProviderCheckin(provider.id)?.success !== false"
-            class="text-[10px] text-muted-foreground"
-            :title="getProviderCheckin(provider.id)?.message"
-          >{{ legacyT('已签到') }}</span>
-          <span
-            v-else-if="getProviderCheckin(provider.id)?.success === false"
-            class="text-[10px] text-destructive/70"
-            :title="getProviderCheckin(provider.id)?.message"
-          >{{ legacyT('签到失败') }}</span>
-        </div>
-      </div>
+        {{ legacyT('余额') }} <span class="font-semibold text-foreground/90">{{ formatBalanceDisplay(getProviderBalance(provider.id)) }}</span>
+        <!-- Cookie 失效警告 -->
+        <span
+          v-if="getProviderCookieExpired(provider.id)"
+          class="ml-1 text-amber-600 dark:text-amber-500"
+          :title="getProviderCookieExpired(provider.id)?.message"
+        >{{ legacyT('签到 Cookie 已失效') }}</span>
+        <!-- 签到状态显示 -->
+        <span
+          v-else-if="getProviderCheckin(provider.id) && getProviderCheckin(provider.id)?.success !== false"
+          class="ml-1 text-muted-foreground"
+          :title="getProviderCheckin(provider.id)?.message"
+        >{{ legacyT('已签到') }}</span>
+        <span
+          v-else-if="getProviderCheckin(provider.id)?.success === false"
+          class="ml-1 text-destructive/70"
+          :title="getProviderCheckin(provider.id)?.message"
+        >{{ legacyT('签到失败') }}</span>
+      </span>
       <!-- 余额查询失败时显示错误 -->
       <span
         v-else-if="provider.ops_configured && getProviderBalanceError(provider.id)"
@@ -217,7 +204,7 @@
             {{ formatApiFormatShort(endpoint.api_format) }}
           </span>
           <span class="font-medium text-muted-foreground/80">
-            {{ isEndpointAvailable(endpoint) ? `${(endpoint.health_score * 100).toFixed(0)}%` : '-' }}
+            {{ getEndpointHealthLabel(endpoint) }}
           </span>
         </div>
 
@@ -226,7 +213,7 @@
           <div
             class="h-full rounded-full transition-all duration-300"
             :class="getEndpointDotColor(endpoint)"
-            :style="{ width: isEndpointAvailable(endpoint) ? `${Math.max(endpoint.health_score * 100, 5)}%` : '100%' }"
+            :style="{ width: getEndpointHealthBarWidth(endpoint) }"
           />
         </div>
       </div>
@@ -235,7 +222,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   Edit,
   Eye,
@@ -252,10 +239,16 @@ import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
 import { type ProviderWithEndpointsSummary, formatApiFormatShort } from '@/api/endpoints'
 import { formatBillingType } from '@/utils/format'
-import { sortEndpoints, isEndpointAvailable, getEndpointDotColor, getEndpointTooltip } from '@/features/providers/composables/useEndpointStatus'
-import type { ProviderBalanceBreakdown } from '@/features/providers/composables/useProviderBalance'
+import {
+  sortEndpoints,
+  getEndpointHealthLabel,
+  getEndpointHealthBarWidth,
+  getEndpointDotColor,
+  getEndpointTooltip,
+} from '@/features/providers/composables/useEndpointStatus'
 import { isKeyManagedProviderType } from '../utils/providerTypeUtils'
 import { useI18n } from '@/i18n'
+import { safeExternalWebUrl } from '@/utils/navigationSecurity'
 
 const props = defineProps<{
   provider: ProviderWithEndpointsSummary
@@ -263,7 +256,6 @@ const props = defineProps<{
   // Balance functions
   isBalanceLoading: (providerId: string) => boolean
   getProviderBalance: (providerId: string) => { available: number | null; currency: string } | null
-  getProviderBalanceBreakdown: (providerId: string) => ProviderBalanceBreakdown | null
   getProviderBalanceError: (providerId: string) => { status: string; message: string } | null
   getProviderCheckin: (providerId: string) => { success: boolean | null; message: string } | null
   getProviderCookieExpired: (providerId: string) => { expired: boolean; message: string } | null
@@ -282,17 +274,13 @@ const emit = defineEmits<{
   'cancelEditDescription': [event?: Event]
 }>()
 
-function formatBalanceAmount(amount: number, currency: string): string {
-  const symbol = currency === 'USD' ? '$' : `${currency} `
-  return `${symbol}${amount.toFixed(2)}`
-}
-
 const vAutoFocus = {
   mounted: (el: HTMLElement) => el.focus(),
 }
 
 const localDescriptionValue = ref('')
 const { legacyT, locale } = useI18n()
+const safeProviderWebsite = computed(() => safeExternalWebUrl(props.provider.website))
 
 watch(
   () => props.editingDescriptionId,

@@ -11,8 +11,7 @@ pub struct SpawnedServer {
 
 impl SpawnedServer {
     pub async fn start(app: Router) -> Result<Self, std::io::Error> {
-        let port = reserve_local_port()?;
-        Self::start_on_port(port, app).await
+        Self::start_on_port(0, app).await
     }
 
     pub async fn start_on_port(port: u16, app: Router) -> Result<Self, std::io::Error> {

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
+use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data::repository::pool_scores::InMemoryPoolMemberScoreRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
@@ -23,7 +23,8 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use serde_json::json;
 
 use super::super::{
-    build_router_with_state, sample_endpoint, sample_key, sample_provider, start_server, AppState,
+    build_router_with_state, sample_bound_auth_config, sample_bound_key as sample_key,
+    sample_endpoint, sample_provider, start_server, AppState,
 };
 use crate::admin_api::{maybe_build_local_admin_pool_response, AdminAppState, AdminRequestContext};
 use crate::ai_serving::{provider_key_pool_score_id, provider_key_pool_score_scope};
@@ -661,29 +662,11 @@ impl ProviderCatalogWriteRepository for FailAfterCreateKeysProviderCatalogReposi
         self.inner.clear_key_oauth_invalid_marker(key_id).await
     }
 
-    async fn update_key_oauth_credentials(
-        &self,
-        key_id: &str,
-        encrypted_api_key: &str,
-        encrypted_auth_config: Option<&str>,
-        expires_at_unix_secs: Option<u64>,
-    ) -> Result<bool, DataLayerError> {
-        self.inner
-            .update_key_oauth_credentials(
-                key_id,
-                encrypted_api_key,
-                encrypted_auth_config,
-                expires_at_unix_secs,
-            )
-            .await
-    }
-
     async fn update_key_oauth_runtime_state(
         &self,
         key_id: &str,
         oauth_invalid_at_unix_secs: Option<u64>,
         oauth_invalid_reason: Option<&str>,
-        encrypted_auth_config_update: Option<&str>,
         updated_at_unix_secs: Option<u64>,
     ) -> Result<bool, DataLayerError> {
         self.inner
@@ -691,7 +674,6 @@ impl ProviderCatalogWriteRepository for FailAfterCreateKeysProviderCatalogReposi
                 key_id,
                 oauth_invalid_at_unix_secs,
                 oauth_invalid_reason,
-                encrypted_auth_config_update,
                 updated_at_unix_secs,
             )
             .await
@@ -2118,13 +2100,11 @@ async fn gateway_handles_admin_pool_list_keys_with_quota_compatibility_fields() 
     key.name = "quota-key".to_string();
     key.auth_type = "oauth".to_string();
     key.expires_at_unix_secs = Some(1_775_556_730);
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"plan_type":"pro","account_id":"acct-antigravity-1","account_name":"quota-user","account_user_id":"quota-user-1","organizations":[{"id":"org-1","name":"Org One"}]}"#,
-        )
-        .expect("auth config ciphertext should build"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-antigravity",
+        "key-antigravity-a",
+        r#"{"plan_type":"pro","account_id":"acct-antigravity-1","account_name":"quota-user","account_user_id":"quota-user-1","organizations":[{"id":"org-1","name":"Org One"}]}"#,
+    ));
     key.status_snapshot = Some(json!({
         "oauth": {
             "code": "expired",
@@ -2241,20 +2221,18 @@ async fn gateway_includes_pool_quota_and_compat_fields_in_list_keys_response() {
     key.name = "quota key".to_string();
     key.auth_type = "oauth".to_string();
     key.expires_at_unix_secs = Some(1_775_556_730);
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            &json!({
-                "plan_type": "pro",
-                "account_id": "acct-demo-001",
-                "account_name": "Demo Account",
-                "account_user_id": "user-demo-001",
-                "organizations": [],
-            })
-            .to_string(),
-        )
-        .expect("auth config should encrypt"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-antigravity",
+        "key-antigravity-oauth",
+        &json!({
+            "plan_type": "pro",
+            "account_id": "acct-demo-001",
+            "account_name": "Demo Account",
+            "account_user_id": "user-demo-001",
+            "organizations": [],
+        })
+        .to_string(),
+    ));
     key.upstream_metadata = Some(json!({
         "antigravity": {
             "updated_at": 1_775_553_285u64,
@@ -3377,17 +3355,15 @@ async fn gateway_pool_prefers_upstream_plan_type_over_auth_config() {
         "oauth-placeholder",
     );
     key.auth_type = "oauth".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            &json!({
-                "plan_type": "free",
-                "account_id": "acct-codex-legacy"
-            })
-            .to_string(),
-        )
-        .expect("auth config should encrypt"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-precedence",
+        &json!({
+            "plan_type": "free",
+            "account_id": "acct-codex-legacy"
+        })
+        .to_string(),
+    ));
     key.upstream_metadata = Some(json!({
         "codex": {
             "plan_type": "plus",
@@ -3452,17 +3428,15 @@ async fn gateway_pool_plan_free_selector_prefers_upstream_plan_type() {
         "oauth-placeholder",
     );
     key.auth_type = "oauth".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            &json!({
-                "plan_type": "free",
-                "account_id": "acct-codex-legacy"
-            })
-            .to_string(),
-        )
-        .expect("auth config should encrypt"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-selector",
+        &json!({
+            "plan_type": "free",
+            "account_id": "acct-codex-legacy"
+        })
+        .to_string(),
+    ));
     key.upstream_metadata = Some(json!({
         "codex": {
             "plan_type": "plus",
@@ -3534,13 +3508,11 @@ async fn gateway_pool_keys_classify_oauth_credentials() {
         "imported-session-token",
     );
     key.auth_type = "oauth".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"codex","headers":{"authorization":"Bearer imported-session-token"}}"#,
-        )
-        .expect("auth config should encrypt"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-oauth-header",
+        r#"{"provider_type":"codex","headers":{"authorization":"Bearer imported-session-token"}}"#,
+    ));
     let mut agent_key = sample_key(
         "key-codex-agent-identity",
         "provider-codex",
@@ -3548,13 +3520,11 @@ async fn gateway_pool_keys_classify_oauth_credentials() {
         "",
     );
     agent_key.auth_type = "oauth".to_string();
-    agent_key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"codex","auth_mode":"agentIdentity","agent_runtime_id":"runtime-1","agent_private_key":"base64-private-key","task_id":"task-1"}"#,
-        )
-        .expect("Agent Identity auth config should encrypt"),
-    );
+    agent_key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-agent-identity",
+        r#"{"provider_type":"codex","auth_mode":"agentIdentity","agent_runtime_id":"runtime-1","agent_private_key":"base64-private-key","task_id":"task-1"}"#,
+    ));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
@@ -3626,13 +3596,11 @@ async fn gateway_pool_resolve_selection_marks_oauth_header_auth() {
         "imported-session-token",
     );
     key.auth_type = "oauth".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"codex","headers":{"authorization":"Bearer imported-session-token"}}"#,
-        )
-        .expect("auth config should encrypt"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-codex",
+        "key-codex-oauth-header",
+        r#"{"provider_type":"codex","headers":{"authorization":"Bearer imported-session-token"}}"#,
+    ));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
@@ -3700,7 +3668,7 @@ async fn gateway_handles_admin_pool_resolve_selection_locally_with_trusted_admin
     proxy_key.name = "alpha proxy".to_string();
     proxy_key.proxy = Some(json!({
         "mode": "direct",
-        "url": "https://proxy.example.com"
+        "url": "https://proxy.example.com/"
     }));
     let mut plain_key = sample_key("key-openai-b", "provider-openai", "openai:chat", "sk-b");
     plain_key.name = "beta".to_string();
@@ -3710,7 +3678,7 @@ async fn gateway_handles_admin_pool_resolve_selection_locally_with_trusted_admin
     disabled_proxy_key.is_active = false;
     disabled_proxy_key.proxy = Some(json!({
         "mode": "direct",
-        "url": "https://proxy-disabled.example.com"
+        "url": "https://proxy-disabled.example.com/"
     }));
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
@@ -3890,13 +3858,11 @@ async fn gateway_resolve_selection_marks_legacy_kiro_bearer_keys_as_oauth_manage
         "kiro-access-token",
     );
     key.auth_type = "bearer".to_string();
-    key.encrypted_auth_config = Some(
-        encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"kiro","email":"legacy-kiro@example.com","refresh_token":"legacy-kiro-refresh-token"}"#,
-        )
-        .expect("auth config ciphertext should build"),
-    );
+    key.encrypted_auth_config = Some(sample_bound_auth_config(
+        "provider-kiro",
+        "key-kiro-legacy",
+        r#"{"provider_type":"kiro","email":"legacy-kiro@example.com","refresh_token":"legacy-kiro-refresh-token"}"#,
+    ));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],

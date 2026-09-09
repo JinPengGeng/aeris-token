@@ -287,6 +287,7 @@ pub(super) async fn handle_user_rate_limit_status(
             local_rejection: None,
             allowed_models: None,
             ip_rules: None,
+            verified_api_key_hash: None,
         });
         let daily_usage = match daily_limiter.current_status(state, &daily_decision).await {
             Ok(Some(status)) => daily_usage_available_payload(status),

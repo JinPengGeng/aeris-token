@@ -822,15 +822,20 @@ where
     let started_at = Instant::now();
     let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(1);
     let request_diagnostics = current_request_diagnostics();
+    let cancel_on_disconnect = crate::request_lifecycle::cancel_on_client_disconnect();
 
     tokio::spawn(async move {
         scope_request_diagnostics_with(request_diagnostics, async move {
-            let bytes = standard_text_sync_heartbeat_final_bytes(
+            let completion = standard_text_sync_heartbeat_final_bytes(
                 client_api_format.as_str(),
                 redaction_slot.as_ref(),
-                execute(state, parts, trace_id, decision, plan_kind, started_at).await,
-            )
-            .await;
+                tokio::select! {
+                    biased;
+                    _ = tx.closed(), if cancel_on_disconnect => return,
+                    result = execute(state, parts, trace_id, decision, plan_kind, started_at) => result,
+                },
+            );
+            let bytes = completion.await;
             let _ = tx.send(Ok(Bytes::from(bytes))).await;
         })
         .await;
@@ -899,10 +904,10 @@ async fn standard_text_sync_heartbeat_final_bytes(
             STANDARD_TEXT_SYNC_HEARTBEAT_EXHAUSTED_STATUS,
             "standard text sync exhausted all local candidates",
         ),
-        Err(err) => standard_text_sync_heartbeat_error_body(
+        Err(_err) => standard_text_sync_heartbeat_error_body(
             client_api_format,
             STANDARD_TEXT_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
-            &format!("{err:?}"),
+            "internal gateway error while executing request",
         ),
     }
 }
@@ -922,11 +927,11 @@ async fn standard_text_sync_heartbeat_response_body_bytes(
                 bytes.as_ref(),
             ) {
                 Ok(body) => body,
-                Err(err) => {
+                Err(_err) => {
                     return standard_text_sync_heartbeat_error_body(
                         client_api_format,
                         STANDARD_TEXT_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
-                        &format!("{err:?}"),
+                        "internal gateway error while restoring response",
                     );
                 }
             };
@@ -946,10 +951,10 @@ async fn standard_text_sync_heartbeat_response_body_bytes(
                 "empty standard text sync response",
             )
         }
-        Err(err) => standard_text_sync_heartbeat_error_body(
+        Err(_err) => standard_text_sync_heartbeat_error_body(
             client_api_format,
             STANDARD_TEXT_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
-            &err.to_string(),
+            "internal gateway error while reading response",
         ),
     }
 }
@@ -1097,23 +1102,26 @@ fn build_openai_image_sync_heartbeat_shell_response(
     let started_at = Instant::now();
     let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(1);
     let request_diagnostics = current_request_diagnostics();
+    let cancel_on_disconnect = crate::request_lifecycle::cancel_on_client_disconnect();
 
     tokio::spawn(async move {
         scope_request_diagnostics_with(request_diagnostics, async move {
-            let bytes = openai_image_sync_heartbeat_final_bytes(
-                execute_openai_image_sync_heartbeat_attempts(
-                    state,
-                    request_path,
-                    trace_id,
-                    decision,
-                    plan_kind,
-                    attempts,
-                    transfer_tracker,
-                    started_at,
-                )
-                .await,
-            )
-            .await;
+            let execution = execute_openai_image_sync_heartbeat_attempts(
+                state,
+                request_path,
+                trace_id,
+                decision,
+                plan_kind,
+                attempts,
+                transfer_tracker,
+                started_at,
+            );
+            let outcome = tokio::select! {
+                biased;
+                _ = tx.closed(), if cancel_on_disconnect => return,
+                result = execution => result,
+            };
+            let bytes = openai_image_sync_heartbeat_final_bytes(outcome).await;
             let _ = tx.send(Ok(Bytes::from(bytes))).await;
         })
         .await;
@@ -1200,9 +1208,9 @@ async fn openai_image_sync_heartbeat_final_bytes(
             OPENAI_IMAGE_SYNC_HEARTBEAT_EXHAUSTED_STATUS,
             "OpenAI image sync exhausted all local candidates",
         ),
-        Err(err) => openai_image_sync_heartbeat_error_body(
+        Err(_err) => openai_image_sync_heartbeat_error_body(
             OPENAI_IMAGE_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
-            &format!("{err:?}"),
+            "internal gateway error while executing image request",
         ),
     }
 }
@@ -1223,9 +1231,9 @@ async fn openai_image_sync_heartbeat_response_body_bytes(response: Response<Body
             OPENAI_IMAGE_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
             "empty sync image response",
         ),
-        Err(err) => openai_image_sync_heartbeat_error_body(
+        Err(_err) => openai_image_sync_heartbeat_error_body(
             OPENAI_IMAGE_SYNC_HEARTBEAT_INTERNAL_ERROR_STATUS,
-            &err.to_string(),
+            "internal gateway error while reading image response",
         ),
     }
 }
@@ -2265,6 +2273,109 @@ mod tests {
             .expect("heartbeat chunk should be ok");
         assert_eq!(first.as_ref(), b"\n");
         let _ = release_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn standard_text_sync_heartbeat_background_holds_request_admission_after_disconnect() {
+        let state = AppState::new().expect("state should build");
+        let gate = aether_runtime::ConcurrencyGate::new("heartbeat_request", 1);
+        let admission = aether_runtime::AdmissionPermit::from(
+            gate.try_acquire().expect("request admission permit"),
+        );
+        let (mut parts, _) = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/responses")
+            .body(())
+            .expect("request should build")
+            .into_parts();
+        parts.extensions.insert(
+            crate::executor::candidate_loop::BackgroundAdmissionPermit::new(admission.clone()),
+        );
+        drop(admission);
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let response = build_standard_text_sync_heartbeat_shell_response(
+            state,
+            parts,
+            "trace-standard-text-heartbeat-admission".to_string(),
+            test_standard_text_heartbeat_decision(),
+            TEST_STANDARD_TEXT_SYNC_PLAN_KIND.to_string(),
+            move |_state, parts, _trace_id, _decision, _plan_kind, _started_at| async move {
+                assert!(
+                    parts
+                        .extensions
+                        .get::<crate::executor::candidate_loop::BackgroundAdmissionPermit>()
+                        .is_some(),
+                    "background request parts should carry admission"
+                );
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Ok(LocalExecutionRequestOutcome::responded(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(r#"{"id":"resp_done","output":[]}"#))
+                        .expect("response should build"),
+                ))
+            },
+        )
+        .expect("heartbeat shell should build");
+
+        started_rx.await.expect("background execution should start");
+        drop(response);
+        assert_eq!(gate.snapshot().in_flight, 1);
+        assert!(
+            gate.try_acquire().is_err(),
+            "disconnect must not release background admission"
+        );
+
+        let _ = release_tx.send(());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while gate.snapshot().in_flight != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background completion should release admission");
+    }
+
+    #[tokio::test]
+    async fn standard_text_sync_heartbeat_cancels_when_routing_policy_enables_it() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (mut release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let response = crate::request_lifecycle::run_request(async move {
+            crate::request_lifecycle::configure_client_disconnect(
+                aether_routing_core::RoutingExecutionPolicy {
+                    cancel_on_client_disconnect: true,
+                    ..Default::default()
+                },
+            );
+            let (parts, _) = http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .body(())
+                .unwrap()
+                .into_parts();
+            build_standard_text_sync_heartbeat_shell_response(
+                AppState::new().unwrap(),
+                parts,
+                "trace-heartbeat-disconnect".to_string(),
+                test_standard_text_heartbeat_decision(),
+                TEST_STANDARD_TEXT_SYNC_PLAN_KIND.to_string(),
+                move |_, _, _, _, _, _| async move {
+                    started_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                    Ok(LocalExecutionRequestOutcome::NoPath)
+                },
+            )
+        })
+        .await
+        .unwrap();
+        started_rx.await.unwrap();
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(1), release_tx.closed())
+            .await
+            .expect("heartbeat must drop upstream execution immediately");
     }
 
     #[tokio::test]

@@ -3,8 +3,9 @@
  * 演示模式的 API 请求拦截和模拟响应
  */
 
-import type { AxiosRequestConfig, AxiosResponse } from 'axios'
+import { AxiosHeaders, type AxiosRequestConfig, type AxiosResponse } from 'axios'
 import { isDemoMode, DEMO_ACCOUNTS } from '@/config/demo'
+import { log } from '@/utils/logger'
 import {
   MOCK_ADMIN_USER,
   MOCK_NORMAL_USER,
@@ -29,6 +30,41 @@ import {
 // 当前登录用户的 token（用于判断角色）
 let currentUserToken: string | null = null
 
+const UINT32_RANGE = 0x1_0000_0000
+const SECURE_RANDOM_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'
+
+function secureRandomIndex(length: number): number {
+  if (!Number.isSafeInteger(length) || length <= 0 || length > UINT32_RANGE) {
+    throw new RangeError('安全随机索引范围无效')
+  }
+
+  const cryptoSource = globalThis.crypto
+  if (!cryptoSource || typeof cryptoSource.getRandomValues !== 'function') {
+    throw new Error('当前环境不支持安全随机数，无法生成安全相关的 Mock 数据')
+  }
+
+  const values = new Uint32Array(1)
+  const unbiasedLimit = UINT32_RANGE - (UINT32_RANGE % length)
+  let value: number
+  do {
+    cryptoSource.getRandomValues(values)
+    value = values[0]
+  } while (value >= unbiasedLimit)
+
+  return value % length
+}
+
+function secureRandomElement<T>(values: readonly T[]): T {
+  return values[secureRandomIndex(values.length)]
+}
+
+function secureRandomString(length: number): string {
+  return Array.from(
+    { length },
+    () => SECURE_RANDOM_ALPHABET[secureRandomIndex(SECURE_RANDOM_ALPHABET.length)]
+  ).join('')
+}
+
 // 模拟网络延迟
 function delay(ms: number = 150): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms + Math.random() * 200))
@@ -41,7 +77,7 @@ function createMockResponse<T>(data: T, status: number = 200): AxiosResponse<T> 
     status,
     statusText: status === 200 ? 'OK' : 'Error',
     headers: {},
-    config: {} as AxiosRequestConfig
+    config: { headers: new AxiosHeaders() }
   }
 }
 
@@ -801,8 +837,8 @@ function generateMockUsageRecords(count: number = 100) {
   const statusOptions: Array<'completed' | 'failed' | 'streaming'> = ['completed', 'completed', 'completed', 'completed', 'failed', 'streaming']
 
   for (let i = 0; i < count; i++) {
-    const model = models[Math.floor(Math.random() * models.length)]
-    const user = users[Math.floor(Math.random() * users.length)]
+    const model = secureRandomElement(models)
+    const user = secureRandomElement(users)
     const status = statusOptions[Math.floor(Math.random() * statusOptions.length)]
 
     // 根据模型类型选择 API 格式
@@ -841,12 +877,12 @@ function generateMockUsageRecords(count: number = 100) {
       username: user.username,
       user_email: user.email,
       api_key: {
-        id: `key-${user.id}-${Math.ceil(Math.random() * 2)}`,
-        name: `${user.username} Key ${Math.ceil(Math.random() * 3)}`,
-        display: `sk-ae...${String(1000 + Math.floor(Math.random() * 9000))}`
+        id: `key-${user.id}-${secureRandomIndex(2) + 1}`,
+        name: `${user.username} Key ${secureRandomIndex(3) + 1}`,
+        display: `sk-ae...${String(1000 + secureRandomIndex(9000))}`
       },
       provider: model.provider,
-      api_key_name: `${model.provider}-key-${Math.ceil(Math.random() * 3)}`,
+      api_key_name: `${model.provider}-key-${secureRandomIndex(3) + 1}`,
       rate_multiplier: 1.0,
       model: model.name,
       target_model: model.name,
@@ -1540,7 +1576,7 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     await delay()
     return createMockResponse(MOCK_ENDPOINTS.map(e => ({
       api_format: e.api_format,
-      health_score: e.health_score,
+      health_score: 1,
       is_active: e.is_active
     })))
   },
@@ -2141,7 +2177,7 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
       models: MOCK_GLOBAL_MODELS.map(m => ({
         name: m.name,
         display_name: m.display_name,
-        description: m.description
+        description: m.config?.description
       }))
     })
   },
@@ -2322,15 +2358,13 @@ export async function handleMockRequest(config: AxiosRequestConfig): Promise<Axi
       if ((error as Record<string, unknown>)?.response) {
         throw error
       }
-      // eslint-disable-next-line no-console
-      console.error('[Mock] Handler error:', error)
+      log.error('Mock request handler failed', error)
       throw { response: createMockResponse({ detail: '模拟请求处理失败' }, 500) }
     }
   }
 
   // 未匹配的请求返回默认响应
-  // eslint-disable-next-line no-console
-  console.warn(`[Mock] Unhandled request: ${method} ${url}`)
+  log.warn('Mock request was not handled', { method, url })
   return createMockResponse({ message: '演示模式：该接口暂未模拟', demo_mode: true })
 }
 
@@ -2409,7 +2443,7 @@ function generateMockKeysForProvider(providerId: string, count: number = 2) {
       id: `key-${providerId}-${i + 1}`,
       provider_id: providerId,
       api_formats: i === 0 ? formats : formats.slice(0, 1),
-      api_key_masked: `sk-***...${Math.random().toString(36).substring(2, 6)}`,
+      api_key_masked: `sk-***...${secureRandomString(4)}`,
       name: i === 0 ? 'Primary Key' : `Backup Key ${i}`,
       ...oauthFields,
       rate_multiplier: 1.0,
@@ -3055,7 +3089,7 @@ registerDynamicRoute('POST', '/api/admin/endpoints/providers/:providerId/refresh
     .filter(key => !requestedKeyIds || requestedKeyIds.has(key.id))
   const results = keys.map(key => ({
     key_id: key.id,
-    key_name: key.name || key.id.slice(0, 8),
+    key_name: key.name || String(key.id).slice(0, 8),
     status: 'success',
     metadata: { updated_at: new Date().toISOString() }
   }))
@@ -3199,7 +3233,7 @@ registerDynamicRoute('POST', '/api/admin/provider-oauth/providers/:providerId/ba
   await delay()
   requireAdmin()
   const body = JSON.parse(config.data || '{}')
-  const raw = typeof body.credentials === 'string' ? body.credentials.trim() : ''
+  const raw: string = typeof body.credentials === 'string' ? body.credentials.trim() : ''
   const lines = raw ? raw.split('\n').filter(line => line.trim() && !line.trim().startsWith('#')) : []
   const total = Math.max(Math.min(lines.length, 5), 2)
   const results = []
@@ -3295,7 +3329,7 @@ mockHandlers['GET /api/admin/endpoints/keys/grouped-by-format'] = async () => {
     const baseUrlByFormat = Object.fromEntries(endpoints.map(e => [e.api_format, e.base_url]))
     const keys = PROVIDER_KEYS_CACHE[provider.id] || []
     for (const key of keys) {
-      const formats: string[] = key.api_formats || []
+      const formats = Array.isArray(key.api_formats) ? key.api_formats.filter((format): format is string => typeof format === 'string') : []
       for (const fmt of formats) {
         if (!grouped[fmt]) grouped[fmt] = []
         grouped[fmt].push({
@@ -4495,7 +4529,7 @@ function generateIntervalTimelineData(
 
     if (includeUserInfo) {
       // 管理员视图：添加用户信息
-      const user = users[Math.floor(Math.random() * users.length)]
+      const user = secureRandomElement(users)
       point.user_id = user.id
     }
 
@@ -4993,7 +5027,7 @@ mockHandlers['GET /api/admin/monitoring/system-status'] = async () => {
       active_streams: 164
     },
     internal_gateway: {
-      status: 'rust_native_control_plane',
+      status: 'disabled',
       path_prefixes: ['/api/', '/v1/', '/v1beta/', '/_gateway/']
     },
     recent_errors: 9

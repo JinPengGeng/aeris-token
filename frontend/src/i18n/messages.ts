@@ -1,3 +1,7 @@
+import { legacyUiEnglishMessages } from './legacy-ui-messages'
+import { legacyAdminEnglishMessages } from './legacy-admin-messages'
+import { legacyGuideEnglishMessages } from './legacy-guide-messages'
+
 export const messages = {
   'zh-CN': {
     'common.loading': '加载中...',
@@ -12,6 +16,28 @@ export const messages = {
     'common.language': '语言',
     'common.chinese': '简体中文',
     'common.english': 'English',
+    'common.searchPlaceholder': '搜索...',
+    'common.noSearchResults': '无搜索结果',
+    'common.filter': '筛选',
+    'common.sort': '排序',
+    'common.openMenu': '打开导航菜单',
+    'common.closeMenu': '关闭导航菜单',
+    'common.configure': '配置',
+    'chart.crosshairValue': '当前值：{value}',
+    'chart.pointsBelow': '个点低于此值',
+    'chart.total': '总计',
+    'chart.unknown': '未知',
+    'chart.intervalAxis': '间隔 (分钟)',
+    'chart.intervalTooltip': '间隔：{value}',
+    'chart.actualCost': '实际成本',
+    'chart.forecastCost': '预测成本',
+    'heatmap.requests': '{count} 次请求',
+    'heatmap.cost': '成本 {value}',
+    'heatmap.less': '少',
+    'heatmap.more': '多',
+    'heatmap.empty': '暂无活动数据',
+    'heatmap.actualCost': '实际成本 {value}',
+    'modules.bark.deviceKeyHint': 'Bark 设备密钥，用于发送通知',
     'auth.expired': '认证已过期，请重新登录',
     'auth.relogin': '重新登录',
     'auth.role.admin': '管理员',
@@ -429,6 +455,28 @@ export const messages = {
     'common.language': 'Language',
     'common.chinese': 'Simplified Chinese',
     'common.english': 'English',
+    'common.searchPlaceholder': 'Search...',
+    'common.noSearchResults': 'No search results',
+    'common.filter': 'Filter',
+    'common.sort': 'Sort',
+    'common.openMenu': 'Open navigation menu',
+    'common.closeMenu': 'Close navigation menu',
+    'common.configure': 'Configure',
+    'chart.crosshairValue': 'Value: {value}',
+    'chart.pointsBelow': 'points below',
+    'chart.total': 'Total',
+    'chart.unknown': 'Unknown',
+    'chart.intervalAxis': 'Interval (minutes)',
+    'chart.intervalTooltip': 'Interval: {value}',
+    'chart.actualCost': 'Actual cost',
+    'chart.forecastCost': 'Forecast cost',
+    'heatmap.requests': '{count} requests',
+    'heatmap.cost': 'Cost {value}',
+    'heatmap.less': 'Less',
+    'heatmap.more': 'More',
+    'heatmap.empty': 'No activity data',
+    'heatmap.actualCost': 'Actual cost {value}',
+    'modules.bark.deviceKeyHint': 'Bark device key used to send notifications',
     'auth.expired': 'Authentication expired. Please sign in again.',
     'auth.relogin': 'Sign in again',
     'auth.role.admin': 'Admin',
@@ -836,6 +884,13 @@ export const messages = {
 } as const
 
 const legacyExactEnglishMessages: Record<string, string> = {
+  ...legacyUiEnglishMessages,
+  ...legacyAdminEnglishMessages,
+  ...legacyGuideEnglishMessages,
+  '切换到卡片视图': 'Switch to card view',
+  '切换到列表视图': 'Switch to list view',
+  '卡片视图': 'Card view',
+  '列表视图': 'List view',
   '关闭': 'Close',
   '取消': 'Cancel',
   '确定': 'Confirm',
@@ -2880,7 +2935,14 @@ const legacyDynamicPatterns: Array<[RegExp, (match: RegExpMatchArray) => string]
   [/^发布于 (.+)$/u, match => `Published at ${match[1]}`],
   [/^已启用 (.+) 项$/u, match => `${match[1]} enabled`],
   [/^影响 (.+) 行$/u, match => `${match[1]} rows affected`],
-  [/^(.+)月$/u, match => `${match[1]}/`],
+  [/^(1[0-2]|[1-9])月$/u, match => new Intl.DateTimeFormat('en-US', { month: 'short', timeZone: 'UTC' }).format(new Date(Date.UTC(2020, Number(match[1]) - 1, 1)))],
+  [/^成功率 ([\d.]+%)$/u, match => `Success rate ${match[1]}`],
+  [/^输入 ([\d.]+[KM]?) \/ 输出 ([\d.]+[KM]?)$/u, match => `Input ${match[1]} / Output ${match[2]}`],
+  [/^节省 (\$[\d.]+) \(([\d.]+%)\)$/u, match => `Saved ${match[1]} (${match[2]})`],
+  [/^总用户 (\d+)$/u, match => `Total users ${match[1]}`],
+  [/^(\d+) 维度$/u, match => `${match[1]} ${match[1] === '1' ? 'dimension' : 'dimensions'}`],
+  [/^(\d+)天(\d+)时$/u, match => `${match[1]}d ${match[2]}h`],
+  [/^(\d+)天 ([01]?\d|2[0-3]):([0-5]\d):([0-5]\d)$/u, match => `${match[1]}d ${match[2]}:${match[3]}:${match[4]}`],
   [/^总可用：(.+)$/u, match => `Total available: ${match[1]}`],
   [/^余额：(.+)$/u, match => `Balance: ${match[1]}`],
   [/^(.+) 秒$/u, match => `${translateLegacyText(match[1], 'en-US')}s`],
@@ -2889,13 +2951,13 @@ const legacyDynamicPatterns: Array<[RegExp, (match: RegExpMatchArray) => string]
   [/^(.+) 天$/u, match => `${translateLegacyText(match[1], 'en-US')} d`],
   [/^影响用户：(.+) 个$/u, match => `Affected users: ${match[1]}`],
   [/^等 (.+) 个用户$/u, match => `and ${match[1]} users`],
-  [/^确认(.+)（(.+)）$/u, match => `Confirm ${translateLegacyByTokens(match[1])} (${match[2]})`],
+  [/^确认(删除|禁用|启用)（(.+)）$/u, match => `Confirm ${translateLegacyByTokens(match[1]).toLowerCase()} (${match[2]})`],
   [/^成功 (.+) 个，失败 (.+) 个$/u, match => `Succeeded ${match[1]}, failed ${match[2]}`],
   [/^批量操作完成：成功 (.+) 个，失败 (.+) 个$/u, match => `Batch action complete: succeeded ${match[1]}, failed ${match[2]}`],
   [/^匹配 (.+) 个，当前页 (.+) 个，已选 (.+) 个$/u, match => `Matched ${match[1]} items, current page ${match[2]} items, selected ${match[3]} items`],
   [/^已选 (.+) 个$/u, match => `Selected ${match[1]} items`],
   [/^已强制下线 (.+) 个设备$/u, match => `Signed out ${match[1]} devices`],
-  [/^用户已(.+)$/u, match => `User ${translateLegacyByTokens(match[1]).toLowerCase()}d`],
+  [/^用户已(启用|禁用|删除)$/u, match => `User ${{ '启用': 'enabled', '禁用': 'disabled', '删除': 'deleted' }[match[1]]}`],
   [/^(.+)用户失败$/u, match => `Failed to ${translateLegacyByTokens(match[1]).toLowerCase()} user`],
   [/^(.+) 个用户$/u, match => `${match[1]} users`],
   [/^有 (.+) 条格式错误$/u, match => `${match[1]} format errors`],
@@ -3743,7 +3805,12 @@ export function translateLegacyText(source: string, locale: keyof typeof message
   }
 
   const trimmed = source.trim()
-  const exact = legacyExactEnglishMessages[trimmed]
+  const normalized = trimmed.replace(/\s+/g, ' ')
+  const key = (Object.keys(messages['zh-CN']) as Array<keyof typeof messages['zh-CN']>)
+    .find(key => messages['zh-CN'][key] === trimmed)
+  const exact = legacyUiEnglishMessages[normalized] ?? legacyAdminEnglishMessages[normalized]
+    ?? legacyGuideEnglishMessages[normalized] ?? (key ? messages['en-US'][key] : undefined)
+    ?? legacyExactEnglishMessages[trimmed]
   if (exact) {
     return preserveOuterWhitespace(source, exact)
   }
@@ -3755,8 +3822,7 @@ export function translateLegacyText(source: string, locale: keyof typeof message
     }
   }
 
-  const fallback = translateLegacyByTokens(trimmed)
-  return preserveOuterWhitespace(source, fallback)
+  return source
 }
 
 export type Locale = keyof typeof messages

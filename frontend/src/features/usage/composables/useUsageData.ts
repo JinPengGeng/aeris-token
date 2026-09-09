@@ -166,7 +166,7 @@ export function useUsageData(options: UseUsageDataOptions) {
           }
 
           // statsData may contain additional fields not declared in UsageStats
-          const statsRaw = statsData as Record<string, unknown>
+          const statsRaw = statsData
           stats.value = {
             total_requests: statsData.total_requests || 0,
             total_tokens: statsData.total_tokens || 0,
@@ -193,7 +193,7 @@ export function useUsageData(options: UseUsageDataOptions) {
           }
 
           modelStats.value = modelData.map(item => {
-            const raw = item as Record<string, unknown>
+            const raw = item
             return {
               model: item.model,
               request_count: item.request_count || 0,
@@ -543,7 +543,6 @@ export function useUsageData(options: UseUsageDataOptions) {
       record.output_tokens,
       record.total_tokens,
       record.provider,
-      record.provider_name,
       record.target_model,
       record.is_websocket,
     ].join('\u0001')
@@ -571,8 +570,8 @@ export function useUsageData(options: UseUsageDataOptions) {
       // 确定是否需要保护 status（避免刷新把已知状态覆盖为 undefined 或回退）
       const hasExistingStatus = typeof existing.status === 'string' && existing.status.length > 0
       const hasNextStatus = typeof record.status === 'string' && record.status.length > 0
-      const currentRank = hasExistingStatus ? (statusPriority[existing.status] ?? -1) : -1
-      const nextRank = hasNextStatus ? (statusPriority[record.status] ?? -1) : -1
+      const currentRank = hasExistingStatus ? (statusPriority[existing.status ?? ''] ?? -1) : -1
+      const nextRank = hasNextStatus ? (statusPriority[record.status ?? ''] ?? -1) : -1
       const existingUpdatedAtMs = parseUsageTimestampMs(existing.updated_at)
       const nextUpdatedAtMs = parseUsageTimestampMs(record.updated_at)
       const nextStatusSnapshotIsStale = existingUpdatedAtMs != null &&

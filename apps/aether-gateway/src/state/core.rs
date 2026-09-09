@@ -13,7 +13,7 @@ use aether_data::repository::proxy_nodes::{
 use aether_data_contracts::repository::usage::{
     UsageCounterHealthSnapshot, UsageCounterPendingHealthSnapshot,
 };
-use aether_http::{build_http_client, HttpClientConfig};
+use aether_http::{apply_http_client_config, HttpClientConfig};
 use aether_runtime::{
     service_up_sample, AdmissionPermit, ConcurrencyGate, ConcurrencySnapshot, MetricKind,
     MetricLabel, MetricSample,
@@ -104,6 +104,24 @@ const USAGE_COUNTER_EXACT_HEALTH_METRICS_TIMEOUT: Duration = Duration::from_secs
 const USAGE_COUNTER_EXACT_HEALTH_METRICS_TTL: Duration = Duration::from_secs(5 * 60);
 const USAGE_COUNTER_EXACT_HEALTH_METRICS_MAX_STALENESS: Duration = Duration::from_secs(10 * 60);
 const USAGE_COUNTER_EXACT_HEALTH_METRICS_RETRY_BACKOFF: Duration = Duration::from_secs(5);
+
+const ADMIN_USAGE_AGGREGATE_INVALID_INPUT_DETAIL: &str =
+    "usage aggregate import payload is invalid";
+
+fn admin_usage_aggregate_import_error(detail: String) -> GatewayError {
+    // Import validation errors can include source row IDs, table names, and
+    // adapter-specific details. Keep those details in process memory only;
+    // the public/admin response receives a stable client-safe message.
+    warn!(
+        event_name = "admin_usage_aggregate_import_rejected",
+        error_length = detail.len(),
+        "usage aggregate import input was rejected"
+    );
+    GatewayError::Client {
+        status: http::StatusCode::BAD_REQUEST,
+        message: ADMIN_USAGE_AGGREGATE_INVALID_INPUT_DETAIL.to_string(),
+    }
+}
 
 fn system_config_key_affects_scheduler(key: &str) -> bool {
     let key = key.trim();
@@ -289,18 +307,38 @@ impl AppState {
         let runtime_state = Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
         let data =
             Arc::new(GatewayDataState::disabled().with_usage_runtime_state(runtime_state.clone()));
-        let client = build_http_client(&HttpClientConfig {
-            connect_timeout_ms: Some(10_000),
-            request_timeout_ms: Some(300_000),
-            http2_adaptive_window: true,
-            ..HttpClientConfig::default()
-        })?;
-        let owner_forward_client = build_http_client(&HttpClientConfig {
-            connect_timeout_ms: Some(10_000),
-            http2_adaptive_window: true,
-            ..HttpClientConfig::default()
-        })?;
+        let client = apply_http_client_config(
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none()),
+            &HttpClientConfig {
+                connect_timeout_ms: Some(10_000),
+                request_timeout_ms: Some(300_000),
+                http2_adaptive_window: true,
+                ..HttpClientConfig::default()
+            },
+        )
+        .build()?;
+        let owner_forward_client = apply_http_client_config(
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none()),
+            &HttpClientConfig {
+                connect_timeout_ms: Some(10_000),
+                http2_adaptive_window: true,
+                ..HttpClientConfig::default()
+            },
+        )
+        .build()?;
         let frontdoor_runtime_guards = Arc::new(FrontdoorRuntimeGuardConfig::from_env());
+        let internal_gateway_auth =
+            Arc::new(crate::internal_gateway_auth::InternalGatewayAuthConfig::for_process());
+        if internal_gateway_auth.status() == "misconfigured" {
+            warn!(
+                environment_variable = crate::internal_gateway_auth::INTERNAL_GATEWAY_AUTH_SECRET_ENV,
+                "internal gateway control plane is fail-closed because its authentication secret is invalid"
+            );
+        }
         Ok(Self {
             #[cfg(test)]
             execution_runtime_override_base_url: execution_runtime_override_base_url
@@ -312,6 +350,7 @@ impl AppState {
             background_data: Arc::clone(&data),
             background_data_isolated: false,
             runtime_state: runtime_state.clone(),
+            internal_gateway_auth,
             usage_runtime: Arc::new(usage::UsageRuntime::disabled()),
             video_tasks: Arc::new(VideoTaskService::new(
                 VideoTaskTruthSourceMode::PythonSyncReport,
@@ -351,6 +390,7 @@ impl AppState {
             auth_api_key_force_capabilities_cache: Arc::new(JsonValueCache::default()),
             auth_api_key_feature_settings_cache: Arc::new(JsonValueCache::default()),
             auth_daily_quota_availability_cache: Arc::new(ValueCache::default()),
+            auth_plan_usage_policy_cache: Arc::new(ValueCache::default()),
             auth_wallet_snapshot_cache: Arc::new(ValueCache::default()),
             auth_request_cost_upper_bound_cache: Arc::new(ValueCache::default()),
             provider_quota_snapshot_cache: Arc::new(ValueCache::default()),
@@ -454,6 +494,10 @@ impl AppState {
 
     pub const fn execution_runtime_configured(&self) -> bool {
         true
+    }
+
+    pub(crate) fn internal_gateway_auth_status(&self) -> &'static str {
+        self.internal_gateway_auth.status()
     }
 
     #[cfg(test)]
@@ -749,22 +793,40 @@ impl AppState {
         &self,
         key: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        self.read_system_config_json_value_with_cache_windows(
-            key,
-            SYSTEM_CONFIG_CACHE_TTL,
-            SYSTEM_CONFIG_CACHE_MAX_STALENESS,
-        )
-        .await
+        let value = self
+            .read_system_config_json_value_with_cache_windows(
+                key,
+                SYSTEM_CONFIG_CACHE_TTL,
+                SYSTEM_CONFIG_CACHE_MAX_STALENESS,
+            )
+            .await?;
+        Ok(value)
     }
 
     pub(crate) async fn read_system_config_json_value_strong(
         &self,
         key: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        self.data
+        let value = self
+            .data
             .find_system_config_value_strong(key)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        Ok(value)
+    }
+
+    pub(crate) async fn compare_and_set_system_config_string_value(
+        &self,
+        key: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, GatewayError> {
+        let result = self
+            .data
+            .compare_and_set_system_config_string_value(key, expected, replacement)
+            .await;
+        self.system_config_cache.invalidate(key);
+        result.map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
     async fn read_system_config_json_value_with_cache_windows(
@@ -964,6 +1026,7 @@ impl AppState {
         self.auth_api_key_force_capabilities_cache.clear();
         self.auth_api_key_feature_settings_cache.clear();
         self.auth_daily_quota_availability_cache.clear();
+        self.auth_plan_usage_policy_cache.clear();
         self.auth_wallet_snapshot_cache.clear();
         self.auth_request_cost_upper_bound_cache.clear();
         self.provider_quota_snapshot_cache.clear();
@@ -1056,10 +1119,9 @@ impl AppState {
             .import_admin_system_usage_aggregates(snapshot, user_id_map, api_key_id_map, mode)
             .await
             .map_err(|err| match err {
-                aether_data::DataLayerError::InvalidInput(detail) => GatewayError::Client {
-                    status: http::StatusCode::BAD_REQUEST,
-                    message: detail,
-                },
+                aether_data::DataLayerError::InvalidInput(detail) => {
+                    admin_usage_aggregate_import_error(detail)
+                }
                 other => GatewayError::Internal(other.to_string()),
             })
     }
@@ -1150,18 +1212,27 @@ impl AppState {
         &self,
         mutation: &aether_data::repository::proxy_nodes::ProxyNodeRegistrationMutation,
     ) -> Result<Option<StoredProxyNode>, GatewayError> {
-        self.data
-            .register_proxy_node(mutation)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+        self.register_proxy_node_with_bound_secrets(mutation).await
     }
 
     pub(crate) async fn create_manual_proxy_node(
         &self,
         mutation: &ProxyNodeManualCreateMutation,
     ) -> Result<Option<StoredProxyNode>, GatewayError> {
+        let mut protected = mutation.clone();
+        let node_id = mutation
+            .node_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        protected.node_id = Some(node_id.clone());
+        if let Some(password) = mutation.proxy_password.as_deref() {
+            protected.proxy_password = Some(self.protect_proxy_node_password(&node_id, password)?);
+        }
         self.data
-            .create_manual_proxy_node(mutation)
+            .create_manual_proxy_node(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -1170,8 +1241,17 @@ impl AppState {
         &self,
         mutation: &ProxyNodeManualUpdateMutation,
     ) -> Result<Option<StoredProxyNode>, GatewayError> {
+        let Some(existing) = self.find_proxy_node(&mutation.node_id).await? else {
+            return Ok(None);
+        };
+        let mut protected = mutation.clone();
+        protected.node_id = existing.id.clone();
+        if let Some(password) = mutation.proxy_password.as_deref() {
+            protected.proxy_password =
+                Some(self.protect_proxy_node_password(&existing.id, password)?);
+        }
         self.data
-            .update_manual_proxy_node(mutation)
+            .update_manual_proxy_node(&protected)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -1204,6 +1284,9 @@ impl AppState {
         &self,
         mutation: &ProxyNodeHeartbeatMutation,
     ) -> Result<Option<StoredProxyNode>, GatewayError> {
+        crate::state::decrypt_or_migrate_proxy_tunnel_psk(&self.data, &mutation.node_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
         self.data
             .apply_proxy_node_heartbeat(mutation)
             .await
@@ -2047,9 +2130,16 @@ impl AppState {
         mut self,
         path: impl Into<std::path::PathBuf>,
     ) -> std::io::Result<Self> {
+        let encryption_key = self.data.encryption_key().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "AETHER_GATEWAY_VIDEO_TASK_STORE_PATH requires a configured encryption key",
+            )
+        })?;
         self.video_tasks = Arc::new(VideoTaskService::with_file_store(
             self.video_tasks.truth_source_mode(),
             path,
+            encryption_key,
         )?);
         Ok(self)
     }
@@ -3875,7 +3965,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        database_bounded_auth_load_limit, merge_usage_counter_health_snapshots,
+        admin_usage_aggregate_import_error, database_bounded_auth_load_limit,
+        merge_usage_counter_health_snapshots,
         usage_counter_pending_health_metric_samples_with_timeout,
         usage_queue_health_metric_samples_with_timeout, usage_runtime_metric_samples, AppState,
         MetricKind, MetricSample, METRIC_SNAPSHOT_TTL,
@@ -3883,6 +3974,23 @@ mod tests {
     };
     use crate::cache::SchedulerAffinityTarget;
     use crate::data::{GatewayDataConfig, GatewayDataState};
+
+    #[test]
+    fn usage_aggregate_import_invalid_input_is_projected_to_a_safe_client_message() {
+        let error = admin_usage_aggregate_import_error(
+            "postgres table stats_user_daily row secret-user contains column password".to_string(),
+        );
+
+        match error {
+            super::GatewayError::Client { status, message } => {
+                assert_eq!(status, http::StatusCode::BAD_REQUEST);
+                assert_eq!(message, "usage aggregate import payload is invalid");
+                assert!(!message.contains("secret-user"));
+                assert!(!message.contains("password"));
+            }
+            other => panic!("expected client-safe import error, got {other:?}"),
+        }
+    }
 
     #[test]
     fn auth_load_gate_reserves_half_of_foreground_database_pool() {

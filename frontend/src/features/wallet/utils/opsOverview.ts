@@ -151,7 +151,7 @@ export function buildWalletOpsOverview(input: WalletOpsOverviewInput): WalletOps
   const creditedOrders = orders.filter(isCreditedOrder)
   const expiredOrders = orders.filter(isExpiredOrder)
 
-  const pendingOrderWarnings = pendingOrders.flatMap((order) => {
+  const pendingOrderWarnings = pendingOrders.flatMap<PendingOrderWarning>((order): PendingOrderWarning[] => {
     const expiresAtMs = parseDateMs(order.expires_at)
     if (expiresAtMs === null) {
       return [{

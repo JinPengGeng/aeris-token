@@ -8,7 +8,7 @@ use crate::redis::{
 use crate::{
     DailyUsageLimitCountInput, DailyUsageLimitCounts, DailyUsageLimitIncrementInput,
     DailyUsageLimitRestoreInput, DataLayerError, RateLimitCheck, RateLimitInput, RateLimitScope,
-    RuntimeSemaphoreError,
+    RuntimeSemaphoreError, UsageLimitCheck, UsageLimitInput, UsageLimitReleaseInput,
 };
 
 const RATE_LIMIT_CHECK_AND_CONSUME_SCRIPT: &str = r#"
@@ -53,57 +53,49 @@ end
 return {1, 0, 0, remaining}
 "#;
 
-const DAILY_USAGE_LIMIT_INCREMENT_SCRIPT: &str = r#"
-local user_key = KEYS[1]
-local key_key = KEYS[2]
-local include_user = tonumber(ARGV[1])
-local amount = tonumber(ARGV[2])
-local ttl = tonumber(ARGV[3])
+const USAGE_LIMIT_CHECK_AND_CONSUME_SCRIPT: &str = r#"
+local count = #KEYS
+local now = tonumber(ARGV[1])
+local event_id = ARGV[2]
 
-local user_units = 0
-if include_user == 1 then
-    user_units = redis.call('INCRBY', user_key, amount)
-    redis.call('EXPIRE', user_key, ttl)
+for i = 1, count do
+    local window_ms = tonumber(ARGV[(i - 1) * 3 + 4]) * 1000
+    local cutoff = now - window_ms
+    redis.call('ZREMRANGEBYSCORE', KEYS[i], '-inf', cutoff)
 end
 
-local key_units = redis.call('INCRBY', key_key, amount)
-redis.call('EXPIRE', key_key, ttl)
-return {user_units, key_units}
-"#;
-
-const DAILY_USAGE_LIMIT_RESTORE_BATCH_SCRIPT: &str = r#"
-local ttl = tonumber(ARGV[1])
-local entry_count = #KEYS / 2
-
-for i = 1, entry_count do
-    local user_key = KEYS[(i - 1) * 2 + 1]
-    local key_key = KEYS[(i - 1) * 2 + 2]
-    local arg_offset = (i - 1) * 3 + 2
-    local include_user = tonumber(ARGV[arg_offset])
-    local user_units = tonumber(ARGV[arg_offset + 1])
-    local key_units = tonumber(ARGV[arg_offset + 2])
-
-    if include_user == 1 then
-        local current_user_units = tonumber(redis.call('GET', user_key) or '0')
-        if current_user_units < user_units then
-            redis.call('SET', user_key, user_units, 'EX', ttl)
-        else
-            redis.call('EXPIRE', user_key, ttl)
+for i = 1, count do
+    local limit = tonumber(ARGV[(i - 1) * 3 + 3])
+    local window_ms = tonumber(ARGV[(i - 1) * 3 + 4]) * 1000
+    local already_consumed = redis.call('ZSCORE', KEYS[i], event_id)
+    if not already_consumed then
+        local current = redis.call('ZCARD', KEYS[i])
+        if current >= limit then
+            local earliest = redis.call('ZRANGE', KEYS[i], 0, 0, 'WITHSCORES')
+            local retry_after = 1
+            if #earliest >= 2 then
+                local retry_after_ms = math.max(1, tonumber(earliest[2]) + window_ms - now)
+                retry_after = math.ceil(retry_after_ms / 1000)
+            end
+            return {0, i, limit, retry_after}
         end
     end
-
-    local current_key_units = tonumber(redis.call('GET', key_key) or '0')
-    if current_key_units < key_units then
-        redis.call('SET', key_key, key_units, 'EX', ttl)
-    else
-        redis.call('EXPIRE', key_key, ttl)
-    end
 end
 
-return entry_count
+for i = 1, count do
+    local retention = tonumber(ARGV[(i - 1) * 3 + 5])
+    redis.call('ZADD', KEYS[i], 'NX', now, event_id)
+    redis.call('EXPIRE', KEYS[i], retention + 1)
+end
+return {1, 0, 0, 0}
 "#;
 
-const DAILY_USAGE_LIMIT_RESTORE_BATCH_SIZE: usize = 256;
+const USAGE_LIMIT_RELEASE_SCRIPT: &str = r#"
+for i = 1, #KEYS do
+    redis.call('ZREM', KEYS[i], ARGV[1])
+end
+return 1
+"#;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RedisRuntimeDiagnostics {
@@ -129,6 +121,136 @@ pub(crate) struct RedisRuntimeRunner {
     connections: RedisConnectionRouter,
     keyspace: RedisKeyspace,
     command_timeout_ms: Option<u64>,
+}
+
+impl RedisRuntimeRunner {
+    pub(crate) async fn increment_daily_usage_limit(
+        &self,
+        input: DailyUsageLimitIncrementInput<'_>,
+    ) -> Result<DailyUsageLimitCounts, DataLayerError> {
+        let amount = i64::try_from(input.amount_units).map_err(|_| {
+            DataLayerError::InvalidInput("daily usage amount exceeds i64".to_string())
+        })?;
+        let key = self.keyspace.key(input.key_key);
+        let key_units = self
+            .query_i64(RedisConnectionLane::Fast, "daily usage increment", {
+                let mut c = cmd("INCRBY");
+                c.arg(&key).arg(amount);
+                c
+            })
+            .await?;
+        let ttl = i64::try_from(input.ttl_seconds.max(1)).unwrap_or(i64::MAX);
+        let _ = self
+            .query_i64(RedisConnectionLane::Fast, "daily usage expiry", {
+                let mut c = cmd("EXPIRE");
+                c.arg(&key).arg(ttl);
+                c
+            })
+            .await?;
+        let user_units = if let Some(user) = input.user_key {
+            let user_key = self.keyspace.key(user);
+            let v = self
+                .query_i64(RedisConnectionLane::Fast, "daily user increment", {
+                    let mut c = cmd("INCRBY");
+                    c.arg(&user_key).arg(amount);
+                    c
+                })
+                .await?;
+            let _ = self
+                .query_i64(RedisConnectionLane::Fast, "daily user expiry", {
+                    let mut c = cmd("EXPIRE");
+                    c.arg(&user_key).arg(ttl);
+                    c
+                })
+                .await?;
+            u64::try_from(v).unwrap_or_default()
+        } else {
+            0
+        };
+        Ok(DailyUsageLimitCounts {
+            user_units,
+            key_units: u64::try_from(key_units).unwrap_or_default(),
+            user_present: input.user_key.is_some(),
+            key_present: true,
+            state_ready: false,
+        })
+    }
+    pub(crate) async fn restore_daily_usage_limits(
+        &self,
+        input: DailyUsageLimitRestoreInput<'_>,
+    ) -> Result<(), DataLayerError> {
+        for entry in input.entries {
+            let ttl = Duration::from_secs(input.ttl_seconds.max(1));
+            if let Some(user) = &entry.user_key {
+                let k = self.keyspace.key(user);
+                let cur = self
+                    .kv_get_many(&[user.to_string()])
+                    .await?
+                    .first()
+                    .and_then(Option::as_deref)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                if cur < entry.user_units {
+                    self.kv_set_with_ttl(user, entry.user_units.to_string(), ttl)
+                        .await?;
+                } else {
+                    let _ = self
+                        .query_i64(RedisConnectionLane::Fast, "daily user expiry", {
+                            let mut c = cmd("EXPIRE");
+                            c.arg(k).arg(ttl.as_secs() as i64);
+                            c
+                        })
+                        .await?;
+                }
+            }
+            let cur = self
+                .kv_get_many(std::slice::from_ref(&entry.key_key))
+                .await?
+                .first()
+                .and_then(Option::as_deref)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            if cur < entry.key_units {
+                self.kv_set_with_ttl(&entry.key_key, entry.key_units.to_string(), ttl)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) async fn daily_usage_limit_counts(
+        &self,
+        input: DailyUsageLimitCountInput<'_>,
+    ) -> Result<DailyUsageLimitCounts, DataLayerError> {
+        let mut keys = vec![input.state_key.to_string()];
+        if let Some(user) = input.user_key {
+            keys.push(user.to_string());
+        }
+        keys.push(input.key_key.to_string());
+        let values = self.kv_get_many(&keys).await?;
+        let parse = |v: Option<&Option<String>>| {
+            v.and_then(Option::as_deref)
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(0)
+        };
+        let state_ready = values.first().and_then(Option::as_deref) == Some("ready");
+        let ku = if input.user_key.is_some() {
+            parse(values.get(2))
+        } else {
+            parse(values.get(1))
+        };
+        let uu = if input.user_key.is_some() {
+            parse(values.get(1))
+        } else {
+            0
+        };
+        Ok(DailyUsageLimitCounts {
+            user_units: uu,
+            key_units: ku,
+            user_present: input.user_key.is_some() && values.get(1).is_some_and(Option::is_some),
+            key_present: true,
+            state_ready,
+        })
+    }
 }
 
 impl RedisRuntimeRunner {
@@ -199,6 +321,37 @@ impl RedisRuntimeRunner {
         self.query_string(RedisConnectionLane::Fast, "runtime kv set ttl", command)
             .await?;
         Ok(())
+    }
+
+    pub(crate) async fn kv_set_if_absent(
+        &self,
+        key: &str,
+        value: String,
+        ttl: Duration,
+    ) -> Result<bool, DataLayerError> {
+        let namespaced_key = self.keyspace.key(key);
+        let ttl_ms = u64::try_from(ttl.as_millis().max(1)).unwrap_or(u64::MAX);
+        let mut command = cmd("SET");
+        command
+            .arg(namespaced_key)
+            .arg(value)
+            .arg("NX")
+            .arg("PX")
+            .arg(ttl_ms);
+        let response = self
+            .query::<Option<String>>(
+                RedisConnectionLane::Fast,
+                "runtime kv set if absent",
+                command,
+            )
+            .await?;
+        match response.as_deref() {
+            Some("OK") => Ok(true),
+            None => Ok(false),
+            Some(value) => Err(DataLayerError::UnexpectedValue(format!(
+                "unexpected runtime kv set if absent response {value}"
+            ))),
+        }
     }
 
     pub(crate) async fn kv_get_many(
@@ -336,129 +489,103 @@ impl RedisRuntimeRunner {
         Ok(RateLimitCheck::Rejected { scope, limit })
     }
 
-    pub(crate) async fn increment_daily_usage_limit(
+    pub(crate) async fn check_and_consume_usage_limits(
         &self,
-        input: DailyUsageLimitIncrementInput<'_>,
-    ) -> Result<DailyUsageLimitCounts, DataLayerError> {
-        let user_key = self.keyspace.key(input.user_key.unwrap_or(input.key_key));
-        let key_key = self.keyspace.key(input.key_key);
-        let amount = i64::try_from(input.amount_units).map_err(|_| {
-            DataLayerError::InvalidInput("daily usage limit increment exceeds i64".to_string())
-        })?;
+        input: UsageLimitInput<'_>,
+    ) -> Result<UsageLimitCheck, DataLayerError> {
+        let script = script(USAGE_LIMIT_CHECK_AND_CONSUME_SCRIPT);
+        let mut invocation = script.prepare_invoke();
+        for rule in input.rules {
+            invocation.key(self.keyspace.key(rule.key));
+        }
+        invocation.arg(input.now_unix_ms as i64);
+        invocation.arg(input.event_id);
+        for rule in input.rules {
+            invocation.arg(rule.limit as i64);
+            invocation.arg(rule.window_seconds as i64);
+            invocation.arg(rule.retention_seconds as i64);
+        }
         let raw = run_lane_with_timeout(
             &self.connections,
             RedisConnectionLane::Fast,
             self.command_timeout_ms,
-            "runtime daily usage limit increment",
+            "runtime usage limit check",
             async {
                 let mut connection = self.connections.connection(RedisConnectionLane::Fast);
-                script(DAILY_USAGE_LIMIT_INCREMENT_SCRIPT)
-                    .key(user_key)
-                    .key(key_key)
-                    .arg(i64::from(input.user_key.is_some()))
-                    .arg(amount)
-                    .arg(i64::try_from(input.ttl_seconds.max(1)).unwrap_or(i64::MAX))
+                invocation
                     .invoke_async::<Vec<i64>>(&mut connection)
                     .await
                     .map_redis_err()
             },
         )
         .await?;
-        Ok(DailyUsageLimitCounts {
-            user_units: raw
-                .first()
-                .copied()
-                .and_then(|value| u64::try_from(value).ok())
-                .unwrap_or_default(),
-            key_units: raw
-                .get(1)
-                .copied()
-                .and_then(|value| u64::try_from(value).ok())
-                .unwrap_or_default(),
-            user_present: input.user_key.is_some(),
-            key_present: true,
-            state_ready: false,
+        match raw.first().copied() {
+            Some(1) if raw.len() >= 4 => return Ok(UsageLimitCheck::Allowed),
+            Some(0) if raw.len() >= 4 => {}
+            _ => {
+                return Err(DataLayerError::UnexpectedValue(
+                    "runtime usage limit script returned an invalid response".to_string(),
+                ));
+            }
+        }
+        let rule_index = raw
+            .get(1)
+            .copied()
+            .and_then(|value| usize::try_from(value.saturating_sub(1)).ok())
+            .filter(|index| *index < input.rules.len())
+            .ok_or_else(|| {
+                DataLayerError::UnexpectedValue(
+                    "runtime usage limit script returned an invalid rule index".to_string(),
+                )
+            })?;
+        let limit = raw
+            .get(2)
+            .copied()
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|limit| *limit > 0)
+            .ok_or_else(|| {
+                DataLayerError::UnexpectedValue(
+                    "runtime usage limit script returned an invalid limit".to_string(),
+                )
+            })?;
+        let retry_after = raw
+            .get(3)
+            .copied()
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(1)
+            .max(1);
+        Ok(UsageLimitCheck::Rejected {
+            rule_index,
+            limit,
+            retry_after,
         })
     }
 
-    pub(crate) async fn restore_daily_usage_limits(
+    pub(crate) async fn release_usage_limits(
         &self,
-        input: DailyUsageLimitRestoreInput<'_>,
+        input: UsageLimitReleaseInput<'_>,
     ) -> Result<(), DataLayerError> {
-        for entries in input.entries.chunks(DAILY_USAGE_LIMIT_RESTORE_BATCH_SIZE) {
-            run_lane_with_timeout(
-                &self.connections,
-                RedisConnectionLane::Fast,
-                self.command_timeout_ms,
-                "runtime daily usage limit restore batch",
-                async {
-                    let restore_script = script(DAILY_USAGE_LIMIT_RESTORE_BATCH_SCRIPT);
-                    let mut invocation = restore_script.prepare_invoke();
-                    for entry in entries {
-                        invocation
-                            .key(
-                                self.keyspace
-                                    .key(entry.user_key.as_deref().unwrap_or(&entry.key_key)),
-                            )
-                            .key(self.keyspace.key(&entry.key_key));
-                    }
-                    invocation.arg(i64::try_from(input.ttl_seconds.max(1)).unwrap_or(i64::MAX));
-                    for entry in entries {
-                        invocation
-                            .arg(i64::from(entry.user_key.is_some()))
-                            .arg(i64::try_from(entry.user_units).unwrap_or(i64::MAX))
-                            .arg(i64::try_from(entry.key_units).unwrap_or(i64::MAX));
-                    }
-                    let mut connection = self.connections.connection(RedisConnectionLane::Fast);
-                    invocation
-                        .invoke_async::<i64>(&mut connection)
-                        .await
-                        .map_redis_err()
-                },
-            )
-            .await?;
+        let script = script(USAGE_LIMIT_RELEASE_SCRIPT);
+        let mut invocation = script.prepare_invoke();
+        for rule in input.rules {
+            invocation.key(self.keyspace.key(rule.key));
         }
+        invocation.arg(input.event_id);
+        run_lane_with_timeout(
+            &self.connections,
+            RedisConnectionLane::Fast,
+            self.command_timeout_ms,
+            "runtime usage limit release",
+            async {
+                let mut connection = self.connections.connection(RedisConnectionLane::Fast);
+                invocation
+                    .invoke_async::<i64>(&mut connection)
+                    .await
+                    .map_redis_err()
+            },
+        )
+        .await?;
         Ok(())
-    }
-
-    pub(crate) async fn daily_usage_limit_counts(
-        &self,
-        input: DailyUsageLimitCountInput<'_>,
-    ) -> Result<DailyUsageLimitCounts, DataLayerError> {
-        let mut keys = Vec::with_capacity(3);
-        keys.push(input.state_key.to_string());
-        if let Some(user_key) = input.user_key {
-            keys.push(user_key.to_string());
-        }
-        keys.push(input.key_key.to_string());
-        let values = self.kv_get_many(&keys).await?;
-        let parse = |value: Option<&Option<String>>| {
-            value
-                .and_then(Option::as_deref)
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or_default()
-        };
-        let state_ready = values
-            .first()
-            .and_then(Option::as_deref)
-            .is_some_and(|value| value == "ready");
-        Ok(if input.user_key.is_some() {
-            DailyUsageLimitCounts {
-                user_units: parse(values.get(1)),
-                key_units: parse(values.get(2)),
-                user_present: values.get(1).is_some_and(Option::is_some),
-                key_present: values.get(2).is_some_and(Option::is_some),
-                state_ready,
-            }
-        } else {
-            DailyUsageLimitCounts {
-                user_units: 0,
-                key_units: parse(values.get(1)),
-                user_present: false,
-                key_present: values.get(1).is_some_and(Option::is_some),
-                state_ready,
-            }
-        })
     }
 
     pub(crate) async fn set_add(&self, key: &str, member: &str) -> Result<bool, DataLayerError> {

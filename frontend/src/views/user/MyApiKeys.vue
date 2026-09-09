@@ -974,6 +974,7 @@
 </template>
 
 <script setup lang="ts">
+import { getI18nLocale } from '@/i18n'
 import { ref, onMounted, onBeforeUnmount, computed, watch, reactive } from 'vue'
 import { meApi, type ApiKey, type InstallSessionTargetSystem, type InstallTargetCli, type ApiKeyInstallSession } from '@/api/me'
 import Card from '@/components/ui/card.vue'
@@ -1702,7 +1703,7 @@ function formatNumber(num: number | undefined | null): string {
   if (num === undefined || num === null) {
     return '0'
   }
-  return num.toLocaleString('zh-CN')
+  return num.toLocaleString(getI18nLocale())
 }
 
 function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
@@ -1747,7 +1748,7 @@ function formatDate(dateString?: string | null): string {
   if (!dateString) return '未知'
   const date = new Date(dateString)
   if (Number.isNaN(date.getTime())) return '未知'
-  return date.toLocaleDateString('zh-CN', {
+  return date.toLocaleDateString(getI18nLocale(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit'

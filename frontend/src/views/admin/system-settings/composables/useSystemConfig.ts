@@ -139,7 +139,7 @@ function createDefaultConfig(): SystemConfig {
     // 格式转换
     enable_format_conversion: false,
     // 请求记录
-    request_record_level: 'full',
+    request_record_level: 'basic',
     sensitive_headers: ['authorization', 'x-api-key', 'api-key', 'cookie', 'set-cookie'],
     // 请求记录清理
     enable_auto_cleanup: true,
@@ -300,7 +300,7 @@ export function useSystemConfig() {
             continue
           }
           if (response.value !== null && response.value !== undefined) {
-            ; (nextConfig as Record<string, unknown>)[key] = response.value
+            Reflect.set(nextConfig, key, response.value)
           }
         } catch {
           // 单个配置项加载失败时忽略，使用默认值
