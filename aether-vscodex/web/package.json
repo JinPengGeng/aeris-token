@@ -19,7 +19,7 @@
     "@vue/test-utils": "^2.4.6",
     "jsdom": "^26.1.0",
     "typescript": "^5.9.2",
-    "vitest": "^3.2.4",
+    "vitest": "^5.0.0",
     "vue-tsc": "^3.0.6"
   },
   "engines": {
