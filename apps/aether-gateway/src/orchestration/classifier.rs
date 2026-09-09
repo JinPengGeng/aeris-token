@@ -561,7 +561,6 @@ mod tests {
                     pattern: "invalid.*parameter".to_string(),
                     status_codes: [400].into_iter().collect(),
                 }],
-                ..Default::default()
             },
             stop_status_codes: [200, 403].into_iter().collect(),
             continue_status_codes: [400].into_iter().collect(),
@@ -605,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn routing_transport_stop_cannot_be_overridden_by_provider() {
+    fn provider_transport_stop_rule_is_respected() {
         let policy = super::LocalFailoverPolicy {
             stop_on_transport_errors: true,
             ..Default::default()

@@ -48,6 +48,16 @@ assert_line "${RELEASE_WORKFLOW}" "            release-assets/install.sh"
 assert_line "${RELEASE_WORKFLOW}" "            release-assets/SHA256SUMS"
 assert_line "${RELEASE_WORKFLOW}" "            release-assets/AETHER_RELEASE_PROVENANCE.sigstore.json"
 
+for workflow in "${RELEASE_WORKFLOW}"; do
+    assert_line "${workflow}" "          - name: linux-amd64"
+    assert_line "${workflow}" "          - name: linux-arm64"
+    assert_line "${workflow}" "          for arch in amd64 arm64; do"
+    assert_line "${workflow}" '            bundle="aether-${VERSION}-linux-${arch}"'
+    if grep -Eq 'macos|apple-darwin|for platform in' "${workflow}"; then
+        fail_test "gateway workflow still references a removed build platform: ${workflow}"
+    fi
+done
+
 assert_line "${TUNNEL_RELEASE_WORKFLOW}" "      attestations: write"
 assert_line "${TUNNEL_RELEASE_WORKFLOW}" "      id-token: write"
 assert_line "${TUNNEL_RELEASE_WORKFLOW}" \
