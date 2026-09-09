@@ -1040,6 +1040,7 @@ mod tests {
             policy,
             LocalFailoverPolicy {
                 max_retries: Some(1),
+                routing_rules: Default::default(),
                 max_transfer_count: 0,
                 max_transfer_timeout_seconds: 0,
                 stop_status_codes: [503].into_iter().collect(),
