@@ -20,8 +20,8 @@ use aether_runtime::{
     MetricLabel, MetricSample,
 };
 use aether_runtime_state::{
-    MemoryRuntimeStateConfig, RedisRuntimeDiagnostics, RuntimeSemaphore, RuntimeSemaphoreError,
-    RuntimeSemaphoreSnapshot, RuntimeState,
+    MemoryRuntimeStateConfig, RedisRuntimeDiagnostics, RuntimeQueueStore, RuntimeSemaphore,
+    RuntimeSemaphoreError, RuntimeSemaphoreSnapshot, RuntimeState,
 };
 use aether_scheduler_core::PROVIDER_KEY_RPM_WINDOW_SECS;
 use dashmap::DashMap;

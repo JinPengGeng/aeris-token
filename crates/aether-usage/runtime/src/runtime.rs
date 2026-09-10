@@ -33,11 +33,11 @@ use crate::worker::{
     build_usage_queue_worker_with_record_gate, UsageWorkerControl, UsageWorkerObservation,
 };
 use crate::{
-    apply_usage_body_capture_policy_to_event, build_stream_terminal_usage_seed,
-    build_sync_terminal_usage_seed, build_terminal_usage_event_from_seed,
-    build_upsert_usage_record_from_event, LifecycleUsageSeed, StreamTerminalUsagePayloadSeed,
-    SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed, UsageEvent, UsageQueue,
-    UsageRecordWriter, UsageRuntimeConfig, UsageSettlementWriter,
+    apply_usage_body_capture_policy_to_event, build_pending_usage_record_from_seed,
+    build_stream_terminal_usage_seed, build_sync_terminal_usage_seed,
+    build_terminal_usage_event_from_seed, build_upsert_usage_record_from_event, LifecycleUsageSeed,
+    StreamTerminalUsagePayloadSeed, SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed,
+    UsageEvent, UsageQueue, UsageRecordWriter, UsageRuntimeConfig, UsageSettlementWriter,
 };
 
 #[async_trait]
@@ -4140,6 +4140,52 @@ impl UsageRuntime {
         // Keep the direct API non-blocking as well. The ordered dispatcher builds the lightweight
         // pending event off the response task and commits it before this request's streaming item.
         self.record_pending(data, seed);
+    }
+
+    /// Persist a pending lifecycle row before admitting an externally-owned session.
+    pub async fn admit_pending_durable<T>(
+        &self,
+        data: &T,
+        seed: LifecycleUsageSeed,
+    ) -> Result<(), DataLayerError>
+    where
+        T: UsageRuntimeAccess,
+    {
+        if !self.is_enabled() {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime is disabled; durable pending admission is unavailable".to_string(),
+            ));
+        }
+        if !data.has_usage_writer() {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage writer is unavailable; durable pending admission is unavailable".to_string(),
+            ));
+        }
+        if data.usage_worker_should_defer_for_database_pressure() {
+            return Err(DataLayerError::TimedOut(
+                "usage database is under pressure; durable pending admission is deferred"
+                    .to_string(),
+            ));
+        }
+
+        let record = build_pending_usage_record_from_seed(&seed, now_unix_secs())?;
+        let _worker_record_permit = if let Some(gate) = self.worker_record_gate.as_ref() {
+            Some(gate.acquire().await)
+        } else {
+            None
+        };
+        match catch_usage_writer_panic(
+            "durable pending usage admission",
+            data.upsert_usage_record(record),
+        )
+        .await
+        {
+            Ok(Some(_stored)) => Ok(()),
+            Ok(None) => Err(DataLayerError::UnexpectedValue(
+                "usage writer did not return a stored pending row".to_string(),
+            )),
+            Err(err) => Err(err),
+        }
     }
 
     pub fn record_stream_started<T>(

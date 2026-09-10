@@ -318,6 +318,7 @@ async fn select_requested_model(
                 auth,
                 None,
                 now,
+                0,
                 false,
                 SchedulerOrderingConfig::default(),
             )
@@ -471,6 +472,7 @@ async fn no_model_capability_selection_does_not_reenumerate_during_polls() {
                 Some(&auth),
                 None,
                 now,
+                0,
                 SchedulerOrderingConfig::default(),
             )
         },
