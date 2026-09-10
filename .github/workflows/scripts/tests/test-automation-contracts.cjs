@@ -93,7 +93,7 @@ assert(
   JSON.stringify(sync.resource_bounds) === JSON.stringify({
     fetch_timeout_seconds: 90,
     max_received_bytes: 268435456,
-    max_received_expanded_bytes: 1073741824,
+    max_received_expanded_bytes: 2147483648,
     max_received_objects: 250000,
     max_import_bytes: 268435456,
     max_import_objects: 250000,
@@ -107,6 +107,19 @@ assert(
   }),
   'sync resource-bound constants must remain deterministic',
 );
+
+// The compiled defaults in bounded-git-fetch.sh and the policy ceilings are
+// enforced equal at runtime by aeris_bounded_fetch_assert_policy; pin the same
+// equality here so a one-sided edit fails CI instead of the sync loop (#271:
+// the full-history graph crossed the expanded-byte ceiling after #267).
+for (const [key, value] of Object.entries(sync.resource_bounds)) {
+  const envName = `AERIS_FETCH_${key === 'fetch_timeout_seconds' ? 'TIMEOUT_SECONDS' : key.toUpperCase()}`;
+  const compiled = boundedFetchScript.match(new RegExp(`^${envName}=(\\d+)$`, 'm'));
+  assert(
+    compiled && Number(compiled[1]) === value,
+    `bounded-git-fetch.sh ${envName} must equal policy resource_bounds.${key}`,
+  );
+}
 
 const expectedAgents = [
   'triage',
