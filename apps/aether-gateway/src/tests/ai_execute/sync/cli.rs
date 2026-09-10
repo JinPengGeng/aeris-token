@@ -12,11 +12,11 @@ use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelect
 use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data_contracts::repository::candidate_selection::{
-    MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
-    StoredProviderModelMapping,
+    StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
 };
 use aether_data_contracts::repository::candidates::{
-    RequestCandidateReadRepository, RequestCandidateStatus, RequestCandidateWriteRepository,
+    PublicHealthStatusCount, PublicHealthTimelineBucket, RequestCandidateReadRepository,
+    RequestCandidateStatus, RequestCandidateWriteRepository, StoredRequestCandidate,
     UpsertRequestCandidateRecord,
 };
 use aether_data_contracts::repository::provider_catalog::{
@@ -1133,81 +1133,105 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
         .expect("key transport should build")
     }
 
-    struct CountingCandidateSelectionRepository {
-        inner: InMemoryMinimalCandidateSelectionReadRepository,
-        selection_reads: Arc<std::sync::atomic::AtomicUsize>,
+    struct CountingRequestCandidateRepository {
+        inner: InMemoryRequestCandidateRepository,
+        recent_runtime_reads: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[async_trait::async_trait]
-    impl aether_data_contracts::repository::candidate_selection::MinimalCandidateSelectionReadRepository
-        for CountingCandidateSelectionRepository
+    impl aether_data_contracts::repository::candidates::RequestCandidateReadRepository
+        for CountingRequestCandidateRepository
     {
-        async fn list_for_exact_api_format(
+        async fn list_by_request_id(
             &self,
-            api_format: &str,
-        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
-        {
-            self.selection_reads
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            self.inner.list_for_exact_api_format(api_format).await
+            request_id: &str,
+        ) -> Result<Vec<StoredRequestCandidate>, aether_data_contracts::DataLayerError> {
+            self.inner.list_by_request_id(request_id).await
         }
 
-        async fn list_for_exact_api_format_and_global_model(
+        async fn list_recent(
             &self,
-            api_format: &str,
-            global_model_name: &str,
-        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
-        {
-            self.selection_reads
+            limit: usize,
+        ) -> Result<Vec<StoredRequestCandidate>, aether_data_contracts::DataLayerError> {
+            self.inner.list_recent(limit).await
+        }
+
+        async fn list_recent_runtime(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<StoredRequestCandidate>, aether_data_contracts::DataLayerError> {
+            self.recent_runtime_reads
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.inner.list_recent_runtime(limit).await
+        }
+
+        async fn list_by_provider_id(
+            &self,
+            provider_id: &str,
+            limit: usize,
+        ) -> Result<Vec<StoredRequestCandidate>, aether_data_contracts::DataLayerError> {
+            self.inner.list_by_provider_id(provider_id, limit).await
+        }
+
+        async fn list_finalized_by_endpoint_ids_since(
+            &self,
+            endpoint_ids: &[String],
+            since_unix_secs: u64,
+            limit: usize,
+        ) -> Result<Vec<StoredRequestCandidate>, aether_data_contracts::DataLayerError> {
             self.inner
-                .list_for_exact_api_format_and_global_model(api_format, global_model_name)
+                .list_finalized_by_endpoint_ids_since(endpoint_ids, since_unix_secs, limit)
                 .await
         }
 
-        async fn list_for_exact_api_format_and_requested_model(
+        async fn count_finalized_statuses_by_endpoint_ids_since(
             &self,
-            api_format: &str,
-            requested_model_name: &str,
-        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
-        {
-            self.selection_reads
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            endpoint_ids: &[String],
+            since_unix_secs: u64,
+        ) -> Result<Vec<PublicHealthStatusCount>, aether_data_contracts::DataLayerError> {
             self.inner
-                .list_for_exact_api_format_and_requested_model(api_format, requested_model_name)
+                .count_finalized_statuses_by_endpoint_ids_since(endpoint_ids, since_unix_secs)
                 .await
         }
 
-        async fn list_for_exact_api_format_and_requested_model_page(
+        async fn aggregate_finalized_timeline_by_endpoint_ids_since(
             &self,
-            query: &aether_data_contracts::repository::candidate_selection::StoredRequestedModelCandidateRowsQuery,
-        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
+            endpoint_ids: &[String],
+            since_unix_secs: u64,
+            until_unix_secs: u64,
+            segments: u32,
+        ) -> Result<Vec<PublicHealthTimelineBucket>, aether_data_contracts::DataLayerError>
         {
-            self.selection_reads
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             self.inner
-                .list_for_exact_api_format_and_requested_model_page(query)
+                .aggregate_finalized_timeline_by_endpoint_ids_since(
+                    endpoint_ids,
+                    since_unix_secs,
+                    until_unix_secs,
+                    segments,
+                )
                 .await
         }
+    }
 
-        async fn list_pool_key_rows_for_group(
+    #[async_trait::async_trait]
+    impl aether_data_contracts::repository::candidates::RequestCandidateWriteRepository
+        for CountingRequestCandidateRepository
+    {
+        async fn upsert(
             &self,
-            query: &aether_data_contracts::repository::candidate_selection::StoredPoolKeyCandidateRowsQuery,
-        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
-        {
-            self.selection_reads
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            self.inner.list_pool_key_rows_for_group(query).await
+            candidate: UpsertRequestCandidateRecord,
+        ) -> Result<StoredRequestCandidate, aether_data_contracts::DataLayerError> {
+            self.inner.upsert(candidate).await
         }
 
-        async fn list_pool_key_rows_for_group_key_ids(
+        async fn delete_created_before(
             &self,
-            query: &aether_data_contracts::repository::candidate_selection::StoredPoolKeyCandidateRowsByKeyIdsQuery,
-        ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, aether_data_contracts::DataLayerError>
-        {
-            self.selection_reads
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            self.inner.list_pool_key_rows_for_group_key_ids(query).await
+            created_before_unix_secs: u64,
+            limit: usize,
+        ) -> Result<usize, aether_data_contracts::DataLayerError> {
+            self.inner
+                .delete_created_before(created_before_unix_secs, limit)
+                .await
         }
     }
 
@@ -1215,7 +1239,11 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let public_hits = Arc::new(Mutex::new(0usize));
     let public_hits_clone = Arc::clone(&public_hits);
-    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let recent_runtime_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let request_candidate_repository = Arc::new(CountingRequestCandidateRepository {
+        inner: InMemoryRequestCandidateRepository::default(),
+        recent_runtime_reads: Arc::clone(&recent_runtime_reads),
+    });
 
     let upstream = Router::new()
         .route(
@@ -1325,11 +1353,10 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
         Some(hash_api_key("sk-client-openai-cli-local-timeout")),
         auth_snapshot,
     )]));
-    let selection_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let candidate_selection_repository = Arc::new(CountingCandidateSelectionRepository {
-        inner: InMemoryMinimalCandidateSelectionReadRepository::seed(vec![sample_candidate_row()]),
-        selection_reads: Arc::clone(&selection_reads),
-    });
+    let candidate_selection_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_candidate_row(),
+        ]));
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider_catalog_provider()],
         vec![sample_provider_catalog_endpoint()],
@@ -1398,7 +1425,8 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    let selection_reads_before_second = selection_reads.load(std::sync::atomic::Ordering::Acquire);
+    let recent_reads_before_second =
+        recent_runtime_reads.load(std::sync::atomic::Ordering::Acquire);
     let started_at = std::time::Instant::now();
     let second_client = client.clone();
     let second_gateway_url = gateway_url.clone();
@@ -1416,12 +1444,16 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
             .await
             .expect("request should complete")
     });
-    // Every attempt of the bounded concurrency wait loop re-reads the candidate
-    // rows, so a read bump proves the second request evaluated selection while
-    // the first request still holds the only slot — i.e. it is parked in the
-    // wait loop now and it is safe to release the slot.
+    // Candidate row pages are served from the row page cache, so a blocked
+    // selection attempt produces no candidate-selection repository reads.
+    // The bounded concurrency wait loop, however, re-reads the recent request
+    // candidates on every poll: one read for the blocked evaluation plus one
+    // read per poll. A +3 bump therefore proves the second request is parked
+    // in the wait loop right now — with most of its wait budget still ahead —
+    // and it is safe to release the slot.
     wait_until(5_000, || {
-        selection_reads.load(std::sync::atomic::Ordering::Acquire) > selection_reads_before_second
+        recent_runtime_reads.load(std::sync::atomic::Ordering::Acquire)
+            >= recent_reads_before_second + 3
     })
     .await;
     release_first_execution.notify_one();
