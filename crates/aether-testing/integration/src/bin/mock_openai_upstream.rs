@@ -1600,6 +1600,7 @@ mod tests {
                     metrics: Arc::new(Metrics::for_binds(&config.binds)),
                     bind_label: Arc::from(config.binds[0].to_string()),
                     config,
+                    truncate_error_release: None,
                 };
                 let mut payload = json!({"stream": true, "model": "mock-test"});
                 if let Some(include_usage) = include_usage {
