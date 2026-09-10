@@ -148,13 +148,18 @@ describe('CrossTabRefreshCoordinator', () => {
       .mockRejectedValue(refreshError)
     const secondExecutor = vi.fn(() => Promise.resolve('verified-in-second-tab'))
 
+    // Keep the wait budget short: when the retry starts in a later millisecond
+    // than the peer success, the consumed success no longer counts and the
+    // coordinator waits the full waitTimeoutMs before surfacing the failure.
     const first = new CrossTabRefreshCoordinator({
       storage: localStorage,
       channelFactory: createChannel,
+      waitTimeoutMs: 100,
     })
     const second = new CrossTabRefreshCoordinator({
       storage: localStorage,
       channelFactory: createChannel,
+      waitTimeoutMs: 100,
     })
 
     const firstRun = first.run(firstExecutor)
