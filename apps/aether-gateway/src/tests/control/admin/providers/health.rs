@@ -193,6 +193,73 @@ async fn admin_provider_summary_health_missing_provider_remains_not_found() {
 }
 
 #[tokio::test]
+async fn admin_provider_summary_health_maps_one_key_to_each_same_format_endpoint_once() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let other_provider = sample_provider("provider-other", "openai", 10);
+    let mut key = sample_key("key-shared-format", &provider.id, "openai:chat", "test");
+    key.api_formats = Some(json!(["openai:chat", "openai:chat"]));
+    key.health_by_format = Some(json!({"openai:chat": {"health_score": 0.25}}));
+    let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider.clone(), other_provider.clone()],
+        vec![
+            sample_endpoint(
+                "endpoint-chat-a",
+                &provider.id,
+                "openai:chat",
+                "https://api-a.openai.example",
+            ),
+            sample_endpoint(
+                "endpoint-chat-b",
+                &provider.id,
+                "openai:chat",
+                "https://api-b.openai.example",
+            ),
+            sample_endpoint(
+                "endpoint-other",
+                &other_provider.id,
+                "openai:chat",
+                "https://api.other.example",
+            ),
+        ],
+        vec![
+            key,
+            sample_key("key-other", &other_provider.id, "openai:chat", "test")
+                .with_health_fields(Some(json!({"openai:chat": {"health_score": 0.9}})), None),
+        ],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            repository,
+        ));
+
+    let response = local_admin_providers_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/providers/provider-openai/summary",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("summary body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("summary should parse");
+    let details = payload["endpoint_health_details"]
+        .as_array()
+        .expect("endpoint health details");
+
+    assert_eq!(details.len(), 2);
+    for detail in details {
+        assert_eq!(detail["api_format"], "openai:chat");
+        assert_eq!(detail["total_keys"], 1);
+        assert_eq!(detail["active_keys"], 1);
+        assert_eq!(detail["health_score"], 0.25);
+    }
+    assert_eq!(payload["avg_health_score"], 0.25);
+}
+
+#[tokio::test]
 async fn admin_provider_summary_health_counts_inherited_reverse_proxy_accounts() {
     for (provider_type, auth_type, api_format) in [
         ("codex", "oauth", "openai:responses"),

@@ -8,9 +8,11 @@ on:
       - main
     paths:
       - "frontend/**"
+      - "aether-vscodex/**"
       - ".github/agents.yml"
       - ".github/automation-policy.yml"
       - ".github/automation/**"
+      - ".github/change-filters.yml"
       - ".github/upstream-sync-policy.yml"
       - ".github/workflows/scripts/**"
       - ".github/workflows/frontend-ci.yml"
@@ -33,6 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       frontend: ${{ steps.filter.outputs.frontend || 'true' }}
+      vscodex: ${{ steps.filter.outputs.vscodex || 'true' }}
       automation: ${{ steps.filter.outputs.automation || 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -152,6 +155,47 @@ jobs:
         run: npm ci
       - run: npm run build
 
+  vscodex:
+    name: VSCodex CI
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.vscodex == 'true' }}
+    defaults:
+      run:
+        working-directory: aether-vscodex
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            aether-vscodex/package-lock.json
+            aether-vscodex/web/package-lock.json
+            aether-vscodex/vscode-extension/package-lock.json
+      - run: npm ci
+      - name: Install web dependencies
+        working-directory: aether-vscodex/web
+        run: npm ci
+      - name: Build web
+        working-directory: aether-vscodex/web
+        run: npm run build
+      - name: Install extension dependencies
+        working-directory: aether-vscodex/vscode-extension
+        run: npm ci
+      - name: Check extension
+        working-directory: aether-vscodex/vscode-extension
+        run: npm run check
+      - name: Build extension
+        working-directory: aether-vscodex/vscode-extension
+        run: npm run build
+      - run: npm test
+      - name: Test web
+        working-directory: aether-vscodex/web
+        run: npm test
+
   check:
     name: Frontend CI / check
     runs-on: ubuntu-latest
@@ -162,6 +206,7 @@ jobs:
       - type_check
       - test
       - build
+      - vscodex
       - automation
     if: ${{ always() }}
     steps:
@@ -173,6 +218,7 @@ jobs:
              [ "${{ needs.type_check.result }}" = "failure" ] || [ "${{ needs.type_check.result }}" = "cancelled" ] || \
              [ "${{ needs.test.result }}" = "failure" ] || [ "${{ needs.test.result }}" = "cancelled" ] || \
              [ "${{ needs.build.result }}" = "failure" ] || [ "${{ needs.build.result }}" = "cancelled" ] || \
+             [ "${{ needs.vscodex.result }}" = "failure" ] || [ "${{ needs.vscodex.result }}" = "cancelled" ] || \
              [ "${{ needs.automation.result }}" = "failure" ] || [ "${{ needs.automation.result }}" = "cancelled" ]; then
             echo "Frontend CI failed"
             exit 1
