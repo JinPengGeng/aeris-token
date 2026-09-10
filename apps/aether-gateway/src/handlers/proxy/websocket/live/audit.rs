@@ -286,10 +286,9 @@ impl LiveSessionAudit {
         }
     }
 
-    /// Persists one terminal lifecycle row. The spawned write remains alive,
-    /// up to its hard timeout, if the bounded caller wait elapses. Closing a
-    /// socket therefore does not silently cancel the only audit write, while a
-    /// stalled database cannot retain the task forever.
+    /// Persists one terminal lifecycle row. The spawned write remains alive if
+    /// the bounded caller wait elapses, so closing a socket does not silently
+    /// cancel the only audit write.
     pub(super) async fn finish(self, state: &AppState, terminal: LiveSessionTerminal) {
         let event = self.build_terminal_event(terminal);
         persist_live_audit_event(state, event, LIVE_AUDIT_WRITE_WAIT, "session").await;
