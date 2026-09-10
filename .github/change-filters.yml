@@ -22,6 +22,9 @@ data:
 frontend:
   - 'frontend/**'
   - '.github/workflows/frontend-ci.yml'
+vscodex:
+  - 'aether-vscodex/**'
+  - '.github/workflows/frontend-ci.yml'
 automation:
   - '.github/agents.yml'
   - '.github/ai-executors.json'

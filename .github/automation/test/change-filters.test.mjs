@@ -34,6 +34,7 @@ const EXPECTED_GROUPS = {
     '.github/workflows/rust-ci.yml',
   ],
   frontend: ['frontend/**', '.github/workflows/frontend-ci.yml'],
+  vscodex: ['aether-vscodex/**', '.github/workflows/frontend-ci.yml'],
   automation: [
     '.github/agents.yml',
     '.github/ai-executors.json',
@@ -45,7 +46,7 @@ const EXPECTED_GROUPS = {
   ],
 };
 
-test('change-filters.yml keeps the four CI filter groups pinned', () => {
+test('change-filters.yml keeps the five CI filter groups pinned', () => {
   const parsed = yaml.load(fs.readFileSync(path.join(repoRoot, CHANGE_FILTERS_PATH), 'utf8'));
   assert.deepEqual(parsed, EXPECTED_GROUPS);
 });
@@ -58,9 +59,14 @@ test('both CI workflows consume the shared change filters file', () => {
   }
 });
 
+test('frontend push routing includes the shared change filters file', () => {
+  const text = fs.readFileSync(path.join(repoRoot, '.github/workflows/frontend-ci.yml'), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(text, /^      - "\.github\/change-filters\.yml"$/m);
+});
+
 test('the runtime matcher loads the shared file from the trusted checkout', () => {
   const filters = loadChangeFilters(repoRoot);
-  assert.deepEqual(Object.keys(filters), ['rust', 'data', 'frontend', 'automation']);
+  assert.deepEqual(Object.keys(filters), ['rust', 'data', 'frontend', 'vscodex', 'automation']);
 });
 
 test('matcher classifies representative paths exactly like the CI filters', () => {
@@ -69,7 +75,8 @@ test('matcher classifies representative paths exactly like the CI filters', () =
     // Docs-only and otherwise unfiltered changes hit no group.
     [['docs/guide.md', 'README.md'], []],
     [['LICENSE'], []],
-    [['aether-vscodex/web/src/app.ts'], []],
+    [['aether-vscodex/web/src/app.ts'], ['vscodex']],
+    [['aether-vscodex/vscode-extension/src/extension.ts'], ['vscodex']],
     // Rust workspace changes.
     [['crates/aether-gateway/src/lib.rs'], ['rust']],
     [['crates/aether-data/src/lib.rs'], ['data', 'rust']],
@@ -84,7 +91,7 @@ test('matcher classifies representative paths exactly like the CI filters', () =
     [['.github/automation/src/engine.mjs'], ['automation']],
     [['.github/change-filters.yml'], ['automation']],
     [['.github/workflows/rust-ci.yml'], ['automation', 'data', 'rust']],
-    [['.github/workflows/frontend-ci.yml'], ['automation', 'frontend']],
+    [['.github/workflows/frontend-ci.yml'], ['automation', 'frontend', 'vscodex']],
     [['.github/workflows/agent-pr-review.yml'], ['automation']],
     // Mixed changes report every matched group.
     [['docs/guide.md', 'frontend/package.json'], ['frontend']],

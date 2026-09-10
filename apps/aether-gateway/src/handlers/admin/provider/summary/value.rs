@@ -15,7 +15,7 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use aether_scheduler_core::provider_key_health_score;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn json_truthy(value: &serde_json::Value) -> bool {
     match value {
@@ -63,23 +63,34 @@ pub(crate) fn build_admin_provider_summary_value(
         .map(|endpoint| endpoint.api_format.clone())
         .collect::<Vec<_>>();
 
-    let format_to_endpoint_id = endpoints
-        .iter()
-        .map(|endpoint| (endpoint.api_format.clone(), endpoint.id.clone()))
-        .collect::<BTreeMap<_, _>>();
+    let format_to_endpoint_ids = endpoints.iter().fold(
+        BTreeMap::<String, BTreeSet<String>>::new(),
+        |mut formats, endpoint| {
+            formats
+                .entry(endpoint.api_format.clone())
+                .or_default()
+                .insert(endpoint.id.clone());
+            formats
+        },
+    );
     let mut keys_by_endpoint = BTreeMap::<String, Vec<&StoredProviderCatalogKey>>::new();
     for endpoint in endpoints {
         keys_by_endpoint.entry(endpoint.id.clone()).or_default();
     }
     for key in keys {
+        let mut key_endpoint_ids = BTreeSet::new();
         for api_format in
             provider_key_effective_api_formats(key, &provider.provider_type, endpoints)
         {
-            if let Some(endpoint_id) = format_to_endpoint_id.get(&api_format) {
-                keys_by_endpoint
-                    .entry(endpoint_id.clone())
-                    .or_default()
-                    .push(key);
+            if let Some(endpoint_ids) = format_to_endpoint_ids.get(&api_format) {
+                for endpoint_id in endpoint_ids {
+                    if key_endpoint_ids.insert(endpoint_id.clone()) {
+                        keys_by_endpoint
+                            .entry(endpoint_id.clone())
+                            .or_default()
+                            .push(key);
+                    }
+                }
             }
         }
     }
