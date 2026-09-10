@@ -217,7 +217,7 @@ aeris_bounded_fetch_ref "${BIG_REMOTE}" refs/heads/big "${BIG_TIP}" refs/aeris/t
 [[ "$(git rev-parse refs/aeris/test/big)" == "${BIG_TIP}" ]] ||
   fail 'second sequential big fetch did not get a fresh stage budget'
 assert_stages_clean
-AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES=1073741824
+AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES=2147483648
 
 RECEIVER_EXPANDED="$(new_receiver receiver-expanded)"
 cd "${RECEIVER_EXPANDED}"
@@ -234,7 +234,7 @@ expect_rejected 'expanded-byte over-boundary fetch' \
   aeris_bounded_fetch_ref "${REMOTE}" refs/heads/exact "${TIP}" refs/aeris/test/exact exact
 git show-ref --verify --quiet refs/aeris/test/exact && fail 'expanded-byte rejection imported a destination ref'
 assert_stages_clean
-AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES=1073741824
+AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES=2147483648
 
 RECEIVER_DELTA="$(new_receiver receiver-delta-over)"
 cd "${RECEIVER_DELTA}"
@@ -249,7 +249,7 @@ git show-ref --verify --quiet refs/aeris/test/delta-over && fail 'delta rejectio
 assert_stages_clean
 AERIS_FETCH_MAX_OBJECT_BYTES=33554432
 AERIS_FETCH_MAX_BLOB_BYTES=33554432
-AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES=1073741824
+AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES=2147483648
 
 RECEIVER_IMPORT="$(new_receiver receiver-import)"
 cd "${RECEIVER_IMPORT}"
@@ -420,7 +420,7 @@ git show-ref --verify --quiet refs/aeris/test/compressed-over && fail 'compressi
 assert_stages_clean
 AERIS_FETCH_MAX_OBJECT_BYTES=33554432
 AERIS_FETCH_MAX_BLOB_BYTES=33554432
-AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES=1073741824
+AERIS_FETCH_MAX_RECEIVED_EXPANDED_BYTES=2147483648
 
 RECEIVER_STALL="$(new_receiver receiver-stall)"
 cd "${RECEIVER_STALL}"
