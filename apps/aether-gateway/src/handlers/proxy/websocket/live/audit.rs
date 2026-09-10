@@ -506,7 +506,9 @@ async fn persist_live_audit_event(
     let request_id = event.request_id.clone();
     let usage_runtime = std::sync::Arc::clone(&state.usage_runtime);
     let usage_data = std::sync::Arc::clone(state.usage_lifecycle_data_state());
+    let usage_producer = usage_runtime.track_producer();
     let task = tokio::spawn(async move {
+        let _usage_producer = usage_producer;
         // Terminal submission uses the usage runtime's queue/retry/direct-fallback
         // path. Do not cap this future: cancelling it would discard the only
         // lifecycle row while its durable enqueue is still in progress.
@@ -558,7 +560,9 @@ fn spawn_live_audit_event_detached(state: &AppState, event: UsageEvent, audit_sc
     };
     let usage_runtime = std::sync::Arc::clone(&state.usage_runtime);
     let usage_data = std::sync::Arc::clone(state.usage_lifecycle_data_state());
+    let usage_producer = usage_runtime.track_producer();
     runtime.spawn(async move {
+        let _usage_producer = usage_producer;
         usage_runtime
             .record_terminal_event(usage_data.as_ref(), event)
             .await;
