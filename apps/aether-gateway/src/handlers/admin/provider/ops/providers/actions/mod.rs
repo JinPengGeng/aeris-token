@@ -2,6 +2,7 @@ mod checkin;
 mod query_balance;
 mod responses;
 mod support;
+mod sync_remote_quota;
 
 use super::config::{
     admin_provider_ops_config_object, admin_provider_ops_connector_object,
@@ -28,6 +29,7 @@ pub(super) fn admin_provider_ops_is_valid_action_type(action_type: &str) -> bool
             | "refresh_token"
             | "get_usage"
             | "get_models"
+            | "sync_remote_quota"
             | "custom"
     )
 }
@@ -43,6 +45,14 @@ pub(crate) async fn admin_provider_ops_local_action_response(
     let Some(provider) = provider else {
         return responses::admin_provider_ops_action_not_configured(action_type, "未配置操作设置");
     };
+    if action_type == "sync_remote_quota" {
+        return sync_remote_quota::admin_provider_ops_run_sync_remote_quota_action(
+            state,
+            provider_id,
+            provider,
+        )
+        .await;
+    }
     let credential_snapshot = match admin_provider_ops_credential_snapshot(state, provider).await {
         Ok(snapshot) => snapshot,
         Err(_) => {

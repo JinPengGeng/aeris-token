@@ -928,8 +928,56 @@ export interface ProviderWithEndpointsSummary {
   kiro_simulated_cache_enabled?: boolean
   responses_websocket_enabled?: boolean
   ops_quota_alert_enabled?: boolean
+  ops_remote_quota?: ProviderRemoteQuotaStatus | null  // Sub2API 远程配额同步状态（默认关闭）
   created_at: string
   updated_at: string
+}
+
+/** Sub2API 远程配额窗口状态（管理面只读投影） */
+export interface ProviderRemoteQuotaWindow {
+  code: string  // daily | weekly | monthly
+  label?: string | null
+  used_value?: number | null
+  limit_value?: number | null
+  used_ratio?: number | null
+  remaining_value?: number | null
+  reset_at?: string | null
+  reset_seconds?: number | null
+  is_exhausted?: boolean
+}
+
+/** Sub2API 远程配额最近一次同步状态 */
+export interface ProviderRemoteQuotaSyncStatus {
+  sync_status: 'ok' | 'error' | string
+  synced_at?: string | null
+  code?: string | null
+  exhausted?: boolean
+  usage_ratio?: number | null
+  reset_at?: string | null
+  updated_at?: string | null
+  blocked?: boolean
+  block_reason?: string | null
+  blocked_until?: string | null
+  conservative_cooldown?: boolean
+  subscription_id?: string | null
+  subscription_status?: string | null
+  subscription_active?: boolean
+  group_id?: string | null
+  group_name?: string | null
+  expires_at?: string | null
+  last_error?: string | null
+  last_error_at?: string | null
+  windows?: ProviderRemoteQuotaWindow[]
+}
+
+/** Sub2API 远程配额配置与同步状态（provider summary 透出） */
+export interface ProviderRemoteQuotaStatus {
+  enabled: boolean
+  group_id?: string | null
+  progress_endpoint?: string | null
+  fetch_interval_seconds?: number | null
+  config_error?: string | null
+  sync?: ProviderRemoteQuotaSyncStatus | null
 }
 
 export interface HealthStatus {

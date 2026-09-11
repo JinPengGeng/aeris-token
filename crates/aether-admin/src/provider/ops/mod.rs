@@ -20,7 +20,8 @@ pub use self::config::{
     resolve_admin_provider_ops_base_url,
 };
 pub use self::remote_quota::{
-    parse_sub2api_remote_quota, parse_sub2api_remote_quota_at, parse_sub2api_remote_quota_config,
+    build_sub2api_remote_quota_admin_status, parse_sub2api_remote_quota,
+    parse_sub2api_remote_quota_at, parse_sub2api_remote_quota_config,
     validate_sub2api_same_origin_endpoint, Sub2ApiQuotaWindowKind, Sub2ApiRemoteQuotaConfig,
     Sub2ApiRemoteQuotaObservation, Sub2ApiRemoteQuotaState, Sub2ApiRemoteQuotaWindow,
     DEFAULT_REMOTE_QUOTA_FETCH_INTERVAL_SECS, DEFAULT_SUB2API_PROGRESS_ENDPOINT,

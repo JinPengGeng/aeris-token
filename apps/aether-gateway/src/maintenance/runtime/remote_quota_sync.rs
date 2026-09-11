@@ -42,6 +42,18 @@ pub(crate) struct RemoteQuotaSyncRunSummary {
     pub(crate) failed: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteQuotaSyncFailureDetail {
+    pub(crate) kind: &'static str,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct RemoteQuotaSyncProviderRunReport {
+    pub(crate) summary: RemoteQuotaSyncRunSummary,
+    pub(crate) failure: Option<RemoteQuotaSyncFailureDetail>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RemoteQuotaSyncProviderOutcome {
     AppliedAvailable,
@@ -163,7 +175,7 @@ pub(crate) async fn perform_remote_quota_sync_once(
     }))
     .buffer_unordered(REMOTE_QUOTA_SYNC_CONCURRENCY);
 
-    while let Some(outcome) = results.next().await {
+    while let Some((outcome, _failure)) = results.next().await {
         match outcome {
             RemoteQuotaSyncProviderOutcome::AppliedAvailable => summary.applied += 1,
             RemoteQuotaSyncProviderOutcome::AppliedBlocked => {
@@ -207,20 +219,78 @@ pub(crate) async fn perform_remote_quota_sync_for_provider(
             Ok(RemoteQuotaSyncProviderOutcome::Failed)
         }
         RemoteQuotaConfigSelection::Enabled(config) => {
-            Ok(sync_remote_quota_for_provider(state, provider, &config).await)
+            let (outcome, _) = sync_remote_quota_for_provider(state, provider, &config).await;
+            Ok(outcome)
         }
     }
+}
+
+/// 单 provider 手动同步入口（管理 action 通道使用）：返回单 provider 摘要与
+/// 最近一次失败的脱敏详情。未启用/未找到 provider 返回 skipped，不视为错误。
+pub(crate) async fn perform_remote_quota_sync_once_for_provider(
+    state: &AppState,
+    provider_id: &str,
+) -> Result<RemoteQuotaSyncProviderRunReport, GatewayError> {
+    let mut report = RemoteQuotaSyncProviderRunReport::default();
+    if !state.has_provider_catalog_data_reader() || !state.has_provider_catalog_data_writer() {
+        report.summary.skipped = 1;
+        return Ok(report);
+    }
+    let Some(provider) = state
+        .read_provider_catalog_providers_by_ids(&[provider_id.to_string()])
+        .await?
+        .into_iter()
+        .next()
+    else {
+        report.summary.skipped = 1;
+        return Ok(report);
+    };
+    match remote_quota_sync_config(&provider) {
+        RemoteQuotaConfigSelection::Disabled => {
+            report.summary.skipped = 1;
+        }
+        RemoteQuotaConfigSelection::Invalid(message) => {
+            report.summary.attempted = 1;
+            report.summary.failed = 1;
+            report.failure = Some(RemoteQuotaSyncFailureDetail {
+                kind: "invalid_config",
+                message,
+            });
+        }
+        RemoteQuotaConfigSelection::Enabled(config) => {
+            report.summary.attempted = 1;
+            let (outcome, failure) = sync_remote_quota_for_provider(state, provider, &config).await;
+            report.failure = failure;
+            match outcome {
+                RemoteQuotaSyncProviderOutcome::AppliedAvailable => report.summary.applied = 1,
+                RemoteQuotaSyncProviderOutcome::AppliedBlocked => {
+                    report.summary.applied = 1;
+                    report.summary.blocked = 1;
+                }
+                RemoteQuotaSyncProviderOutcome::AppliedRecovered => {
+                    report.summary.applied = 1;
+                    report.summary.recovered = 1;
+                }
+                RemoteQuotaSyncProviderOutcome::Skipped => report.summary.skipped = 1,
+                RemoteQuotaSyncProviderOutcome::Failed => report.summary.failed = 1,
+            }
+        }
+    }
+    Ok(report)
 }
 
 async fn sync_remote_quota_for_provider(
     state: &AppState,
     provider: StoredProviderCatalogProvider,
     config: &Sub2ApiRemoteQuotaConfig,
-) -> RemoteQuotaSyncProviderOutcome {
+) -> (
+    RemoteQuotaSyncProviderOutcome,
+    Option<RemoteQuotaSyncFailureDetail>,
+) {
     let provider_id = provider.id.clone();
     let lock = acquire_remote_quota_sync_lock(state, &provider_id).await;
     let Some(lock) = lock else {
-        return RemoteQuotaSyncProviderOutcome::Skipped;
+        return (RemoteQuotaSyncProviderOutcome::Skipped, None);
     };
     let outcome = sync_remote_quota_for_provider_locked(state, &provider, config).await;
     if let Err(err) = state.runtime_state().lock_release(&lock).await {
@@ -263,7 +333,10 @@ async fn sync_remote_quota_for_provider_locked(
     state: &AppState,
     provider: &StoredProviderCatalogProvider,
     config: &Sub2ApiRemoteQuotaConfig,
-) -> RemoteQuotaSyncProviderOutcome {
+) -> (
+    RemoteQuotaSyncProviderOutcome,
+    Option<RemoteQuotaSyncFailureDetail>,
+) {
     let provider_id = provider.id.clone();
     let now_unix_secs = now_unix_secs();
     let admin_state = AdminAppState::new(state);
@@ -276,21 +349,25 @@ async fn sync_remote_quota_for_provider_locked(
     {
         Ok(fetch) => fetch,
         Err(err) => {
-            let message = match err {
-                AdminProviderOpsRemoteQuotaFetchError::NotConfigured => {
-                    "provider_ops_not_configured"
-                }
+            let kind = match err {
+                AdminProviderOpsRemoteQuotaFetchError::NotConfigured => "not_configured",
                 AdminProviderOpsRemoteQuotaFetchError::Auth => "auth_failed",
                 AdminProviderOpsRemoteQuotaFetchError::Transport => "network_error",
             };
             warn!(
                 provider_id = %provider_id,
-                error_kind = message,
+                error_kind = kind,
                 error_message = err.message(),
                 "provider remote quota fetch failed; keeping last synced state"
             );
-            record_remote_quota_sync_failure(state, provider, config, message).await;
-            return RemoteQuotaSyncProviderOutcome::Failed;
+            record_remote_quota_sync_failure(state, provider, config, kind).await;
+            return (
+                RemoteQuotaSyncProviderOutcome::Failed,
+                Some(RemoteQuotaSyncFailureDetail {
+                    kind,
+                    message: err.message().to_string(),
+                }),
+            );
         }
     };
 
@@ -308,7 +385,13 @@ async fn sync_remote_quota_for_provider_locked(
                 "provider remote quota response rejected; keeping last synced state"
             );
             record_remote_quota_sync_failure(state, provider, config, &message).await;
-            return RemoteQuotaSyncProviderOutcome::Failed;
+            return (
+                RemoteQuotaSyncProviderOutcome::Failed,
+                Some(RemoteQuotaSyncFailureDetail {
+                    kind: "invalid_data",
+                    message,
+                }),
+            );
         }
     };
     let decision = remote_quota_decision(&quota_state, now_unix_secs);
@@ -324,7 +407,13 @@ async fn sync_remote_quota_for_provider_locked(
                 error = ?err,
                 "provider remote quota sync failed to load endpoints"
             );
-            return RemoteQuotaSyncProviderOutcome::Failed;
+            return (
+                RemoteQuotaSyncProviderOutcome::Failed,
+                Some(RemoteQuotaSyncFailureDetail {
+                    kind: "internal",
+                    message: "读取 Provider 端点数据失败".to_string(),
+                }),
+            );
         }
     };
     let keys = match state
@@ -338,7 +427,13 @@ async fn sync_remote_quota_for_provider_locked(
                 error = ?err,
                 "provider remote quota sync failed to load keys"
             );
-            return RemoteQuotaSyncProviderOutcome::Failed;
+            return (
+                RemoteQuotaSyncProviderOutcome::Failed,
+                Some(RemoteQuotaSyncFailureDetail {
+                    kind: "internal",
+                    message: "读取 Provider 密钥数据失败".to_string(),
+                }),
+            );
         }
     };
     let endpoint_api_formats = crate::provider_key_auth::provider_active_api_formats(&endpoints);
@@ -364,7 +459,7 @@ async fn sync_remote_quota_for_provider_locked(
         persist_key_quota_snapshot(state, &key.id, quota_payload.clone()).await;
     }
 
-    match decision {
+    let outcome = match decision {
         RemoteQuotaDecision::Available => {
             if managed_circuit_cleared {
                 RemoteQuotaSyncProviderOutcome::AppliedRecovered
@@ -373,7 +468,8 @@ async fn sync_remote_quota_for_provider_locked(
             }
         }
         RemoteQuotaDecision::Blocked { .. } => RemoteQuotaSyncProviderOutcome::AppliedBlocked,
-    }
+    };
+    (outcome, None)
 }
 
 pub(crate) fn remote_quota_decision(

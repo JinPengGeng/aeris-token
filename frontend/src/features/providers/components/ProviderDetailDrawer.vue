@@ -57,6 +57,12 @@
                 :reset-day="provider.quota_reset_day"
               />
 
+              <!-- Sub2API 远程配额（默认关闭，未启用时不渲染） -->
+              <ProviderRemoteQuotaCard
+                :provider="provider"
+                @synced="handleRemoteQuotaSynced"
+              />
+
               <!-- 密钥管理 -->
               <Card class="overflow-hidden">
                 <div class="p-4 border-b border-border/60">
@@ -978,6 +984,7 @@ import ProviderKeyIdentityBlock from '@/features/providers/components/ProviderKe
 import ProviderMonthlyQuotaCard from '@/features/providers/components/ProviderMonthlyQuotaCard.vue'
 import ProviderQuotaProgressRow from '@/features/providers/components/ProviderQuotaProgressRow.vue'
 import ProviderQuotaSectionHeader from '@/features/providers/components/ProviderQuotaSectionHeader.vue'
+import ProviderRemoteQuotaCard from '@/features/providers/components/ProviderRemoteQuotaCard.vue'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import { resolveAntigravityQuotaGroupLabel } from '@/features/providers/utils/antigravityQuota'
 import { refreshQuotaInBackground } from '@/features/providers/utils/refreshQuotaInBackground'
@@ -3790,6 +3797,12 @@ async function loadProvider() {
       loading.value = false
     }
   }
+}
+
+// 远程配额手动同步完成后刷新 provider 摘要（成功与失败 payload 都会写回状态）
+async function handleRemoteQuotaSynced() {
+  await loadProvider()
+  emit('refresh')
 }
 
 async function loadProviderKeysPage(page = currentKeyPage.value) {

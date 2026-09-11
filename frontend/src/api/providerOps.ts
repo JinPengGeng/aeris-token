@@ -8,6 +8,7 @@
  */
 
 import client from './client'
+import axios from 'axios'
 import type { CredentialsSchema } from './providerCredentials'
 
 // ==================== Types ====================
@@ -23,6 +24,7 @@ export type ProviderActionType =
   | 'refresh_token'
   | 'get_usage'
   | 'get_models'
+  | 'sync_remote_quota'
   | 'custom'
 
 /** 操作状态 */
@@ -158,6 +160,17 @@ export interface ConnectRequest {
 /** 执行操作请求 */
 export interface ExecuteActionRequest {
   config?: Record<string, unknown>
+}
+
+/** 远程配额同步执行摘要（sync_remote_quota action 的 data 字段） */
+export interface RemoteQuotaSyncSummary {
+  attempted: number
+  applied: number
+  blocked: number
+  recovered: number
+  skipped: number
+  failed: number
+  last_error?: string | null
 }
 
 // ==================== API Functions ====================
@@ -334,6 +347,28 @@ export async function batchQueryBalance(
     providerIds
   )
   return response.data
+}
+
+/**
+ * 立即同步远程配额（Sub2API remote_quota）。
+ *
+ * 未启用远程配额的 Provider 会被路由层明确拒绝（HTTP 400 + action payload），
+ * 这里把该 4xx 归一化为 ActionResultResponse 返回，只有真正的传输层错误才抛出。
+ */
+export async function syncRemoteQuota(providerId: string): Promise<ActionResultResponse> {
+  try {
+    return await executeAction(providerId, 'sync_remote_quota')
+  } catch (error) {
+    if (
+      axios.isAxiosError(error) &&
+      error.response?.data &&
+      typeof error.response.data === 'object' &&
+      'action_type' in error.response.data
+    ) {
+      return error.response.data as ActionResultResponse
+    }
+    throw error
+  }
 }
 
 /** 验证认证请求 */
