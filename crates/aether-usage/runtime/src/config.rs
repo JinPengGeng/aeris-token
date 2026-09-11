@@ -14,6 +14,9 @@ pub struct UsageRuntimeConfig {
     pub stream_key: String,
     pub consumer_group: String,
     pub dlq_stream_key: String,
+    /// Maximum number of entries retained in the dead-letter stream.
+    /// A bounded DLQ protects Redis memory while preserving the newest failures.
+    pub dlq_stream_maxlen: usize,
     pub stream_maxlen: usize,
     pub queue_payload_max_bytes: usize,
     pub consumer_batch_size: usize,
@@ -47,6 +50,7 @@ impl Default for UsageRuntimeConfig {
             stream_key: "usage:events".to_string(),
             consumer_group: "usage_consumers".to_string(),
             dlq_stream_key: "usage:events:dlq".to_string(),
+            dlq_stream_maxlen: 50_000,
             stream_maxlen: 200_000,
             queue_payload_max_bytes: 1024 * 1024,
             consumer_batch_size: 128,
@@ -95,6 +99,11 @@ impl UsageRuntimeConfig {
         if self.stream_key == self.dlq_stream_key {
             return Err(DataLayerError::InvalidConfiguration(
                 "usage runtime stream_key and dlq_stream_key must be different".to_string(),
+            ));
+        }
+        if self.dlq_stream_maxlen == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime dlq_stream_maxlen must be positive".to_string(),
             ));
         }
         if self.worker_count == 0 {
@@ -262,5 +271,19 @@ mod tests {
         ));
         config.queue_payload_max_bytes = 1;
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn enabled_config_rejects_zero_dead_letter_stream_maxlen() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            dlq_stream_maxlen: 0,
+            ..UsageRuntimeConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(aether_data_contracts::DataLayerError::InvalidConfiguration(message))
+                if message.contains("dlq_stream_maxlen")
+        ));
     }
 }

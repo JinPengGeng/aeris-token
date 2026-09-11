@@ -272,7 +272,28 @@ impl RedisStreamRunner {
         destination: &str,
         destination_fields: &BTreeMap<String, String>,
     ) -> Result<RuntimeQueueTransferOutcome, DataLayerError> {
+        self.try_transfer_pending_to_stream_with_maxlen(
+            source,
+            group,
+            entry_id,
+            destination,
+            destination_fields,
+            None,
+        )
+        .await
+    }
+
+    pub async fn try_transfer_pending_to_stream_with_maxlen(
+        &self,
+        source: &str,
+        group: &str,
+        entry_id: &str,
+        destination: &str,
+        destination_fields: &BTreeMap<String, String>,
+        destination_maxlen: Option<usize>,
+    ) -> Result<RuntimeQueueTransferOutcome, DataLayerError> {
         validate_runtime_queue_transfer(source, group, entry_id, destination, destination_fields)?;
+        let destination_maxlen = destination_maxlen.unwrap_or(0);
         self.run_with_timeout(
             RedisConnectionLane::BlockingStream,
             "redis stream pending transfer",
@@ -285,7 +306,8 @@ impl RedisStreamRunner {
                     .arg(source)
                     .arg(destination)
                     .arg(group)
-                    .arg(entry_id);
+                    .arg(entry_id)
+                    .arg(destination_maxlen);
                 for (field, value) in destination_fields {
                     command.arg(field).arg(value);
                 }
