@@ -360,10 +360,46 @@ impl Default for TaskSupervisor {
     }
 }
 
+impl Drop for TaskSupervisor {
+    fn drop(&mut self) {
+        // The JoinSet owns supervisor wrappers, while each wrapper owns the actual task handle.
+        // Let the wrappers observe cancellation so they can abort and reap those inner tasks.
+        self.cancellation_token.cancel();
+        self.join_set.detach_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TaskSupervisor, TaskSupervisorMetrics};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use tokio::sync::oneshot;
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    async fn running_task(
+        started: oneshot::Sender<()>,
+        dropped: oneshot::Sender<()>,
+        ticks: Arc<AtomicUsize>,
+    ) {
+        let _drop_signal = DropSignal(Some(dropped));
+        let _ = started.send(());
+        loop {
+            ticks.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
 
     #[tokio::test]
     async fn supervisor_metrics_record_completion_and_cancellation() {
@@ -413,5 +449,75 @@ mod tests {
         assert_eq!(snapshot.active_tasks, 0);
 
         supervisor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dropping_supervisor_cancels_spawned_and_supervised_tasks() {
+        let metrics = TaskSupervisorMetrics::default();
+        let mut supervisor = TaskSupervisor::with_metrics(metrics.clone());
+        let spawned_ticks = Arc::new(AtomicUsize::new(0));
+        let supervised_ticks = Arc::new(AtomicUsize::new(0));
+        let (spawned_started_tx, spawned_started_rx) = oneshot::channel();
+        let (spawned_dropped_tx, spawned_dropped_rx) = oneshot::channel();
+        let (supervised_started_tx, supervised_started_rx) = oneshot::channel();
+        let (supervised_dropped_tx, supervised_dropped_rx) = oneshot::channel();
+
+        supervisor.spawn_named(
+            "test.drop.spawned",
+            running_task(
+                spawned_started_tx,
+                spawned_dropped_tx,
+                spawned_ticks.clone(),
+            ),
+        );
+        supervisor.supervise_handle(
+            "test.drop.supervised",
+            tokio::spawn(running_task(
+                supervised_started_tx,
+                supervised_dropped_tx,
+                supervised_ticks.clone(),
+            )),
+        );
+
+        spawned_started_rx.await.expect("spawned task should start");
+        supervised_started_rx
+            .await
+            .expect("supervised task should start");
+        drop(supervisor);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), spawned_dropped_rx)
+            .await
+            .expect("spawned task should be dropped")
+            .expect("spawned task should signal drop");
+        tokio::time::timeout(std::time::Duration::from_secs(1), supervised_dropped_rx)
+            .await
+            .expect("supervised task should be dropped")
+            .expect("supervised task should signal drop");
+
+        let spawned_ticks_after_drop = spawned_ticks.load(Ordering::Relaxed);
+        let supervised_ticks_after_drop = supervised_ticks.load(Ordering::Relaxed);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert_eq!(
+            spawned_ticks.load(Ordering::Relaxed),
+            spawned_ticks_after_drop
+        );
+        assert_eq!(
+            supervised_ticks.load(Ordering::Relaxed),
+            supervised_ticks_after_drop
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while metrics.snapshot().active_tasks != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop cancellation should settle supervisor metrics");
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.supervised_total, 2);
+        assert_eq!(snapshot.cancelled_total, 2);
+        assert_eq!(snapshot.completed_total, 0);
+        assert_eq!(snapshot.panicked_total, 0);
+        assert_eq!(snapshot.aborted_total, 0);
     }
 }
