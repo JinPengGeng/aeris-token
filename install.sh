@@ -83,8 +83,8 @@ Options:
                       stable/latest resolves the latest stable tag (default)
                       rc resolves the latest tag like v0.7.0-rc.1
                       beta resolves the latest tag like v0.7.0-beta.1
-                      nightly resolves the rolling nightly build from main
-  --version VERSION    Exact release tag to install, for example aeris-token-v0.1.0-rc.1 or nightly
+                      nightly resolves the latest dated nightly build from main (aeris-token-nightly-YYYYMMDD)
+  --version VERSION    Exact release tag to install, for example aeris-token-v0.1.0-rc.1 or aeris-token-nightly-20260901
   --repo OWNER/REPO    GitHub repository to download from (default: fawney19/Aether)
   --source-ref REF     Source branch/tag used for compose templates (default: main)
   --archive PATH       Install from a local release tarball instead of downloading
@@ -1316,9 +1316,10 @@ resolve_version() {
                 head -n1 || true)"
             ;;
         nightly)
-            # The nightly release is a single rolling tag, so no API listing is
-            # needed (and unauthenticated release-list calls are rate-limited).
-            tag="nightly"
+            tag="$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=50" |
+                sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+                grep -E '^aeris-token-nightly-[0-9]{8}$' |
+                head -n1 || true)"
             ;;
         *)
             die "unsupported release channel: ${CHANNEL}; expected stable, latest, rc, beta, or nightly"
@@ -1738,8 +1739,17 @@ compose_image() {
 
     local tag=""
     if [[ -n "${VERSION}" ]]; then
-        tag="${VERSION#aeris-token-v}"
-        tag="${tag#v}"
+        case "${VERSION}" in
+            aeris-token-nightly-*)
+                # The rolling image tag is decoupled from the dated Release
+                # tag: compose deployments always track the latest nightly.
+                tag="nightly"
+                ;;
+            *)
+                tag="${VERSION#aeris-token-v}"
+                tag="${tag#v}"
+                ;;
+        esac
     else
         case "${CHANNEL}" in
             stable|latest)
