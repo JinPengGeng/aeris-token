@@ -68,7 +68,7 @@ async fn gateway_locally_denies_video_control_sync_even_with_opt_in_headers_when
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(
         payload["error"]["message"],
         "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径"
@@ -144,7 +144,7 @@ async fn gateway_locally_denies_video_control_sync_without_opt_in_header_when_ex
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(
         payload["error"]["message"],
         "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径"
@@ -213,7 +213,7 @@ async fn gateway_skips_video_get_control_sync_without_opt_in_header() {
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(
         payload["error"]["message"],
         "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径"
