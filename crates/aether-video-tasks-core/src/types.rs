@@ -188,7 +188,7 @@ impl std::fmt::Debug for LocalVideoTaskTransportBridgeInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalVideoTaskPersistence {
     pub request_id: String,
     pub username: Option<String>,
@@ -199,7 +199,22 @@ pub struct LocalVideoTaskPersistence {
     pub format_converted: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl std::fmt::Debug for LocalVideoTaskPersistence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalVideoTaskPersistence")
+            .field("request_id", &self.request_id)
+            .field("username", &self.username)
+            .field("api_key_name", &self.api_key_name)
+            .field("client_api_format", &self.client_api_format)
+            .field("provider_api_format", &self.provider_api_format)
+            .field("original_request_body", &"[redacted]")
+            .field("format_converted", &self.format_converted)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiVideoTaskSeed {
     pub local_task_id: String,
     pub upstream_task_id: String,
@@ -222,7 +237,37 @@ pub struct OpenAiVideoTaskSeed {
     pub transport: LocalVideoTaskTransport,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl std::fmt::Debug for OpenAiVideoTaskSeed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenAiVideoTaskSeed")
+            .field("local_task_id", &self.local_task_id)
+            .field("upstream_task_id", &self.upstream_task_id)
+            .field("created_at_unix_ms", &self.created_at_unix_ms)
+            .field("user_id", &self.user_id)
+            .field("api_key_id", &self.api_key_id)
+            .field("model", &self.model)
+            .field("prompt", &self.prompt.as_ref().map(|_| "[redacted]"))
+            .field("size", &self.size)
+            .field("seconds", &self.seconds)
+            .field("remixed_from_video_id", &self.remixed_from_video_id)
+            .field("status", &self.status)
+            .field("progress_percent", &self.progress_percent)
+            .field("completed_at_unix_secs", &self.completed_at_unix_secs)
+            .field("expires_at_unix_secs", &self.expires_at_unix_secs)
+            .field("error_code", &self.error_code.as_ref().map(|_| "[redacted]"))
+            .field(
+                "error_message",
+                &self.error_message.as_ref().map(|_| "[redacted]"),
+            )
+            .field("video_url", &self.video_url.as_ref().map(|_| "[redacted]"))
+            .field("persistence", &self.persistence)
+            .field("transport", &self.transport)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct GeminiVideoTaskSeed {
     pub local_short_id: String,
     pub upstream_operation_name: String,
@@ -236,4 +281,27 @@ pub struct GeminiVideoTaskSeed {
     pub metadata: Value,
     pub persistence: LocalVideoTaskPersistence,
     pub transport: LocalVideoTaskTransport,
+}
+
+impl std::fmt::Debug for GeminiVideoTaskSeed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GeminiVideoTaskSeed")
+            .field("local_short_id", &self.local_short_id)
+            .field("upstream_operation_name", &self.upstream_operation_name)
+            .field("user_id", &self.user_id)
+            .field("api_key_id", &self.api_key_id)
+            .field("model", &self.model)
+            .field("status", &self.status)
+            .field("progress_percent", &self.progress_percent)
+            .field("error_code", &self.error_code.as_ref().map(|_| "[redacted]"))
+            .field(
+                "error_message",
+                &self.error_message.as_ref().map(|_| "[redacted]"),
+            )
+            .field("metadata", &"[redacted]")
+            .field("persistence", &self.persistence)
+            .field("transport", &self.transport)
+            .finish()
+    }
 }
