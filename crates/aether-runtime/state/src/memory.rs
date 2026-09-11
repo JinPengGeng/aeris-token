@@ -1367,6 +1367,26 @@ impl MemoryRuntimeBackend {
         destination: &str,
         destination_fields: &BTreeMap<String, String>,
     ) -> Result<RuntimeQueueTransferOutcome, DataLayerError> {
+        self.queue_transfer_pending_to_stream_with_maxlen(
+            source,
+            group,
+            entry_id,
+            destination,
+            destination_fields,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn queue_transfer_pending_to_stream_with_maxlen(
+        &self,
+        source: &str,
+        group: &str,
+        entry_id: &str,
+        destination: &str,
+        destination_fields: &BTreeMap<String, String>,
+        destination_maxlen: Option<usize>,
+    ) -> Result<RuntimeQueueTransferOutcome, DataLayerError> {
         crate::validate_runtime_queue_transfer(
             source,
             group,
@@ -1404,17 +1424,22 @@ impl MemoryRuntimeBackend {
         let sequence = previous_sequence + 1;
         let destination_id = format!("{sequence}-0");
         prune_memory_key(&mut queues, destination, now);
-        queues
-            .entry(destination.to_string())
-            .or_default()
-            .entries
-            .push_back(MemoryQueuedEntry {
-                sequence,
-                entry: RuntimeQueueEntry {
-                    id: destination_id.clone(),
-                    fields: destination_fields,
-                },
-            });
+        let destination_state = queues.entry(destination.to_string()).or_default();
+        destination_state.entries.push_back(MemoryQueuedEntry {
+            sequence,
+            entry: RuntimeQueueEntry {
+                id: destination_id.clone(),
+                fields: destination_fields,
+            },
+        });
+        if let Some(maxlen) = destination_maxlen.filter(|value| *value > 0) {
+            while destination_state.entries.len() > maxlen {
+                let Some(removed) = destination_state.entries.pop_front() else {
+                    break;
+                };
+                remove_pending_from_all_groups(destination_state, &removed.entry.id);
+            }
+        }
 
         // No await occurs between archive creation and source removal. Cancellation can only
         // happen while waiting for the mutex, so it cannot leave a half-completed transfer.
@@ -2234,6 +2259,42 @@ mod tests {
                 .stream_length,
             0
         );
+    }
+
+    #[tokio::test]
+    async fn memory_queue_transfer_applies_destination_retention_limit_atomically() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let existing = backend
+            .queue_append("transfer:archive", memory_queue_test_fields(1), None)
+            .await;
+        let entries = memory_queue_transfer_fixture(&backend, 1).await;
+        let outcome = backend
+            .queue_transfer_pending_to_stream_with_maxlen(
+                "transfer:source",
+                "workers",
+                &entries[0].id,
+                "transfer:archive",
+                &memory_queue_test_fields(2),
+                Some(1),
+            )
+            .await
+            .expect("bounded transfer");
+        assert!(matches!(
+            outcome,
+            RuntimeQueueTransferOutcome::Transferred { acked: 1, .. }
+        ));
+        let archive = backend.queue_stats("transfer:archive", None).await;
+        assert_eq!(archive.stream_length, 1);
+        backend
+            .queue_ensure_consumer_group("transfer:archive", "inspect", "0-0")
+            .await
+            .expect("archive group");
+        let archived = backend
+            .queue_read("transfer:archive", "inspect", "reader", 8, None)
+            .await
+            .expect("archive read");
+        assert_eq!(archived.len(), 1);
+        assert_ne!(archived[0].id, existing);
     }
 
     #[tokio::test]

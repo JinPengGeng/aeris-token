@@ -463,6 +463,7 @@ pub struct UsageRuntimeMetricsSnapshot {
     pub producers_in_flight: usize,
     pub delayed_lifecycle_pending: usize,
     pub queue_payload_max_bytes: usize,
+    pub dlq_stream_maxlen: usize,
     pub queue_payload_downgraded_total: u64,
     pub queue_payload_rejected_total: u64,
     pub queue_read_payload_budget_bytes: usize,
@@ -3665,6 +3666,7 @@ impl UsageRuntime {
         let dlq_encoding = crate::dead_letter_encoding::dead_letter_encoding_metrics();
         UsageRuntimeMetricsSnapshot {
             queue_payload_max_bytes: self.config.queue_payload_max_bytes,
+            dlq_stream_maxlen: self.config.dlq_stream_maxlen,
             queue_payload_downgraded_total,
             queue_payload_rejected_total,
             queue_read_payload_budget_bytes: queue_read.limit_bytes,

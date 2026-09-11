@@ -1011,6 +1011,13 @@ struct GatewayUsageArgs {
 
     #[arg(
         long,
+        env = "AETHER_GATEWAY_USAGE_QUEUE_DLQ_MAXLEN",
+        default_value_t = 50_000
+    )]
+    queue_dlq_maxlen: usize,
+
+    #[arg(
+        long,
         env = "AETHER_GATEWAY_USAGE_QUEUE_PAYLOAD_MAX_BYTES",
         default_value_t = 1024 * 1024
     )]
@@ -1228,6 +1235,7 @@ impl GatewayUsageArgs {
             stream_key: self.queue_stream_key.trim().to_string(),
             consumer_group: self.queue_group.trim().to_string(),
             dlq_stream_key: self.queue_dlq_stream_key.trim().to_string(),
+            dlq_stream_maxlen: self.queue_dlq_maxlen,
             stream_maxlen: self.queue_stream_maxlen.max(1),
             queue_payload_max_bytes: self.queue_payload_max_bytes,
             consumer_batch_size: self.queue_batch_size.max(1),
@@ -3685,6 +3693,7 @@ mod tests {
                 queue_group: "usage_consumers".to_string(),
                 queue_dlq_stream_key: "usage:events:dlq".to_string(),
                 queue_stream_maxlen: 200_000,
+                queue_dlq_maxlen: 50_000,
                 queue_payload_max_bytes: 1024 * 1024,
                 queue_batch_size: 128,
                 queue_block_ms: 500,
@@ -4107,6 +4116,31 @@ mod tests {
         args.usage.queue_payload_max_bytes = 0;
         let config = args.usage.to_config(4, 8, Some(4));
         assert_eq!(config.queue_payload_max_bytes, 0);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn gateway_usage_dlq_limit_preserves_cli_override_and_rejects_zero() {
+        let command = <Args as clap::CommandFactory>::command();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "queue_dlq_maxlen")
+            .expect("usage DLQ retention argument must be registered");
+        assert_eq!(
+            argument.get_env(),
+            Some(std::ffi::OsStr::new("AETHER_GATEWAY_USAGE_QUEUE_DLQ_MAXLEN"))
+        );
+        assert_eq!(argument.get_default_values()[0].to_str(), Some("50000"));
+        let args = Args::try_parse_from(["aether-gateway", "--queue-dlq-maxlen", "4096"])
+            .expect("explicit usage DLQ limit should parse");
+        let config = args.usage.to_config(4, 8, Some(4));
+        assert_eq!(config.dlq_stream_maxlen, 4096);
+        assert!(config.validate().is_ok());
+
+        let mut args = test_args();
+        args.usage.queue_dlq_maxlen = 0;
+        let config = args.usage.to_config(4, 8, Some(4));
+        assert_eq!(config.dlq_stream_maxlen, 0);
         assert!(config.validate().is_err());
     }
 

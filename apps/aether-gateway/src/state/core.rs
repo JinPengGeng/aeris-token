@@ -3494,6 +3494,12 @@ fn usage_runtime_metric_samples(
             snapshot.queue_payload_max_bytes as u64,
         ),
         MetricSample::new(
+            "usage_runtime_dlq_stream_maxlen",
+            "Maximum number of entries retained in the usage dead-letter stream.",
+            MetricKind::Gauge,
+            snapshot.dlq_stream_maxlen as u64,
+        ),
+        MetricSample::new(
             "usage_runtime_queue_payload_downgraded_total",
             "Process-wide enqueue and retry validation encoding attempts that omitted diagnostic data after exceeding the payload limit; not unique events.",
             MetricKind::Counter,
@@ -4350,6 +4356,7 @@ mod tests {
     fn usage_runtime_metrics_export_queue_payload_limit_and_attempt_counters() {
         let mut snapshot = crate::usage::UsageRuntimeMetricsSnapshot::default();
         snapshot.queue_payload_max_bytes = 1024 * 1024;
+        snapshot.dlq_stream_maxlen = 50_000;
         snapshot.queue_payload_downgraded_total = 11;
         snapshot.queue_payload_rejected_total = 3;
         snapshot.enqueue_retry_permanent_failure_total = 2;
@@ -4359,6 +4366,11 @@ mod tests {
                 "usage_runtime_queue_payload_max_bytes",
                 MetricKind::Gauge,
                 1024 * 1024,
+            ),
+            (
+                "usage_runtime_dlq_stream_maxlen",
+                MetricKind::Gauge,
+                50_000,
             ),
             (
                 "usage_runtime_queue_payload_downgraded_total",

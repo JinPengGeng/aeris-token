@@ -258,7 +258,11 @@ impl UsageQueue {
             .encode_owned(entry.clone(), error.to_string())
             .await?;
         self.runner
-            .append_fields_with_maxlen(&self.dlq_stream, &encoded.fields, None)
+            .append_fields_with_maxlen(
+                &self.dlq_stream,
+                &encoded.fields,
+                Some(self.config.dlq_stream_maxlen),
+            )
             .await
     }
 
@@ -277,12 +281,13 @@ impl UsageQueue {
         };
         match self
             .runner
-            .try_transfer_pending_to_stream(
+            .try_transfer_pending_to_stream_with_maxlen(
                 &self.stream,
                 &self.group,
                 &encoded.entry_id,
                 &self.dlq_stream,
                 &encoded.fields,
+                Some(self.config.dlq_stream_maxlen),
             )
             .await?
         {
@@ -298,7 +303,11 @@ impl UsageQueue {
             None => Ok(UsageDeadLetterOutcome::Appended {
                 destination_id: self
                     .runner
-                    .append_fields_with_maxlen(&self.dlq_stream, &encoded.fields, None)
+                    .append_fields_with_maxlen(
+                        &self.dlq_stream,
+                        &encoded.fields,
+                        Some(self.config.dlq_stream_maxlen),
+                    )
                     .await?,
             }),
         }
@@ -543,6 +552,35 @@ mod tests {
         drop(held);
         assert_eq!(budget.snapshot().active_jobs, 0);
         assert_eq!(budget.snapshot().reserved_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn dead_letter_append_obeys_configured_retention_limit() {
+        let runner = Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(
+            runner,
+            UsageRuntimeConfig {
+                dlq_stream_maxlen: 2,
+                ..UsageRuntimeConfig::default()
+            },
+        )
+        .unwrap();
+        for index in 1..=3 {
+            queue
+                .push_dead_letter(
+                    &RuntimeQueueEntry {
+                        id: format!("{index}-0"),
+                        fields: BTreeMap::from([(
+                            "payload".to_string(),
+                            format!("entry-{index}"),
+                        )]),
+                    },
+                    "permanent failure",
+                )
+                .await
+                .expect("dead letter append");
+        }
+        assert_eq!(queue.dlq_stats().await.unwrap().stream_length, 2);
     }
 
     #[test]

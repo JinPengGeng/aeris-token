@@ -1338,6 +1338,28 @@ pub trait RuntimeQueueStore: Send + Sync {
         Ok(None)
     }
 
+    /// Bounded variant used by queues with a finite dead-letter retention policy.
+    /// Existing implementations retain their previous behavior by delegating to the
+    /// unbounded method; built-in backends override this to apply the limit atomically.
+    async fn try_transfer_pending_to_stream_with_maxlen(
+        &self,
+        source: &str,
+        group: &str,
+        entry_id: &str,
+        destination: &str,
+        destination_fields: &BTreeMap<String, String>,
+        _destination_maxlen: Option<usize>,
+    ) -> Result<Option<RuntimeQueueTransferOutcome>, DataLayerError> {
+        self.try_transfer_pending_to_stream(
+            source,
+            group,
+            entry_id,
+            destination,
+            destination_fields,
+        )
+        .await
+    }
+
     async fn ack(&self, stream: &str, group: &str, ids: &[String])
         -> Result<usize, DataLayerError>;
 
@@ -1546,6 +1568,46 @@ impl RuntimeQueueStore for RuntimeState {
                         entry_id,
                         destination,
                         destination_fields,
+                    )
+                    .await?
+            }
+        };
+        Ok(Some(outcome))
+    }
+
+    async fn try_transfer_pending_to_stream_with_maxlen(
+        &self,
+        source: &str,
+        group: &str,
+        entry_id: &str,
+        destination: &str,
+        destination_fields: &BTreeMap<String, String>,
+        destination_maxlen: Option<usize>,
+    ) -> Result<Option<RuntimeQueueTransferOutcome>, DataLayerError> {
+        validate_runtime_queue_transfer(source, group, entry_id, destination, destination_fields)?;
+        let outcome = match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                memory
+                    .queue_transfer_pending_to_stream_with_maxlen(
+                        source,
+                        group,
+                        entry_id,
+                        destination,
+                        destination_fields,
+                        destination_maxlen,
+                    )
+                    .await?
+            }
+            RuntimeStateBackend::Redis(redis) => {
+                redis
+                    .stream
+                    .try_transfer_pending_to_stream_with_maxlen(
+                        source,
+                        group,
+                        entry_id,
+                        destination,
+                        destination_fields,
+                        destination_maxlen,
                     )
                     .await?
             }
