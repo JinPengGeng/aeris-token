@@ -4128,7 +4128,9 @@ mod tests {
             .expect("usage DLQ retention argument must be registered");
         assert_eq!(
             argument.get_env(),
-            Some(std::ffi::OsStr::new("AETHER_GATEWAY_USAGE_QUEUE_DLQ_MAXLEN"))
+            Some(std::ffi::OsStr::new(
+                "AETHER_GATEWAY_USAGE_QUEUE_DLQ_MAXLEN"
+            ))
         );
         assert_eq!(argument.get_default_values()[0].to_str(), Some("50000"));
         let args = Args::try_parse_from(["aether-gateway", "--queue-dlq-maxlen", "4096"])

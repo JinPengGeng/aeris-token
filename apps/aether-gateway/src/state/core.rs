@@ -4367,11 +4367,7 @@ mod tests {
                 MetricKind::Gauge,
                 1024 * 1024,
             ),
-            (
-                "usage_runtime_dlq_stream_maxlen",
-                MetricKind::Gauge,
-                50_000,
-            ),
+            ("usage_runtime_dlq_stream_maxlen", MetricKind::Gauge, 50_000),
             (
                 "usage_runtime_queue_payload_downgraded_total",
                 MetricKind::Counter,

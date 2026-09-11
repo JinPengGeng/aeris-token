@@ -570,10 +570,7 @@ mod tests {
                 .push_dead_letter(
                     &RuntimeQueueEntry {
                         id: format!("{index}-0"),
-                        fields: BTreeMap::from([(
-                            "payload".to_string(),
-                            format!("entry-{index}"),
-                        )]),
+                        fields: BTreeMap::from([("payload".to_string(), format!("entry-{index}"))]),
                     },
                     "permanent failure",
                 )
