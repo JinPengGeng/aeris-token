@@ -665,7 +665,8 @@ async fn gateway_returns_error_body_when_prefetch_detects_embedded_stream_error_
         Some("execution_runtime_candidates_exhausted")
     );
     let body_json: serde_json::Value = response.json().await.expect("response body should parse");
-    assert_eq!(body_json["error"]["type"], "http_error");
+    // OpenAI-family local 503 responses use the public OpenAI error contract.
+    assert_eq!(body_json["error"]["type"], "server_error");
     let stored_candidates = request_candidate_repository
         .list_by_request_id("trace-openai-chat-stream-prefetch-error-123")
         .await
