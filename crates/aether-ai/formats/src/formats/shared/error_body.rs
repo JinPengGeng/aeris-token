@@ -43,7 +43,9 @@ pub fn build_core_error_body_for_client_format(
         | "openai:responses"
         | "openai:responses:compact"
         | "openai:search"
-        | "openai:embedding" => {
+        | "openai:embedding"
+        | "openai:image"
+        | "openai:rerank" => {
             error_object.insert(
                 "type".to_string(),
                 Value::String(map_local_sync_error_kind_to_openai_type(kind).to_string()),
@@ -51,10 +53,16 @@ pub fn build_core_error_body_for_client_format(
             if let Some(code) = code.filter(|value| !value.is_empty()) {
                 error_object.insert("code".to_string(), Value::String(code.to_string()));
             }
-            Some(Value::Object(Map::from_iter([(
-                "error".to_string(),
-                Value::Object(error_object),
-            )])))
+            let mut body = Map::from_iter([("error".to_string(), Value::Object(error_object))]);
+            // Embeddings and rerank historically exposed `detail`; retain that
+            // field as a compatibility alias while adding the OpenAI envelope.
+            if matches!(
+                aether_ai_formats::normalize_api_format_alias(client_api_format).as_str(),
+                "openai:embedding" | "openai:rerank"
+            ) {
+                body.insert("detail".to_string(), Value::String(message.to_string()));
+            }
+            Some(Value::Object(body))
         }
         "claude:messages" => {
             error_object.insert(
@@ -179,6 +187,21 @@ mod tests {
         assert_eq!(body["error"]["message"], "search unavailable");
         assert_eq!(body["error"]["type"], "server_error");
         assert_eq!(body["error"]["code"], "upstream_unavailable");
+    }
+
+    #[test]
+    fn builds_openai_image_and_rerank_core_error_bodies() {
+        for format in ["openai:image", "openai:rerank"] {
+            let body = build_core_error_body_for_client_format(
+                format,
+                "invalid image request",
+                None,
+                LocalCoreSyncErrorKind::InvalidRequest,
+            )
+            .expect("OpenAI family body should build");
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+            assert_eq!(body["error"]["message"], "invalid image request");
+        }
     }
 
     #[test]

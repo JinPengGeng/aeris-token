@@ -262,13 +262,23 @@ pub(crate) fn build_local_balance_denied_response(
             }
         }
     });
-    let payload = build_local_error_payload(
-        control_decision,
-        None,
-        &message,
-        LocalCoreSyncErrorKind::RateLimit,
-        fallback_payload,
-    );
+    let payload = if local_error_uses_openai_format(control_decision, None) {
+        build_core_error_body_for_client_format(
+            "openai:chat",
+            "Insufficient quota",
+            Some("insufficient_quota"),
+            LocalCoreSyncErrorKind::RateLimit,
+        )
+        .unwrap_or(fallback_payload)
+    } else {
+        build_local_error_payload(
+            control_decision,
+            None,
+            &message,
+            LocalCoreSyncErrorKind::RateLimit,
+            fallback_payload,
+        )
+    };
     let body =
         serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
     let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
@@ -588,6 +598,10 @@ fn build_local_error_payload(
     kind: LocalCoreSyncErrorKind,
     fallback_payload: serde_json::Value,
 ) -> serde_json::Value {
+    if local_error_uses_openai_format(control_decision, request_path) {
+        return build_core_error_body_for_client_format("openai:chat", message, None, kind)
+            .unwrap_or(fallback_payload);
+    }
     if !local_error_uses_claude_format(control_decision, request_path) {
         return fallback_payload;
     }
@@ -617,6 +631,34 @@ fn local_error_uses_claude_format(
     })
 }
 
+fn local_error_uses_openai_format(
+    control_decision: Option<&GatewayControlDecision>,
+    request_path: Option<&str>,
+) -> bool {
+    control_decision.is_some_and(|decision| {
+        decision.route_family.as_deref() == Some("openai")
+            || decision
+                .auth_endpoint_signature
+                .as_deref()
+                .is_some_and(|format| {
+                    crate::ai_serving::normalize_api_format_alias(format)
+                        .to_ascii_lowercase()
+                        .starts_with("openai:")
+                })
+    }) || request_path.is_some_and(|path| {
+        matches!(
+            path.trim_end_matches('/'),
+            "/v1/chat/completions"
+                | "/v1/responses"
+                | "/v1/responses/compact"
+                | "/v1/embeddings"
+                | "/v1/images/generations"
+                | "/v1/images/edits"
+                | "/v1/rerank"
+        )
+    })
+}
+
 fn local_error_kind_for_status(status: StatusCode) -> LocalCoreSyncErrorKind {
     match status.as_u16() {
         400 | 405 | 422 => LocalCoreSyncErrorKind::InvalidRequest,
@@ -635,7 +677,7 @@ mod tests {
     use super::{
         build_client_response, build_client_response_from_parts,
         build_client_response_from_parts_with_mutator, build_local_auth_rejection_response,
-        build_local_daily_usage_limited_response,
+        build_local_balance_denied_response, build_local_daily_usage_limited_response,
         build_local_http_error_response_with_request_path, build_local_overloaded_response,
         build_local_plan_usage_limited_response, build_local_user_rpm_limited_response,
     };
@@ -840,6 +882,16 @@ mod tests {
         )
     }
 
+    fn openai_decision() -> GatewayControlDecision {
+        GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        )
+    }
+
     async fn response_json(response: http::Response<Body>) -> serde_json::Value {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -885,6 +937,21 @@ mod tests {
         let overloaded = response_json(overloaded).await;
         assert_eq!(overloaded["type"], "error");
         assert_eq!(overloaded["error"]["type"], "overloaded_error");
+    }
+
+    #[tokio::test]
+    async fn openai_balance_denial_uses_insufficient_quota_contract() {
+        let decision = openai_decision();
+        let response =
+            build_local_balance_denied_response("trace-balance-openai", Some(&decision), Some(0.0))
+                .expect("balance response should build");
+
+        assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+        let payload = response_json(response).await;
+        assert_eq!(payload["error"]["type"], "rate_limit_error");
+        assert_eq!(payload["error"]["code"], "insufficient_quota");
+        assert_eq!(payload["error"]["message"], "Insufficient quota");
+        assert!(payload["error"]["details"].is_null());
     }
 
     #[tokio::test]

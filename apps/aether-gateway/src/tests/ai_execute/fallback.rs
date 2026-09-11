@@ -120,7 +120,8 @@ async fn gateway_locally_denies_openai_chat_after_repeated_execution_runtime_mis
             Some("missing_auth_context")
         );
         let payload: serde_json::Value = response.json().await.expect("body should parse");
-        assert_eq!(payload["error"]["type"], "http_error");
+        // OpenAI-family local 503 responses use the public OpenAI error contract.
+        assert_eq!(payload["error"]["type"], "server_error");
         assert_eq!(
             payload["error"]["message"],
             "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商"
@@ -246,7 +247,8 @@ async fn gateway_locally_denies_openai_chat_when_control_api_is_configured_witho
         Some("missing_auth_context")
     );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    // OpenAI-family local 503 responses use the public OpenAI error contract.
+    assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(
         payload["error"]["message"],
         "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商"
@@ -357,7 +359,8 @@ async fn gateway_locally_denies_openai_chat_stream_after_execution_runtime_miss_
         Some("missing_auth_context")
     );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    // OpenAI-family local 503 responses use the public OpenAI error contract.
+    assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(
         payload["error"]["message"],
         "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商"
@@ -553,7 +556,11 @@ async fn assert_ai_route_locally_denied_after_execution_runtime_miss_with_reques
         None
     );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    if request_path.trim_end_matches('/') == "/v1/messages" {
+    if route_family == "openai" {
+        // OpenAI-family local 503 responses use the public OpenAI error contract.
+        assert!(payload.get("type").is_none());
+        assert_eq!(payload["error"]["type"], "server_error");
+    } else if request_path.trim_end_matches('/') == "/v1/messages" {
         assert_eq!(payload["type"], "error");
         assert_eq!(payload["error"]["type"], "overloaded_error");
     } else {

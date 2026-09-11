@@ -510,7 +510,7 @@ async fn gateway_uses_signed_tunnel_affinity_identity_once_and_rejects_replay() 
             .expect("first response body should read"),
     )
     .expect("first response body should parse");
-    assert_eq!(first_payload["error"]["type"], "http_error");
+    assert_eq!(first_payload["error"]["type"], "permission_error");
     assert!(first_payload["error"]["message"]
         .as_str()
         .is_some_and(|message| message.contains("gpt-5")));
@@ -791,7 +791,7 @@ async fn gateway_rejects_execution_runtime_loop_guarded_ai_request() {
         Some(EXECUTION_PATH_LOCAL_EXECUTION_LOOP_DETECTED)
     );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(
         payload["error"]["message"],
         "Gateway detected an execution runtime request loop back into the local frontdoor"

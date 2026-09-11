@@ -246,11 +246,13 @@ async fn gateway_locally_denies_explicit_trusted_balance_failure_without_hitting
             .and_then(|value| value.to_str().ok()),
         Some("ai_public")
     );
+    let has_retry_after = response.headers().get("retry-after").is_some();
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
-    assert_eq!(payload["error"]["type"], "balance_exceeded");
-    assert_eq!(payload["error"]["message"], "余额不足（剩余: $0.00）");
-    assert_eq!(payload["error"]["details"]["balance_type"], "USD");
-    assert_eq!(payload["error"]["details"]["remaining"], 0.0);
+    assert_eq!(payload["error"]["type"], "rate_limit_error");
+    assert_eq!(payload["error"]["code"], "insufficient_quota");
+    assert_eq!(payload["error"]["message"], "Insufficient quota");
+    assert!(payload["error"]["details"].is_null());
+    assert!(!has_retry_after);
 
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -338,7 +340,7 @@ async fn gateway_locally_denies_invalid_trusted_snapshot_without_hitting_control
         Some(EXECUTION_PATH_LOCAL_AUTH_DENIED)
     );
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["error"]["type"], "authentication_error");
     assert_eq!(payload["error"]["message"], "无效的API密钥");
 
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
@@ -424,7 +426,7 @@ async fn gateway_locally_denies_missing_wallet_without_hitting_control_or_upstre
         Some(EXECUTION_PATH_LOCAL_AUTH_DENIED)
     );
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["error"]["type"], "permission_error");
     assert_eq!(payload["error"]["message"], "钱包不可用");
 
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
@@ -495,7 +497,7 @@ async fn gateway_locally_denies_invalid_bearer_api_key_without_hitting_control_o
     );
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
     assert!(payload.get("type").is_none());
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["error"]["type"], "authentication_error");
     assert_eq!(payload["error"]["message"], "无效的API密钥");
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -965,7 +967,7 @@ async fn gateway_locally_denies_locked_trusted_snapshot_without_hitting_control_
         Some(EXECUTION_PATH_LOCAL_AUTH_DENIED)
     );
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["error"]["type"], "permission_error");
     assert_eq!(
         payload["error"]["message"],
         "该密钥已被管理员锁定，请联系管理员"
@@ -1043,7 +1045,7 @@ async fn gateway_locally_denies_disallowed_openai_model_without_hitting_control_
         Some(EXECUTION_PATH_LOCAL_AUTH_DENIED)
     );
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["error"]["type"], "permission_error");
     assert_eq!(
         payload["error"]["message"],
         "当前用户、用户组或密钥的访问控制策略不允许访问模型 gpt-5"

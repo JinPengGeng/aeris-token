@@ -1405,7 +1405,7 @@ async fn embeddings_route_rejects_invalid_local_payloads_impl() {
             Some("embedding")
         );
         let payload: serde_json::Value = response.json().await.expect("body should parse");
-        assert_eq!(payload["detail"], expected_detail);
+        assert_eq!(payload["error"]["message"], expected_detail);
     }
 
     gateway_handle.abort();
@@ -1434,7 +1434,7 @@ async fn embeddings_route_rejects_non_json_content_type_impl() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(
-        payload["detail"],
+        payload["error"]["message"],
         "Embedding request content-type must be application/json"
     );
 
