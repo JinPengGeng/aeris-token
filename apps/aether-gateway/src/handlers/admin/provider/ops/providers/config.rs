@@ -487,6 +487,14 @@ pub(super) async fn build_admin_provider_ops_saved_config_value(
         "schedule": payload.schedule,
         "quota_alert": quota_alert,
     });
+    // 保存 ops 配置会整体重建 provider_ops 对象；remote_quota（PR-A 远程配额）
+    // 不属于本表单的编辑面，但必须原样保留，避免 UI 保存时静默丢失配置。
+    if let Some(remote_quota) = admin_provider_ops_config_object(&merged.provider)
+        .and_then(|config| config.get("remote_quota"))
+        .cloned()
+    {
+        provider_ops_config["remote_quota"] = remote_quota;
+    }
     let new_binding = admin_provider_ops_binding_from_config(
         &merged.provider.id,
         provider_ops_config
@@ -638,8 +646,14 @@ pub(super) async fn build_admin_provider_ops_config_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_provider_ops_credential_snapshot, open_provider_ops_credential};
+    use super::{
+        admin_provider_ops_credential_snapshot, build_admin_provider_ops_saved_config_value,
+        open_provider_ops_credential,
+    };
     use crate::data::GatewayDataState;
+    use crate::handlers::admin::provider::ops::providers::support::{
+        AdminProviderOpsConnectorConfigRequest, AdminProviderOpsSaveConfigRequest,
+    };
     use crate::handlers::admin::request::AdminAppState;
     use crate::AppState;
     use aether_crypto::{
@@ -780,5 +794,65 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some(tampered.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn save_config_preserves_remote_quota_key() {
+        let mut provider = provider_with_api_key(TEST_API_KEY);
+        let remote_quota = json!({
+            "enabled": true,
+            "group_id": "42",
+            "progress_endpoint": "/api/v1/subscriptions/progress",
+            "fetch_interval_seconds": 120
+        });
+        provider.config.as_mut().expect("provider config")["provider_ops"]["remote_quota"] =
+            remote_quota.clone();
+        let (state, _) = state_with_provider(provider.clone());
+        let admin_state = AdminAppState::new(&state);
+        let payload = AdminProviderOpsSaveConfigRequest {
+            architecture_id: "generic_api".to_string(),
+            base_url: Some("https://provider.example.com".to_string()),
+            connector: AdminProviderOpsConnectorConfigRequest {
+                auth_type: "api_key".to_string(),
+                config: Default::default(),
+                credentials: Default::default(),
+            },
+            actions: Default::default(),
+            schedule: Default::default(),
+            quota_alert: None,
+        };
+
+        let snapshot =
+            build_admin_provider_ops_saved_config_value(&admin_state, &provider, payload)
+                .await
+                .expect("save config should build");
+
+        assert_eq!(snapshot.provider_ops_config["remote_quota"], remote_quota);
+    }
+
+    #[tokio::test]
+    async fn save_config_without_remote_quota_does_not_inject_key() {
+        let provider = provider_with_api_key(TEST_API_KEY);
+        let (state, _) = state_with_provider(provider.clone());
+        let admin_state = AdminAppState::new(&state);
+        let payload = AdminProviderOpsSaveConfigRequest {
+            architecture_id: "generic_api".to_string(),
+            base_url: Some("https://provider.example.com".to_string()),
+            connector: AdminProviderOpsConnectorConfigRequest {
+                auth_type: "api_key".to_string(),
+                config: Default::default(),
+                credentials: Default::default(),
+            },
+            actions: Default::default(),
+            schedule: Default::default(),
+            quota_alert: None,
+        };
+
+        let snapshot =
+            build_admin_provider_ops_saved_config_value(&admin_state, &provider, payload)
+                .await
+                .expect("save config should build");
+
+        assert!(snapshot.provider_ops_config.get("remote_quota").is_none());
     }
 }

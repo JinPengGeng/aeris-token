@@ -114,7 +114,9 @@ pub(crate) use proxy_upgrade_rollout::{
 };
 pub(crate) use remote_quota_sync::{
     perform_remote_quota_sync_for_provider, perform_remote_quota_sync_once,
-    remote_quota_sync_worker_interval, RemoteQuotaSyncProviderOutcome, RemoteQuotaSyncRunSummary,
+    perform_remote_quota_sync_once_for_provider, remote_quota_sync_worker_interval,
+    RemoteQuotaSyncFailureDetail, RemoteQuotaSyncProviderOutcome, RemoteQuotaSyncProviderRunReport,
+    RemoteQuotaSyncRunSummary,
 };
 use request_candidate_cleanup::*;
 use runners::*;

@@ -136,6 +136,15 @@ pub(super) async fn handle_admin_provider_ops_action(
             }
         }
     } else {
+        if action_type == "sync_remote_quota" && provider.is_none() {
+            return Ok(Some(
+                (
+                    http::StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "Provider 不存在" })),
+                )
+                    .into_response(),
+            ));
+        }
         let payload = admin_provider_ops_local_action_response(
             state,
             provider_id,
@@ -147,6 +156,15 @@ pub(super) async fn handle_admin_provider_ops_action(
         .await;
         if action_type == "query_balance" && route_kind == "refresh_provider_balance" {
             store_admin_provider_ops_balance_cache(state, provider_id, &payload).await;
+        }
+        // 未启用远程配额同步的 Provider 调用 sync_remote_quota 属于客户端语义错误，
+        // 明确返回 400 而不是统一 200，避免被当作服务端故障。
+        if action_type == "sync_remote_quota"
+            && payload.get("status").and_then(serde_json::Value::as_str) == Some("not_configured")
+        {
+            return Ok(Some(
+                (http::StatusCode::BAD_REQUEST, Json(payload)).into_response(),
+            ));
         }
         payload
     };
@@ -173,4 +191,158 @@ fn bad_request_detail_response(detail: &str) -> Response<Body> {
         Json(json!({ "detail": detail })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_admin_provider_ops_action;
+    use crate::data::GatewayDataState;
+    use crate::handlers::admin::request::AdminAppState;
+    use crate::AppState;
+    use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn provider_with_ops_config(
+        provider_id: &str,
+        remote_quota: serde_json::Value,
+    ) -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            provider_id.to_string(),
+            "Sub2API 中转".to_string(),
+            None,
+            "custom".to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(json!({
+                "provider_ops": {
+                    "architecture_id": "sub2api",
+                    "base_url": "http://127.0.0.1:9",
+                    "connector": {
+                        "auth_type": "api_key",
+                        "config": {},
+                        "credentials": {
+                            "refresh_token": encrypt_python_fernet_plaintext(
+                                DEVELOPMENT_ENCRYPTION_KEY,
+                                "initial-refresh-token",
+                            ).expect("refresh token should encrypt"),
+                        }
+                    },
+                    "remote_quota": remote_quota,
+                }
+            })),
+        )
+    }
+
+    fn state_with_providers(providers: Vec<StoredProviderCatalogProvider>) -> AppState {
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            providers,
+            vec![],
+            vec![],
+        ));
+        AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+    }
+
+    async fn execute_sync_remote_quota(
+        state: &AppState,
+        provider_id: &str,
+    ) -> (http::StatusCode, serde_json::Value) {
+        let admin_state = AdminAppState::new(state);
+        let action_route = (provider_id.to_string(), "sync_remote_quota".to_string());
+        let response = handle_admin_provider_ops_action(
+            &admin_state,
+            provider_id,
+            "execute_provider_action",
+            Some(&action_route),
+            None,
+            None,
+        )
+        .await
+        .expect("route should handle")
+        .expect("route should match");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let payload = serde_json::from_slice(&body).expect("body should be JSON");
+        (status, payload)
+    }
+
+    #[tokio::test]
+    async fn sync_remote_quota_without_enable_returns_400_not_configured() {
+        let provider = provider_with_ops_config(
+            "provider-disabled",
+            json!({"enabled": false, "group_id": "42"}),
+        );
+        let state = state_with_providers(vec![provider]);
+
+        let (status, payload) = execute_sync_remote_quota(&state, "provider-disabled").await;
+
+        assert_eq!(status, http::StatusCode::BAD_REQUEST);
+        assert_eq!(payload["status"], json!("not_configured"));
+        assert_eq!(payload["action_type"], json!("sync_remote_quota"));
+        assert!(payload["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("未启用远程配额同步")));
+    }
+
+    #[tokio::test]
+    async fn sync_remote_quota_without_provider_ops_returns_400() {
+        let provider = StoredProviderCatalogProvider::new(
+            "provider-plain".to_string(),
+            "Plain".to_string(),
+            None,
+            "custom".to_string(),
+        )
+        .expect("provider should build");
+        let state = state_with_providers(vec![provider]);
+
+        let (status, payload) = execute_sync_remote_quota(&state, "provider-plain").await;
+
+        assert_eq!(status, http::StatusCode::BAD_REQUEST);
+        assert_eq!(payload["status"], json!("not_configured"));
+    }
+
+    #[tokio::test]
+    async fn sync_remote_quota_with_invalid_config_returns_400() {
+        let provider = provider_with_ops_config(
+            "provider-invalid",
+            json!({"enabled": true, "fetch_interval_seconds": 0}),
+        );
+        let state = state_with_providers(vec![provider]);
+
+        let (status, payload) = execute_sync_remote_quota(&state, "provider-invalid").await;
+
+        assert_eq!(status, http::StatusCode::BAD_REQUEST);
+        assert_eq!(payload["status"], json!("not_configured"));
+        assert!(payload["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("group_id")));
+    }
+
+    #[tokio::test]
+    async fn sync_remote_quota_with_unknown_provider_returns_404() {
+        let state = state_with_providers(vec![]);
+
+        let (status, payload) = execute_sync_remote_quota(&state, "provider-missing").await;
+
+        assert_eq!(status, http::StatusCode::NOT_FOUND);
+        assert_eq!(payload["detail"], json!("Provider 不存在"));
+    }
 }

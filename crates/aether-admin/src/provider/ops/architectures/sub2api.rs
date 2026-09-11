@@ -126,6 +126,7 @@ pub(super) fn default_action_config(action_type: &str) -> Option<Map<String, Val
             "method": "GET",
             "currency": "USD"
         }))),
+        "sync_remote_quota" => Some(json_object(json!({}))),
         _ => None,
     }
 }

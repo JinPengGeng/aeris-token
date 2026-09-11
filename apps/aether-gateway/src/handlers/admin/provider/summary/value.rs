@@ -163,6 +163,14 @@ pub(crate) fn build_admin_provider_summary_value(
         .and_then(|cfg| cfg.get("enabled"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let key_status_snapshots = keys
+        .iter()
+        .map(|key| key.status_snapshot.as_ref())
+        .collect::<Vec<_>>();
+    let ops_remote_quota = aether_admin::provider::ops::build_sub2api_remote_quota_admin_status(
+        provider.config.as_ref(),
+        &key_status_snapshots,
+    );
     let billing_type = quota_snapshot
         .map(|quota| quota.billing_type.clone())
         .or_else(|| provider.billing_type.clone());
@@ -231,7 +239,168 @@ pub(crate) fn build_admin_provider_summary_value(
         ),
         "responses_websocket_enabled": responses_websocket_adapter(&provider.provider_type, provider.config.as_ref()).is_some(),
         "ops_quota_alert_enabled": ops_quota_alert_enabled,
+        "ops_remote_quota": ops_remote_quota,
         "created_at": endpoint_timestamp_or_now(provider.created_at_unix_ms, now_unix_secs),
         "updated_at": endpoint_timestamp_or_now(provider.updated_at_unix_secs, now_unix_secs),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_admin_provider_summary_value;
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    };
+    use serde_json::json;
+
+    const NOW_UNIX_SECS: u64 = 1_896_004_800;
+
+    fn provider_with_remote_quota(
+        remote_quota: serde_json::Value,
+    ) -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-1".to_string(),
+            "Sub2API 中转".to_string(),
+            None,
+            "custom".to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(json!({
+                "provider_ops": {
+                    "architecture_id": "sub2api",
+                    "base_url": "https://sub2api.example.com",
+                    "connector": {
+                        "auth_type": "api_key",
+                        "config": {},
+                        "credentials": {"refresh_token": "ciphertext"},
+                    },
+                    "remote_quota": remote_quota,
+                }
+            })),
+        )
+    }
+
+    fn key_with_status_snapshot(
+        status_snapshot: Option<serde_json::Value>,
+    ) -> StoredProviderCatalogKey {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key-1".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.status_snapshot = status_snapshot;
+        key
+    }
+
+    fn summary_value(
+        provider: &StoredProviderCatalogProvider,
+        keys: &[StoredProviderCatalogKey],
+    ) -> serde_json::Value {
+        build_admin_provider_summary_value(
+            provider,
+            &[],
+            keys,
+            None,
+            None,
+            Vec::new(),
+            NOW_UNIX_SECS,
+        )
+    }
+
+    #[test]
+    fn ops_remote_quota_disabled_by_default() {
+        let provider = StoredProviderCatalogProvider::new(
+            "provider-1".to_string(),
+            "Plain".to_string(),
+            None,
+            "custom".to_string(),
+        )
+        .expect("provider should build");
+        let value = summary_value(&provider, &[]);
+        assert_eq!(value["ops_remote_quota"], json!({"enabled": false}));
+    }
+
+    #[test]
+    fn ops_remote_quota_projects_latest_sync_status() {
+        let provider = provider_with_remote_quota(json!({
+            "enabled": true,
+            "group_id": "42",
+            "fetch_interval_seconds": 60
+        }));
+        let key = key_with_status_snapshot(Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "sub2api",
+                "code": "exhausted",
+                "exhausted": true,
+                "usage_ratio": 1.0,
+                "updated_at": 1_896_000_000_u64,
+                "reset_at": 1_896_048_000_u64,
+                "windows": [{
+                    "code": "monthly",
+                    "label": "月",
+                    "used_value": 100.0,
+                    "limit_value": 100.0,
+                    "used_ratio": 1.0,
+                    "reset_at": 1_896_048_000_u64,
+                    "is_exhausted": true
+                }],
+                "remote_quota": {
+                    "sync_status": "ok",
+                    "synced_at_unix_secs": 1_896_000_000_u64,
+                    "group_id": "42",
+                    "group_name": "Pro",
+                    "subscription_id": "9",
+                    "subscription_status": "active",
+                    "subscription_active": true,
+                    "blocked": true,
+                    "block_reason": "window_exhausted",
+                    "blocked_until_unix_secs": 1_896_048_000_u64,
+                    "conservative_cooldown": false
+                }
+            }
+        })));
+
+        let value = summary_value(&provider, std::slice::from_ref(&key));
+        let remote_quota = &value["ops_remote_quota"];
+        assert_eq!(remote_quota["enabled"], json!(true));
+        assert_eq!(remote_quota["group_id"], json!("42"));
+        assert_eq!(remote_quota["fetch_interval_seconds"], json!(60));
+        let sync = &remote_quota["sync"];
+        assert_eq!(sync["sync_status"], json!("ok"));
+        assert_eq!(sync["exhausted"], json!(true));
+        assert_eq!(sync["blocked"], json!(true));
+        assert_eq!(sync["windows"][0]["used_value"], json!(100.0));
+        // 凭据与内部字段不得透出
+        let serialized = remote_quota.to_string();
+        assert!(!serialized.contains("ciphertext"));
+        assert!(!serialized.contains("refresh_token"));
+    }
+
+    #[test]
+    fn ops_remote_quota_without_sync_history_returns_null_sync() {
+        let provider = provider_with_remote_quota(json!({
+            "enabled": true,
+            "group_id": "42"
+        }));
+        let value = summary_value(&provider, &[key_with_status_snapshot(None)]);
+        assert_eq!(value["ops_remote_quota"]["enabled"], json!(true));
+        assert_eq!(
+            value["ops_remote_quota"]["sync"],
+            json!(serde_json::Value::Null)
+        );
+    }
 }

@@ -1,4 +1,4 @@
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 pub const DEFAULT_SUB2API_PROGRESS_ENDPOINT: &str = "/api/v1/subscriptions/progress";
 pub const DEFAULT_REMOTE_QUOTA_FETCH_INTERVAL_SECS: u64 = 300;
@@ -659,13 +659,174 @@ fn optional_timestamp_unix_secs(value: Option<&Value>, field: &str) -> Result<Op
         .map_err(|_| format!("Sub2API {field} 不能早于 Unix epoch"))
 }
 
+// ---------- 管理面只读投影（PR-B） ----------
+
+const REMOTE_QUOTA_ADMIN_DISPLAY_STRING_MAX_CHARS: usize = 100;
+
+/// 管理面只读投影：provider 的 remote_quota 配置与最近一次同步状态。
+///
+/// `key_status_snapshots` 为该 provider 各 key 的 `status_snapshot` 列值。
+/// 写入侧已保证这些字段不含凭据；投影仍按白名单复制并对字符串做形态约束，
+/// 时间字段统一转为 RFC3339（与 admin provider summary 既有风格一致）。
+pub fn build_sub2api_remote_quota_admin_status(
+    provider_config: Option<&Value>,
+    key_status_snapshots: &[Option<&Value>],
+) -> Value {
+    let provider_ops_config = provider_config
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("provider_ops"))
+        .and_then(Value::as_object);
+    let enabled = provider_ops_config
+        .and_then(|ops| ops.get("remote_quota"))
+        .and_then(Value::as_object)
+        .and_then(|remote_quota| remote_quota.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !enabled {
+        return json!({ "enabled": false });
+    }
+
+    let (group_id, progress_endpoint, fetch_interval_seconds, config_error) =
+        match provider_ops_config.map(parse_sub2api_remote_quota_config) {
+            Some(Ok(Some(config))) => (
+                Some(config.group_id),
+                Some(config.progress_endpoint),
+                Some(config.fetch_interval_seconds),
+                Value::Null,
+            ),
+            Some(Err(message)) => (None, None, None, Value::String(message)),
+            _ => (None, None, None, Value::Null),
+        };
+    let sync = key_status_snapshots
+        .iter()
+        .filter_map(|snapshot| snapshot.and_then(project_sub2api_remote_quota_sync_status))
+        .max_by_key(|(sort_key, _)| *sort_key)
+        .map(|(_, payload)| payload)
+        .unwrap_or(Value::Null);
+
+    json!({
+        "enabled": true,
+        "group_id": group_id,
+        "progress_endpoint": progress_endpoint,
+        "fetch_interval_seconds": fetch_interval_seconds,
+        "config_error": config_error,
+        "sync": sync,
+    })
+}
+
+fn project_sub2api_remote_quota_sync_status(status_snapshot: &Value) -> Option<(u64, Value)> {
+    let quota = status_snapshot.get("quota")?.as_object()?;
+    let remote_quota = quota.get("remote_quota")?.as_object()?;
+    let sync_status = safe_status_token(remote_quota.get("sync_status"))?;
+
+    let synced_at = json_u64(remote_quota.get("synced_at_unix_secs"));
+    let last_error_at = json_u64(remote_quota.get("last_error_at_unix_secs"));
+    let blocked_until = json_u64(remote_quota.get("blocked_until_unix_secs"));
+    let expires_at = json_u64(remote_quota.get("expires_at_unix_secs"));
+    let windows = quota
+        .get("windows")
+        .and_then(Value::as_array)
+        .map(|windows| {
+            windows
+                .iter()
+                .filter_map(project_sub2api_remote_quota_window)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let payload = json!({
+        "sync_status": sync_status,
+        "synced_at": synced_at.and_then(unix_secs_to_rfc3339),
+        "code": safe_status_token(quota.get("code")),
+        "exhausted": quota.get("exhausted").and_then(Value::as_bool).unwrap_or(false),
+        "usage_ratio": quota.get("usage_ratio").filter(|value| value.is_number()).cloned(),
+        "reset_at": json_u64(quota.get("reset_at")).and_then(unix_secs_to_rfc3339),
+        "updated_at": json_u64(quota.get("updated_at")).and_then(unix_secs_to_rfc3339),
+        "blocked": remote_quota.get("blocked").and_then(Value::as_bool).unwrap_or(false),
+        "block_reason": safe_status_token(remote_quota.get("block_reason")),
+        "blocked_until": blocked_until.and_then(unix_secs_to_rfc3339),
+        "conservative_cooldown": remote_quota
+            .get("conservative_cooldown")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "subscription_id": safe_display_string(remote_quota.get("subscription_id")),
+        "subscription_status": safe_status_token(remote_quota.get("subscription_status")),
+        "subscription_active": remote_quota
+            .get("subscription_active")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "group_id": safe_display_string(remote_quota.get("group_id")),
+        "group_name": safe_display_string(remote_quota.get("group_name")),
+        "expires_at": expires_at.and_then(unix_secs_to_rfc3339),
+        "last_error": safe_display_string(remote_quota.get("last_error")),
+        "last_error_at": last_error_at.and_then(unix_secs_to_rfc3339),
+        "windows": windows,
+    });
+    let sort_key = synced_at.or(last_error_at).unwrap_or(0);
+    Some((sort_key, payload))
+}
+
+fn project_sub2api_remote_quota_window(value: &Value) -> Option<Value> {
+    let window = value.as_object()?;
+    let code = safe_status_token(window.get("code"))?;
+    Some(json!({
+        "code": code,
+        "label": safe_display_string(window.get("label")),
+        "used_value": window.get("used_value").filter(|value| value.is_number()).cloned(),
+        "limit_value": window.get("limit_value").filter(|value| value.is_number()).cloned(),
+        "used_ratio": window.get("used_ratio").filter(|value| value.is_number()).cloned(),
+        "remaining_value": window.get("remaining_value").filter(|value| value.is_number()).cloned(),
+        "reset_at": json_u64(window.get("reset_at")).and_then(unix_secs_to_rfc3339),
+        "reset_seconds": json_u64(window.get("reset_seconds")),
+        "is_exhausted": window.get("is_exhausted").and_then(Value::as_bool).unwrap_or(false),
+    }))
+}
+
+fn safe_status_token(value: Option<&Value>) -> Option<String> {
+    let raw = value?.as_str()?.trim();
+    if raw.is_empty()
+        || raw.len() > 64
+        || !raw
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+    {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
+fn safe_display_string(value: Option<&Value>) -> Option<String> {
+    let raw = value?.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(
+        raw.chars()
+            .take(REMOTE_QUOTA_ADMIN_DISPLAY_STRING_MAX_CHARS)
+            .collect(),
+    )
+}
+
+fn json_u64(value: Option<&Value>) -> Option<u64> {
+    value?
+        .as_u64()
+        .or_else(|| value?.as_i64().and_then(|value| u64::try_from(value).ok()))
+}
+
+fn unix_secs_to_rfc3339(unix_secs: u64) -> Option<String> {
+    let timestamp = i64::try_from(unix_secs).ok()?;
+    Some(
+        chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)?
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_sub2api_remote_quota_at, parse_sub2api_remote_quota_config,
-        validate_sub2api_same_origin_endpoint, Sub2ApiQuotaWindowKind, Sub2ApiRemoteQuotaState,
-        Sub2ApiRemoteQuotaWindow, DEFAULT_REMOTE_QUOTA_FETCH_INTERVAL_SECS,
-        MIN_REMOTE_QUOTA_FETCH_INTERVAL_SECS,
+        build_sub2api_remote_quota_admin_status, parse_sub2api_remote_quota_at,
+        parse_sub2api_remote_quota_config, validate_sub2api_same_origin_endpoint,
+        Sub2ApiQuotaWindowKind, Sub2ApiRemoteQuotaState, Sub2ApiRemoteQuotaWindow,
+        DEFAULT_REMOTE_QUOTA_FETCH_INTERVAL_SECS, MIN_REMOTE_QUOTA_FETCH_INTERVAL_SECS,
     };
     use serde_json::{json, Value};
 
@@ -1229,5 +1390,206 @@ mod tests {
             ..window
         };
         assert_eq!(window.used_ratio(), 1.0);
+    }
+
+    fn enabled_provider_config() -> Value {
+        json!({
+            "provider_ops": {
+                "architecture_id": "sub2api",
+                "remote_quota": {
+                    "enabled": true,
+                    "group_id": "42",
+                    "fetch_interval_seconds": 120,
+                    "connector": {"credentials": {"refresh_token": "secret-token"}}
+                }
+            }
+        })
+    }
+
+    fn synced_status_snapshot(synced_at: u64) -> Value {
+        json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "sub2api",
+                "code": "exhausted",
+                "exhausted": true,
+                "usage_ratio": 1.0,
+                "updated_at": synced_at,
+                "reset_at": 1_896_048_000_u64,
+                "windows": [{
+                    "code": "monthly",
+                    "label": "月",
+                    "used_value": 100.0,
+                    "limit_value": 100.0,
+                    "used_ratio": 1.0,
+                    "remaining_value": 0.0,
+                    "reset_at": 1_896_048_000_u64,
+                    "reset_seconds": 43_200,
+                    "is_exhausted": true,
+                    "raw_internal": "drop-me"
+                }],
+                "remote_quota": {
+                    "sync_status": "ok",
+                    "synced_at_unix_secs": synced_at,
+                    "group_id": "42",
+                    "group_name": "Pro",
+                    "subscription_id": "9",
+                    "subscription_status": "active",
+                    "subscription_active": true,
+                    "expires_at_unix_secs": 1_896_134_400_u64,
+                    "blocked": true,
+                    "block_reason": "window_exhausted",
+                    "blocked_until_unix_secs": 1_896_048_000_u64,
+                    "conservative_cooldown": false,
+                    "last_error": Value::Null
+                }
+            },
+            "oauth": {"code": "none"}
+        })
+    }
+
+    #[test]
+    fn admin_status_disabled_by_default() {
+        assert_eq!(
+            build_sub2api_remote_quota_admin_status(None, &[]),
+            json!({"enabled": false})
+        );
+        assert_eq!(
+            build_sub2api_remote_quota_admin_status(Some(&json!({"provider_ops": {}})), &[]),
+            json!({"enabled": false})
+        );
+        assert_eq!(
+            build_sub2api_remote_quota_admin_status(
+                Some(
+                    &json!({"provider_ops": {"remote_quota": {"enabled": false, "group_id": "42"}}})
+                ),
+                &[]
+            ),
+            json!({"enabled": false})
+        );
+    }
+
+    #[test]
+    fn admin_status_projects_config_and_latest_sync() {
+        let older = synced_status_snapshot(1_896_000_000);
+        let newer = synced_status_snapshot(1_896_004_000);
+        let status = build_sub2api_remote_quota_admin_status(
+            Some(&enabled_provider_config()),
+            &[Some(&older), Some(&newer), None],
+        );
+        assert_eq!(status["enabled"], json!(true));
+        assert_eq!(status["group_id"], json!("42"));
+        assert_eq!(
+            status["progress_endpoint"],
+            json!("/api/v1/subscriptions/progress")
+        );
+        assert_eq!(status["fetch_interval_seconds"], json!(120));
+        assert_eq!(status["config_error"], json!(Value::Null));
+        let sync = &status["sync"];
+        assert_eq!(sync["sync_status"], json!("ok"));
+        assert_eq!(sync["synced_at"], json!("2030-01-30T11:46:40Z"));
+        assert_eq!(sync["code"], json!("exhausted"));
+        assert_eq!(sync["exhausted"], json!(true));
+        assert_eq!(sync["blocked"], json!(true));
+        assert_eq!(sync["block_reason"], json!("window_exhausted"));
+        assert_eq!(sync["blocked_until"], json!("2030-01-31T00:00:00Z"));
+        assert_eq!(sync["subscription_id"], json!("9"));
+        assert_eq!(sync["subscription_active"], json!(true));
+        assert_eq!(sync["group_name"], json!("Pro"));
+        assert_eq!(sync["windows"].as_array().expect("windows").len(), 1);
+        assert_eq!(sync["windows"][0]["used_value"], json!(100.0));
+        assert_eq!(
+            sync["windows"][0]["reset_at"],
+            json!("2030-01-31T00:00:00Z")
+        );
+        // 白名单之外的字段不得透出
+        assert!(sync["windows"][0].get("raw_internal").is_none());
+        let serialized = status.to_string();
+        assert!(!serialized.contains("secret-token"));
+        assert!(!serialized.contains("refresh_token"));
+        assert!(!serialized.contains("drop-me"));
+    }
+
+    #[test]
+    fn admin_status_without_sync_history_exposes_null_sync() {
+        let status = build_sub2api_remote_quota_admin_status(
+            Some(&enabled_provider_config()),
+            &[None, Some(&json!({"oauth": {"code": "none"}}))],
+        );
+        assert_eq!(status["enabled"], json!(true));
+        assert_eq!(status["sync"], json!(Value::Null));
+    }
+
+    #[test]
+    fn admin_status_surfaces_invalid_config_error() {
+        let status = build_sub2api_remote_quota_admin_status(
+            Some(&json!({
+                "provider_ops": {"remote_quota": {"enabled": true, "group_id": "42", "fetch_interval_seconds": 0}}
+            })),
+            &[],
+        );
+        assert_eq!(status["enabled"], json!(true));
+        assert!(status["config_error"]
+            .as_str()
+            .is_some_and(|message| message.contains("fetch_interval_seconds")));
+        assert_eq!(status["sync"], json!(Value::Null));
+    }
+
+    #[test]
+    fn admin_status_prefers_error_snapshot_when_it_is_the_latest() {
+        let ok_snapshot = synced_status_snapshot(1_896_000_000);
+        let error_snapshot = json!({
+            "quota": {
+                "code": "exhausted",
+                "exhausted": true,
+                "windows": [],
+                "remote_quota": {
+                    "sync_status": "error",
+                    "synced_at_unix_secs": 1_896_000_000_u64,
+                    "group_id": "42",
+                    "last_error": "网络错误",
+                    "last_error_at_unix_secs": 1_896_004_500_u64
+                }
+            }
+        });
+        let status = build_sub2api_remote_quota_admin_status(
+            Some(&enabled_provider_config()),
+            &[Some(&ok_snapshot), Some(&error_snapshot)],
+        );
+        assert_eq!(status["sync"]["sync_status"], json!("error"));
+        assert_eq!(status["sync"]["last_error"], json!("网络错误"));
+        assert_eq!(
+            status["sync"]["last_error_at"],
+            json!("2030-01-30T11:55:00Z")
+        );
+    }
+
+    #[test]
+    fn admin_status_drops_unsafe_tokens_and_oversized_strings() {
+        let mut snapshot = synced_status_snapshot(1_896_000_000);
+        snapshot["quota"]["remote_quota"]["sync_status"] = json!("ok; DROP TABLE");
+        snapshot["quota"]["remote_quota"]["group_name"] = json!("x".repeat(500));
+        snapshot["quota"]["code"] = json!("exhausted\r\ninjected");
+        let status = build_sub2api_remote_quota_admin_status(
+            Some(&enabled_provider_config()),
+            &[Some(&snapshot)],
+        );
+        // sync_status 非法 → 整条快照不可投影，sync 为 null
+        assert_eq!(status["sync"], json!(Value::Null));
+
+        snapshot["quota"]["remote_quota"]["sync_status"] = json!("ok");
+        let status = build_sub2api_remote_quota_admin_status(
+            Some(&enabled_provider_config()),
+            &[Some(&snapshot)],
+        );
+        assert_eq!(status["sync"]["code"], json!(Value::Null));
+        assert_eq!(
+            status["sync"]["group_name"]
+                .as_str()
+                .expect("group_name")
+                .chars()
+                .count(),
+            100
+        );
     }
 }

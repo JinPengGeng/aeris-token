@@ -1004,3 +1004,223 @@ fn remote_quota_sync_task_definition_is_registered() {
         "worker boot should be recorded like the other maintenance workers"
     );
 }
+
+// ---- sync_remote_quota 管理 action 通道（PR-B） ----
+
+#[tokio::test]
+async fn gateway_sync_remote_quota_action_runs_full_sync_and_reports_summary() {
+    let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+    let mock = RemoteQuotaMockState::new(now_unix_secs);
+    let (ops_url, ops_handle) = start_server(remote_quota_mock_router(mock.clone())).await;
+
+    let provider_id = "provider-sub2api";
+    let provider = remote_quota_test_provider(
+        provider_id,
+        &ops_url,
+        json!({"enabled": true, "group_id": "42"}),
+    );
+    let key = remote_quota_test_key(provider_id);
+    let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider.clone()],
+        vec![],
+        vec![key],
+    ));
+    let gateway_state = remote_quota_test_gateway_state(Arc::clone(&repository)).await;
+    let admin_state = crate::admin_api::AdminAppState::new(&gateway_state);
+
+    let payload = crate::admin_api::admin_provider_ops_local_action_response(
+        &admin_state,
+        provider_id,
+        Some(&provider),
+        &[],
+        "sync_remote_quota",
+        None,
+    )
+    .await;
+
+    assert_eq!(payload["status"], json!("success"));
+    assert_eq!(payload["action_type"], json!("sync_remote_quota"));
+    assert_eq!(payload["data"]["attempted"], json!(1));
+    assert_eq!(payload["data"]["applied"], json!(1));
+    assert_eq!(payload["data"]["blocked"], json!(1));
+    assert_eq!(payload["data"]["failed"], json!(0));
+    assert!(payload["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("已熔断")));
+    assert!(
+        aether_scheduler_core::is_provider_key_circuit_open_at(
+            &remote_quota_reload_key(&repository, provider_id).await,
+            "openai:chat",
+            now_unix_secs
+        ),
+        "action-driven sync should apply the exhausted mapping"
+    );
+
+    ops_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_sync_remote_quota_action_reports_sanitized_failure_with_summary() {
+    let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+    let mock = RemoteQuotaMockState::new(now_unix_secs);
+    mock.set_mode(RemoteQuotaMockMode::Garbage);
+    let (ops_url, ops_handle) = start_server(remote_quota_mock_router(mock.clone())).await;
+
+    let provider_id = "provider-sub2api";
+    let provider = remote_quota_test_provider(
+        provider_id,
+        &ops_url,
+        json!({"enabled": true, "group_id": "42"}),
+    );
+    let key = remote_quota_test_key(provider_id);
+    let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider.clone()],
+        vec![],
+        vec![key],
+    ));
+    let gateway_state = remote_quota_test_gateway_state(Arc::clone(&repository)).await;
+    let admin_state = crate::admin_api::AdminAppState::new(&gateway_state);
+
+    let payload = crate::admin_api::admin_provider_ops_local_action_response(
+        &admin_state,
+        provider_id,
+        Some(&provider),
+        &[],
+        "sync_remote_quota",
+        None,
+    )
+    .await;
+
+    assert_eq!(payload["status"], json!("parse_error"));
+    assert_eq!(payload["data"]["attempted"], json!(1));
+    assert_eq!(payload["data"]["applied"], json!(0));
+    assert_eq!(payload["data"]["failed"], json!(1));
+    let last_error = payload["data"]["last_error"]
+        .as_str()
+        .expect("last error should be present");
+    assert!(last_error.contains("没有可用条目"));
+    let serialized = payload.to_string();
+    for secret in ["mock-access-token", "refresh_token", "Authorization"] {
+        assert!(!serialized.contains(secret), "leaked {secret}");
+    }
+
+    ops_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_sync_remote_quota_action_recovers_and_reports() {
+    let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+    let mock = RemoteQuotaMockState::new(now_unix_secs);
+    let (ops_url, ops_handle) = start_server(remote_quota_mock_router(mock.clone())).await;
+
+    let provider_id = "provider-sub2api";
+    let provider = remote_quota_test_provider(
+        provider_id,
+        &ops_url,
+        json!({"enabled": true, "group_id": "42"}),
+    );
+    let key = remote_quota_test_key(provider_id);
+    let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider.clone()],
+        vec![],
+        vec![key],
+    ));
+    let gateway_state = remote_quota_test_gateway_state(Arc::clone(&repository)).await;
+    let admin_state = crate::admin_api::AdminAppState::new(&gateway_state);
+
+    let payload = crate::admin_api::admin_provider_ops_local_action_response(
+        &admin_state,
+        provider_id,
+        Some(&provider),
+        &[],
+        "sync_remote_quota",
+        None,
+    )
+    .await;
+    assert_eq!(payload["data"]["blocked"], json!(1));
+
+    mock.set_mode(RemoteQuotaMockMode::Healthy);
+    let payload = crate::admin_api::admin_provider_ops_local_action_response(
+        &admin_state,
+        provider_id,
+        Some(&provider),
+        &[],
+        "sync_remote_quota",
+        None,
+    )
+    .await;
+    assert_eq!(payload["status"], json!("success"));
+    assert_eq!(payload["data"]["recovered"], json!(1));
+    assert!(payload["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("已恢复")));
+    assert!(
+        !aether_scheduler_core::is_provider_key_circuit_open_at(
+            &remote_quota_reload_key(&repository, provider_id).await,
+            "openai:chat",
+            now_unix_secs
+        ),
+        "recovery via action should clear the managed circuit"
+    );
+
+    ops_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_remote_quota_sync_once_for_provider_reports_invalid_config() {
+    let provider_id = "provider-invalid";
+    let provider =
+        remote_quota_test_provider(provider_id, "http://127.0.0.1:9", json!({"enabled": true}));
+    let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![],
+        vec![],
+    ));
+    let gateway_state = remote_quota_test_gateway_state(repository).await;
+
+    let report = crate::maintenance::perform_remote_quota_sync_once_for_provider(
+        &gateway_state,
+        provider_id,
+    )
+    .await
+    .expect("invalid config should be reported, not propagated");
+    assert_eq!(report.summary.attempted, 1);
+    assert_eq!(report.summary.failed, 1);
+    let failure = report.failure.expect("failure detail should be present");
+    assert_eq!(failure.kind, "invalid_config");
+    assert!(failure.message.contains("group_id"));
+}
+
+#[tokio::test]
+async fn gateway_remote_quota_sync_once_for_provider_skips_when_disabled() {
+    let provider_id = "provider-disabled";
+    let provider = remote_quota_test_provider(
+        provider_id,
+        "http://127.0.0.1:9",
+        json!({"enabled": false, "group_id": "42"}),
+    );
+    let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![],
+        vec![],
+    ));
+    let gateway_state = remote_quota_test_gateway_state(repository).await;
+
+    let report = crate::maintenance::perform_remote_quota_sync_once_for_provider(
+        &gateway_state,
+        provider_id,
+    )
+    .await
+    .expect("disabled provider should skip cleanly");
+    assert_eq!(report.summary.attempted, 0);
+    assert_eq!(report.summary.skipped, 1);
+    assert!(report.failure.is_none());
+
+    let missing = crate::maintenance::perform_remote_quota_sync_once_for_provider(
+        &gateway_state,
+        "provider-missing",
+    )
+    .await
+    .expect("missing provider should skip cleanly");
+    assert_eq!(missing.summary.skipped, 1);
+}
