@@ -273,13 +273,15 @@ async fn gateway_rejects_second_in_flight_stream_request_with_distributed_overlo
             .and_then(|value| value.to_str().ok()),
         Some(EXECUTION_PATH_DISTRIBUTED_OVERLOADED)
     );
-    assert_eq!(
-        second_response
-            .json::<serde_json::Value>()
-            .await
-            .expect("json body should decode")["error"]["details"]["gate"],
-        "gateway_requests_distributed"
-    );
+    let payload = second_response
+        .json::<serde_json::Value>()
+        .await
+        .expect("json body should decode");
+    // OpenAI-family local errors retain only the public envelope; the internal
+    // distributed admission gate must not be exposed to clients.
+    assert!(payload.get("type").is_none());
+    assert_eq!(payload["error"]["type"], "server_error");
+    assert!(payload["error"]["details"].is_null());
     assert_eq!(execution_runtime_hits.load(Ordering::SeqCst), 1);
 
     drop(first_response);
@@ -368,13 +370,12 @@ async fn gateway_rejects_second_in_flight_stream_request_with_local_overload_imp
             .and_then(|value| value.to_str().ok()),
         Some(EXECUTION_PATH_LOCAL_OVERLOADED)
     );
-    assert_eq!(
-        second_response
-            .json::<serde_json::Value>()
-            .await
-            .expect("json body should decode")["error"]["type"],
-        "overloaded"
-    );
+    let payload = second_response
+        .json::<serde_json::Value>()
+        .await
+        .expect("json body should decode");
+    assert!(payload.get("type").is_none());
+    assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(execution_runtime_hits.load(Ordering::SeqCst), 1);
 
     drop(first_response);
