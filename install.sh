@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${AETHER_REPO:-fawney19/Aether}"
+REPO="${AETHER_REPO:-JinPengGeng/aeris-token}"
 SOURCE_REF="${AETHER_SOURCE_REF:-main}"
 SOURCE_REF_EXPLICIT="false"
 if [[ -n "${AETHER_SOURCE_REF:-}" ]]; then
@@ -25,7 +25,7 @@ COMPOSE_DIR_EXPLICIT="false"
 if [[ -n "${AETHER_COMPOSE_DIR:-}" ]]; then
     COMPOSE_DIR_EXPLICIT="true"
 fi
-IMAGE_REPO="${AETHER_IMAGE_REPO:-ghcr.io/fawney19/aether}"
+IMAGE_REPO="${AETHER_IMAGE_REPO:-ghcr.io/jinpenggeng/aeris-token}"
 APP_IMAGE="${AETHER_APP_IMAGE:-}"
 SERVICE_USER_EXPLICIT="false"
 SERVICE_GROUP_EXPLICIT="false"
@@ -84,7 +84,7 @@ Options:
                       rc resolves the latest tag like v0.7.0-rc.1
                       beta resolves the latest tag like v0.7.0-beta.1
                       nightly resolves the rolling nightly build from main
-  --version VERSION    Exact release tag to install, for example v0.7.0-rc.1 or nightly
+  --version VERSION    Exact release tag to install, for example aeris-v0.8.0-rc.1 or nightly
   --repo OWNER/REPO    GitHub repository to download from (default: fawney19/Aether)
   --source-ref REF     Source branch/tag used for compose templates (default: main)
   --archive PATH       Install from a local release tarball instead of downloading
@@ -399,7 +399,7 @@ select_version() {
   2) 最新 RC 预发布版
   3) 最新 Beta 预发布版
   4) 最新 nightly 构建版
-  5) 指定 tag，例如 v0.7.0-rc.1
+  5) 指定 tag，例如 aeris-v0.8.0-rc.1
 
 请输入选项 [1]:
 EOF
@@ -411,7 +411,7 @@ Choose Aether version:
   2) Latest RC prerelease
   3) Latest beta prerelease
   4) Latest nightly build
-  5) Exact tag, for example v0.7.0-rc.1
+  5) Exact tag, for example aeris-v0.8.0-rc.1
 
 Enter choice [1]:
 EOF
@@ -1300,19 +1300,19 @@ resolve_version() {
         stable|latest)
             tag="$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=50" |
                 sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
-                grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
+                grep -E '^aeris-v[0-9]+\.[0-9]+\.[0-9]+$' |
                 head -n1 || true)"
             ;;
         rc)
             tag="$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=50" |
                 sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
-                grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$' |
+                grep -E '^aeris-v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$' |
                 head -n1 || true)"
             ;;
         beta)
             tag="$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=50" |
                 sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
-                grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$' |
+                grep -E '^aeris-v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$' |
                 head -n1 || true)"
             ;;
         nightly)
@@ -1738,7 +1738,8 @@ compose_image() {
 
     local tag=""
     if [[ -n "${VERSION}" ]]; then
-        tag="${VERSION#v}"
+        tag="${VERSION#aeris-v}"
+        tag="${tag#v}"
     else
         case "${CHANNEL}" in
             stable|latest)

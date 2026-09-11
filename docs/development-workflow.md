@@ -85,3 +85,13 @@ npm run build
 Dependabot 每周为 Cargo、`frontend` npm 和 GitHub Actions 创建更新 PR。依赖更新与其他 PR 一样需要 CI 和审查；重大版本升级需要单独记录兼容性与回滚风险。
 
 发布只能由已通过 `main` CI 的 tag 触发，并须经 `release` Environment 人工审批；`workflow_dispatch` 仅用于不发布的手工构建验证。发布工作流的镜像、下载链接和 Release 目标必须使用当前仓库所有者，不能保留上游 fork 的 `fawney19/Aether` 标识。具有写权限或可访问发布 secrets 的第三方 GitHub Actions 应优先固定到完整 commit SHA；其余 Action 至少固定到明确版本，并由 Dependabot 持续更新。
+
+### 版本号纪律
+
+本 fork 与上游 fawney19/Aether 使用**不同的 tag 命名空间**，从机制上避免同名 tag 指向不同提交的混淆（两仓都曾有过 `v0.7.19`，且上游号段未来会覆盖任何纯数字 fork 号段）：
+
+- 上游线：`v0.7.x` 及后续（上游仓库自行演进；同步只跟随代码，不跟随 tag）
+- 本仓线：`aeris-vX.Y.Z` 前缀序列（自 `aeris-v0.8.0` 起；预发布 `aeris-vX.Y.Z-beta.N` / `aeris-vX.Y.Z-rc.N`）。`release.yml`/`deploy-pages.yml` 只响应 `aeris-v*` tag；裸 `v*` tag 不再触发发布
+- Docker 镜像 tag 去掉前缀：GitHub tag `aeris-v0.8.0` → 镜像 `ghcr.io/jinpenggeng/aeris-token:0.8.0`（另发 `0.8`、`latest`；预发布发 `beta`/`rc` 通道 tag）
+- 每次 Release 的正文必须注明当次包含的上游基线 SHA（upstream/main 顶端），保持与上游的可追溯对应关系
+- `tunnel-v*` 是 tunnel 组件的独立 tag 流，不触发本发布流程

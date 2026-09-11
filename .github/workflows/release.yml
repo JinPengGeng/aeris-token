@@ -2,7 +2,10 @@ name: Release Aether
 
 on:
   push:
-    tags: ['v*']
+    # Fork release namespace: only aeris-v* tags publish. Upstream-style v* tags
+    # are deliberately NOT matched so upstream and fork release lines can never
+    # collide on the same tag name.
+    tags: ['aeris-v*']
   workflow_dispatch:
     inputs:
       release_approval_canary:
@@ -51,9 +54,9 @@ jobs:
           fi
 
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
+          if [[ ! "${tag}" =~ ^aeris-v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
             echo "Unsupported release tag: ${tag}" >&2
-            echo "Expected vX.Y.Z, vX.Y.Z-beta.N, or vX.Y.Z-rc.N." >&2
+            echo "Expected aeris-vX.Y.Z, aeris-vX.Y.Z-beta.N, or aeris-vX.Y.Z-rc.N." >&2
             exit 1
           fi
 
@@ -416,8 +419,8 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.GHCR_IMAGE }}
             name=docker.io/${{ steps.registry.outputs.image }},enable=${{ steps.registry.outputs.publish == 'true' }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.preflight.outputs.make_latest == 'true' }}
+            type=match,pattern=aeris-v(\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?)
+            type=match,pattern=aeris-v(\d+\.\d+),enable=${{ needs.preflight.outputs.make_latest == 'true' }}
             type=raw,value=latest,enable=${{ needs.preflight.outputs.make_latest == 'true' }}
             type=raw,value=beta,enable=${{ contains(github.ref_name, '-beta.') }}
             type=raw,value=rc,enable=${{ contains(github.ref_name, '-rc.') }}

@@ -56,7 +56,7 @@ services:
     restart: unless-stopped
 
   app:
-    image: ${APP_IMAGE:-ghcr.io/fawney19/aether:latest}
+    image: ${APP_IMAGE:-ghcr.io/jinpenggeng/aeris-token:latest}
     container_name: aether-app
     user: "0:0"
     read_only: true
