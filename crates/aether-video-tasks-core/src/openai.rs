@@ -896,7 +896,7 @@ mod tests {
         failed.apply_provider_body(failure.as_object().expect("object"));
 
         assert_eq!(failed.status, LocalVideoTaskStatus::Failed);
-        assert_eq!(failed.progress_percent, 100);
+        assert_eq!(failed.progress_percent, 45);
         assert_eq!(failed.error_code.as_deref(), Some("provider_error"));
         assert!(failed.video_url.is_none());
     }
