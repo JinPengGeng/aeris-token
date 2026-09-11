@@ -435,3 +435,572 @@ async fn gateway_provider_checkin_skips_when_disabled_via_system_config() {
         }
     );
 }
+
+// ---- Sub2API 远程配额同步（remote_quota_sync）集成闭环 ----
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteQuotaMockMode {
+    Exhausted,
+    Healthy,
+    Garbage,
+}
+
+#[derive(Clone)]
+struct RemoteQuotaMockState {
+    refresh_hits: Arc<Mutex<usize>>,
+    summary_hits: Arc<Mutex<usize>>,
+    progress_hits: Arc<Mutex<usize>>,
+    mode: Arc<Mutex<RemoteQuotaMockMode>>,
+    latest_access_token: Arc<Mutex<String>>,
+    reject_next_summary_once: Arc<Mutex<bool>>,
+    window_start_unix_secs: u64,
+    resets_at_unix_secs: u64,
+    expires_at_unix_secs: u64,
+}
+
+impl RemoteQuotaMockState {
+    fn new(now_unix_secs: u64) -> Self {
+        Self {
+            refresh_hits: Arc::new(Mutex::new(0)),
+            summary_hits: Arc::new(Mutex::new(0)),
+            progress_hits: Arc::new(Mutex::new(0)),
+            mode: Arc::new(Mutex::new(RemoteQuotaMockMode::Exhausted)),
+            latest_access_token: Arc::new(Mutex::new(String::new())),
+            reject_next_summary_once: Arc::new(Mutex::new(false)),
+            window_start_unix_secs: now_unix_secs - 86_400,
+            resets_at_unix_secs: now_unix_secs + 3_600,
+            expires_at_unix_secs: now_unix_secs + 86_400,
+        }
+    }
+
+    fn set_mode(&self, mode: RemoteQuotaMockMode) {
+        *self.mode.lock().expect("mutex should lock") = mode;
+    }
+
+    fn hits(counter: &Arc<Mutex<usize>>) -> usize {
+        *counter.lock().expect("mutex should lock")
+    }
+
+    fn bearer_token(&self) -> String {
+        format!(
+            "Bearer {}",
+            self.latest_access_token.lock().expect("mutex should lock")
+        )
+    }
+
+    fn summary_body(&self) -> serde_json::Value {
+        let (limit, used) = match *self.mode.lock().expect("mutex should lock") {
+            RemoteQuotaMockMode::Exhausted => (100.0, 100.0),
+            RemoteQuotaMockMode::Healthy => (100.0, 10.0),
+            RemoteQuotaMockMode::Garbage => (-5.0, 1.0),
+        };
+        json!({
+            "code": 0,
+            "data": {
+                "active_count": 1,
+                "subscriptions": [{
+                    "id": 9,
+                    "group_id": 42,
+                    "group_name": "Pro",
+                    "status": "active",
+                    "monthly_limit_usd": limit,
+                    "monthly_used_usd": used,
+                    "expires_at_unix_secs": self.expires_at_unix_secs,
+                }]
+            }
+        })
+    }
+
+    fn progress_body(&self) -> serde_json::Value {
+        let (limit, used) = match *self.mode.lock().expect("mutex should lock") {
+            RemoteQuotaMockMode::Exhausted => (100.0, 100.0),
+            RemoteQuotaMockMode::Healthy => (100.0, 10.0),
+            RemoteQuotaMockMode::Garbage => (-5.0, 1.0),
+        };
+        json!({
+            "code": 0,
+            "data": [{
+                "subscription_id": 9,
+                "group_id": 42,
+                "expires_at_unix_secs": self.expires_at_unix_secs,
+                "monthly": {
+                    "limit_usd": limit,
+                    "used_usd": used,
+                    "window_start_unix_secs": self.window_start_unix_secs,
+                    "resets_at_unix_secs": self.resets_at_unix_secs,
+                }
+            }]
+        })
+    }
+}
+
+fn remote_quota_mock_router(state: RemoteQuotaMockState) -> Router {
+    let refresh_state = state.clone();
+    let summary_state = state.clone();
+    let progress_state = state;
+    Router::new()
+        .route(
+            "/api/v1/auth/refresh",
+            post(move || {
+                let state = refresh_state.clone();
+                async move {
+                    let mut hits = state.refresh_hits.lock().expect("mutex should lock");
+                    *hits += 1;
+                    let token = format!("mock-access-token-{}", *hits);
+                    drop(hits);
+                    *state.latest_access_token.lock().expect("mutex should lock") = token.clone();
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "code": 0,
+                            "data": {
+                                "access_token": token,
+                                "refresh_token": "mock-refresh-token",
+                                "expires_in": 900,
+                            }
+                        })),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/api/v1/subscriptions/summary",
+            get(move |headers: axum::http::HeaderMap| {
+                let state = summary_state.clone();
+                async move {
+                    *state.summary_hits.lock().expect("mutex should lock") += 1;
+                    let reject_once = {
+                        let mut flag = state
+                            .reject_next_summary_once
+                            .lock()
+                            .expect("mutex should lock");
+                        std::mem::replace(&mut *flag, false)
+                    };
+                    let authorized = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        == Some(state.bearer_token().as_str());
+                    if reject_once || !authorized {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({"code": 401, "message": "unauthorized"})),
+                        );
+                    }
+                    (StatusCode::OK, Json(state.summary_body()))
+                }
+            }),
+        )
+        .route(
+            "/api/v1/subscriptions/progress",
+            get(move |headers: axum::http::HeaderMap| {
+                let state = progress_state.clone();
+                async move {
+                    *state.progress_hits.lock().expect("mutex should lock") += 1;
+                    let authorized = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        == Some(state.bearer_token().as_str());
+                    if !authorized {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({"code": 401, "message": "unauthorized"})),
+                        );
+                    }
+                    (StatusCode::OK, Json(state.progress_body()))
+                }
+            }),
+        )
+}
+
+fn remote_quota_test_provider(
+    provider_id: &str,
+    ops_url: &str,
+    remote_quota: serde_json::Value,
+) -> StoredProviderCatalogProvider {
+    StoredProviderCatalogProvider::new(
+        provider_id.to_string(),
+        "Sub2API 中转".to_string(),
+        Some("https://example.com".to_string()),
+        "custom".to_string(),
+    )
+    .expect("provider should build")
+    .with_routing_fields(10)
+    .with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "provider_ops": {
+                "architecture_id": "sub2api",
+                "base_url": ops_url,
+                "connector": {
+                    "auth_type": "api_key",
+                    "config": {},
+                    "credentials": {
+                        "refresh_token": encrypt_python_fernet_plaintext(
+                            DEVELOPMENT_ENCRYPTION_KEY,
+                            "initial-refresh-token",
+                        ).expect("refresh token should encrypt"),
+                    }
+                },
+                "remote_quota": remote_quota,
+            }
+        })),
+    )
+}
+
+fn remote_quota_test_key(
+    provider_id: &str,
+) -> aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey {
+    let mut key =
+        aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            provider_id.to_string(),
+            "key-1".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+    key.api_formats = Some(json!(["openai:chat"]));
+    key
+}
+
+async fn remote_quota_test_gateway_state(
+    repository: Arc<InMemoryProviderCatalogReadRepository>,
+) -> AppState {
+    AppState::new()
+        .expect("gateway state should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        )
+}
+
+async fn remote_quota_reload_key(
+    repository: &InMemoryProviderCatalogReadRepository,
+    provider_id: &str,
+) -> aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey {
+    use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
+    repository
+        .list_keys_by_provider_ids(&[provider_id.to_string()])
+        .await
+        .expect("keys should load")
+        .into_iter()
+        .next()
+        .expect("seeded key should exist")
+}
+
+#[tokio::test]
+async fn gateway_remote_quota_sync_circuits_exhausted_provider_and_recovers() {
+    let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+    let mock = RemoteQuotaMockState::new(now_unix_secs);
+    let (ops_url, ops_handle) = start_server(remote_quota_mock_router(mock.clone())).await;
+
+    let provider_id = "provider-sub2api";
+    let provider = remote_quota_test_provider(
+        provider_id,
+        &ops_url,
+        json!({"enabled": true, "group_id": "42", "fetch_interval_seconds": 60}),
+    );
+    let key = remote_quota_test_key(provider_id);
+    let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![],
+        vec![key],
+    ));
+    let gateway_state = remote_quota_test_gateway_state(Arc::clone(&repository)).await;
+
+    // 阶段 1：月窗口耗尽 → 熔断至 resets_at，快照记录数值。
+    let summary = crate::maintenance::perform_remote_quota_sync_once(&gateway_state)
+        .await
+        .expect("remote quota sync should succeed");
+    assert_eq!(
+        summary,
+        crate::maintenance::RemoteQuotaSyncRunSummary {
+            attempted: 1,
+            applied: 1,
+            blocked: 1,
+            recovered: 0,
+            skipped: 0,
+            failed: 0,
+        }
+    );
+    let key = remote_quota_reload_key(&repository, provider_id).await;
+    assert!(
+        aether_scheduler_core::is_provider_key_circuit_open_at(&key, "openai:chat", now_unix_secs),
+        "exhausted remote quota should open the key circuit"
+    );
+    let circuit = &key.circuit_breaker_by_format.as_ref().expect("circuit")["openai:chat"];
+    assert_eq!(circuit["remote_quota_managed"], json!(true));
+    assert_eq!(circuit["reason"], json!("remote_quota_exhausted"));
+    assert_eq!(
+        circuit["next_probe_at_unix_secs"],
+        json!(mock.resets_at_unix_secs)
+    );
+    assert!(
+        !aether_scheduler_core::is_provider_key_circuit_open_at(
+            &key,
+            "openai:chat",
+            mock.resets_at_unix_secs
+        ),
+        "circuit should cool down only until resets_at"
+    );
+    let quota = &key.status_snapshot.as_ref().expect("status snapshot")["quota"];
+    assert_eq!(quota["code"], json!("exhausted"));
+    assert_eq!(quota["exhausted"], json!(true));
+    assert_eq!(quota["windows"][0]["used_value"], json!(100.0));
+    assert_eq!(quota["windows"][0]["limit_value"], json!(100.0));
+    assert_eq!(
+        quota["windows"][0]["reset_at"],
+        json!(mock.resets_at_unix_secs)
+    );
+    assert_eq!(quota["remote_quota"]["sync_status"], json!("ok"));
+    assert_eq!(quota["remote_quota"]["group_id"], json!("42"));
+    assert_eq!(RemoteQuotaMockState::hits(&mock.refresh_hits), 1);
+    assert_eq!(RemoteQuotaMockState::hits(&mock.summary_hits), 1);
+    assert_eq!(RemoteQuotaMockState::hits(&mock.progress_hits), 1);
+    assert!(
+        !key.status_snapshot
+            .as_ref()
+            .expect("status snapshot")
+            .to_string()
+            .contains("mock-access-token"),
+        "status snapshot must not contain access tokens"
+    );
+
+    // 阶段 2：配额恢复 → 解除本 worker 写入的熔断，快照转为 ok。
+    mock.set_mode(RemoteQuotaMockMode::Healthy);
+    let summary = crate::maintenance::perform_remote_quota_sync_once(&gateway_state)
+        .await
+        .expect("remote quota sync should succeed");
+    assert_eq!(
+        summary,
+        crate::maintenance::RemoteQuotaSyncRunSummary {
+            attempted: 1,
+            applied: 1,
+            blocked: 0,
+            recovered: 1,
+            skipped: 0,
+            failed: 0,
+        }
+    );
+    let key = remote_quota_reload_key(&repository, provider_id).await;
+    assert!(
+        !aether_scheduler_core::is_provider_key_circuit_open_at(&key, "openai:chat", now_unix_secs),
+        "recovered remote quota should close the managed circuit"
+    );
+    let quota = &key.status_snapshot.as_ref().expect("status snapshot")["quota"];
+    assert_eq!(quota["code"], json!("ok"));
+    assert_eq!(quota["exhausted"], json!(false));
+    assert_eq!(quota["windows"][0]["used_value"], json!(10.0));
+    assert_eq!(quota["remote_quota"]["sync_status"], json!("ok"));
+    assert_eq!(
+        RemoteQuotaMockState::hits(&mock.refresh_hits),
+        1,
+        "cached access token should be reused across syncs"
+    );
+
+    ops_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_remote_quota_sync_failure_keeps_last_synced_state() {
+    let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+    let mock = RemoteQuotaMockState::new(now_unix_secs);
+    let (ops_url, ops_handle) = start_server(remote_quota_mock_router(mock.clone())).await;
+
+    let provider_id = "provider-sub2api";
+    let provider = remote_quota_test_provider(
+        provider_id,
+        &ops_url,
+        json!({"enabled": true, "group_id": "42"}),
+    );
+    let key = remote_quota_test_key(provider_id);
+    let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![],
+        vec![key],
+    ));
+    let gateway_state = remote_quota_test_gateway_state(Arc::clone(&repository)).await;
+
+    let summary = crate::maintenance::perform_remote_quota_sync_once(&gateway_state)
+        .await
+        .expect("first sync should succeed");
+    assert_eq!(summary.blocked, 1);
+
+    // 上游返回整体非法数据（负值 → 条目全部拒收）→ 同步失败，保留旧值。
+    mock.set_mode(RemoteQuotaMockMode::Garbage);
+    let summary = crate::maintenance::perform_remote_quota_sync_once(&gateway_state)
+        .await
+        .expect("sync should not propagate data errors");
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.applied, 0);
+
+    let key = remote_quota_reload_key(&repository, provider_id).await;
+    assert!(
+        aether_scheduler_core::is_provider_key_circuit_open_at(&key, "openai:chat", now_unix_secs),
+        "failed sync must keep the previous circuit state"
+    );
+    let quota = &key.status_snapshot.as_ref().expect("status snapshot")["quota"];
+    assert_eq!(quota["code"], json!("exhausted"));
+    assert_eq!(quota["windows"][0]["used_value"], json!(100.0));
+    assert_eq!(quota["remote_quota"]["sync_status"], json!("error"));
+    assert!(quota["remote_quota"]["last_error"]
+        .as_str()
+        .is_some_and(|message| !message.is_empty()));
+
+    ops_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_remote_quota_sync_refreshes_token_once_on_401() {
+    let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+    let mock = RemoteQuotaMockState::new(now_unix_secs);
+    *mock
+        .reject_next_summary_once
+        .lock()
+        .expect("mutex should lock") = true;
+    let (ops_url, ops_handle) = start_server(remote_quota_mock_router(mock.clone())).await;
+
+    let provider_id = "provider-sub2api";
+    let provider = remote_quota_test_provider(
+        provider_id,
+        &ops_url,
+        json!({"enabled": true, "group_id": "42"}),
+    );
+    let key = remote_quota_test_key(provider_id);
+    let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![],
+        vec![key],
+    ));
+    let gateway_state = remote_quota_test_gateway_state(Arc::clone(&repository)).await;
+
+    let outcome =
+        crate::maintenance::perform_remote_quota_sync_for_provider(&gateway_state, provider_id)
+            .await
+            .expect("sync should recover from a single 401 via forced refresh");
+    assert_eq!(
+        outcome,
+        crate::maintenance::RemoteQuotaSyncProviderOutcome::AppliedBlocked
+    );
+    assert_eq!(
+        RemoteQuotaMockState::hits(&mock.refresh_hits),
+        2,
+        "401 should trigger exactly one forced token refresh"
+    );
+    assert!(
+        aether_scheduler_core::is_provider_key_circuit_open_at(
+            &remote_quota_reload_key(&repository, provider_id).await,
+            "openai:chat",
+            now_unix_secs
+        ),
+        "sync after forced refresh should apply the exhausted mapping"
+    );
+
+    ops_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_remote_quota_sync_is_disabled_by_default() {
+    let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+    let mock = RemoteQuotaMockState::new(now_unix_secs);
+    let (ops_url, ops_handle) = start_server(remote_quota_mock_router(mock.clone())).await;
+
+    let provider_without_remote_quota = StoredProviderCatalogProvider::new(
+        "provider-plain".to_string(),
+        "Plain".to_string(),
+        Some("https://example.com".to_string()),
+        "custom".to_string(),
+    )
+    .expect("provider should build")
+    .with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "provider_ops": {
+                "architecture_id": "sub2api",
+                "base_url": ops_url,
+                "connector": {"auth_type": "api_key", "config": {}, "credentials": {}}
+            }
+        })),
+    );
+    let provider_disabled = remote_quota_test_provider(
+        "provider-disabled",
+        &ops_url,
+        json!({"enabled": false, "group_id": "42"}),
+    );
+    let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider_without_remote_quota, provider_disabled],
+        vec![],
+        vec![remote_quota_test_key("provider-plain")],
+    ));
+    let gateway_state = remote_quota_test_gateway_state(Arc::clone(&repository)).await;
+
+    let summary = crate::maintenance::perform_remote_quota_sync_once(&gateway_state)
+        .await
+        .expect("sync should be a no-op when nothing is enabled");
+    assert_eq!(
+        summary,
+        crate::maintenance::RemoteQuotaSyncRunSummary {
+            attempted: 0,
+            applied: 0,
+            blocked: 0,
+            recovered: 0,
+            skipped: 0,
+            failed: 0,
+        }
+    );
+    assert_eq!(RemoteQuotaMockState::hits(&mock.summary_hits), 0);
+    let key = remote_quota_reload_key(&repository, "provider-plain").await;
+    assert!(key.circuit_breaker_by_format.is_none());
+    assert!(key.status_snapshot.is_none());
+
+    ops_handle.abort();
+}
+
+#[tokio::test]
+async fn spawn_remote_quota_sync_worker_requires_provider_catalog() {
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_data_state_for_tests(crate::data::GatewayDataState::disabled());
+    assert!(crate::maintenance::spawn_remote_quota_sync_worker(state).is_none());
+}
+
+#[tokio::test]
+async fn spawn_remote_quota_sync_worker_spawns_with_provider_catalog() {
+    let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![],
+        vec![],
+        vec![],
+    ));
+    let state = remote_quota_test_gateway_state(repository).await;
+    let handle = crate::maintenance::spawn_remote_quota_sync_worker(state)
+        .expect("worker should spawn with provider catalog reader and writer");
+    handle.abort();
+}
+
+#[test]
+fn remote_quota_sync_task_definition_is_registered() {
+    let definition =
+        crate::task_runtime::task_definition(crate::task_runtime::TASK_KEY_REMOTE_QUOTA_SYNC)
+            .expect("remote quota sync task should be registered");
+    assert_eq!(definition.key, "maintenance.provider.remote_quota_sync");
+    assert!(definition.singleton, "worker must stay a singleton");
+    assert!(
+        definition.persist_history,
+        "worker boot should be recorded like the other maintenance workers"
+    );
+}
