@@ -1221,13 +1221,13 @@ impl MemoryRuntimeBackend {
             .map(|entry| entry.entry.clone())
             .collect::<Vec<_>>();
         let has_more = queues.get(stream).is_some_and(|state| {
-                state
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.sequence > start_sequence)
-                    .count()
-                    > entries.len()
-            });
+            state
+                .entries
+                .iter()
+                .filter(|entry| entry.sequence > start_sequence)
+                .count()
+                > entries.len()
+        });
         let next_start_id = entries
             .last()
             .map(|entry| entry.id.clone())

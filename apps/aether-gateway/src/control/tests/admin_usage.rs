@@ -272,8 +272,8 @@ fn classifies_admin_usage_dlq_redrive_as_admin_write() {
     let uri: Uri = "/api/admin/usage/dlq/1-0/redrive"
         .parse()
         .expect("uri should parse");
-    let decision = classify_control_route(&http::Method::POST, &uri, &headers)
-        .expect("route should classify");
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
     assert_eq!(decision.route_family.as_deref(), Some("usage_manage"));
     assert_eq!(decision.route_kind.as_deref(), Some("dlq_redrive"));
     assert_eq!(
