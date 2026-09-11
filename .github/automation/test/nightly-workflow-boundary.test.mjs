@@ -83,6 +83,10 @@ test('nightly pins every action to the release-approved immutable set', () => {
     for (const step of job.steps ?? []) {
       if (step.uses?.startsWith('actions/checkout@')) {
         assert.equal(step.with?.['persist-credentials'], false);
+        // CodeQL actions/cache-poisoning/poisonable-step: a computed checkout
+        // ref reads as an untrusted checkout in cache-writable scheduled or
+        // dispatched jobs. Every job checks out the run commit by default.
+        assert.equal(step.with?.ref, undefined, 'checkout must not take a computed ref');
       }
     }
   }
