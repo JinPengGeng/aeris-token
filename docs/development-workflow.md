@@ -91,7 +91,7 @@ Dependabot 每周为 Cargo、`frontend` npm 和 GitHub Actions 创建更新 PR�
 本 fork 与上游 fawney19/Aether 使用**不同的 tag 命名空间**，从机制上避免同名 tag 指向不同提交的混淆（两仓都曾有过 `v0.7.19`，且上游号段未来会覆盖任何纯数字 fork 号段）：
 
 - 上游线：`v0.7.x` 及后续（上游仓库自行演进；同步只跟随代码，不跟随 tag）
-- 本仓线：`aeris-vX.Y.Z` 前缀序列（自 `aeris-v0.8.0` 起；预发布 `aeris-vX.Y.Z-beta.N` / `aeris-vX.Y.Z-rc.N`）。`release.yml`/`deploy-pages.yml` 只响应 `aeris-v*` tag；裸 `v*` tag 不再触发发布
-- Docker 镜像 tag 去掉前缀：GitHub tag `aeris-v0.8.0` → 镜像 `ghcr.io/jinpenggeng/aeris-token:0.8.0`（另发 `0.8`、`latest`；预发布发 `beta`/`rc` 通道 tag）
+- 本仓线：`aeris-token-vX.Y.Z` 前缀序列（自 `aeris-token-v0.1.0` 起；预发布 `aeris-token-vX.Y.Z-beta.N` / `aeris-token-vX.Y.Z-rc.N`）。`release.yml`/`deploy-pages.yml` 只响应 `aeris-token-v*` tag；裸 `v*` 与早期试验性的 `aeris-v*` tag 均不触发发布
+- Docker 镜像 tag 去掉前缀：GitHub tag `aeris-token-v0.1.0` → 镜像 `ghcr.io/jinpenggeng/aeris-token:0.1.0`（另发 `0.1`、`latest`；预发布发 `beta`/`rc` 通道 tag）
 - 每次 Release 的正文必须注明当次包含的上游基线 SHA（upstream/main 顶端），保持与上游的可追溯对应关系
 - `tunnel-v*` 是 tunnel 组件的独立 tag 流，不触发本发布流程

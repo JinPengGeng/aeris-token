@@ -2,10 +2,10 @@ name: Release Aether
 
 on:
   push:
-    # Fork release namespace: only aeris-v* tags publish. Upstream-style v* tags
-    # are deliberately NOT matched so upstream and fork release lines can never
-    # collide on the same tag name.
-    tags: ['aeris-v*']
+    # Fork release namespace: only aeris-token-v* tags publish. Upstream-style
+    # v* tags are deliberately NOT matched so upstream and fork release lines
+    # can never collide on the same tag name.
+    tags: ['aeris-token-v*']
   workflow_dispatch:
     inputs:
       release_approval_canary:
@@ -54,18 +54,18 @@ jobs:
           fi
 
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "${tag}" =~ ^aeris-v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
+          if [[ ! "${tag}" =~ ^aeris-token-v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
             echo "Unsupported release tag: ${tag}" >&2
-            echo "Expected aeris-vX.Y.Z, aeris-vX.Y.Z-beta.N, or aeris-vX.Y.Z-rc.N." >&2
+            echo "Expected aeris-token-vX.Y.Z, aeris-token-vX.Y.Z-beta.N, or aeris-token-vX.Y.Z-rc.N." >&2
             exit 1
           fi
 
           echo "version_tag=${tag}" >> "${GITHUB_OUTPUT}"
 
-          # Classify on the version with the aeris-v prefix stripped: the
-          # namespace prefix itself contains a dash and must not read as a
+          # Classify on the version with the aeris-token-v prefix stripped: the
+          # namespace prefix itself contains dashes and must not read as a
           # prerelease marker.
-          ver="${tag#aeris-v}"
+          ver="${tag#aeris-token-v}"
           if [[ "${ver}" == *-* ]]; then
             echo "prerelease=true" >> "${GITHUB_OUTPUT}"
           else
@@ -423,8 +423,8 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.GHCR_IMAGE }}
             name=docker.io/${{ steps.registry.outputs.image }},enable=${{ steps.registry.outputs.publish == 'true' }}
           tags: |
-            type=match,pattern=aeris-v(\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?),group=1
-            type=match,pattern=aeris-v(\d+\.\d+)\.\d+,group=1,enable=${{ needs.preflight.outputs.make_latest == 'true' }}
+            type=match,pattern=aeris-token-v(\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?),group=1
+            type=match,pattern=aeris-token-v(\d+\.\d+)\.\d+,group=1,enable=${{ needs.preflight.outputs.make_latest == 'true' }}
             type=raw,value=latest,enable=${{ needs.preflight.outputs.make_latest == 'true' }}
             type=raw,value=beta,enable=${{ contains(github.ref_name, '-beta.') }}
             type=raw,value=rc,enable=${{ contains(github.ref_name, '-rc.') }}

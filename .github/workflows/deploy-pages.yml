@@ -2,8 +2,8 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    # Fork release namespace: Pages deploys follow aeris-v* stable tags only.
-    tags: ['aeris-v*']
+    # Fork release namespace: Pages deploys follow aeris-token-v* stable tags only.
+    tags: ['aeris-token-v*']
   workflow_dispatch:
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
           fi
 
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "${tag}" =~ ^aeris-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "${tag}" =~ ^aeris-token-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Skipping Pages deploy for non-stable release tag: ${tag}"
             exit 0
           fi
