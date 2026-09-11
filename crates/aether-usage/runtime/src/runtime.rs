@@ -3606,11 +3606,12 @@ impl UsageRuntime {
                         "dead-letter entry has no payload field".to_string(),
                     ));
                 };
-                let decoded: DeadLetterPayload = serde_json::from_str(payload).map_err(|error| {
-                    DataLayerError::InvalidInput(format!(
-                        "dead-letter payload is invalid JSON: {error}"
-                    ))
-                })?;
+                let decoded: DeadLetterPayload =
+                    serde_json::from_str(payload).map_err(|error| {
+                        DataLayerError::InvalidInput(format!(
+                            "dead-letter payload is invalid JSON: {error}"
+                        ))
+                    })?;
                 if decoded.fields.is_empty() {
                     return Err(DataLayerError::InvalidInput(
                         "dead-letter payload fields cannot be empty".to_string(),

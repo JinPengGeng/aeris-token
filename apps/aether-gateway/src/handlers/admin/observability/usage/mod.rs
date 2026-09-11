@@ -4,8 +4,8 @@ use axum::{body::Body, response::Response};
 
 mod analytics;
 mod analytics_routes;
-mod dlq;
 mod detail_routes;
+mod dlq;
 mod replay;
 mod summary_routes;
 
@@ -22,11 +22,8 @@ pub(crate) async fn maybe_build_local_admin_usage_response(
         return Ok(None);
     }
 
-    if let Some(response) = dlq::maybe_build_local_admin_usage_dlq_response(
-        state,
-        request_context,
-    )
-    .await?
+    if let Some(response) =
+        dlq::maybe_build_local_admin_usage_dlq_response(state, request_context).await?
     {
         return Ok(Some(response));
     }

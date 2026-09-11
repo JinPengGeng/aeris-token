@@ -82,11 +82,13 @@ pub(super) async fn maybe_build_local_admin_usage_dlq_response(
                 "next_cursor": next_cursor,
                 "has_more": has_more,
                 "entries": entries,
-            })).into_response();
+            }))
+            .into_response();
             return Ok(Some(attach_admin_audit_response(
                 response,
                 "admin_usage_dlq_listed",
                 "list_usage_dead_letters",
+                "usage_dlq",
                 state.app().usage_runtime.dlq_stream_key(),
             )));
         }
@@ -130,6 +132,7 @@ pub(super) async fn maybe_build_local_admin_usage_dlq_response(
                 response,
                 "admin_usage_dlq_redriven",
                 "redrive_usage_dead_letter",
+                "usage_dlq",
                 id,
             )));
         }

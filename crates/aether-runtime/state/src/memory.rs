@@ -1220,9 +1220,7 @@ impl MemoryRuntimeBackend {
             .take(count)
             .map(|entry| entry.entry.clone())
             .collect::<Vec<_>>();
-        let has_more = queues
-            .get(stream)
-            .is_some_and(|state| {
+        let has_more = queues.get(stream).is_some_and(|state| {
                 state
                     .entries
                     .iter()
@@ -1250,7 +1248,12 @@ impl MemoryRuntimeBackend {
         prune_memory_key(&mut queues, stream, Instant::now());
         queues
             .get(stream)
-            .and_then(|state| state.entries.iter().find(|entry| entry.entry.id == entry_id))
+            .and_then(|state| {
+                state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.entry.id == entry_id)
+            })
             .map(|entry| entry.entry.clone())
     }
 
@@ -1266,9 +1269,7 @@ impl MemoryRuntimeBackend {
         let destination_fields = destination_fields.clone();
         let mut markers = self.queue_redrive_markers.lock().await;
         if let Some(destination_id) = markers.get(&marker).cloned() {
-            return Ok(crate::RuntimeQueueRedriveOutcome::AlreadyRedriven {
-                destination_id,
-            });
+            return Ok(crate::RuntimeQueueRedriveOutcome::AlreadyRedriven { destination_id });
         }
         let mut queues = self.queues.lock().await;
         prune_memory_key(&mut queues, source, Instant::now());
@@ -1301,7 +1302,9 @@ impl MemoryRuntimeBackend {
             }
         }
         let source_state = queues.get_mut(source).expect("validated source stream");
-        source_state.entries.retain(|entry| entry.entry.id != entry_id);
+        source_state
+            .entries
+            .retain(|entry| entry.entry.id != entry_id);
         remove_pending_from_all_groups(source_state, entry_id);
         markers.insert(marker, destination_id.clone());
         Ok(crate::RuntimeQueueRedriveOutcome::Redriven { destination_id })
@@ -2939,7 +2942,10 @@ mod tests {
             crate::RuntimeQueueRedriveOutcome::Redriven { destination_id } => destination_id,
             other => panic!("unexpected first outcome: {other:?}"),
         };
-        assert!(backend.queue_read_stream_entry("usage:dlq", &source_id).await.is_none());
+        assert!(backend
+            .queue_read_stream_entry("usage:dlq", &source_id)
+            .await
+            .is_none());
         let second = backend
             .queue_redrive_stream_entry(
                 "usage:dlq",
@@ -2954,6 +2960,12 @@ mod tests {
             second,
             crate::RuntimeQueueRedriveOutcome::AlreadyRedriven { destination_id }
         );
-        assert_eq!(backend.queue_stats("usage:events", None).await.stream_length, 1);
+        assert_eq!(
+            backend
+                .queue_stats("usage:events", None)
+                .await
+                .stream_length,
+            1
+        );
     }
 }

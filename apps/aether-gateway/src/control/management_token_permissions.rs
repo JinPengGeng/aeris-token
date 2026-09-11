@@ -567,7 +567,10 @@ fn access_for_route(method: &http::Method, decision: &GatewayControlDecision) ->
                 Some("admin:proxy_nodes"),
                 Some("create_proxy_node_install_session")
             )
-            | (Some("admin:usage"), Some("detail" | "curl" | "replay" | "dlq_redrive"))
+            | (
+                Some("admin:usage"),
+                Some("detail" | "curl" | "replay" | "dlq_redrive")
+            )
             | (Some("admin:monitoring"), Some("trace_request"))
             | (Some("admin:tasks"), Some("detail" | "events"))
             | (

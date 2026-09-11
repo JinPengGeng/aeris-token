@@ -320,26 +320,30 @@ impl RedisStreamRunner {
             ));
         }
         let marker = format!("{}:__redrive:{}", source.0, entry_id);
-        self.run_with_timeout(RedisConnectionLane::Stream, "redis stream dead-letter redrive", async {
-            let mut connection = self.connections.connection(RedisConnectionLane::Stream);
-            let mut command = redis::cmd("EVAL");
-            command
-                .arg(DEAD_LETTER_REDRIVE_SCRIPT)
-                .arg(3)
-                .arg(&source.0)
-                .arg(&destination.0)
-                .arg(marker)
-                .arg(entry_id)
-                .arg(destination_maxlen.unwrap_or(0));
-            for (field, value) in destination_fields {
-                command.arg(field).arg(value);
-            }
-            let reply = command
-                .query_async::<RedisValue>(&mut connection)
-                .await
-                .map_redis_err()?;
-            parse_redrive_result(reply)
-        })
+        self.run_with_timeout(
+            RedisConnectionLane::Stream,
+            "redis stream dead-letter redrive",
+            async {
+                let mut connection = self.connections.connection(RedisConnectionLane::Stream);
+                let mut command = redis::cmd("EVAL");
+                command
+                    .arg(DEAD_LETTER_REDRIVE_SCRIPT)
+                    .arg(3)
+                    .arg(&source.0)
+                    .arg(&destination.0)
+                    .arg(marker)
+                    .arg(entry_id)
+                    .arg(destination_maxlen.unwrap_or(0));
+                for (field, value) in destination_fields {
+                    command.arg(field).arg(value);
+                }
+                let reply = command
+                    .query_async::<RedisValue>(&mut connection)
+                    .await
+                    .map_redis_err()?;
+                parse_redrive_result(reply)
+            },
+        )
         .await
     }
 

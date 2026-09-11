@@ -1185,9 +1185,13 @@ pub struct RuntimeQueuePage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeQueueRedriveOutcome {
-    Redriven { destination_id: String },
+    Redriven {
+        destination_id: String,
+    },
     /// The same source entry was already redriven by an earlier request.
-    AlreadyRedriven { destination_id: String },
+    AlreadyRedriven {
+        destination_id: String,
+    },
     NotFound,
 }
 
