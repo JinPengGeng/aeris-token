@@ -23,6 +23,8 @@
 
 Aether 是一个自托管的 AI API 网关，为团队和个人提供多租户管理、智能负载均衡、成本配额控制和健康监控能力。通过统一的 API 入口，可以无缝对接 Claude、OpenAI、Gemini 等主流 AI 服务及其 CLI 工具。
 
+本仓库是 [JinPengGeng/aeris-token](https://github.com/JinPengGeng/aeris-token)，基于上游 [fawney19/Aether](https://github.com/fawney19/Aether) 的 fork。请向本仓库提交 Issue 和 Pull Request；上游项目及其资源仍归上游及其贡献者所有。
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/architecture/architecture-dark.svg">
@@ -31,7 +33,7 @@ Aether 是一个自托管的 AI API 网关，为团队和个人提供多租户�
   </picture>
 </p>
 
-页面预览: https://fawney19.github.io/Aether/
+上游页面预览: https://fawney19.github.io/Aether/
 
 ## 部署
 
@@ -39,8 +41,8 @@ Aether 是一个自托管的 AI API 网关，为团队和个人提供多租户�
 
 ```bash
 # 1. 克隆代码
-git clone https://github.com/fawney19/Aether.git
-cd Aether
+git clone https://github.com/JinPengGeng/aeris-token.git
+cd aeris-token
 
 # 2. 配置环境变量
 cp .env.example .env
@@ -57,9 +59,9 @@ docker compose pull && docker compose up -d
 ### 一键安装（PostgreSQL + Redis）
 
 ```bash
-git clone https://github.com/fawney19/Aether.git
-cd Aether
-curl -fsSL https://raw.githubusercontent.com/fawney19/Aether/main/install.sh | sudo bash -s -- --mode compose
+git clone https://github.com/JinPengGeng/aeris-token.git
+cd aeris-token
+curl -fsSL https://raw.githubusercontent.com/JinPengGeng/aeris-token/main/install.sh | sudo bash -s -- --mode compose
 ```
 
 正式版和 Nightly 自动构建仅提供 Linux `amd64` / `arm64` 二进制包，Docker 镜像同样支持这两种架构。macOS 用户可使用 Docker 或自行从源码构建；安装脚本保留对历史 macOS 制品的兼容。独立 Aether Tunnel 的多平台发行不受此调整影响。
@@ -68,15 +70,15 @@ curl -fsSL https://raw.githubusercontent.com/fawney19/Aether/main/install.sh | s
 
 ### Nightly（每日 main 构建）
 
-Nightly workflow 每天从 `main` 的固定 commit 构建并发布滚动的 GitHub Release `nightly`，同时推送多架构 GHCR 镜像 `ghcr.io/fawney19/aether:nightly`。Nightly 是预发布版本，适合验证最新代码，不保证与正式版相同的稳定性。滚动 Release 需要仓库保持关闭 GitHub Release immutability。
+Nightly workflow 每天从 `main` 的固定 commit 构建并发布日期化的预发布版本 `aeris-token-nightly-YYYYMMDD`，同时推送多架构 GHCR 镜像 `ghcr.io/jinpenggeng/aeris-token:nightly`。Nightly 是预发布版本，适合验证最新代码，不保证与正式版相同的稳定性；日期 tag 保证不可变 Release 不会被覆盖。正式版使用 `aeris-token-vX.Y.Z` tag，并发布到同一镜像仓库。
 
 安装最新 nightly（PostgreSQL + Redis）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fawney19/Aether/main/install.sh | sudo bash -s -- --mode compose --channel nightly
+curl -fsSL https://raw.githubusercontent.com/JinPengGeng/aeris-token/main/install.sh | sudo bash -s -- --mode compose --channel nightly
 ```
 
-Docker Compose 用户可在部署目录的 `.env` 中设置 `APP_IMAGE=ghcr.io/fawney19/aether:nightly`，然后运行 `./update.sh` 获取下一次 nightly。二进制部署请沿用已有 PostgreSQL 环境配置，并使用 `--mode single-node --channel nightly` 重新运行安装脚本升级；当前管理后台的在线更新列表只跟踪正式版/RC/Beta，不会自动提示下一次 nightly。
+Docker Compose 用户可在部署目录的 `.env` 中设置 `APP_IMAGE=ghcr.io/jinpenggeng/aeris-token:nightly`，然后运行 `./update.sh` 获取下一次 nightly。二进制部署请沿用已有 PostgreSQL 环境配置，并使用 `--mode single-node --channel nightly` 重新运行安装脚本升级；当前管理后台的在线更新列表只跟踪正式版/RC/Beta，不会自动提示下一次 nightly。
 
 ## 本地开发
 
@@ -178,6 +180,8 @@ AETHER_BACKUP_ENCRYPTION_KEY='原备份密钥' \
 
 本项目采用 [Aether 非商业开源许可证](LICENSE)。允许个人学习、教育研究、非盈利组织及企业内部非盈利性质的使用；禁止用于盈利目的。商业使用请联系获取商业许可。
 
+贡献、漏洞报告和商业使用边界分别见 [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md) 和 [COMMERCIAL.md](COMMERCIAL.md)。本仓库继续保留 Aether 名称、Logo 与上游版权/署名；上游资源链接仅用于归属说明。
+
 ## 联系作者
 
 <p align="center">
@@ -187,5 +191,7 @@ AETHER_BACKUP_ENCRYPTION_KEY='原备份密钥' \
 </p>
 
 ## Star History
+
+上游项目的 Star History：
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=fawney19/Aether&type=date&legend=top-left)](https://star-history.dera.page/#fawney19/Aether&type=date&legend=top-left)

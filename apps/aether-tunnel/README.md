@@ -157,7 +157,7 @@ Linux/macOS 可运行 `sudo aether-tunnel upgrade [version]`。自更新只接�
 | `--tunnel-scale-up-threshold-percent` | `AETHER_TUNNEL_SCALE_UP_THRESHOLD_PERCENT` | `50` | 单 tunnel 占用率超过该值时扩容 |
 | `--tunnel-scale-down-threshold-percent` | `AETHER_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT` | `35` | 单 tunnel 占用率持续低于该值时允许缩容 |
 | `--tunnel-scale-down-grace-secs` | `AETHER_TUNNEL_SCALE_DOWN_GRACE_SECS` | `15` | 低负载持续时间达到该值后才回收次级 tunnel |
-| `--tunnel-tcp-keepalive-secs` | `AETHER_TUNNEL_TCP_KEEPALIVE_SECS` | `30` | TCP keepalive 初始延迟（秒） |
+| `--tunnel-tcp-keepalive-secs` | `AETHER_TUNNEL_TCP_KEEPALIVE` | `30` | TCP keepalive 初始延迟（秒） |
 | `--tunnel-tcp-nodelay` | `AETHER_TUNNEL_TCP_NODELAY` | `true` | 禁用 Nagle 算法 |
 | `--tunnel-reconnect-base-ms` | `AETHER_TUNNEL_RECONNECT_BASE_MS` | `50` | 指数退避基础延迟（毫秒） |
 | `--tunnel-reconnect-max-ms` | `AETHER_TUNNEL_RECONNECT_MAX_MS` | `250` | 指数退避上限（毫秒） |
