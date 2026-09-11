@@ -101,3 +101,15 @@ PR #290 remains under required-check review. Its API documents and error
 contract changes must be merged before #254 is marked complete; balance
 notification behavior in #247 is intentionally not claimed by that PR.
 
+## 2026-09-12 state-change record
+
+The maintainer comments carrying the above transitions are recorded on
+[#211](https://github.com/JinPengGeng/aeris-token/issues/211#issuecomment-5640656268),
+[#216](https://github.com/JinPengGeng/aeris-token/issues/216#issuecomment-5640656263),
+[#220](https://github.com/JinPengGeng/aeris-token/issues/220#issuecomment-5640656258),
+[#223](https://github.com/JinPengGeng/aeris-token/issues/223#issuecomment-5640656368),
+[#229](https://github.com/JinPengGeng/aeris-token/issues/229#issuecomment-5640656269),
+[#247](https://github.com/JinPengGeng/aeris-token/issues/247#issuecomment-5640656271),
+[#254](https://github.com/JinPengGeng/aeris-token/issues/254#issuecomment-5640656257),
+[#255](https://github.com/JinPengGeng/aeris-token/issues/255#issuecomment-5640656296),
+and [#256](https://github.com/JinPengGeng/aeris-token/issues/256#issuecomment-5640656260).
