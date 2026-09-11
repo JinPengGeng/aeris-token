@@ -62,7 +62,11 @@ jobs:
 
           echo "version_tag=${tag}" >> "${GITHUB_OUTPUT}"
 
-          if [[ "${tag}" == *-* ]]; then
+          # Classify on the version with the aeris-v prefix stripped: the
+          # namespace prefix itself contains a dash and must not read as a
+          # prerelease marker.
+          ver="${tag#aeris-v}"
+          if [[ "${ver}" == *-* ]]; then
             echo "prerelease=true" >> "${GITHUB_OUTPUT}"
           else
             echo "make_latest=true" >> "${GITHUB_OUTPUT}"
@@ -419,8 +423,8 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.GHCR_IMAGE }}
             name=docker.io/${{ steps.registry.outputs.image }},enable=${{ steps.registry.outputs.publish == 'true' }}
           tags: |
-            type=match,pattern=aeris-v(\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?)
-            type=match,pattern=aeris-v(\d+\.\d+),enable=${{ needs.preflight.outputs.make_latest == 'true' }}
+            type=match,pattern=aeris-v(\d+\.\d+\.\d+(?:-(?:beta|rc)\.\d+)?),group=1
+            type=match,pattern=aeris-v(\d+\.\d+)\.\d+,group=1,enable=${{ needs.preflight.outputs.make_latest == 'true' }}
             type=raw,value=latest,enable=${{ needs.preflight.outputs.make_latest == 'true' }}
             type=raw,value=beta,enable=${{ contains(github.ref_name, '-beta.') }}
             type=raw,value=rc,enable=${{ contains(github.ref_name, '-rc.') }}
@@ -507,12 +511,28 @@ jobs:
       - name: Publish GitHub Release assets
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
+          # Immutable releases: assets can only be uploaded while the release
+          # is still a draft. Create as draft, upload, then publish below.
+          draft: true
           generate_release_notes: true
           prerelease: ${{ needs.preflight.outputs.prerelease }}
-          make_latest: ${{ needs.preflight.outputs.make_latest }}
           files: |
             release-assets/*.tar.gz
             release-assets/AETHER_RELEASE_PROVENANCE.sigstore.json
             release-assets/SHA256SUMS
             release-assets/install.sh
             release-assets/*.vsix
+
+      - name: Publish the drafted release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          MAKE_LATEST: ${{ needs.preflight.outputs.make_latest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--draft=false --verify-tag)
+          if [[ "${MAKE_LATEST}" == "true" ]]; then
+            args+=(--latest)
+          fi
+          gh release edit "${RELEASE_TAG}" "${args[@]}"
