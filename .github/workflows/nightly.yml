@@ -104,17 +104,20 @@ jobs:
             exit 0
           fi
 
-          # Quality gate: the push-lane required checks must be green on the
-          # exact snapshot commit. Conservative by design: a failed query, a
-          # pending run, or a missing context all read as not green and skip
+          # Quality gate: the push-lane required checks must be green for the
+          # snapshot's tree state. Both contexts only exist on commits whose
+          # push touched their trigger paths (an automation-only push produces
+          # no Rust CI run), so a context absent on the exact snapshot is
+          # resolved by walking back first-parent ancestors until it appears —
+          # the tree's state for that lane is unchanged since that ancestor.
+          # Conservative by design: a failed query, a pending run, a failure,
+          # or no result within the walk bound all read as not green and skip
           # the day. `Automation Policy / gate` is deliberately NOT required
-          # here: automation-policy.yml only runs on pull_request and
-          # workflow_dispatch, so its context never exists on a main push
-          # commit — and the snapshot's content already passed that gate at
-          # its PR head before merging.
-          context_state() {
-            local context="$1" checks statuses
-            if ! checks="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/check-runs?per_page=100" \
+          # here: it only runs on pull_request and workflow_dispatch, and the
+          # snapshot's content already passed that gate at its PR head.
+          context_state_at() {
+            local at="$1" context="$2" checks statuses
+            if ! checks="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${at}/check-runs?per_page=100" \
               --jq "[.check_runs[] | select(.name == \"${context}\")] | sort_by(.id) | last // {} |
                 if .status == null then \"absent\"
                 elif .status == \"completed\" and .conclusion == \"success\" then \"success\"
@@ -122,7 +125,7 @@ jobs:
                 else \"pending\" end" 2>/dev/null)"; then
               checks="pending"
             fi
-            if ! statuses="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/status" \
+            if ! statuses="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${at}/status" \
               --jq "[.statuses[] | select(.context == \"${context}\")] | sort_by(.created_at) | last // {} |
                 if .state == null then \"absent\"
                 elif .state == \"success\" then \"success\"
@@ -134,17 +137,40 @@ jobs:
               printf 'success\n'
             elif [[ "${checks}" == failed || "${statuses}" == failed ]]; then
               printf 'failed\n'
+            elif [[ "${checks}" == absent && "${statuses}" == absent ]]; then
+              printf 'absent\n'
             else
               printf 'pending\n'
             fi
+          }
+
+          # context_state_walk <context> → "state ancestor_sha"; walks up to 15
+          # ancestors (snapshot first) until the context produces a verdict.
+          context_state_walk() {
+            local context="$1" ancestor state
+            while IFS= read -r ancestor; do
+              [[ "${ancestor}" =~ ^[0-9a-f]{40}$ ]] || continue
+              state="$(context_state_at "${ancestor}" "${context}")"
+              if [[ "${state}" != absent ]]; then
+                printf '%s %s\n' "${state}" "${ancestor}"
+                return 0
+              fi
+            done < <(gh api "repos/${GITHUB_REPOSITORY}/commits?sha=${sha}&per_page=15" --jq '.[].sha' 2>/dev/null)
+            printf 'absent %s\n' ''
           }
 
           required_contexts=("Rust CI / check" "Frontend CI / check")
           gate_green="true"
           gate_report=""
           for context in "${required_contexts[@]}"; do
-            state="$(context_state "${context}")"
-            gate_report+="- \`${context}\`: ${state}"$'\n'
+            read -r state resolved_at <<<"$(context_state_walk "${context}")"
+            if [[ "${resolved_at}" == "${sha}" ]]; then
+              gate_report+="- \`${context}\`: ${state} (on snapshot)"$'\n'
+            elif [[ -n "${resolved_at}" ]]; then
+              gate_report+="- \`${context}\`: ${state} (inherited from ${resolved_at:0:9})"$'\n'
+            else
+              gate_report+="- \`${context}\`: no result within walk bound"$'\n'
+            fi
             if [[ "${state}" != success ]]; then
               gate_green="false"
             fi

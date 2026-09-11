@@ -128,7 +128,12 @@ test('nightly quality gate pins the push-lane required check contexts', () => {
   // requiring it would deadlock the nightly gate.
   assert.doesNotMatch(snapshot.run, /required_contexts=\([^)]*"Automation Policy \/ gate"/);
   assert.match(snapshot.run, /check-runs\?per_page=100/);
-  assert.match(snapshot.run, /commits\/\$\{sha\}\/status/);
+  // Path-filtered pushes leave a lane's context absent on the exact snapshot;
+  // the gate must walk first-parent ancestors and inherit the verdict instead
+  // of deadlocking on absent.
+  assert.match(snapshot.run, /context_state_walk/);
+  assert.match(snapshot.run, /commits\?sha=\$\{sha\}&per_page=15/);
+  assert.match(snapshot.run, /inherited from/);
   // Conservative default: publish is opt-in only after every context is green.
   assert.match(snapshot.run, /echo "publish=false"/);
   assert.match(snapshot.run, /echo "publish=true"/);
