@@ -3681,7 +3681,7 @@ async fn gateway_rejects_image_request_above_gateway_limit_without_hitting_fallb
     );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(
-        payload["detail"],
+        payload["error"]["message"],
         format!(
             "当前图片反代仅支持 n=1..{}",
             openai_image_gateway_max_generation_count()
