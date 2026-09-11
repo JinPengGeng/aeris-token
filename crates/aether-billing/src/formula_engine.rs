@@ -178,18 +178,19 @@ impl FormulaEngine {
             });
         }
 
+        let cost = quantize_finite_cost(cost)?;
         let mut breakdown = BTreeMap::new();
         for (key, value) in &resolved {
             if key.ends_with("_cost") {
                 if let Some(number) = as_f64(value) {
-                    breakdown.insert(key.clone(), quantize_cost(number));
+                    breakdown.insert(key.clone(), quantize_finite_cost(number)?);
                 }
             }
         }
 
         Ok(FormulaEvaluationResult {
             status: FormulaEvaluationStatus::Complete,
-            cost: quantize_cost(cost),
+            cost,
             resolved_dimensions: dims,
             resolved_variables: resolved,
             cost_breakdown: breakdown,
@@ -450,6 +451,27 @@ fn as_f64(value: &serde_json::Value) -> Option<f64> {
     value.as_f64().or_else(|| value.as_i64().map(|v| v as f64))
 }
 
+fn ensure_finite(value: f64) -> Result<f64, UnsafeExpressionError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(UnsafeExpressionError::Unsupported(
+            "non-finite expression result".to_string(),
+        ))
+    }
+}
+
+fn quantize_finite_cost(value: f64) -> Result<f64, ExpressionEvaluationError> {
+    let quantized = quantize_cost(value);
+    if quantized.is_finite() {
+        Ok(quantized)
+    } else {
+        Err(ExpressionEvaluationError::Failed(
+            "non-finite cost after quantization".to_string(),
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Number(f64),
@@ -484,7 +506,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, UnsafeExpressionError> {
                 let number = text.parse::<f64>().map_err(|_| {
                     UnsafeExpressionError::Unsupported(format!("invalid numeric literal: {text}"))
                 })?;
-                tokens.push(Token::Number(number));
+                tokens.push(Token::Number(ensure_finite(number)?));
             }
             ch if ch.is_ascii_alphabetic() || ch == '_' => {
                 let start = index;
@@ -564,7 +586,7 @@ fn evaluate_expression(
             "unexpected trailing tokens".to_string(),
         ));
     }
-    Ok(value)
+    ensure_finite(value)
 }
 
 struct Parser<'a> {
@@ -580,11 +602,13 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 Some(Token::Plus) => {
                     self.index += 1;
-                    left += self.parse_term()?;
+                    let right = self.parse_term()?;
+                    left = ensure_finite(left + right)?;
                 }
                 Some(Token::Minus) => {
                     self.index += 1;
-                    left -= self.parse_term()?;
+                    let right = self.parse_term()?;
+                    left = ensure_finite(left - right)?;
                 }
                 _ => break,
             }
@@ -598,19 +622,23 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 Some(Token::Star) => {
                     self.index += 1;
-                    left *= self.parse_power()?;
+                    let right = self.parse_power()?;
+                    left = ensure_finite(left * right)?;
                 }
                 Some(Token::Slash) => {
                     self.index += 1;
-                    left /= self.parse_power()?;
+                    let right = self.parse_power()?;
+                    left = ensure_finite(left / right)?;
                 }
                 Some(Token::DoubleSlash) => {
                     self.index += 1;
-                    left = (left / self.parse_power()?).floor();
+                    let right = self.parse_power()?;
+                    left = ensure_finite((left / right).floor())?;
                 }
                 Some(Token::Percent) => {
                     self.index += 1;
-                    left %= self.parse_power()?;
+                    let right = self.parse_power()?;
+                    left = ensure_finite(left % right)?;
                 }
                 _ => break,
             }
@@ -623,7 +651,7 @@ impl<'a> Parser<'a> {
         if matches!(self.peek(), Some(Token::DoubleStar)) {
             self.index += 1;
             let right = self.parse_power()?;
-            return Ok(left.powf(right));
+            return ensure_finite(left.powf(right));
         }
         Ok(left)
     }
@@ -636,7 +664,7 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Minus) => {
                 self.index += 1;
-                Ok(-self.parse_unary()?)
+                ensure_finite(-self.parse_unary()?)
             }
             _ => self.parse_primary(),
         }
@@ -644,17 +672,17 @@ impl<'a> Parser<'a> {
 
     fn parse_primary(&mut self) -> Result<f64, UnsafeExpressionError> {
         match self.next() {
-            Some(Token::Number(value)) => Ok(*value),
+            Some(Token::Number(value)) => ensure_finite(*value),
             Some(Token::Identifier(name)) => {
                 if matches!(self.peek(), Some(Token::LeftParen)) {
                     self.index += 1;
                     let args = self.parse_arguments()?;
-                    evaluate_function(name, &args)
+                    ensure_finite(evaluate_function(name, &args)?)
                 } else {
                     let value = self.variables.get(name).and_then(as_f64).ok_or_else(|| {
                         UnsafeExpressionError::Unsupported(format!("unknown variable: {name}"))
                     })?;
-                    Ok(value)
+                    ensure_finite(value)
                 }
             }
             Some(Token::LeftParen) => {
@@ -852,6 +880,79 @@ mod tests {
 
         assert_eq!(result.status, FormulaEvaluationStatus::Incomplete);
         assert_eq!(result.missing_required, vec!["input_tokens".to_string()]);
+    }
+
+    #[test]
+    fn rejects_zero_divisor_for_all_division_operators() {
+        let engine = FormulaEngine::new();
+
+        for expression in ["1 / 0", "1 // 0", "1 % 0"] {
+            let error = engine
+                .evaluate(expression, None, None, None, false)
+                .expect_err("a zero divisor must not produce a billing result");
+
+            assert!(
+                error.to_string().contains("non-finite expression result"),
+                "unexpected error for {expression}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_finite_intermediate_even_when_function_would_mask_it() {
+        let error = FormulaEngine::new()
+            .evaluate("min(1 / 0, 1)", None, None, None, false)
+            .expect_err("a non-finite intermediate must fail evaluation");
+
+        assert!(error.to_string().contains("non-finite expression result"));
+    }
+
+    #[test]
+    fn rejects_arithmetic_and_quantization_overflow() {
+        let engine = FormulaEngine::new();
+        let variables = BTreeMap::from([("large".to_string(), serde_json::json!(f64::MAX))]);
+
+        let arithmetic_error = engine
+            .evaluate("large * 2", Some(&variables), None, None, false)
+            .expect_err("arithmetic overflow must fail evaluation");
+        assert!(arithmetic_error
+            .to_string()
+            .contains("non-finite expression result"));
+
+        let quantization_error = engine
+            .evaluate("large", Some(&variables), None, None, false)
+            .expect_err("quantization overflow must fail evaluation");
+        assert!(quantization_error
+            .to_string()
+            .contains("non-finite cost after quantization"));
+    }
+
+    #[test]
+    fn preserves_finite_boundary_zero_and_negative_cost_contracts() {
+        let engine = FormulaEngine::new();
+        let variables = BTreeMap::from([(
+            "large".to_string(),
+            serde_json::json!(f64::MAX / 1_000_000_000.0),
+        )]);
+
+        let boundary = engine
+            .evaluate("large", Some(&variables), None, None, false)
+            .expect("a large quantizable finite value should remain valid");
+        assert_eq!(boundary.status, FormulaEvaluationStatus::Complete);
+        assert!(boundary.cost.is_finite());
+
+        let zero = engine
+            .evaluate("0", None, None, None, false)
+            .expect("zero remains a valid cost");
+        assert_eq!(zero.status, FormulaEvaluationStatus::Complete);
+        assert_eq!(zero.cost, 0.0);
+
+        let negative = engine
+            .evaluate("-1", None, None, None, false)
+            .expect("negative cost remains an incomplete result");
+        assert_eq!(negative.status, FormulaEvaluationStatus::Incomplete);
+        assert_eq!(negative.cost, 0.0);
+        assert_eq!(negative.error.as_deref(), Some("negative_cost"));
     }
 
     #[test]
