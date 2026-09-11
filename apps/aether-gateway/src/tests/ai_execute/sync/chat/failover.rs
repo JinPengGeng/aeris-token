@@ -667,7 +667,8 @@ async fn gateway_surfaces_local_execution_runtime_miss_reason_when_all_openai_ch
         Some("all_candidates_skipped")
     );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    // OpenAI-family local 503 responses use the public OpenAI error contract.
+    assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(
         payload["error"]["message"],
         "没有可用提供商支持模型 gpt-5 的同步请求"
