@@ -28,20 +28,23 @@ const AI_PUBLIC_METHOD_NOT_ALLOWED_DETAIL: &str = "Method not allowed";
 const AI_PUBLIC_UNAUTHORIZED_DETAIL: &str = "Unauthorized";
 const AI_PUBLIC_INTERNAL_ERROR_DETAIL: &str = "Service temporarily unavailable";
 const AI_PUBLIC_UPSTREAM_ERROR_DETAIL: &str = "Upstream request failed";
-const OPENAI_IMAGE_PROMPT_DETAIL: &str = "图片生成/编辑请求缺少 prompt";
-const OPENAI_IMAGE_EDIT_INPUT_DETAIL: &str = "图片编辑请求至少需要 1 张输入图片";
+const OPENAI_IMAGE_PROMPT_DETAIL: &str = "Image generation or edit request requires prompt";
+const OPENAI_IMAGE_EDIT_INPUT_DETAIL: &str = "Image edit request requires at least one input image";
 const OPENAI_IMAGE_PARTIAL_IMAGES_DETAIL: &str =
-    "partial_images 仅支持 0-3，且必须配合 stream=true";
-const OPENAI_IMAGE_STYLE_DETAIL: &str = "当前 Codex 图片反代暂不支持 style 参数";
-const OPENAI_IMAGE_RESPONSE_FORMAT_DETAIL: &str = "response_format 仅支持 url 或 b64_json";
-const OPENAI_IMAGE_OUTPUT_FORMAT_DETAIL: &str = "output_format 仅支持 png、jpeg 或 webp";
-const OPENAI_IMAGE_QUALITY_DETAIL: &str = "quality 仅支持 auto、low、medium、high、standard 或 hd";
-const OPENAI_IMAGE_BACKGROUND_DETAIL: &str = "background 仅支持 auto、opaque 或 transparent";
-const OPENAI_IMAGE_MODERATION_DETAIL: &str = "moderation 仅支持 auto 或 low";
-const OPENAI_IMAGE_INPUT_FIDELITY_DETAIL: &str = "input_fidelity 仅支持 low 或 high";
-const OPENAI_IMAGE_OUTPUT_COMPRESSION_DETAIL: &str = "output_compression 必须是 0-100 的整数";
-const OPENAI_IMAGE_INVALID_JSON_DETAIL: &str = "图片接口 JSON 请求体无效";
-const OPENAI_IMAGE_INVALID_MULTIPART_DETAIL: &str = "图片接口 multipart/form-data 请求体无效";
+    "partial_images must be between 0 and 3 and requires stream=true";
+const OPENAI_IMAGE_STYLE_DETAIL: &str = "The Codex image proxy does not support style";
+const OPENAI_IMAGE_RESPONSE_FORMAT_DETAIL: &str = "response_format must be url or b64_json";
+const OPENAI_IMAGE_OUTPUT_FORMAT_DETAIL: &str = "output_format must be png, jpeg, or webp";
+const OPENAI_IMAGE_QUALITY_DETAIL: &str =
+    "quality must be auto, low, medium, high, standard, or hd";
+const OPENAI_IMAGE_BACKGROUND_DETAIL: &str = "background must be auto, opaque, or transparent";
+const OPENAI_IMAGE_MODERATION_DETAIL: &str = "moderation must be auto or low";
+const OPENAI_IMAGE_INPUT_FIDELITY_DETAIL: &str = "input_fidelity must be low or high";
+const OPENAI_IMAGE_OUTPUT_COMPRESSION_DETAIL: &str =
+    "output_compression must be an integer between 0 and 100";
+const OPENAI_IMAGE_INVALID_JSON_DETAIL: &str = "Image API JSON request body is invalid";
+const OPENAI_IMAGE_INVALID_MULTIPART_DETAIL: &str =
+    "Image API multipart/form-data request body is invalid";
 const OPENAI_EMBEDDING_CONTENT_TYPE_DETAIL: &str =
     "Embedding request content-type must be application/json";
 const OPENAI_EMBEDDING_INVALID_JSON_DETAIL: &str = "Embedding request JSON body is invalid";
@@ -444,7 +447,7 @@ fn maybe_build_local_openai_request_validation_response(
         && request_context.request_path == "/v1/embeddings"
     {
         let Some(request_body) = request_body else {
-            return Some(build_ai_public_error_response(
+            return Some(build_openai_public_error_response(
                 http::StatusCode::BAD_REQUEST,
                 OPENAI_EMBEDDING_INVALID_JSON_DETAIL,
             ));
@@ -453,7 +456,7 @@ fn maybe_build_local_openai_request_validation_response(
             request_context.request_content_type.as_deref(),
             request_body,
         ) {
-            return Some(build_ai_public_error_response(
+            return Some(build_openai_public_error_response(
                 http::StatusCode::BAD_REQUEST,
                 detail,
             ));
@@ -465,7 +468,7 @@ fn maybe_build_local_openai_request_validation_response(
         && request_context.request_path == "/v1/rerank"
     {
         let Some(request_body) = request_body else {
-            return Some(build_ai_public_error_response(
+            return Some(build_openai_public_error_response(
                 http::StatusCode::BAD_REQUEST,
                 OPENAI_RERANK_INVALID_JSON_DETAIL,
             ));
@@ -474,7 +477,7 @@ fn maybe_build_local_openai_request_validation_response(
             request_context.request_content_type.as_deref(),
             request_body,
         ) {
-            return Some(build_ai_public_error_response(
+            return Some(build_openai_public_error_response(
                 http::StatusCode::BAD_REQUEST,
                 detail,
             ));
@@ -503,7 +506,7 @@ fn maybe_build_local_openai_request_validation_response(
     ) {
         Ok(validation) => validation,
         Err(detail) => {
-            return Some(build_ai_public_error_response(
+            return Some(build_openai_public_error_response(
                 http::StatusCode::BAD_REQUEST,
                 detail,
             ));
@@ -514,13 +517,13 @@ fn maybe_build_local_openai_request_validation_response(
         OpenAiImageOperation::Generate | OpenAiImageOperation::Edit
             if validation.prompt.is_none() =>
         {
-            return Some(build_ai_public_error_response(
+            return Some(build_openai_public_error_response(
                 http::StatusCode::BAD_REQUEST,
                 OPENAI_IMAGE_PROMPT_DETAIL,
             ));
         }
         OpenAiImageOperation::Edit if validation.image_count == 0 => {
-            return Some(build_ai_public_error_response(
+            return Some(build_openai_public_error_response(
                 http::StatusCode::BAD_REQUEST,
                 OPENAI_IMAGE_EDIT_INPUT_DETAIL,
             ));
@@ -529,7 +532,7 @@ fn maybe_build_local_openai_request_validation_response(
     }
 
     if let Some(detail) = validate_openai_image_n(&validation) {
-        return Some(build_ai_public_error_response(
+        return Some(build_openai_public_error_response(
             http::StatusCode::BAD_REQUEST,
             detail,
         ));
@@ -538,14 +541,14 @@ fn maybe_build_local_openai_request_validation_response(
     if validation.partial_images.is_some_and(|value| value > 3)
         || (validation.partial_images.is_some() && !validation.stream)
     {
-        return Some(build_ai_public_error_response(
+        return Some(build_openai_public_error_response(
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_PARTIAL_IMAGES_DETAIL,
         ));
     }
 
     if validation.style_present {
-        return Some(build_ai_public_error_response(
+        return Some(build_openai_public_error_response(
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_STYLE_DETAIL,
         ));
@@ -556,7 +559,7 @@ fn maybe_build_local_openai_request_validation_response(
         .as_deref()
         .is_some_and(|value| !matches!(value, "url" | "b64_json"))
     {
-        return Some(build_ai_public_error_response(
+        return Some(build_openai_public_error_response(
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_RESPONSE_FORMAT_DETAIL,
         ));
@@ -567,7 +570,7 @@ fn maybe_build_local_openai_request_validation_response(
         .as_deref()
         .is_some_and(|value| !matches!(value, "png" | "jpeg" | "jpg" | "webp"))
     {
-        return Some(build_ai_public_error_response(
+        return Some(build_openai_public_error_response(
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_OUTPUT_FORMAT_DETAIL,
         ));
@@ -578,7 +581,7 @@ fn maybe_build_local_openai_request_validation_response(
         .as_deref()
         .is_some_and(|value| normalize_openai_image_quality(value).is_none())
     {
-        return Some(build_ai_public_error_response(
+        return Some(build_openai_public_error_response(
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_QUALITY_DETAIL,
         ));
@@ -589,7 +592,7 @@ fn maybe_build_local_openai_request_validation_response(
         .as_deref()
         .is_some_and(|value| !matches!(value, "auto" | "opaque" | "transparent"))
     {
-        return Some(build_ai_public_error_response(
+        return Some(build_openai_public_error_response(
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_BACKGROUND_DETAIL,
         ));
@@ -600,7 +603,7 @@ fn maybe_build_local_openai_request_validation_response(
         .as_deref()
         .is_some_and(|value| !matches!(value, "auto" | "low"))
     {
-        return Some(build_ai_public_error_response(
+        return Some(build_openai_public_error_response(
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_MODERATION_DETAIL,
         ));
@@ -611,7 +614,7 @@ fn maybe_build_local_openai_request_validation_response(
         .as_deref()
         .is_some_and(|value| !matches!(value, "low" | "high"))
     {
-        return Some(build_ai_public_error_response(
+        return Some(build_openai_public_error_response(
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_INPUT_FIDELITY_DETAIL,
         ));
@@ -621,7 +624,7 @@ fn maybe_build_local_openai_request_validation_response(
         .output_compression
         .is_some_and(|value| value > 100)
     {
-        return Some(build_ai_public_error_response(
+        return Some(build_openai_public_error_response(
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_OUTPUT_COMPRESSION_DETAIL,
         ));
@@ -2027,6 +2030,29 @@ fn build_ai_public_error_response(
     build_ai_public_error_payload(status, public_detail)
 }
 
+fn build_openai_public_error_response(
+    status: http::StatusCode,
+    detail: impl Into<String>,
+) -> Response<Body> {
+    let detail = detail.into();
+    let kind = match status {
+        http::StatusCode::BAD_REQUEST
+        | http::StatusCode::METHOD_NOT_ALLOWED
+        | http::StatusCode::UNPROCESSABLE_ENTITY => LocalCoreSyncErrorKind::InvalidRequest,
+        http::StatusCode::UNAUTHORIZED => LocalCoreSyncErrorKind::Authentication,
+        http::StatusCode::FORBIDDEN => LocalCoreSyncErrorKind::PermissionDenied,
+        http::StatusCode::NOT_FOUND => LocalCoreSyncErrorKind::NotFound,
+        http::StatusCode::PAYLOAD_TOO_LARGE => LocalCoreSyncErrorKind::RequestTooLarge,
+        http::StatusCode::TOO_MANY_REQUESTS => LocalCoreSyncErrorKind::RateLimit,
+        http::StatusCode::SERVICE_UNAVAILABLE => LocalCoreSyncErrorKind::Overloaded,
+        _ if status.is_server_error() => LocalCoreSyncErrorKind::ServerError,
+        _ => LocalCoreSyncErrorKind::InvalidRequest,
+    };
+    let body = build_core_error_body_for_client_format("openai:image", &detail, None, kind)
+        .unwrap_or_else(|| json!({ "error": { "message": detail } }));
+    (status, Json(body)).into_response()
+}
+
 fn build_ai_public_internal_error_response(
     operation: &'static str,
     error_category: &'static str,
@@ -2081,14 +2107,14 @@ fn build_ai_public_error_payload(
 mod tests {
     use super::{
         build_ai_public_error_response, build_ai_public_upstream_error_response,
-        build_gemini_file_mapping_payload, gemini_video_task_error_projection,
-        parse_multipart_fields, parse_openai_image_validation_input,
-        validate_claude_count_tokens_request, validate_openai_image_n, OpenAiImageOperation,
-        StoredGeminiFileMapping, AI_PUBLIC_UPSTREAM_ERROR_DETAIL,
-        CLAUDE_COUNT_TOKENS_BODY_REQUIRED_DETAIL, CLAUDE_COUNT_TOKENS_INVALID_JSON_DETAIL,
-        CLAUDE_COUNT_TOKENS_MESSAGES_REQUIRED_DETAIL, CLAUDE_COUNT_TOKENS_MODEL_REQUIRED_DETAIL,
-        MAX_MULTIPART_PARTS, MAX_MULTIPART_PART_HEADER_BYTES,
-        OPENAI_IMAGE_INVALID_MULTIPART_DETAIL,
+        build_gemini_file_mapping_payload, build_openai_public_error_response,
+        gemini_video_task_error_projection, parse_multipart_fields,
+        parse_openai_image_validation_input, validate_claude_count_tokens_request,
+        validate_openai_image_n, OpenAiImageOperation, StoredGeminiFileMapping,
+        AI_PUBLIC_UPSTREAM_ERROR_DETAIL, CLAUDE_COUNT_TOKENS_BODY_REQUIRED_DETAIL,
+        CLAUDE_COUNT_TOKENS_INVALID_JSON_DETAIL, CLAUDE_COUNT_TOKENS_MESSAGES_REQUIRED_DETAIL,
+        CLAUDE_COUNT_TOKENS_MODEL_REQUIRED_DETAIL, MAX_MULTIPART_PARTS,
+        MAX_MULTIPART_PART_HEADER_BYTES, OPENAI_IMAGE_INVALID_MULTIPART_DETAIL,
     };
     use aether_data_contracts::repository::video_tasks::{StoredVideoTask, VideoTaskStatus};
     use axum::body::{to_bytes, Body, Bytes};
@@ -2110,6 +2136,27 @@ mod tests {
             serde_json::from_slice(&body).expect("error response should be JSON");
         assert_eq!(payload["detail"], "Service temporarily unavailable");
         assert!(!String::from_utf8_lossy(&body).contains("internal-secret"));
+    }
+
+    #[tokio::test]
+    async fn openai_local_validation_errors_use_openai_error_envelope() {
+        let response = build_openai_public_error_response(
+            StatusCode::BAD_REQUEST,
+            "Image API JSON request body is invalid",
+        );
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error response body should read");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        assert_eq!(payload["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            payload["error"]["message"],
+            "Image API JSON request body is invalid"
+        );
+        assert!(payload.get("detail").is_none());
     }
 
     #[tokio::test]

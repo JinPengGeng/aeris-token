@@ -43,7 +43,9 @@ pub fn build_core_error_body_for_client_format(
         | "openai:responses"
         | "openai:responses:compact"
         | "openai:search"
-        | "openai:embedding" => {
+        | "openai:embedding"
+        | "openai:image"
+        | "openai:rerank" => {
             error_object.insert(
                 "type".to_string(),
                 Value::String(map_local_sync_error_kind_to_openai_type(kind).to_string()),
@@ -179,6 +181,21 @@ mod tests {
         assert_eq!(body["error"]["message"], "search unavailable");
         assert_eq!(body["error"]["type"], "server_error");
         assert_eq!(body["error"]["code"], "upstream_unavailable");
+    }
+
+    #[test]
+    fn builds_openai_image_and_rerank_core_error_bodies() {
+        for format in ["openai:image", "openai:rerank"] {
+            let body = build_core_error_body_for_client_format(
+                format,
+                "invalid image request",
+                None,
+                LocalCoreSyncErrorKind::InvalidRequest,
+            )
+            .expect("OpenAI family body should build");
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+            assert_eq!(body["error"]["message"], "invalid image request");
+        }
     }
 
     #[test]
