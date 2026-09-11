@@ -25,4 +25,11 @@ DLQ 无上限会让 poison message 长期堆积并把 Redis 内存风险转化�
 
 ## 后续拆分
 
-另开 PR 实现管理员 DLQ 查询和 redrive：只允许 `admin:usage:admin`，每次请求有数量/字节上限，按源 stream、consumer group、pending ID 做幂等转移，成功/跳过/失败逐项返回并写入 durable audit。redrive 不能绕过计费幂等或把已不在 PEL 的条目标记为已归档。另行建立 Postgres restore 演练和任务重试策略记录。
+## Operator lifecycle（本 PR）
+
+- `GET /api/admin/usage/dlq?cursor=0-0&limit=50` 以游标读取 DLQ，不创建 consumer group；只返回 ID、原始 entry ID、错误摘要和 payload 合法性，避免列表默认泄露完整请求体。`limit` 最大 100。
+- `POST /api/admin/usage/dlq/{id}/redrive` 从 DLQ 中按 ID 原子读取并重放到 usage stream，成功后删除 DLQ 条目；Redis 使用 Lua，Memory 使用同一锁。重复请求返回 `already_redriven`，不会追加第二条 usage event；不存在返回 `not_found`。
+- list 需要已认证的 `admin:usage:read`（或更高）；redrive 是写操作并提升到 `admin:usage:admin`，每次动作附加 admin audit。未配置 queue/backend 时 fail closed。
+- redrive 严格解析 DLQ 的 JSON `payload.fields`，不接受客户端提供的事件字段，避免通过管理 API 注入任意队列数据；目标 stream 继续使用既有 `stream_maxlen`。
+
+后续仍需批量 redrive、失败重试/死信原因过滤和 durable audit 查询；这些属于独立高影响变更。另行建立 Postgres restore 演练和任务重试策略记录。

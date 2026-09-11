@@ -457,6 +457,31 @@ pub(super) fn classify_admin_observability_family_route(
             false,
         ))
     } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/admin/usage/dlq" | "/api/admin/usage/dlq/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "usage_manage",
+            "dlq_list",
+            "admin:usage",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path.starts_with("/api/admin/usage/dlq/")
+        && normalized_path.ends_with("/redrive")
+        && normalized_path.matches('/').count() == 6
+    {
+        Some(classified(
+            "admin_proxy",
+            "usage_manage",
+            "dlq_redrive",
+            "admin:usage",
+            false,
+        ))
+    } else if method == http::Method::GET
         && normalized_path.starts_with("/api/admin/usage/")
         && normalized_path.ends_with("/curl")
         && normalized_path.matches('/').count() == 5

@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use aether_contracts::ExecutionTelemetry;
 use aether_data_contracts::repository::usage::UpsertUsageRecord;
 use aether_data_contracts::DataLayerError;
-use aether_runtime_state::{RuntimeQueueStats, RuntimeQueueStore};
+use aether_runtime_state::{
+    RuntimeQueuePage, RuntimeQueueRedriveOutcome, RuntimeQueueStats, RuntimeQueueStore,
+};
 use async_trait::async_trait;
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
@@ -3545,6 +3547,88 @@ impl UsageRuntime {
 
     pub fn is_enabled(&self) -> bool {
         self.config.enabled
+    }
+
+    pub fn dlq_stream_key(&self) -> &str {
+        &self.config.dlq_stream_key
+    }
+
+    /// Inspect the bounded DLQ without creating a consumer group or changing
+    /// pending state. Intended for authenticated operator tooling.
+    pub async fn dead_letter_page<T>(
+        &self,
+        data: &T,
+        start_id: &str,
+        count: usize,
+    ) -> Result<RuntimeQueuePage, DataLayerError>
+    where
+        T: UsageRuntimeAccess,
+    {
+        let Some(runner) = data.usage_worker_queue() else {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage worker queue is unavailable".to_string(),
+            ));
+        };
+        runner
+            .read_stream_page(&self.config.dlq_stream_key, start_id, count)
+            .await
+    }
+
+    /// Redrive one encoded DLQ payload to the usage stream. The state backend
+    /// performs the append/delete and idempotency check atomically.
+    pub async fn redrive_dead_letter<T>(
+        &self,
+        data: &T,
+        dead_letter_id: &str,
+    ) -> Result<RuntimeQueueRedriveOutcome, DataLayerError>
+    where
+        T: UsageRuntimeAccess,
+    {
+        let Some(runner) = data.usage_worker_queue() else {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage worker queue is unavailable".to_string(),
+            ));
+        };
+        #[derive(serde::Deserialize)]
+        struct DeadLetterPayload {
+            fields: BTreeMap<String, String>,
+        }
+        // The backend owns the idempotency marker.  When the entry is already
+        // deleted, retain a non-empty placeholder so it can still return
+        // `AlreadyRedriven` rather than losing that terminal result.
+        let destination_fields = match runner
+            .read_stream_entry(&self.config.dlq_stream_key, dead_letter_id)
+            .await?
+        {
+            Some(entry) => {
+                let Some(payload) = entry.fields.get("payload") else {
+                    return Err(DataLayerError::InvalidInput(
+                        "dead-letter entry has no payload field".to_string(),
+                    ));
+                };
+                let decoded: DeadLetterPayload = serde_json::from_str(payload).map_err(|error| {
+                    DataLayerError::InvalidInput(format!(
+                        "dead-letter payload is invalid JSON: {error}"
+                    ))
+                })?;
+                if decoded.fields.is_empty() {
+                    return Err(DataLayerError::InvalidInput(
+                        "dead-letter payload fields cannot be empty".to_string(),
+                    ));
+                }
+                decoded.fields
+            }
+            None => BTreeMap::from([("_redrive_probe".to_string(), String::new())]),
+        };
+        runner
+            .redrive_stream_entry(
+                &self.config.dlq_stream_key,
+                dead_letter_id,
+                &self.config.stream_key,
+                &destination_fields,
+                Some(self.config.stream_maxlen),
+            )
+            .await
     }
 
     /// Call before spawning a request finalizer that can outlive its HTTP body.
