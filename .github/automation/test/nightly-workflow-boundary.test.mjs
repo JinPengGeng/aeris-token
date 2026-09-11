@@ -117,12 +117,16 @@ test('nightly tag is date-stamped, unique per UTC day, and only built from main'
   }
 });
 
-test('nightly quality gate pins the three required check contexts', () => {
+test('nightly quality gate pins the push-lane required check contexts', () => {
   const document = workflow();
   const snapshot = findStep(document, 'source', (step) => step.id === 'snapshot');
-  for (const context of ['Rust CI / check', 'Frontend CI / check', 'Automation Policy / gate']) {
+  for (const context of ['Rust CI / check', 'Frontend CI / check']) {
     assert.ok(snapshot.run.includes(context), `quality gate must check ${context}`);
   }
+  // Automation Policy / gate must NOT be required: that context only exists on
+  // pull_request/workflow_dispatch runs, never on main push commits, so
+  // requiring it would deadlock the nightly gate.
+  assert.doesNotMatch(snapshot.run, /required_contexts=\([^)]*"Automation Policy \/ gate"/);
   assert.match(snapshot.run, /check-runs\?per_page=100/);
   assert.match(snapshot.run, /commits\/\$\{sha\}\/status/);
   // Conservative default: publish is opt-in only after every context is green.
