@@ -11,7 +11,8 @@ use super::{
     cleanup_processed_usage_counter_deltas_once, duration_until_next_daily_run,
     duration_until_next_db_maintenance_run, duration_until_next_stats_aggregation_run,
     duration_until_next_stats_hourly_aggregation_run, maintenance_timezone, parse_hhmm_time,
-    perform_oauth_token_refresh_once, perform_provider_quota_alert_once, provider_checkin_schedule,
+    perform_oauth_token_refresh_once, perform_provider_quota_alert_once,
+    perform_remote_quota_sync_once, provider_checkin_schedule, remote_quota_sync_worker_interval,
     run_audit_cleanup_once, run_db_maintenance_once, run_gemini_file_mapping_cleanup_once,
     run_pending_cleanup_once, run_pool_monitor_once, run_provider_checkin_once,
     run_proxy_node_metrics_cleanup_once, run_proxy_node_stale_cleanup_once,
@@ -517,6 +518,38 @@ pub(crate) fn spawn_provider_quota_alert_worker(
                 }
                 if let Err(err) = perform_provider_quota_alert_once(&state).await {
                     log_maintenance_worker_failure("provider_quota_alert", "tick", &err);
+                }
+            }
+        },
+    ))
+}
+
+pub(crate) fn spawn_remote_quota_sync_worker(
+    state: AppState,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !state.has_provider_catalog_data_reader() || !state.has_provider_catalog_data_writer() {
+        return None;
+    }
+
+    Some(crate::task_runtime::spawn_singleton_worker(
+        state,
+        crate::task_runtime::TASK_KEY_REMOTE_QUOTA_SYNC,
+        |state| async move {
+            if let Err(err) = perform_remote_quota_sync_once(&state).await {
+                log_maintenance_worker_failure("remote_quota_sync", "startup", &err);
+            }
+            let mut deferred_since = None;
+            loop {
+                tokio::time::sleep(remote_quota_sync_worker_interval(&state).await).await;
+                if should_defer_for_database_pressure(
+                    &state.data,
+                    "remote_quota_sync",
+                    &mut deferred_since,
+                ) {
+                    continue;
+                }
+                if let Err(err) = perform_remote_quota_sync_once(&state).await {
+                    log_maintenance_worker_failure("remote_quota_sync", "tick", &err);
                 }
             }
         },

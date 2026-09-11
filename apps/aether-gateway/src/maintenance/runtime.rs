@@ -36,6 +36,8 @@ mod proxy_node_metrics_cleanup;
 mod proxy_node_staleness;
 #[path = "runtime/proxy_upgrade_rollout.rs"]
 mod proxy_upgrade_rollout;
+#[path = "runtime/remote_quota_sync.rs"]
+mod remote_quota_sync;
 #[path = "runtime/request_candidate_cleanup.rs"]
 mod request_candidate_cleanup;
 #[path = "runtime/runners.rs"]
@@ -110,6 +112,10 @@ pub(crate) use proxy_upgrade_rollout::{
     ProxyUpgradeRolloutSkippedRestoreSummary, ProxyUpgradeRolloutStatus,
     ProxyUpgradeRolloutSummary, ProxyUpgradeRolloutTrackedNodeState,
 };
+pub(crate) use remote_quota_sync::{
+    perform_remote_quota_sync_for_provider, perform_remote_quota_sync_once,
+    remote_quota_sync_worker_interval, RemoteQuotaSyncProviderOutcome, RemoteQuotaSyncRunSummary,
+};
 use request_candidate_cleanup::*;
 use runners::*;
 pub(crate) use runners::{
@@ -149,6 +155,7 @@ const OAUTH_TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const PROVIDER_CHECKIN_CONCURRENCY: usize = 3;
 const PROVIDER_QUOTA_ALERT_CONCURRENCY: usize = 3;
 const PROVIDER_QUOTA_ALERT_INTERVAL: Duration = Duration::from_secs(5);
+const REMOTE_QUOTA_SYNC_CONCURRENCY: usize = 3;
 const PROVIDER_CHECKIN_DEFAULT_TIME: &str = "01:05";
 const REQUEST_CANDIDATE_CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const STATS_DAILY_AGGREGATION_HOUR: u32 = 0;
