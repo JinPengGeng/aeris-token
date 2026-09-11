@@ -59,6 +59,7 @@ pub(crate) struct MemoryRuntimeBackend {
     sets: Mutex<HashMap<String, MemorySetEntry>>,
     scores: Mutex<HashMap<String, MemoryScoreEntry>>,
     queues: Mutex<HashMap<String, MemoryQueueStream>>,
+    queue_redrive_markers: Mutex<BTreeMap<String, String>>,
     queue_seq: AtomicU64,
     locks: Mutex<HashMap<String, MemoryLockEntry>>,
     lock_fencing_seq: AtomicU64,
@@ -1200,6 +1201,113 @@ impl MemoryRuntimeBackend {
             }
         }
         id
+    }
+
+    pub(crate) async fn queue_read_stream_page(
+        &self,
+        stream: &str,
+        start_id: &str,
+        count: usize,
+    ) -> Result<crate::RuntimeQueuePage, DataLayerError> {
+        let start_sequence = parse_memory_stream_sequence(start_id)?;
+        let mut queues = self.queues.lock().await;
+        prune_memory_key(&mut queues, stream, Instant::now());
+        let entries = queues
+            .get(stream)
+            .into_iter()
+            .flat_map(|state| state.entries.iter())
+            .filter(|entry| entry.sequence > start_sequence)
+            .take(count)
+            .map(|entry| entry.entry.clone())
+            .collect::<Vec<_>>();
+        let has_more = queues.get(stream).is_some_and(|state| {
+            state
+                .entries
+                .iter()
+                .filter(|entry| entry.sequence > start_sequence)
+                .count()
+                > entries.len()
+        });
+        let next_start_id = entries
+            .last()
+            .map(|entry| entry.id.clone())
+            .unwrap_or_else(|| "0-0".to_string());
+        Ok(crate::RuntimeQueuePage {
+            next_start_id,
+            entries,
+            has_more,
+        })
+    }
+
+    pub(crate) async fn queue_read_stream_entry(
+        &self,
+        stream: &str,
+        entry_id: &str,
+    ) -> Option<RuntimeQueueEntry> {
+        let mut queues = self.queues.lock().await;
+        prune_memory_key(&mut queues, stream, Instant::now());
+        queues
+            .get(stream)
+            .and_then(|state| {
+                state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.entry.id == entry_id)
+            })
+            .map(|entry| entry.entry.clone())
+    }
+
+    pub(crate) async fn queue_redrive_stream_entry(
+        &self,
+        source: &str,
+        entry_id: &str,
+        destination: &str,
+        destination_fields: &BTreeMap<String, String>,
+        destination_maxlen: Option<usize>,
+    ) -> Result<crate::RuntimeQueueRedriveOutcome, DataLayerError> {
+        let marker = format!("{source}\n{entry_id}");
+        let destination_fields = destination_fields.clone();
+        let mut markers = self.queue_redrive_markers.lock().await;
+        if let Some(destination_id) = markers.get(&marker).cloned() {
+            return Ok(crate::RuntimeQueueRedriveOutcome::AlreadyRedriven { destination_id });
+        }
+        let mut queues = self.queues.lock().await;
+        prune_memory_key(&mut queues, source, Instant::now());
+        let source_exists = queues
+            .get(source)
+            .is_some_and(|state| state.entries.iter().any(|entry| entry.entry.id == entry_id));
+        if !source_exists {
+            return Ok(crate::RuntimeQueueRedriveOutcome::NotFound);
+        }
+        let sequence = self
+            .queue_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        let destination_id = format!("{sequence}-0");
+        prune_memory_key(&mut queues, destination, Instant::now());
+        let destination_state = queues.entry(destination.to_string()).or_default();
+        destination_state.entries.push_back(MemoryQueuedEntry {
+            sequence,
+            entry: RuntimeQueueEntry {
+                id: destination_id.clone(),
+                fields: destination_fields,
+            },
+        });
+        if let Some(maxlen) = destination_maxlen.filter(|value| *value > 0) {
+            while destination_state.entries.len() > maxlen {
+                let Some(removed) = destination_state.entries.pop_front() else {
+                    break;
+                };
+                remove_pending_from_all_groups(destination_state, &removed.entry.id);
+            }
+        }
+        let source_state = queues.get_mut(source).expect("validated source stream");
+        source_state
+            .entries
+            .retain(|entry| entry.entry.id != entry_id);
+        remove_pending_from_all_groups(source_state, entry_id);
+        markers.insert(marker, destination_id.clone());
+        Ok(crate::RuntimeQueueRedriveOutcome::Redriven { destination_id })
     }
 
     pub(crate) async fn queue_ensure_consumer_group(
@@ -2811,6 +2919,53 @@ mod tests {
         assert_eq!(
             state.windows[rules[0].key].events["same-event"], 1_000,
             "idempotent replay must preserve the original Redis ZADD NX timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_dead_letter_redrive_is_idempotent_and_removes_source() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let fields = BTreeMap::from([("payload".to_string(), "dead-letter".to_string())]);
+        let source_id = backend.queue_append("usage:dlq", fields, None).await;
+        let replay_fields = BTreeMap::from([("payload".to_string(), "original".to_string())]);
+        let first = backend
+            .queue_redrive_stream_entry(
+                "usage:dlq",
+                &source_id,
+                "usage:events",
+                &replay_fields,
+                Some(10),
+            )
+            .await
+            .expect("redrive succeeds");
+        let destination_id = match first {
+            crate::RuntimeQueueRedriveOutcome::Redriven { destination_id } => destination_id,
+            other => panic!("unexpected first outcome: {other:?}"),
+        };
+        assert!(backend
+            .queue_read_stream_entry("usage:dlq", &source_id)
+            .await
+            .is_none());
+        let second = backend
+            .queue_redrive_stream_entry(
+                "usage:dlq",
+                &source_id,
+                "usage:events",
+                &replay_fields,
+                Some(10),
+            )
+            .await
+            .expect("repeated redrive succeeds");
+        assert_eq!(
+            second,
+            crate::RuntimeQueueRedriveOutcome::AlreadyRedriven { destination_id }
+        );
+        assert_eq!(
+            backend
+                .queue_stats("usage:events", None)
+                .await
+                .stream_length,
+            1
         );
     }
 }

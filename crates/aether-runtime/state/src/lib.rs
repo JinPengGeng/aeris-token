@@ -1173,6 +1173,28 @@ pub struct RuntimeQueueEntry {
     pub fields: BTreeMap<String, String>,
 }
 
+/// A bounded, cursor-based scan of a stream that does not create a consumer-group
+/// pending entry. `next_start_id` is the last returned ID; `has_more` signals
+/// whether a subsequent scan can return another page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeQueuePage {
+    pub next_start_id: String,
+    pub entries: Vec<RuntimeQueueEntry>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeQueueRedriveOutcome {
+    Redriven {
+        destination_id: String,
+    },
+    /// The same source entry was already redriven by an earlier request.
+    AlreadyRedriven {
+        destination_id: String,
+    },
+    NotFound,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeQueueReclaimPage {
     /// Resume the next reclaim scan here; `0-0` marks the end of the current scan.
@@ -1287,6 +1309,44 @@ pub trait RuntimeQueueStore: Send + Sync {
         maxlen: Option<usize>,
     ) -> Result<String, DataLayerError>;
 
+    /// Read entries without registering a consumer or mutating a PEL.  Backends
+    /// that do not expose a raw stream scan return an explicit unsupported error.
+    async fn read_stream_page(
+        &self,
+        _stream: &str,
+        _start_id: &str,
+        _count: usize,
+    ) -> Result<RuntimeQueuePage, DataLayerError> {
+        Err(DataLayerError::InvalidInput(
+            "runtime queue stream scan is unsupported by this backend".to_string(),
+        ))
+    }
+
+    async fn read_stream_entry(
+        &self,
+        _stream: &str,
+        _entry_id: &str,
+    ) -> Result<Option<RuntimeQueueEntry>, DataLayerError> {
+        Err(DataLayerError::InvalidInput(
+            "runtime queue stream lookup is unsupported by this backend".to_string(),
+        ))
+    }
+
+    /// Atomically append fields to `destination` and remove `entry_id` from the
+    /// source DLQ. Repeated calls for the same source ID must not append again.
+    async fn redrive_stream_entry(
+        &self,
+        _source: &str,
+        _entry_id: &str,
+        _destination: &str,
+        _destination_fields: &BTreeMap<String, String>,
+        _destination_maxlen: Option<usize>,
+    ) -> Result<RuntimeQueueRedriveOutcome, DataLayerError> {
+        Err(DataLayerError::InvalidInput(
+            "runtime queue stream redrive is unsupported by this backend".to_string(),
+        ))
+    }
+
     async fn read_group(
         &self,
         stream: &str,
@@ -1396,6 +1456,122 @@ impl RuntimeQueueStore for RuntimeState {
                         &RedisStreamName(stream.to_string()),
                         &RedisConsumerGroup(group.to_string()),
                         start_id,
+                    )
+                    .await
+            }
+        }
+    }
+
+    async fn read_stream_entry(
+        &self,
+        stream: &str,
+        entry_id: &str,
+    ) -> Result<Option<RuntimeQueueEntry>, DataLayerError> {
+        validate_runtime_queue_name(stream, "runtime queue stream")?;
+        validate_runtime_queue_name(entry_id, "runtime queue entry id")?;
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                Ok(memory.queue_read_stream_entry(stream, entry_id).await)
+            }
+            RuntimeStateBackend::Redis(redis) => Ok(redis
+                .stream
+                .read_stream_entry(&RedisStreamName(stream.to_string()), entry_id)
+                .await?
+                .map(|entry| RuntimeQueueEntry {
+                    id: entry.id,
+                    fields: entry.fields,
+                })),
+        }
+    }
+
+    async fn read_stream_page(
+        &self,
+        stream: &str,
+        start_id: &str,
+        count: usize,
+    ) -> Result<RuntimeQueuePage, DataLayerError> {
+        validate_runtime_queue_name(stream, "runtime queue stream")?;
+        validate_runtime_queue_name(start_id, "runtime queue start id")?;
+        if count == 0 {
+            return Err(DataLayerError::InvalidInput(
+                "runtime queue stream scan count must be positive".to_string(),
+            ));
+        }
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                memory.queue_read_stream_page(stream, start_id, count).await
+            }
+            RuntimeStateBackend::Redis(redis) => {
+                let mut entries = redis
+                    .stream
+                    .read_stream_page(
+                        &RedisStreamName(stream.to_string()),
+                        start_id,
+                        count.saturating_add(1),
+                    )
+                    .await?;
+                let has_more = entries.len() > count;
+                entries.truncate(count);
+                let next_start_id = entries
+                    .last()
+                    .map(|entry| entry.id.clone())
+                    .unwrap_or_else(|| "0-0".to_string());
+                Ok(RuntimeQueuePage {
+                    next_start_id,
+                    entries: entries
+                        .into_iter()
+                        .map(|entry| RuntimeQueueEntry {
+                            id: entry.id,
+                            fields: entry.fields,
+                        })
+                        .collect(),
+                    has_more,
+                })
+            }
+        }
+    }
+
+    async fn redrive_stream_entry(
+        &self,
+        source: &str,
+        entry_id: &str,
+        destination: &str,
+        destination_fields: &BTreeMap<String, String>,
+        destination_maxlen: Option<usize>,
+    ) -> Result<RuntimeQueueRedriveOutcome, DataLayerError> {
+        validate_runtime_queue_name(source, "runtime queue source stream")?;
+        validate_runtime_queue_name(destination, "runtime queue destination stream")?;
+        if source == destination {
+            return Err(DataLayerError::InvalidInput(
+                "runtime queue redrive source and destination must differ".to_string(),
+            ));
+        }
+        if destination_fields.is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "runtime queue redrive destination fields cannot be empty".to_string(),
+            ));
+        }
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                memory
+                    .queue_redrive_stream_entry(
+                        source,
+                        entry_id,
+                        destination,
+                        destination_fields,
+                        destination_maxlen,
+                    )
+                    .await
+            }
+            RuntimeStateBackend::Redis(redis) => {
+                redis
+                    .stream
+                    .redrive_stream_entry(
+                        &RedisStreamName(source.to_string()),
+                        entry_id,
+                        &RedisStreamName(destination.to_string()),
+                        destination_fields,
+                        destination_maxlen,
                     )
                     .await
             }

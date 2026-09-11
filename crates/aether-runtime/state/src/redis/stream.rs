@@ -10,10 +10,12 @@ use crate::redis::{
     RedisConnectionRouter, RedisKeyspace,
 };
 use crate::{
-    validate_runtime_queue_transfer, DataLayerError, RuntimeQueueStats, RuntimeQueueTransferOutcome,
+    validate_runtime_queue_transfer, DataLayerError, RuntimeQueueRedriveOutcome, RuntimeQueueStats,
+    RuntimeQueueTransferOutcome,
 };
 
 const DEAD_LETTER_TRANSFER_SCRIPT: &str = include_str!("dead_letter_transfer.lua");
+const DEAD_LETTER_REDRIVE_SCRIPT: &str = include_str!("dead_letter_redrive.lua");
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RedisStreamName(pub String);
@@ -235,6 +237,113 @@ impl RedisStreamRunner {
                 .await
                 .map_redis_err()
         })
+        .await
+    }
+
+    pub async fn read_stream_page(
+        &self,
+        stream: &RedisStreamName,
+        start_id: &str,
+        count: usize,
+    ) -> Result<Vec<RedisStreamEntry>, DataLayerError> {
+        validate_stream_name(stream)?;
+        validate_stream_position(start_id)?;
+        if count == 0 {
+            return Err(DataLayerError::InvalidInput(
+                "redis stream scan count must be positive".to_string(),
+            ));
+        }
+        self.run_with_timeout(RedisConnectionLane::Stream, "redis stream scan", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Stream);
+            let mut command = redis::cmd("XRANGE");
+            command
+                .arg(&stream.0)
+                .arg(format!("({start_id}"))
+                .arg("+")
+                .arg("COUNT")
+                .arg(count);
+            let reply = command
+                .query_async::<RedisValue>(&mut connection)
+                .await
+                .map_redis_err()?;
+            parse_stream_range_entries(reply)
+        })
+        .await
+    }
+
+    pub async fn read_stream_entry(
+        &self,
+        stream: &RedisStreamName,
+        entry_id: &str,
+    ) -> Result<Option<RedisStreamEntry>, DataLayerError> {
+        validate_stream_name(stream)?;
+        validate_stream_position(entry_id)?;
+        self.run_with_timeout(RedisConnectionLane::Stream, "redis stream lookup", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Stream);
+            let reply = redis::cmd("XRANGE")
+                .arg(&stream.0)
+                .arg(entry_id)
+                .arg(entry_id)
+                .arg("COUNT")
+                .arg(1)
+                .query_async::<RedisValue>(&mut connection)
+                .await
+                .map_redis_err()?;
+            Ok(parse_stream_range_entries(reply)?.into_iter().next())
+        })
+        .await
+    }
+
+    pub async fn redrive_stream_entry(
+        &self,
+        source: &RedisStreamName,
+        entry_id: &str,
+        destination: &RedisStreamName,
+        destination_fields: &BTreeMap<String, String>,
+        destination_maxlen: Option<usize>,
+    ) -> Result<RuntimeQueueRedriveOutcome, DataLayerError> {
+        validate_stream_name(source)?;
+        validate_stream_name(destination)?;
+        if source.0 == destination.0 {
+            return Err(DataLayerError::InvalidInput(
+                "redis stream redrive source and destination must differ".to_string(),
+            ));
+        }
+        if entry_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "redis stream redrive entry ID cannot be empty".to_string(),
+            ));
+        }
+        if destination_fields.is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "redis stream redrive destination fields cannot be empty".to_string(),
+            ));
+        }
+        let marker = format!("{}:__redrive:{}", source.0, entry_id);
+        self.run_with_timeout(
+            RedisConnectionLane::Stream,
+            "redis stream dead-letter redrive",
+            async {
+                let mut connection = self.connections.connection(RedisConnectionLane::Stream);
+                let mut command = redis::cmd("EVAL");
+                command
+                    .arg(DEAD_LETTER_REDRIVE_SCRIPT)
+                    .arg(3)
+                    .arg(&source.0)
+                    .arg(&destination.0)
+                    .arg(marker)
+                    .arg(entry_id)
+                    .arg(destination_maxlen.unwrap_or(0));
+                for (field, value) in destination_fields {
+                    command.arg(field).arg(value);
+                }
+                let reply = command
+                    .query_async::<RedisValue>(&mut connection)
+                    .await
+                    .map_redis_err()?;
+                parse_redrive_result(reply)
+            },
+        )
         .await
     }
 
@@ -627,6 +736,53 @@ fn parse_stream_read_entries(value: RedisValue) -> Result<Vec<RedisStreamEntry>,
                 .collect(),
         })
         .collect())
+}
+
+fn parse_stream_range_entries(value: RedisValue) -> Result<Vec<RedisStreamEntry>, DataLayerError> {
+    if matches!(value, RedisValue::Nil) {
+        return Ok(Vec::new());
+    }
+    let RedisValue::Array(rows) = value else {
+        return Err(DataLayerError::UnexpectedValue(
+            "redis xrange returned non-array payload".to_string(),
+        ));
+    };
+    rows.into_iter()
+        .map(|row| {
+            let RedisValue::Array(mut parts) = row else {
+                return Err(DataLayerError::UnexpectedValue(
+                    "redis xrange entry returned non-array payload".to_string(),
+                ));
+            };
+            if parts.len() != 2 {
+                return Err(DataLayerError::UnexpectedValue(
+                    "redis xrange entry returned invalid field count".to_string(),
+                ));
+            }
+            let fields = parts.pop().expect("validated xrange fields");
+            let id = parse_string_value(
+                parts.first().expect("validated xrange id"),
+                "redis xrange entry id",
+            )?;
+            Ok(RedisStreamEntry {
+                id,
+                fields: parse_info_fields(&fields, "redis xrange entry fields")?,
+            })
+        })
+        .collect()
+}
+
+fn parse_redrive_result(value: RedisValue) -> Result<RuntimeQueueRedriveOutcome, DataLayerError> {
+    let (status, destination_id) =
+        from_owned_redis_value::<(i64, String)>(value).map_err(redis_error)?;
+    match status {
+        0 => Ok(RuntimeQueueRedriveOutcome::NotFound),
+        1 => Ok(RuntimeQueueRedriveOutcome::Redriven { destination_id }),
+        2 => Ok(RuntimeQueueRedriveOutcome::AlreadyRedriven { destination_id }),
+        _ => Err(DataLayerError::UnexpectedValue(
+            "redis stream dead-letter redrive returned an invalid status".to_string(),
+        )),
+    }
 }
 
 fn parse_transfer_result(value: RedisValue) -> Result<RuntimeQueueTransferOutcome, DataLayerError> {
