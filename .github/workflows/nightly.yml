@@ -104,9 +104,14 @@ jobs:
             exit 0
           fi
 
-          # Quality gate: the three required checks must be green on the exact
-          # snapshot commit. Conservative by design: a failed query, a pending
-          # run, or a missing context all read as not green and skip the day.
+          # Quality gate: the push-lane required checks must be green on the
+          # exact snapshot commit. Conservative by design: a failed query, a
+          # pending run, or a missing context all read as not green and skip
+          # the day. `Automation Policy / gate` is deliberately NOT required
+          # here: automation-policy.yml only runs on pull_request and
+          # workflow_dispatch, so its context never exists on a main push
+          # commit — and the snapshot's content already passed that gate at
+          # its PR head before merging.
           context_state() {
             local context="$1" checks statuses
             if ! checks="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/check-runs?per_page=100" \
@@ -134,7 +139,7 @@ jobs:
             fi
           }
 
-          required_contexts=("Rust CI / check" "Frontend CI / check" "Automation Policy / gate")
+          required_contexts=("Rust CI / check" "Frontend CI / check")
           gate_green="true"
           gate_report=""
           for context in "${required_contexts[@]}"; do
