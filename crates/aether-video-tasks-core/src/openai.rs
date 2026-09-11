@@ -92,45 +92,89 @@ fn map_openai_stored_task_status(status: VideoTaskStatus) -> &'static str {
 
 impl OpenAiVideoTaskSeed {
     pub fn apply_provider_body(&mut self, provider_body: &Map<String, Value>) {
-        let raw_status = provider_body
+        let provider_status = provider_body
             .get("status")
             .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default();
-        self.status = match raw_status {
-            "queued" => LocalVideoTaskStatus::Queued,
-            "processing" => LocalVideoTaskStatus::Processing,
-            "completed" => LocalVideoTaskStatus::Completed,
-            "failed" => LocalVideoTaskStatus::Failed,
-            "cancelled" => LocalVideoTaskStatus::Cancelled,
-            "expired" => LocalVideoTaskStatus::Expired,
-            _ => LocalVideoTaskStatus::Submitted,
-        };
-        self.progress_percent = provider_body
+            .and_then(parse_openai_provider_status);
+
+        // Polls can arrive out of order. A late active response must not reopen
+        // an already terminal task, but providers may still evolve one terminal
+        // outcome into another (for example, completed to expired).
+        if is_terminal_status(self.status) && provider_status.is_some_and(is_active_status) {
+            return;
+        }
+        if let Some(status) = provider_status {
+            self.status = status;
+        }
+
+        if let Some(progress) = provider_body
             .get("progress")
             .and_then(Value::as_u64)
             .and_then(|value| u16::try_from(value).ok())
-            .unwrap_or(match self.status {
-                LocalVideoTaskStatus::Completed => 100,
-                LocalVideoTaskStatus::Processing => 50,
-                _ => self.progress_percent,
-            });
-        self.completed_at_unix_secs = provider_body.get("completed_at").and_then(Value::as_u64);
-        self.expires_at_unix_secs = provider_body.get("expires_at").and_then(Value::as_u64);
-        let error = provider_body.get("error").and_then(Value::as_object);
-        self.error_code = sanitize_video_task_error_code(
-            error
-                .and_then(|value| value.get("code"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        );
-        self.error_message = None;
-        self.video_url = provider_body
-            .get("video_url")
-            .or_else(|| provider_body.get("url"))
-            .or_else(|| provider_body.get("result_url"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        {
+            self.progress_percent = progress;
+        } else if self.status == LocalVideoTaskStatus::Completed {
+            self.progress_percent = 100;
+        }
+
+        // Provider GET responses may omit fields which were present in an earlier
+        // response. Only an explicitly present field, including JSON null, updates it.
+        if let Some(completed_at) = provider_body.get("completed_at") {
+            self.completed_at_unix_secs = completed_at.as_u64();
+        }
+        if let Some(expires_at) = provider_body.get("expires_at") {
+            self.expires_at_unix_secs = expires_at.as_u64();
+        }
+
+        match self.status {
+            LocalVideoTaskStatus::Failed => {
+                self.error_code = match provider_body.get("error") {
+                    Some(error) => error
+                        .as_object()
+                        .and_then(|value| value.get("code"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .and_then(|code| sanitize_video_task_error_code(Some(code)))
+                        .or_else(|| Some("provider_error".to_string())),
+                    None => self
+                        .error_code
+                        .clone()
+                        .or_else(|| Some("provider_error".to_string())),
+                };
+                self.error_message = None;
+                self.video_url = None;
+            }
+            LocalVideoTaskStatus::Expired => {
+                self.error_code = Some("expired".to_string());
+                self.error_message = None;
+                self.video_url = None;
+            }
+            LocalVideoTaskStatus::Cancelled => {
+                self.error_code = Some("cancelled".to_string());
+                self.error_message = None;
+                self.video_url = None;
+            }
+            LocalVideoTaskStatus::Completed => {
+                self.error_code = None;
+                self.error_message = None;
+                apply_openai_video_url(&mut self.video_url, provider_body);
+            }
+            LocalVideoTaskStatus::Submitted
+            | LocalVideoTaskStatus::Queued
+            | LocalVideoTaskStatus::Processing
+            | LocalVideoTaskStatus::Deleted => {
+                if let Some(error) = provider_body.get("error") {
+                    self.error_code = error
+                        .as_object()
+                        .and_then(|value| value.get("code"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .and_then(|code| sanitize_video_task_error_code(Some(code)));
+                    self.error_message = None;
+                }
+                apply_openai_video_url(&mut self.video_url, provider_body);
+            }
+        }
     }
 
     pub fn build_content_stream_action(
@@ -618,6 +662,47 @@ impl OpenAiVideoTaskSeed {
     }
 }
 
+fn parse_openai_provider_status(value: &str) -> Option<LocalVideoTaskStatus> {
+    match value.trim() {
+        "queued" => Some(LocalVideoTaskStatus::Queued),
+        "in_progress" | "processing" => Some(LocalVideoTaskStatus::Processing),
+        "completed" => Some(LocalVideoTaskStatus::Completed),
+        "failed" => Some(LocalVideoTaskStatus::Failed),
+        "cancelled" => Some(LocalVideoTaskStatus::Cancelled),
+        "expired" => Some(LocalVideoTaskStatus::Expired),
+        _ => None,
+    }
+}
+
+fn is_terminal_status(status: LocalVideoTaskStatus) -> bool {
+    matches!(
+        status,
+        LocalVideoTaskStatus::Completed
+            | LocalVideoTaskStatus::Failed
+            | LocalVideoTaskStatus::Cancelled
+            | LocalVideoTaskStatus::Expired
+            | LocalVideoTaskStatus::Deleted
+    )
+}
+
+fn is_active_status(status: LocalVideoTaskStatus) -> bool {
+    matches!(
+        status,
+        LocalVideoTaskStatus::Submitted
+            | LocalVideoTaskStatus::Queued
+            | LocalVideoTaskStatus::Processing
+    )
+}
+
+fn apply_openai_video_url(video_url: &mut Option<String>, provider_body: &Map<String, Value>) {
+    for field in ["video_url", "url", "result_url"] {
+        if let Some(value) = provider_body.get(field) {
+            *video_url = value.as_str().map(str::to_string);
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -631,6 +716,50 @@ mod tests {
     };
 
     use super::map_openai_stored_task_to_read_response;
+
+    fn sample_seed(status: LocalVideoTaskStatus) -> OpenAiVideoTaskSeed {
+        OpenAiVideoTaskSeed {
+            local_task_id: "task-openai-poll".to_string(),
+            upstream_task_id: "upstream-openai-poll".to_string(),
+            created_at_unix_ms: 1_712_345_678,
+            user_id: Some("user-1".to_string()),
+            api_key_id: Some("api-key-1".to_string()),
+            model: Some("sora-2".to_string()),
+            prompt: Some("business prompt".to_string()),
+            size: Some("1280x720".to_string()),
+            seconds: Some("4".to_string()),
+            remixed_from_video_id: None,
+            status,
+            progress_percent: 45,
+            completed_at_unix_secs: Some(1_712_345_700),
+            expires_at_unix_secs: Some(1_712_432_100),
+            error_code: Some("rate_limit_exceeded".to_string()),
+            error_message: None,
+            video_url: Some("https://cdn.example.test/video.mp4".to_string()),
+            persistence: LocalVideoTaskPersistence {
+                request_id: "request-openai-poll".to_string(),
+                username: Some("alice".to_string()),
+                api_key_name: Some("primary".to_string()),
+                client_api_format: "openai:video".to_string(),
+                provider_api_format: "openai:video".to_string(),
+                original_request_body: json!({"prompt": "business prompt"}),
+                format_converted: false,
+            },
+            transport: LocalVideoTaskTransport {
+                upstream_base_url: "https://api.example/v1".to_string(),
+                provider_name: Some("openai".to_string()),
+                provider_id: "provider-1".to_string(),
+                endpoint_id: "endpoint-1".to_string(),
+                key_id: "provider-key-1".to_string(),
+                headers: BTreeMap::new(),
+                content_type: Some("application/json".to_string()),
+                model_name: Some("sora-2".to_string()),
+                proxy: None,
+                transport_profile: None,
+                timeouts: None,
+            },
+        }
+    }
 
     fn sample_stored_task(status: VideoTaskStatus) -> StoredVideoTask {
         StoredVideoTask {
@@ -692,6 +821,84 @@ mod tests {
             response.body_json["video_url"],
             "https://cdn.example.com/video.mp4"
         );
+    }
+
+    #[test]
+    fn maps_in_progress_poll_status_to_processing() {
+        let mut seed = sample_seed(LocalVideoTaskStatus::Queued);
+        let provider_body = json!({"status": "in_progress", "progress": 51});
+
+        seed.apply_provider_body(provider_body.as_object().expect("object"));
+
+        assert_eq!(seed.status, LocalVideoTaskStatus::Processing);
+        assert_eq!(seed.progress_percent, 51);
+    }
+
+    #[test]
+    fn sparse_openai_poll_preserves_existing_optional_fields() {
+        let mut seed = sample_seed(LocalVideoTaskStatus::Processing);
+        let provider_body = json!({"status": "in_progress"});
+
+        seed.apply_provider_body(provider_body.as_object().expect("object"));
+
+        assert_eq!(seed.status, LocalVideoTaskStatus::Processing);
+        assert_eq!(seed.completed_at_unix_secs, Some(1_712_345_700));
+        assert_eq!(seed.expires_at_unix_secs, Some(1_712_432_100));
+        assert_eq!(seed.error_code.as_deref(), Some("rate_limit_exceeded"));
+        assert_eq!(
+            seed.video_url.as_deref(),
+            Some("https://cdn.example.test/video.mp4")
+        );
+
+        let explicit_clear = json!({
+            "status": "in_progress",
+            "completed_at": null,
+            "expires_at": null,
+            "video_url": null,
+        });
+        seed.apply_provider_body(explicit_clear.as_object().expect("object"));
+        assert_eq!(seed.completed_at_unix_secs, None);
+        assert_eq!(seed.expires_at_unix_secs, None);
+        assert_eq!(seed.video_url, None);
+    }
+
+    #[test]
+    fn terminal_openai_task_rejects_late_active_poll_and_handles_failed_null_error() {
+        let mut completed = sample_seed(LocalVideoTaskStatus::Completed);
+        let stale_poll = json!({
+            "status": "in_progress",
+            "progress": 20,
+            "completed_at": null,
+            "video_url": null,
+        });
+
+        completed.apply_provider_body(stale_poll.as_object().expect("object"));
+
+        assert_eq!(completed.status, LocalVideoTaskStatus::Completed);
+        assert_eq!(completed.progress_percent, 45);
+        assert_eq!(completed.completed_at_unix_secs, Some(1_712_345_700));
+        assert_eq!(
+            completed.video_url.as_deref(),
+            Some("https://cdn.example.test/video.mp4")
+        );
+
+        let mut expired = sample_seed(LocalVideoTaskStatus::Completed);
+        let expiry = json!({"status": "expired"});
+        expired.apply_provider_body(expiry.as_object().expect("object"));
+        assert_eq!(expired.status, LocalVideoTaskStatus::Expired);
+        assert_eq!(expired.progress_percent, 45);
+        assert_eq!(expired.error_code.as_deref(), Some("expired"));
+        assert!(expired.video_url.is_none());
+
+        let mut failed = sample_seed(LocalVideoTaskStatus::Processing);
+        let failure = json!({"status": "failed", "error": null});
+
+        failed.apply_provider_body(failure.as_object().expect("object"));
+
+        assert_eq!(failed.status, LocalVideoTaskStatus::Failed);
+        assert_eq!(failed.progress_percent, 45);
+        assert_eq!(failed.error_code.as_deref(), Some("provider_error"));
+        assert!(failed.video_url.is_none());
     }
 
     #[test]
