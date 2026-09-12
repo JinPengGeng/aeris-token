@@ -8,6 +8,11 @@ use crate::{
     LocalVideoTaskSnapshot, LocalVideoTaskStatus, OpenAiVideoTaskSeed,
 };
 
+/// Completed task snapshots contain prompts and provider metadata, so retain only a
+/// bounded recent history. Active tasks are never evicted by this policy.
+pub const VIDEO_TASK_TERMINAL_RETENTION_SECS: u64 = 24 * 60 * 60;
+pub const VIDEO_TASK_MAX_TERMINAL_ENTRIES: usize = 4096;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VideoTaskRegistry {
     openai: BTreeMap<String, LocalVideoTaskSnapshot>,
@@ -25,6 +30,7 @@ impl VideoTaskRegistry {
                 self.gemini.insert(seed.local_short_id.clone(), snapshot);
             }
         }
+        self.prune_terminal(current_unix_secs());
     }
 
     pub fn read_openai(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse> {
@@ -81,6 +87,7 @@ impl VideoTaskRegistry {
                 }
             }
         }
+        self.prune_terminal(current_unix_secs());
     }
 
     pub fn project_openai(&mut self, task_id: &str, provider_body: &Map<String, Value>) -> bool {
@@ -88,6 +95,7 @@ impl VideoTaskRegistry {
             return false;
         };
         seed.apply_provider_body(provider_body);
+        self.prune_terminal(current_unix_secs());
         true
     }
 
@@ -96,7 +104,13 @@ impl VideoTaskRegistry {
             return false;
         };
         seed.apply_provider_body(provider_body);
+        self.prune_terminal(current_unix_secs());
         true
+    }
+
+    fn prune_terminal(&mut self, now_unix_secs: u64) {
+        prune_terminal_map(&mut self.openai, now_unix_secs);
+        prune_terminal_map(&mut self.gemini, now_unix_secs);
     }
 
     pub(crate) fn sanitize_persisted_diagnostics(&mut self) -> bool {
@@ -105,5 +119,31 @@ impl VideoTaskRegistry {
             changed = snapshot.sanitize_persisted_diagnostics() || changed;
         }
         changed
+    }
+}
+
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn prune_terminal_map(map: &mut BTreeMap<String, LocalVideoTaskSnapshot>, now_unix_secs: u64) {
+    let cutoff = now_unix_secs.saturating_sub(VIDEO_TASK_TERMINAL_RETENTION_SECS);
+    map.retain(|_, snapshot| {
+        snapshot.is_active_for_refresh()
+            || snapshot.created_at_unix_ms() == 0
+            || snapshot.created_at_unix_ms() >= cutoff
+    });
+
+    let mut terminal: Vec<(String, u64)> = map
+        .iter()
+        .filter(|(_, snapshot)| !snapshot.is_active_for_refresh())
+        .map(|(key, snapshot)| (key.clone(), snapshot.created_at_unix_ms()))
+        .collect();
+    terminal.sort_by_key(|(_, created_at)| *created_at);
+    let excess = terminal.len().saturating_sub(VIDEO_TASK_MAX_TERMINAL_ENTRIES);
+    for (key, _) in terminal.into_iter().take(excess) {
+        map.remove(&key);
     }
 }
