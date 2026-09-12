@@ -93,6 +93,7 @@ Local results:
 | `request_lifecycle` | 9 passed |
 | `heartbeat` | 39 passed |
 | `candidate_indices` | 4 passed, including the heartbeat propagation regression |
+| `tests::usage::local` | 14 passed after correcting the two legacy collapsed-candidate fixtures |
 
 The groups overlap. The final sync group was run through `cargo test -p
 aether-gateway --lib tests::ai_execute::sync -- --nocapture`; other groups were
@@ -106,6 +107,18 @@ an existing tunnel heartbeat integration test; the configured run passed all
 39 tests. macOS linking emitted the existing large `__eh_frame` unwind-table
 warning. No local Clippy or live PostgreSQL result is claimed; CI and final
 review remain required before merge.
+
+The first complete hosted gateway run (`34716868647`, head `b56b0a95e`) found
+two more legacy fixtures in `tests/usage/local.rs` that expected both Claude
+CLI planner observations to overwrite one row. Both now require two distinct
+IDs, sequential candidate indices, unchanged retry indices, the expected
+terminal skip reason and a recorded finish time. The usage routing reference
+must identify the last observation, matching the existing
+`select_last_runtime_miss_routing_candidate` ordering. HTTP error, usage
+capture, request metadata and zero-upstream-execution assertions are retained.
+No runtime behavior was changed to accommodate the fixtures. The focused
+14-test group passed on Rust 1.95.0 with the configured gateway stack size;
+the failed hosted run remains visible and a fresh complete CI run is required.
 
 ## Boundaries and rollback
 
