@@ -747,10 +747,9 @@ struct GatewayDataArgs {
     #[arg(
         long,
         env = "AETHER_GATEWAY_DATA_POSTGRES_REQUIRE_SSL",
-        default_value_t = false,
         global = true
     )]
-    postgres_require_ssl: bool,
+    postgres_require_ssl: Option<bool>,
 }
 
 impl GatewayDataArgs {
@@ -804,12 +803,16 @@ impl GatewayDataArgs {
 
         Some(SqlDatabaseConfig {
             driver,
+            pool: self.effective_sql_pool_config(driver, &url),
             url,
-            pool: self.effective_sql_pool_config(driver),
         })
     }
 
-    fn effective_sql_pool_config(&self, driver: DatabaseDriver) -> SqlPoolConfig {
+    fn effective_sql_pool_config(
+        &self,
+        driver: DatabaseDriver,
+        database_url: &str,
+    ) -> SqlPoolConfig {
         let auto = automatic_sql_pool_config(driver);
         let mut min_connections = self
             .postgres_min_connections
@@ -829,6 +832,16 @@ impl GatewayDataArgs {
             _ => {}
         }
 
+        let require_ssl = self.postgres_require_ssl.unwrap_or_else(|| {
+            driver == DatabaseDriver::Postgres
+                && !copy_database_url_is_literal_loopback(
+                    driver,
+                    database_url,
+                    "gateway",
+                )
+                .unwrap_or(false)
+        });
+
         SqlPoolConfig {
             min_connections,
             max_connections,
@@ -844,8 +857,19 @@ impl GatewayDataArgs {
             statement_cache_capacity: self
                 .postgres_statement_cache_capacity
                 .unwrap_or(auto.statement_cache_capacity),
-            require_ssl: self.postgres_require_ssl,
+            require_ssl,
         }
+    }
+
+    fn insecure_postgres_opt_out(&self, database: &SqlDatabaseConfig) -> bool {
+        self.postgres_require_ssl == Some(false)
+            && database.driver == DatabaseDriver::Postgres
+            && !copy_database_url_is_literal_loopback(
+                database.driver,
+                &database.url,
+                "gateway",
+            )
+            .unwrap_or(false)
     }
 
     fn effective_redis_url(&self) -> Option<String> {
@@ -2201,6 +2225,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     aether_gateway::validate_local_auth_jwt_secret()
         .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
     let sql_database_config = args.data.effective_sql_database_config();
+    if let Some(database) = sql_database_config.as_ref() {
+        if args.data.insecure_postgres_opt_out(database) {
+            warn!(
+                database_driver = database.driver.as_str(),
+                "TLS is explicitly disabled for a remote PostgreSQL database; this is an insecure opt-out"
+            );
+        }
+    }
     let data_redis_url = args.data.effective_redis_url();
     let runtime_backend =
         args.effective_runtime_backend(sql_database_config.as_ref(), data_redis_url.as_deref());
@@ -2399,7 +2431,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         runtime_redis_configured = matches!(runtime_backend, RuntimeBackendArg::Redis),
         data_redis_url_supplied = data_redis_url.is_some(),
         data_has_encryption_key = data_config.encryption_key().is_some(),
-        data_postgres_require_ssl = args.data.postgres_require_ssl,
+        data_postgres_require_ssl = sql_database_config
+            .as_ref()
+            .is_some_and(|database| database.pool.require_ssl),
         "aether-gateway startup configuration"
     );
 
@@ -3680,7 +3714,7 @@ mod tests {
                 postgres_idle_timeout_ms: None,
                 postgres_max_lifetime_ms: None,
                 postgres_statement_cache_capacity: None,
-                postgres_require_ssl: false,
+                postgres_require_ssl: None,
             },
             usage: GatewayUsageArgs {
                 queue_terminal_events: true,
@@ -4035,6 +4069,53 @@ mod tests {
         assert_eq!(database.driver, DatabaseDriver::Postgres);
         assert_eq!(database.pool.min_connections, auto.min_connections);
         assert_eq!(database.pool.max_connections, auto.max_connections);
+    }
+
+    #[test]
+    fn gateway_data_remote_postgres_requires_ssl_by_default() {
+        let mut args = test_args();
+        args.data.database_driver = Some(DatabaseDriverArg::Postgres);
+        args.data.database_url =
+            Some("postgres://postgres:postgres@db.example/aether".to_string());
+
+        let database = args
+            .data
+            .effective_sql_database_config()
+            .expect("postgres database config should build");
+
+        assert!(database.pool.require_ssl);
+    }
+
+    #[test]
+    fn gateway_data_loopback_postgres_keeps_local_plaintext_compatibility() {
+        let mut args = test_args();
+        args.data.database_driver = Some(DatabaseDriverArg::Postgres);
+        args.data.database_url =
+            Some("postgres://postgres:postgres@127.0.0.1/aether".to_string());
+
+        let database = args
+            .data
+            .effective_sql_database_config()
+            .expect("postgres database config should build");
+
+        assert!(!database.pool.require_ssl);
+    }
+
+    #[test]
+    fn gateway_data_remote_postgres_explicit_ssl_opt_out_is_preserved() {
+        let mut args = test_args();
+        args.data.database_driver = Some(DatabaseDriverArg::Postgres);
+        args.data.database_url =
+            Some("postgres://postgres:postgres@db.example/aether".to_string());
+        args.data.postgres_require_ssl = Some(false);
+
+        let database = args
+            .data
+            .effective_sql_database_config()
+            .expect("postgres database config should build");
+
+        assert!(!database.pool.require_ssl);
+        assert!(args.data.insecure_postgres_opt_out(&database));
     }
 
     #[test]
