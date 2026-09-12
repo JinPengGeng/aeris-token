@@ -28,6 +28,7 @@ use crate::lifecycle::bootstrap::postgres::{
 };
 
 mod policy_nulls;
+mod referral_numeric_audit;
 
 /// A clean PostgreSQL database is bootstrapped from the schema snapshot first;
 /// migrations after the privacy/security frontier are intentionally left
