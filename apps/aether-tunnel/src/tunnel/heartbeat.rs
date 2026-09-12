@@ -175,7 +175,10 @@ pub fn spawn(
                                     pending = None;
                                 }
                             }
-                            maybe_trigger_upgrade(upgrade_to);
+                            maybe_trigger_upgrade(
+                                upgrade_to,
+                                state.config.remote_upgrade_enabled,
+                            );
                         }
                         AckDecision::Ignore => {}
                     }
@@ -366,7 +369,13 @@ fn normalize_upgrade_target(raw: String) -> Option<String> {
     Some(target.to_string())
 }
 
-fn maybe_trigger_upgrade(version: Option<String>) {
+fn maybe_trigger_upgrade(version: Option<String>, enabled: bool) {
+    if !enabled {
+        if version.is_some() {
+            debug!("remote upgrade skipped: disabled by local policy");
+        }
+        return;
+    }
     let Some(target_version) = version else {
         return;
     };
@@ -417,8 +426,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        build_heartbeat_payload, handle_ack, normalize_upgrade_target, AckDecision,
-        HeartbeatSnapshot, CURRENT_VERSION,
+        build_heartbeat_payload, handle_ack, maybe_trigger_upgrade, normalize_upgrade_target,
+        AckDecision, HeartbeatSnapshot, CURRENT_VERSION, UPGRADE_IN_PROGRESS,
     };
     use crate::registration::client::AetherClient;
     use crate::runtime::DynamicConfig;
@@ -523,6 +532,13 @@ mod tests {
             None
         );
         assert_eq!(normalize_upgrade_target("latest".to_string()), None);
+    }
+
+    #[test]
+    fn remote_upgrade_instruction_is_ignored_when_disabled() {
+        UPGRADE_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+        maybe_trigger_upgrade(Some("999.0.0".to_string()), false);
+        assert!(!UPGRADE_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[tokio::test]
