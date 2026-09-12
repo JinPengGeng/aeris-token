@@ -21,6 +21,7 @@ on:
       - "Dockerfile.app"
       - "docker-compose.yml"
       - "docker-compose.single-node.yml"
+      - "docker-compose.redis-durable.yml"
       - "docker-compose.local.yml"
       - "docker-compose.release-local.yml"
       - "tests/compose_database_config_test.py"

@@ -15,6 +15,7 @@ with tempfile.TemporaryDirectory(prefix="aether-compose-databases-") as director
         "docker-compose.local.yml",
         "docker-compose.single-node.yml",
         "docker-compose.release-local.yml",
+        "docker-compose.redis-durable.yml",
     ):
         shutil.copyfile(repo_root / filename, fixture / filename)
     env_file = fixture / ".env"
@@ -58,6 +59,12 @@ with tempfile.TemporaryDirectory(prefix="aether-compose-databases-") as director
         assert app_env["DATABASE_URL"] == "postgresql://postgres:fixture-postgres@postgres:5432/aether"
         assert app_env["AETHER_GATEWAY_DATA_POSTGRES_REQUIRE_SSL"] == "false"
         assert app_env["REDIS_URL"] == "redis://:fixture-redis@redis:6379/0"
+        assert not any(
+            volume.get("target") == "/data"
+            for volume in config["services"]["redis"].get("volumes", [])
+        ), files
+        assert "--dir /tmp" in config["services"]["redis"]["command"]
+        assert "--appendonly no" in config["services"]["redis"]["command"]
         assert app_env["AETHER_LOG_DESTINATION"] == "stdout"
         for key in ("DB_PASSWORD", "REDIS_PASSWORD"):
             result = compose_config(files, overrides={key: ""})
@@ -76,6 +83,24 @@ with tempfile.TemporaryDirectory(prefix="aether-compose-databases-") as director
     result = compose_config(["docker-compose.release-local.yml"], overrides={"DB_PASSWORD": ""})
     assert result.returncode != 0, "empty DB_PASSWORD was accepted"
     assert "set DB_PASSWORD in .env" in result.stderr, result.stderr
+
+    for base in ("docker-compose.yml", "docker-compose.single-node.yml"):
+        result = compose_config([base, "docker-compose.redis-durable.yml"])
+        assert result.returncode == 0, result.stderr
+        config = json.loads(result.stdout)
+        redis = config["services"]["redis"]
+        assert any(
+            volume.get("source") == "redis_data" and volume.get("target") == "/data"
+            for volume in redis.get("volumes", [])
+        ), base
+        command = redis["command"]
+        assert command[:3] == ["redis-server", "--dir", "/data"], base
+        assert "--appendonly" in command and "yes" in command, base
+        assert "--appendfsync" in command and "everysec" in command, base
+        assert "--aof-use-rdb-preamble" in command, base
+        assert "--save" in command and "60" in command and "1000" in command, base
+        assert "test -w /data" in redis["healthcheck"]["test"][1], base
+        assert "redis-cli" in redis["healthcheck"]["test"][1], base
 
     for log_destination in ("file", "both"):
         env_file.write_text(
