@@ -1,0 +1,104 @@
+rule_files:
+  - aether-alerts.yml
+evaluation_interval: 1m
+
+tests:
+  - name: billing failures retain routing labels and respect the pending window
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_billing_enrichment_failures_total{component="usage",operation="enrichment"}'
+        values: '0+1x10'
+      - series: 'aether_gateway_billing_settlement_failures_total{component="usage",operation="settlement"}'
+        values: '0+1x10'
+      - series: 'aether_gateway_billing_video_task_settlement_failures_total{component="video_task",operation="settlement"}'
+        values: '0+1x10'
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherBillingEnrichmentFailures",alertstate="firing",component="usage",operation="enrichment",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="AetherBillingSettlementFailures",alertstate="firing",component="usage",operation="settlement",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="AetherBillingSettlementFailures",alertstate="firing",component="video_task",operation="settlement",severity="warning"}'
+            value: 1
+
+  - name: fail open distinguishes daily quota and RPM through counter reset and recovery
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_billing_fail_open_total{component="gateway",operation="daily_quota"}'
+        values: '0 1 2 0 1 2 2+0x22'
+      - series: 'aether_gateway_billing_fail_open_total{component="gateway",operation="rpm"}'
+        values: '0 1 2 0 1 2 2+0x22'
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 2m
+        exp_samples: []
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherBillingGuardFailOpen",alertstate="firing",component="gateway",operation="daily_quota",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="AetherBillingGuardFailOpen",alertstate="firing",component="gateway",operation="rpm",severity="critical"}'
+            value: 1
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 20m
+        exp_samples: []
+
+  - name: backlog must persist for ten minutes and clears after redrive
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_usage_queue_dlq_length{instance="fixture"}'
+        values: '3+0x11 0+0x3'
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 9m
+        exp_samples: []
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherUsageDeadLetterBacklog",alertstate="firing",severity="warning"}'
+            value: 1
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 13m
+        exp_samples: []
+
+  - name: RED terminal failures aggregate by bounded provider type and exclude client errors
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_request_errors_total{route_class="ai_public",provider="openai",status_class="5xx"}'
+        values: '0+1x10'
+      - series: 'aether_gateway_request_errors_total{route_class="ai_public",provider="claude",status_class="4xx"}'
+        values: '0+2x10'
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherProviderServerErrors",alertstate="firing",provider="openai",severity="warning"}'
+            value: 1
+
+  - name: steady counters and empty queues never fire
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_billing_enrichment_failures_total{component="usage",operation="enrichment"}'
+        values: '3+0x30'
+      - series: 'aether_gateway_billing_settlement_failures_total{component="usage",operation="settlement"}'
+        values: '3+0x30'
+      - series: 'aether_gateway_billing_video_task_settlement_failures_total{component="video_task",operation="settlement"}'
+        values: '3+0x30'
+      - series: 'aether_gateway_billing_fail_open_total{component="gateway",operation="rpm"}'
+        values: '3+0x30'
+      - series: 'aether_gateway_usage_queue_dlq_length'
+        values: '0+0x30'
+      - series: 'aether_gateway_request_errors_total{route_class="ai_public",provider="openai",status_class="5xx"}'
+        values: '3+0x30'
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 30m
+        exp_samples: []
