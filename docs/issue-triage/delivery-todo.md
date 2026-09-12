@@ -65,7 +65,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #308 | P1 | In progress | PR #327 merged bounded readiness probes; complete deployment drill and parent acceptance |
 | #307 | P1 | In progress | PR #323 merged runtime-owned billing/fail-open counters; complete Prometheus parse/alert drill and link #306 producer |
 | #306 | P1 | In progress | PR #324 adds bounded request RED producer and JSON/pretty evidence; complete provider source and lifecycle review |
-| #216 | P1 | Split, active | PR #332 adds the dev profile build-performance gate; retain parent for live-DB and VSCodex required checks |
+| #216 | P1 | Split, active | PR #332 adds the dev profile build-performance gate; #339 adds an isolated Postgres harness and three selected live tests; retain parent for VSCodex required-check evidence, integration baseline execution and remaining ignored-test coverage |
 | #215 | P2 | Planned | measure synchronous logging/SSE filtering/lock contention before changes |
 | #214 | P1 | Planned | add probe, graceful shutdown and accept-error acceptance tests |
 | #213 | P2 | Planned | split giant handler and standardize error payload boundaries |
@@ -184,6 +184,35 @@ acceptance criteria have evidence; a merged child slice changes the parent to
 tests, pass the four required contexts (Rust, Frontend, Automation Policy and
 Dependency Audit), and record the merge SHA and residual risks here and on its
 Issue.
+
+## 2026-09-13 child slice: isolated PostgreSQL live-DB harness (#339)
+
+Issue #339 is accepted as a P1/Ready child of #216. The fork-only slice adds
+`tools/ci/run_postgres_live_tests.sh` and a required `Data DB Live (selected
+ignored tests)` job. Each job receives a disposable PostgreSQL service; the
+canonical URL is `AETHER_TEST_DATABASE_URL`, while the legacy migration-test
+name is mapped to the same URL and rejected when it differs. The harness first
+runs the migration smoke test, then serially and explicitly runs:
+
+- `live_first_byte_reads_provider_contribution_after_waiting_for_canonical_lock`
+- `live_usage_policy_window_aggregates_preserve_exact_admission_and_idempotency`
+- `live_stale_terminal_event_is_a_full_transaction_noop`
+
+Every invocation uses `--exact --include-ignored --nocapture --test-threads=1`,
+so the log proves discovery and execution while avoiding cross-test races. A
+non-zero exit fails the aggregate `Rust CI / check`; the service database is
+destroyed with the job, providing cleanup and isolation. The remaining ignored
+tests stay explicitly ignored because they require different fixtures or
+additional review. During local validation, the candidate
+`live_pending_batch_and_terminal_upserts_count_each_provider_request_once`
+was intentionally excluded: its 32 terminal writes plus one pending batch
+exceed the production preparation admission limit of 32 and fail with the
+explicit `usage preparation capacity exhausted` error. It needs a separate
+capacity/fixture decision rather than a CI waiver. Local evidence for this
+slice: `bash -n
+tools/ci/run_postgres_live_tests.sh`, `cargo fmt --all -- --check`, and
+`git diff --check`; Docker was unavailable in the development environment, so
+live execution must be confirmed by the CI service job.
 
 ## 2026-09-12 live revalidation (after main `acb022247`)
 
