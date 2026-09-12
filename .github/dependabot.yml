@@ -33,3 +33,36 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+
+  # These independent npm projects also have committed lockfiles. Keep their
+  # version updates covered alongside the frontend and automation projects.
+  - package-ecosystem: npm
+    directories:
+      - "/"
+      - "/aether-vscodex"
+      - "/aether-vscodex/web"
+      - "/aether-vscodex/vscode-extension"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      supporting-npm-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Dockerfile.app variants, VSCodex images, and the root-logging fixture are
+  # fetched from their containing directories, including nonstandard filenames.
+  - package-ecosystem: docker
+    directories:
+      - "/"
+      - "/aether-vscodex"
+      - "/tests"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      container-minor-and-patch:
+        update-types:
+          - minor
+          - patch
