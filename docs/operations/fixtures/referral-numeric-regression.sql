@@ -2,6 +2,7 @@
 -- This fixture is intentionally self-contained and read-only after the
 -- temporary table is created. It can be pasted into a PostgreSQL integration
 -- test or run in an isolated session.
+BEGIN;
 
 CREATE TEMP TABLE referral_numeric_fixture (
   amount_usd numeric(20,8) NOT NULL,
@@ -29,3 +30,5 @@ SELECT
   MAX(CAST(amount_usd AS DOUBLE PRECISION)) = 1234567890.12345678 AS max_amount_ok,
   BOOL_AND(CAST(amount_usd AS DOUBLE PRECISION) IS NOT NULL) AS finite_decode_input
 FROM referral_numeric_fixture;
+
+ROLLBACK;
