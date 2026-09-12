@@ -6,6 +6,7 @@ import test from 'node:test';
 const workflowPath = fileURLToPath(new URL('../../workflows/rust-ci.yml', import.meta.url));
 const expectedActions = new Map([
   ['actions/checkout', 'fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09'],
+  ['actions/upload-artifact', '330a01c490aca151604b8cf639adc76d48f6c5d4'],
   ['dtolnay/rust-toolchain', '4360b52568e2003a75bf9bc1d59f33a8e3fc893c'],
   ['Swatinem/rust-cache', '49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c'],
   ['mozilla-actions/sccache-action', '7d986dd989559c6ecdb630a3fd2557667be217ad'],
