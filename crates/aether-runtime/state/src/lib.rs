@@ -4340,9 +4340,61 @@ mod tests {
             },
             Some(1_000),
         )
-        .await
-        .ok()?;
+        .await;
+        let runtime = redis_test_result(runtime, "connect runtime", local_redis_tests_required())?;
         Some((redis, runtime))
+    }
+
+    fn local_redis_tests_required() -> bool {
+        std::env::var("AETHER_REQUIRE_LOCAL_REDIS_TESTS")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+    }
+
+    fn redis_test_result<T>(
+        result: Result<T, impl std::fmt::Display>,
+        context: &str,
+        required: bool,
+    ) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) if required => {
+                panic!("required Redis test failed ({context}): {error}");
+            }
+            Err(error) => {
+                eprintln!(
+                    "SKIP: optional Redis test ({context}): {error}; set AETHER_REQUIRE_LOCAL_REDIS_TESTS=1 to fail instead"
+                );
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "required Redis test failed (connect runtime)")]
+    async fn redis_strict_harness_rejects_runtime_connection_failure() {
+        // Keep the port reserved without serving Redis, so no other service can
+        // claim it and turn this negative connection check into a successful one.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve test port");
+        let port = listener.local_addr().expect("test port").port();
+        let runtime = RuntimeState::redis(
+            RedisClientConfig {
+                url: format!("redis://127.0.0.1:{port}/0"),
+                key_prefix: Some("strict-connection-failure".to_string()),
+            },
+            Some(50),
+        )
+        .await;
+        assert!(
+            runtime.is_err(),
+            "non-Redis listener must reject the runtime"
+        );
+        redis_test_result(runtime, "connect runtime", true);
     }
 
     struct TestRedisServer {
@@ -4355,12 +4407,20 @@ mod tests {
 
     impl TestRedisServer {
         async fn start() -> Option<Self> {
-            let port = reserve_local_port().ok()?;
+            redis_test_result(
+                Self::try_start().await,
+                "start isolated server",
+                local_redis_tests_required(),
+            )
+        }
+
+        async fn try_start() -> Result<Self, Box<dyn std::error::Error>> {
+            let port = reserve_local_port()?;
             let workdir = std::env::temp_dir().join(format!(
                 "aether-runtime-state-redis-{}-{port}",
                 std::process::id()
             ));
-            std::fs::create_dir_all(&workdir).ok()?;
+            std::fs::create_dir(&workdir)?;
             let binary = std::env::var("AETHER_REDIS_SERVER_BIN")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -4372,8 +4432,9 @@ mod tests {
                 workdir,
                 redis_url: format!("redis://127.0.0.1:{port}/0"),
             };
-            server.restart().await.ok()?;
-            Some(server)
+            server.restart().await?;
+            eprintln!("Redis test fixture ready: isolated server on 127.0.0.1:{port}");
+            Ok(server)
         }
 
         fn stop(&mut self) {
@@ -4385,6 +4446,8 @@ mod tests {
 
         async fn restart(&mut self) -> Result<(), Box<dyn std::error::Error>> {
             self.stop();
+            let log_path = self.workdir.join("redis-server.log");
+            let log = std::fs::File::create(&log_path)?;
             let child = Command::new(&self.binary)
                 .arg("--save")
                 .arg("")
@@ -4396,13 +4459,29 @@ mod tests {
                 .arg(&self.workdir)
                 .arg("--bind")
                 .arg("127.0.0.1")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
+                .stdout(Stdio::from(log.try_clone()?))
+                .stderr(Stdio::from(log))
+                .spawn()
+                .map_err(|error| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!("could not spawn Redis binary {}: {error}", self.binary),
+                    )
+                })?;
             self.child = Some(child);
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             while tokio::time::Instant::now() < deadline {
-                if redis_ping(self.port).await.unwrap_or(false) {
+                if let Some(status) = self.child.as_mut().expect("test child").try_wait()? {
+                    return Err(std::io::Error::other(format!(
+                        "test redis-server exited with {status}; logs: {}",
+                        std::fs::read_to_string(&log_path).unwrap_or_default()
+                    ))
+                    .into());
+                }
+                if matches!(
+                    tokio::time::timeout_at(deadline, redis_ping(self.port)).await,
+                    Ok(Ok(true))
+                ) {
                     return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -4410,7 +4489,10 @@ mod tests {
             self.stop();
             Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                "timed out waiting for test redis-server",
+                format!(
+                    "timed out waiting for test redis-server; logs: {}",
+                    std::fs::read_to_string(&log_path).unwrap_or_default()
+                ),
             )
             .into())
         }
