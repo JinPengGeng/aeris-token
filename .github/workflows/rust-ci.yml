@@ -29,6 +29,7 @@ on:
       - "tests/deploy_*_test.sh"
       - "tests/update_*_test.sh"
       - "tests/release_supply_chain_test.sh"
+      - "tests/redis_durable_crash_drill.sh"
       - "tests/tunnel_installer_config_security_test.sh"
       - ".github/workflows/build-tunnel.yml"
       - ".github/workflows/deploy-pages.yml"
@@ -90,6 +91,7 @@ jobs:
           bash tests/install_privileged_write_safety_test.sh
           bash tests/install_source_trust_test.sh
           bash tests/release_supply_chain_test.sh
+          bash tests/redis_durable_crash_drill.sh
           bash tests/update_compose_safety_test.sh
           bash tests/tunnel_installer_config_security_test.sh
 
