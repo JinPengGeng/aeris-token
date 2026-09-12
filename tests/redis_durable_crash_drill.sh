@@ -31,21 +31,29 @@ redis() {
 test "$(redis ping)" = PONG
 
 source_id="$(redis XADD usage:events:dlq '*' payload fixture)"
+echo "seeded DLQ entry: $source_id"
 target_before="$(redis XLEN usage:events)"
+echo "target length before kill: $target_before"
 test "$target_before" = 0
 sleep 2
-test "$(redis INFO persistence | awk -F: '$1 == "aof_last_write_status" { print $2 }' | tr -d '\r')" = ok
+aof_status="$(redis INFO persistence | awk -F: '$1 == "aof_last_write_status" { print $2 }' | tr -d '\r')"
+echo "AOF write status before kill: $aof_status"
+test "$aof_status" = ok
 
 "${compose[@]}" kill -s KILL redis
 "${compose[@]}" up -d --wait redis
-test "$(redis EXISTS "usage:events:dlq")" = 1
+recovered="$(redis EXISTS "usage:events:dlq")"
+echo "DLQ exists after restart: $recovered"
+test "$recovered" = 1
 
 lua="$(<"$lua_file")"
 marker="usage:redrive:drill:$source_id"
 first=( $(redis --raw EVAL "$lua" 3 usage:events:dlq usage:events "$marker" "$source_id" 0 payload fixture) )
+echo "first redrive result: ${first[*]}"
 test "${first[0]}" = 1
 destination_id="${first[1]}"
 second=( $(redis --raw EVAL "$lua" 3 usage:events:dlq usage:events "$marker" "$source_id" 0 payload fixture) )
+echo "second redrive result: ${second[*]}"
 test "${second[0]}" = 2
 test "${second[1]}" = "$destination_id"
 test "$(redis XLEN usage:events)" = 1
