@@ -2,6 +2,7 @@ use crate::config::ServiceRuntimeConfig;
 use axum::body::Body;
 use axum::http::header::{HeaderValue, CONTENT_TYPE};
 use axum::http::Response;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static METRICS_NAMESPACE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
@@ -73,18 +74,23 @@ pub fn metrics_namespace() -> Option<&'static str> {
 pub fn render_prometheus_text(samples: &[MetricSample]) -> String {
     let mut body = String::new();
     let namespace = metrics_namespace();
+    let mut declared_families = BTreeSet::new();
 
     for sample in samples {
         let metric_name = format_metric_name(namespace, sample.name);
-        body.push_str(&format!("# HELP {} {}\n", metric_name, sample.help));
-        body.push_str(&format!(
-            "# TYPE {} {}\n",
-            metric_name,
-            match sample.kind {
-                MetricKind::Counter => "counter",
-                MetricKind::Gauge => "gauge",
-            }
-        ));
+        // Prometheus permits one HELP/TYPE declaration per family, even when
+        // that family contains multiple (possibly nonadjacent) label sets.
+        if declared_families.insert(sample.name) {
+            body.push_str(&format!("# HELP {} {}\n", metric_name, sample.help));
+            body.push_str(&format!(
+                "# TYPE {} {}\n",
+                metric_name,
+                match sample.kind {
+                    MetricKind::Counter => "counter",
+                    MetricKind::Gauge => "gauge",
+                }
+            ));
+        }
         body.push_str(&metric_name);
         if !sample.labels.is_empty() {
             body.push('{');
@@ -251,6 +257,24 @@ mod tests {
         .with_labels(vec![MetricLabel::new("message", "bad\"line\nx")])]);
 
         assert!(text.contains("message=\"bad\\\"line\\nx\""));
+    }
+
+    #[test]
+    fn declares_each_metric_family_once_without_losing_label_variants() {
+        let counter = |operation| {
+            MetricSample::new("fail_open_total", "Guard failures", MetricKind::Counter, 2)
+                .with_labels(vec![MetricLabel::new("operation", operation)])
+        };
+        let text = render_prometheus_text(&[
+            counter("daily_quota"),
+            service_up_sample("gateway"),
+            counter("rpm"),
+        ]);
+        assert_eq!(text.matches("# HELP fail_open_total ").count(), 1);
+        assert_eq!(text.matches("# TYPE fail_open_total counter").count(), 1);
+        assert!(text.contains("fail_open_total{operation=\"daily_quota\"} 2"));
+        assert!(text.contains("fail_open_total{operation=\"rpm\"} 2"));
+        assert!(text.contains("service_up{service=\"gateway\"} 1"));
     }
 
     #[tokio::test]
