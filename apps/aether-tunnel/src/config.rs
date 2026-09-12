@@ -500,7 +500,8 @@ pub struct Config {
     pub upstream_proxy_remote_dns: bool,
 
     /// Accepted only so older launch commands and environments keep working.
-    /// Redirect request bodies are always replayed without a cumulative size limit.
+    /// The input is ignored. Redirect replay uses fixed resource limits,
+    /// including a 5 MiB per-request replay cache.
     #[arg(
         long = "redirect-replay-budget-bytes",
         env = "AETHER_TUNNEL_REDIRECT_REPLAY_BUDGET_BYTES",
@@ -1722,6 +1723,9 @@ fn div_ceil_u64(value: u64, divisor: u64) -> u64 {
     }
     value.saturating_add(divisor.saturating_sub(1)) / divisor
 }
+
+#[cfg(test)]
+mod env_reference;
 
 #[cfg(test)]
 mod tests {
