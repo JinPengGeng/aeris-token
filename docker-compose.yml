@@ -74,6 +74,7 @@ services:
     environment:
       AETHER_DATABASE_DRIVER: postgres
       DATABASE_URL: postgresql://postgres:${DB_PASSWORD:?set DB_PASSWORD in .env}@postgres:5432/aether
+      AETHER_GATEWAY_DATA_POSTGRES_REQUIRE_SSL: ${AETHER_GATEWAY_DATA_POSTGRES_REQUIRE_SSL:-false}
       REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
       TZ: Asia/Shanghai
       AETHER_BASE_DIR: /opt/aether
