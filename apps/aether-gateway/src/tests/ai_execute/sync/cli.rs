@@ -988,6 +988,18 @@ fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_budget_
 
 async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_budget_elapses_impl()
 {
+    assert_api_key_concurrency_wait_budget_outcome(true).await;
+}
+
+#[test]
+fn gateway_preserves_skips_when_all_api_key_concurrency_wait_budgets_elapse() {
+    run_cli_sync_test(
+        "gateway_preserves_skips_when_all_api_key_concurrency_wait_budgets_elapse",
+        || assert_api_key_concurrency_wait_budget_outcome(false),
+    );
+}
+
+async fn assert_api_key_concurrency_wait_budget_outcome(release_for_later_step: bool) {
     fn hash_api_key(value: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(value.as_bytes());
@@ -1306,15 +1318,10 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
                     };
                     if hit == 1 {
                         // The first request holds the only concurrency slot
-                        // until the test observes the second request parked in
-                        // the bounded wait loop and explicitly releases it.
+                        // until the test observes a terminal concurrency skip
+                        // from the second request's first planner step.
                         first_execution_holding.notify_one();
                         release_first_execution.notified().await;
-                    } else {
-                        // Floor the second request's execution time so the
-                        // elapsed assertion holds regardless of how long the
-                        // bounded wait actually took.
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
                     Json(json!({
                         "request_id": "trace-openai-cli-local-timeout-123",
@@ -1425,8 +1432,6 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    let recent_reads_before_second =
-        recent_runtime_reads.load(std::sync::atomic::Ordering::Acquire);
     let started_at = std::time::Instant::now();
     let second_client = client.clone();
     let second_gateway_url = gateway_url.clone();
@@ -1444,21 +1449,78 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
             .await
             .expect("request should complete")
     });
-    // Candidate row pages are served from the row page cache, so a blocked
-    // selection attempt produces no candidate-selection repository reads.
-    // The bounded concurrency wait loop, however, re-reads the recent request
-    // candidates on every poll: one read for the blocked evaluation plus one
-    // read per poll. A +3 bump therefore proves the second request is parked
-    // in the wait loop right now — with most of its wait budget still ahead —
-    // and it is safe to release the slot.
-    wait_until(5_000, || {
-        recent_runtime_reads.load(std::sync::atomic::Ordering::Acquire)
-            >= recent_reads_before_second + 3
+    // Release only after a planner step has actually exhausted its budget and
+    // persisted a terminal skip. Poll counts or upstream latency cannot prove
+    // that the later successful step uses a different candidate identity.
+    let skipped_before_release = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let candidates = request_candidate_repository
+                .list_by_request_id("trace-openai-cli-local-timeout-123")
+                .await
+                .expect("blocked candidate trace should read");
+            if let Some(skipped) = candidates.into_iter().find(|candidate| {
+                candidate.status == RequestCandidateStatus::Skipped
+                    && candidate.skip_reason.as_deref()
+                        == Some("auth_api_key_concurrency_limit_reached")
+            }) {
+                break skipped;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
     })
-    .await;
-    release_first_execution.notify_one();
+    .await
+    .expect("first planning step must exhaust its concurrency wait budget");
+    if release_for_later_step {
+        release_first_execution.notify_one();
+    }
 
     let response = second_request.await.expect("second request should join");
+
+    if !release_for_later_step {
+        // Auth-limit exhaustion currently uses the local runtime-miss response.
+        // Candidate identity allocation must preserve that existing HTTP contract.
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let candidates = request_candidate_repository
+            .list_by_request_id("trace-openai-cli-local-timeout-123")
+            .await
+            .expect("exhausted candidate trace should read");
+        assert!(
+            candidates.len() >= 2,
+            "successive exhausted steps must retain separate observations: {candidates:?}"
+        );
+        assert!(
+            candidates.iter().all(|candidate| {
+                candidate.status == RequestCandidateStatus::Skipped
+                    && candidate.skip_reason.as_deref()
+                        == Some("auth_api_key_concurrency_limit_reached")
+            }),
+            "exhausted request must retain terminal skips: {candidates:?}"
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.candidate_index)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            candidates.len()
+        );
+        assert_eq!(
+            *execution_runtime_hits.lock().expect("mutex should lock"),
+            1
+        );
+        release_first_execution.notify_one();
+        assert_eq!(
+            first_request
+                .await
+                .expect("inflight request should join")
+                .status(),
+            StatusCode::OK
+        );
+        gateway_handle.abort();
+        execution_runtime_handle.abort();
+        upstream_handle.abort();
+        return;
+    }
 
     assert!(
         started_at.elapsed() >= std::time::Duration::from_millis(100),
@@ -1486,9 +1548,42 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
         .list_by_request_id("trace-openai-cli-local-timeout-123")
         .await
         .expect("request candidate trace should read");
-    assert_eq!(stored_candidates.len(), 1);
-    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Success);
-    assert_eq!(stored_candidates[0].skip_reason.as_deref(), None);
+    let successes = stored_candidates
+        .iter()
+        .filter(|candidate| candidate.status == RequestCandidateStatus::Success)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        successes.len(),
+        1,
+        "successful response must have a successful candidate: {stored_candidates:?}"
+    );
+    let success = successes[0];
+    assert_eq!(success.skip_reason.as_deref(), None);
+    assert_eq!(success.retry_index, 0);
+    assert_ne!(
+        success.candidate_index,
+        skipped_before_release.candidate_index
+    );
+    assert_ne!(success.id, skipped_before_release.id);
+    let preserved_skip = stored_candidates
+        .iter()
+        .find(|candidate| candidate.id == skipped_before_release.id)
+        .expect("the real terminal skip must remain visible");
+    assert_eq!(preserved_skip.status, RequestCandidateStatus::Skipped);
+    assert_eq!(
+        preserved_skip.skip_reason,
+        skipped_before_release.skip_reason
+    );
+    assert_eq!(
+        preserved_skip.finished_at_unix_ms,
+        skipped_before_release.finished_at_unix_ms
+    );
+    assert_eq!(
+        aether_data_contracts::repository::candidates::derive_request_candidate_final_status(
+            &stored_candidates
+        ),
+        aether_data_contracts::repository::candidates::RequestCandidateFinalStatus::Success
+    );
     assert_eq!(
         *execution_runtime_hits.lock().expect("mutex should lock"),
         2
