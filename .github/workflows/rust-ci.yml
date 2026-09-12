@@ -31,6 +31,7 @@ on:
       - "tests/release_supply_chain_test.sh"
       - "tests/redis_durable_crash_drill.sh"
       - "tests/tunnel_installer_config_security_test.sh"
+      - "tools/ci/**"
       - ".github/workflows/build-tunnel.yml"
       - ".github/workflows/deploy-pages.yml"
       - ".github/workflows/release.yml"
