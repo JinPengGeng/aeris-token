@@ -10,6 +10,13 @@ use crate::{
 };
 
 impl LocalVideoTaskSnapshot {
+    pub(crate) fn created_at_unix_ms(&self) -> u64 {
+        match self {
+            Self::OpenAi(seed) => seed.created_at_unix_ms,
+            Self::Gemini(_) => 0,
+        }
+    }
+
     pub fn to_upsert_record(&self) -> UpsertVideoTask {
         match self {
             Self::OpenAi(seed) => seed.to_upsert_record(),

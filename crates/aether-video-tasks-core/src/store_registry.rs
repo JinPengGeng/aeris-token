@@ -8,6 +8,10 @@ use crate::{
     LocalVideoTaskSnapshot, LocalVideoTaskStatus, OpenAiVideoTaskSeed,
 };
 
+/// Completed task snapshots contain prompts and provider metadata, so retain only a
+/// bounded recent history. Active tasks are never evicted by this policy.
+pub const VIDEO_TASK_MAX_TERMINAL_ENTRIES: usize = 4096;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VideoTaskRegistry {
     openai: BTreeMap<String, LocalVideoTaskSnapshot>,
@@ -25,6 +29,7 @@ impl VideoTaskRegistry {
                 self.gemini.insert(seed.local_short_id.clone(), snapshot);
             }
         }
+        self.prune_terminal();
     }
 
     pub fn read_openai(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse> {
@@ -81,6 +86,7 @@ impl VideoTaskRegistry {
                 }
             }
         }
+        self.prune_terminal();
     }
 
     pub fn project_openai(&mut self, task_id: &str, provider_body: &Map<String, Value>) -> bool {
@@ -88,6 +94,7 @@ impl VideoTaskRegistry {
             return false;
         };
         seed.apply_provider_body(provider_body);
+        self.prune_terminal();
         true
     }
 
@@ -96,7 +103,13 @@ impl VideoTaskRegistry {
             return false;
         };
         seed.apply_provider_body(provider_body);
+        self.prune_terminal();
         true
+    }
+
+    fn prune_terminal(&mut self) {
+        prune_terminal_map(&mut self.openai);
+        prune_terminal_map(&mut self.gemini);
     }
 
     pub(crate) fn sanitize_persisted_diagnostics(&mut self) -> bool {
@@ -105,5 +118,20 @@ impl VideoTaskRegistry {
             changed = snapshot.sanitize_persisted_diagnostics() || changed;
         }
         changed
+    }
+}
+
+fn prune_terminal_map(map: &mut BTreeMap<String, LocalVideoTaskSnapshot>) {
+    let mut terminal: Vec<(String, u64)> = map
+        .iter()
+        .filter(|(_, snapshot)| !snapshot.is_active_for_refresh())
+        .map(|(key, snapshot)| (key.clone(), snapshot.created_at_unix_ms()))
+        .collect();
+    terminal.sort_by_key(|(_, created_at)| *created_at);
+    let excess = terminal
+        .len()
+        .saturating_sub(VIDEO_TASK_MAX_TERMINAL_ENTRIES);
+    for (key, _) in terminal.into_iter().take(excess) {
+        map.remove(&key);
     }
 }
