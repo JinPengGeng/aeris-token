@@ -110,6 +110,28 @@ FROM (VALUES
     assert!(row.try_get::<f64, _>("raw").is_err());
     assert_eq!(row.get::<f64, _>("decoded"), 0.00000001);
 
+    // psql sends a file one statement at a time, unlike raw_sql's single
+    // protocol message. This catches ON COMMIT DROP before INSERT when a
+    // standalone fixture forgets its explicit BEGIN.
+    let psql = std::env::var("AETHER_POSTGRES_BIN")
+        .map(|binary| std::path::PathBuf::from(binary).with_file_name("psql"))
+        .unwrap_or_else(|_| "psql".into());
+    let output = std::process::Command::new(psql)
+        .args(["--no-psqlrc", "--set", "ON_ERROR_STOP=1", "--dbname"])
+        .arg(server.database_url())
+        .arg("--file")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/operations/fixtures/referral-numeric-regression.sql"
+        ))
+        .output()
+        .expect("psql must be installed alongside the PostgreSQL server");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
     let cast_rows = sqlx::raw_sql(CAST_FIXTURE)
         .fetch_all(&mut connection)
         .await
