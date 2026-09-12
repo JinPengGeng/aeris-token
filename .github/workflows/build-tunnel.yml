@@ -220,19 +220,11 @@ jobs:
       - name: Verify signed release manifest
         working-directory: artifacts
         env:
+          AETHER_TUNNEL_RELEASE_KEY_ID: ${{ vars.AETHER_TUNNEL_RELEASE_KEY_ID }}
           AETHER_TUNNEL_RELEASE_PUBLIC_KEY: ${{ vars.AETHER_TUNNEL_RELEASE_PUBLIC_KEY }}
         shell: bash
         run: |
-          set -euo pipefail
-          key_file="${RUNNER_TEMP}/aether-tunnel-release-public.pem"
-          raw_file="${RUNNER_TEMP}/aether-tunnel-release-public.der"
-          sig_file="${RUNNER_TEMP}/aether-tunnel-manifest.sig"
-          trap 'shred -u "${key_file}" "${raw_file}" "${sig_file}" 2>/dev/null || true' EXIT
-          test "$(sed -n 's/^key_id=//p' SHA256SUMS.txt.sig)" = "${AETHER_TUNNEL_RELEASE_KEY_ID}"
-          { printf '302a300506032b6570032100' | xxd -r -p; printf '%s' "${AETHER_TUNNEL_RELEASE_PUBLIC_KEY}" | base64 -d; } > "${raw_file}"
-          openssl pkey -pubin -inform DER -in "${raw_file}" -out "${key_file}"
-          base64 -d <(sed -n 's/^signature=//p' SHA256SUMS.txt.sig) > "${sig_file}"
-          openssl pkeyutl -verify -rawin -pubin -inkey "${key_file}" -in SHA256SUMS.txt -sigfile "${sig_file}"
+          "${GITHUB_WORKSPACE}/.github/workflows/scripts/verify-tunnel-release.sh"
 
       - name: Delete stale draft releases for tag
         env:
