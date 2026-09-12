@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static METRICS_NAMESPACE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
-// These counters are intentionally process-wide: billing/usage finalizers can run in
+// These counters are intentionally process-wide: billing/usage accounting paths can run in
 // different crates, but the gateway owns one `/metrics` endpoint. Labels stay fixed so
 // an untrusted request cannot create a new time series.
 static BILLING_ENRICHMENT_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
