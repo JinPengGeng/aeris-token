@@ -9,6 +9,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
+use aether_data_contracts::DataLayerError;
+
 use crate::ai_serving::AiSurfaceFinalizeError;
 use crate::constants::*;
 use crate::insert_header_if_missing;
@@ -172,6 +174,37 @@ pub(crate) enum GatewayError {
 }
 
 impl GatewayError {
+    /// Convert a data-backend failure into the client-visible control-plane
+    /// contract. Validation/configuration errors stay internal because they
+    /// are operator or caller mistakes rather than transient dependencies.
+    pub(crate) fn from_data_layer_error(error: DataLayerError) -> Self {
+        match error {
+            DataLayerError::Postgres(message)
+            | DataLayerError::Redis(message)
+            | DataLayerError::Sql(message)
+            | DataLayerError::TimedOut(message) => Self::ControlUnavailable {
+                trace_id: String::new(),
+                message,
+            },
+            other => Self::Internal(other.to_string()),
+        }
+    }
+
+    /// Attach the request trace id at the HTTP/control boundary. Lower-level
+    /// state helpers intentionally do not know about request metadata.
+    pub(crate) fn with_trace_id(self, trace_id: &str) -> Self {
+        match self {
+            Self::ControlUnavailable {
+                trace_id: current,
+                message,
+            } if current.trim().is_empty() => Self::ControlUnavailable {
+                trace_id: trace_id.to_string(),
+                message,
+            },
+            other => other,
+        }
+    }
+
     pub(crate) fn into_message(self) -> String {
         match self {
             Self::UpstreamUnavailable { message, .. }
@@ -233,12 +266,17 @@ impl IntoResponse for GatewayError {
                 let body = Json(json!({
                     "error": {
                         "message": "gateway control unavailable",
+                        "type": "server_error",
+                        "code": "control_unavailable",
                         "trace_id": trace_id,
+                        "retryable": true,
+                        "failover_disposition": "retry_request",
                     }
                 }));
                 let mut response = (StatusCode::BAD_GATEWAY, body).into_response();
                 let _ =
                     insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, &trace_id);
+                let _ = insert_header_if_missing(response.headers_mut(), "Retry-After", "1");
                 response
             }
             Self::LocalExecutionPlanningTimeout {
@@ -487,6 +525,68 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some(trace_id.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn control_dependency_errors_use_retryable_sanitized_contract() {
+        use aether_data_contracts::DataLayerError;
+
+        for error in [
+            DataLayerError::Postgres("postgres://user:secret@db/aether".to_string()),
+            DataLayerError::Redis("redis://:secret@cache/0".to_string()),
+            DataLayerError::Sql("statement failed: password=secret".to_string()),
+            DataLayerError::TimedOut("backend timed out".to_string()),
+        ] {
+            let response = GatewayError::from_data_layer_error(error)
+                .with_trace_id("trace-control")
+                .into_response();
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+                Some("1")
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(TRACE_ID_HEADER)
+                    .and_then(|v| v.to_str().ok()),
+                Some("trace-control")
+            );
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("control error response body should read");
+            let payload: serde_json::Value =
+                serde_json::from_slice(&body).expect("control error response should be JSON");
+            assert_eq!(payload["error"]["code"], "control_unavailable");
+            assert_eq!(payload["error"]["retryable"], true);
+            assert_eq!(payload["error"]["failover_disposition"], "retry_request");
+            assert!(!String::from_utf8_lossy(&body).contains("secret"));
+        }
+    }
+
+    #[test]
+    fn data_validation_errors_remain_internal() {
+        use aether_data_contracts::DataLayerError;
+
+        assert!(matches!(
+            GatewayError::from_data_layer_error(DataLayerError::InvalidInput("bad request".into())),
+            GatewayError::Internal(_)
+        ));
+        assert!(matches!(
+            GatewayError::from_data_layer_error(DataLayerError::InvalidConfiguration(
+                "bad config".into()
+            )),
+            GatewayError::Internal(_)
+        ));
+        assert!(matches!(
+            GatewayError::from_data_layer_error(DataLayerError::UnexpectedValue(
+                "bad value".into()
+            )),
+            GatewayError::Internal(_)
+        ));
     }
 
     #[test]
