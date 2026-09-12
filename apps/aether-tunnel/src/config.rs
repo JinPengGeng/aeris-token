@@ -1442,6 +1442,18 @@ fn write_private_config_atomically(path: &Path, content: &[u8]) -> io::Result<()
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
+    #[cfg(unix)]
+    let existing_mode = std::fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| metadata.mode() & 0o777)
+        .filter(|mode| *mode == 0o640)
+        .unwrap_or(0o600);
+    #[cfg(unix)]
+    let existing_gid = std::fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| metadata.gid());
     let file_name = path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1468,7 +1480,7 @@ fn write_private_config_atomically(path: &Path, content: &[u8]) -> io::Result<()
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
+            options.mode(existing_mode);
         }
         match options.open(&candidate) {
             Ok(file) => {
@@ -1492,7 +1504,13 @@ fn write_private_config_atomically(path: &Path, content: &[u8]) -> io::Result<()
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            temp_file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            temp_file.set_permissions(std::fs::Permissions::from_mode(existing_mode))?;
+            if let Some(gid) = existing_gid {
+                use std::os::unix::io::AsRawFd as _;
+                if unsafe { libc::fchown(temp_file.as_raw_fd(), u32::MAX, gid) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
         }
         temp_file.write_all(content)?;
         temp_file.sync_all()?;
@@ -1853,6 +1871,30 @@ mod tests {
             "successful save must not leave a temporary file"
         );
 
+        std::fs::remove_dir_all(directory).expect("config save test directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_save_preserves_service_group_readability() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = config_save_test_dir("service-readable");
+        let path = directory.join("tunnel.toml");
+        secret_bearing_config_file("first-secret")
+            .save(&path)
+            .expect("initial config save should succeed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("service config mode should be set");
+        secret_bearing_config_file("second-secret")
+            .save(&path)
+            .expect("service config replacement should succeed");
+        let mode = std::fs::metadata(&path)
+            .expect("saved config metadata should exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o640);
         std::fs::remove_dir_all(directory).expect("config save test directory should be removed");
     }
 
