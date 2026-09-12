@@ -1,9 +1,10 @@
 # Gateway billing and failure metrics contract
 
 This contract is the runtime-owned slice for Issue #307 (217-A/B). The gateway
-exports the samples from the existing `/metrics` endpoint. A deployment may
-prefix names with its configured metrics namespace; the unprefixed names below
-are the stable suffixes used by alert rules.
+exports the samples from `/_gateway/metrics`. Scraping requires an authenticated
+operational identity with the `admin:monitoring:read` permission. A deployment
+may prefix names with its configured metrics namespace; the unprefixed names
+below are the stable suffixes used by alert rules.
 
 | Metric | Type | Fixed labels | Meaning and owner |
 | --- | --- | --- | --- |
