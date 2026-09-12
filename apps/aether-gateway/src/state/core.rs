@@ -2043,6 +2043,10 @@ impl AppState {
         self.runtime_state.is_redis()
     }
 
+    pub(crate) async fn ping_runtime_state(&self) -> Result<(), aether_data::DataLayerError> {
+        self.runtime_state.ping().await
+    }
+
     pub(crate) fn runtime_state_backend(&self) -> &'static str {
         self.runtime_state.backend_kind().as_str()
     }

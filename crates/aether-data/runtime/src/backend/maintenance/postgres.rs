@@ -11,6 +11,14 @@ use crate::DataLayerError;
 use super::maintenance_identifier;
 
 impl PostgresBackend {
+    pub async fn ping_database(&self) -> Result<(), DataLayerError> {
+        sqlx::query("SELECT 1")
+            .execute(self.pool())
+            .await
+            .map_postgres_err()
+            .map(|_| ())
+    }
+
     pub async fn run_table_maintenance(
         &self,
         table_names: &[&str],

@@ -157,6 +157,13 @@ impl Default for BillingModelContextCacheState {
 }
 
 impl GatewayDataState {
+    pub(crate) async fn ping_database(&self) -> Result<(), DataLayerError> {
+        match &self.backends {
+            Some(backends) => backends.ping_database().await,
+            None => Ok(()),
+        }
+    }
+
     pub(crate) async fn create_admin_audit_log(
         &self,
         record: &CreateAdminAuditLog,

@@ -202,6 +202,15 @@ struct RedisRuntimeBackend {
 }
 
 impl RuntimeState {
+    /// Verifies connectivity for an external runtime backend. Memory state is
+    /// always available and therefore reports success without I/O.
+    pub async fn ping(&self) -> Result<(), DataLayerError> {
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(_) => Ok(()),
+            RuntimeStateBackend::Redis(redis) => redis.runtime.ping().await,
+        }
+    }
+
     pub async fn from_config(mut config: RuntimeStateConfig) -> Result<Self, DataLayerError> {
         if matches!(config.backend, RuntimeStateBackendMode::Auto) {
             config.backend = if config.redis.is_some() {
