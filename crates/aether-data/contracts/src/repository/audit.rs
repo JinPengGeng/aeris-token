@@ -57,10 +57,22 @@ impl CreateAdminAuditLog {
             ));
         }
         if self.user_id.as_ref().is_some_and(|value| value.len() > 36)
-            || self.api_key_id.as_ref().is_some_and(|value| value.len() > 36)
-            || self.ip_address.as_ref().is_some_and(|value| value.len() > 45)
-            || self.user_agent.as_ref().is_some_and(|value| value.len() > 500)
-            || self.request_id.as_ref().is_some_and(|value| value.len() > 100)
+            || self
+                .api_key_id
+                .as_ref()
+                .is_some_and(|value| value.len() > 36)
+            || self
+                .ip_address
+                .as_ref()
+                .is_some_and(|value| value.len() > 45)
+            || self
+                .user_agent
+                .as_ref()
+                .is_some_and(|value| value.len() > 500)
+            || self
+                .request_id
+                .as_ref()
+                .is_some_and(|value| value.len() > 100)
         {
             return Err(crate::DataLayerError::InvalidInput(
                 "audit log bounded text field exceeds its database limit".to_string(),

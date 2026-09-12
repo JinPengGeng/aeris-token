@@ -1057,9 +1057,10 @@ pub(crate) async fn proxy_request(
     )
     .await;
     if let Ok(mut response) = result {
-        if let Some(crate::audit::PendingAdminAudit(record)) =
-            response.extensions_mut().remove::<crate::audit::PendingAdminAudit>()
-        {
+        if let Some(crate::audit::PendingAdminAudit(record)) = response
+            .extensions_mut()
+            .remove::<crate::audit::PendingAdminAudit>(
+        ) {
             crate::audit::persist_admin_audit(data.as_ref(), record).await;
         }
         Ok(response)

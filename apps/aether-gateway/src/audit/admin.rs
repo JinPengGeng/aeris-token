@@ -1,6 +1,6 @@
+use aether_data::repository::audit::CreateAdminAuditLog;
 use axum::body::Body;
 use axum::http::{self, Response, StatusCode};
-use aether_data::repository::audit::CreateAdminAuditLog;
 use chrono::Utc;
 use serde_json::json;
 use tracing::{info, warn};
@@ -185,12 +185,7 @@ pub(crate) async fn persist_admin_audit(
         .and_then(|metadata| metadata.get("action"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
-    match tokio::time::timeout(
-        Duration::from_secs(2),
-        data.create_admin_audit_log(&record),
-    )
-    .await
-    {
+    match tokio::time::timeout(Duration::from_secs(2), data.create_admin_audit_log(&record)).await {
         Ok(Ok(_outcome)) => {}
         Ok(Err(_error)) => warn!(
             event_name = "admin_audit_persist_failed",
