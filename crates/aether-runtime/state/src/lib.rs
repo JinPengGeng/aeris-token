@@ -2357,6 +2357,10 @@ mod tests {
         include!("redis/dead_letter_transfer_tests.rs");
     }
 
+    mod dead_letter_redrive {
+        include!("redis/dead_letter_redrive_tests.rs");
+    }
+
     mod usage_limit_cleanup {
         include!("redis/usage_limit_cleanup_tests.rs");
     }
