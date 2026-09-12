@@ -6,6 +6,7 @@ use crate::AppState;
 
 mod adaptive;
 mod attempt;
+mod candidate_indices;
 mod classifier;
 mod codex_quota_breaker;
 mod effects;
@@ -24,6 +25,10 @@ pub(crate) use self::attempt::{
     local_execution_candidate_metadata_from_report_context, next_same_key_retry_attempt,
     ExecutionAttemptIdentity, LocalExecutionCandidateMetadata, POOL_KEY_RETRY_INDEX_STRIDE,
     ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD, SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
+};
+pub(crate) use self::candidate_indices::{
+    current_request_candidate_indices, scope_request_candidate_indices,
+    scope_request_candidate_indices_with, RequestCandidateIndices,
 };
 pub(crate) use self::classifier::{
     classify_anthropic_failure_disposition, classify_failure_disposition, classify_local_failover,
