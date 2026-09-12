@@ -160,8 +160,7 @@ fn signed_affinity_request(
 }
 
 #[tokio::test]
-async fn gateway_locally_denies_explicit_trusted_balance_failure_without_hitting_control_or_upstream(
-) {
+async fn gateway_quota_fixture_denials_reach_real_routes_without_hitting_control_or_upstream() {
     let auth_context_hits = Arc::new(Mutex::new(0usize));
     let auth_context_hits_clone = Arc::clone(&auth_context_hits);
     let public_hits = Arc::new(Mutex::new(0usize));
@@ -214,45 +213,85 @@ async fn gateway_locally_denies_explicit_trusted_balance_failure_without_hitting
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let client = reqwest::Client::new();
-    let response = signed_affinity_request(
-        &client,
-        format!("{gateway_url}/v1/chat/completions"),
-        "/v1/chat/completions",
-        "user-123",
-        "key-123",
-        false,
-        Some("0"),
-        AFFINITY_TEST_BODY.as_bytes(),
-    )
-    .header(http::header::CONTENT_TYPE, "application/json")
-    .header(TRACE_ID_HEADER, "trace-control-balance-denied-1")
-    .body(AFFINITY_TEST_BODY)
-    .send()
-    .await
-    .expect("request should succeed");
-
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let fixture: serde_json::Value =
+        serde_json::from_str(crate::tests::api_contract_fixtures::FIXTURE)
+            .expect("fixture should parse");
+    let cases: Vec<_> = fixture["cases"]
+        .as_array()
+        .expect("fixture cases")
+        .iter()
+        .filter(|case| case["kind"] == "quota_exhausted")
+        .collect();
     assert_eq!(
-        response
-            .headers()
-            .get(EXECUTION_PATH_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some(EXECUTION_PATH_LOCAL_AUTH_DENIED)
+        cases.len(),
+        4,
+        "all four public endpoints require route coverage"
     );
-    assert_eq!(
-        response
-            .headers()
-            .get(CONTROL_ROUTE_CLASS_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some("ai_public")
-    );
-    let has_retry_after = response.headers().get("retry-after").is_some();
-    let payload: serde_json::Value = response.json().await.expect("response json should parse");
-    assert_eq!(payload["error"]["type"], "rate_limit_error");
-    assert_eq!(payload["error"]["code"], "insufficient_quota");
-    assert_eq!(payload["error"]["message"], "Insufficient quota");
-    assert!(payload["error"]["details"].is_null());
-    assert!(!has_retry_after);
+    for case in cases {
+        let path = case["endpoint"].as_str().expect("endpoint");
+        for streaming in [false, true] {
+            if streaming && path == "/v1/embeddings" {
+                continue;
+            }
+            let mut request = case["request"].clone();
+            if streaming {
+                request["stream"] = json!(true);
+            }
+            let body = serde_json::to_vec(&request).expect("request should encode");
+            let trace_id = format!(
+                "trace-{}-{streaming}",
+                case["id"].as_str().expect("fixture id")
+            );
+            let response = signed_affinity_request(
+                &client,
+                format!("{gateway_url}{path}"),
+                path,
+                "user-123",
+                "key-123",
+                false,
+                Some("-12.345678"),
+                &body,
+            )
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header(TRACE_ID_HEADER, &trace_id)
+            .body(body)
+            .send()
+            .await
+            .expect("request should succeed");
+            assert_eq!(
+                u64::from(response.status().as_u16()),
+                case["status"].as_u64().unwrap(),
+                "{path}"
+            );
+            assert_eq!(
+                response.headers()[EXECUTION_PATH_HEADER],
+                EXECUTION_PATH_LOCAL_AUTH_DENIED
+            );
+            assert_eq!(response.headers()[CONTROL_ROUTE_CLASS_HEADER], "ai_public");
+            assert_eq!(response.headers()[TRACE_ID_HEADER], trace_id);
+            assert!(!response.headers().contains_key("retry-after"));
+            let payload: serde_json::Value =
+                response.json().await.expect("response json should parse");
+            assert_eq!(payload["error"]["type"], case["error_type"], "{path}");
+            assert_eq!(payload["error"]["code"], case["error_code"], "{path}");
+            assert_eq!(payload["error"]["message"], "Insufficient quota");
+            assert!(payload["error"]["details"].is_null());
+            if case["envelope"] == "claude" {
+                assert_eq!(payload["type"], "error");
+            }
+            let serialized = payload.to_string();
+            for private in [
+                "12.34",
+                "remaining",
+                "USD",
+                "user-123",
+                "key-123",
+                RELAY_TEST_SECRET,
+            ] {
+                assert!(!serialized.contains(private), "{path} leaked {private}");
+            }
+        }
+    }
 
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -941,37 +980,55 @@ async fn gateway_locally_denies_locked_trusted_snapshot_without_hitting_control_
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let client = reqwest::Client::new();
-    let response = signed_affinity_request(
-        &client,
-        format!("{gateway_url}/v1/chat/completions"),
-        "/v1/chat/completions",
-        "user-locked-123",
-        "key-locked-123",
-        true,
-        None,
-        AFFINITY_TEST_BODY.as_bytes(),
-    )
-    .header(http::header::CONTENT_TYPE, "application/json")
-    .header(TRACE_ID_HEADER, "trace-control-locked-trusted-1")
-    .body(AFFINITY_TEST_BODY)
-    .send()
-    .await
-    .expect("request should succeed");
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert_eq!(
-        response
-            .headers()
-            .get(EXECUTION_PATH_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some(EXECUTION_PATH_LOCAL_AUTH_DENIED)
-    );
-    let payload: serde_json::Value = response.json().await.expect("response json should parse");
-    assert_eq!(payload["error"]["type"], "permission_error");
-    assert_eq!(
-        payload["error"]["message"],
-        "该密钥已被管理员锁定，请联系管理员"
-    );
+    let fixture: serde_json::Value =
+        serde_json::from_str(crate::tests::api_contract_fixtures::FIXTURE)
+            .expect("fixture should parse");
+    let cases: Vec<_> = fixture["cases"]
+        .as_array()
+        .expect("cases")
+        .iter()
+        .filter(|case| case["kind"] == "permission_denied")
+        .collect();
+    assert_eq!(cases.len(), 4);
+    for case in cases {
+        let path = case["endpoint"].as_str().expect("endpoint");
+        let body = serde_json::to_vec(&case["request"]).expect("request should encode");
+        let response = signed_affinity_request(
+            &client,
+            format!("{gateway_url}{path}"),
+            path,
+            "user-locked-123",
+            "key-locked-123",
+            true,
+            None,
+            &body,
+        )
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(TRACE_ID_HEADER, "trace-control-locked-trusted-1")
+        .body(body)
+        .send()
+        .await
+        .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.headers()[TRACE_ID_HEADER],
+            "trace-control-locked-trusted-1"
+        );
+        assert_eq!(
+            response.headers()[EXECUTION_PATH_HEADER],
+            EXECUTION_PATH_LOCAL_AUTH_DENIED
+        );
+        assert!(!response.headers().contains_key("retry-after"));
+        let payload: serde_json::Value = response.json().await.expect("response json should parse");
+        assert_eq!(payload["error"]["type"], case["error_type"]);
+        assert_eq!(
+            payload["error"]["message"],
+            "该密钥已被管理员锁定，请联系管理员"
+        );
+        if case["envelope"] == "claude" {
+            assert_eq!(payload["type"], "error");
+        }
+    }
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 

@@ -700,6 +700,7 @@ pub(super) fn anthropic_error_status_code(body_json: &Value) -> u16 {
     match error_type {
         "invalid_request_error" => 400,
         "authentication_error" => 401,
+        "billing_error" => 402,
         "permission_error" => 403,
         "not_found_error" => 404,
         "request_too_large" => 413,
@@ -1072,6 +1073,7 @@ mod tests {
         for (error_type, status_code) in [
             ("invalid_request_error", 400),
             ("authentication_error", 401),
+            ("billing_error", 402),
             ("permission_error", 403),
             ("not_found_error", 404),
             ("request_too_large", 413),
