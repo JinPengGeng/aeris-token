@@ -25,11 +25,11 @@ fully accepted issue. Project cards must mirror the same decision.
 
 | Order | Work package | Issues | Benefit / complexity | Exit criteria | State |
 | --- | --- | --- | --- | --- | --- |
-| 0 | Protect video-task secrets at rest | #211 | security and privacy / M-L | headers, prompts and provider credentials are redacted or encrypted, file permissions are tested, and no plaintext appears in logs, registry or error paths | Planned |
-| 1 | Durable privileged-mutation audit | #255 | incident accountability / L | each mutation writes a queryable `audit_logs` row before success is returned; timeout/failure semantics and integration tests are documented | Planned |
-| 2 | DLQ operator lifecycle | #223 | recoverability and billing correctness / M | bounded retention, authenticated listing, idempotent redrive, duplicate/poison tests and a real Redis replay drill | Planned |
+| 0 | Protect video-task secrets at rest | #211 | security and privacy / M-L | PR #293 covers debug/file redaction; remaining acceptance is encrypted-or-redacted headers/prompts/provider credentials across every persistence and error path, permission tests, and a clean-log/registry audit | Merged slice; residual acceptance |
+| 1 | Durable privileged-mutation audit | #255 | incident accountability / L | each mutation writes a queryable `audit_logs` row before success is returned; timeout/failure semantics, authorization coverage, and integration tests are documented | In progress (#294; CI rerun blocked) |
+| 2 | DLQ operator lifecycle | #223 | recoverability and billing correctness / M | PR #292 covers bounded retention, authenticated listing and idempotent redrive; remaining acceptance is duplicate/poison-message verification, marker TTL policy, capacity evidence, and a real Redis replay drill | Merged slice; residual acceptance |
 | 3 | CI and supply-chain gates | #216, #220 | catches regressions and CVEs / M | live DB tests are intentionally gated, VSCodex is a real required check, build fan-out is measured, and Cargo/npm advisory policy runs in CI | Planned |
-| 4 | Public API compatibility matrix | #247, #254 | prevents client retries and integration breakage / S-M | OpenAI/Claude status-code, error-code, envelope and retry-header matrix is documented and covered by fixtures; balance and notification transitions are explicit | In review (#290) |
+| 4 | Public API compatibility matrix | #247, #254 | prevents client retries and integration breakage / S-M | PR #290 defines the baseline OpenAI error/endpoint contract; remaining acceptance is OpenAI/Claude status-code, error-code, envelope and retry-header fixtures plus explicit balance and notification transitions | In progress (#290 merged; fixtures pending) |
 | 5 | Operations reference and recovery runbook | #217, #218, #224, #225 | reproducible deployment and observability / M | metrics/alerts, environment table, multi-node topology, Redis failure semantics and restore drill are executable from published docs | Planned |
 | 6 | Billing integrity follow-up | #206, #253 | protects revenue and abuse boundary / M-L | enrichment failure, cancellation, signup credit, quota and image authorization policies have explicit tests and owner sign-off | Planned |
 | 7 | Scheduler and protocol roadmap slices | #268, #276, #179, #205 | correctness and upgrade safety / M-L | each slice has a bounded ADR, dependency/rollback plan and acceptance test; unresolved upstream sync conflict is handled separately | Deferred / blocked |
@@ -47,7 +47,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #268 | P1 | Keep | decide terminal telemetry semantics with scheduler failure-origin work |
 | #256 | P2 | Split | migrate runtime install URL only if fork artifacts are published |
 | #255 | P1 | Split | design durable audit writer and failure contract |
-| #254 | P1 | In review | finish #290, then add compatibility fixtures |
+| #254 | P1 | In progress | #290 merged; add chat/images compatibility fixtures and validate the status/error/envelope/retry matrix |
 | #253 | P1 | Keep | approve signup-credit, overdraft and abuse-control policy before code |
 | #247 | P1 | Split | finalize balance status/code/retry policy and notification triggers |
 | #241 | P2 | Split | remove or deprecate the silent `with_redis_url` no-op builder |
@@ -56,7 +56,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #226 | P2 | Planned | measure dependency tree and pair allowlist work with #229 |
 | #225 | P1 | Split | generate tunnel env table and publish operations runbooks |
 | #224 | P1 | Planned | publish three-node reference topology and capacity smoke test |
-| #223 | P1 | Split | implement list, auth, idempotent redrive and replay drill |
+| #223 | P1 | Split | #292 merged list/auth/idempotent redrive; run duplicate/poison, marker-TTL, capacity and real Redis replay drills |
 | #222 | P2 | Planned | measure one provider/repository extension slice before generic rewrite |
 | #221 | P2 | Planned | produce call/dependency graph and extract one tested boundary |
 | #220 | P1 | Split | add Cargo/npm advisory scan and explicit policy fixture |
@@ -67,7 +67,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #214 | P1 | Planned | add probe, graceful shutdown and accept-error acceptance tests |
 | #213 | P2 | Planned | split giant handler and standardize error payload boundaries |
 | #212 | P2 | Planned | consolidate cross-cutting capacity and dependency tests |
-| #211 | P0/P1 | Split | protect sensitive video fields, bound registry and define lease failure semantics |
+| #211 | P0/P1 | Split | #293 merged debug/file protection; verify all sensitive-field persistence, registry bounds, lease failure semantics and clean-log evidence |
 | #210 | P2 | Planned | verify cryptographic/OAuth contracts with current dependency evidence |
 | #209 | P2 | Planned | remove credential Debug/Serialize exposure and URL key residue |
 | #208 | P2 | Planned | reproduce NUMERIC/f64 paths and add adapter regression coverage |
@@ -90,16 +90,25 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 
 ## Completed slices and residual links
 
-PRs #282–#289 are merged into the fork. They cover contributor entry points,
-watchdog health feedback (#92), finite billing formula values, governance
-records, TaskSupervisor drop cleanup, sparse OpenAI video polling, bounded DLQ
-retention, and CI/release-gate decisions. These merges are evidence for the
+PRs #282–#293 are merged into the fork. They cover contributor entry
+points, watchdog health feedback (#92), finite billing formula values,
+governance records, TaskSupervisor drop cleanup, sparse OpenAI video polling,
+bounded DLQ retention, CI/release-gate decisions, the baseline OpenAI API error
+contract, and video-task secret protection. These merges are evidence for the
 corresponding child slices only; #211, #216, #220, #223, #247, #254 and #255
 remain open until their residual acceptance criteria above are met.
 
-PR #290 remains under required-check review. Its API documents and error
-contract changes must be merged before #254 is marked complete; balance
-notification behavior in #247 is intentionally not claimed by that PR.
+PR #290 merged as `f29a393a44d36ccc16fc003b988e5cc5d8b7dfdd` after all required
+checks passed. PR #293 merged as
+`fe25a3545b8be0944f2f3e12b7206994407fc5cd` after all required checks passed.
+PR #294 is open with auto-merge enabled but currently `BLOCKED` while required
+CI reruns after fix commit `cad0b0b33fc175ce03cf0cf9fd10a4fd4f043536`;
+auto-merge must remain gated on a green required-check set.
+
+The merged API contract is a baseline only: balance notification behavior in
+#247 and the chat/images compatibility fixtures for #254 are intentionally not
+claimed by #290. Likewise, #293 does not close #211 until the residual
+registry, lease, persistence and end-to-end log checks are evidenced.
 
 ## 2026-09-12 state-change record
 
@@ -113,3 +122,11 @@ The maintainer comments carrying the above transitions are recorded on
 [#254](https://github.com/JinPengGeng/aeris-token/issues/254#issuecomment-5640656257),
 [#255](https://github.com/JinPengGeng/aeris-token/issues/255#issuecomment-5640656296),
 and [#256](https://github.com/JinPengGeng/aeris-token/issues/256#issuecomment-5640656260).
+
+The current PR evidence is [#290](https://github.com/JinPengGeng/aeris-token/pull/290),
+[#293](https://github.com/JinPengGeng/aeris-token/pull/293), and
+[#294](https://github.com/JinPengGeng/aeris-token/pull/294). On 2026-09-12,
+#294 received the import/format fix `cad0b0b33fc175ce03cf0cf9fd10a4fd4f043536`;
+GitHub reports the PR as open, auto-merge enabled, and merge state `BLOCKED`
+until the in-progress required checks complete. This record intentionally does
+not claim a merge or close #255.
