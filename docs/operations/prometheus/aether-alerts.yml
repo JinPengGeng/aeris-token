@@ -2,7 +2,7 @@ groups:
   - name: aether-billing-foundation
     rules:
       - alert: AetherBillingEnrichmentFailures
-        expr: sum(increase(aether_gateway_billing_enrichment_failures_total[10m])) > 0
+        expr: sum by (component, operation) (increase(aether_gateway_billing_enrichment_failures_total[10m])) > 0
         for: 5m
         labels:
           severity: warning
@@ -12,6 +12,18 @@ groups:
           runbook: docs/operations/observability-runbook.md#billing-enrichment-or-settlement
           deduplication: Group by alertname, component and operation; inhibit info alerts while this warning is firing.
           rollback: Roll back the release only after checking the failed event path and DLQ; counters are additive and safe to revert.
+
+      - alert: AetherBillingSettlementFailures
+        expr: sum by (component, operation) (increase(aether_gateway_billing_settlement_failures_total[10m]) or increase(aether_gateway_billing_video_task_settlement_failures_total[10m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Terminal billing settlement failures are present
+          description: Usage or video-task settlement failed in the last 10 minutes; verify persisted usage before retrying.
+          runbook: docs/operations/observability-runbook.md#billing-enrichment-or-settlement
+          deduplication: Group by alertname, component and operation; inhibit repeats for the same failed settlement path.
+          rollback: Preserve usage and DLQ records; restore the dependency or roll back a release-correlated regression before idempotent replay.
 
       - alert: AetherUsageDeadLetterBacklog
         expr: max(aether_gateway_usage_queue_dlq_length) > 0
@@ -26,7 +38,7 @@ groups:
           rollback: Do not delete the DLQ; pause redrive and restore the last known-good consumer if processing is suspect.
 
       - alert: AetherBillingGuardFailOpen
-        expr: sum(increase(aether_gateway_billing_fail_open_total[10m])) > 0
+        expr: sum by (component, operation) (increase(aether_gateway_billing_fail_open_total[10m])) > 0
         for: 2m
         labels:
           severity: critical
@@ -44,7 +56,7 @@ groups:
           severity: warning
         annotations:
           summary: Provider 5xx responses are elevated
-          description: This rule consumes the low-cardinality provider/status contract delivered by Issue #306.
+          description: Terminal gateway requests have 5xx errors, grouped by the bounded provider type; inspect the failure origin before attributing an outage upstream.
           runbook: docs/operations/observability-runbook.md#provider-5xx
           deduplication: Group by alertname and provider; inhibit while a provider maintenance silence is active.
           rollback: Roll back only a release-correlated regression; otherwise fail over or contact the provider.

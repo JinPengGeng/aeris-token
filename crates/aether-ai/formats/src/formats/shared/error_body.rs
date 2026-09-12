@@ -7,10 +7,45 @@ pub enum LocalCoreSyncErrorKind {
     PermissionDenied,
     NotFound,
     RateLimit,
+    /// Account credit exhaustion requires an account change, not a timed retry.
+    QuotaExhausted,
     ContextLengthExceeded,
     RequestTooLarge,
     Overloaded,
     ServerError,
+}
+
+impl LocalCoreSyncErrorKind {
+    pub fn is_quota_exhausted_error(error_type: Option<&str>, code: Option<&str>) -> bool {
+        [error_type, code].into_iter().flatten().any(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "insufficient_quota"
+                    | "credit_balance_exhausted"
+                    | "balance_exceeded"
+                    | "billing_error"
+            )
+        })
+    }
+
+    pub fn http_status_code(self, client_api_format: &str) -> u16 {
+        match self {
+            Self::InvalidRequest | Self::ContextLengthExceeded => 400,
+            Self::Authentication => 401,
+            Self::PermissionDenied => 403,
+            Self::NotFound => 404,
+            Self::RequestTooLarge => 413,
+            Self::QuotaExhausted
+                if aether_ai_formats::normalize_api_format_alias(client_api_format)
+                    == "claude:messages" =>
+            {
+                402
+            }
+            Self::RateLimit | Self::QuotaExhausted => 429,
+            Self::Overloaded => 503,
+            Self::ServerError => 500,
+        }
+    }
 }
 
 pub fn is_core_error_finalize_kind(report_kind: &str) -> bool {
@@ -35,10 +70,24 @@ pub fn build_core_error_body_for_client_format(
     code: Option<&str>,
     kind: LocalCoreSyncErrorKind,
 ) -> Option<Value> {
+    let normalized_format = aether_ai_formats::normalize_api_format_alias(client_api_format);
+    // Keep account details out of public quota envelopes, including conversions
+    // of upstream errors. Gemini retains its existing RESOURCE_EXHAUSTED mapping.
+    let (message, code) = if kind == LocalCoreSyncErrorKind::QuotaExhausted {
+        if normalized_format.starts_with("openai:") {
+            ("Insufficient quota", Some("credit_balance_exhausted"))
+        } else if normalized_format == "claude:messages" {
+            ("Insufficient quota", Some("balance_exceeded"))
+        } else {
+            (message, code)
+        }
+    } else {
+        (message, code)
+    };
     let mut error_object = Map::new();
     error_object.insert("message".to_string(), Value::String(message.to_string()));
 
-    match aether_ai_formats::normalize_api_format_alias(client_api_format).as_str() {
+    match normalized_format.as_str() {
         "openai:chat"
         | "openai:responses"
         | "openai:responses:compact"
@@ -102,6 +151,7 @@ fn map_local_sync_error_kind_to_openai_type(kind: LocalCoreSyncErrorKind) -> &'s
         LocalCoreSyncErrorKind::PermissionDenied => "permission_error",
         LocalCoreSyncErrorKind::NotFound => "not_found_error",
         LocalCoreSyncErrorKind::RateLimit => "rate_limit_error",
+        LocalCoreSyncErrorKind::QuotaExhausted => "insufficient_quota",
         LocalCoreSyncErrorKind::ContextLengthExceeded | LocalCoreSyncErrorKind::RequestTooLarge => {
             "context_length_exceeded"
         }
@@ -119,6 +169,7 @@ fn map_local_sync_error_kind_to_claude_type(kind: LocalCoreSyncErrorKind) -> &'s
         LocalCoreSyncErrorKind::PermissionDenied => "permission_error",
         LocalCoreSyncErrorKind::NotFound => "not_found_error",
         LocalCoreSyncErrorKind::RateLimit => "rate_limit_error",
+        LocalCoreSyncErrorKind::QuotaExhausted => "billing_error",
         LocalCoreSyncErrorKind::Overloaded => "overloaded_error",
         LocalCoreSyncErrorKind::ServerError => "api_error",
     }
@@ -132,7 +183,7 @@ fn map_local_sync_error_kind_to_gemini_code(kind: LocalCoreSyncErrorKind) -> u16
         LocalCoreSyncErrorKind::Authentication => 401,
         LocalCoreSyncErrorKind::PermissionDenied => 403,
         LocalCoreSyncErrorKind::NotFound => 404,
-        LocalCoreSyncErrorKind::RateLimit => 429,
+        LocalCoreSyncErrorKind::RateLimit | LocalCoreSyncErrorKind::QuotaExhausted => 429,
         LocalCoreSyncErrorKind::Overloaded => 503,
         LocalCoreSyncErrorKind::ServerError => 500,
     }
@@ -146,7 +197,9 @@ fn map_local_sync_error_kind_to_gemini_status(kind: LocalCoreSyncErrorKind) -> &
         LocalCoreSyncErrorKind::Authentication => "UNAUTHENTICATED",
         LocalCoreSyncErrorKind::PermissionDenied => "PERMISSION_DENIED",
         LocalCoreSyncErrorKind::NotFound => "NOT_FOUND",
-        LocalCoreSyncErrorKind::RateLimit => "RESOURCE_EXHAUSTED",
+        LocalCoreSyncErrorKind::RateLimit | LocalCoreSyncErrorKind::QuotaExhausted => {
+            "RESOURCE_EXHAUSTED"
+        }
         LocalCoreSyncErrorKind::Overloaded => "UNAVAILABLE",
         LocalCoreSyncErrorKind::ServerError => "INTERNAL",
     }

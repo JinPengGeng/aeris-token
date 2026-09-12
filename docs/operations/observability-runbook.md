@@ -22,6 +22,9 @@ sum by (component, operation) (
 sum by (component, operation) (
   increase(aether_gateway_billing_settlement_failures_total[10m])
 )
+sum by (component, operation) (
+  increase(aether_gateway_billing_video_task_settlement_failures_total[10m])
+)
 ```
 
 Inspect the usage worker and terminal finalizer logs, then verify whether the
@@ -63,9 +66,33 @@ sum by (provider) (
 ```
 
 Check provider health, key rotation and upstream status before changing routing.
-The `provider` label is a stable configured provider identifier; never add a
-model, URL, request ID or raw error label. This query depends on the RED
-contract delivered by Issue #306.
+The `provider` label is a bounded provider type such as `openai` or `claude_code`;
+unrecognized values map to `unknown`. It is not a configured provider ID.
+Never add a model, URL, request ID or raw error label. The RED contract delivered
+by Issue #306 counts terminal gateway failures, so inspect the failure origin
+before attributing a 5xx spike to upstream availability.
+
+## Repeatable validation
+
+Use Prometheus 3.14.0 `promtool` (the CI workflow pins the release and archive
+SHA-256):
+
+```bash
+cargo run --locked --quiet -p aether-runtime --example prometheus_billing_fixture > /tmp/aeris-billing.prom
+promtool check metrics < /tmp/aeris-billing.prom
+promtool check rules docs/operations/prometheus/aether-alerts.yml
+promtool test rules docs/operations/prometheus/aether-alerts.test.yml
+```
+
+The fixture invokes the real billing recorders and exporter. Rule tests cover
+usage/video settlement, enrichment, daily quota/RPM fail-open, DLQ and request
+5xx. They verify `for` windows, zero-growth controls, reset handling, recovery
+and the labels used for incident routing. The `Prometheus Contracts` workflow
+uploads the rendered metrics, tool version and results on every PR.
+
+These checks prove parser and rule behavior. They do not substitute for
+deployment scraping, delivery to an external Alertmanager, or fault injection
+at every production event point; record those separately when accepting #307.
 
 ## Silence and recovery
 
