@@ -79,6 +79,9 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #207 | P2 | Planned | bound internal errors and Windsurf buffering; add graceful shutdown slice |
 | #206 | P1 | Split | #300 tracks image authorization cost bypass; implement fail-closed unknown paid-image estimate, then bounded pricing |
 | #205 | P1 | Split | #299 merged opt-in/default-off and anti-downgrade; design signed provenance and non-root service slices |
+| #315 | P1 | Ready | define the signed release provenance contract before implementing tunnel verification under #205 |
+| #314 | P1 | Ready | implement least-privilege systemd/OpenRC service identities after permission audit under #205 |
+| #316 | P2 | Ready | audit historical NUMERIC rebate records and decide idempotent backfill under #208 |
 | #179 | P2 | Deferred | retain as roadmap; move actionable slices into child issues |
 | #158 | P2 | Deferred | upstream provider-scoped allowlist evaluation only |
 | #157 | P2 | Deferred | refresh upstream billing/quota registry; no blind cherry-pick |
@@ -110,6 +113,10 @@ recovery evidence after its #302 preflight slice.
 Issue #218 now has two ready children: #311 for remote PostgreSQL TLS defaults
 and #312 for the production Redis durability profile. These children capture
 the remaining P1 decisions without changing local development defaults.
+
+Issue #205 now has #314 (service identity) and #315 (signed provenance) ready
+children. Issue #208 has #316 ready for a read-only historical data audit after
+the new-write adapter fix.
 
 The dependency gate #296 is held with auto-merge disabled. Its current review
 found that `Dependency Audit / check` is not yet in ruleset 21984327, and the
