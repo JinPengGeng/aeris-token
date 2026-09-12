@@ -248,10 +248,11 @@ async fn grant_capacity(
     let rows = sqlx::query(
         "SELECT e.id, e.entitlements_snapshot, p.entitlements_json FROM user_plan_entitlements e \
          JOIN billing_plans p ON p.id = e.plan_id WHERE e.user_id = $1 AND e.status = 'active' \
-         AND e.starts_at <= NOW() AND e.expires_at > NOW() \
+         AND e.starts_at <= $2 AND e.expires_at > $2 \
          ORDER BY e.expires_at, e.created_at, e.id FOR UPDATE OF e",
     )
     .bind(&identity.user_id)
+    .bind(admitted_at)
     .fetch_all(&mut **tx)
     .await
     .map_postgres_err()?;

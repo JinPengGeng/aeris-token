@@ -93,7 +93,7 @@ fn quote(request: &str, key: &str, units: u64) -> ReserveRequestFundsInput {
         },
         authorized_cost_units: units,
         pricing_snapshot: json!({"version":1,"unit_price":0.08}),
-        admitted_at_unix_secs: 1_800_000_000,
+        admitted_at_unix_secs: chrono::Utc::now().timestamp() as u64,
     }
 }
 
@@ -333,53 +333,87 @@ async fn live_request_funds_freeze_entitlement_day_and_recover_legacy_partial_de
 
 #[tokio::test]
 #[ignore = "requires an isolated AETHER_TEST_DATABASE_URL; runs real migrations"]
-async fn live_request_funds_binds_reservation_and_recovery_to_admission_date() {
+async fn live_request_funds_admission_time_controls_grant_eligibility_and_frozen_day() {
     let (admin, first, second, schema) = fixture().await;
     let result = AssertUnwindSafe(async {
         let entitlements = json!([{"type":"daily_quota","daily_quota_usd":0.05,"reset_timezone":"UTC","allow_wallet_overage":true}]);
         sqlx::query("INSERT INTO billing_plans (id,title,price_amount,duration_unit,duration_value,entitlements_json,created_at,updated_at) VALUES ('plan','plan',1,'day',1,$1,NOW(),NOW())")
             .bind(&entitlements).execute(&first).await.unwrap();
-        sqlx::query("INSERT INTO user_plan_entitlements (id,user_id,plan_id,payment_order_id,starts_at,expires_at,entitlements_snapshot,status,created_at,updated_at) VALUES ('grant','owner','plan','order',NOW()-INTERVAL '1 hour',NOW()+INTERVAL '1 hour',$1,'active',NOW(),NOW())")
-            .bind(&entitlements).execute(&first).await.unwrap();
+        let database_now: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(&first).await.unwrap();
+        let midnight = database_now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let admitted_at = midnight - chrono::Duration::seconds(1);
+        let admission_date = admitted_at.date_naive().to_string();
+        assert_ne!(admission_date, database_now.date_naive().to_string());
+        // Validity is starts_at <= admission < expires_at. The eligible grant
+        // starts at admission exactly and has expired by the actual DB clock.
+        // A second grant is eligible now but had not started at admission; a
+        // third ends at admission exactly and must also be excluded.
+        for (id, starts_at, expires_at) in [
+            ("at-admission", admitted_at, midnight),
+            ("not-started", midnight, database_now + chrono::Duration::days(1)),
+            ("already-expired", admitted_at - chrono::Duration::days(1), admitted_at),
+        ] {
+            sqlx::query("INSERT INTO user_plan_entitlements (id,user_id,plan_id,payment_order_id,starts_at,expires_at,entitlements_snapshot,status,created_at,updated_at) VALUES ($1,'owner','plan',$1,$2,$3,$4,'active',NOW(),NOW())")
+                .bind(id).bind(starts_at).bind(expires_at).bind(&entitlements)
+                .execute(&first).await.unwrap();
+        }
+        sqlx::query("UPDATE wallets SET balance=0 WHERE id='wallet'")
+            .execute(&first).await.unwrap();
         let repo = SqlxSettlementRepository::new(first.clone());
-        // This is one second before the UTC date boundary; the test itself may
-        // run on another day, so using wall-clock now here would hide regressions.
+        let mut too_large = quote("midnight-insufficient", "key-a", 8_000_000);
+        too_large.admitted_at_unix_secs = admitted_at.timestamp() as u64;
+        assert_eq!(repo.reserve_request_funds(too_large).await.unwrap(),
+            ReserveRequestFundsOutcome::Insufficient { available_cost_units: 5_000_000 });
         let mut request = quote("midnight-admission", "key-a", 3_000_000);
-        request.admitted_at_unix_secs = 1_789_343_999;
+        request.admitted_at_unix_secs = admitted_at.timestamp() as u64;
         let reservation = match repo.reserve_request_funds(request.clone()).await.unwrap() {
             ReserveRequestFundsOutcome::Reserved { reservation } => reservation,
             other => panic!("unexpected {other:?}"),
         };
-        let admission_date = match &reservation.allocations[0].source {
-            RequestFundingSource::Entitlement { usage_date, .. } => usage_date.clone(),
+        assert_eq!(reservation.allocations, vec![RequestFundsAllocation {
+            source: RequestFundingSource::Entitlement {
+                entitlement_id: "at-admission".to_string(),
+                usage_date: admission_date.clone(),
+                quota_cost_units: 5_000_000,
+            },
+            reserved_cost_units: 3_000_000,
+        }]);
+        assert_eq!(repo.reserve_request_funds(request.clone()).await.unwrap(),
+            ReserveRequestFundsOutcome::Reserved { reservation });
+        repo.mark_request_funds_dispatched(request.identity.clone()).await.unwrap();
+        // Admission on the next day uses the newly started grant instead.
+        let mut next_day = quote("next-day-admission", "key-b", 5_000_000);
+        next_day.admitted_at_unix_secs = midnight.timestamp() as u64;
+        let next_day_reservation = match repo.reserve_request_funds(next_day.clone()).await.unwrap() {
+            ReserveRequestFundsOutcome::Reserved { reservation } => reservation,
             other => panic!("unexpected {other:?}"),
         };
-        assert_eq!(admission_date, "2026-09-13");
-        repo.mark_request_funds_dispatched(request.identity.clone()).await.unwrap();
-        let usage = persist_usage(&first, &request.identity, 0.03).await;
-        repo.finalize_request_funds(FinalizeRequestFundsInput {
+        assert_eq!(next_day_reservation.allocations[0].source,
+            RequestFundingSource::Entitlement {
+                entitlement_id: "not-started".to_string(),
+                usage_date: midnight.date_naive().to_string(),
+                quota_cost_units: 5_000_000,
+            });
+        repo.release_request_funds(ReleaseRequestFundsInput {
+            identity: next_day.identity, terminal_no_charge: false,
+        }).await.unwrap();
+        sqlx::query("UPDATE user_plan_entitlements SET status='expired' WHERE id='at-admission'")
+            .execute(&first).await.unwrap();
+        let mut usage = persist_usage(&first, &request.identity, 0.03).await;
+        usage.finalized_at_unix_secs = Some((midnight + chrono::Duration::seconds(1)).timestamp() as u64);
+        let finalize = FinalizeRequestFundsInput {
             identity: request.identity,
             usage,
             reconciliation_facts: None,
-        }).await.unwrap();
-        let ledger_date: String = sqlx::query_scalar("SELECT usage_date FROM entitlement_usage_ledgers WHERE request_id='midnight-admission'")
-            .fetch_one(&first).await.unwrap();
-        assert_eq!(ledger_date, admission_date);
-
-        let legacy = quote("midnight-recovery", "key-b", 6_000_000);
-        let mut legacy = legacy;
-        legacy.admitted_at_unix_secs = 1_789_343_999;
-        persist_usage(&first, &legacy.identity, 0.06).await;
-        sqlx::query("UPDATE \"usage\" SET billing_status='insufficient_quota' WHERE request_id='midnight-recovery'")
-            .execute(&first).await.unwrap();
-        sqlx::query("INSERT INTO entitlement_usage_ledgers (id,user_entitlement_id,user_id,request_id,amount_usd,balance_before,balance_after,usage_date,created_at) VALUES ('old-midnight','grant','owner','midnight-recovery',0.05,0.05,0,$1,NOW())")
-            .bind(&admission_date).execute(&first).await.unwrap();
-        sqlx::query("UPDATE wallets SET balance=0.01 WHERE id='wallet'").execute(&first).await.unwrap();
-        let recovered = repo.recover_insufficient_quota(RecoverInsufficientQuotaInput { request_id: "midnight-recovery".to_string() }).await.unwrap().unwrap();
-        assert_eq!(recovered.collected_cost_units, 1_000_000);
-        let recovery_date: String = sqlx::query_scalar("SELECT usage_date FROM entitlement_usage_ledgers WHERE request_id='midnight-recovery'")
-            .fetch_one(&first).await.unwrap();
-        assert_eq!(recovery_date, admission_date);
+        };
+        let settled = repo.finalize_request_funds(finalize.clone()).await.unwrap().unwrap();
+        assert_eq!(settled.collected_cost_units, 3_000_000);
+        assert_eq!(repo.finalize_request_funds(finalize).await.unwrap(), Some(settled));
+        let ledgers: Vec<(String, String, f64)> = sqlx::query_as("SELECT user_entitlement_id,usage_date,amount_usd::double precision FROM entitlement_usage_ledgers ORDER BY id")
+            .fetch_all(&first).await.unwrap();
+        assert_eq!(ledgers, vec![("at-admission".to_string(), admission_date, 0.03)]);
+        assert_eq!(balance(&first).await, 0.0);
     }).catch_unwind().await;
     first.close().await;
     second.close().await;

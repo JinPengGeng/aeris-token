@@ -30,10 +30,13 @@ with fail-closed unsupported defaults for implementations that do not provide th
 - `reserve_request_funds(ReserveRequestFundsInput)` resolves the current funding
   sources atomically and returns a stored reservation or a structured rejection.
   Input contains identity (token, request ID, user ID, API key ID, standalone flag),
-  `authorized_cost_units`, a non-secret `pricing_snapshot`, and admission time.
+  `authorized_cost_units`, a non-secret `pricing_snapshot` (at most 64 KiB), and
+  server-assigned admission time. The same admission timestamp selects eligible
+  entitlements (`starts_at <= admission < expires_at`) and their reset-timezone
+  usage date. An active entitlement valid only at processing time is ineligible.
   Repeating the same identity and quote returns the original result; altered owner
-  or quote is a conflict. Increasing a quote requires a distinct explicit API,
-  not accidental mutation through replay.
+  or quote is a conflict. No quote-increase API is implemented; callers must
+  authorize the full supported execution before dispatch.
 - `mark_request_funds_dispatched(RequestFundsIdentity)` fences release before
   upstream dispatch. It is idempotent and refuses a released reservation.
 - `release_request_funds(ReleaseRequestFundsInput)` releases only prepared work or
@@ -43,14 +46,19 @@ with fail-closed unsupported defaults for implementations that do not provide th
   identity and the existing `UsageSettlementInput`. It requires a persisted usage
   row and atomically consumes frozen sources, writes the normal settlement snapshot,
   updates provider accounting, and terminates the hold. Replays return the original
-  financial result; conflicting actual facts fail without mutation.
+  financial result; conflicting actual facts fail without mutation. Optional
+  non-secret `reconciliation_facts` are bounded to a 16 KiB object and persisted
+  even for an actual amount within the quote. Terminal reconciliation releases
+  unused holds while preserving the discrepancy for review.
 - `recover_insufficient_quota(RecoverInsufficientQuotaInput)` is an explicit,
   idempotent recovery operation over frozen persisted cost and existing debit
   evidence. It never reruns current pricing or duplicates entitlement deductions.
 
 Amounts use checked integer units at 100,000,000 units per USD. Available balances
 are rounded down; authorization upper bounds round up. Non-finite values and range
-overflow are rejected. Existing wallet storage remains compatible in this change.
+overflow are rejected. The maximum is `(1 << 52) - 1` units, matching SQL checks;
+this permits eight-decimal round trips through existing f64 wallet storage.
+The caller must reject any upstream quote exceeding this bound.
 
 ## Persistence and lock order
 
@@ -63,9 +71,10 @@ Recovery receipts preserve previously collected amounts and remaining liabilitie
 Operations involving existing usage lock that usage first, then the wallet,
 entitlements in deterministic order, and the reservation. Admission never acquires
 a usage lock while holding financial rows. Refund and negative adjustment hold the
-same wallet row while checking outstanding holds. Callbacks enqueue recovery after
-credit and do not acquire usage locks while holding wallets. All debit and hold
-changes roll back together when an operation fails.
+same wallet row while checking outstanding holds. All debit and hold changes roll
+back together when an operation fails. Future recharge callbacks must enqueue
+recovery after credit and must not acquire usage locks while holding wallets;
+that callback/worker integration is not implemented here.
 
 The existing plan cost-window reservation is a separate limit. Its token fencing
 and transaction conventions are reusable, but its expiring window counters cannot
@@ -86,6 +95,39 @@ applicable limits before dispatch and eventually reconcile both.
   receipts and never recreates negative balances or re-prices a historical request.
 - PostgreSQL and in-memory contract behavior agree; migration source generation,
   bootstrap, focused tests, real database tests and required CI pass.
+
+## Admission-time correction and validation
+
+The initial date-only change still selected entitlement validity against database
+`NOW()`. Review identified that this could allocate an entitlement that had not
+started at admission, or discard one that was valid then. Both SQL validity bounds
+now bind the same checked admission timestamp used to calculate the usage date.
+The earlier fixed-future-time test has been replaced by a real PostgreSQL test
+using the previous UTC day's last second, ensuring it differs from database time.
+The test creates an entitlement starting exactly at admission, one starting at
+midnight, and one ending exactly at admission. It asserts the selected entitlement
+and capacity, next-day selection, then finalizes after midnight and replays the
+result after the admitted entitlement is marked expired. The only ledger entry
+must be produced by finalize for the originally admitted entitlement and day.
+
+Validation on Rust 1.95.0 and an owned disposable PostgreSQL 17 database:
+
+```sh
+cargo test -p aether-data-postgres --all-features \
+  settlement::funding::tests::live_request_funds_ --lib -- \
+  --include-ignored --nocapture --test-threads=1
+```
+
+With `AETHER_TEST_DATABASE_URL` set to that disposable database and a separate
+`CARGO_TARGET_DIR`, all four live tests passed (4 passed, 0 failed, 0 ignored).
+The database was stopped after validation, with its files retained for recovery.
+
+Required lifecycle integration remains outstanding: gateway admission/dispatch/
+terminal calls, retry authorization, prepared crash recovery, dispatched outcome
+reconciliation, recharge-triggered recovery workers, and live CI wiring. This data
+branch does not complete or close #300/#206 or re-enable unknown paid images.
+The in-memory repository implements wallet funding but does not store entitlements;
+entitlement evidence here comes from actual PostgreSQL transactions.
 
 ## Rollback
 
