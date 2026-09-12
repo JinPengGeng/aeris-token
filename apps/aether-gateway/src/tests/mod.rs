@@ -10,6 +10,7 @@ pub(super) use http::StatusCode;
 pub(super) use serde_json::json;
 
 mod ai_execute;
+mod api_contract_fixtures;
 mod architecture;
 mod async_task;
 mod audit;

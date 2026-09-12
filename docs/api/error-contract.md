@@ -4,6 +4,9 @@ This document records the error contract at the public gateway boundary. It
 describes the current fork implementation, not every provider's native error
 format. `x-trace-id` is present on gateway responses for correlation.
 
+The executable compatibility rows for Chat Completions, Images, and Claude
+Messages live in [Public API Compatibility Fixtures](compatibility-fixtures.md).
+
 ## OpenAI-family envelope
 
 OpenAI Chat, Responses, Embeddings, Rerank, and Images validation errors use:
