@@ -26,14 +26,14 @@ fully accepted issue. Project cards must mirror the same decision.
 | Order | Work package | Issues | Benefit / complexity | Exit criteria | State |
 | --- | --- | --- | --- | --- | --- |
 | 0 | Protect video-task secrets at rest | #211 | security and privacy / M-L | PR #293 covers debug/file redaction; remaining acceptance is encrypted-or-redacted headers/prompts/provider credentials across every persistence and error path, permission tests, and a clean-log/registry audit | Merged slice; residual acceptance |
-| 1 | Durable privileged-mutation audit | #255 | incident accountability / L | each mutation writes a queryable `audit_logs` row before success is returned; timeout/failure semantics, authorization coverage, and integration tests are documented | In progress (#294; CI rerun blocked) |
+| 1 | Durable privileged-mutation audit | #255 | incident accountability / L | each mutation writes a queryable `audit_logs` row before success is returned; timeout/failure semantics, authorization coverage, and integration tests are documented | In progress (#294 merged slice; residual acceptance) |
 | 2 | DLQ operator lifecycle | #223 | recoverability and billing correctness / M | PR #292 covers bounded retention, authenticated listing and idempotent redrive; remaining acceptance is duplicate/poison-message verification, marker TTL policy, capacity evidence, and a real Redis replay drill | Merged slice; residual acceptance |
-| 3 | CI and supply-chain gates | #216, #220 | catches regressions and CVEs / M | live DB tests are intentionally gated, VSCodex is a real required check, build fan-out is measured, and Cargo/npm advisory policy runs in CI | Planned |
+| 3 | CI and supply-chain gates | #216, #220 | catches regressions and CVEs / M | live DB tests are intentionally gated, VSCodex is a real required check, build fan-out is measured, and Cargo/npm advisory policy runs in CI | In progress (#296; advisory gate deployment and guard fixes pending) |
 | 4 | Public API compatibility matrix | #247, #254 | prevents client retries and integration breakage / S-M | PR #290 defines the baseline OpenAI error/endpoint contract; remaining acceptance is OpenAI/Claude status-code, error-code, envelope and retry-header fixtures plus explicit balance and notification transitions | In progress (#290 merged; fixtures pending) |
-| 5 | Operations reference and recovery runbook | #217, #218, #224, #225 | reproducible deployment and observability / M | metrics/alerts, environment table, multi-node topology, Redis failure semantics and restore drill are executable from published docs | Planned |
+| 5 | Operations reference and recovery runbook | #217, #218, #224, #225 | reproducible deployment and observability / M | metrics/alerts, environment table, multi-node topology, Redis failure semantics and restore drill are executable from published docs | In progress (#217 split to #306–#308; #224 preflight merged) |
 | 6 | Billing integrity follow-up | #206, #253 | protects revenue and abuse boundary / M-L | enrichment failure, cancellation, signup credit, quota and image authorization policies have explicit tests and owner sign-off | Planned |
 | 7 | Scheduler and protocol roadmap slices | #268, #276, #179, #205 | correctness and upgrade safety / M-L | each slice has a bounded ADR, dependency/rollback plan and acceptance test; unresolved upstream sync conflict is handled separately | Deferred / blocked |
-| 8 | Developer and architecture debt | #229, #221, #222, #226, #235, #241 | lowers long-term change cost / S-L | one billing allowlist, no-op builder removed or deprecated, ADR index and one measured extraction slice are merged | Planned |
+| 8 | Developer and architecture debt | #229, #221, #222, #226, #235, #241 | lowers long-term change cost / S-L | one billing allowlist, no-op builder removed or deprecated, ADR index and one measured extraction slice are merged | In progress (#304 merged allowlist; #305 pending) |
 | 9 | Fork installation URL | #256 | avoids wrong-origin installs / S | runtime installer points to fork only when the fork publishes the artifact; otherwise documented as intentionally upstream | Planned |
 
 ## Per-issue disposition
@@ -50,18 +50,18 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #254 | P1 | In progress | #290 merged; add chat/images compatibility fixtures and validate the status/error/envelope/retry matrix |
 | #253 | P1 | Keep | approve signup-credit, overdraft and abuse-control policy before code |
 | #247 | P1 | Split | finalize balance status/code/retry policy and notification triggers |
-| #241 | P2 | Split | remove or deprecate the silent `with_redis_url` no-op builder |
+| #241 | P2 | Split | #305 removes the silent `with_redis_url` no-op builder; parent remains open for broader architecture consistency |
 | #235 | P2 | Planned | create ADR index and ownership/rollback records |
-| #229 | P2 | Split | share formula allowlist with parser and engine; add DX map |
+| #229 | P2 | Split | #304 merged the shared formula allowlist; add the remaining DX map and keep parent open |
 | #226 | P2 | Planned | measure dependency tree and pair allowlist work with #229 |
 | #225 | P1 | Split | generate tunnel env table and publish operations runbooks |
-| #224 | P1 | Planned | publish three-node reference topology and capacity smoke test |
+| #224 | P1 | Split | #302 merged multi-node preflight; publish capacity smoke test and Redis failure runbook |
 | #223 | P1 | Split | #292 merged list/auth/idempotent redrive; run duplicate/poison, marker-TTL, capacity and real Redis replay drills |
 | #222 | P2 | Planned | measure one provider/repository extension slice before generic rewrite |
 | #221 | P2 | Planned | produce call/dependency graph and extract one tested boundary |
 | #220 | P1 | Split | add Cargo/npm advisory scan and explicit policy fixture |
-| #218 | P1 | Planned | document production defaults, JWT checks and environment contract |
-| #217 | P1 | Planned | define actionable metrics, alerts and readiness semantics |
+| #218 | P1 | Split | #297 merged JWT startup validation; decide non-loopback environment/TLS and Redis durability slices |
+| #217 | P1 | Split | reopened after accidental auto-close; deliver #307 metrics/alerts, #308 readiness, and #306 RED/log/trace contracts |
 | #216 | P1 | Split | implement live-DB, VSCodex and build-performance child gates |
 | #215 | P2 | Planned | measure synchronous logging/SSE filtering/lock contention before changes |
 | #214 | P1 | Planned | add probe, graceful shutdown and accept-error acceptance tests |
@@ -72,8 +72,8 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #209 | P2 | Planned | remove credential Debug/Serialize exposure and URL key residue |
 | #208 | P2 | Planned | reproduce NUMERIC/f64 paths and add adapter regression coverage |
 | #207 | P2 | Planned | bound internal errors and Windsurf buffering; add graceful shutdown slice |
-| #206 | P1 | Split | preserve billing on enrichment failure and close authorization bypasses |
-| #205 | P1 | Planned | require signed tunnel upgrades and scheduler admission tests |
+| #206 | P1 | Split | #300 tracks image authorization cost bypass; implement fail-closed unknown paid-image estimate, then bounded pricing |
+| #205 | P1 | Split | #299 merged opt-in/default-off and anti-downgrade; design signed provenance and non-root service slices |
 | #179 | P2 | Deferred | retain as roadmap; move actionable slices into child issues |
 | #158 | P2 | Deferred | upstream provider-scoped allowlist evaluation only |
 | #157 | P2 | Deferred | refresh upstream billing/quota registry; no blind cherry-pick |
@@ -88,9 +88,29 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #44 | P2 | Blocked | emergency-chain behavior remains deferred and expiring |
 | #1 | P2 | Blocked | umbrella only; do not duplicate child implementation |
 
+## 2026-09-12 live checkpoint
+
+The fork main branch currently includes #290, #293, #294, #295, #297, #298,
+#299, #301, #302 and #304. Their merge commits and required-check evidence are
+available from the linked PRs; each is a slice of its parent Issue. #305 is
+still open with squash auto-merge enabled and is being revalidated after the
+#304 base moved.
+
+The observability parent #217 is OPEN again because #301 was a scope review
+that was accidentally treated as a closing reference. It now has three
+bounded children: #307 (metrics and alerts), #308 (readiness/health), and #306
+(RED dimensions and telemetry). #224 remains open for capacity and Redis
+recovery evidence after its #302 preflight slice.
+
+The dependency gate #296 is held with auto-merge disabled. Its current review
+found that `Dependency Audit / check` is not yet in ruleset 21984327, and the
+RSA active-graph guard can miss a match when `rg -q` closes a pipe under
+`pipefail`. The exact evidence and remediation are recorded in the PR; no
+advisory is silently ignored.
+
 ## Completed slices and residual links
 
-PRs #282–#293 are merged into the fork. They cover contributor entry
+PRs #282–#304 include merged slices into the fork. They cover contributor entry
 points, watchdog health feedback (#92), finite billing formula values,
 governance records, TaskSupervisor drop cleanup, sparse OpenAI video polling,
 bounded DLQ retention, CI/release-gate decisions, the baseline OpenAI API error
@@ -101,9 +121,8 @@ remain open until their residual acceptance criteria above are met.
 PR #290 merged as `f29a393a44d36ccc16fc003b988e5cc5d8b7dfdd` after all required
 checks passed. PR #293 merged as
 `fe25a3545b8be0944f2f3e12b7206994407fc5cd` after all required checks passed.
-PR #294 is open with auto-merge enabled but currently `BLOCKED` while required
-CI reruns after fix commit `cad0b0b33fc175ce03cf0cf9fd10a4fd4f043536`;
-auto-merge must remain gated on a green required-check set.
+PR #294 is merged as `d08fe6ebe11951e9390037893efc8ef6b77ea4a7`; the durable
+audit parent #255 remains open for residual failure and integration semantics.
 
 The merged API contract is a baseline only: balance notification behavior in
 #247 and the chat/images compatibility fixtures for #254 are intentionally not
