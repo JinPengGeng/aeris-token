@@ -588,6 +588,13 @@ jobs:
           AETHER_TEST_POSTGRES_URL: postgres://aether:aether@127.0.0.1:5432/aether_test
         run: cargo test -p aether-data --all-features postgres_core_export_reads_migrated_database_rows_when_url_is_set --lib -- --nocapture
 
+      - name: Run historical referral NUMERIC audit regression
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          AETHER_REQUIRE_LOCAL_POSTGRES_TESTS: "true"
+        run: cargo test -p aether-data --all-features postgres_referral_numeric_audit_detects_missing_and_incorrect_credits --lib -- --nocapture
+
       - name: Show sccache stats
         if: always()
         env:
