@@ -74,6 +74,7 @@ mod request_candidate_queue;
 mod request_candidate_runtime;
 mod request_diagnostics;
 mod request_lifecycle;
+mod request_metrics;
 mod roles;
 mod router;
 mod routing;
