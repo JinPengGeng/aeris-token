@@ -1724,6 +1724,9 @@ fn div_ceil_u64(value: u64, divisor: u64) -> u64 {
 }
 
 #[cfg(test)]
+mod env_reference;
+
+#[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
 
