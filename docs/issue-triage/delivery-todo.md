@@ -4,7 +4,31 @@ Snapshot: 2026-09-13, fork `JinPengGeng/aeris-token`. This queue is based on
 the current fork tree and GitHub issue state; it does not modify upstream
 `fawney19/Aether`.
 
-## 2026-09-13 status refresh after PR #351
+## 2026-09-13 status refresh after PR #349
+
+Latest verified intake: 47 open issues (24 P1, 23 P2), with 12 in progress,
+24 in triage and 11 blocked after #220 entered implementation and #348 closed.
+PR #349 merged as `b044b1292694c1850a6efb7eccc9da63451be7bd`; its four required
+checks passed and its real Redis artifacts were downloaded and verified.
+PR #352 merged as
+`6c2ba493131c6fcf59dcda32779b1fce219912ce`; #343 is closed and its issue/PR
+cards are Done. #247 and #254 retain their separate residual acceptance.
+#225's generated tunnel configuration reference is ready in PR #354, and
+#268's candidate identity correction is ready in PR #355. Both are reviewed
+with automatic merge enabled under the protected checks. #308's complete
+readiness contract is in draft PR #356 for final review and CI. #357's reviewed
+Dependabot coverage is also awaiting protected checks with automatic merge
+enabled. Decisions are recorded in the individual PRs and issue documents.
+
+PR #350's new CI exposed a fallback-recovery test race: persistence completed
+before the lifecycle worker decremented its pending count. The test now waits
+at most two seconds for lifecycle accounting, retaining all capacity and
+persistence assertions. Independent review and six pinned Rust 1.95.0 runs
+passed; #350 then passed CI and merged as
+`f11d9ff3bc27aee42e54982cbe24343c1627ab5e`. #307 and #217 remain open for
+production producer fault injection, scraping and actual alert delivery evidence.
+
+### Earlier status after PR #351
 
 Live GitHub verification: 49 open issues (26 P1, 23 P2), with 11 in progress,
 27 in triage and 11 blocked. Counts include parent and child issues and must
@@ -60,10 +84,8 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 
 | Issue | Priority | Decision | Next action |
 | --- | --- | --- | --- |
-| #348 | P1 | In progress | PR #349 requires real Redis execution and artifacts; verify current-head CI and merge, keeping #223 open |
-| #343 | P1 | In progress | PR #352 implements the agreed OpenAI/Claude quota contract; verify current-head CI and merge, keeping #247/#254 open |
 | #276 | P1 | Keep blocked | resolve the real upstream sync conflict with a reviewed merge commit |
-| #268 | P1 | Keep | decide terminal telemetry semantics with scheduler failure-origin work |
+| #268 | P1 | In progress | reviewed PR #355 preserves terminal facts with request-wide candidate identities, including heartbeat propagation; await protected checks and merge |
 | #256 | P2 | Split, active | PR #331 merged the no-fork-release policy and first-release migration gate; retain parent for first fork release evidence |
 | #255 | P1 | Split, active | PR #329 persists audit after client disconnect; retain parent for broader mutation coverage and retry/reconciliation evidence |
 | #254 | P1 | Split | PR #335 merged the chat/images and Claude compatibility fixtures; retain parent for remaining endpoint coverage |
@@ -72,16 +94,16 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #241 | P2 | Split | #305 merged removal of the silent `with_redis_url` no-op builder; parent remains open for broader architecture consistency |
 | #235 | P2 | Planned | create ADR index and ownership/rollback records |
 | #226 | P2 | Planned | measure dependency tree and pair allowlist work with #229 |
-| #225 | P1 | Split | generate tunnel env table and publish operations runbooks |
+| #225 | P1 | Split, active | PR #354 generates and checks the complete tunnel clap reference; retain parent for remaining gateway env and operations acceptance |
 | #224 | P1 | Split | #302 merged multi-node preflight; publish capacity smoke test and Redis failure runbook |
 | #223 | P1 | Split, active | PR #333 merged Redis redrive idempotency/retention coverage and a recovery drill; retain parent for restore/backup evidence |
 | #222 | P2 | Planned | measure one provider/repository extension slice before generic rewrite |
 | #221 | P2 | Planned | produce call/dependency graph and extract one tested boundary |
-| #220 | P1 | Split | Cargo/npm advisory policy and gate are merged; verify remaining installer checksum and image supply-chain coverage |
+| #220 | P1 | Split, active | installer checksum/signature and Cargo/npm advisory gates are merged; PR #357 fills updater coverage, while container permissions, remaining image supply-chain work, dependency exception and hosted updater evidence remain |
 | #218 | P2 | Split | JWT/TLS/Redis-profile slices are merged; document remaining environment settings and mandatory production encryption-key policy |
 | #217 | P1 | Split | #306 RED is closed; #307 alert event-path/deployment and #308 readiness recovery acceptance remain open |
-| #308 | P1 | In progress | PR #327 merged bounded readiness probes; complete deployment drill and parent acceptance |
-| #307 | P1 | In progress | PR #323 merged runtime-owned billing/fail-open counters; complete Prometheus parse/alert drill and link #306 producer |
+| #308 | P1 | In progress | draft PR #356 implements shared probes, cache, one overall deadline, lifecycle and critical-worker gates; 12-phase local real dependency drill passed, with final review and CI pending |
+| #307 | P1 | In progress | #323 and #350 merged counters and Prometheus contract/alert verification; retain production producer fault injection, scraping and actual alert delivery evidence |
 | #216 | P1 | Split, active | PR #332 adds the dev profile build-performance gate; #339 adds an isolated Postgres harness and three selected live tests; retain parent for VSCodex required-check evidence, integration baseline execution and remaining ignored-test coverage |
 | #215 | P2 | Planned | measure synchronous logging/SSE filtering/lock contention before changes |
 | #214 | P1 | Planned | add probe, graceful shutdown and accept-error acceptance tests |
@@ -413,3 +435,39 @@ board; then continue #223 marker/restore acceptance, #308 dependency withdrawal
 and recovery, #307 event-path coverage, #205 signing/identity residuals, and the
 remaining triage/deferred decisions in the ordered queue. Parent closure still
 requires every remaining acceptance item or an explicit documented disposition.
+
+## 2026-09-13 authoritative parallel checkpoint (remote revalidation)
+
+The fork inventory was re-read after the parallel acceptance merges: **47 open
+issues** (24 P1, 23 P2), with 12 `status:in-progress`, 24 `status:triage`, and
+11 `status:blocked`. This supersedes earlier counts while retaining them as
+history. PR #350 merged as `f11d9ff3bc27aee42e54982cbe24343c1627ab5e`, #351
+merged as `5c620e7681cba50451847c3d163076614ddf8e83`, and #352 merged as
+`6c2ba493131c6fcf59dcda32779b1fce219912ce`; #229 and #343 are closed after
+their accepted slices. #349 merged as `b044b1292694c1850a6efb7eccc9da63451be7bd`
+and closed #348. Open delivery PRs are #354
+(environment reference), #355 (candidate lifecycle), #356 (readiness draft),
+and #357 (Dependabot coverage), plus this #353 documentation PR. Their merge status and CI remain authoritative
+until each reaches a terminal state.
+
+The #308 readiness/lifecycle residual is broader than a deployment rehearsal:
+it must cover single-flight and cache semantics, dependency withdrawal,
+gateway lifecycle transitions, an overall probe deadline, and a real
+failure/recovery drill. The #357 dependency slice must count only the five
+real npm projects and three Docker build directories; an orphan root lockfile
+without a project manifest is not an additional project. Issue #220 therefore
+remains open for container permissions, remaining image supply-chain work,
+the tracked dependency exception and hosted updater evidence. Review correction
+`3761872aa` removes the invalid root npm target; YAML/inventory checks now use
+tracked manifest/lockfile pairs. Ready PRs #354, #355 and #357 may proceed under
+the normal four required checks;
+parent issues remain open until all acceptance evidence is recorded.
+
+PR #349's reviewed head `c65e035e04b9e06f0c43f39b6a6c51c2da2aa8c9` passed
+all four required checks in [Rust CI run 34716866543](https://github.com/JinPengGeng/aeris-token/actions/runs/34716866543).
+The downloaded `redis-runtime-tests` and `redis-durable-crash-drill` artifacts
+confirm 123 passing runtime tests (one existing ignored benchmark), strict
+missing-binary/startup/connection failures, an explicit optional local skip,
+AOF persistence after kill/restart and idempotent redrive to one final stream
+entry with an empty DLQ. Issue #348 and its PR card are Done; #223 remains open
+for marker retention/capacity, PostgreSQL restore and end-to-end billing recovery.

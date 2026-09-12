@@ -72,3 +72,27 @@ The remaining 49 open issues have one lifecycle label each after removing
 #348's duplicate triage label: 11 in progress, 27 triage, 11 blocked. The current
 delivery intake was compared by issue number and priority against all 49 live
 GitHub issues, with no missing, extra or mismatched rows.
+
+## 2026-09-13 parallel acceptance revalidation
+
+The current fork now has 47 open issues: 24 P1 and 23 P2, with lifecycle labels
+deduplicated to 12 in progress, 24 triage, and 11 blocked after #220 entered
+implementation and #348 closed. #229, #343 and #348 are
+closed and their Project cards are Done; #350, #351, and #352 are merged with
+the merge SHAs recorded in the delivery TODO. #349 also merged with all four
+required checks and verified Redis runtime/crash-drill artifacts; its card is
+Done, while parent #223 remains open. Open PR cards remain subject to
+current-head checks and must not be marked Done before merge and acceptance.
+
+The active readiness work (#356, child of #308) is accepted only when its
+single-flight/cache behavior, dependency withdrawal, lifecycle transitions,
+overall deadline, and real failure/recovery drill are evidenced. This is not a
+deployment-only rehearsal. The dependency audit slice #357 is scoped to five
+actual npm projects and three Docker build directories; an orphan root
+lockfile is excluded, and #220 remains open for container permissions, remaining
+image supply-chain work, the tracked dependency exception and hosted updater
+evidence. #354, #355, #356 and #357 cards have Status, Priority, Area, Risk,
+Size and Decision populated; #356 remains draft during final review and CI.
+The repository's four required checks remain Rust CI / check, Frontend CI /
+check, Automation Policy / gate, and Dependency Audit / check; no gate was
+weakened or changed in this reconciliation.
