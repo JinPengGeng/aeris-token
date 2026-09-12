@@ -21,7 +21,7 @@ impl AppState {
             .find_user_session(user_id, session_id)
             .await
             .map(|value| value.map(Into::into))
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(GatewayError::from_data_layer_error)
     }
 
     pub(crate) async fn list_user_sessions(

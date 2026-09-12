@@ -40,12 +40,14 @@ RUST_MIN_STACK=16777216 cargo nextest run -p aether-gateway --lib
 RUST_MIN_STACK=16777216 cargo nextest run -p aether-gateway --bins
 ```
 
-数据层默认测试与真实 PostgreSQL 测试不同。`cargo nextest run -p aether-data` 在 CI 中设置 `AETHER_REQUIRE_LOCAL_POSTGRES_TESTS=1`，并要求本机可找到 PostgreSQL 服务端工具（`pg_config --bindir`）。标记为 ignored 的适配器测试需要隔离的 PostgreSQL 实例和 `AETHER_TEST_DATABASE_URL`；只在需要覆盖该场景时运行，例如：
+数据层默认测试与真实 PostgreSQL 测试不同。`cargo nextest run -p aether-data` 在 CI 中设置 `AETHER_REQUIRE_LOCAL_POSTGRES_TESTS=1`，并要求本机可找到 PostgreSQL 服务端工具（`pg_config --bindir`）。标记为 ignored 的适配器测试需要隔离的 PostgreSQL 实例和 canonical `AETHER_TEST_DATABASE_URL`；CI 的 `Data DB Live (selected ignored tests)` job 使用一次性 PostgreSQL service、先执行迁移初始化，再由 `tools/ci/run_postgres_live_tests.sh` 串行点名运行高价值测试。`AETHER_TEST_POSTGRES_URL` 仅作为迁移 smoke 测试的兼容别名，并且必须与 canonical URL 完全一致。只在 disposable 数据库中运行该 harness，例如：
 
 ```bash
 AETHER_TEST_DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DB \
-  cargo test -p aether-data-postgres --lib -- --include-ignored --test-threads=1
+  bash tools/ci/run_postgres_live_tests.sh
 ```
+
+该脚本不会启用未列入清单的 ignored 测试；job 失败会阻断 `Rust CI / check`。本地没有数据库时应保持 URL 未设置，让默认测试流程继续按原有行为运行。
 
 前端改动遵循现有工作流：
 
