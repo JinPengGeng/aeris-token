@@ -123,9 +123,7 @@ async fn run_suite(
     prepare_aether_postgres_schema(&postgres_url).await?;
     seed_tunnel_auth(&postgres_url).await?;
 
-    let key_prefix = format!("aether-owner-relay-baseline-{}", std::process::id());
-    let shared_data = GatewayDataConfig::from_postgres_url(postgres_url.clone(), false)
-        .with_redis_url(redis_url.clone(), Some(key_prefix));
+    let shared_data = GatewayDataConfig::from_postgres_url(postgres_url.clone(), false);
 
     let owner_port = reserve_local_port()?;
     let forwarder_port = reserve_local_port()?;

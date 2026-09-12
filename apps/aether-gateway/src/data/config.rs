@@ -71,14 +71,6 @@ impl GatewayDataConfig {
         self.encryption_key.as_deref()
     }
 
-    pub fn with_redis_url(
-        self,
-        _url: impl Into<String>,
-        _key_prefix: Option<impl Into<String>>,
-    ) -> Self {
-        self
-    }
-
     pub fn is_enabled(&self) -> bool {
         self.database.is_some() || self.postgres.is_some()
     }
