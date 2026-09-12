@@ -255,7 +255,10 @@ impl std::fmt::Debug for OpenAiVideoTaskSeed {
             .field("progress_percent", &self.progress_percent)
             .field("completed_at_unix_secs", &self.completed_at_unix_secs)
             .field("expires_at_unix_secs", &self.expires_at_unix_secs)
-            .field("error_code", &self.error_code.as_ref().map(|_| "[redacted]"))
+            .field(
+                "error_code",
+                &self.error_code.as_ref().map(|_| "[redacted]"),
+            )
             .field(
                 "error_message",
                 &self.error_message.as_ref().map(|_| "[redacted]"),
@@ -294,7 +297,10 @@ impl std::fmt::Debug for GeminiVideoTaskSeed {
             .field("model", &self.model)
             .field("status", &self.status)
             .field("progress_percent", &self.progress_percent)
-            .field("error_code", &self.error_code.as_ref().map(|_| "[redacted]"))
+            .field(
+                "error_code",
+                &self.error_code.as_ref().map(|_| "[redacted]"),
+            )
             .field(
                 "error_message",
                 &self.error_message.as_ref().map(|_| "[redacted]"),

@@ -266,14 +266,14 @@ fn read_persisted_video_task_store(path: &Path) -> std::io::Result<PersistedVide
     }
 }
 
-fn ensure_private_store_file(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-) -> std::io::Result<()> {
+fn ensure_private_store_file(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
     if !metadata.file_type().is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("video task store must be a regular file: {}", path.display()),
+            format!(
+                "video task store must be a regular file: {}",
+                path.display()
+            ),
         ));
     }
 
