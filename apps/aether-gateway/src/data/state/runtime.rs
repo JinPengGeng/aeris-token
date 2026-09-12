@@ -5,10 +5,10 @@ use super::{
     AdminBillingRuleWriteInput, AdminPaymentOrderListQuery, AdminRedeemCodeBatchListQuery,
     AdminRedeemCodeListQuery, AdminWalletLedgerQuery, AdminWalletListQuery,
     AdminWalletRefundRequestListQuery, AnnouncementListQuery, AuditLogListQuery,
-    BackgroundTaskListQuery, BackgroundTaskSummary, BillingModelContextCacheKey,
-    BillingModelContextCacheState, BillingModelContextInflightState, BillingPlanRecord,
-    BillingPlanWriteInput, CompareAndSwapPaymentOrderStripeClientSecretInput,
-    CompleteAdminWalletRefundInput, CreateAdminRedeemCodeBatchInput,
+    AuditLogWriteOutcome, BackgroundTaskListQuery, BackgroundTaskSummary,
+    BillingModelContextCacheKey, BillingModelContextCacheState, BillingModelContextInflightState,
+    BillingPlanRecord, BillingPlanWriteInput, CompareAndSwapPaymentOrderStripeClientSecretInput,
+    CompleteAdminWalletRefundInput, CreateAdminAuditLog, CreateAdminRedeemCodeBatchInput,
     CreateAdminRedeemCodeBatchResult, CreateAnnouncementRecord, CreateManualWalletRechargeInput,
     CreatePlanPurchaseOrderInput, CreatePlanPurchaseOrderOutcome, CreateWalletRechargeOrderInput,
     CreateWalletRechargeOrderOutcome, CreateWalletRefundRequestInput,
@@ -157,6 +157,22 @@ impl Default for BillingModelContextCacheState {
 }
 
 impl GatewayDataState {
+    pub(crate) async fn create_admin_audit_log(
+        &self,
+        record: &CreateAdminAuditLog,
+    ) -> Result<AuditLogWriteOutcome, DataLayerError> {
+        let Some(repository) = self
+            .backends
+            .as_ref()
+            .and_then(|backends| backends.write().audit_logs())
+        else {
+            return Err(DataLayerError::InvalidConfiguration(
+                "admin audit persistence is unavailable".to_string(),
+            ));
+        };
+        repository.create_admin_audit_log(record).await
+    }
+
     const MAINTENANCE_POOL_IDLE_RESERVE_ENV: &'static str =
         "AETHER_GATEWAY_MAINTENANCE_POOL_IDLE_RESERVE";
     const MAINTENANCE_POOL_PRESSURE_MAX_DEFER: Duration = Duration::from_secs(30);

@@ -19,8 +19,8 @@ use aether_data::repository::announcements::{
     CreateAnnouncementRecord, StoredAnnouncement, StoredAnnouncementPage, UpdateAnnouncementRecord,
 };
 use aether_data::repository::audit::{
-    AuditLogListQuery, RequestAuditBundle, StoredAdminAuditLogPage, StoredSuspiciousActivity,
-    StoredUserAuditLogPage,
+    AuditLogListQuery, AuditLogWriteOutcome, CreateAdminAuditLog, RequestAuditBundle,
+    StoredAdminAuditLogPage, StoredSuspiciousActivity, StoredUserAuditLogPage,
 };
 use aether_data::repository::auth::{
     AuthApiKeyLookupKey, AuthApiKeyReadRepository, AuthApiKeyWriteRepository,

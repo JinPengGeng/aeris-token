@@ -18,6 +18,76 @@ pub struct AuditLogListQuery {
     pub offset: usize,
 }
 
+/// A validated, redacted audit record prepared by the gateway boundary.
+///
+/// The write contract deliberately accepts a fixed shape rather than arbitrary
+/// tracing fields so callers cannot accidentally persist request or credential
+/// payloads.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CreateAdminAuditLog {
+    pub id: String,
+    pub event_type: String,
+    pub user_id: Option<String>,
+    pub api_key_id: Option<String>,
+    pub description: String,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub request_id: Option<String>,
+    pub event_metadata: Option<Value>,
+    pub status_code: Option<i32>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl CreateAdminAuditLog {
+    pub fn validate(&self) -> Result<(), crate::DataLayerError> {
+        if self.id.trim().is_empty() || self.id.len() > 36 {
+            return Err(crate::DataLayerError::InvalidInput(
+                "audit log id must be 1..=36 characters".to_string(),
+            ));
+        }
+        if self.event_type.trim().is_empty() || self.event_type.len() > 50 {
+            return Err(crate::DataLayerError::InvalidInput(
+                "audit log event_type must be 1..=50 characters".to_string(),
+            ));
+        }
+        if self.description.trim().is_empty() {
+            return Err(crate::DataLayerError::InvalidInput(
+                "audit log description must not be empty".to_string(),
+            ));
+        }
+        if self.user_id.as_ref().is_some_and(|value| value.len() > 36)
+            || self
+                .api_key_id
+                .as_ref()
+                .is_some_and(|value| value.len() > 36)
+            || self
+                .ip_address
+                .as_ref()
+                .is_some_and(|value| value.len() > 45)
+            || self
+                .user_agent
+                .as_ref()
+                .is_some_and(|value| value.len() > 500)
+            || self
+                .request_id
+                .as_ref()
+                .is_some_and(|value| value.len() > 100)
+        {
+            return Err(crate::DataLayerError::InvalidInput(
+                "audit log bounded text field exceeds its database limit".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditLogWriteOutcome {
+    Inserted,
+    AlreadyExists,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredAdminAuditLog {
     pub id: String,
@@ -118,6 +188,14 @@ pub trait AuditLogReadRepository: Send + Sync {
         cutoff_unix_secs: u64,
         limit: usize,
     ) -> Result<usize, crate::DataLayerError>;
+}
+
+#[async_trait]
+pub trait AuditLogWriteRepository: Send + Sync {
+    async fn create_admin_audit_log(
+        &self,
+        record: &CreateAdminAuditLog,
+    ) -> Result<AuditLogWriteOutcome, crate::DataLayerError>;
 }
 
 pub fn optional_json_from_text(

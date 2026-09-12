@@ -4,6 +4,7 @@ use std::sync::Arc;
 #[cfg(feature = "postgres")]
 use super::PostgresBackend;
 use crate::repository::announcements::AnnouncementWriteRepository;
+use crate::repository::audit::AuditLogWriteRepository;
 use crate::repository::auth::AuthApiKeyWriteRepository;
 use crate::repository::auth_modules::AuthModuleWriteRepository;
 use crate::repository::background_tasks::BackgroundTaskWriteRepository;
@@ -24,6 +25,7 @@ use crate::repository::wallet::WalletWriteRepository;
 
 #[derive(Clone, Default)]
 pub struct DataWriteRepositories {
+    audit_logs: Option<Arc<dyn AuditLogWriteRepository>>,
     announcements: Option<Arc<dyn AnnouncementWriteRepository>>,
     auth_api_keys: Option<Arc<dyn AuthApiKeyWriteRepository>>,
     auth_modules: Option<Arc<dyn AuthModuleWriteRepository>>,
@@ -47,6 +49,7 @@ pub struct DataWriteRepositories {
 impl fmt::Debug for DataWriteRepositories {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DataWriteRepositories")
+            .field("has_audit_logs", &self.audit_logs.is_some())
             .field("has_announcements", &self.announcements.is_some())
             .field("has_auth_api_keys", &self.auth_api_keys.is_some())
             .field("has_auth_modules", &self.auth_modules.is_some())
@@ -88,6 +91,9 @@ impl DataWriteRepositories {
     fn install_postgres(&mut self, backend: &PostgresBackend) {
         if self.announcements.is_none() {
             self.announcements = Some(PostgresBackend::announcement_write_repository(backend));
+        }
+        if self.audit_logs.is_none() {
+            self.audit_logs = Some(PostgresBackend::audit_log_write_repository(backend));
         }
         if self.auth_api_keys.is_none() {
             self.auth_api_keys = Some(PostgresBackend::auth_api_key_write_repository(backend));
@@ -156,6 +162,10 @@ impl DataWriteRepositories {
 
     pub fn announcements(&self) -> Option<Arc<dyn AnnouncementWriteRepository>> {
         self.announcements.clone()
+    }
+
+    pub fn audit_logs(&self) -> Option<Arc<dyn AuditLogWriteRepository>> {
+        self.audit_logs.clone()
     }
 
     pub fn auth_api_keys(&self) -> Option<Arc<dyn AuthApiKeyWriteRepository>> {
@@ -228,6 +238,7 @@ impl DataWriteRepositories {
 
     pub fn has_any(&self) -> bool {
         self.announcements.is_some()
+            || self.audit_logs.is_some()
             || self.auth_api_keys.is_some()
             || self.auth_modules.is_some()
             || self.background_tasks.is_some()
@@ -271,6 +282,7 @@ mod tests {
         let write = DataWriteRepositories::from_postgres(Some(&backend));
 
         assert!(write.has_any());
+        assert!(write.audit_logs().is_some());
         assert!(write.announcements().is_some());
         assert!(write.auth_api_keys().is_some());
         assert!(write.auth_modules().is_some());
