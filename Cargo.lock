@@ -729,6 +729,7 @@ dependencies = [
  "aether-contracts",
  "aether-data",
  "aether-data-contracts",
+ "aether-runtime",
  "aether-runtime-state",
  "async-trait",
  "base64",

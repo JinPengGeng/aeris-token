@@ -551,9 +551,11 @@ fn metric_samples(workers: &[LogWorker]) -> Vec<MetricSample> {
 }
 
 pub fn logging_metric_samples() -> Vec<MetricSample> {
-    LOG_WORKERS
+    let mut samples = LOG_WORKERS
         .get()
-        .map_or_else(Vec::new, |workers| metric_samples(workers))
+        .map_or_else(Vec::new, |workers| metric_samples(workers));
+    samples.extend(super::super::metrics::billing_metric_samples());
+    samples
 }
 
 #[cfg(test)]
@@ -565,6 +567,41 @@ mod tests {
     use super::super::{
         JsonRuntimeEventFormatter, PrettyRuntimeEventFormatter, RuntimeLogIdentity,
     };
+
+    #[test]
+    fn logging_metrics_include_billing_failure_counters() {
+        let samples = logging_metric_samples();
+
+        for name in [
+            "billing_enrichment_failures_total",
+            "billing_settlement_failures_total",
+            "billing_video_task_settlement_failures_total",
+            "billing_fail_open_total",
+        ] {
+            assert!(
+                samples.iter().any(|sample| sample.name == name),
+                "logging metrics should expose {name}"
+            );
+        }
+
+        let fail_open = samples
+            .iter()
+            .filter(|sample| sample.name == "billing_fail_open_total")
+            .collect::<Vec<_>>();
+        assert_eq!(fail_open.len(), 2);
+        assert!(fail_open.iter().any(|sample| {
+            sample
+                .labels
+                .iter()
+                .any(|label| label.key == "operation" && label.value == "daily_quota")
+        }));
+        assert!(fail_open.iter().any(|sample| {
+            sample
+                .labels
+                .iter()
+                .any(|label| label.key == "operation" && label.value == "rpm")
+        }));
+    }
 
     #[derive(Clone, Default)]
     struct Buffer {

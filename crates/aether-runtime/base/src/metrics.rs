@@ -2,8 +2,18 @@ use crate::config::ServiceRuntimeConfig;
 use axum::body::Body;
 use axum::http::header::{HeaderValue, CONTENT_TYPE};
 use axum::http::Response;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static METRICS_NAMESPACE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+// These counters are intentionally process-wide: billing/usage accounting paths can run in
+// different crates, but the gateway owns one `/metrics` endpoint. Labels stay fixed so
+// an untrusted request cannot create a new time series.
+static BILLING_ENRICHMENT_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BILLING_SETTLEMENT_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static VIDEO_TASK_SETTLEMENT_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BILLING_FAIL_OPEN_DAILY_QUOTA_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BILLING_FAIL_OPEN_RPM_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricKind {
@@ -116,6 +126,81 @@ pub fn service_up_sample(service: &'static str) -> MetricSample {
     .with_labels(vec![MetricLabel::new("service", service)])
 }
 
+pub fn record_billing_enrichment_failure() {
+    BILLING_ENRICHMENT_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_billing_settlement_failure() {
+    BILLING_SETTLEMENT_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_video_task_settlement_failure() {
+    VIDEO_TASK_SETTLEMENT_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_billing_fail_open_daily_quota() {
+    BILLING_FAIL_OPEN_DAILY_QUOTA_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_billing_fail_open_rpm() {
+    BILLING_FAIL_OPEN_RPM_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn billing_metric_samples() -> Vec<MetricSample> {
+    vec![
+        MetricSample::new(
+            "billing_enrichment_failures_total",
+            "Terminal usage events whose billing enrichment failed before persistence.",
+            MetricKind::Counter,
+            BILLING_ENRICHMENT_FAILURES_TOTAL.load(Ordering::Relaxed),
+        )
+        .with_labels(vec![
+            MetricLabel::new("component", "usage"),
+            MetricLabel::new("operation", "enrichment"),
+        ]),
+        MetricSample::new(
+            "billing_settlement_failures_total",
+            "Terminal usage events whose settlement operation failed.",
+            MetricKind::Counter,
+            BILLING_SETTLEMENT_FAILURES_TOTAL.load(Ordering::Relaxed),
+        )
+        .with_labels(vec![
+            MetricLabel::new("component", "usage"),
+            MetricLabel::new("operation", "settlement"),
+        ]),
+        MetricSample::new(
+            "billing_video_task_settlement_failures_total",
+            "Video task terminal usage events whose settlement operation failed.",
+            MetricKind::Counter,
+            VIDEO_TASK_SETTLEMENT_FAILURES_TOTAL.load(Ordering::Relaxed),
+        )
+        .with_labels(vec![
+            MetricLabel::new("component", "video_task"),
+            MetricLabel::new("operation", "settlement"),
+        ]),
+        MetricSample::new(
+            "billing_fail_open_total",
+            "Billing protection checks that deliberately allowed traffic while their runtime backend was unavailable.",
+            MetricKind::Counter,
+            BILLING_FAIL_OPEN_DAILY_QUOTA_TOTAL.load(Ordering::Relaxed),
+        )
+        .with_labels(vec![
+            MetricLabel::new("component", "gateway"),
+            MetricLabel::new("operation", "daily_quota"),
+        ]),
+        MetricSample::new(
+            "billing_fail_open_total",
+            "Billing protection checks that deliberately allowed traffic while their runtime backend was unavailable.",
+            MetricKind::Counter,
+            BILLING_FAIL_OPEN_RPM_TOTAL.load(Ordering::Relaxed),
+        )
+        .with_labels(vec![
+            MetricLabel::new("component", "gateway"),
+            MetricLabel::new("operation", "rpm"),
+        ]),
+    ]
+}
+
 fn format_metric_name(namespace: Option<&str>, name: &str) -> String {
     match namespace {
         Some(namespace) if !namespace.is_empty() => format!("{}_{}", namespace, name),
@@ -133,8 +218,10 @@ fn escape_prometheus_label(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        prometheus_response, render_prometheus_text, service_up_sample, MetricKind, MetricLabel,
-        MetricSample,
+        billing_metric_samples, prometheus_response, record_billing_enrichment_failure,
+        record_billing_fail_open_daily_quota, record_billing_fail_open_rpm,
+        record_billing_settlement_failure, record_video_task_settlement_failure,
+        render_prometheus_text, service_up_sample, MetricKind, MetricLabel, MetricSample,
     };
     use axum::body::to_bytes;
 
@@ -182,5 +269,24 @@ mod tests {
             .expect("body should read");
         let text = String::from_utf8(body.to_vec()).expect("body should be utf8");
         assert!(text.contains("service_up{service=\"gateway\"} 1"));
+    }
+
+    #[test]
+    fn billing_metrics_use_fixed_low_cardinality_labels() {
+        record_billing_enrichment_failure();
+        record_billing_settlement_failure();
+        record_video_task_settlement_failure();
+        record_billing_fail_open_daily_quota();
+        record_billing_fail_open_rpm();
+        let samples = billing_metric_samples();
+        assert_eq!(samples.len(), 5);
+        assert!(samples
+            .iter()
+            .all(|sample| sample.kind == MetricKind::Counter));
+        assert!(samples.iter().all(|sample| sample
+            .labels
+            .iter()
+            .all(|label| matches!(label.key, "component" | "operation"))));
+        assert!(samples.iter().all(|sample| sample.value >= 1));
     }
 }

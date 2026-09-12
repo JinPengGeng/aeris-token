@@ -799,7 +799,10 @@ where
     let reconciled = reconcile_usage_policy_cost_for_event_with_result(data, event).await?;
     let record = build_upsert_usage_record_from_event(event)?;
     if let Some(stored) = data.upsert_usage_record(record).await? {
-        settle_usage_with_reconciled_cost(data, &stored, reconciled).await?;
+        if let Err(err) = settle_usage_with_reconciled_cost(data, &stored, reconciled).await {
+            aether_runtime::record_billing_settlement_failure();
+            return Err(err);
+        }
     }
     // Manual proxy traffic is counted at the actual transport-attempt boundary. Usage events are
     // replayable, so emitting that side effect here would count normal requests and reclaims twice.
@@ -818,6 +821,7 @@ where
     }
 
     if let Err(err) = data.enrich_usage_event(event).await {
+        aether_runtime::record_billing_enrichment_failure();
         warn!(
             event_name = "usage_worker_billing_enrichment_failed",
             log_type = "event",

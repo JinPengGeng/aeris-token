@@ -225,6 +225,7 @@ impl FrontdoorUserRpmLimiter {
                     "frontdoor user rpm runtime check failed"
                 );
                 if self.config.fail_open() {
+                    aether_runtime::record_billing_fail_open_rpm();
                     return Ok(FrontdoorUserRpmOutcome::NotApplicable);
                 }
                 if !self.config.allow_local_fallback() {
@@ -237,6 +238,7 @@ impl FrontdoorUserRpmLimiter {
 
         if !self.config.allow_local_fallback() {
             if self.config.fail_open() {
+                aether_runtime::record_billing_fail_open_rpm();
                 return Ok(FrontdoorUserRpmOutcome::NotApplicable);
             }
             return Err(GatewayError::Internal(

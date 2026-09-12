@@ -24,7 +24,11 @@ pub use distributed::{
     DistributedConcurrencySnapshot,
 };
 pub use error::RuntimeBootstrapError;
-pub use metrics::{prometheus_response, service_up_sample, MetricKind, MetricLabel, MetricSample};
+pub use metrics::{
+    prometheus_response, record_billing_enrichment_failure, record_billing_fail_open_daily_quota,
+    record_billing_fail_open_rpm, record_billing_settlement_failure,
+    record_video_task_settlement_failure, service_up_sample, MetricKind, MetricLabel, MetricSample,
+};
 pub use observability::{
     FileLoggingConfig, LogDestination, LogRotation, ServiceObservabilityConfig,
 };

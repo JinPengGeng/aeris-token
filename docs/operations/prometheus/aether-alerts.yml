@@ -1,0 +1,50 @@
+groups:
+  - name: aether-billing-foundation
+    rules:
+      - alert: AetherBillingEnrichmentFailures
+        expr: sum(increase(aether_gateway_billing_enrichment_failures_total[10m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Billing enrichment failures are present
+          description: Terminal usage events could not be enriched in the last 10 minutes.
+          runbook: docs/operations/observability-runbook.md#billing-enrichment-or-settlement
+          deduplication: Group by alertname, component and operation; inhibit info alerts while this warning is firing.
+          rollback: Roll back the release only after checking the failed event path and DLQ; counters are additive and safe to revert.
+
+      - alert: AetherUsageDeadLetterBacklog
+        expr: max(aether_gateway_usage_queue_dlq_length) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Usage dead-letter queue is non-empty
+          description: Usage events require operator review or an idempotent redrive.
+          runbook: docs/operations/observability-runbook.md#usage-dlq
+          deduplication: Group by alertname and stream; inhibit backlog alerts while the gateway is down.
+          rollback: Do not delete the DLQ; pause redrive and restore the last known-good consumer if processing is suspect.
+
+      - alert: AetherBillingGuardFailOpen
+        expr: sum(increase(aether_gateway_billing_fail_open_total[10m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Billing or RPM guard allowed traffic during a runtime outage
+          description: Inspect the operation label and restore the shared runtime before disabling the guard.
+          runbook: docs/operations/observability-runbook.md#fail-open
+          deduplication: Group by alertname, component and operation; inhibit repeats for the same outage window.
+          rollback: Prefer restoring Redis/runtime connectivity; changing fail-open policy requires an explicit configuration review.
+
+      - alert: AetherProviderServerErrors
+        expr: sum by (provider) (rate(aether_gateway_request_errors_total{status_class="5xx"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Provider 5xx responses are elevated
+          description: This rule consumes the low-cardinality provider/status contract delivered by Issue #306.
+          runbook: docs/operations/observability-runbook.md#provider-5xx
+          deduplication: Group by alertname and provider; inhibit while a provider maintenance silence is active.
+          rollback: Roll back only a release-correlated regression; otherwise fail over or contact the provider.

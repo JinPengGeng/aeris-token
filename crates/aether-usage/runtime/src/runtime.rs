@@ -5238,6 +5238,7 @@ impl UsageRuntime {
         };
 
         let write_succeeded = if let Err(err) = data.enrich_usage_event(event).await {
+            aether_runtime::record_billing_enrichment_failure();
             warn!(
                 event_name = "usage_terminal_direct_fallback_enrichment_failed",
                 log_type = "event",
@@ -5311,6 +5312,7 @@ impl UsageRuntime {
                     if let Err(err) =
                         settle_usage_with_reconciled_cost(data, &stored, reconciled).await
                     {
+                        aether_runtime::record_billing_settlement_failure();
                         warn!(
                             event_name = "usage_terminal_settlement_failed",
                             log_type = "event",
@@ -5445,6 +5447,7 @@ where
     T: UsageBillingEventEnricher + Send + Sync,
 {
     if let Err(err) = data.enrich_usage_event(event).await {
+        aether_runtime::record_billing_enrichment_failure();
         warn!(
             event_name = "usage_terminal_billing_enrichment_failed",
             log_type = "event",
