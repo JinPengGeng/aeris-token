@@ -21,11 +21,14 @@ Issue #220 中安装器 `SHA256SUMS` 消费和基础镜像 digest 已在当前 m
 
 `.github/workflows/dependency-audit.yml` 在 pull request、main/master push、
 手工触发和每周定时运行。Cargo 使用 Rust `1.95.0` 和固定的
-`cargo-audit 0.21.2`；npm 使用 Node `22.14.0`，并将 registry 固定为
+`cargo-audit 0.22.2`；npm 使用 Node `22.14.0`，并将 registry 固定为
 `https://registry.npmjs.org`，避免继承本地或 runner 镜像配置。
 
-`cargo audit` 对 Cargo advisory database 中的漏洞失败；审计工具自身读取
-仓库锁文件，且 `cargo-audit 0.21.2` 不支持额外的 `--locked` 参数。npm 使用
+`cargo audit` 对 Cargo advisory database 中的漏洞失败；`cargo-audit 0.22.2`
+通过 `rustsec 0.33`/`cvss 2.2` 支持当前 advisory database 使用的 CVSS v4.0
+向量。安装阶段使用 `--locked` 锁定审计器自身的依赖，运行阶段由审计工具读取
+仓库锁文件。任何 advisory 解析错误（包括未来不支持的 CVSS 版本）都会直接失败，
+保持 fail-closed；npm 使用
 `npm audit --package-lock-only --audit-level=high`：high/critical 漏洞失败，
 moderate/low 仍会出现在审计输出中但不阻塞合并。网络、registry 或 advisory
 数据库不可用同样失败（fail closed），因为无法证明依赖安全。
