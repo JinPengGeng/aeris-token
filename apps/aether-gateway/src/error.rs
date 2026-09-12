@@ -542,7 +542,10 @@ mod tests {
                 .into_response();
             assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
             assert_eq!(
-                response.headers().get(RETRY_AFTER).and_then(|v| v.to_str().ok()),
+                response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
                 Some("1")
             );
             assert_eq!(
@@ -555,8 +558,8 @@ mod tests {
             let body = to_bytes(response.into_body(), usize::MAX)
                 .await
                 .expect("control error response body should read");
-            let payload: serde_json::Value = serde_json::from_slice(&body)
-                .expect("control error response should be JSON");
+            let payload: serde_json::Value =
+                serde_json::from_slice(&body).expect("control error response should be JSON");
             assert_eq!(payload["error"]["code"], "control_unavailable");
             assert_eq!(payload["error"]["retryable"], true);
             assert_eq!(payload["error"]["failover_disposition"], "retry_request");
@@ -573,11 +576,15 @@ mod tests {
             GatewayError::Internal(_)
         ));
         assert!(matches!(
-            GatewayError::from_data_layer_error(DataLayerError::InvalidConfiguration("bad config".into())),
+            GatewayError::from_data_layer_error(DataLayerError::InvalidConfiguration(
+                "bad config".into()
+            )),
             GatewayError::Internal(_)
         ));
         assert!(matches!(
-            GatewayError::from_data_layer_error(DataLayerError::UnexpectedValue("bad value".into())),
+            GatewayError::from_data_layer_error(DataLayerError::UnexpectedValue(
+                "bad value".into()
+            )),
             GatewayError::Internal(_)
         ));
     }
