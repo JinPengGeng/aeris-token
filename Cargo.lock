@@ -683,6 +683,7 @@ dependencies = [
  "bytes",
  "clap",
  "crossterm 0.28.1",
+ "ed25519-dalek",
  "flate2",
  "futures-util",
  "hex",
