@@ -360,6 +360,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lifecycle_owned_finalizer_runs_after_handler_future_is_dropped() {
+        let usage = Arc::new(UsageRuntime::disabled());
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let finalized = Arc::new(AtomicBool::new(false));
+        let finalized_for_request = Arc::clone(&finalized);
+        let request = tokio::spawn(run_request_with_usage(usage.clone(), async move {
+            configure_client_disconnect(RoutingExecutionPolicy::default());
+            started_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            // This models response-finalizer work such as durable audit
+            // persistence. It must run in the lifecycle-owned future so a
+            // disconnected handler cannot drop it with its outer continuation.
+            finalized_for_request.store(true, Ordering::Release);
+            Ok(Response::new(Body::empty()))
+        }));
+
+        started_rx.await.unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(!finalized.load(Ordering::Acquire));
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !finalized.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("lifecycle-owned finalizer should complete after disconnect");
+        usage.shutdown(Duration::from_secs(1)).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn usage_shutdown_waits_for_disconnected_body_drain() {
         let usage = Arc::new(UsageRuntime::disabled());
         let (sender, receiver) = mpsc::channel::<Result<Bytes, io::Error>>(1);

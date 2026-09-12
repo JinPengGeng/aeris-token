@@ -1051,22 +1051,29 @@ pub(crate) async fn proxy_request(
     request: Request,
 ) -> Result<Response<Body>, GatewayError> {
     let data = state.data.clone();
-    let result = crate::request_lifecycle::run_request_with_usage(
+    // Keep audit persistence inside the lifecycle-owned future. When the
+    // client disconnects, `run_request_with_usage` may finish this future in
+    // the background after the handler itself has been dropped; persistence
+    // must therefore not live in the outer continuation.
+    crate::request_lifecycle::run_request_with_usage(
         state.usage_runtime.clone(),
-        Box::pin(proxy_request_inner(state, remote_addr, request)),
+        Box::pin(async move {
+            let result = proxy_request_inner(state, remote_addr, request).await;
+            if let Ok(mut response) = result {
+                if let Some(crate::audit::PendingAdminAudit(record)) =
+                    response
+                        .extensions_mut()
+                        .remove::<crate::audit::PendingAdminAudit>()
+                {
+                    crate::audit::persist_admin_audit(data.as_ref(), record).await;
+                }
+                Ok(response)
+            } else {
+                result
+            }
+        }),
     )
-    .await;
-    if let Ok(mut response) = result {
-        if let Some(crate::audit::PendingAdminAudit(record)) = response
-            .extensions_mut()
-            .remove::<crate::audit::PendingAdminAudit>(
-        ) {
-            crate::audit::persist_admin_audit(data.as_ref(), record).await;
-        }
-        Ok(response)
-    } else {
-        result
-    }
+    .await
 }
 
 async fn proxy_request_inner(
