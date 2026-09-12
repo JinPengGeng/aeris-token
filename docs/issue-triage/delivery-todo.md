@@ -230,7 +230,7 @@ GitHub reports the PR as open, auto-merge enabled, and merge state `BLOCKED`
 until the in-progress required checks complete. This record intentionally does
 not claim a merge or close #255.
 
-## 2026-09-13 authoritative live checkpoint (main `3d9a1116`)
+## 2026-09-13 authoritative live checkpoint (main `2734843c`)
 
 This section supersedes earlier live-checkpoint paragraphs when they conflict;
 older paragraphs remain as an audit trail. The fork inventory was re-read from
