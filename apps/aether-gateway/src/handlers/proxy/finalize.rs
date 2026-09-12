@@ -109,6 +109,7 @@ pub(super) fn finalize_gateway_response(
         method,
         sanitized_path_and_query.as_str(),
         control_decision,
+        client_ip,
     );
     if response.status().is_server_error() {
         warn!(

@@ -1050,11 +1050,22 @@ pub(crate) async fn proxy_request(
     ConnectInfo(remote_addr): ConnectInfo<std::net::SocketAddr>,
     request: Request,
 ) -> Result<Response<Body>, GatewayError> {
-    crate::request_lifecycle::run_request_with_usage(
+    let data = state.data.clone();
+    let result = crate::request_lifecycle::run_request_with_usage(
         state.usage_runtime.clone(),
         Box::pin(proxy_request_inner(state, remote_addr, request)),
     )
-    .await
+    .await;
+    if let Ok(mut response) = result {
+        if let Some(crate::audit::PendingAdminAudit(record)) =
+            response.extensions_mut().remove::<crate::audit::PendingAdminAudit>()
+        {
+            crate::audit::persist_admin_audit(data.as_ref(), record).await;
+        }
+        Ok(response)
+    } else {
+        result
+    }
 }
 
 async fn proxy_request_inner(

@@ -4,9 +4,9 @@ mod types;
 mod tests;
 
 pub use aether_data_contracts::repository::audit::{
-    optional_json_from_text, AuditLogListQuery, AuditLogReadRepository, StoredAdminAuditLog,
-    StoredAdminAuditLogPage, StoredSuspiciousActivity, StoredUserAuditLog, StoredUserAuditLogPage,
-    SUSPICIOUS_EVENT_TYPES,
+    optional_json_from_text, AuditLogListQuery, AuditLogReadRepository, AuditLogWriteOutcome,
+    AuditLogWriteRepository, CreateAdminAuditLog, StoredAdminAuditLog, StoredAdminAuditLogPage,
+    StoredSuspiciousActivity, StoredUserAuditLog, StoredUserAuditLogPage, SUSPICIOUS_EVENT_TYPES,
 };
 #[cfg(feature = "postgres")]
 pub use aether_data_postgres::PostgresAuditLogReadRepository;

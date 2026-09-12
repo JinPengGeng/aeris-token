@@ -21,6 +21,46 @@ impl PostgresAuditLogReadRepository {
 }
 
 #[async_trait]
+impl AuditLogWriteRepository for PostgresAuditLogReadRepository {
+    async fn create_admin_audit_log(
+        &self,
+        record: &CreateAdminAuditLog,
+    ) -> Result<AuditLogWriteOutcome, DataLayerError> {
+        record.validate()?;
+        let inserted = sqlx::query(
+            r#"
+INSERT INTO audit_logs (
+  id, event_type, user_id, api_key_id, description, ip_address,
+  user_agent, request_id, event_metadata, status_code, error_message, created_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+ON CONFLICT (id) DO NOTHING
+"#,
+        )
+        .bind(&record.id)
+        .bind(&record.event_type)
+        .bind(record.user_id.as_deref())
+        .bind(record.api_key_id.as_deref())
+        .bind(&record.description)
+        .bind(record.ip_address.as_deref())
+        .bind(record.user_agent.as_deref())
+        .bind(record.request_id.as_deref())
+        .bind(record.event_metadata.clone())
+        .bind(record.status_code)
+        .bind(record.error_message.as_deref())
+        .bind(record.created_at)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
+        Ok(if inserted == 1 {
+            AuditLogWriteOutcome::Inserted
+        } else {
+            AuditLogWriteOutcome::AlreadyExists
+        })
+    }
+}
+
+#[async_trait]
 impl AuditLogReadRepository for PostgresAuditLogReadRepository {
     async fn list_admin_audit_logs(
         &self,
