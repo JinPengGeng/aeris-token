@@ -275,15 +275,19 @@ async fn grant_capacity(
                 ));
             }
             allow_overage &= grant.allow_wallet_overage;
-            let spent: f64 = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(amount_usd), 0)::double precision FROM entitlement_usage_ledgers \
+            // Preserve the NUMERIC ledger sum through conversion to integer
+            // units instead of crossing a floating-point boundary.
+            let spent: i64 = sqlx::query_scalar(
+                "SELECT CEIL(COALESCE(SUM(amount_usd), 0) * 100000000)::bigint FROM entitlement_usage_ledgers \
                  WHERE user_entitlement_id = $1 AND usage_date = $2",
             )
             .bind(&id).bind(&grant.usage_date)
             .fetch_one(&mut **tx).await.map_postgres_err()?;
             let held = held_source_units(tx, &id, "entitlement", Some(&grant.usage_date)).await?;
             let capacity = request_funds_available_units(grant.daily_quota_usd)?
-                .saturating_sub(request_funds_authorized_units(spent)?)
+                .saturating_sub(
+                    u64::try_from(spent).map_err(|_| invalid("negative entitlement spending"))?,
+                )
                 .saturating_sub(held);
             out.push((
                 RequestFundingSource::Entitlement {
@@ -308,7 +312,7 @@ pub(super) async fn reserve(
     if let Some(stored) = find_reservation(tx, &input.identity.reservation_token).await? {
         return Ok(if stored.quote == input {
             ReserveRequestFundsOutcome::Reserved {
-                reservation: stored,
+                reservation: Box::new(stored),
             }
         } else {
             ReserveRequestFundsOutcome::Conflict
@@ -327,12 +331,15 @@ pub(super) async fn reserve(
         let gift: f64 = row.try_get("gift_balance").map_postgres_err()?;
         let consumed: f64 = row.try_get("total_consumed").map_postgres_err()?;
         validate_wallet_settlement_values(recharge, gift, consumed, 0.0)?;
-        if recharge < 0.0 && input.authorized_cost_units > 0 {
+        let mode: String = row.try_get("limit_mode").map_postgres_err()?;
+        if !mode.eq_ignore_ascii_case("unlimited")
+            && recharge < 0.0
+            && input.authorized_cost_units > 0
+        {
             return Ok(ReserveRequestFundsOutcome::Insufficient {
                 available_cost_units: 0,
             });
         }
-        let mode: String = row.try_get("limit_mode").map_postgres_err()?;
         let id = wallet_id.as_ref().expect("resolved wallet has an id");
         if allow_overage {
             if mode.eq_ignore_ascii_case("unlimited") {
@@ -396,7 +403,7 @@ pub(super) async fn reserve(
         return Ok(
             match find_reservation(tx, &input.identity.reservation_token).await? {
                 Some(stored) if stored.quote == input => ReserveRequestFundsOutcome::Reserved {
-                    reservation: stored,
+                    reservation: Box::new(stored),
                 },
                 _ => ReserveRequestFundsOutcome::Conflict,
             },
@@ -426,7 +433,7 @@ pub(super) async fn reserve(
             .bind(allocation.reserved_cost_units as i64).bind(quota_units).execute(&mut **tx).await.map_postgres_err()?;
     }
     Ok(ReserveRequestFundsOutcome::Reserved {
-        reservation: StoredRequestFundsReservation {
+        reservation: Box::new(StoredRequestFundsReservation {
             quote: input,
             wallet_id,
             allocations,
@@ -435,7 +442,7 @@ pub(super) async fn reserve(
             collected_cost_units: 0,
             reconciliation_facts: None,
             settlement: None,
-        },
+        }),
     })
 }
 
@@ -583,10 +590,11 @@ pub(super) async fn finalize(
                         "request funds entitlement was already charged outside reservation",
                     ));
                 }
-                let spent: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(amount_usd), 0)::double precision FROM entitlement_usage_ledgers WHERE user_entitlement_id = $1 AND usage_date = $2")
+                let spent: i64 = sqlx::query_scalar("SELECT CEIL(COALESCE(SUM(amount_usd), 0) * 100000000)::bigint FROM entitlement_usage_ledgers WHERE user_entitlement_id = $1 AND usage_date = $2")
                     .bind(entitlement_id).bind(usage_date).fetch_one(&mut **tx).await.map_postgres_err()?;
-                let balance_before =
-                    quota_cost_units.saturating_sub(request_funds_authorized_units(spent)?);
+                let balance_before = quota_cost_units.saturating_sub(
+                    u64::try_from(spent).map_err(|_| invalid("negative entitlement spending"))?,
+                );
                 let balance_after = balance_before
                     .checked_sub(amount)
                     .ok_or_else(|| invalid("frozen entitlement funds are missing"))?;
@@ -792,9 +800,10 @@ pub(super) async fn recover(
                 .map_postgres_err()? as u64,
         )
     } else {
-        let prior: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(amount_usd), 0)::double precision FROM entitlement_usage_ledgers WHERE request_id = $1")
+        let prior: i64 = sqlx::query_scalar("SELECT CEIL(COALESCE(SUM(amount_usd), 0) * 100000000)::bigint FROM entitlement_usage_ledgers WHERE request_id = $1")
             .bind(&input.request_id).fetch_one(&mut **tx).await.map_postgres_err()?;
-        let prior = request_funds_authorized_units(prior)?;
+        let prior = u64::try_from(prior)
+            .map_err(|_| invalid("negative historical entitlement spending"))?;
         if prior > actual {
             return Err(invalid(
                 "historical entitlement charges exceed frozen request cost",

@@ -60,6 +60,11 @@ overflow are rejected. The maximum is `(1 << 52) - 1` units, matching SQL checks
 this permits eight-decimal round trips through existing f64 wallet storage.
 The caller must reject any upstream quote exceeding this bound.
 
+The reservation outcome boxes its stored reservation to keep the common rejection
+variants small without changing the serialized contract. Integer conversion uses
+checked decimal arithmetic and the standard divisibility predicate; neither change
+relaxes the financial bounds to satisfy lint checks.
+
 ## Persistence and lock order
 
 `request_fund_reservations` stores the immutable identity, quote, financial outcome
@@ -82,6 +87,15 @@ serve as a wallet ledger. Gateway integration must successfully acquire both
 applicable limits before dispatch and eventually reconcile both.
 
 ## Required evidence before readiness
+
+The required PostgreSQL live harness selects all six `live_request_funds_*`
+tests explicitly, in addition to the existing five exact targets. A green unit
+job that skips these ignored fixtures is insufficient. Each invocation must run
+one passing test against the disposable hosted PostgreSQL service. Main-thread
+review corrected admission eligibility and usage-date calculation to use the same
+server-provided timestamp; the live fixture checks valid, not-yet-started and
+exactly-expired grants independently of the database's current date, then checks
+the persisted ledger and finalization replay after the date boundary.
 
 - Two PostgreSQL connections competing to reserve two USD 0.08 requests against
   one USD 0.10 wallet admit exactly one request.
@@ -124,10 +138,56 @@ The database was stopped after validation, with its files retained for recovery.
 
 Required lifecycle integration remains outstanding: gateway admission/dispatch/
 terminal calls, retry authorization, prepared crash recovery, dispatched outcome
-reconciliation, recharge-triggered recovery workers, and live CI wiring. This data
+reconciliation, and recharge-triggered recovery workers. Live CI wiring is included
+in this branch and must pass on the final PR head. This data
 branch does not complete or close #300/#206 or re-enable unknown paid images.
 The in-memory repository implements wallet funding but does not store entitlements;
 entitlement evidence here comes from actual PostgreSQL transactions.
+
+## Decimal boundary review and correction
+
+Independent review identified floating-point boundaries shared by ordinary
+settlement and reservations. Ordinary recharge/gift subtraction now uses integer
+units in both PostgreSQL and memory, preserving another request's complete hold.
+The ordinary entitlement allocator also tracks capacity, deductions and the split
+between entitlement and wallet in units. This fixes the real mixed-payment case:
+USD 0.40 total minus USD 0.10 entitlement must consume exactly USD 0.30 of wallet
+capacity, not reject it after rounding the floating remainder upward.
+
+Live schema inspection corrected part of the initial review hypothesis:
+`wallets.balance`, `wallets.gift_balance` and
+`entitlement_usage_ledgers.amount_usd` are PostgreSQL `NUMERIC(20,8)` in the real
+migrations, despite their logical float64 representation. Therefore a pure
+floating-SUM reproduction is not evidence that PostgreSQL's stored ledger sum
+invented debt. SQL SUM was already exact, and persisted wallet scale normalizes
+the proposed USD 0.30 minus USD 0.10 writeback example. The memory hold failure and
+Rust mixed-payment subtraction remain valid concerns. The final SQL converts
+the existing exact NUMERIC sum directly into integer units; the regression
+proves the resulting contract without claiming that the prior SQL SUM was float.
+
+PostgreSQL now permits reservations against explicitly unlimited wallets with
+historical negative recharge balances, consistent with memory and existing
+postpaid accounting. Finite wallets continue to reject new paid reservations
+while recharge is negative.
+
+The two added live fixtures cover recharge and gift holds coexisting with ordinary
+settlement, mixed entitlement/wallet funding, finite-to-unlimited transitions,
+sequential USD 0.10/0.20/0.30 entitlement use and recovery after two historical
+grant payments. Replay assertions verify that none of these actions duplicates
+collection. A memory regression covers both buckets and negative postpaid balance.
+
+Final local verification of the reviewed data change used the required harness
+itself: all eleven exact targets passed against the disposable PostgreSQL 17
+database (five existing targets plus six funds targets; each ran one test).
+Twenty settlement memory tests and the two currency conversion contract tests
+also passed. A first run of the new mixed-payment assertion used a Rust f64 decoder
+for a NUMERIC column and correctly failed; its query now explicitly casts the
+asserted value, matching the adapter's established decoding contract.
+
+Usage-row retention remains a required gateway/recovery integration dependency:
+cleanup must retain rows needed by unresolved holds or partially collected debt,
+or move equivalent authoritative facts into durable recovery storage first. This
+branch does not claim that existing time-based usage cleanup meets that contract.
 
 ## Rollback
 

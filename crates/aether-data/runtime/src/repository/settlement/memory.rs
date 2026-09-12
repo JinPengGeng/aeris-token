@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use async_trait::async_trait;
 
 use super::{
-    plan_finite_wallet_debit, settlement_billable_cost_usd,
-    settlement_billing_status_for_usage_status, validate_wallet_settlement_values,
-    ReconcileUsagePolicyCostInput, ReleaseUsagePolicyRequestAdmissionInput,
-    ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
+    settlement_billable_cost_usd, settlement_billing_status_for_usage_status,
+    validate_wallet_settlement_values, ReconcileUsagePolicyCostInput,
+    ReleaseUsagePolicyRequestAdmissionInput, ReserveUsagePolicyCostInput,
+    ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
     ReserveUsagePolicyRequestOutcome, SettlementWriteRepository, StoredUsagePolicyCostReservation,
     StoredUsagePolicyRequestAdmission, StoredUsageSettlement, UsagePolicyCostReservationState,
     UsagePolicyRequestAdmissionState, UsageSettlementInput, SETTLEMENT_EPSILON_USD,
@@ -556,15 +556,23 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
                             settlement.billing_status = final_billing_status.clone();
                             return Ok(settlement);
                         }
-                        let debit_plan = plan_finite_wallet_debit(
-                            super::request_funds_usd(available_recharge),
-                            super::request_funds_usd(available_gift),
-                            billable_cost_usd,
-                        );
-                        let (after_recharge, after_gift) = (
-                            before_recharge - debit_plan.recharge_deduction,
-                            before_gift - debit_plan.gift_deduction,
-                        );
+                        let recharge_debit = required.min(available_recharge);
+                        let gift_debit = required - recharge_debit;
+                        let after_recharge = if recharge_debit == 0 {
+                            before_recharge
+                        } else {
+                            super::request_funds_usd(
+                                super::request_funds_available_units(before_recharge)?
+                                    - recharge_debit,
+                            )
+                        };
+                        let after_gift = if gift_debit == 0 {
+                            before_gift
+                        } else {
+                            super::request_funds_usd(
+                                super::request_funds_available_units(before_gift)? - gift_debit,
+                            )
+                        };
                         validate_wallet_settlement_values(
                             after_recharge,
                             after_gift,
@@ -1161,6 +1169,96 @@ mod tests {
             100,
         )
         .expect("wallet should build")
+    }
+
+    #[tokio::test]
+    async fn ordinary_settlement_preserves_reserved_decimal_buckets_and_postpaid_debt() {
+        use crate::repository::settlement::{
+            FinalizeRequestFundsInput, RequestFundsIdentity, RequestFundsState,
+            ReserveRequestFundsInput, ReserveRequestFundsOutcome,
+        };
+
+        for (recharge, gift, unlimited) in
+            [(0.30, 0.0, false), (0.0, 0.30, false), (-0.10, 0.0, true)]
+        {
+            let mut wallet = sample_wallet();
+            wallet.balance = recharge;
+            wallet.gift_balance = gift;
+            if unlimited {
+                wallet.limit_mode = "unlimited".to_string();
+            }
+            let repository = InMemorySettlementRepository::seed(vec![wallet]);
+            let quote = ReserveRequestFundsInput {
+                identity: RequestFundsIdentity {
+                    reservation_token: "token".to_string(),
+                    request_id: "reserved".to_string(),
+                    user_id: Some("user-1".to_string()),
+                    api_key_id: Some("key-1".to_string()),
+                    api_key_is_standalone: false,
+                },
+                authorized_cost_units: 20_000_000,
+                pricing_snapshot: serde_json::json!({"cost":0.20}),
+                admitted_at_unix_secs: 100,
+            };
+            assert!(matches!(
+                repository
+                    .reserve_request_funds(quote.clone())
+                    .await
+                    .unwrap(),
+                ReserveRequestFundsOutcome::Reserved { .. }
+            ));
+            repository
+                .mark_request_funds_dispatched(quote.identity.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            let usage = |request_id: &str, cost: f64| UsageSettlementInput {
+                request_id: request_id.to_string(),
+                user_id: Some("user-1".to_string()),
+                api_key_id: Some("key-1".to_string()),
+                api_key_is_standalone: false,
+                provider_id: None,
+                status: "completed".to_string(),
+                billing_status: "pending".to_string(),
+                total_cost_usd: cost,
+                actual_total_cost_usd: cost,
+                finalized_at_unix_secs: Some(200),
+            };
+            let ordinary = repository
+                .settle_usage(usage("ordinary", 0.10))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(ordinary.billing_status, "settled");
+            assert_eq!(
+                ordinary.wallet_balance_after,
+                Some(if unlimited { -0.10 } else { 0.20 })
+            );
+            let finalize = FinalizeRequestFundsInput {
+                identity: quote.identity,
+                usage: usage("reserved", 0.20),
+                reconciliation_facts: None,
+            };
+            let settled = repository
+                .finalize_request_funds(finalize.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(settled.state, RequestFundsState::Settled);
+            assert_eq!(settled.collected_cost_units, 20_000_000);
+            assert_eq!(
+                settled.settlement.as_ref().unwrap().wallet_balance_after,
+                Some(if unlimited { -0.10 } else { 0.0 })
+            );
+            assert_eq!(
+                repository
+                    .finalize_request_funds(finalize)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                settled
+            );
+        }
     }
 
     #[tokio::test]

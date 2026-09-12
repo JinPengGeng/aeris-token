@@ -62,7 +62,9 @@ fn request_funds_units(usd: f64, round_up: bool) -> Result<u64, DataLayerError> 
         digits.checked_mul(10_u128.checked_pow(shift as u32).unwrap_or(u128::MAX))
     } else {
         match 10_u128.checked_pow((-shift) as u32) {
-            Some(divisor) => Some(digits / divisor + u128::from(round_up && digits % divisor != 0)),
+            Some(divisor) => {
+                Some(digits / divisor + u128::from(round_up && !digits.is_multiple_of(divisor)))
+            }
             None => Some(u128::from(round_up && digits != 0)),
         }
     }
@@ -243,7 +245,7 @@ pub fn request_funds_wallet_held_units<'a>(
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ReserveRequestFundsOutcome {
     Reserved {
-        reservation: StoredRequestFundsReservation,
+        reservation: Box<StoredRequestFundsReservation>,
     },
     Insufficient {
         available_cost_units: u64,

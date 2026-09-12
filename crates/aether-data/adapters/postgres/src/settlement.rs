@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
 use aether_data_contracts::repository::settlement::{
-    plan_finite_wallet_debit, settlement_billable_cost_usd,
-    settlement_billing_status_for_usage_status, validate_wallet_settlement_values,
-    ReconcileUsagePolicyCostInput, ReleaseUsagePolicyRequestAdmissionInput,
-    ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
+    settlement_billable_cost_usd, settlement_billing_status_for_usage_status,
+    validate_wallet_settlement_values, ReconcileUsagePolicyCostInput,
+    ReleaseUsagePolicyRequestAdmissionInput, ReserveUsagePolicyCostInput,
+    ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
     ReserveUsagePolicyRequestOutcome, SettlementWriteRepository, StoredUsagePolicyCostReservation,
     StoredUsagePolicyRequestAdmission, StoredUsageSettlement, UsagePolicyCostReservationState,
     UsagePolicyRequestAdmissionState, UsageSettlementInput, SETTLEMENT_EPSILON_USD,
@@ -542,6 +542,9 @@ async fn consume_daily_quota_postgres(
     wallet_available_usd: Option<f64>,
     wallet_can_overdraft: bool,
 ) -> Result<DailyQuotaDebitResult, DataLayerError> {
+    use aether_data_contracts::repository::settlement::{
+        request_funds_authorized_units, request_funds_available_units, request_funds_usd,
+    };
     if !total_cost_usd.is_finite() || total_cost_usd < 0.0 {
         return Err(DataLayerError::InvalidInput(
             "daily quota settlement cost must be finite and non-negative".to_string(),
@@ -550,6 +553,10 @@ async fn consume_daily_quota_postgres(
     if total_cost_usd == 0.0 {
         return Ok(DailyQuotaDebitResult::default());
     }
+    let total_cost_units = request_funds_authorized_units(total_cost_usd)?;
+    let wallet_available_units = wallet_available_usd
+        .map(request_funds_available_units)
+        .transpose()?;
     let now = chrono::Utc::now();
     // Serialize each entitlement's debits. Read the shared plan's current overage policy
     // from this statement's snapshot without locking every subscriber's plan row.
@@ -593,19 +600,18 @@ FOR UPDATE OF user_plan_entitlements
         return Ok(DailyQuotaDebitResult {
             debited_usd: 0.0,
             insufficient: !wallet_can_overdraft
-                && wallet_available_usd
-                    .is_some_and(|available| available + SETTLEMENT_EPSILON_USD < total_cost_usd),
+                && wallet_available_units.is_some_and(|available| available < total_cost_units),
         });
     }
 
     let mut grants_with_remaining = Vec::new();
-    let mut total_remaining = 0.0;
+    let mut total_remaining = 0_u64;
     let mut allow_wallet_overage = true;
     for grant in grants {
         allow_wallet_overage &= grant.allow_wallet_overage;
-        let used = sqlx::query_scalar::<_, Option<f64>>(
+        let used = sqlx::query_scalar::<_, i64>(
             r#"
-SELECT CAST(COALESCE(SUM(amount_usd), 0) AS DOUBLE PRECISION)
+SELECT CEIL(COALESCE(SUM(amount_usd), 0) * 100000000)::bigint
 FROM entitlement_usage_ledgers
 WHERE user_entitlement_id = $1
   AND usage_date = $2
@@ -615,13 +621,10 @@ WHERE user_entitlement_id = $1
         .bind(&grant.usage_date)
         .fetch_one(&mut **tx)
         .await
-        .map_postgres_err()?
-        .unwrap_or(0.0);
-        if !used.is_finite() || used < 0.0 {
-            return Err(DataLayerError::UnexpectedValue(
-                "daily quota usage ledger total is invalid".to_string(),
-            ));
-        }
+        .map_postgres_err()?;
+        let used = u64::try_from(used).map_err(|_| {
+            DataLayerError::UnexpectedValue("daily quota usage ledger total is invalid".to_string())
+        })?;
         let held_units = funding::held_source_units(
             tx,
             &grant.entitlement_id,
@@ -629,24 +632,20 @@ WHERE user_entitlement_id = $1
             Some(&grant.usage_date),
         )
         .await?;
-        let remaining = (grant.daily_quota_usd
-            - used
-            - aether_data_contracts::repository::settlement::request_funds_usd(held_units))
-        .max(0.0);
-        total_remaining += remaining;
-        if !total_remaining.is_finite() {
-            return Err(DataLayerError::UnexpectedValue(
-                "daily quota remaining total overflowed".to_string(),
-            ));
-        }
+        let remaining = request_funds_available_units(grant.daily_quota_usd)?
+            .saturating_sub(used)
+            .saturating_sub(held_units);
+        total_remaining = total_remaining.checked_add(remaining).ok_or_else(|| {
+            DataLayerError::UnexpectedValue("daily quota remaining total overflowed".to_string())
+        })?;
         grants_with_remaining.push((grant, remaining));
     }
 
-    let insufficient = (!allow_wallet_overage && total_remaining + 0.000_000_01 < total_cost_usd)
+    let insufficient = (!allow_wallet_overage && total_remaining < total_cost_units)
         || (allow_wallet_overage
             && !wallet_can_overdraft
-            && wallet_available_usd.is_some_and(|available| {
-                total_remaining + available + SETTLEMENT_EPSILON_USD < total_cost_usd
+            && wallet_available_units.is_some_and(|available| {
+                total_remaining.saturating_add(available) < total_cost_units
             }));
 
     if insufficient {
@@ -655,10 +654,10 @@ WHERE user_entitlement_id = $1
             insufficient: true,
         });
     }
-    let mut remaining_cost = total_cost_usd;
-    let mut debited = 0.0;
+    let mut remaining_cost = total_cost_units;
+    let mut debited = 0_u64;
     for (grant, balance_before) in grants_with_remaining {
-        if remaining_cost <= 0.000_000_01 || balance_before <= 0.0 {
+        if remaining_cost == 0 || balance_before == 0 {
             continue;
         }
         let amount = remaining_cost.min(balance_before);
@@ -677,9 +676,9 @@ ON CONFLICT (user_entitlement_id, request_id) DO NOTHING
         .bind(&grant.entitlement_id)
         .bind(user_id)
         .bind(request_id)
-        .bind(amount)
-        .bind(balance_before)
-        .bind(balance_after)
+        .bind(request_funds_usd(amount))
+        .bind(request_funds_usd(balance_before))
+        .bind(request_funds_usd(balance_after))
         .bind(&grant.usage_date)
         .execute(&mut **tx)
         .await
@@ -688,7 +687,7 @@ ON CONFLICT (user_entitlement_id, request_id) DO NOTHING
         debited += amount;
     }
     Ok(DailyQuotaDebitResult {
-        debited_usd: debited,
+        debited_usd: request_funds_usd(debited),
         insufficient,
     })
 }
@@ -1409,7 +1408,12 @@ LIMIT 1
                                     settlement.billing_status = final_billing_status.clone();
                                     0.0
                                 } else {
-                                    (billable_cost_usd - quota.debited_usd).max(0.0)
+                                    // Split the canonical bill in units; floating subtraction
+                                    // (0.40 - 0.10) would fabricate one unit of wallet debt.
+                                    aether_data_contracts::repository::settlement::request_funds_usd(
+                                        aether_data_contracts::repository::settlement::request_funds_authorized_units(billable_cost_usd)?
+                                            .saturating_sub(aether_data_contracts::repository::settlement::request_funds_authorized_units(quota.debited_usd)?),
+                                    )
                                 }
                             } else {
                                 billable_cost_usd
@@ -1460,13 +1464,20 @@ LIMIT 1
                                             .execute(&mut **tx).await.map_postgres_err()?;
                                         return Ok(Some(settlement));
                                     }
-                                    let debit_plan = plan_finite_wallet_debit(
-                                        aether_data_contracts::repository::settlement::request_funds_usd(available_recharge),
-                                        aether_data_contracts::repository::settlement::request_funds_usd(available_gift),
-                                        wallet_debit_cost_usd,
-                                    );
-                                    after_recharge = before_recharge - debit_plan.recharge_deduction;
-                                    after_gift = before_gift - debit_plan.gift_deduction;
+                                    let recharge_debit = required.min(available_recharge);
+                                    let gift_debit = required - recharge_debit;
+                                    // Canonical integer subtraction preserves every unit owned
+                                    // by another reservation (e.g. 0.30 - 0.10 must remain 0.20).
+                                    if recharge_debit > 0 {
+                                        after_recharge = aether_data_contracts::repository::settlement::request_funds_usd(
+                                            aether_data_contracts::repository::settlement::request_funds_available_units(before_recharge)? - recharge_debit,
+                                        );
+                                    }
+                                    if gift_debit > 0 {
+                                        after_gift = aether_data_contracts::repository::settlement::request_funds_usd(
+                                            aether_data_contracts::repository::settlement::request_funds_available_units(before_gift)? - gift_debit,
+                                        );
+                                    }
                                 }
                                 let total_consumed_after = total_consumed + wallet_debit_cost_usd;
                                 validate_wallet_settlement_values(

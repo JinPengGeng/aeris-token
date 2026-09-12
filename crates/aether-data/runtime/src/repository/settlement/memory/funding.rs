@@ -72,7 +72,7 @@ pub(super) fn reserve(
         if let Some(stored) = funds.get(&input.identity.reservation_token) {
             return Ok(if stored.quote == input {
                 ReserveRequestFundsOutcome::Reserved {
-                    reservation: stored.clone(),
+                    reservation: Box::new(stored.clone()),
                 }
             } else {
                 ReserveRequestFundsOutcome::Conflict
@@ -151,7 +151,9 @@ pub(super) fn reserve(
             reservation.quote.identity.reservation_token.clone(),
             reservation.clone(),
         );
-        Ok(ReserveRequestFundsOutcome::Reserved { reservation })
+        Ok(ReserveRequestFundsOutcome::Reserved {
+            reservation: Box::new(reservation),
+        })
     })
 }
 

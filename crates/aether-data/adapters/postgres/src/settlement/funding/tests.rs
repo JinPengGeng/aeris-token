@@ -130,6 +130,184 @@ async fn balance(pool: &PgPool) -> f64 {
 
 #[tokio::test]
 #[ignore = "requires an isolated AETHER_TEST_DATABASE_URL; runs real migrations"]
+async fn live_request_funds_preserve_decimal_holds_across_ordinary_settlement_and_postpaid() {
+    let (admin, first, second, schema) = fixture().await;
+    let result = AssertUnwindSafe(async {
+        let repo = SqlxSettlementRepository::new(first.clone());
+        for (bucket, recharge, gift) in [("recharge", 0.30, 0.0), ("gift", 0.0, 0.30)] {
+            sqlx::query("UPDATE wallets SET balance=$1, gift_balance=$2 WHERE id='wallet'")
+                .bind(recharge)
+                .bind(gift)
+                .execute(&first)
+                .await
+                .unwrap();
+            let reserved = quote(&format!("held-{bucket}"), "key-a", 20_000_000);
+            assert!(matches!(
+                repo.reserve_request_funds(reserved.clone()).await.unwrap(),
+                ReserveRequestFundsOutcome::Reserved { .. }
+            ));
+            repo.mark_request_funds_dispatched(reserved.identity.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            let ordinary = quote(&format!("ordinary-{bucket}"), "key-b", 10_000_000);
+            let usage = persist_usage(&first, &ordinary.identity, 0.10).await;
+            let settled = repo.settle_usage(usage).await.unwrap().unwrap();
+            assert_eq!(settled.billing_status, "settled");
+            assert_eq!(settled.wallet_balance_after, Some(0.20));
+            let usage = persist_usage(&first, &reserved.identity, 0.20).await;
+            let finalize = FinalizeRequestFundsInput {
+                identity: reserved.identity,
+                usage,
+                reconciliation_facts: None,
+            };
+            let settled = repo
+                .finalize_request_funds(finalize.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(settled.state, RequestFundsState::Settled);
+            assert_eq!(settled.collected_cost_units, 20_000_000);
+            assert_eq!(
+                settled.settlement.as_ref().unwrap().wallet_balance_after,
+                Some(0.0)
+            );
+            assert_eq!(
+                repo.finalize_request_funds(finalize)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                settled
+            );
+        }
+        sqlx::query("UPDATE wallets SET balance=-0.10, gift_balance=0 WHERE id='wallet'")
+            .execute(&first)
+            .await
+            .unwrap();
+        let postpaid = quote("postpaid", "key-a", 20_000_000);
+        assert_eq!(
+            repo.reserve_request_funds(postpaid.clone()).await.unwrap(),
+            ReserveRequestFundsOutcome::Insufficient {
+                available_cost_units: 0
+            }
+        );
+        sqlx::query("UPDATE wallets SET limit_mode='unlimited' WHERE id='wallet'")
+            .execute(&first)
+            .await
+            .unwrap();
+        let reservation = match repo.reserve_request_funds(postpaid.clone()).await.unwrap() {
+            ReserveRequestFundsOutcome::Reserved { reservation } => reservation,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert!(matches!(
+            reservation.allocations[0].source,
+            RequestFundingSource::Postpaid { .. }
+        ));
+        repo.mark_request_funds_dispatched(postpaid.identity.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let usage = persist_usage(&first, &postpaid.identity, 0.20).await;
+        let settled = repo
+            .finalize_request_funds(FinalizeRequestFundsInput {
+                identity: postpaid.identity,
+                usage,
+                reconciliation_facts: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.collected_cost_units, 20_000_000);
+        assert_eq!(
+            balance(&first).await,
+            -0.10,
+            "postpaid preserves historical balance"
+        );
+        // Total cost and entitlement debit must also be subtracted as integers.
+        sqlx::query("UPDATE wallets SET limit_mode='finite', balance=0.30 WHERE id='wallet'").execute(&first).await.unwrap();
+        let entitlements = json!([{"type":"daily_quota","daily_quota_usd":0.10,"reset_timezone":"UTC","allow_wallet_overage":true}]);
+        sqlx::query("INSERT INTO billing_plans (id,title,price_amount,duration_unit,duration_value,entitlements_json,created_at,updated_at) VALUES ('mixed-plan','mixed',1,'day',1,$1,NOW(),NOW())")
+            .bind(&entitlements).execute(&first).await.unwrap();
+        sqlx::query("INSERT INTO user_plan_entitlements (id,user_id,plan_id,payment_order_id,starts_at,expires_at,entitlements_snapshot,status,created_at,updated_at) VALUES ('mixed-grant','owner','mixed-plan','mixed-order',NOW()-INTERVAL '1 hour',NOW()+INTERVAL '1 hour',$1,'active',NOW(),NOW())")
+            .bind(&entitlements).execute(&first).await.unwrap();
+        let mixed = quote("mixed-payment", "key-a", 40_000_000);
+        let usage = persist_usage(&first, &mixed.identity, 0.40).await;
+        let settled = repo.settle_usage(usage.clone()).await.unwrap().unwrap();
+        assert_eq!(settled.billing_status, "settled");
+        assert_eq!(settled.wallet_balance_after, Some(0.0));
+        assert_eq!(sqlx::query_scalar::<_, f64>("SELECT amount_usd::double precision FROM entitlement_usage_ledgers WHERE request_id='mixed-payment'").fetch_one(&first).await.unwrap(), 0.10);
+        assert_eq!(repo.settle_usage(usage).await.unwrap().unwrap(), settled);
+    })
+    .catch_unwind()
+    .await;
+    first.close().await;
+    second.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic)
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated AETHER_TEST_DATABASE_URL; runs real migrations"]
+async fn live_request_funds_sum_entitlement_decimals_without_phantom_debt() {
+    let (admin, first, second, schema) = fixture().await;
+    let result = AssertUnwindSafe(async {
+        let entitlements = json!([{"type":"daily_quota","daily_quota_usd":0.60,"reset_timezone":"UTC","allow_wallet_overage":false}]);
+        sqlx::query("INSERT INTO billing_plans (id,title,price_amount,duration_unit,duration_value,entitlements_json,created_at,updated_at) VALUES ('plan','plan',1,'day',1,$1,NOW(),NOW())")
+            .bind(&entitlements).execute(&first).await.unwrap();
+        sqlx::query("INSERT INTO user_plan_entitlements (id,user_id,plan_id,payment_order_id,starts_at,expires_at,entitlements_snapshot,status,created_at,updated_at) VALUES ('grant','owner','plan','order',NOW()-INTERVAL '1 hour',NOW()+INTERVAL '1 hour',$1,'active',NOW(),NOW())")
+            .bind(&entitlements).execute(&first).await.unwrap();
+        let repo = SqlxSettlementRepository::new(first.clone());
+        for (request, cost, units) in [("first", 0.10, 10_000_000), ("second", 0.20, 20_000_000), ("third", 0.30, 30_000_000)] {
+            let request = quote(request, "key-a", units);
+            let reservation = match repo.reserve_request_funds(request.clone()).await.unwrap() {
+                ReserveRequestFundsOutcome::Reserved { reservation } => reservation,
+                other => panic!("full decimal quota must remain available: {other:?}"),
+            };
+            assert_eq!(reservation.allocations.len(), 1);
+            assert!(matches!(reservation.allocations[0].source, RequestFundingSource::Entitlement { .. }));
+            repo.mark_request_funds_dispatched(request.identity.clone()).await.unwrap().unwrap();
+            let usage = persist_usage(&first, &request.identity, cost).await;
+            let finalize = FinalizeRequestFundsInput { identity: request.identity, usage, reconciliation_facts: None };
+            let settled = repo.finalize_request_funds(finalize.clone()).await.unwrap().unwrap();
+            assert_eq!(settled.collected_cost_units, units);
+            assert_eq!(repo.finalize_request_funds(finalize).await.unwrap().unwrap(), settled);
+        }
+        assert_eq!(repo.reserve_request_funds(quote("over-quota", "key-b", 1)).await.unwrap(), ReserveRequestFundsOutcome::Insufficient { available_cost_units: 0 });
+        assert_eq!(balance(&first).await, 0.10, "entitlements fund the entire day");
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT (SUM(amount_usd::text::numeric)*100000000)::bigint FROM entitlement_usage_ledgers").fetch_one(&first).await.unwrap(), 60_000_000);
+
+        // A historical request may have partial charges from multiple grants.
+        let historical = quote("historical", "key-b", 40_000_000);
+        persist_usage(&first, &historical.identity, 0.40).await;
+        sqlx::query("UPDATE usage SET billing_status='insufficient_quota' WHERE request_id='historical'").execute(&first).await.unwrap();
+        sqlx::query("INSERT INTO entitlement_usage_ledgers (id,user_entitlement_id,user_id,request_id,amount_usd,balance_before,balance_after,usage_date,created_at) VALUES ('history-a','history-grant-a','owner','historical',0.10,0.10,0,'2026-01-01',NOW()), ('history-b','history-grant-b','owner','historical',0.20,0.20,0,'2026-01-01',NOW())").execute(&first).await.unwrap();
+        let recover = RecoverInsufficientQuotaInput { request_id: "historical".to_string() };
+        let recovered = repo.recover_insufficient_quota(recover.clone()).await.unwrap().unwrap();
+        assert_eq!(recovered.collected_cost_units, 10_000_000);
+        assert_eq!(recovered.outstanding_cost_units, 0);
+        assert_eq!(balance(&first).await, 0.0);
+        assert_eq!(repo.recover_insufficient_quota(recover).await.unwrap().unwrap(), recovered);
+    }).catch_unwind().await;
+    first.close().await;
+    second.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic)
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated AETHER_TEST_DATABASE_URL; runs real migrations"]
 async fn live_request_funds_reserve_settle_release_protect_shared_wallet_and_rollback() {
     let (admin, first, second, schema) = fixture().await;
     let result = AssertUnwindSafe(async {
