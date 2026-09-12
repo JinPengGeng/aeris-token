@@ -44,7 +44,7 @@ jobs:
         run: cargo install cargo-audit --version 0.22.2 --locked
 
       - name: Audit Cargo.lock
-        run: cargo audit
+        run: .github/scripts/cargo-audit-gate.sh
 
   npm:
     name: npm advisory audit

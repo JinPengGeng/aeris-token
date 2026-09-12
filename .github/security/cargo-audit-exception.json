@@ -1,0 +1,10 @@
+{
+  "advisory_id": "RUSTSEC-2023-0071",
+  "package": "rsa",
+  "affected_version": "0.9.10",
+  "owner": "aeris-token maintainers",
+  "created_on": "2026-09-12",
+  "expires_on": "2026-10-12",
+  "review_cadence": "at least every 30 days and on each rsa/sqlx release",
+  "rationale": "Cargo.lock contains rsa through optional sqlx-mysql support. The workspace enables PostgreSQL only; production RSA private signing uses aws-lc-rs. sqlx-mysql's rsa use is public-key OAEP encryption for MySQL authentication, so the advisory's private-operation timing oracle is not reachable."
+}
