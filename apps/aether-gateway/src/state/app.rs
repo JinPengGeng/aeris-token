@@ -108,12 +108,15 @@ pub(crate) struct FrontdoorRuntimeGuardConfig {
     pub(crate) candidate_planning_gate_limit: Option<usize>,
     pub(crate) upstream_execution_gate_limit: Option<usize>,
     pub(crate) upstream_target_gate_limit: Option<usize>,
+    pub(crate) upstream_target_gate_is_auto: bool,
 }
 
 pub(crate) const METRIC_SNAPSHOT_TTL: Duration = Duration::from_secs(2);
 
 impl FrontdoorRuntimeGuardConfig {
     pub(crate) fn from_env() -> Self {
+        let target_raw = std::env::var(UPSTREAM_TARGET_GATE_LIMIT_ENV).ok();
+        let target_setting = GateLimitSetting::parse(target_raw.as_deref());
         Self {
             request_body_read_timeout: optional_env_duration_ms(
                 REQUEST_BODY_READ_TIMEOUT_MS_ENV,
@@ -143,7 +146,11 @@ impl FrontdoorRuntimeGuardConfig {
             auth_snapshot_load_gate_limit: auth_snapshot_load_gate_limit_from_env(),
             candidate_planning_gate_limit: candidate_planning_gate_limit_from_env(),
             upstream_execution_gate_limit: upstream_execution_gate_limit_from_env(),
-            upstream_target_gate_limit: upstream_target_gate_limit_from_env(),
+            upstream_target_gate_limit: target_setting.resolve(
+                UPSTREAM_TARGET_GATE_AUTO_PROFILE,
+                current_gate_auto_capacity(),
+            ),
+            upstream_target_gate_is_auto: matches!(target_setting, GateLimitSetting::Auto),
         }
     }
 
@@ -165,7 +172,20 @@ impl FrontdoorRuntimeGuardConfig {
             candidate_planning_gate_limit: Some(DEFAULT_CANDIDATE_PLANNING_GATE_LIMIT),
             upstream_execution_gate_limit: Some(DEFAULT_UPSTREAM_EXECUTION_GATE_LIMIT),
             upstream_target_gate_limit: Some(DEFAULT_UPSTREAM_TARGET_GATE_LIMIT),
+            upstream_target_gate_is_auto: false,
         }
+    }
+
+    pub(crate) fn target_limit_for_request_capacity(&self, request_limit: usize) -> Option<usize> {
+        self.upstream_target_gate_limit.map(|limit| {
+            if self.upstream_target_gate_is_auto {
+                // Reserve capacity for other targets. A one-request gateway
+                // cannot provide isolation, but must retain one usable permit.
+                limit.min((request_limit / 4).max(1))
+            } else {
+                limit
+            }
+        })
     }
 }
 
@@ -319,18 +339,36 @@ fn parse_gate_limit_value(
     profile: GateAutoProfile,
     capacity: GateAutoCapacity,
 ) -> Option<usize> {
-    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Some(auto_gate_limit(profile, capacity));
-    };
-    let normalized = value.to_ascii_lowercase();
-    match normalized.as_str() {
-        "auto" => Some(auto_gate_limit(profile, capacity)),
-        "off" | "none" | "disabled" | "disable" => None,
-        _ => match value.parse::<usize>() {
-            Ok(0) => None,
-            Ok(limit) => Some(limit.max(1)),
-            Err(_) => Some(auto_gate_limit(profile, capacity)),
-        },
+    GateLimitSetting::parse(raw).resolve(profile, capacity)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GateLimitSetting {
+    Auto,
+    Fixed(usize),
+    Disabled,
+}
+
+impl GateLimitSetting {
+    fn parse(raw: Option<&str>) -> Self {
+        let value = raw.unwrap_or_default().trim();
+        match value.to_ascii_lowercase().as_str() {
+            "" | "auto" => Self::Auto,
+            "off" | "none" | "disabled" | "disable" => Self::Disabled,
+            _ => match value.parse::<usize>() {
+                Ok(0) => Self::Disabled,
+                Ok(limit) => Self::Fixed(limit),
+                Err(_) => Self::Auto,
+            },
+        }
+    }
+
+    fn resolve(self, profile: GateAutoProfile, capacity: GateAutoCapacity) -> Option<usize> {
+        match self {
+            Self::Auto => Some(auto_gate_limit(profile, capacity)),
+            Self::Fixed(limit) => Some(limit),
+            Self::Disabled => None,
+        }
     }
 }
 
@@ -617,6 +655,48 @@ mod tests {
             parse_gate_limit_value(Some("  AUTO  "), TEST_PROFILE, TEST_CAPACITY),
             Some(12_288)
         );
+    }
+
+    #[test]
+    fn target_auto_capacity_reserves_global_headroom_and_respects_fd_budget() {
+        for (cpu, fd, global, expected) in [
+            (4, 65_536, 4096, 1024),
+            (16, 65_536, 16_384, 4096),
+            (4, 1024, 384, 96),
+            (32, 128, 64, 1),
+            (16, 65_536, 128, 32),
+            (16, 65_536, 1, 1),
+        ] {
+            for raw in [None, Some("auto"), Some(""), Some("invalid")] {
+                let setting = GateLimitSetting::parse(raw);
+                let mut config =
+                    FrontdoorRuntimeGuardConfig::for_tests(None, Duration::from_secs(1));
+                config.upstream_target_gate_is_auto = matches!(setting, GateLimitSetting::Auto);
+                config.upstream_target_gate_limit = setting.resolve(
+                    UPSTREAM_TARGET_GATE_AUTO_PROFILE,
+                    GateAutoCapacity {
+                        cpu_parallelism: cpu,
+                        fd_soft_limit: fd,
+                    },
+                );
+                assert_eq!(
+                    config.target_limit_for_request_capacity(global),
+                    Some(expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn target_fixed_and_disabled_settings_remain_operator_overrides() {
+        for (raw, expected) in [("20000", Some(20_000)), ("off", None), ("0", None)] {
+            let setting = GateLimitSetting::parse(Some(raw));
+            let mut config = FrontdoorRuntimeGuardConfig::for_tests(None, Duration::from_secs(1));
+            config.upstream_target_gate_is_auto = matches!(setting, GateLimitSetting::Auto);
+            config.upstream_target_gate_limit =
+                setting.resolve(UPSTREAM_TARGET_GATE_AUTO_PROFILE, TEST_CAPACITY);
+            assert_eq!(config.target_limit_for_request_capacity(4), expected);
+        }
     }
 
     #[test]
