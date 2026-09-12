@@ -20,6 +20,8 @@ use crate::{
     ExpressionEvaluationError, FormulaEngine, FormulaEvaluationStatus,
 };
 
+pub(crate) mod image_authorization;
+
 pub struct BillingService {
     engine: FormulaEngine,
 }
@@ -230,6 +232,26 @@ impl BillingService {
                     "token_pricing",
                 ));
             }
+        }
+
+        // An unmatched image catalog is missing pricing, not a free image.
+        // Token-only image billing intentionally has no image output catalog.
+        if input.image_count > 0
+            && !pricing.is_free_tier()
+            && image_output_pricing_state(pricing_resolution.tiered_pricing.as_ref()).enabled
+            && resolve_image_output_price_resolution(
+                pricing_resolution.tiered_pricing.as_ref(),
+                input,
+            )
+            .pricing_mode
+                == "none"
+        {
+            return Ok(no_rule_computation(
+                pricing,
+                input,
+                pricing_resolution,
+                "image_output_pricing",
+            ));
         }
 
         let Some(rule) = DefaultBillingRuleGenerator::generate_for_pricing(
