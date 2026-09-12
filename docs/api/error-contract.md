@@ -4,8 +4,8 @@ This document records the error contract at the public gateway boundary. It
 describes the current fork implementation, not every provider's native error
 format. `x-trace-id` is present on gateway responses for correlation.
 
-The executable compatibility rows for Chat Completions, Images, and Claude
-Messages live in [Public API Compatibility Fixtures](compatibility-fixtures.md).
+The executable compatibility rows for Chat Completions, Responses, Embeddings,
+Images, and Claude Messages live in [Public API Compatibility Fixtures](compatibility-fixtures.md).
 
 ## OpenAI-family envelope
 
@@ -31,6 +31,7 @@ gateway's generic mapping is:
 | 404 | `not_found_error` | Check the path/resource; a missing model uses `model_not_found`. |
 | 413 | `context_length_exceeded` | Reduce request size. |
 | 429 | `rate_limit_error` | Retry only when the response identifies a transient rate/quota window. |
+| 429 | `insufficient_quota` | Restore account credit; do not retry unchanged. |
 | 503/529 | `server_error` | Retry with bounded backoff when `Retry-After` is present. |
 
 ## Quota versus rate limit
@@ -43,16 +44,34 @@ recognize OpenAI's quota response, but has this stable payload:
 {
   "error": {
     "message": "Insufficient quota",
-    "type": "rate_limit_error",
-    "code": "insufficient_quota"
+    "type": "insufficient_quota",
+    "code": "credit_balance_exhausted"
   }
 }
 ```
 
-No `Retry-After` header is emitted for wallet denial. Daily usage, plan, and
+Claude Messages wallet denial uses HTTP `402` and
+`{"type":"error","error":{"type":"billing_error","code":"balance_exceeded","message":"Insufficient quota"}}`.
+Neither format exposes the balance, user/key identifiers, or internal billing
+details. Both retain `x-trace-id` for support correlation.
+
+No `Retry-After` header is emitted for wallet denial or tenant permission
+denial (`403/permission_error`). Provider rate limits remain `429/rate_limit_error`;
+the gateway retains a provider-supplied wait time and does not invent one when
+none is known. Daily usage, plan, and
 RPM windows remain separate errors and include `Retry-After` plus their
 existing `X-RateLimit-*` or `X-Daily-Usage-*` headers. Clients must not treat
-`insufficient_quota` as a backoff-only event.
+`insufficient_quota` or `billing_error` as a backoff-only event. Some SDKs retry
+all HTTP `429` responses automatically, even without `Retry-After`; applications
+should inspect the error type/code and disable such retries for exhausted credit.
+
+Streaming requests rejected before stream commitment use the same HTTP JSON
+error. An error after commitment stays inside the protocol's terminal SSE event;
+its quota type/code are preserved when converting between Chat, Responses and
+Claude, while the already-sent HTTP status cannot change.
+
+See [Issue 343 decision and migration](../issue-triage/issue-343-quota-contract.md)
+for changes from the earlier `rate_limit_error/insufficient_quota` contract.
 
 ## Control-plane dependency failures
 
@@ -84,8 +103,9 @@ decision.
 ## Other public formats
 
 Claude Messages uses the Anthropic envelope (`type=error` with a nested
-`error` object), and Gemini uses its `error.code/message/status` envelope.
-Changing the OpenAI contract does not rewrite these format-specific errors.
+`error` object), including `402/billing_error` for exhausted credit. Gemini
+retains its existing `error.code/message/status` envelope and resource-exhaustion
+semantics; this decision does not introduce a Gemini billing contract.
 Provider error bodies are not copied blindly across the public boundary;
 non-client provider failures are projected to a generic gateway error to avoid
 credential or internal URL disclosure.
