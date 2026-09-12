@@ -22,7 +22,10 @@ impl AppState {
         gate.acquire()
             .await
             .map(Some)
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::ControlUnavailable {
+                trace_id: String::new(),
+                message: err.to_string(),
+            })
     }
 
     pub(crate) async fn read_cached_auth_api_key_snapshot(
@@ -44,7 +47,7 @@ impl AppState {
                     self.data
                         .read_auth_api_key_snapshot(user_id, api_key_id, now_unix_secs)
                         .await
-                        .map_err(|err| GatewayError::Internal(err.to_string()))
+                        .map_err(GatewayError::from_data_layer_error)
                 },
             )
             .await
@@ -70,7 +73,7 @@ impl AppState {
                     self.data
                         .read_auth_api_key_snapshot_by_key_hash(key_hash, now_unix_secs)
                         .await
-                        .map_err(|err| GatewayError::Internal(err.to_string()))
+                        .map_err(GatewayError::from_data_layer_error)
                 },
             )
             .await?;
@@ -109,7 +112,7 @@ impl AppState {
             .data
             .list_auth_api_key_snapshots_by_ids(&api_key_ids)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .map_err(GatewayError::from_data_layer_error)?
             .into_iter()
             .map(|snapshot| (snapshot.api_key_id.clone(), snapshot))
             .collect::<BTreeMap<_, _>>();
@@ -122,7 +125,7 @@ impl AppState {
                 .data
                 .find_stored_auth_api_key_snapshot(AuthApiKeyLookupKey::ApiKeyId(api_key_id))
                 .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                .map_err(GatewayError::from_data_layer_error)?;
             if let Some(snapshot) = snapshot {
                 snapshots.insert(api_key_id.clone(), snapshot);
             }
@@ -155,7 +158,7 @@ impl AppState {
             .data
             .list_auth_api_key_snapshots_by_ids(&api_key_ids)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .map_err(GatewayError::from_data_layer_error)?
             .into_iter()
             .filter_map(|snapshot| {
                 snapshot
@@ -172,7 +175,7 @@ impl AppState {
                 .data
                 .find_stored_auth_api_key_snapshot(AuthApiKeyLookupKey::ApiKeyId(api_key_id))
                 .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                .map_err(GatewayError::from_data_layer_error)?;
             if let Some(name) = snapshot.and_then(|snapshot| snapshot.api_key_name) {
                 names.insert(api_key_id.clone(), name);
             }

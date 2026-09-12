@@ -183,7 +183,8 @@ pub(in super::super) async fn resolve_control_decision_auth_with_trusted_auth(
         uri,
         decision.auth_endpoint_signature.as_deref(),
     )
-    .await?
+    .await
+    .map_err(|error| error.with_trace_id(trace_id))?
     {
         log_admin_principal_resolution(trace_id, &decision, "local_session", &admin_principal);
         decision.admin_principal = Some(admin_principal);
@@ -216,7 +217,8 @@ pub(in super::super) async fn resolve_control_decision_auth_with_trusted_auth(
                         uri,
                         trusted_auth_verified,
                     )
-                    .await?,
+                    .await
+                    .map_err(|error| error.with_trace_id(trace_id))?,
                 );
             } else {
                 // The configured refresh interval is the bounded authorization
@@ -236,7 +238,8 @@ pub(in super::super) async fn resolve_control_decision_auth_with_trusted_auth(
             true,
             trusted_auth_verified,
         )
-        .await?;
+        .await
+        .map_err(|error| error.with_trace_id(trace_id))?;
     }
 
     if let Some(auth_context) = resolved_auth_context {
@@ -517,8 +520,6 @@ pub(crate) async fn resolve_execution_runtime_auth_context(
     uri: &Uri,
     trace_id: &str,
 ) -> Result<Option<GatewayControlAuthContext>, GatewayError> {
-    let _ = trace_id;
-
     if let Some(auth_context) = decision.auth_context.as_ref() {
         // Control-route auth resolution already refreshed and validated this context.
         // Revalidating here would perform a second snapshot/wallet lookup per request.
@@ -545,6 +546,7 @@ pub(crate) async fn resolve_execution_runtime_auth_context(
                 cfg!(test),
             )
             .await
+            .map_err(|error| error.with_trace_id(trace_id))
             .map(Some);
         }
         return Ok(Some(auth_context));
@@ -559,7 +561,8 @@ pub(crate) async fn resolve_execution_runtime_auth_context(
         true,
         cfg!(test),
     )
-    .await?
+    .await
+    .map_err(|error| error.with_trace_id(trace_id))?
     {
         if auth_context.user_id.is_empty() || auth_context.api_key_id.is_empty() {
             return Ok(None);
@@ -817,7 +820,7 @@ pub(crate) async fn refresh_execution_runtime_auth_context_with_snapshot(
                     current_unix_secs(),
                 )
                 .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?
+                .map_err(GatewayError::from_data_layer_error)?
         } else {
             state
                 .data
@@ -827,7 +830,7 @@ pub(crate) async fn refresh_execution_runtime_auth_context_with_snapshot(
                     current_unix_secs(),
                 )
                 .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?
+                .map_err(GatewayError::from_data_layer_error)?
         }
     };
     let Some(snapshot) = snapshot else {
@@ -1019,7 +1022,7 @@ async fn resolve_data_backed_auth_context_with_trusted_auth(
                     .data
                     .read_auth_api_key_snapshot_by_key_hash_strong(&key_hash, now_unix_secs)
                     .await
-                    .map_err(|err| GatewayError::Internal(err.to_string()))?
+                    .map_err(GatewayError::from_data_layer_error)?
             };
             let Some(snapshot) = snapshot else {
                 return Ok(Some(GatewayControlAuthContext {
@@ -1101,7 +1104,7 @@ async fn resolve_antigravity_bearer_bridge_auth_context(
             .data
             .find_system_config_value_strong(crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .map_err(GatewayError::from_data_layer_error)?
     };
     let Some(config_value) = config_value else {
         return Ok(None);
@@ -1137,7 +1140,7 @@ async fn resolve_antigravity_bearer_bridge_auth_context(
             .data
             .read_auth_api_key_snapshot_strong(user_id, api_key_id, now_unix_secs)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .map_err(GatewayError::from_data_layer_error)?
     };
     let Some(snapshot) = snapshot else {
         return Ok(Some(GatewayControlAuthContext {
@@ -1201,7 +1204,7 @@ async fn resolve_trusted_auth_context(
                 now_unix_secs,
             )
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .map_err(GatewayError::from_data_layer_error)?
     };
     let Some(snapshot) = snapshot else {
         return Ok(Some(GatewayControlAuthContext {

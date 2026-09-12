@@ -198,7 +198,7 @@ impl AppState {
         self.data
             .find_user_auth_by_id(user_id)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(GatewayError::from_data_layer_error)
     }
 
     pub(crate) async fn find_user_auth_by_identifier(

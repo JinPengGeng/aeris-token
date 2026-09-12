@@ -50,7 +50,7 @@ impl AppState {
                     self.data
                         .read_auth_api_key_feature_settings(user_id, api_key_id, is_standalone)
                         .await
-                        .map_err(|err| GatewayError::Internal(err.to_string()))
+                        .map_err(GatewayError::from_data_layer_error)
                 },
             )
             .await
