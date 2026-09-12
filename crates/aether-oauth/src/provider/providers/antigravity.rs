@@ -1,7 +1,7 @@
 use super::generic::{
     provider_account_state_from_metadata, template_for_provider_type, GenericProviderOAuthAdapter,
 };
-use crate::core::OAuthError;
+use crate::core::{redacted_oauth_error_body_excerpt, OAuthError};
 use crate::network::{OAuthHttpExecutor, OAuthHttpRequest};
 use crate::provider::{ProviderOAuthAdapter, ProviderOAuthTokenSet, ProviderOAuthTransportContext};
 use serde_json::Value;
@@ -90,7 +90,7 @@ impl AntigravityProviderOAuthAdapter {
         if !(200..300).contains(&response.status_code) {
             return Err(OAuthError::HttpStatus {
                 status_code: response.status_code,
-                body_excerpt: response.body_text.trim().chars().take(500).collect(),
+                body_excerpt: redacted_oauth_error_body_excerpt(&response.body_text),
             });
         }
 
@@ -503,6 +503,44 @@ mod tests {
                 result.is_err(),
                 "invalid Google identity should reject import: {profile}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn antigravity_userinfo_error_excerpt_redacts_credentials() {
+        let adapter = AntigravityProviderOAuthAdapter::default()
+            .with_oauth_credentials_for_tests("test-client-id", "test-client-secret");
+        let ctx = transport_context();
+        let executor = GoogleOAuthExecutor {
+            user_info_response: Some(OAuthHttpResponse {
+                status_code: 401,
+                body_text: r#"{"error":"unauthorized","access_token":"oauth-secret"}"#.to_string(),
+                json_body: None,
+            }),
+            ..Default::default()
+        };
+
+        let error = adapter
+            .import_credentials(
+                &executor,
+                &ctx,
+                ProviderOAuthImportInput {
+                    provider_type: "antigravity".to_string(),
+                    name: None,
+                    refresh_token: Some("google-refresh-token".to_string()),
+                    raw_credentials: None,
+                    network: ctx.network.clone(),
+                },
+            )
+            .await
+            .expect_err("userinfo failure should reject import");
+
+        match error {
+            crate::core::OAuthError::HttpStatus { body_excerpt, .. } => {
+                assert!(!body_excerpt.contains("oauth-secret"));
+                assert!(body_excerpt.contains("REDACTED"));
+            }
+            other => panic!("expected HTTP status error, got {other:?}"),
         }
     }
 
