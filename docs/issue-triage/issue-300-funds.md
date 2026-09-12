@@ -189,6 +189,16 @@ cleanup must retain rows needed by unresolved holds or partially collected debt,
 or move equivalent authoritative facts into durable recovery storage first. This
 branch does not claim that existing time-based usage cleanup meets that contract.
 
+Final independent review accepted the integer mixed-payment fix and the schema
+correction at PR #362 head `9e32e2d7`. Hosted Test (Data) then caught a stale
+explicit migration-version fixture: the runtime correctly included the new
+`20260913010000` reservation migration, but the expected pending list omitted it.
+The fixture is updated to retain its complete ordered-list assertion; no runtime
+migration or assertion is removed to satisfy CI.
+The complete local `aether-data --all-features --lib` suite passed afterward:
+363 passed, 0 failed, 1 explicitly ignored. The separate required PostgreSQL live
+harness supplies the previously documented database execution evidence.
+
 ## Rollback
 
 Disable new reservations before reverting application code. Drain or explicitly
