@@ -33,7 +33,7 @@ impl AppState {
         self.data
             .find_wallet(lookup)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(GatewayError::from_data_layer_error)
     }
 
     pub(crate) async fn read_wallet_snapshot_for_auth(

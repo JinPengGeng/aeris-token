@@ -54,6 +54,33 @@ RPM windows remain separate errors and include `Retry-After` plus their
 existing `X-RateLimit-*` or `X-Daily-Usage-*` headers. Clients must not treat
 `insufficient_quota` as a backoff-only event.
 
+## Control-plane dependency failures
+
+Failures while reading the control-plane data dependencies (Postgres/SQL,
+Redis, or a bounded backend timeout) are projected as a retryable gateway
+error. The response deliberately hides the backend error text:
+
+```json
+{
+  "error": {
+    "message": "gateway control unavailable",
+    "type": "server_error",
+    "code": "control_unavailable",
+    "trace_id": "trace-...",
+    "retryable": true,
+    "failover_disposition": "retry_request"
+  }
+}
+```
+
+The current HTTP status is `502` and `Retry-After: 1` is emitted. Clients may
+retry the request with bounded backoff and should use `x-trace-id`/`trace_id`
+for support correlation. Invalid input, invalid configuration, and
+unexpected stored values remain internal/operator errors and are not
+classified as a transient dependency outage. This contract does not choose
+Redis fail-open or fail-closed behavior; that remains a deployment policy
+decision.
+
 ## Other public formats
 
 Claude Messages uses the Anthropic envelope (`type=error` with a nested

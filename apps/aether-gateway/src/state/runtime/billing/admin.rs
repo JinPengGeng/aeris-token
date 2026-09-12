@@ -8,8 +8,8 @@ use super::{
 
 const PAYMENT_GATEWAY_SECRET_MIGRATION_MAX_ATTEMPTS: usize = 8;
 
-fn data_error(err: impl ToString) -> GatewayError {
-    GatewayError::Internal(err.to_string())
+fn data_error(err: aether_data::DataLayerError) -> GatewayError {
+    GatewayError::from_data_layer_error(err)
 }
 
 fn local_mutation_outcome<T>(outcome: AdminBillingMutationOutcome<T>) -> LocalMutationOutcome<T> {

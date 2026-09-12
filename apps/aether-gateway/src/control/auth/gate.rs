@@ -575,7 +575,7 @@ async fn load_execution_plan_billing_context(
             .data
             .find_billing_model_context_by_model_id(&plan.provider_id, Some(&plan.key_id), model_id)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?,
+            .map_err(GatewayError::from_data_layer_error)?,
         None => state
             .data
             .find_billing_model_context(
@@ -584,7 +584,7 @@ async fn load_execution_plan_billing_context(
                 global_model_name.expect("global model name should exist"),
             )
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?,
+            .map_err(GatewayError::from_data_layer_error)?,
     };
     Ok(context)
 }
