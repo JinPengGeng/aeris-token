@@ -5,6 +5,7 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 COMPOSE_FILE="${REPO_ROOT}/docker-compose.yml"
 RELEASE_WORKFLOW="${REPO_ROOT}/.github/workflows/release.yml"
 TUNNEL_RELEASE_WORKFLOW="${REPO_ROOT}/.github/workflows/build-tunnel.yml"
+TUNNEL_VERIFY_SCRIPT="${REPO_ROOT}/.github/workflows/scripts/verify-tunnel-release.sh"
 APP_DOCKERFILE="${REPO_ROOT}/Dockerfile.app"
 
 fail_test() {
@@ -66,11 +67,49 @@ assert_line "${TUNNEL_RELEASE_WORKFLOW}" "            artifacts/SHA256SUMS.txt"
 assert_line "${TUNNEL_RELEASE_WORKFLOW}" \
     "            artifacts/AETHER_TUNNEL_RELEASE_PROVENANCE.sigstore.json"
 assert_line "${TUNNEL_RELEASE_WORKFLOW}" \
+    "          AETHER_TUNNEL_RELEASE_KEY_ID: \${{ vars.AETHER_TUNNEL_RELEASE_KEY_ID }}"
+assert_line "${TUNNEL_RELEASE_WORKFLOW}" \
+    "          AETHER_TUNNEL_RELEASE_PUBLIC_KEY: \${{ vars.AETHER_TUNNEL_RELEASE_PUBLIC_KEY }}"
+assert_line "${TUNNEL_RELEASE_WORKFLOW}" \
+    "          \"\${GITHUB_WORKSPACE}/.github/workflows/scripts/verify-tunnel-release.sh\""
+[[ -x "${TUNNEL_VERIFY_SCRIPT}" ]] || fail_test "tunnel release verifier is not executable"
+assert_line "${TUNNEL_RELEASE_WORKFLOW}" \
     "          tar czf ../../../aether-tunnel-\${{ matrix.name }}.tar.gz aether-tunnel.exe"
 
 if grep -ERq '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+[^[:space:]#]+@[^0-9a-f[:space:]][^[:space:]]*([[:space:]#]|$)' \
     "${REPO_ROOT}/.github/workflows"; then
     fail_test "workflow contains a mutable third-party action reference"
 fi
+
+VERIFY_FIXTURE="$(mktemp -d)"
+cleanup_verify_fixture() { rm -rf -- "${VERIFY_FIXTURE}"; }
+trap cleanup_verify_fixture EXIT
+printf '%s\n' 'signed tunnel release fixture' >"${VERIFY_FIXTURE}/SHA256SUMS.txt"
+openssl genpkey -algorithm ED25519 -out "${VERIFY_FIXTURE}/private.pem" >/dev/null 2>&1 \
+    || fail_test "OpenSSL Ed25519 key generation is unavailable"
+openssl pkey -in "${VERIFY_FIXTURE}/private.pem" -pubout -outform DER \
+    -out "${VERIFY_FIXTURE}/public.der" >/dev/null 2>&1 \
+    || fail_test "OpenSSL Ed25519 public-key export failed"
+public_key="$(dd if="${VERIFY_FIXTURE}/public.der" bs=1 skip=12 count=32 2>/dev/null | base64 | tr -d '\n')"
+openssl pkeyutl -sign -rawin -inkey "${VERIFY_FIXTURE}/private.pem" \
+    -in "${VERIFY_FIXTURE}/SHA256SUMS.txt" -out "${VERIFY_FIXTURE}/signature.bin" \
+    >/dev/null 2>&1 || fail_test "OpenSSL Ed25519 signing failed"
+signature="$(base64 <"${VERIFY_FIXTURE}/signature.bin" | tr -d '\n')"
+printf 'version=1\nkey_id=fixture-key\nsignature=%s\n' "${signature}" \
+    >"${VERIFY_FIXTURE}/SHA256SUMS.txt.sig"
+if AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${public_key}" \
+    "${TUNNEL_VERIFY_SCRIPT}" "${VERIFY_FIXTURE}/SHA256SUMS.txt" \
+    "${VERIFY_FIXTURE}/SHA256SUMS.txt.sig" >/dev/null 2>&1; then
+    fail_test "missing release key id was accepted"
+fi
+if AETHER_TUNNEL_RELEASE_KEY_ID=wrong-key AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${public_key}" \
+    "${TUNNEL_VERIFY_SCRIPT}" "${VERIFY_FIXTURE}/SHA256SUMS.txt" \
+    "${VERIFY_FIXTURE}/SHA256SUMS.txt.sig" >/dev/null 2>&1; then
+    fail_test "mismatched release key id was accepted"
+fi
+AETHER_TUNNEL_RELEASE_KEY_ID=fixture-key AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${public_key}" \
+    "${TUNNEL_VERIFY_SCRIPT}" "${VERIFY_FIXTURE}/SHA256SUMS.txt" \
+    "${VERIFY_FIXTURE}/SHA256SUMS.txt.sig" >/dev/null \
+    || fail_test "valid release signature was rejected"
 
 echo "PASS: release supply-chain pins and provenance workflow"
