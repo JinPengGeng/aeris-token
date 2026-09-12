@@ -26,7 +26,7 @@
 
 1. 禁止直接推送、强制推送和删除分支。
 2. 要求通过 PR 合并并解决全部 review 讨论。当前仓库只有一名维护者时将审批数设为 0；增加协作者后再启用至少一位审批和 CODEOWNERS review。
-3. 要求状态检查 `Rust CI / check`、`Frontend CI / check` 和 `Automation Policy / gate` 成功后才可合并。该设置由 GitHub 远端治理执行；`main` 当前使用 `main-protection` ruleset。
+3. 要求状态检查 `Rust CI / check`、`Frontend CI / check`、`Automation Policy / gate` 和 `Dependency Audit / check` 成功后才可合并。四个名称必须与 GitHub ruleset 的 required contexts 完全一致；路径选择性 job 可以 skipped，但聚合 context 不能 failure 或 cancelled。该设置由 GitHub 远端治理执行；`main` 当前使用 `main-protection` ruleset。
 
    两个 CI 工作流在 PR 上按变更路径选择性执行 job：无相关改动时对应 job 以 `skipped` 结论跳过并视为通过门禁，聚合 check 只将 `failure` 或 `cancelled` 判为失败。推送到 `main` 与手动 `workflow_dispatch` 始终全量执行，作为主干完整性的兜底。
 4. 只允许 Squash merge并在合并后自动删除源分支。增加独立 reviewer 后启用 CODEOWNERS review。
@@ -63,7 +63,7 @@ Scheduler、重试、路由、池、额度或故障转移变更必须说明状�
 
 ## 3. 本地验证
 
-按改动范围执行必要检查：
+按改动范围执行必要检查。PR 描述必须列出四个受保护聚合 context 的结论；其中 `Dependency Audit / check` 要覆盖 Cargo 生产依赖图和仓库中每个受版本控制的 npm lockfile，并对任何 advisory 例外记录 advisory ID、责任人、复查日期和移除条件：
 
 ```powershell
 cargo fmt --check
