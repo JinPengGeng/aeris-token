@@ -1,4 +1,5 @@
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Json;
@@ -87,15 +88,49 @@ pub(crate) async fn health(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-pub(crate) async fn readyz(State(_state): State<AppState>) -> impl IntoResponse {
-    Json(json!({
-        "status": "ready",
+const READINESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+pub(crate) async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    let database_configured = state.has_data_backends();
+    let redis_configured = state.has_redis_data_backend();
+    let database_ok = if database_configured {
+        tokio::time::timeout(READINESS_PROBE_TIMEOUT, state.data.ping_database())
+            .await
+            .is_ok_and(|result| result.is_ok())
+    } else {
+        true
+    };
+    let redis_ok = if redis_configured {
+        tokio::time::timeout(READINESS_PROBE_TIMEOUT, state.ping_runtime_state())
+            .await
+            .is_ok_and(|result| result.is_ok())
+    } else {
+        true
+    };
+    let ready = database_ok && redis_ok;
+    let payload = json!({
+        "status": if ready { "ready" } else { "not_ready" },
         "component": "aether-gateway",
         "manifest_version": FRONTDOOR_MANIFEST_VERSION,
         "manifest_path": FRONTDOOR_MANIFEST_PATH,
         "warmup_status": "disabled",
-        "gate_readiness": false,
-    }))
+        "gate_readiness": ready,
+        "dependencies": {
+            "database": {
+                "status": if !database_configured { "disabled" } else if database_ok { "ok" } else { "failed" },
+                "required": database_configured,
+            },
+            "redis": {
+                "status": if !redis_configured { "disabled" } else if redis_ok { "ok" } else { "failed" },
+                "required": redis_configured,
+            },
+        },
+    });
+    if ready {
+        (StatusCode::OK, Json(payload))
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(payload))
+    }
 }
 
 pub(crate) async fn frontdoor_manifest(State(state): State<AppState>) -> impl IntoResponse {

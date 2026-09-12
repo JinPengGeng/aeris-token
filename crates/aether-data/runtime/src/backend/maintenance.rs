@@ -42,6 +42,20 @@ pub(super) fn maintenance_identifier(value: &str) -> Result<&str, DataLayerError
 }
 
 impl DataBackends {
+    /// Performs a bounded, side-effect-free connectivity probe against the
+    /// configured SQL backend. Pool acquisition and the driver's configured
+    /// statement timeout provide the lower-level bounds; callers should apply
+    /// an overall request timeout as well.
+    pub async fn ping_database(&self) -> Result<(), DataLayerError> {
+        match self.sql_backend() {
+            #[cfg(feature = "postgres")]
+            Some(SqlBackendRef::Postgres(backend)) => backend.ping_database().await,
+            #[cfg(not(feature = "postgres"))]
+            Some(SqlBackendRef::Disabled(_)) => Ok(()),
+            None => Ok(()),
+        }
+    }
+
     pub fn has_database_maintenance_backend(&self) -> bool {
         self.sql_backend().is_some()
     }
