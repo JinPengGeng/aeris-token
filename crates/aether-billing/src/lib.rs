@@ -31,6 +31,10 @@ pub use pricing::{
 pub use schema::{
     BillingSnapshot, BillingSnapshotStatus, CostResult, BILLING_SNAPSHOT_SCHEMA_VERSION,
 };
+pub use service::image_authorization::{
+    BillingImageAuthorizationInput, BillingImageAuthorizationQuote, BillingImageOutputDimensions,
+    BillingImageQuotedCalculation, BillingImageTokenBounds,
+};
 pub use service::BillingService;
 pub use token_normalization::{
     normalize_input_tokens_for_billing, normalize_total_input_context_for_cache_hit_rate,
