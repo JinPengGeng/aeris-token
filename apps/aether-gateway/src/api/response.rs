@@ -262,28 +262,22 @@ pub(crate) fn build_local_balance_denied_response(
             }
         }
     });
-    let payload = if local_error_uses_openai_format(control_decision, None) {
-        build_core_error_body_for_client_format(
-            "openai:chat",
-            "Insufficient quota",
-            Some("insufficient_quota"),
-            LocalCoreSyncErrorKind::RateLimit,
-        )
-        .unwrap_or(fallback_payload)
+    let client_format = if local_error_uses_openai_format(control_decision, None) {
+        Some("openai:chat")
+    } else if local_error_uses_claude_format(control_decision, None) {
+        Some("claude:messages")
     } else {
-        build_local_error_payload(
-            control_decision,
-            None,
-            &message,
-            LocalCoreSyncErrorKind::RateLimit,
-            fallback_payload,
-        )
+        None
     };
+    let kind = LocalCoreSyncErrorKind::QuotaExhausted;
+    let payload = client_format
+        .and_then(|format| build_core_error_body_for_client_format(format, &message, None, kind))
+        .unwrap_or(fallback_payload);
     let body =
         serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
     let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
     build_client_response_from_parts(
-        StatusCode::TOO_MANY_REQUESTS.as_u16(),
+        kind.http_status_code(client_format.unwrap_or_default()),
         &headers,
         Body::from(body),
         trace_id,
@@ -663,6 +657,7 @@ fn local_error_kind_for_status(status: StatusCode) -> LocalCoreSyncErrorKind {
     match status.as_u16() {
         400 | 405 | 422 => LocalCoreSyncErrorKind::InvalidRequest,
         401 => LocalCoreSyncErrorKind::Authentication,
+        402 => LocalCoreSyncErrorKind::QuotaExhausted,
         403 => LocalCoreSyncErrorKind::PermissionDenied,
         404 => LocalCoreSyncErrorKind::NotFound,
         413 => LocalCoreSyncErrorKind::RequestTooLarge,
@@ -948,8 +943,8 @@ mod tests {
 
         assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
         let payload = response_json(response).await;
-        assert_eq!(payload["error"]["type"], "rate_limit_error");
-        assert_eq!(payload["error"]["code"], "insufficient_quota");
+        assert_eq!(payload["error"]["type"], "insufficient_quota");
+        assert_eq!(payload["error"]["code"], "credit_balance_exhausted");
         assert_eq!(payload["error"]["message"], "Insufficient quota");
         assert!(payload["error"]["details"].is_null());
     }
