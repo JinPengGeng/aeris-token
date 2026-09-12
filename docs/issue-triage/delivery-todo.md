@@ -1,6 +1,6 @@
 # Issue delivery TODO and community workflow
 
-Snapshot: 2026-09-13, fork `JinPengGeng/aeris-token`. This queue is based on
+Snapshot: 2026-09-12, fork `JinPengGeng/aeris-token`. This queue is based on
 the current fork tree and GitHub issue state; it does not modify upstream
 `fawney19/Aether`.
 
@@ -188,6 +188,26 @@ acceptance criteria have evidence; a merged child slice changes the parent to
 tests, pass the four required contexts (Rust, Frontend, Automation Policy and
 Dependency Audit), and record the merge SHA and residual risks here and on its
 Issue.
+
+## 2026-09-12 live revalidation (after main `acb022247`)
+
+The current fork inventory was re-read from GitHub rather than inferred from
+this document: **50 open issues** (26 P1, 24 P2), with 10 `status:in-progress`,
+1 `status:ready`, 28 `status:triage`, and 11 `status:blocked`. The Project #1
+cards retain the same lifecycle decisions and priority/area/risk fields.
+
+Four squash PRs remain open and have native auto-merge enabled: #324 (RED
+telemetry), #328 (video terminal registry retention), #331 (fork tunnel install
+policy), and #334 (refund terminal notification). Their branches were rebased
+onto `main@acb022247`; all required checks are either successful or currently
+running, and no new failure is being treated as accepted until the corresponding
+head SHA completes CI. #324's earlier missing telemetry test import was resolved
+in the pushed head `e966cd2c` and its focused frontdoor tests pass locally.
+
+The immediate exit condition is therefore CI completion followed by automatic
+squash merges. After each merge, re-read the PR head/base and parent Issue
+acceptance, record the merge SHA, and keep the parent open when residual evidence
+is still missing. No user action is required while these checks run.
 
 The merged API contract is a baseline only: balance notification behavior in
 #247 and the chat/images compatibility fixtures for #254 are intentionally not
