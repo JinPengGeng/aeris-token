@@ -30,18 +30,25 @@ if created > date.today() or expires <= created or expires > created + timedelta
 PY
 
 if ! awk '
+  function record_package() {
+    if (name == "rsa") {
+      rsa_count++
+      if (version == "0.9.10") reviewed_count++
+      else unexpected_version = 1
+    }
+  }
   /^\[\[package\]\]$/ {
-    if (name == "rsa" && version == "0.9.10") found = 1
+    record_package()
     name = version = ""
   }
   /^name = / { name = $3; gsub(/"/, "", name) }
   /^version = / { version = $3; gsub(/"/, "", version) }
   END {
-    if (name == "rsa" && version == "0.9.10") found = 1
-    exit !found
+    record_package()
+    exit !(rsa_count == 1 && reviewed_count == 1 && !unexpected_version)
   }
 ' Cargo.lock; then
-  echo "Cargo.lock no longer contains the reviewed rsa 0.9.10 package" >&2
+  echo "Cargo.lock must contain exactly one reviewed rsa 0.9.10 package stanza" >&2
   exit 1
 fi
 

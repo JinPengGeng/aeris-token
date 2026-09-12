@@ -94,6 +94,7 @@ jobs:
           bash tests/redis_durable_crash_drill.sh
           bash tests/update_compose_safety_test.sh
           bash tests/tunnel_installer_config_security_test.sh
+          bash tests/cargo_audit_gate_test.sh
 
   fmt:
     name: Format
