@@ -99,7 +99,9 @@ sudo aether-tunnel setup /etc/aether-tunnel/aether-tunnel.toml
 sudo aether-tunnel uninstall
 ```
 
-完成向导后，如果启用了 Install Service，将自动注册并启动当前系统支持的服务（`systemd` 或 `OpenRC`）。为避免 root 服务被普通用户替换二进制或凭据配置，服务模式只接受 root 所有、父目录不可由组或其他用户写入的二进制，以及权限为 `0600` 的单硬链接配置文件；直接运行模式不受此限制。
+完成向导后，如果启用了 Install Service，将自动注册并启动当前系统支持的服务（`systemd` 或 `OpenRC`）。安装会创建不可登录的 `aether-tunnel` system user/group，并让 tunnel 进程以该身份运行。systemd 还启用 `NoNewPrivileges`、空 capability 集、`ProtectSystem=strict`、`ProtectHome` 和独立临时目录；OpenRC 使用 `supervise-daemon --user aether-tunnel:aether-tunnel`。配置目录保持 root 所有、服务组可读（目录 `0750`，配置 `0640`），日志目录和文件由服务身份写入。
+
+既有 root 安装在重新执行 `setup` 时会迁移上述 owner/mode，只有校验成功后才会生成新的服务定义；失败时安装会中止。卸载不会删除配置、日志或服务账号。二进制仍保持 root 所有且不可由服务身份写入，因此自动远程升级在非 root 服务身份下继续拒绝；请使用 `sudo aether-tunnel upgrade` 完成手工升级。签名发布制品校验由 Issue #315 单独定义。
 
 ### 直接运行
 

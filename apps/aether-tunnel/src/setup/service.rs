@@ -12,6 +12,8 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
 const SERVICE_NAME: &str = "aether-tunnel";
+const SERVICE_USER: &str = "aether-tunnel";
+const SERVICE_GROUP: &str = "aether-tunnel";
 
 const SYSTEMD_UNIT_PATH: &str = "/etc/systemd/system/aether-tunnel.service";
 
@@ -40,6 +42,13 @@ const OPENRC_SUPERVISE_BINS: &[&str] = &[
     "supervise-daemon",
 ];
 const TAIL_BINS: &[&str] = &["/usr/bin/tail", "/bin/tail", "tail"];
+const ID_BINS: &[&str] = &["/usr/bin/id", "/bin/id"];
+const GROUPADD_BINS: &[&str] = &["/usr/sbin/groupadd", "/usr/bin/groupadd"];
+const USERADD_BINS: &[&str] = &["/usr/sbin/useradd", "/usr/bin/useradd"];
+const ADDGROUP_BINS: &[&str] = &["/sbin/addgroup", "/usr/sbin/addgroup"];
+const ADDUSER_BINS: &[&str] = &["/sbin/adduser", "/usr/sbin/adduser"];
+const CHOWN_BINS: &[&str] = &["/usr/bin/chown", "/bin/chown"];
+const GETENT_BINS: &[&str] = &["/usr/bin/getent", "/bin/getent"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ServiceManager {
@@ -297,8 +306,12 @@ fn install_systemd_service(config_path: &Path) -> anyhow::Result<()> {
     validate_service_unit_path(exe_str, "binary")?;
     validate_service_unit_path(config_str, "config")?;
     validate_service_unit_path(working_dir, "working directory")?;
+    ensure_service_identity()?;
+    migrate_service_permissions(&config_abs)?;
+    ensure_private_service_directory(Path::new(OPENRC_LOG_DIR), 0o750)?;
+    migrate_service_log_permissions()?;
     validate_root_managed_service_file(&exe_path, "binary", false)?;
-    validate_root_managed_service_file(&config_abs, "config", true)?;
+    validate_service_config_file(&config_abs)?;
 
     if Path::new(SYSTEMD_UNIT_PATH).exists() {
         eprintln!("  Stopping existing service...");
@@ -355,6 +368,15 @@ fn render_systemd_unit(
          Environment=AETHER_TUNNEL_LOG_DESTINATION=both\n\
          Environment=AETHER_TUNNEL_LOG_DIR=/var/log/aether-tunnel\n\
          ExecStart={exe_path}\n\
+         User={SERVICE_USER}\n\
+         Group={SERVICE_GROUP}\n\
+         NoNewPrivileges=true\n\
+         PrivateTmp=true\n\
+         ProtectSystem=strict\n\
+         ProtectHome=true\n\
+         ReadWritePaths=/var/log/aether-tunnel\n\
+         CapabilityBoundingSet=\n\
+         AmbientCapabilities=\n\
          Restart=on-failure\n\
          RestartSec=5\n\
          LimitNOFILE=65535\n\
@@ -387,8 +409,10 @@ fn install_openrc_service(config_path: &Path) -> anyhow::Result<()> {
     validate_service_unit_path(exe_str, "binary")?;
     validate_service_unit_path(config_str, "config")?;
     validate_service_unit_path(working_dir, "working directory")?;
+    ensure_service_identity()?;
+    migrate_service_permissions(&config_abs)?;
     validate_root_managed_service_file(&exe_path, "binary", false)?;
-    validate_root_managed_service_file(&config_abs, "config", true)?;
+    validate_service_config_file(&config_abs)?;
 
     if Path::new(OPENRC_INIT_PATH).exists() {
         eprintln!("  Stopping existing service...");
@@ -400,13 +424,33 @@ fn install_openrc_service(config_path: &Path) -> anyhow::Result<()> {
     ensure_private_service_directory(Path::new(OPENRC_LOG_DIR), 0o750)?;
     open_private_service_log(Path::new(OPENRC_STDOUT_LOG), 0o640)?;
     open_private_service_log(Path::new(OPENRC_STDERR_LOG), 0o640)?;
+    migrate_service_log_permissions()?;
 
     eprintln!("  Generating OpenRC init script...");
     eprintln!("    Binary:  {}", exe_str);
     eprintln!("    Config:  {}", config_str);
     eprintln!("    WorkDir: {}", working_dir);
 
-    let init_content = format!(
+    let init_content = render_openrc_init(exe_str, config_str, working_dir);
+    write_service_definition(OPENRC_INIT_PATH, &init_content, 0o755)?;
+
+    eprintln!("  Enabling and starting service...");
+    run_cmd(openrc_update_bin(), &["add", SERVICE_NAME, "default"])?;
+    run_cmd(openrc_service_bin(), &[SERVICE_NAME, "start"])?;
+
+    eprintln!();
+    if manager_is_active(ServiceManager::OpenRc) {
+        eprintln!("  Service started successfully!");
+    } else {
+        eprintln!("  Service state is not active yet. Check `sudo ./aether-tunnel logs`.");
+    }
+
+    print_post_install_commands();
+    Ok(())
+}
+
+fn render_openrc_init(exe_str: &str, config_str: &str, working_dir: &str) -> String {
+    format!(
         r#"#!{}
 name={}
 description={}
@@ -444,6 +488,7 @@ start() {{
         --chdir "$directory" \
         --stdout "$output_log" \
         --stderr "$error_log" \
+        --user "{SERVICE_USER}:{SERVICE_GROUP}" \
         --respawn-delay "$respawn_delay" \
         --respawn-max "$respawn_max" \
         --respawn-period "$respawn_period" \
@@ -475,22 +520,7 @@ stop() {{
         shell_quote("AETHER_TUNNEL_SERVICE_MANAGER=openrc"),
         shell_quote("AETHER_TUNNEL_LOG_DESTINATION=both"),
         shell_quote(&format!("AETHER_TUNNEL_LOG_DIR={OPENRC_LOG_DIR}")),
-    );
-    write_service_definition(OPENRC_INIT_PATH, &init_content, 0o755)?;
-
-    eprintln!("  Enabling and starting service...");
-    run_cmd(openrc_update_bin(), &["add", SERVICE_NAME, "default"])?;
-    run_cmd(openrc_service_bin(), &[SERVICE_NAME, "start"])?;
-
-    eprintln!();
-    if manager_is_active(ServiceManager::OpenRc) {
-        eprintln!("  Service started successfully!");
-    } else {
-        eprintln!("  Service state is not active yet. Check `sudo ./aether-tunnel logs`.");
-    }
-
-    print_post_install_commands();
-    Ok(())
+    )
 }
 
 fn uninstall_systemd_service() -> anyhow::Result<()> {
@@ -656,6 +686,28 @@ fn pick_bin(candidates: &[&'static str]) -> &'static str {
         .expect("trusted binary candidate list must include an absolute path")
 }
 
+fn id_bin() -> &'static str {
+    pick_bin(ID_BINS)
+}
+fn groupadd_bin() -> &'static str {
+    pick_bin(GROUPADD_BINS)
+}
+fn useradd_bin() -> &'static str {
+    pick_bin(USERADD_BINS)
+}
+fn addgroup_bin() -> &'static str {
+    pick_bin(ADDGROUP_BINS)
+}
+fn adduser_bin() -> &'static str {
+    pick_bin(ADDUSER_BINS)
+}
+fn chown_bin() -> &'static str {
+    pick_bin(CHOWN_BINS)
+}
+fn getent_bin() -> &'static str {
+    pick_bin(GETENT_BINS)
+}
+
 fn systemctl_bin() -> &'static str {
     pick_bin(SYSTEMCTL_BINS)
 }
@@ -732,6 +784,151 @@ fn validate_root_managed_service_file(
         let _ = (path, label, require_private_file);
         anyhow::bail!("managed tunnel services require Unix ownership checks")
     }
+}
+
+fn validate_service_config_file(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.uid() != 0 {
+            anyhow::bail!("service config must be a regular root-owned file");
+        }
+        if metadata.nlink() != 1 || metadata.mode() & 0o777 != 0o640 {
+            anyhow::bail!("service config must be root-owned, single-link, and mode 0640");
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        anyhow::bail!("managed tunnel services require Unix ownership checks")
+    }
+}
+
+fn ensure_service_identity() -> anyhow::Result<()> {
+    if !is_root() {
+        anyhow::bail!("root required to create the tunnel service identity");
+    }
+    let group = Command::new(getent_bin())
+        .args(["group", SERVICE_GROUP])
+        .output()?;
+    if !group.status.success() {
+        let status = if Path::new(groupadd_bin()).exists() {
+            Command::new(groupadd_bin())
+                .args(["--system", SERVICE_GROUP])
+                .status()?
+        } else {
+            Command::new(addgroup_bin())
+                .args(["-S", SERVICE_GROUP])
+                .status()?
+        };
+        if !status.success() {
+            anyhow::bail!("failed to create service group '{SERVICE_GROUP}'");
+        }
+    }
+    let user = Command::new(getent_bin())
+        .args(["passwd", SERVICE_USER])
+        .output()?;
+    if !user.status.success() {
+        let status = if Path::new(useradd_bin()).exists() {
+            Command::new(useradd_bin())
+                .args([
+                    "--system",
+                    "--no-create-home",
+                    "--shell",
+                    "/usr/sbin/nologin",
+                    "--gid",
+                    SERVICE_GROUP,
+                    SERVICE_USER,
+                ])
+                .status()?
+        } else {
+            Command::new(adduser_bin())
+                .args([
+                    "-S",
+                    "-D",
+                    "-H",
+                    "-G",
+                    SERVICE_GROUP,
+                    "-s",
+                    "/sbin/nologin",
+                    SERVICE_USER,
+                ])
+                .status()?
+        };
+        if !status.success() {
+            anyhow::bail!("failed to create service user '{SERVICE_USER}'");
+        }
+    }
+    let uid = Command::new(id_bin()).args(["-u", SERVICE_USER]).output()?;
+    let gid = Command::new(id_bin()).args(["-g", SERVICE_USER]).output()?;
+    if !uid.status.success()
+        || !gid.status.success()
+        || String::from_utf8_lossy(&gid.stdout).trim() != service_group_id()?.to_string()
+    {
+        anyhow::bail!("service identity '{SERVICE_USER}' must use primary group '{SERVICE_GROUP}'");
+    }
+    let groups = Command::new(id_bin()).args(["-G", SERVICE_USER]).output()?;
+    let expected_gid = service_group_id()?.to_string();
+    if !groups.status.success()
+        || String::from_utf8_lossy(&groups.stdout)
+            .split_whitespace()
+            .any(|group| group != expected_gid)
+    {
+        anyhow::bail!("service identity '{SERVICE_USER}' has unexpected supplementary groups");
+    }
+    Ok(())
+}
+
+fn service_group_id() -> anyhow::Result<u32> {
+    let output = Command::new(id_bin())
+        .args(["-g", SERVICE_GROUP])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("cannot resolve service group");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().parse()?)
+}
+
+fn migrate_service_permissions(config: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    let parent = config
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config has no parent"))?;
+    let parent_str = parent
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("config parent is not UTF-8"))?;
+    run_cmd(chown_bin(), &[&format!("root:{SERVICE_GROUP}"), parent_str])?;
+    #[cfg(unix)]
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))?;
+    run_cmd(
+        chown_bin(),
+        &[
+            &format!("root:{SERVICE_GROUP}"),
+            config.to_str().unwrap_or_default(),
+        ],
+    )?;
+    #[cfg(unix)]
+    std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o640))?;
+    Ok(())
+}
+
+fn migrate_service_log_permissions() -> anyhow::Result<()> {
+    run_cmd(
+        chown_bin(),
+        &[&format!("{SERVICE_USER}:{SERVICE_GROUP}"), OPENRC_LOG_DIR],
+    )?;
+    for path in [OPENRC_STDOUT_LOG, OPENRC_STDERR_LOG] {
+        if Path::new(path).exists() {
+            run_cmd(
+                chown_bin(),
+                &[&format!("{SERVICE_USER}:{SERVICE_GROUP}"), path],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn systemd_quote(value: &str) -> String {
@@ -966,9 +1163,9 @@ fn open_private_service_log(path: &Path, mode: u32) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_private_service_directory, open_private_service_log, pick_bin, render_systemd_unit,
-        systemd_quote, validate_root_managed_service_file, validate_service_unit_path,
-        write_service_definition,
+        ensure_private_service_directory, open_private_service_log, pick_bin, render_openrc_init,
+        render_systemd_unit, systemd_quote, validate_root_managed_service_file,
+        validate_service_unit_path, write_service_definition,
     };
 
     #[test]
@@ -986,6 +1183,29 @@ mod tests {
         ));
         assert!(unit.contains(r#"WorkingDirectory="/var/lib/aether tunnel""#));
         assert_eq!(systemd_quote("a\\b\"c"), r#""a\\b\"c""#);
+    }
+
+    #[test]
+    fn service_renderers_drop_privileges() {
+        let unit = render_systemd_unit(
+            "/usr/local/bin/aether-tunnel",
+            "/etc/aether-tunnel/aether-tunnel.toml",
+            "/etc/aether-tunnel",
+        )
+        .unwrap();
+        assert!(unit.contains("User=aether-tunnel\n"));
+        assert!(unit.contains("Group=aether-tunnel\n"));
+        assert!(unit.contains("NoNewPrivileges=true\n"));
+        assert!(unit.contains("CapabilityBoundingSet=\n"));
+        assert!(!unit.contains("User=root"));
+
+        let init = render_openrc_init(
+            "/usr/local/bin/aether-tunnel",
+            "/etc/aether-tunnel/aether-tunnel.toml",
+            "/etc/aether-tunnel",
+        );
+        assert!(init.contains("--user \"aether-tunnel:aether-tunnel\""));
+        assert!(!init.contains("--user root"));
     }
 
     #[test]
