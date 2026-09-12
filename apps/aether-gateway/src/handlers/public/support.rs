@@ -26,6 +26,25 @@ use axum::Json;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub(crate) fn public_liveness_payload() -> serde_json::Value {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+    json!({
+        "status": "healthy",
+        "timestamp": timestamp,
+        "database_pool": {
+            "checked_out": 0,
+            "pool_size": 0,
+            "overflow": 0,
+            "max_capacity": 0,
+            "usage_rate": "0.0%",
+            "source": "rust_frontdoor",
+        },
+    })
+}
+
 #[path = "support/announcements.rs"]
 mod support_announcements;
 #[path = "support/auth.rs"]
@@ -719,21 +738,7 @@ async fn build_local_public_support_response(
         if decision.route_kind.as_deref() == Some("health")
             && request_context.request_path == "/health"
         {
-            return Some(
-                Json(json!({
-                    "status": "healthy",
-                    "timestamp": timestamp,
-                    "database_pool": {
-                        "checked_out": 0,
-                        "pool_size": 0,
-                        "overflow": 0,
-                        "max_capacity": 0,
-                        "usage_rate": "0.0%",
-                        "source": "rust_frontdoor",
-                    },
-                }))
-                .into_response(),
-            );
+            return Some(Json(public_liveness_payload()).into_response());
         }
 
         if decision.route_kind.as_deref() == Some("health")
