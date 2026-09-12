@@ -182,7 +182,8 @@ fn is_image_authorization_plan(
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
 ) -> bool {
-    plan.provider_api_format.eq_ignore_ascii_case("openai:image")
+    plan.provider_api_format
+        .eq_ignore_ascii_case("openai:image")
         || report_context
             .and_then(|context| context.get("image_request"))
             .is_some()
