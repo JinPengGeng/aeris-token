@@ -133,17 +133,28 @@ fn prune_terminal_map(map: &mut BTreeMap<String, LocalVideoTaskSnapshot>, now_un
     map.retain(|_, snapshot| {
         snapshot.is_active_for_refresh()
             || snapshot.created_at_unix_ms() == 0
-            || snapshot.created_at_unix_ms() >= cutoff
+            || snapshot_created_at_secs(snapshot) >= cutoff
     });
 
     let mut terminal: Vec<(String, u64)> = map
         .iter()
         .filter(|(_, snapshot)| !snapshot.is_active_for_refresh())
-        .map(|(key, snapshot)| (key.clone(), snapshot.created_at_unix_ms()))
+        .map(|(key, snapshot)| (key.clone(), snapshot_created_at_secs(snapshot)))
         .collect();
     terminal.sort_by_key(|(_, created_at)| *created_at);
-    let excess = terminal.len().saturating_sub(VIDEO_TASK_MAX_TERMINAL_ENTRIES);
+    let excess = terminal
+        .len()
+        .saturating_sub(VIDEO_TASK_MAX_TERMINAL_ENTRIES);
     for (key, _) in terminal.into_iter().take(excess) {
         map.remove(&key);
+    }
+}
+
+fn snapshot_created_at_secs(snapshot: &LocalVideoTaskSnapshot) -> u64 {
+    let value = snapshot.created_at_unix_ms();
+    if value >= 1_000_000_000_000 {
+        value / 1_000
+    } else {
+        value
     }
 }
