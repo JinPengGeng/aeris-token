@@ -10,7 +10,6 @@ use crate::{
 
 /// Completed task snapshots contain prompts and provider metadata, so retain only a
 /// bounded recent history. Active tasks are never evicted by this policy.
-pub const VIDEO_TASK_TERMINAL_RETENTION_SECS: u64 = 24 * 60 * 60;
 pub const VIDEO_TASK_MAX_TERMINAL_ENTRIES: usize = 4096;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -30,7 +29,7 @@ impl VideoTaskRegistry {
                 self.gemini.insert(seed.local_short_id.clone(), snapshot);
             }
         }
-        self.prune_terminal(current_unix_secs());
+        self.prune_terminal();
     }
 
     pub fn read_openai(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse> {
@@ -87,7 +86,7 @@ impl VideoTaskRegistry {
                 }
             }
         }
-        self.prune_terminal(current_unix_secs());
+        self.prune_terminal();
     }
 
     pub fn project_openai(&mut self, task_id: &str, provider_body: &Map<String, Value>) -> bool {
@@ -95,7 +94,7 @@ impl VideoTaskRegistry {
             return false;
         };
         seed.apply_provider_body(provider_body);
-        self.prune_terminal(current_unix_secs());
+        self.prune_terminal();
         true
     }
 
@@ -104,13 +103,13 @@ impl VideoTaskRegistry {
             return false;
         };
         seed.apply_provider_body(provider_body);
-        self.prune_terminal(current_unix_secs());
+        self.prune_terminal();
         true
     }
 
-    fn prune_terminal(&mut self, now_unix_secs: u64) {
-        prune_terminal_map(&mut self.openai, now_unix_secs);
-        prune_terminal_map(&mut self.gemini, now_unix_secs);
+    fn prune_terminal(&mut self) {
+        prune_terminal_map(&mut self.openai);
+        prune_terminal_map(&mut self.gemini);
     }
 
     pub(crate) fn sanitize_persisted_diagnostics(&mut self) -> bool {
@@ -122,27 +121,11 @@ impl VideoTaskRegistry {
     }
 }
 
-fn current_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
-}
-
-fn prune_terminal_map(map: &mut BTreeMap<String, LocalVideoTaskSnapshot>, now_unix_secs: u64) {
-    let cutoff = now_unix_secs.saturating_sub(VIDEO_TASK_TERMINAL_RETENTION_SECS);
-    map.retain(|_, snapshot| {
-        snapshot.is_active_for_refresh()
-            // A missing or legacy synthetic timestamp cannot establish an
-            // expiry boundary. Keep it for the capacity bound below instead
-            // of deleting an otherwise addressable task on the next write.
-            || snapshot_created_at_secs(snapshot) < MIN_REALISTIC_UNIX_SECS
-            || snapshot_created_at_secs(snapshot) >= cutoff
-    });
-
+fn prune_terminal_map(map: &mut BTreeMap<String, LocalVideoTaskSnapshot>) {
     let mut terminal: Vec<(String, u64)> = map
         .iter()
         .filter(|(_, snapshot)| !snapshot.is_active_for_refresh())
-        .map(|(key, snapshot)| (key.clone(), snapshot_created_at_secs(snapshot)))
+        .map(|(key, snapshot)| (key.clone(), snapshot.created_at_unix_ms()))
         .collect();
     terminal.sort_by_key(|(_, created_at)| *created_at);
     let excess = terminal
@@ -150,20 +133,5 @@ fn prune_terminal_map(map: &mut BTreeMap<String, LocalVideoTaskSnapshot>, now_un
         .saturating_sub(VIDEO_TASK_MAX_TERMINAL_ENTRIES);
     for (key, _) in terminal.into_iter().take(excess) {
         map.remove(&key);
-    }
-}
-
-// Unix seconds before 2000 are treated as unknown/legacy values. Existing
-// persisted fixtures and old records may use a zero or placeholder timestamp;
-// retaining those records until the per-provider capacity bound is reached is
-// safer than making them disappear solely because their timestamp is invalid.
-const MIN_REALISTIC_UNIX_SECS: u64 = 946_684_800;
-
-fn snapshot_created_at_secs(snapshot: &LocalVideoTaskSnapshot) -> u64 {
-    let value = snapshot.created_at_unix_ms();
-    if value >= 1_000_000_000_000 {
-        value / 1_000
-    } else {
-        value
     }
 }
