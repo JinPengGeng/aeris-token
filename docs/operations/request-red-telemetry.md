@@ -13,7 +13,7 @@ Unknown values are preferred over creating a new label at runtime.
 | --- | --- | ---: | --- |
 | `route_class` | `admin_proxy`, `ai_public`, `auth`, `internal_proxy`, `local`, `passthrough`, `public_support`, `unknown` | 8 | trusted control decision; `local` for a response without a decision, otherwise `unknown` |
 | `status_class` | `1xx`, `2xx`, `3xx`, `4xx`, `5xx`, `unknown` | 6 | terminal HTTP status; `unknown` is reserved for a non-HTTP/cancelled outcome |
-| `provider_type` | `openai`, `codex`, `chatgpt_web`, `claude_code`, `kiro`, `grok`, `gemini_cli`, `antigravity`, `windsurf`, `vertex_ai`, `custom`, `other`, `unknown` | 13 | trusted execution response header; `unknown` when no provider attempt was made |
+| `provider_type` | `openai`, `codex`, `chatgpt_web`, `claude_code`, `kiro`, `grok`, `gemini_cli`, `antigravity`, `windsurf`, `vertex_ai`, `custom`, `other`, `unknown` | 13 | trusted provider catalog snapshot attached to response extensions; `unknown` when no provider attempt was made |
 
 The implementation lives in `aether-gateway-frontdoor::telemetry`.  Provider
 IDs, API-key IDs, model names, raw paths, user IDs, error text, trace IDs and
@@ -28,15 +28,19 @@ logged; query credentials are removed by the existing path sanitizer.
 
 The request lifecycle has one terminal observation.  A retry or failover of an
 upstream provider does not create another external request total; it is an
-internal attempt.  The future metrics implementation must therefore increment
-the terminal request counter exactly once after the client response status is
+internal attempt and increments only `request_retries_total`.  The terminal
+request counter is emitted exactly once after the client response status is
 known.  The outcome mapping is:
 
 * `2xx`/`3xx`: successful terminal response;
 * `4xx`: client/auth/policy rejection (still a completed request);
 * `5xx`: gateway or upstream failure;
 * cancellation before a response: a separate bounded cancellation counter and
-  no fabricated HTTP status.
+  no fabricated HTTP status;
+* streaming responses: first-byte latency is recorded on the first non-empty
+  frame, while terminal RED counters wait for EOF or body error. Dropping an
+  incomplete body records a bounded `cancelled` outcome and cancellation
+  counter.
 
 For a streaming response, `latency_first_byte` is measured from front-door
 acceptance until the first non-empty body frame.  `latency_terminal` is measured

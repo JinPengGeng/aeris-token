@@ -11,9 +11,7 @@ use tracing::{info, trace, warn};
 use aether_ai_formats::api::sanitize_request_path_and_query;
 
 use crate::request_id::short_request_id;
-use crate::telemetry::{
-    normalize_provider_type, normalize_route_class, status_class, PROVIDER_TYPE_HEADER,
-};
+use crate::telemetry::{normalize_route_class, status_class, ProviderTelemetryType};
 
 pub const TRACE_ID_HEADER: &str = "x-trace-id";
 pub const EXECUTION_PATH_HEADER: &str = "x-aether-execution-path";
@@ -135,12 +133,11 @@ pub async fn access_log_middleware(mut request: Request<Body>, next: Next) -> Re
         let request_id = short_request_id(request_id);
         let status_code = response.status().as_u16();
         let status_class = status_class(response.status());
-        let provider_type = normalize_provider_type(
-            response
-                .headers()
-                .get(PROVIDER_TYPE_HEADER)
-                .and_then(|value| value.to_str().ok()),
-        );
+        let provider_type = response
+            .extensions()
+            .get::<ProviderTelemetryType>()
+            .map(|marker| marker.0)
+            .unwrap_or("unknown");
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
         if response.status().is_server_error() {
             warn!(
@@ -404,10 +401,11 @@ mod tests {
             .route(
                 "/ok",
                 get(|| async {
-                    Response::builder()
-                        .header(crate::telemetry::PROVIDER_TYPE_HEADER, "OpenAI")
-                        .body(Body::empty())
-                        .expect("response should build")
+                    let mut response = Response::new(Body::empty());
+                    response
+                        .extensions_mut()
+                        .insert(ProviderTelemetryType("openai"));
+                    response
                 }),
             )
             .layer(axum::middleware::from_fn(access_log_middleware));
@@ -528,7 +526,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn access_log_emits_failed_events_by_default_for_server_errors() {
+    async fn access_log_ignores_provider_type_header_spoofing() {
         let writer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
@@ -550,7 +548,7 @@ mod tests {
                         .status(StatusCode::BAD_GATEWAY)
                         .header(CONTROL_ROUTE_CLASS_HEADER, "passthrough")
                         .header(EXECUTION_PATH_HEADER, "execution_runtime_sync")
-                        .header(crate::telemetry::PROVIDER_TYPE_HEADER, "provider-secret-id")
+                        .header(crate::telemetry::PROVIDER_TYPE_HEADER, "openai")
                         .body(Body::empty())
                         .expect("response should build")
                 }),
@@ -569,6 +567,7 @@ mod tests {
 
         let logs = writer.lines();
         assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["provider_type"], "unknown");
         assert_eq!(logs[0]["event_name"], "http_request_failed");
         assert_eq!(logs[0]["status"], "failed");
         assert_eq!(logs[0]["status_code"], 502);

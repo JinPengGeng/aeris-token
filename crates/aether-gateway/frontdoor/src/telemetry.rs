@@ -44,6 +44,11 @@ pub const PROVIDER_TYPES: &[&str] = &[
 /// is still normalized before it reaches a log or metric label.
 pub const PROVIDER_TYPE_HEADER: &str = "x-aether-telemetry-provider-type";
 
+/// Trusted provider metadata carried in response extensions between gateway
+/// execution and telemetry. This is deliberately not a client-visible header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderTelemetryType(pub &'static str);
+
 /// Map an arbitrary route class to the bounded contract set.
 pub fn normalize_route_class(value: Option<&str>) -> &'static str {
     match value.map(str::trim) {

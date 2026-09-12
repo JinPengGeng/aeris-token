@@ -10,11 +10,15 @@ use crate::control::GatewayPublicRequestContext;
 use crate::middleware::{sanitize_access_log_path, should_downgrade_access_log, RequestLogEmitted};
 use crate::AppState;
 use aether_gateway_frontdoor::telemetry::{
-    normalize_provider_type, normalize_route_class, status_class, PROVIDER_TYPE_HEADER,
+    normalize_route_class, status_class, ProviderTelemetryType,
 };
 use aether_runtime::{maybe_hold_axum_response_permit, AdmissionPermit};
 use axum::body::{Body, Bytes};
 use axum::http::{self, header::HeaderName, header::HeaderValue, Response};
+use futures_util::Stream;
+use http_body_util::BodyExt;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Instant;
 use tracing::{info, trace, warn};
 
@@ -108,24 +112,30 @@ pub(super) fn finalize_gateway_response(
         .unwrap_or("-");
     let status_code = response.status().as_u16();
     let status_class = status_class(response.status());
-    let provider_type = normalize_provider_type(
-        response
-            .headers()
-            .get(PROVIDER_TYPE_HEADER)
-            .and_then(|value| value.to_str().ok()),
-    );
+    let provider_type = response
+        .extensions()
+        .get::<ProviderTelemetryType>()
+        .map(|marker| marker.0)
+        .unwrap_or("unknown");
     let request_outcome = if response.status().is_server_error() {
         "error"
     } else {
         "success"
     };
-    crate::request_metrics::global_request_metrics().record(
-        Some(route_class),
-        status_class,
-        Some(provider_type),
-        request_outcome,
-        elapsed_ms,
-    );
+    let is_streaming_response = response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
+    if !is_streaming_response {
+        crate::request_metrics::global_request_metrics().record(
+            Some(route_class),
+            status_class,
+            Some(provider_type),
+            request_outcome,
+            elapsed_ms,
+        );
+    }
     let sanitized_path_and_query = sanitize_access_log_path(path_and_query);
     emit_admin_audit(
         &mut response,
@@ -205,9 +215,114 @@ pub(super) fn finalize_gateway_response(
             "gateway completed request"
         );
     }
+    // Streaming requests cannot observe first-byte latency at the headers
+    // boundary. Wrap the body so the metric is emitted on the first non-empty
+    // frame while preserving the response extensions and headers.
+    if is_streaming_response {
+        response = record_stream_metrics(
+            response,
+            route_class,
+            status_class,
+            provider_type,
+            *started_at,
+        );
+    }
     response.extensions_mut().insert(RequestLogEmitted);
 
     maybe_hold_axum_response_permit(response, request_permit)
+}
+
+fn record_stream_metrics(
+    response: Response<Body>,
+    route_class: &'static str,
+    status_class: &'static str,
+    provider_type: &'static str,
+    started_at: Instant,
+) -> Response<Body> {
+    let (parts, body) = response.into_parts();
+    let metrics = std::sync::Arc::clone(crate::request_metrics::global_request_metrics());
+    let stream = StreamMetrics {
+        body: Box::pin(body.into_data_stream()),
+        metrics,
+        route_class,
+        status_class,
+        provider_type,
+        started_at,
+        first_byte_seen: false,
+        terminal: false,
+    };
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
+struct StreamMetrics {
+    body: Pin<Box<dyn Stream<Item = Result<Bytes, axum::Error>> + Send>>,
+    metrics: std::sync::Arc<crate::request_metrics::RequestMetrics>,
+    route_class: &'static str,
+    status_class: &'static str,
+    provider_type: &'static str,
+    started_at: Instant,
+    first_byte_seen: bool,
+    terminal: bool,
+}
+
+impl Stream for StreamMetrics {
+    type Item = Result<Bytes, axum::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.body.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                if !self.first_byte_seen && !bytes.is_empty() {
+                    self.first_byte_seen = true;
+                    self.metrics
+                        .record_first_byte(self.started_at.elapsed().as_millis() as u64);
+                }
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.terminal = true;
+                self.metrics.record(
+                    Some(self.route_class),
+                    self.status_class,
+                    Some(self.provider_type),
+                    "error",
+                    self.started_at.elapsed().as_millis() as u64,
+                );
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                self.terminal = true;
+                self.metrics.record(
+                    Some(self.route_class),
+                    self.status_class,
+                    Some(self.provider_type),
+                    if self.status_class == "5xx" {
+                        "error"
+                    } else {
+                        "success"
+                    },
+                    self.started_at.elapsed().as_millis() as u64,
+                );
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for StreamMetrics {
+    fn drop(&mut self) {
+        if self.terminal {
+            return;
+        }
+        self.metrics.record_cancellation();
+        self.metrics.record(
+            Some(self.route_class),
+            self.status_class,
+            Some(self.provider_type),
+            "cancelled",
+            self.started_at.elapsed().as_millis() as u64,
+        );
+    }
 }
 
 fn apply_sensitive_route_cache_policy(

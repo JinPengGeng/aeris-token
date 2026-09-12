@@ -122,6 +122,7 @@ where
         if self.cancel.load(Ordering::Acquire) {
             return;
         }
+        crate::request_metrics::global_request_metrics().record_cancellation();
         if let (Some(future), Ok(runtime)) =
             (self.future.take(), tokio::runtime::Handle::try_current())
         {
@@ -183,6 +184,7 @@ impl Drop for CompleteOnDisconnectBody {
         let Some(body) = self.body.take().filter(|body| !body.is_end_stream()) else {
             return;
         };
+        crate::request_metrics::global_request_metrics().record_cancellation();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let producer = self.producer.take();
             runtime.spawn(scope_request_diagnostics_with(

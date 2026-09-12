@@ -23,6 +23,9 @@ struct Key {
 pub(crate) struct RequestMetrics {
     counters: Mutex<BTreeMap<Key, u64>>,
     duration_ms: Mutex<u64>,
+    first_byte_ms: Mutex<u64>,
+    cancellations: Mutex<u64>,
+    retries: Mutex<u64>,
 }
 
 impl RequestMetrics {
@@ -100,7 +103,61 @@ impl RequestMetrics {
             MetricKind::Counter,
             duration_ms,
         ));
+        let first_byte_ms = *self
+            .first_byte_ms
+            .lock()
+            .expect("request first-byte metric lock poisoned");
+        samples.push(MetricSample::new(
+            "request_first_byte_ms_sum",
+            "Sum of time to first non-empty response body frame in milliseconds.",
+            MetricKind::Counter,
+            first_byte_ms,
+        ));
+        let cancellations = *self
+            .cancellations
+            .lock()
+            .expect("request cancellation metric lock poisoned");
+        samples.push(MetricSample::new(
+            "request_cancellations_total",
+            "Gateway requests cancelled before terminal response completion.",
+            MetricKind::Counter,
+            cancellations,
+        ));
+        let retries = *self
+            .retries
+            .lock()
+            .expect("request retry metric lock poisoned");
+        samples.push(MetricSample::new(
+            "request_retries_total",
+            "Internal provider retry attempts; does not increment request_total.",
+            MetricKind::Counter,
+            retries,
+        ));
         samples
+    }
+
+    pub(crate) fn record_first_byte(&self, elapsed_ms: u64) {
+        let mut total = self
+            .first_byte_ms
+            .lock()
+            .expect("request first-byte metric lock poisoned");
+        *total = total.saturating_add(elapsed_ms);
+    }
+
+    pub(crate) fn record_cancellation(&self) {
+        let mut total = self
+            .cancellations
+            .lock()
+            .expect("request cancellation metric lock poisoned");
+        *total = total.saturating_add(1);
+    }
+
+    pub(crate) fn record_retry(&self) {
+        let mut total = self
+            .retries
+            .lock()
+            .expect("request retry metric lock poisoned");
+        *total = total.saturating_add(1);
     }
 }
 

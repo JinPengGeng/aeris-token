@@ -48,6 +48,7 @@ use crate::request_candidate_runtime::{
 };
 use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AppState, GatewayError};
+use aether_gateway_frontdoor::telemetry::ProviderTelemetryType;
 
 const DEFAULT_STREAM_FIRST_BYTE_WATCHDOG_TIMEOUT_MS: u64 = 30_000;
 const UPSTREAM_TARGET_GATE_NAME: &str = "gateway_upstream_target";
@@ -76,6 +77,25 @@ fn attach_redaction_execution_candidate(response: &mut Response<Body>, candidate
             .extensions_mut()
             .insert(RedactionExecutionCandidateId::new(candidate_id));
     }
+}
+
+async fn attach_trusted_provider_type(
+    state: &AppState,
+    response: &mut Response<Body>,
+    plan: &aether_contracts::ExecutionPlan,
+) {
+    let Ok(Some(snapshot)) = state
+        .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
+        .await
+    else {
+        return;
+    };
+    let provider_type = aether_gateway_frontdoor::telemetry::normalize_provider_type(Some(
+        snapshot.provider.provider_type.as_str(),
+    ));
+    response
+        .extensions_mut()
+        .insert(ProviderTelemetryType(provider_type));
 }
 
 pub(crate) async fn execute_sync_plan_and_reports<T>(
@@ -421,6 +441,7 @@ where
         match &mut execution {
             AiAttemptExecutionOutcome::Responded(response) => {
                 attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
+                attach_trusted_provider_type(self.state, response, plan).await;
             }
             AiAttemptExecutionOutcome::Retry {
                 fallback_response: Some(response),
@@ -428,6 +449,7 @@ where
             } => {
                 attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
                 attach_deferred_usage_context(response, plan, deferred_report_context.as_ref());
+                attach_trusted_provider_type(self.state, response, plan).await;
             }
             AiAttemptExecutionOutcome::Retry {
                 fallback_response: None,
@@ -1141,6 +1163,7 @@ where
                 scope,
                 fallback_response: attempt_fallback_response,
             } => {
+                crate::request_metrics::global_request_metrics().record_retry();
                 if attempt_fallback_response.is_some() {
                     fallback_response = attempt_fallback_response;
                 }
@@ -1470,6 +1493,7 @@ where
         match &mut execution {
             AiAttemptExecutionOutcome::Responded(response) => {
                 attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
+                attach_trusted_provider_type(self.state, response, plan).await;
             }
             AiAttemptExecutionOutcome::Retry {
                 fallback_response: Some(response),
@@ -1477,6 +1501,7 @@ where
             } => {
                 attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
                 attach_deferred_usage_context(response, plan, watchdog_report_context);
+                attach_trusted_provider_type(self.state, response, plan).await;
             }
             AiAttemptExecutionOutcome::Retry {
                 fallback_response: None,
