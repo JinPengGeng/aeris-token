@@ -13,6 +13,10 @@ Issue #220 中安装器 `SHA256SUMS` 消费和基础镜像 digest 已在当前 m
 `aether-vscodex/web`、`aether-vscodex/vscode-extension`、
 `.github/automation`。
 
+根目录当前只有用于锁定工具链依赖的 `package-lock.json`，没有
+`package.json`；门禁因此对每个目录验证 lockfile 并使用
+`npm audit --package-lock-only`，不把 `package.json` 存在作为前置条件。
+
 ## 门禁和工具版本
 
 `.github/workflows/dependency-audit.yml` 在 pull request、main/master push、
