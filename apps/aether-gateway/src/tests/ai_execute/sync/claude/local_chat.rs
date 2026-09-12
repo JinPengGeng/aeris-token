@@ -1077,8 +1077,11 @@ async fn gateway_returns_claude_chat_error_for_local_sync_failure_impl() {
         .list_by_request_id("trace-claude-chat-local-error-123")
         .await
         .expect("request candidate trace should read");
-    assert_eq!(stored_candidates.len(), 1);
-    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Failed);
+    assert_eq!(stored_candidates.len(), 2);
+    for (index, candidate) in stored_candidates.iter().enumerate() {
+        assert_eq!(candidate.candidate_index, index as u32);
+        assert_eq!(candidate.status, RequestCandidateStatus::Failed);
+    }
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(

@@ -678,12 +678,16 @@ async fn gateway_surfaces_local_execution_runtime_miss_reason_when_all_openai_ch
         .list_by_request_id("trace-openai-chat-local-miss-123")
         .await
         .expect("request candidate trace should read");
-    assert_eq!(stored_candidates.len(), 1);
-    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Skipped);
-    assert_eq!(
-        stored_candidates[0].skip_reason.as_deref(),
-        Some("transport_provider_type_unsupported")
-    );
+    // Both matching planner steps retain their own terminal observation.
+    assert_eq!(stored_candidates.len(), 2);
+    for (index, candidate) in stored_candidates.iter().enumerate() {
+        assert_eq!(candidate.candidate_index, index as u32);
+        assert_eq!(candidate.status, RequestCandidateStatus::Skipped);
+        assert_eq!(
+            candidate.skip_reason.as_deref(),
+            Some("transport_provider_type_unsupported")
+        );
+    }
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

@@ -822,10 +822,11 @@ where
     let started_at = Instant::now();
     let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(1);
     let request_diagnostics = current_request_diagnostics();
+    let candidate_indices = crate::orchestration::current_request_candidate_indices();
     let cancel_on_disconnect = crate::request_lifecycle::cancel_on_client_disconnect();
 
     tokio::spawn(async move {
-        scope_request_diagnostics_with(request_diagnostics, async move {
+        let execution = scope_request_diagnostics_with(request_diagnostics, async move {
             let completion = standard_text_sync_heartbeat_final_bytes(
                 client_api_format.as_str(),
                 redaction_slot.as_ref(),
@@ -837,8 +838,9 @@ where
             );
             let bytes = completion.await;
             let _ = tx.send(Ok(Bytes::from(bytes))).await;
-        })
-        .await;
+        });
+        crate::orchestration::scope_request_candidate_indices_with(candidate_indices, execution)
+            .await;
     });
 
     let headers = BTreeMap::from([(
@@ -2376,6 +2378,55 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), release_tx.closed())
             .await
             .expect("heartbeat must drop upstream execution immediately");
+    }
+
+    #[tokio::test]
+    async fn standard_text_sync_heartbeat_continues_request_candidate_indices() {
+        let (index_tx, index_rx) = tokio::sync::oneshot::channel();
+        let response = crate::orchestration::scope_request_candidate_indices(async move {
+            assert_eq!(
+                crate::orchestration::current_request_candidate_indices()
+                    .reserve(2)
+                    .unwrap(),
+                0
+            );
+            let (parts, _) = http::Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .body(())
+                .unwrap()
+                .into_parts();
+            build_standard_text_sync_heartbeat_shell_response(
+                AppState::new().unwrap(),
+                parts,
+                "trace-heartbeat-candidate-indices".to_string(),
+                test_standard_text_heartbeat_decision(),
+                TEST_STANDARD_TEXT_SYNC_PLAN_KIND.to_string(),
+                move |_, _, _, _, _, _| async move {
+                    index_tx
+                        .send(
+                            crate::orchestration::current_request_candidate_indices()
+                                .reserve(1)
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    Ok(LocalExecutionRequestOutcome::NoPath)
+                },
+            )
+        })
+        .await
+        .unwrap();
+        to_bytes(
+            response.into_body(),
+            crate::headers::max_internal_buffered_body_bytes(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            index_rx.await.unwrap(),
+            2,
+            "background planner must retain the request's earlier observations"
+        );
     }
 
     #[tokio::test]
