@@ -744,11 +744,7 @@ struct GatewayDataArgs {
     )]
     postgres_statement_cache_capacity: Option<usize>,
 
-    #[arg(
-        long,
-        env = "AETHER_GATEWAY_DATA_POSTGRES_REQUIRE_SSL",
-        global = true
-    )]
+    #[arg(long, env = "AETHER_GATEWAY_DATA_POSTGRES_REQUIRE_SSL", global = true)]
     postgres_require_ssl: Option<bool>,
 }
 
@@ -834,12 +830,8 @@ impl GatewayDataArgs {
 
         let require_ssl = self.postgres_require_ssl.unwrap_or_else(|| {
             driver == DatabaseDriver::Postgres
-                && !copy_database_url_is_literal_loopback(
-                    driver,
-                    database_url,
-                    "gateway",
-                )
-                .unwrap_or(false)
+                && !copy_database_url_is_literal_loopback(driver, database_url, "gateway")
+                    .unwrap_or(false)
         });
 
         SqlPoolConfig {
@@ -864,12 +856,8 @@ impl GatewayDataArgs {
     fn insecure_postgres_opt_out(&self, database: &SqlDatabaseConfig) -> bool {
         self.postgres_require_ssl == Some(false)
             && database.driver == DatabaseDriver::Postgres
-            && !copy_database_url_is_literal_loopback(
-                database.driver,
-                &database.url,
-                "gateway",
-            )
-            .unwrap_or(false)
+            && !copy_database_url_is_literal_loopback(database.driver, &database.url, "gateway")
+                .unwrap_or(false)
     }
 
     fn effective_redis_url(&self) -> Option<String> {
@@ -4075,8 +4063,7 @@ mod tests {
     fn gateway_data_remote_postgres_requires_ssl_by_default() {
         let mut args = test_args();
         args.data.database_driver = Some(DatabaseDriverArg::Postgres);
-        args.data.database_url =
-            Some("postgres://postgres:postgres@db.example/aether".to_string());
+        args.data.database_url = Some("postgres://postgres:postgres@db.example/aether".to_string());
 
         let database = args
             .data
@@ -4090,8 +4077,7 @@ mod tests {
     fn gateway_data_loopback_postgres_keeps_local_plaintext_compatibility() {
         let mut args = test_args();
         args.data.database_driver = Some(DatabaseDriverArg::Postgres);
-        args.data.database_url =
-            Some("postgres://postgres:postgres@127.0.0.1/aether".to_string());
+        args.data.database_url = Some("postgres://postgres:postgres@127.0.0.1/aether".to_string());
 
         let database = args
             .data
@@ -4105,8 +4091,7 @@ mod tests {
     fn gateway_data_remote_postgres_explicit_ssl_opt_out_is_preserved() {
         let mut args = test_args();
         args.data.database_driver = Some(DatabaseDriverArg::Postgres);
-        args.data.database_url =
-            Some("postgres://postgres:postgres@db.example/aether".to_string());
+        args.data.database_url = Some("postgres://postgres:postgres@db.example/aether".to_string());
         args.data.postgres_require_ssl = Some(false);
 
         let database = args
