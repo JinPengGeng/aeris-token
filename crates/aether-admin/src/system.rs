@@ -231,6 +231,17 @@ fn notification_service_default_items() -> serde_json::Value {
             "text_template": "你的账户余额已低于提醒阈值，请及时处理。",
             "user_email_enabled": true,
             "system": true
+        },
+        {
+            "key": "user_refund_status",
+            "name": "退款状态更新",
+            "enabled": true,
+            "channel": "email",
+            "title_template": "退款状态更新：{status}",
+            "markdown_template": "退款申请 `{refund_no}` 的状态已更新为 **{status}**。\n\n金额：${amount_usd}\n{failure_reason}",
+            "text_template": "退款申请 {refund_no} 的状态已更新为 {status}。金额：${amount_usd}\n{failure_reason}",
+            "user_email_enabled": true,
+            "system": true
         }
     ])
 }
