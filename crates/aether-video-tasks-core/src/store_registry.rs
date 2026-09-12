@@ -132,7 +132,10 @@ fn prune_terminal_map(map: &mut BTreeMap<String, LocalVideoTaskSnapshot>, now_un
     let cutoff = now_unix_secs.saturating_sub(VIDEO_TASK_TERMINAL_RETENTION_SECS);
     map.retain(|_, snapshot| {
         snapshot.is_active_for_refresh()
-            || snapshot.created_at_unix_ms() == 0
+            // A missing or legacy synthetic timestamp cannot establish an
+            // expiry boundary. Keep it for the capacity bound below instead
+            // of deleting an otherwise addressable task on the next write.
+            || snapshot_created_at_secs(snapshot) < MIN_REALISTIC_UNIX_SECS
             || snapshot_created_at_secs(snapshot) >= cutoff
     });
 
@@ -149,6 +152,12 @@ fn prune_terminal_map(map: &mut BTreeMap<String, LocalVideoTaskSnapshot>, now_un
         map.remove(&key);
     }
 }
+
+// Unix seconds before 2000 are treated as unknown/legacy values. Existing
+// persisted fixtures and old records may use a zero or placeholder timestamp;
+// retaining those records until the per-provider capacity bound is reached is
+// safer than making them disappear solely because their timestamp is invalid.
+const MIN_REALISTIC_UNIX_SECS: u64 = 946_684_800;
 
 fn snapshot_created_at_secs(snapshot: &LocalVideoTaskSnapshot) -> u64 {
     let value = snapshot.created_at_unix_ms();
