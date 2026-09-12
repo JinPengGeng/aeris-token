@@ -1833,6 +1833,13 @@ FOR UPDATE
                     if current != after {
                         return Ok(false);
                     }
+                    crate::settlement::funding::ensure_wallet_holds_preserved(
+                        tx,
+                        &before.id,
+                        before.balance,
+                        before.gift_balance,
+                    )
+                    .await?;
                     let updated = sqlx::query(
                         r#"
 UPDATE wallets
@@ -4334,6 +4341,13 @@ FOR UPDATE
                     }
                     let after_total = after_recharge + after_gift;
                     let after_total_adjusted = before_total_adjusted + input.amount_usd;
+                    crate::settlement::funding::ensure_wallet_holds_preserved(
+                        tx,
+                        &input.wallet_id,
+                        after_recharge,
+                        after_gift,
+                    )
+                    .await?;
                     if !after_recharge.is_finite()
                         || !after_gift.is_finite()
                         || !after_total.is_finite()
@@ -4810,6 +4824,22 @@ FOR UPDATE
                         return Ok(WalletMutationOutcome::Invalid(
                             "refund amount exceeds refundable recharge balance".to_string(),
                         ));
+                    }
+                    match crate::settlement::funding::ensure_wallet_holds_preserved(
+                        tx,
+                        &input.wallet_id,
+                        after_recharge,
+                        before_gift,
+                    )
+                    .await
+                    {
+                        Ok(()) => {}
+                        Err(DataLayerError::InvalidInput(_)) => {
+                            return Ok(WalletMutationOutcome::Invalid(
+                                "refund would consume funds reserved for a request".to_string(),
+                            ));
+                        }
+                        Err(error) => return Err(error),
                     }
 
                     if let Some(payment_order_id) = refund.payment_order_id.as_deref() {
@@ -8277,6 +8307,25 @@ SET balance = $2,
 WHERE {owner_predicate}
 "#
     );
+    let runner = PostgresTransactionRunner::new(pool.clone());
+    let mut tx = runner
+        .begin(crate::PostgresTransactionOptions::read_write())
+        .await?;
+    let select_sql = format!("SELECT id FROM wallets WHERE {owner_predicate} FOR UPDATE");
+    let wallet_id: Option<String> = sqlx::query_scalar(&select_sql)
+        .bind(owner_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+    if let Some(wallet_id) = wallet_id {
+        crate::settlement::funding::ensure_wallet_holds_preserved(
+            &mut tx,
+            &wallet_id,
+            balance,
+            gift_balance,
+        )
+        .await?;
+    }
     sqlx::query(&sql)
         .bind(owner_id)
         .bind(balance)
@@ -8289,9 +8338,10 @@ WHERE {owner_predicate}
         .bind(total_refunded)
         .bind(total_adjusted)
         .bind(updated_at_unix_secs.map(|value| value as i64))
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_postgres_err()?;
+    tx.commit().await.map_postgres_err()?;
     Ok(())
 }
 
@@ -8565,6 +8615,8 @@ mod tests {
             "user_plan_entitlements",
             "redeem_code_batches",
             "redeem_codes",
+            "request_fund_reservations",
+            "request_fund_allocations",
         ] {
             sqlx::query(&format!(
                 "CREATE TEMP TABLE {table} (LIKE public.{table} INCLUDING ALL)"

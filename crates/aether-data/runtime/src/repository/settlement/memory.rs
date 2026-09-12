@@ -15,6 +15,8 @@ use super::{
 use crate::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
 use crate::DataLayerError;
 
+mod funding;
+
 #[derive(Debug)]
 enum InMemorySettlementWalletStore {
     Owned(RwLock<BTreeMap<String, StoredWalletSnapshot>>),
@@ -58,6 +60,9 @@ pub struct InMemorySettlementRepository {
     settlements: RwLock<BTreeMap<String, StoredUsageSettlement>>,
     cost_reservations: RwLock<BTreeMap<String, StoredUsagePolicyCostReservation>>,
     request_admissions: RwLock<BTreeMap<String, StoredUsagePolicyRequestAdmission>>,
+    funds: Arc<RwLock<BTreeMap<String, super::StoredRequestFundsReservation>>>,
+    recoverable_usage: RwLock<BTreeMap<String, UsageSettlementInput>>,
+    recovered_units: RwLock<BTreeMap<String, u64>>,
 }
 
 impl InMemorySettlementRepository {
@@ -72,10 +77,14 @@ impl InMemorySettlementRepository {
             settlements: RwLock::new(BTreeMap::new()),
             cost_reservations: RwLock::new(BTreeMap::new()),
             request_admissions: RwLock::new(BTreeMap::new()),
+            funds: Default::default(),
+            recoverable_usage: Default::default(),
+            recovered_units: Default::default(),
         }
     }
 
     pub fn from_wallet_repository(wallet_repository: Arc<InMemoryWalletRepository>) -> Self {
+        let funds = wallet_repository.request_funds.clone();
         Self {
             wallets: InMemorySettlementWalletStore::Shared(wallet_repository),
             settlement_lock: Mutex::new(()),
@@ -83,12 +92,45 @@ impl InMemorySettlementRepository {
             settlements: RwLock::new(BTreeMap::new()),
             cost_reservations: RwLock::new(BTreeMap::new()),
             request_admissions: RwLock::new(BTreeMap::new()),
+            funds,
+            recoverable_usage: Default::default(),
+            recovered_units: Default::default(),
         }
     }
 }
 
 #[async_trait]
 impl SettlementWriteRepository for InMemorySettlementRepository {
+    async fn reserve_request_funds(
+        &self,
+        input: super::ReserveRequestFundsInput,
+    ) -> Result<super::ReserveRequestFundsOutcome, DataLayerError> {
+        funding::reserve(self, input)
+    }
+    async fn mark_request_funds_dispatched(
+        &self,
+        identity: super::RequestFundsIdentity,
+    ) -> Result<Option<super::StoredRequestFundsReservation>, DataLayerError> {
+        funding::dispatch(self, identity)
+    }
+    async fn release_request_funds(
+        &self,
+        input: super::ReleaseRequestFundsInput,
+    ) -> Result<Option<super::StoredRequestFundsReservation>, DataLayerError> {
+        funding::release(self, input)
+    }
+    async fn finalize_request_funds(
+        &self,
+        input: super::FinalizeRequestFundsInput,
+    ) -> Result<Option<super::StoredRequestFundsReservation>, DataLayerError> {
+        funding::finalize(self, input)
+    }
+    async fn recover_insufficient_quota(
+        &self,
+        input: super::RecoverInsufficientQuotaInput,
+    ) -> Result<Option<super::RequestFundsRecoveryOutcome>, DataLayerError> {
+        funding::recover(self, input)
+    }
     async fn reserve_usage_policy_request(
         &self,
         input: ReserveUsagePolicyRequestInput,
@@ -422,6 +464,14 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
             None
         };
         let mut settlement = self.wallets.with_mut(|wallets| {
+            let funds = self.funds.read().expect("request funds lock");
+            if funds.values().any(|funds| {
+                funds.quote.identity.request_id == input.request_id && funds.state.holds_funds()
+            }) {
+                return Err(DataLayerError::InvalidInput(
+                    "reserved usage requires token-bound funds settlement".to_string(),
+                ));
+            }
             let wallet_id = input
                 .api_key_id
                 .as_deref()
@@ -477,8 +527,11 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
                 let before_total = before_recharge + before_gift;
                 settlement.wallet_id = Some(wallet.id.clone());
                 settlement.wallet_balance_before = Some(before_total);
+                settlement.wallet_balance_after = Some(before_total);
                 settlement.wallet_recharge_balance_before = Some(before_recharge);
+                settlement.wallet_recharge_balance_after = Some(before_recharge);
                 settlement.wallet_gift_balance_before = Some(before_gift);
+                settlement.wallet_gift_balance_after = Some(before_gift);
 
                 if final_billing_status == "settled" {
                     let total_consumed_after = wallet.total_consumed + billable_cost_usd;
@@ -490,13 +543,28 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
                             0.0,
                         )?;
                     } else {
+                        let (held_recharge, held_gift) =
+                            funding::held_wallet_units(&funds, &wallet.id);
+                        let available_recharge =
+                            super::request_funds_available_units(before_recharge.max(0.0))?
+                                .saturating_sub(held_recharge);
+                        let available_gift = super::request_funds_available_units(before_gift)?
+                            .saturating_sub(held_gift);
+                        let required = super::request_funds_authorized_units(billable_cost_usd)?;
+                        if before_recharge < 0.0 || required > available_recharge + available_gift {
+                            final_billing_status = "insufficient_quota".to_string();
+                            settlement.billing_status = final_billing_status.clone();
+                            return Ok(settlement);
+                        }
                         let debit_plan = plan_finite_wallet_debit(
-                            before_recharge,
-                            before_gift,
+                            super::request_funds_usd(available_recharge),
+                            super::request_funds_usd(available_gift),
                             billable_cost_usd,
                         );
-                        let (after_recharge, after_gift) =
-                            debit_plan.after_balances(before_recharge, before_gift);
+                        let (after_recharge, after_gift) = (
+                            before_recharge - debit_plan.recharge_deduction,
+                            before_gift - debit_plan.gift_deduction,
+                        );
                         validate_wallet_settlement_values(
                             after_recharge,
                             after_gift,
@@ -536,6 +604,13 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
             .write()
             .expect("settlement snapshot lock")
             .insert(settlement.request_id.clone(), settlement.clone());
+
+        if settlement.billing_status == "insufficient_quota" {
+            self.recoverable_usage
+                .write()
+                .expect("recoverable usage lock")
+                .insert(input.request_id.clone(), input);
+        }
 
         Ok(Some(settlement))
     }
@@ -1196,7 +1271,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finite_wallet_insufficient_balance_overdraws_and_settles() {
+    async fn finite_wallet_insufficient_balance_stays_nonnegative_and_recovers_after_funding() {
         let repository = InMemorySettlementRepository::seed(vec![sample_wallet()]);
         let settlement = repository
             .settle_usage(UsageSettlementInput {
@@ -1215,12 +1290,49 @@ mod tests {
             .expect("settlement should succeed")
             .expect("settlement should exist");
 
-        assert_eq!(settlement.billing_status, "settled");
+        assert_eq!(settlement.billing_status, "insufficient_quota");
         assert_eq!(settlement.wallet_balance_before, Some(12.0));
-        assert_eq!(settlement.wallet_balance_after, Some(-3.0));
-        assert_eq!(settlement.wallet_recharge_balance_after, Some(-3.0));
-        assert_eq!(settlement.wallet_gift_balance_after, Some(0.0));
-        assert_eq!(settlement.provider_monthly_used_usd, Some(15.0));
+        assert_eq!(settlement.wallet_balance_after, Some(12.0));
+        assert_eq!(settlement.wallet_recharge_balance_after, Some(10.0));
+        assert_eq!(settlement.wallet_gift_balance_after, Some(2.0));
+        assert_eq!(settlement.provider_monthly_used_usd, None);
+        let input = crate::repository::settlement::RecoverInsufficientQuotaInput {
+            request_id: "req-insufficient-wallet".to_string(),
+        };
+        let first = repository
+            .recover_insufficient_quota(input.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.collected_cost_units, 1_200_000_000);
+        assert_eq!(first.outstanding_cost_units, 300_000_000);
+        assert_eq!(
+            repository
+                .recover_insufficient_quota(input.clone())
+                .await
+                .unwrap()
+                .unwrap(),
+            first
+        );
+        repository
+            .wallets
+            .with_mut(|wallets| wallets.get_mut("wallet-1").unwrap().balance += 3.0);
+        let recovered = repository
+            .recover_insufficient_quota(input.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.outstanding_cost_units, 0);
+        assert_eq!(recovered.settlement.billing_status, "settled");
+        assert_eq!(recovered.settlement.provider_monthly_used_usd, Some(15.0));
+        assert_eq!(
+            repository
+                .recover_insufficient_quota(input)
+                .await
+                .unwrap()
+                .unwrap(),
+            recovered
+        );
     }
 
     #[tokio::test]
