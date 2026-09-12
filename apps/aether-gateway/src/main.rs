@@ -2198,6 +2198,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return run_healthcheck(app_port, args.healthcheck_timeout_ms).await;
     }
     init_service_runtime(args.runtime_config()?)?;
+    aether_gateway::validate_local_auth_jwt_secret()
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
     let sql_database_config = args.data.effective_sql_database_config();
     let data_redis_url = args.data.effective_redis_url();
     let runtime_backend =

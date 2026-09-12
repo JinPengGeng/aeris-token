@@ -9,3 +9,5 @@ services:
       context: .
       dockerfile: Dockerfile.app.local
     image: ${LOCAL_APP_IMAGE:-aether-app:latest}
+    environment:
+      ENVIRONMENT: development
