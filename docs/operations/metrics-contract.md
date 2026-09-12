@@ -19,6 +19,15 @@ monotonic; a restart resets them, so alerting should use `rate()` or
 corresponding failure branch is entered; retries that do not enter a failure
 branch do not increment a counter.
 
-The request RED contract and provider status dimensions are intentionally owned
-by Issue #306. The alert examples reference that future stable contract rather
-than introducing a second provider metric family here.
+The request RED contract was delivered in #306. `request_total` has fixed label
+keys `route_class`, `status_class`, `provider`, and `outcome`;
+`request_errors_total` omits `outcome` because it counts only the `error`
+terminal outcome. `provider` is a normalized provider **type**, never an
+arbitrary configured provider ID. Unrecognized types become `unknown`.
+These are terminal gateway outcomes, including gateway failures; the 5xx rule
+does not by itself establish that a provider attempt failed.
+
+The shared Prometheus text renderer declares HELP/TYPE once per metric family
+and retains every labeled sample. The real billing exporter output is checked
+with Prometheus `promtool`; the alert fixture tests pending, firing, counter
+reset and recovery behavior. See the runbook for commands and evidence limits.
