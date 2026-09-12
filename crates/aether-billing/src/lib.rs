@@ -14,8 +14,9 @@ pub use aether_usage_runtime::{
 pub use default_rule::{normalize_task_type, DefaultBillingRuleGenerator, VirtualBillingRule};
 pub use event_enrichment::{enrich_usage_event_with_billing, BillingModelContextLookup};
 pub use formula_engine::{
-    extract_variable_names, BillingIncompleteError, ExpressionEvaluationError, FormulaEngine,
-    FormulaEvaluationResult, FormulaEvaluationStatus, UnsafeExpressionError,
+    extract_variable_names, is_formula_function_allowed, BillingIncompleteError,
+    ExpressionEvaluationError, FormulaEngine, FormulaEvaluationResult, FormulaEvaluationStatus,
+    UnsafeExpressionError, FORMULA_ALLOWED_FUNCTIONS,
 };
 pub use models::{BillingDimension, BillingUnit, CostBreakdown};
 pub use precision::{

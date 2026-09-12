@@ -47,6 +47,17 @@ pub struct FormulaEngine;
 type TierMetadata = Option<(i64, serde_json::Value)>;
 type MappingResolution = Result<(serde_json::Value, bool, TierMetadata), ExpressionEvaluationError>;
 
+/// Function names supported by the billing expression language.
+///
+/// This is a public contract because the admin API validates formulas before
+/// storing them. Keep the parser, evaluator, and admin validation on this one
+/// declaration so a newly supported function cannot be rejected at write time.
+pub const FORMULA_ALLOWED_FUNCTIONS: &[&str] = &["min", "max", "abs", "round", "int", "float"];
+
+pub fn is_formula_function_allowed(name: &str) -> bool {
+    FORMULA_ALLOWED_FUNCTIONS.contains(&name)
+}
+
 impl Default for FormulaEngine {
     fn default() -> Self {
         Self::new()
@@ -735,6 +746,12 @@ impl<'a> Parser<'a> {
 }
 
 fn evaluate_function(name: &str, args: &[f64]) -> Result<f64, UnsafeExpressionError> {
+    if !is_formula_function_allowed(name) {
+        return Err(UnsafeExpressionError::Unsupported(format!(
+            "function not allowed: {name}"
+        )));
+    }
+
     match name {
         "min" => args.iter().copied().reduce(f64::min).ok_or_else(|| {
             UnsafeExpressionError::Unsupported("min() requires arguments".to_string())
@@ -765,15 +782,15 @@ fn evaluate_function(name: &str, args: &[f64]) -> Result<f64, UnsafeExpressionEr
         "float" => args.first().copied().ok_or_else(|| {
             UnsafeExpressionError::Unsupported("float() requires one argument".to_string())
         }),
-        _ => Err(UnsafeExpressionError::Unsupported(format!(
-            "function not allowed: {name}"
-        ))),
+        _ => unreachable!("allowed function list and evaluator must stay in sync"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_variable_names, FormulaEngine, FormulaEvaluationStatus};
+    use super::{
+        extract_variable_names, FormulaEngine, FormulaEvaluationStatus, FORMULA_ALLOWED_FUNCTIONS,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -784,6 +801,17 @@ mod tests {
         assert!(names.contains("output_cost"));
         assert!(names.contains("tax"));
         assert!(!names.contains("min"));
+    }
+
+    #[test]
+    fn every_allowed_function_is_evaluated_by_the_formula_engine() {
+        let engine = FormulaEngine::new();
+        for function in FORMULA_ALLOWED_FUNCTIONS {
+            let result = engine
+                .evaluate(&format!("{function}(2, 3)"), None, None, None, true)
+                .unwrap_or_else(|error| panic!("{function} must be executable: {error}"));
+            assert_eq!(result.status, FormulaEvaluationStatus::Complete);
+        }
     }
 
     #[test]

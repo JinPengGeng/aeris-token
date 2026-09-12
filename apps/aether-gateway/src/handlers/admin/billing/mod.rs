@@ -1,6 +1,7 @@
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
 use crate::GatewayError;
+use aether_billing::is_formula_function_allowed;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -181,17 +182,40 @@ fn admin_billing_validate_safe_expression(expression: &str) -> Result<(), String
     }
 
     let identifier = Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").expect("regex should compile");
-    const ALLOWED_FUNCTIONS: &[&str] = &["min", "max", "abs", "round", "int", "float"];
     for matched in identifier.find_iter(expression) {
         let name = matched.as_str();
         let next_non_ws = expression[matched.end()..]
             .chars()
             .find(|value| !value.is_whitespace());
-        if next_non_ws == Some('(') && !ALLOWED_FUNCTIONS.iter().any(|value| value == &name) {
+        if next_non_ws == Some('(') && !is_formula_function_allowed(name) {
             return Err(format!("Function not allowed: {name}"));
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admin_billing_validate_safe_expression;
+    use aether_billing::FORMULA_ALLOWED_FUNCTIONS;
+
+    #[test]
+    fn admin_validation_accepts_every_shared_formula_function() {
+        for function in FORMULA_ALLOWED_FUNCTIONS {
+            assert!(
+                admin_billing_validate_safe_expression(&format!("{function}(input_cost, tax)"))
+                    .is_ok(),
+                "{function} must be accepted by admin validation"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_validation_rejects_functions_outside_the_shared_allowlist() {
+        let error = admin_billing_validate_safe_expression("unapproved(input_cost)")
+            .expect_err("unapproved functions must be rejected");
+        assert_eq!(error, "Function not allowed: unapproved");
+    }
 }
 
 pub(crate) async fn maybe_build_local_admin_billing_response(
