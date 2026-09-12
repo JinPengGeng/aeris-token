@@ -18,9 +18,12 @@ from an idempotent duplicate. No schema change or tracing-to-database layer is
 introduced.
 
 The gateway finalizer remains synchronous because it is used by many response
-paths. It places a redacted record in a response extension; the outer proxy
-request future removes that extension and awaits persistence before returning
-the response to Hyper. A bounded two-second timeout prevents a database outage
+paths. It places a redacted record in a response extension; the proxy request's
+*lifecycle-owned* future removes that extension and awaits persistence before
+returning the response to Hyper. Keeping this continuation inside
+`run_request_with_usage` is required for disconnected clients: the lifecycle
+wrapper may finish the inner future in a background task after the handler
+future is dropped. A bounded two-second timeout prevents a database outage
 from holding a request indefinitely. Insert failures and timeouts are reported
 with a separate tracing event and preserve the business response, avoiding
 client retries of already-applied mutations.
@@ -41,9 +44,11 @@ client retries of already-applied mutations.
 
 Contract validation covers database text bounds and required fields. The
 backend composition test asserts that a configured PostgreSQL backend exposes
-the audit writer. Full Rust formatting and tests require a Rust toolchain; the
-current execution environment does not provide `cargo`, so CI must run the
-workspace checks before review.
+the audit writer. The request-lifecycle regression test proves that
+finalizer work continues after the handler future is dropped, covering the
+client-disconnect boundary. `cargo fmt --all` and `git diff --check` pass
+locally; the focused Rust test is also required in CI when the workspace
+toolchain is available.
 
 ## Follow-up
 
