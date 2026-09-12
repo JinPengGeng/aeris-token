@@ -92,10 +92,24 @@ jobs:
           bash tests/install_privileged_write_safety_test.sh
           bash tests/install_source_trust_test.sh
           bash tests/release_supply_chain_test.sh
-          bash tests/redis_durable_crash_drill.sh
           bash tests/update_compose_safety_test.sh
           bash tests/tunnel_installer_config_security_test.sh
           bash tests/cargo_audit_gate_test.sh
+
+      - name: Redis durable crash drill
+        shell: bash
+        run: |
+          mkdir -p artifacts/redis-durable
+          bash tests/redis_durable_crash_drill.sh 2>&1 | tee artifacts/redis-durable/crash-drill.log
+
+      - name: Upload Redis durable crash drill evidence
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: redis-durable-crash-drill
+          path: artifacts/redis-durable/
+          if-no-files-found: warn
+          retention-days: 14
 
   fmt:
     name: Format
@@ -425,11 +439,32 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@d5f9268ff7620505a81ada10ddf18cdd72240185 # nextest
 
+      - name: Install Redis for isolated runtime tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes redis-server
+
+      - name: Run strict Redis runtime tests and negative probes
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          AETHER_REQUIRE_LOCAL_REDIS_TESTS: "1"
+        run: bash tools/ci/run_redis_live_tests.sh
+
+      - name: Upload Redis runtime test evidence
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: redis-runtime-tests
+          path: artifacts/redis-runtime/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Test
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-        run: cargo nextest run --workspace --exclude aether-gateway --exclude aether-data --exclude aether-integration-tests
+        run: cargo nextest run --workspace --exclude aether-gateway --exclude aether-data --exclude aether-integration-tests --exclude aether-runtime-state
 
       - name: Show sccache stats
         if: always()
