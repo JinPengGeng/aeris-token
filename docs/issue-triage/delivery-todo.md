@@ -45,29 +45,27 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | --- | --- | --- | --- |
 | #276 | P1 | Keep blocked | resolve the real upstream sync conflict with a reviewed merge commit |
 | #268 | P1 | Keep | decide terminal telemetry semantics with scheduler failure-origin work |
-| #256 | P2 | Split | migrate runtime install URL only if fork artifacts are published |
+| #256 | P2 | Split, active | PR #331 records the no-fork-release policy and first-release migration gate; retain parent for release evidence |
 | #255 | P1 | Split, active | PR #329 persists audit after client disconnect; retain parent for broader mutation coverage and retry/reconciliation evidence |
-| #254 | P1 | In progress | #290 merged; add chat/images compatibility fixtures and validate the status/error/envelope/retry matrix |
+| #254 | P1 | In progress | PR #335 adds chat/images and Claude compatibility fixtures; retain parent for remaining endpoint coverage |
 | #253 | P1 | Keep | approve signup-credit, overdraft and abuse-control policy before code |
-| #247 | P1 | Split | finalize balance status/code/retry policy and notification triggers |
+| #247 | P1 | Split, active | PR #334 adds idempotent refund terminal notifications; retain parent for balance and notification transition coverage |
 | #241 | P2 | Split | #305 removes the silent `with_redis_url` no-op builder; parent remains open for broader architecture consistency |
 | #235 | P2 | Planned | create ADR index and ownership/rollback records |
 | #229 | P2 | Split | #304 merged the shared formula allowlist; add the remaining DX map and keep parent open |
 | #226 | P2 | Planned | measure dependency tree and pair allowlist work with #229 |
 | #225 | P1 | Split | generate tunnel env table and publish operations runbooks |
 | #224 | P1 | Split | #302 merged multi-node preflight; publish capacity smoke test and Redis failure runbook |
-| #223 | P1 | Split | #292 merged list/auth/idempotent redrive; run duplicate/poison, marker-TTL, capacity and real Redis replay drills |
+| #223 | P1 | Split, active | PR #333 adds Redis redrive idempotency/retention coverage and a recovery drill; retain parent for restore/backup evidence |
 | #222 | P2 | Planned | measure one provider/repository extension slice before generic rewrite |
 | #221 | P2 | Planned | produce call/dependency graph and extract one tested boundary |
 | #220 | P1 | Split | add Cargo/npm advisory scan and explicit policy fixture |
 | #218 | P1 | Split | #297 merged JWT startup validation; decide non-loopback environment/TLS and Redis durability slices |
 | #217 | P1 | Split | reopened after accidental auto-close; #307 metrics slice merged, #308 readiness and #306 RED remain under review |
-| #312 | P1 | Ready | implement the durable Redis production overlay and replay drill under #218 |
-| #311 | P1 | Ready | implement remote PostgreSQL TLS default hardening under #218 |
 | #308 | P1 | In progress | PR #327 implements bounded readiness probes; await required CI and deployment drill |
 | #307 | P1 | In progress | PR #323 merged runtime-owned billing/fail-open counters; complete Prometheus parse/alert drill and link #306 producer |
 | #306 | P1 | In progress | PR #324 adds bounded request RED producer and JSON/pretty evidence; complete provider source and lifecycle review |
-| #216 | P1 | Split | implement live-DB, VSCodex and build-performance child gates |
+| #216 | P1 | Split, active | PR #332 adds the dev profile build-performance gate; retain parent for live-DB and VSCodex required checks |
 | #215 | P2 | Planned | measure synchronous logging/SSE filtering/lock contention before changes |
 | #214 | P1 | Planned | add probe, graceful shutdown and accept-error acceptance tests |
 | #213 | P2 | Planned | split giant handler and standardize error payload boundaries |
@@ -78,10 +76,10 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #208 | P2 | Planned | reproduce NUMERIC/f64 paths and add adapter regression coverage |
 | #207 | P2 | Planned | bound internal errors and Windsurf buffering; add graceful shutdown slice |
 | #206 | P1 | Split | #300 tracks image authorization cost bypass; implement fail-closed unknown paid-image estimate, then bounded pricing |
+| #300 | P1 | Keep | validate bounded image cost estimation and wallet credit checks before changing authorization behavior |
 | #205 | P1 | Split | #299 merged opt-in/default-off and anti-downgrade; design signed provenance and non-root service slices |
-| #315 | P1 | Split | PR #320/#321 signed provenance decision and verifier merged; retain parent for release rotation follow-up |
-| #314 | P1 | Split | PR #322 service identity merged; retain parent for rollout evidence |
 | #316 | P2 | Split | PR #325 read-only historical NUMERIC inventory merged; decide whether reviewed backfill is needed |
+| #303 | P1 | Split, active | reviewed RSA Marvin exception is time-bounded and fail-closed; retain parent for dependency release/removal evidence |
 | #179 | P2 | Deferred | retain as roadmap; move actionable slices into child issues |
 | #158 | P2 | Deferred | upstream provider-scoped allowlist evaluation only |
 | #157 | P2 | Deferred | refresh upstream billing/quota registry; no blind cherry-pick |
@@ -143,8 +141,8 @@ audit parent #255 remains open for residual failure and integration semantics.
 ## 2026-09-13 live checkpoint (after PRs #323, #325 and #326)
 
 The authoritative remote inventory is **50 open issues**: 26 P1 and 24 P2.
-Their lifecycle labels are 6 `status:ready`, 27 `status:triage`, 11
-`status:blocked`, and 6 `status:in-progress`. This count is deliberately
+Their lifecycle labels are 1 `status:ready`, 27 `status:triage`, 11
+`status:blocked`, and 11 `status:in-progress`. This count is deliberately
 separate from the historical snapshots above.
 
 Completed fork-only slices since the previous checkpoint:
@@ -160,19 +158,20 @@ Completed fork-only slices since the previous checkpoint:
 
 Current delivery order:
 
-1. **#327/#328/#329** — finish required CI and squash auto-merge the readiness,
-   video-retention and audit-lifecycle slices; then record deployment/drill
-   evidence before changing parent Issue states.
+1. **#328/#329** — finish required CI and squash auto-merge the video-retention
+   and audit-lifecycle slices; then record deployment/drill evidence before
+   changing parent Issue states. #327 is already merged.
 2. **#324 / #306** — complete the provider production-source, cancellation,
    retry and streaming lifecycle review; enable auto-merge only after the
    RED producer contract is consistent with #307.
-3. **#216, #223, #247 and #254** — start the next P1 ready slices: live-DB/
-   VSCodex gates, Redis DLQ recovery drill, billing notification transitions,
-   and API compatibility fixtures.
+3. **#331–#335** — finish the install-policy, live-DB/build gate, Redis DLQ
+   recovery, billing notification and API compatibility slices now in progress.
 4. **#255, #211, #303 and #308 residual acceptance** — expand mutation-audit
    coverage, verify remaining sensitive-field paths, govern the RSA exception,
    and run readiness isolation drills.
-5. **Triage/blocked backlog** — review the remaining 27 triage and 11 blocked
+5. **#229 and #256** — complete the remaining P2 ready/community adoption work
+   after CI; keep runtime-install policy tied to the first fork release.
+6. **Triage/blocked backlog** — review the remaining 27 triage and 11 blocked
    issues, split only when acceptance criteria and ownership are concrete.
 
 PRs are squash-only and fork-only. A parent issue is closed only when its full
