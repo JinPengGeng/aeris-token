@@ -63,8 +63,14 @@ with tempfile.TemporaryDirectory(prefix="aether-compose-databases-") as director
             volume.get("target") == "/data"
             for volume in config["services"]["redis"].get("volumes", [])
         ), files
-        assert "--dir /tmp" in config["services"]["redis"]["command"]
-        assert "--appendonly no" in config["services"]["redis"]["command"]
+        redis_command = config["services"]["redis"]["command"]
+        redis_command_text = (
+            " ".join(redis_command)
+            if isinstance(redis_command, list)
+            else redis_command
+        )
+        assert "--dir /tmp" in redis_command_text
+        assert "--appendonly no" in redis_command_text
         assert app_env["AETHER_LOG_DESTINATION"] == "stdout"
         for key in ("DB_PASSWORD", "REDIS_PASSWORD"):
             result = compose_config(files, overrides={key: ""})
