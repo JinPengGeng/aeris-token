@@ -56,6 +56,21 @@ pub(crate) fn local_auth_jwt_secret() -> Result<String, String> {
     }
 }
 
+/// Validate the configured JWT secret before starting the network service.
+///
+/// Unlike request-time secret resolution, startup validation never uses the
+/// test-only development secret fallback. This keeps a misconfigured
+/// production deployment from appearing healthy until its first auth request.
+pub fn validate_local_auth_jwt_secret() -> Result<(), String> {
+    match std::env::var("JWT_SECRET_KEY") {
+        Ok(value) => validate_jwt_secret_value(Some(&value)).map(|_| ()),
+        Err(std::env::VarError::NotPresent) => validate_jwt_secret_value(None).map(|_| ()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("JWT_SECRET_KEY 必须是有效的UTF-8字符串".to_string())
+        }
+    }
+}
+
 fn base64url_encode(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
