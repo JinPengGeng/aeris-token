@@ -56,11 +56,14 @@ impl BillingService {
         else {
             return Ok(None);
         };
-        if normalize_task_type(&estimate.task_type) == "image" {
-            return Ok(None);
-        }
         if pricing.is_free_tier() {
             return Ok(Some(0.0));
+        }
+        // Image pricing still lacks a bounded authorization input. Keep paid
+        // images fail-closed until request dimensions and a conservative
+        // upper-bound contract are wired through this API.
+        if normalize_task_type(&estimate.task_type) == "image" {
+            return Ok(None);
         }
         if estimate.max_output_tokens.is_none()
             && pricing_resolutions.iter().any(|resolution| {
@@ -1397,6 +1400,22 @@ mod tests {
         assert!(err
             .to_string()
             .contains("Standard catalog contains malformed or unrecognized prices"));
+    }
+
+    #[test]
+    fn free_tier_image_authorization_estimate_is_zero_before_image_fallback() {
+        let pricing = BillingModelPricingSnapshot {
+            provider_billing_type: Some("free_tier".to_string()),
+            ..pricing()
+        };
+        let estimate = BillingAuthorizationEstimateInput::new("image", 0);
+
+        assert_eq!(
+            BillingService::new()
+                .estimate_authorization_cost_upper_bound(&pricing, &estimate)
+                .expect("free-tier image estimate should resolve"),
+            Some(0.0)
+        );
     }
 
     #[test]
