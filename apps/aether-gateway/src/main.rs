@@ -1532,6 +1532,15 @@ struct Args {
 
     #[arg(
         long,
+        env = "AETHER_GATEWAY_READINESS_WITHDRAWAL_DELAY_MS",
+        default_value_t = 2_000,
+        value_parser = clap::value_parser!(u64).range(0..=60_000)
+    )]
+    /// Keep probes available after readiness closes, before draining HTTP listeners.
+    readiness_withdrawal_delay_ms: u64,
+
+    #[arg(
+        long,
         env = "AETHER_GATEWAY_USAGE_SHUTDOWN_TIMEOUT_MS",
         default_value_t = 30_000
     )]
@@ -2605,6 +2614,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let public_base_url = resolve_local_http_base_url(app_port)?;
     let frontdoor_health_url = format!("{public_base_url}/_gateway/health");
     let shutdown_state = state.clone();
+    state.mark_startup_complete(args.node_role.spawns_background_tasks());
     let api_router = build_router_with_state(state);
 
     // Compose the final router: API routes + optional static file serving.
@@ -2651,30 +2661,42 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             result = &mut server => result,
             signal = aether_runtime::wait_for_shutdown_signal() => {
                 signal?;
-                info!("shutdown signal received, draining gateway requests");
+                shutdown_state.begin_readiness_shutdown();
+                info!("shutdown signal received, withdrawing gateway readiness");
+                let finished_during_withdrawal = tokio::select! {
+                    result = &mut server => Some(result),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(
+                        args.readiness_withdrawal_delay_ms,
+                    )) => None
+                };
                 shutdown.cancel();
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(args.http_shutdown_timeout_ms),
-                    &mut server,
-                ).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        warn!(
-                            event_name = "gateway_http_shutdown_deadline",
-                            connections = http_connection_budget.snapshot().in_flight,
-                            "HTTP drain deadline reached; closing remaining sockets"
-                        );
-                        http_connection_budget.force_close();
-                        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server).await {
-                            Ok(result) => result,
-                            Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut,
-                                "gateway connection tasks did not stop after forced close").into()),
+                if let Some(result) = finished_during_withdrawal {
+                    result
+                } else {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(args.http_shutdown_timeout_ms),
+                        &mut server,
+                    ).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!(
+                                event_name = "gateway_http_shutdown_deadline",
+                                connections = http_connection_budget.snapshot().in_flight,
+                                "HTTP drain deadline reached; closing remaining sockets"
+                            );
+                            http_connection_budget.force_close();
+                            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server).await {
+                                Ok(result) => result,
+                                Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut,
+                                    "gateway connection tasks did not stop after forced close").into()),
+                            }
                         }
                     }
                 }
             }
         }
     };
+    shutdown_state.begin_readiness_shutdown();
     let usage_result = shutdown_state
         .shutdown_usage_runtime(std::time::Duration::from_millis(
             args.usage_shutdown_timeout_ms,
@@ -3667,6 +3689,7 @@ mod tests {
             http_header_max_bytes: DEFAULT_GATEWAY_HTTP_HEADER_MAX_BYTES,
             http_max_headers: DEFAULT_GATEWAY_HTTP_MAX_HEADERS,
             http_shutdown_timeout_ms: 30_000,
+            readiness_withdrawal_delay_ms: 2_000,
             usage_shutdown_timeout_ms: 30_000,
             healthcheck: false,
             healthcheck_timeout_ms: 3_000,

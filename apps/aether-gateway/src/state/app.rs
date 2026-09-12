@@ -385,6 +385,7 @@ pub(crate) struct FrontdoorLimiters {
 
 #[derive(Debug, Clone)]
 pub struct AppState {
+    pub(crate) readiness: Arc<crate::readiness::Readiness>,
     #[cfg(test)]
     pub(crate) execution_runtime_override_base_url: Option<String>,
     #[cfg(test)]

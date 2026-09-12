@@ -11,7 +11,7 @@ pub(crate) fn mount_public_support_routes(router: Router<AppState>) -> Router<Ap
         .route("/v1/models", get(proxy_request))
         .route("/v1beta/models", get(proxy_request))
         .route("/v1/health", get(proxy_request))
-        .route("/health", get(proxy_request))
+        .route("/health", get(crate::api::core::liveness))
         .route("/v1/providers", get(proxy_request))
         .route("/v1/providers/{*provider_path}", get(proxy_request))
         .route("/v1/test-connection", get(proxy_request))

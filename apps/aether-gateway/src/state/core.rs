@@ -342,6 +342,7 @@ impl AppState {
             );
         }
         Ok(Self {
+            readiness: Arc::new(crate::readiness::Readiness::default()),
             #[cfg(test)]
             execution_runtime_override_base_url: execution_runtime_override_base_url
                 .map(|value| value.trim_end_matches('/').to_string())
@@ -2211,6 +2212,7 @@ impl AppState {
         &self,
         timeout: Duration,
     ) -> Result<(), aether_data_contracts::DataLayerError> {
+        self.begin_readiness_shutdown();
         tokio::time::timeout(timeout, async {
             let local_queue = self.runtime_state.is_memory().then(|| {
                 let queue: Arc<dyn RuntimeQueueStore> = self.runtime_state.clone();
