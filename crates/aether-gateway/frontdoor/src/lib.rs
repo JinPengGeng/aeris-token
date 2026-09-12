@@ -2,6 +2,7 @@ pub mod body;
 mod connection;
 pub mod middleware;
 mod request_id;
+pub mod telemetry;
 
 pub use body::{
     BodyBufferBudget, BodyBufferError, BodyBufferPolicy, BodyBufferReservation, BufferedBody,

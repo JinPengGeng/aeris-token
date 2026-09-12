@@ -9,6 +9,9 @@ use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
 use crate::middleware::{sanitize_access_log_path, should_downgrade_access_log, RequestLogEmitted};
 use crate::AppState;
+use aether_gateway_frontdoor::telemetry::{
+    normalize_provider_type, normalize_route_class, status_class, PROVIDER_TYPE_HEADER,
+};
 use aether_runtime::{maybe_hold_axum_response_permit, AdmissionPermit};
 use axum::body::{Body, Bytes};
 use axum::http::{self, header::HeaderName, header::HeaderValue, Response};
@@ -84,9 +87,11 @@ pub(super) fn finalize_gateway_response(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("none")
         .to_string();
-    let route_class = control_decision
-        .and_then(|decision| decision.route_class.as_deref())
-        .unwrap_or("passthrough");
+    let route_class = normalize_route_class(
+        control_decision
+            .and_then(|decision| decision.route_class.as_deref())
+            .or(Some("passthrough")),
+    );
     let request_id = response
         .headers()
         .get(CONTROL_REQUEST_ID_HEADER)
@@ -102,6 +107,25 @@ pub(super) fn finalize_gateway_response(
         .map(|auth_context| auth_context.api_key_id.as_str())
         .unwrap_or("-");
     let status_code = response.status().as_u16();
+    let status_class = status_class(response.status());
+    let provider_type = normalize_provider_type(
+        response
+            .headers()
+            .get(PROVIDER_TYPE_HEADER)
+            .and_then(|value| value.to_str().ok()),
+    );
+    let request_outcome = if response.status().is_server_error() {
+        "error"
+    } else {
+        "success"
+    };
+    crate::request_metrics::global_request_metrics().record(
+        Some(route_class),
+        status_class,
+        Some(provider_type),
+        request_outcome,
+        elapsed_ms,
+    );
     let sanitized_path_and_query = sanitize_access_log_path(path_and_query);
     emit_admin_audit(
         &mut response,
@@ -117,6 +141,8 @@ pub(super) fn finalize_gateway_response(
             log_type = "access",
             status = "failed",
             status_code,
+            status_class,
+            provider_type,
             trace_id = %trace_id,
             request_id,
             remote_addr = %remote_addr,
@@ -138,6 +164,8 @@ pub(super) fn finalize_gateway_response(
             log_type = "access",
             status = "completed",
             status_code,
+            status_class,
+            provider_type,
             trace_id = %trace_id,
             request_id,
             remote_addr = %remote_addr,
@@ -159,6 +187,8 @@ pub(super) fn finalize_gateway_response(
             log_type = "access",
             status = "completed",
             status_code,
+            status_class,
+            provider_type,
             trace_id = %trace_id,
             request_id,
             remote_addr = %remote_addr,
