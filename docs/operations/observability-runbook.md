@@ -66,7 +66,7 @@ sum by (provider) (
 ```
 
 Check provider health, key rotation and upstream status before changing routing.
-The `provider` label is a bounded provider type such as `openai` or `claude`;
+The `provider` label is a bounded provider type such as `openai` or `claude_code`;
 unrecognized values map to `unknown`. It is not a configured provider ID.
 Never add a model, URL, request ID or raw error label. The RED contract delivered
 by Issue #306 counts terminal gateway failures, so inspect the failure origin

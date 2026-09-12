@@ -38,6 +38,13 @@ tests:
         eval_time: 2m
         exp_samples: []
       - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherBillingGuardFailOpen",alertstate="firing",component="gateway",operation="daily_quota",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="AetherBillingGuardFailOpen",alertstate="firing",component="gateway",operation="rpm",severity="critical"}'
+            value: 1
+      - expr: 'ALERTS{alertstate="firing"}'
         eval_time: 6m
         exp_samples:
           - labels: 'ALERTS{alertname="AetherBillingGuardFailOpen",alertstate="firing",component="gateway",operation="daily_quota",severity="critical"}'
@@ -71,7 +78,7 @@ tests:
     input_series:
       - series: 'aether_gateway_request_errors_total{route_class="ai_public",provider="openai",status_class="5xx"}'
         values: '0+1x10'
-      - series: 'aether_gateway_request_errors_total{route_class="ai_public",provider="claude",status_class="4xx"}'
+      - series: 'aether_gateway_request_errors_total{route_class="ai_public",provider="claude_code",status_class="4xx"}'
         values: '0+2x10'
     promql_expr_test:
       - expr: 'ALERTS{alertstate="firing"}'
