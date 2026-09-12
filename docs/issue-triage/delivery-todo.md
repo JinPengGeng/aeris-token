@@ -47,7 +47,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #268 | P1 | Keep | decide terminal telemetry semantics with scheduler failure-origin work |
 | #256 | P2 | Split, active | PR #331 records the no-fork-release policy and first-release migration gate; retain parent for release evidence |
 | #255 | P1 | Split, active | PR #329 persists audit after client disconnect; retain parent for broader mutation coverage and retry/reconciliation evidence |
-| #254 | P1 | In progress | PR #335 adds chat/images and Claude compatibility fixtures; retain parent for remaining endpoint coverage |
+| #254 | P1 | Split | PR #335 merged the chat/images and Claude compatibility fixtures; retain parent for remaining endpoint coverage |
 | #253 | P1 | Keep | approve signup-credit, overdraft and abuse-control policy before code |
 | #247 | P1 | Split, active | PR #334 adds idempotent refund terminal notifications; retain parent for balance and notification transition coverage |
 | #241 | P2 | Split | #305 removes the silent `with_redis_url` no-op builder; parent remains open for broader architecture consistency |
@@ -141,8 +141,8 @@ audit parent #255 remains open for residual failure and integration semantics.
 ## 2026-09-13 live checkpoint (after PRs #323, #325 and #326)
 
 The authoritative remote inventory is **50 open issues**: 26 P1 and 24 P2.
-Their lifecycle labels are 1 `status:ready`, 27 `status:triage`, 11
-`status:blocked`, and 11 `status:in-progress`. This count is deliberately
+Their lifecycle labels are 1 `status:ready`, 28 `status:triage`, 11
+`status:blocked`, and 10 `status:in-progress`. This count is deliberately
 separate from the historical snapshots above.
 
 Completed fork-only slices since the previous checkpoint:
@@ -155,7 +155,9 @@ Completed fork-only slices since the previous checkpoint:
   reconciliation acceptance.
 - PR #325 merged the read-only historical NUMERIC audit (`c58ccc85…`); #316
   remains open pending an explicitly reviewed backfill decision.
-- PR #326 merged this delivery TODO/workflow refresh (`042504cf…`).
+- PR #326 merged the previous delivery TODO/workflow refresh (`042504cf…`).
+- PR #335 merged the public API compatibility fixture slice (`ace87b52…`);
+  #254 remains open for any uncovered endpoints.
 - Earlier PRs #317–#322 remain merged; their parent Issues retain only the
   residual acceptance documented above.
 
@@ -167,8 +169,9 @@ Current delivery order:
 2. **#324 / #306** — complete the provider production-source, cancellation,
    retry and streaming lifecycle review; enable auto-merge only after the
    RED producer contract is consistent with #307.
-3. **#331–#335** — finish the install-policy, live-DB/build gate, Redis DLQ
-   recovery, billing notification and API compatibility slices now in progress.
+3. **#331–#334** — finish the install-policy, live-DB/build gate, Redis DLQ
+   recovery and billing notification slices now in progress. #335 is merged;
+   #254 remains open for residual endpoint coverage.
 4. **#255, #211, #303 and #308 residual acceptance** — expand mutation-audit
    coverage, verify remaining sensitive-field paths, govern the RSA exception,
    and run readiness isolation drills.
