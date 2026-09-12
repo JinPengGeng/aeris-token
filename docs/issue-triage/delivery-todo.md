@@ -158,6 +158,8 @@ Completed fork-only slices since the previous checkpoint:
 - PR #326 merged the previous delivery TODO/workflow refresh (`042504cf…`).
 - PR #335 merged the public API compatibility fixture slice (`ace87b52…`);
   #254 remains open for any uncovered endpoints.
+- PR #332 merged the dev-profile build-performance slice (`99225356…`);
+  #216 remains open for live-DB and VSCodex gate coverage.
 - Earlier PRs #317–#322 remain merged; their parent Issues retain only the
   residual acceptance documented above.
 
@@ -169,9 +171,9 @@ Current delivery order:
 2. **#324 / #306** — complete the provider production-source, cancellation,
    retry and streaming lifecycle review; enable auto-merge only after the
    RED producer contract is consistent with #307.
-3. **#331–#334** — finish the install-policy, live-DB/build gate, Redis DLQ
-   recovery and billing notification slices now in progress. #335 is merged;
-   #254 remains open for residual endpoint coverage.
+3. **#331, #333 and #334** — finish the install-policy, Redis DLQ recovery and
+   billing notification slices now in progress. #332 and #335 are merged;
+   #216 and #254 remain open for residual acceptance.
 4. **#255, #211, #303 and #308 residual acceptance** — expand mutation-audit
    coverage, verify remaining sensitive-field paths, govern the RSA exception,
    and run readiness isolation drills.
