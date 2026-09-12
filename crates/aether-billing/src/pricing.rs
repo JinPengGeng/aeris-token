@@ -1554,3 +1554,16 @@ pub struct BillingComputation {
     pub is_free_tier: bool,
     pub pricing_resolution: BillingPricingResolution,
 }
+
+impl BillingComputation {
+    /// Apply both multipliers before the final currency rounding. The provider-
+    /// only `actual_total_cost` has already been rounded and loses information
+    /// needed when an API-key multiplier increases the amount again.
+    pub(crate) fn cost_before_final_rounding(&self, api_key_multiplier: f64) -> f64 {
+        if self.is_free_tier {
+            0.0
+        } else {
+            self.cost_result.cost * (self.rate_multiplier * api_key_multiplier)
+        }
+    }
+}

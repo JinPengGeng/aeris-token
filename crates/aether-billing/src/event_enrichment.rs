@@ -400,11 +400,8 @@ fn apply_billing_computation(
         .filter(|value| value.is_finite() && *value >= 0.0)
         .unwrap_or(1.0);
     let combined_rate_multiplier = provider_rate_multiplier * api_key_billing_multiplier;
-    let actual_total_cost = if computation.is_free_tier {
-        0.0
-    } else {
-        crate::quantize_cost(computation.cost_result.cost * combined_rate_multiplier)
-    };
+    let actual_total_cost =
+        crate::quantize_cost(computation.cost_before_final_rounding(api_key_billing_multiplier));
     event.data.total_cost_usd = Some(computation.cost_result.cost);
     event.data.actual_total_cost_usd = Some(actual_total_cost);
     merge_billing_snapshot_metadata(
@@ -1982,6 +1979,106 @@ mod tests {
                 .and_then(Value::as_str),
             Some("image")
         );
+    }
+
+    #[tokio::test]
+    async fn image_quote_matches_usage_enrichment_at_multiplier_rounding_boundaries() {
+        use crate::{BillingModelPricingSnapshot, BillingService, BillingUsageInput};
+
+        for price in [0.050_000_04, 0.000_000_01, 0.000_000_05] {
+            let context = StoredBillingModelContext::new(
+                "provider-1".into(),
+                Some("pay_as_you_go".into()),
+                Some("key-1".into()),
+                Some(json!({"openai:image": 0.1})),
+                None,
+                "image-model".into(),
+                "image-model".into(),
+                None,
+                Some(0.0),
+                Some(json!({"image_output_price_default": price})),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let pricing = BillingModelPricingSnapshot::from(&context);
+            let service = BillingService::new();
+            let quote = service
+                .quote_image_authorization(
+                    &pricing,
+                    &crate::BillingImageAuthorizationInput {
+                        image_count: 1,
+                        max_image_count: 10,
+                        operation: "generate".into(),
+                        size: Some("1024x1024".into()),
+                        quality: Some("medium".into()),
+                        output_format: Some("png".into()),
+                        partial_images: 0,
+                        possible_outputs: vec![crate::BillingImageOutputDimensions {
+                            size: "1024x1024".into(),
+                            quality: "medium".into(),
+                        }],
+                        api_format: Some("openai:image".into()),
+                        requested_processing_tier: None,
+                        api_key_multiplier: 10.0,
+                        token_bounds: None,
+                    },
+                )
+                .unwrap()
+                .unwrap();
+            let mut event = UsageEvent::new(
+                UsageEventType::Completed,
+                "image-rounding",
+                UsageEventData {
+                    provider_name: "OpenAI Image".into(),
+                    model: "image-model".into(),
+                    provider_id: Some("provider-1".into()),
+                    provider_api_key_id: Some("key-1".into()),
+                    api_key_billing_multiplier: Some(10.0),
+                    request_type: Some("image".into()),
+                    api_format: Some("openai:image".into()),
+                    endpoint_api_format: Some("openai:image".into()),
+                    status_code: Some(200),
+                    request_metadata: Some(json!({"dimensions": {
+                        "image_count": 1, "image_size": "1024x1024", "image_quality": "medium", "image_output_format": "png"
+                    }})),
+                    ..UsageEventData::default()
+                },
+            );
+            enrich_usage_event_with_billing(
+                &TestLookup {
+                    name_context: Some(context),
+                    model_id_context: None,
+                },
+                &mut event,
+            )
+            .await
+            .unwrap();
+            let frozen = service
+                .calculate_image_with_quote(
+                    &quote,
+                    &BillingUsageInput {
+                        image_count: 1,
+                        request_count: 1,
+                        image_size: Some("1024x1024".into()),
+                        image_quality: Some("medium".into()),
+                        image_output_format: Some("png".into()),
+                        api_format: Some("openai:image".into()),
+                        ..BillingUsageInput::new("image")
+                    },
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.data.actual_total_cost_usd, Some(price));
+            let enriched_units =
+                (event.data.actual_total_cost_usd.unwrap() * 100_000_000.0).round() as i64;
+            assert_eq!(frozen.calculated_units, enriched_units);
+            assert!(quote.upper_bound_units() >= enriched_units);
+            assert!(!frozen.requires_reconciliation);
+        }
     }
 
     #[tokio::test]

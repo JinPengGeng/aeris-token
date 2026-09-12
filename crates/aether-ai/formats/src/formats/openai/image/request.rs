@@ -48,6 +48,54 @@ pub struct NormalizedOpenAiImageRequest {
     user: Option<String>,
 }
 
+/// Content-free dimensions taken from the existing normalized request. Provider
+/// projection may still change dimensions or lower the count limit; authorization
+/// must use the final projection and separately prove any token-cost bound.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct OpenAiImageAuthorizationDimensions {
+    pub operation: String,
+    pub image_count: u64,
+    pub max_image_count: u64,
+    pub size: Option<String>,
+    pub quality: Option<String>,
+    pub output_format: Option<String>,
+    pub partial_images: u64,
+    pub has_input_images: bool,
+    pub has_mask: bool,
+}
+
+impl NormalizedOpenAiImageRequest {
+    pub fn authorization_dimensions(&self) -> OpenAiImageAuthorizationDimensions {
+        OpenAiImageAuthorizationDimensions {
+            operation: self.operation.as_str().to_string(),
+            image_count: self.image_count.unwrap_or(1),
+            max_image_count: self.max_generation_count,
+            size: self
+                .tool
+                .get("size")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            quality: self
+                .tool
+                .get("quality")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            output_format: self
+                .summary_json
+                .get("output_format")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            partial_images: self
+                .summary_json
+                .get("partial_images")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            has_input_images: !self.images.is_empty(),
+            has_mask: self.tool.contains_key("input_image_mask"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenAiImageNormalizeOptions {
     max_generation_count: u64,
@@ -2115,6 +2163,37 @@ mod tests {
     }
 
     #[test]
+    fn image_authorization_dimensions_use_normalized_fields_without_content() {
+        let parts = request_parts("/v1/images/generations", Some("application/json"));
+        let request = normalize_openai_image_request_with_options(
+            &parts,
+            &json!({"n": 2, "size": "1024x1024", "quality": "hd", "output_format": "jpg", "partial_images": 3,
+                "prompt": "secret prompt", "user": "private user"}),
+            None,
+            OpenAiImageNormalizeOptions::with_max_generation_count(2),
+        ).unwrap();
+        let dimensions = request.authorization_dimensions();
+        assert_eq!(dimensions.image_count, 2);
+        assert_eq!(dimensions.max_image_count, 2);
+        assert_eq!(dimensions.size.as_deref(), Some("1024x1024"));
+        assert_eq!(dimensions.quality.as_deref(), Some("high"));
+        assert_eq!(dimensions.output_format.as_deref(), Some("jpeg"));
+        assert_eq!(dimensions.partial_images, 3);
+        assert!(!dimensions.has_input_images);
+        let serialized = serde_json::to_string(&dimensions).unwrap();
+        assert!(!serialized.contains("secret prompt"));
+        assert!(!serialized.contains("private user"));
+        let over_limit = json!({"n": 3});
+        assert!(normalize_openai_image_request_with_options(
+            &parts,
+            &over_limit,
+            None,
+            OpenAiImageNormalizeOptions::with_max_generation_count(2)
+        )
+        .is_none());
+    }
+
+    #[test]
     fn resolves_openai_image_sync_spec() {
         let spec = resolve_sync_spec("openai_image_sync").expect("spec");
         assert_eq!(spec.api_format, "openai:image");
@@ -2420,6 +2499,12 @@ mod tests {
         assert_eq!(request.requested_model.as_deref(), Some("gpt-image-2"));
         assert_eq!(request.prompt.as_deref(), Some("edit this image"));
         assert_eq!(request.images.len(), 1);
+        let dimensions = request.authorization_dimensions();
+        assert_eq!(dimensions.operation, "edit");
+        assert_eq!(dimensions.image_count, 1);
+        assert!(dimensions.has_input_images);
+        assert!(!dimensions.has_mask);
+        assert!(dimensions.size.is_none());
         assert_eq!(
             request.tool.get("action").and_then(|value| value.as_str()),
             Some("edit")
