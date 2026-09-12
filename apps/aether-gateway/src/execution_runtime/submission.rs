@@ -42,6 +42,7 @@ pub(super) fn maybe_build_local_core_error_response(
     }
 
     let mut response_headers = payload.headers.clone();
+    strip_nonretryable_error_headers(&mut response_headers, &response_body_json);
     response_headers.remove("content-encoding");
     response_headers.remove("content-length");
     response_headers.insert("content-type".to_string(), "application/json".to_string());
@@ -50,12 +51,13 @@ pub(super) fn maybe_build_local_core_error_response(
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
     response_headers.insert("content-length".to_string(), body_bytes.len().to_string());
 
+    let source_status = status_source_json
+        .as_ref()
+        .map_or(payload.status_code, |body_json| {
+            resolve_local_sync_error_status_code(payload.status_code, body_json)
+        });
     Ok(Some(build_client_response_from_parts(
-        status_source_json
-            .as_ref()
-            .map_or(payload.status_code, |body_json| {
-                resolve_local_sync_error_status_code(payload.status_code, body_json)
-            }),
+        resolve_local_sync_error_status_code(source_status, &response_body_json),
         &response_headers,
         Body::from(body_bytes),
         trace_id,
@@ -85,6 +87,7 @@ fn build_local_sync_response_from_json(
     payload: &GatewaySyncReportRequest,
     body_json: serde_json::Value,
 ) -> Result<Response<Body>, GatewayError> {
+    let body_json = normalize_public_quota_error_body(payload, body_json);
     let body_has_error = has_nested_error(&body_json);
     let status_code = if body_has_error
         || (payload.status_code >= 400 && is_core_error_finalize_kind(payload.report_kind.as_str()))
@@ -95,6 +98,7 @@ fn build_local_sync_response_from_json(
     };
 
     let mut response_headers = payload.headers.clone();
+    strip_nonretryable_error_headers(&mut response_headers, &body_json);
     response_headers.remove("content-encoding");
     response_headers.remove("content-length");
     response_headers.insert("content-type".to_string(), "application/json".to_string());
@@ -243,11 +247,15 @@ pub(crate) fn build_best_effort_local_core_error_body(
     if client_api_format.is_empty() {
         return Ok(None);
     }
-    if client_api_format == provider_api_format {
+    let details = extract_local_sync_error_details(payload.status_code, body_json);
+    if client_api_format == provider_api_format
+        && (details.kind != LocalCoreSyncErrorKind::QuotaExhausted
+            || !(client_api_format.starts_with("openai:")
+                || client_api_format == "claude:messages"))
+    {
         return Ok(Some(body_json.clone()));
     }
 
-    let details = extract_local_sync_error_details(payload.status_code, body_json);
     Ok(build_core_error_body_for_client_format(
         &client_api_format,
         &details.message,
@@ -264,7 +272,10 @@ pub(crate) fn resolve_local_core_error_response_body_json(
     }
 
     if let Some(client_body_json) = payload.client_body_json.clone() {
-        return Ok(Some(client_body_json));
+        return Ok(Some(normalize_public_quota_error_body(
+            payload,
+            client_body_json,
+        )));
     }
 
     if let Some(body_json) = resolve_local_sync_source_body_json(payload)? {
@@ -373,6 +384,17 @@ pub(crate) fn resolve_local_sync_error_status_code(
     status_code: u16,
     body_json: &serde_json::Value,
 ) -> u16 {
+    let error = body_json.get("error").unwrap_or(body_json);
+    let error_type = error.get("type").and_then(serde_json::Value::as_str);
+    let code = error.get("code").and_then(serde_json::Value::as_str);
+    if LocalCoreSyncErrorKind::is_quota_exhausted_error(error_type, code) {
+        let format = if error_type.is_some_and(|value| value == "billing_error") {
+            "claude:messages"
+        } else {
+            "openai:chat"
+        };
+        return LocalCoreSyncErrorKind::QuotaExhausted.http_status_code(format);
+    }
     if (400..600).contains(&status_code) {
         return status_code;
     }
@@ -409,7 +431,39 @@ pub(crate) fn resolve_local_sync_error_status_code(
         raw_code.as_deref(),
         message.as_str(),
     );
-    default_status_code_for_local_sync_error_kind(kind)
+    kind.http_status_code("")
+}
+
+fn normalize_public_quota_error_body(
+    payload: &GatewaySyncReportRequest,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let details = extract_local_sync_error_details(payload.status_code, &body);
+    let format = resolve_local_sync_client_api_format(payload);
+    if details.kind == LocalCoreSyncErrorKind::QuotaExhausted
+        && (format.starts_with("openai:") || format == "claude:messages")
+    {
+        return build_core_error_body_for_client_format(
+            &format,
+            &details.message,
+            details.code.as_deref(),
+            details.kind,
+        )
+        .unwrap_or(body);
+    }
+    body
+}
+
+fn strip_nonretryable_error_headers(
+    headers: &mut std::collections::BTreeMap<String, String>,
+    body: &serde_json::Value,
+) {
+    if matches!(
+        extract_local_sync_error_details(200, body).kind,
+        LocalCoreSyncErrorKind::QuotaExhausted | LocalCoreSyncErrorKind::PermissionDenied
+    ) {
+        headers.retain(|name, _| !name.eq_ignore_ascii_case("retry-after"));
+    }
 }
 
 fn extract_local_sync_error_details(
@@ -475,6 +529,11 @@ fn classify_local_sync_error_kind(
     raw_code: Option<&str>,
     message: &str,
 ) -> LocalCoreSyncErrorKind {
+    // Exact structured billing hints take precedence over 429 and transient
+    // rate-limit text. Do not infer exhausted credit from arbitrary messages.
+    if status_code == 402 || LocalCoreSyncErrorKind::is_quota_exhausted_error(raw_type, raw_code) {
+        return LocalCoreSyncErrorKind::QuotaExhausted;
+    }
     let mut fingerprint = String::new();
     for segment in [raw_type, raw_status, raw_code, Some(message)] {
         if let Some(segment) = segment.map(str::trim).filter(|value| !value.is_empty()) {
@@ -539,21 +598,6 @@ fn classify_local_sync_error_kind(
         return LocalCoreSyncErrorKind::ServerError;
     }
     LocalCoreSyncErrorKind::InvalidRequest
-}
-
-fn default_status_code_for_local_sync_error_kind(kind: LocalCoreSyncErrorKind) -> u16 {
-    match kind {
-        LocalCoreSyncErrorKind::InvalidRequest | LocalCoreSyncErrorKind::ContextLengthExceeded => {
-            400
-        }
-        LocalCoreSyncErrorKind::RequestTooLarge => 413,
-        LocalCoreSyncErrorKind::Authentication => 401,
-        LocalCoreSyncErrorKind::PermissionDenied => 403,
-        LocalCoreSyncErrorKind::NotFound => 404,
-        LocalCoreSyncErrorKind::RateLimit => 429,
-        LocalCoreSyncErrorKind::Overloaded => 503,
-        LocalCoreSyncErrorKind::ServerError => 500,
-    }
 }
 
 pub(crate) fn strip_utf8_bom_and_ws(mut body: &[u8]) -> &[u8] {
@@ -729,6 +773,158 @@ mod tests {
             body_base64: None,
             telemetry: None,
         }
+    }
+
+    #[tokio::test]
+    async fn public_quota_permission_and_provider_rate_fixtures_match_finalize_responses() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/api/fixtures/public-api-compatibility.json"
+        ))
+        .expect("fixture should parse");
+        let mut count = 0;
+        for case in fixture["cases"].as_array().expect("cases") {
+            let kind = case["kind"].as_str().expect("kind");
+            if !matches!(kind, "quota_exhausted" | "permission_denied" | "rate_limit") {
+                continue;
+            }
+            count += 1;
+            let format = case["client_format"].as_str().expect("format");
+            let report_kind = match format {
+                "openai:responses" => "openai_responses_sync_finalize",
+                "openai:embedding" => "openai_embedding_sync_finalize",
+                "claude:messages" => "claude_chat_sync_finalize",
+                _ => "openai_chat_sync_finalize",
+            };
+            // Exercise both protocol directions and same-format finalization,
+            // including HTTP-200 bodies and bodies already converted by a worker.
+            for provider in ["openai:chat", "claude:messages"] {
+                let provider_type = match kind {
+                    "quota_exhausted" if provider == "claude:messages" => "billing_error",
+                    "quota_exhausted" => "insufficient_quota",
+                    "permission_denied" => "permission_error",
+                    _ => "rate_limit_error",
+                };
+                let provider_status = match kind {
+                    "quota_exhausted" if provider == "claude:messages" => 402,
+                    "permission_denied" => 403,
+                    _ => 429,
+                };
+                for source_status in [200, provider_status] {
+                    for preconverted in [false, true] {
+                        let mut source_body = json!({"error": {
+                            "type": provider_type,
+                            "message": "private balance_remaining=-12.345678"
+                        }});
+                        if provider == "claude:messages" {
+                            source_body["type"] = json!("error");
+                        }
+                        if kind == "rate_limit" {
+                            source_body["error"]["code"] = json!("rate_limit_exceeded");
+                        }
+                        let mut payload = core_finalize_payload(
+                            report_kind,
+                            format,
+                            provider,
+                            source_status,
+                            source_body,
+                        );
+                        if preconverted {
+                            payload.client_body_json =
+                                super::build_best_effort_local_core_error_body(
+                                    &payload,
+                                    payload.body_json.as_ref().expect("source body"),
+                                )
+                                .expect("conversion should succeed");
+                        }
+                        // Nonretryable errors discard even an upstream-supplied
+                        // header. A rate limit retains only a known wait time.
+                        if kind != "rate_limit" || !case["retry_after"].is_null() {
+                            payload
+                                .headers
+                                .insert("Retry-After".to_string(), "1".to_string());
+                        }
+                        let response = maybe_build_local_core_error_response(
+                            "trace-quota-fixture",
+                            &test_decision(),
+                            &payload,
+                        )
+                        .expect("response should build")
+                        .expect("finalizer supported");
+                        assert_eq!(
+                            u64::from(response.status().as_u16()),
+                            case["status"].as_u64().unwrap(),
+                            "{} source={provider}/{source_status}",
+                            case["id"]
+                        );
+                        assert_eq!(
+                            response.headers()[crate::constants::TRACE_ID_HEADER],
+                            "trace-quota-fixture"
+                        );
+                        assert_eq!(
+                            response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|value| value.to_str().ok()),
+                            case["retry_after"].as_str(),
+                            "{} retry",
+                            case["id"]
+                        );
+                        let body: serde_json::Value = serde_json::from_slice(
+                            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            body["error"]["type"], case["error_type"],
+                            "{} type",
+                            case["id"]
+                        );
+                        assert_eq!(body["error"]["code"], case["error_code"]);
+                        if case["envelope"] == "claude" {
+                            assert_eq!(body["type"], "error");
+                        }
+                        if kind == "quota_exhausted" {
+                            assert_eq!(body["error"]["message"], "Insufficient quota");
+                            assert!(!body.to_string().contains("12.345678"));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            count, 16,
+            "all four endpoints need quota, permission and known/unknown rate-limit waits"
+        );
+    }
+
+    #[test]
+    fn billing_classification_precedes_429_without_guessing_from_message_text() {
+        use crate::ai_serving::LocalCoreSyncErrorKind;
+        for code in [
+            "credit_balance_exhausted",
+            "balance_exceeded",
+            "insufficient_quota",
+        ] {
+            assert_eq!(
+                super::classify_local_sync_error_kind(
+                    429,
+                    Some("rate_limit_error"),
+                    None,
+                    Some(code),
+                    "rate limited"
+                ),
+                LocalCoreSyncErrorKind::QuotaExhausted
+            );
+        }
+        assert_eq!(
+            super::classify_local_sync_error_kind(
+                429,
+                Some("rate_limit_error"),
+                None,
+                None,
+                "insufficient_quota mentioned in prose"
+            ),
+            LocalCoreSyncErrorKind::RateLimit
+        );
     }
 
     #[tokio::test]
