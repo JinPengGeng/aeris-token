@@ -57,10 +57,10 @@ echo "second redrive result: ${second[*]}"
 test "${second[0]}" = 2
 test "${second[1]}" = "$destination_id"
 target_after="$(redis XLEN usage:events)"
-source_after="$(redis EXISTS "usage:events:dlq")"
+source_after="$(redis XLEN usage:events:dlq)"
 marker_value="$(redis GET "$marker")"
 echo "target length after redrive: $target_after"
-echo "DLQ exists after redrive: $source_after"
+echo "DLQ entry count after redrive: $source_after"
 echo "redrive marker: $marker_value"
 test "$target_after" = 1
 test "$source_after" = 0
