@@ -234,10 +234,17 @@ async fn persist_reservation(
 async fn grant_capacity(
     tx: &mut PostgresTransaction,
     identity: &RequestFundsIdentity,
+    admitted_at_unix_secs: u64,
 ) -> Result<(Vec<(RequestFundingSource, u64)>, bool), DataLayerError> {
     if identity.api_key_is_standalone {
         return Ok((Vec::new(), true));
     }
+    let admitted_at = chrono::DateTime::<chrono::Utc>::from_timestamp(
+        i64::try_from(admitted_at_unix_secs)
+            .map_err(|_| invalid("admission timestamp overflow"))?,
+        0,
+    )
+    .ok_or_else(|| invalid("invalid admission timestamp"))?;
     let rows = sqlx::query(
         "SELECT e.id, e.entitlements_snapshot, p.entitlements_json FROM user_plan_entitlements e \
          JOIN billing_plans p ON p.id = e.plan_id WHERE e.user_id = $1 AND e.status = 'active' \
@@ -259,7 +266,7 @@ async fn grant_capacity(
             &id,
             &snapshot,
             super::daily_quota_wallet_overage_policy(&plan),
-            chrono::Utc::now(),
+            admitted_at,
         )? {
             if !seen.insert((id.clone(), grant.usage_date.clone())) {
                 return Err(invalid(
@@ -295,7 +302,8 @@ pub(super) async fn reserve(
     input: ReserveRequestFundsInput,
 ) -> Result<ReserveRequestFundsOutcome, DataLayerError> {
     let wallet = locked_wallet(tx, &input.identity).await?;
-    let (mut sources, allow_overage) = grant_capacity(tx, &input.identity).await?;
+    let (mut sources, allow_overage) =
+        grant_capacity(tx, &input.identity, input.admitted_at_unix_secs).await?;
     if let Some(stored) = find_reservation(tx, &input.identity.reservation_token).await? {
         return Ok(if stored.quote == input {
             ReserveRequestFundsOutcome::Reserved {
