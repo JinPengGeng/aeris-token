@@ -744,7 +744,13 @@ struct GatewayDataArgs {
     )]
     postgres_statement_cache_capacity: Option<usize>,
 
-    #[arg(long, env = "AETHER_GATEWAY_DATA_POSTGRES_REQUIRE_SSL", global = true)]
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_DATA_POSTGRES_REQUIRE_SSL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        global = true
+    )]
     postgres_require_ssl: Option<bool>,
 }
 

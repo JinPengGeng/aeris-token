@@ -124,6 +124,7 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 
 - `APP_PORT`：`aether-gateway` 唯一监听端口，固定绑定 `0.0.0.0:${APP_PORT}`
 - `DATABASE_URL`：PostgreSQL 连接串，例如 `postgresql://USER:PASSWORD@HOST:5432/aether`
+- `AETHER_GATEWAY_DATA_POSTGRES_REQUIRE_SSL`：非 loopback PostgreSQL 默认要求 TLS；`localhost`、回环 IP 和 Unix socket 保留本地开发兼容。仅在确认网络隔离时显式设为 `false`，网关会记录安全告警；不会记录连接串、密码或证书内容。内置 Compose 的本地明文 Postgres 已显式设置为 `false`，生产远程数据库应保持默认或设为 `true`
 - `AETHER_GATEWAY_DATA_POSTGRES_MIN_CONNECTIONS` / `AETHER_GATEWAY_DATA_POSTGRES_MAX_CONNECTIONS`：数据库连接池手动覆盖值；未配置时 PostgreSQL 按每核 `4` 条自动推导，总池范围为 `32-100`。该预算按进程计算，多实例部署应按数据库连接上限显式分配
 - `AETHER_GATEWAY_DATA_POSTGRES_STATEMENT_TIMEOUT_MS` / `AETHER_GATEWAY_DATA_POSTGRES_LOCK_TIMEOUT_MS`：普通数据库连接的单条 SQL / 锁等待期限，默认 `30000` / `3000` 毫秒，显式 `0` 关闭；不是整个事务总期限。迁移与历史 backfill 使用独立连接放宽，事务可通过局部设置覆盖
 - `AETHER_USAGE_EVENT_CAPTURE_MEMORY_BUDGET_BYTES`：usage 诊断正文共享预算，默认 `134217728`（128 MiB），按 JSON 堆内存估算，覆盖进入终态队列的 seed、Redis 解码后的事件、数据库写入 DTO 及其正文副本。额度不足或显式 `0` 时先保留计费事实，再舍弃诊断正文；已有清空或禁用状态保持不变，其余标记截断。预算随正文保留到释放，后台构建或压缩不会因调用方取消而提前归还额度。该额度不覆盖原始 Redis 批次、解码临时分配、序列化及压缩结果、协议观察缓冲或进程总内存；可通过 `usage_runtime_event_capture_memory_*` 指标观察
