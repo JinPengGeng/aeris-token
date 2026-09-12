@@ -29,3 +29,19 @@ The billing crate evaluates every exported function name. The gateway test
 iterates the same exported list through admin validation and verifies an
 unlisted function is rejected. Adding a built-in function now changes one
 declaration and requires both checks to pass.
+
+## Completion review (2026-09-13)
+
+PR #304 merged the shared declaration. Its review correctly noted that a future
+allowlist entry without an evaluator branch would reach `unreachable!`. The
+fallback now returns `Unsupported`; the per-function test requires an expected
+numeric result and rejects missing arguments for every exported name. The engine
+also directly tests rejection of an unlisted function. Admin still uses the same
+helper and its existing acceptance/rejection tests.
+
+Adding a function means adding its name to the one allowlist, implementing its
+semantics, and adding a result fixture. The admin validator needs no new list or
+dispatch arm. This work preserves current function arity behavior; changes to the
+formula language or dependency architecture belong to #226. The full #229
+acceptance and documentation decisions are recorded in
+[the completion review](issue-229-completion.md).
