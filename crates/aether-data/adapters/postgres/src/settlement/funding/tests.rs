@@ -330,3 +330,65 @@ async fn live_request_funds_freeze_entitlement_day_and_recover_legacy_partial_de
         std::panic::resume_unwind(panic)
     }
 }
+
+#[tokio::test]
+#[ignore = "requires an isolated AETHER_TEST_DATABASE_URL; runs real migrations"]
+async fn live_request_funds_binds_reservation_and_recovery_to_admission_date() {
+    let (admin, first, second, schema) = fixture().await;
+    let result = AssertUnwindSafe(async {
+        let entitlements = json!([{"type":"daily_quota","daily_quota_usd":0.05,"reset_timezone":"UTC","allow_wallet_overage":true}]);
+        sqlx::query("INSERT INTO billing_plans (id,title,price_amount,duration_unit,duration_value,entitlements_json,created_at,updated_at) VALUES ('plan','plan',1,'day',1,$1,NOW(),NOW())")
+            .bind(&entitlements).execute(&first).await.unwrap();
+        sqlx::query("INSERT INTO user_plan_entitlements (id,user_id,plan_id,payment_order_id,starts_at,expires_at,entitlements_snapshot,status,created_at,updated_at) VALUES ('grant','owner','plan','order',NOW()-INTERVAL '1 hour',NOW()+INTERVAL '1 hour',$1,'active',NOW(),NOW())")
+            .bind(&entitlements).execute(&first).await.unwrap();
+        let repo = SqlxSettlementRepository::new(first.clone());
+        // This is one second before the UTC date boundary; the test itself may
+        // run on another day, so using wall-clock now here would hide regressions.
+        let mut request = quote("midnight-admission", "key-a", 3_000_000);
+        request.admitted_at_unix_secs = 1_789_343_999;
+        let reservation = match repo.reserve_request_funds(request.clone()).await.unwrap() {
+            ReserveRequestFundsOutcome::Reserved { reservation } => reservation,
+            other => panic!("unexpected {other:?}"),
+        };
+        let admission_date = match &reservation.allocations[0].source {
+            RequestFundingSource::Entitlement { usage_date, .. } => usage_date.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(admission_date, "2026-09-13");
+        repo.mark_request_funds_dispatched(request.identity.clone()).await.unwrap();
+        let usage = persist_usage(&first, &request.identity, 0.03).await;
+        repo.finalize_request_funds(FinalizeRequestFundsInput {
+            identity: request.identity,
+            usage,
+            reconciliation_facts: None,
+        }).await.unwrap();
+        let ledger_date: String = sqlx::query_scalar("SELECT usage_date FROM entitlement_usage_ledgers WHERE request_id='midnight-admission'")
+            .fetch_one(&first).await.unwrap();
+        assert_eq!(ledger_date, admission_date);
+
+        let legacy = quote("midnight-recovery", "key-b", 6_000_000);
+        let mut legacy = legacy;
+        legacy.admitted_at_unix_secs = 1_789_343_999;
+        persist_usage(&first, &legacy.identity, 0.06).await;
+        sqlx::query("UPDATE \"usage\" SET billing_status='insufficient_quota' WHERE request_id='midnight-recovery'")
+            .execute(&first).await.unwrap();
+        sqlx::query("INSERT INTO entitlement_usage_ledgers (id,user_entitlement_id,user_id,request_id,amount_usd,balance_before,balance_after,usage_date,created_at) VALUES ('old-midnight','grant','owner','midnight-recovery',0.05,0.05,0,$1,NOW())")
+            .bind(&admission_date).execute(&first).await.unwrap();
+        sqlx::query("UPDATE wallets SET balance=0.01 WHERE id='wallet'").execute(&first).await.unwrap();
+        let recovered = repo.recover_insufficient_quota(RecoverInsufficientQuotaInput { request_id: "midnight-recovery".to_string() }).await.unwrap().unwrap();
+        assert_eq!(recovered.collected_cost_units, 1_000_000);
+        let recovery_date: String = sqlx::query_scalar("SELECT usage_date FROM entitlement_usage_ledgers WHERE request_id='midnight-recovery'")
+            .fetch_one(&first).await.unwrap();
+        assert_eq!(recovery_date, admission_date);
+    }).catch_unwind().await;
+    first.close().await;
+    second.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic)
+    }
+}
