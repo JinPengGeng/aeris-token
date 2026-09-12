@@ -414,6 +414,7 @@ pub(crate) async fn finalize_video_task_if_terminal(state: &AppState, task: &Sto
     };
     let mut event = event;
     if let Err(err) = enrich_usage_event_with_billing(state.data.as_ref(), &mut event).await {
+        aether_runtime::record_billing_enrichment_failure();
         warn!(
             event_name = "video_task_finalize_billing_enrichment_failed",
             log_type = "event",
@@ -426,6 +427,8 @@ pub(crate) async fn finalize_video_task_if_terminal(state: &AppState, task: &Sto
         Ok(record) => match state.data.upsert_usage(record).await {
             Ok(Some(stored)) => {
                 if let Err(err) = settle_usage_if_needed(state.data.as_ref(), &stored).await {
+                    aether_runtime::record_video_task_settlement_failure();
+                    aether_runtime::record_billing_settlement_failure();
                     warn!(
                         event_name = "video_task_finalize_settlement_failed",
                         log_type = "event",

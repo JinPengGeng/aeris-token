@@ -551,9 +551,11 @@ fn metric_samples(workers: &[LogWorker]) -> Vec<MetricSample> {
 }
 
 pub fn logging_metric_samples() -> Vec<MetricSample> {
-    LOG_WORKERS
+    let mut samples = LOG_WORKERS
         .get()
-        .map_or_else(Vec::new, |workers| metric_samples(workers))
+        .map_or_else(Vec::new, |workers| metric_samples(workers));
+    samples.extend(super::super::metrics::billing_metric_samples());
+    samples
 }
 
 #[cfg(test)]

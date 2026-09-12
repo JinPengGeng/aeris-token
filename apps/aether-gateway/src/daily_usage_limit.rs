@@ -118,6 +118,7 @@ impl FrontdoorDailyUsageLimiter {
             Ok(Some(status)) => status,
             Ok(None) => return FrontdoorDailyUsageOutcome::NotApplicable,
             Err(err) => {
+                aether_runtime::record_billing_fail_open_daily_quota();
                 let failure_count = self.runtime_failures.fetch_add(1, Ordering::Relaxed) + 1;
                 let auth = decision.auth_context.as_ref();
                 warn!(
@@ -274,6 +275,7 @@ impl FrontdoorDailyUsageLimiter {
                 Ok(true) => {}
                 Ok(false) => tokio::time::sleep(DAILY_USAGE_RECOVERY_RETRY_DELAY).await,
                 Err(err) => {
+                    aether_runtime::record_billing_fail_open_daily_quota();
                     let failure_count =
                         limiter.runtime_failures.fetch_add(1, Ordering::Relaxed) + 1;
                     warn!(

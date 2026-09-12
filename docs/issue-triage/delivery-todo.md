@@ -1,167 +1,210 @@
 # Issue delivery TODO and community workflow
 
-Snapshot: **2026-09-12**, fork `JinPengGeng/aeris-token`, based on the
-`origin/main` tree after PR #322. This file is a current-state queue, not a
-claim that an upstream issue is fixed. It is maintained from the fork's live
-GitHub Issue/PR state and never changes `fawney19/Aether`.
+Snapshot: 2026-09-12, fork `JinPengGeng/aeris-token`. This queue is based on
+the current fork tree and GitHub issue state; it does not modify upstream
+`fawney19/Aether`.
 
-## Current inventory
+## Operating rules
 
-- **50 open Issues**: 26 P1, 24 P2; labels are 9 `status:ready`, 4
-  `status:in-progress` (#306, #307, #308, #316), 26 `status:triage`, and
-  11 `status:blocked`. Project #1 mirrors these labels; explicitly deferred
-  roadmap work uses its Deferred column. Open parents #217 and #223 have
-  been removed from the erroneous Done column.
-- **Three open implementation PRs**: [#323](https://github.com/JinPengGeng/aeris-token/pull/323)
-  (#307 metrics, lockfile, exporter and failure-path review corrections),
-  [#324](https://github.com/JinPengGeng/aeris-token/pull/324) (#306 RED
-  telemetry, runtime producer and lifecycle acceptance still incomplete), and
-  [#325](https://github.com/JinPengGeng/aeris-token/pull/325) (#316 historical
-  NUMERIC audit, review corrections tested on isolated PostgreSQL and new CI
-  pending). #323/#324 auto-merge is paused until review findings are resolved;
-  #325 auto-merge is enabled for the corrected toolkit. It does not close
-  #316 without historical impact evidence. #308 has an initial implementation
-  under review for bounded concurrency, lifecycle and failure tests, with no
-  PR open yet.
-- Every merge must pass the four protected contexts: `Rust CI / check`,
-  `Frontend CI / check`, `Automation Policy / gate`, and `Dependency Audit /
-  check`. A skipped path-specific job is acceptable only when the aggregate
-  context succeeds.
+Every item follows the same path: (1) revalidate the report against current
+source and runtime evidence; (2) record scope, benefit, complexity, owner and
+acceptance criteria in an issue/decision note; (3) split implementation into a
+small PR; (4) add focused regression and integration tests; (5) request review
+and wait for `Rust CI / check`, `Frontend CI / check` and `Automation Policy /
+gate`; (6) squash-merge only after all required checks pass; (7) update the
+issue labels, Project status and this queue with the merge commit and residual
+work. Mixed review issues are never closed merely because one child PR lands.
 
-## Delivery rules
-
-Every issue follows the same auditable path:
-
-1. Revalidate the report against current source, CI and runtime evidence.
-2. Record scope, benefit, complexity, owner, acceptance criteria and residual
-   risk in the Issue or a linked decision note. A parent remains open while a
-   child slice is incomplete.
-3. Move the Issue to `status:ready` only after the acceptance boundary is
-   agreed; use `status:in-progress` when an implementation PR is active and
-   return to `status:triage` when a merged slice leaves residual scope.
-4. Implement one bounded slice in a short-lived fork branch. Do not modify
-   upstream. Add focused regression/integration tests and update the relevant
-   runbook or ADR.
-5. Open a PR that links the Issue, documents risk/rollback and records the
-   exact verification commands. Request review and wait for all four required
-   contexts.
-6. Squash-merge only after review and checks pass. Enable auto-merge where the
-   branch protection policy allows it; never bypass a failing or missing
-   context.
-7. After merge, record the merge SHA, evidence and residual scope in the
-   Issue, reconcile labels and Project status, and update this file. Close a
-   parent only when its complete acceptance criteria have evidence.
+Labels remain the auditable lifecycle source: `status:triage` means validated
+but not scheduled, `status:ready` means acceptance criteria are approved,
+`status:in-progress` means a PR is under active implementation, `status:blocked`
+means an explicit external dependency, and `status:done` is reserved for a
+fully accepted issue. Project cards must mirror the same decision.
 
 ## Ordered delivery queue
 
 | Order | Work package | Issues | Benefit / complexity | Exit criteria | State |
 | --- | --- | --- | --- | --- | --- |
-| 0 | Observability and data evidence already in review | #306, #307, #308, #316 | production diagnosis and billing safety / S-M | #323/#324/#325 pass review plus four required contexts; #308 has real readiness tests and a PR | Active: three PRs open; #308 implementation underway |
-| 1 | Secret persistence and privileged audit | #211, #255 | prevents credential disclosure and untraceable admin mutation / M-L | verify remaining persistence, registry and lease paths; exercise durable audit authorization and failure semantics against real repositories | Next security lane after current work in progress; earlier child PRs do not close these parents |
-| 2 | Supply-chain exception and residual gate | #220, #303 | prevents silent advisory regressions / S-M | maintain the advisory gate and expiring RSA exception; decide remaining container identity and dependency update coverage from current evidence | Checksum consumption and production Dockerfile digest pins confirmed in source; no duplicate implementation |
-| 3 | Runtime security and configuration parent follow-up | #205, #218 | removes upgrade/configuration attack paths / M-L | signed provenance and least-privilege service slices are recorded as complete; remaining env, TLS and privileged-upgrade boundaries have tests/docs | Parent triage; #314/#315 closed child slices |
-| 4 | Billing authorization and settlement | #206, #253, #300, #247 | protects revenue and client-visible billing semantics / M-L | record conservative billing defaults and atomic reservation policy in a reviewed ADR, then test bounded estimates, wallet floors, signup credit and notifications | Triage/ready split; existing unknown-cost fail-closed behavior remains the baseline |
-| 5 | Operations recovery and horizontal scale | #217, #223, #224, #225 | recoverability and deployability / M | readiness, metrics, DLQ replay/restore, capacity and tunnel environment runbooks are executable | Parent triage; child slices scheduled |
-| 6 | CI and API contracts | #216, #254, #256 | catches regressions and prevents integration breakage / S-M | live-DB/build gates and compatibility fixtures pass; contributor/install docs reflect fork artifacts | Ready with residual acceptance |
-| 7 | Runtime correctness and data debt | #214, #207, #209, #210, #208 | protects availability and data integrity / M-L | each issue has a bounded reproduction and regression evidence; historical NUMERIC audit is read-only unless a reviewed migration is justified | Triage; #316 is the current #208 child |
-| 8 | Architecture and developer experience | #229, #221, #222, #226, #235, #241, #212, #213, #215 | reduces future change cost / S-L | an ADR/ownership record and one measured extraction or performance slice exists for each accepted item | Triage with selected ready slices |
-| 9 | Scheduler/protocol roadmap | #268, #276, #179, #157, #158, #1, #44–#53 | correctness and upstream adoption / M-L | upstream conflict and lifecycle contracts are resolved before implementation; blocked Issues stay blocked with the dependency recorded | Deferred/blocked |
+| 0 | Protect video-task secrets at rest | #211 | security and privacy / M-L | PR #293 covers debug/file redaction; remaining acceptance is encrypted-or-redacted headers/prompts/provider credentials across every persistence and error path, permission tests, and a clean-log/registry audit | Merged slice; residual acceptance |
+| 1 | Durable privileged-mutation audit | #255 | incident accountability / L | each mutation writes a queryable `audit_logs` row before success is returned; timeout/failure semantics, authorization coverage, and integration tests are documented | In progress (#294 merged slice; residual acceptance) |
+| 2 | DLQ operator lifecycle | #223 | recoverability and billing correctness / M | PR #292 covers bounded retention, authenticated listing and idempotent redrive; remaining acceptance is duplicate/poison-message verification, marker TTL policy, capacity evidence, and a real Redis replay drill | Merged slice; residual acceptance |
+| 3 | CI and supply-chain gates | #216, #220 | catches regressions and CVEs / M | live DB tests are intentionally gated, VSCodex is a real required check, build fan-out is measured, and Cargo/npm advisory policy runs in CI | In progress (#296; advisory gate deployment and guard fixes pending) |
+| 4 | Public API compatibility matrix | #247, #254 | prevents client retries and integration breakage / S-M | PR #290 defines the baseline OpenAI error/endpoint contract; remaining acceptance is OpenAI/Claude status-code, error-code, envelope and retry-header fixtures plus explicit balance and notification transitions | In progress (#290 merged; fixtures pending) |
+| 5 | Operations reference and recovery runbook | #217, #218, #224, #225 | reproducible deployment and observability / M | metrics/alerts, environment table, multi-node topology, Redis failure semantics and restore drill are executable from published docs | In progress (#217 split to #306–#308; #224 preflight merged) |
+| 6 | Billing integrity follow-up | #206, #253 | protects revenue and abuse boundary / M-L | enrichment failure, cancellation, signup credit, quota and image authorization policies have explicit tests and owner sign-off | Planned |
+| 7 | Scheduler and protocol roadmap slices | #268, #276, #179, #205 | correctness and upgrade safety / M-L | each slice has a bounded ADR, dependency/rollback plan and acceptance test; unresolved upstream sync conflict is handled separately | Deferred / blocked |
+| 8 | Developer and architecture debt | #229, #221, #222, #226, #235, #241 | lowers long-term change cost / S-L | one billing allowlist, no-op builder removed or deprecated, ADR index and one measured extraction slice are merged | In progress (#304 merged allowlist; #305 pending) |
+| 9 | Fork installation URL | #256 | avoids wrong-origin installs / S | runtime installer points to fork only when the fork publishes the artifact; otherwise documented as intentionally upstream | Planned |
 
-## Open issue disposition
+## Per-issue disposition
 
-The table below is the complete 50-item open-issue intake. “Keep” means the
-report remains valid or needs evidence; “split” means the parent stays open
-while the named child carries a bounded slice; “defer” means no implementation
-is scheduled until the stated dependency is resolved.
+The following is the complete open-issue intake. “Keep” means the issue remains
+open; “split” means the parent stays open while child issues/PRs carry delivery.
 
-| Issue | Priority | Decision | Next action / acceptance boundary |
+| Issue | Priority | Decision | Next action |
 | --- | --- | --- | --- |
-| #308 | P1 | Keep, active | Implement readiness versus liveness semantics, dependency failure mapping and probe tests; open a PR before changing the parent #217 state. |
-| #307 | P1 | Split, active | Review PR #323; require request/billing counters, bounded labels, alert thresholds and failure-path tests. |
-| #306 | P1 | Split, active | Review PR #324; require RED dimensions, cardinality limits, structured log policy and trace correlation tests. |
-| #303 | P1 | Keep, ready | Maintain an exact RUSTSEC-2023-0071 exception with owner, review date, exposure assessment and removal trigger; never disable fail-closed audit. |
-| #300 | P1 | Keep, triage | Record the image price upper bound, wallet floor and atomic reservation policy in an ADR, using the current fail-closed baseline; implement with pricing and concurrency tests. |
-| #276 | P1 | Blocked | Resolve the real upstream sync conflict with a reviewed merge commit; no blind conflict resolution. |
-| #268 | P1 | Keep, triage | Decide terminal telemetry semantics and failure-origin mapping; coordinate with scheduler Issues #49/#53. |
-| #255 | P1 | Split, ready | Finish durable audit authorization/failure semantics and Docker upgrade safety; #294 is only a merged child slice. |
-| #254 | P1 | Split, ready | Add chat/images compatibility fixtures for status, error code, envelope and retry headers; #290 is only the baseline. |
-| #253 | P1 | Keep, triage | Record signup credit, overdraft and `insufficient_quota` policy with abuse controls before coding. |
-| #247 | P1 | Split, ready | Define balance error/status/retry and notification transitions; add API and settlement tests. |
-| #225 | P1 | Keep, triage | Reconcile tunnel environment names, operational runbooks and ADR status against current manifests. |
-| #224 | P1 | Split, triage | Extend #302 preflight with capacity evidence, cache consistency and Redis failure/restore drills. |
-| #223 | P1 | Split, ready | Run duplicate/poison DLQ replay, marker-TTL, capacity and real Redis recovery drills after #292. |
-| #220 | P1 | Split, triage | Current source already consumes checksum manifests and pins production image digests; address Docker/npm updater coverage and container identity separately. Published artifact verification remains distinct. See evidence below. |
-| #218 | P1 | Split, triage | Keep the parent open for environment documentation, non-loopback/TLS policy and privileged upgrade boundaries; #311/#312 are closed children. |
-| #217 | P1 | Split, triage | Do not close until #306, #307 and #308 provide runtime, metric and alert evidence. |
-| #216 | P1 | Split, ready | Complete live-DB, build performance and VSCodex gate slices; dependency audit is now a required context. |
-| #214 | P1 | Keep, triage | Add probe failure, graceful shutdown, accept-error and default-isolation acceptance tests. |
-| #211 | P1 | Split, ready | Audit every secret persistence/error path, registry bounds, lease failures and clean-log evidence after #293. |
-| #206 | P1 | Split, triage | Keep billing parent open; #300 covers image authorization policy while enrichment, cancellation and wallet semantics remain. |
-| #205 | P1 | Split, triage | Keep scheduler/upgrade parent open for remaining admission and rollback contracts; #314/#315 signed-service slices are closed. |
-| #53 | P1 | Blocked | Approve the scheduler attempt-budget contract before implementation. |
-| #51 | P1 | Blocked | Approve dynamic admission revalidation and failure behavior before implementation. |
-| #49 | P1 | Blocked | Pair failure-origin and replay policy with #268's terminal telemetry decision. |
-| #46 | P1 | Blocked | Define attempt/client-commit lifecycle and replay boundaries first. |
-| #256 | P2 | Split, ready | Keep contributor/fork documentation residuals explicit; migrate installer URLs only when fork artifacts are published. |
-| #241 | P2 | Keep, triage | Record architecture identity, management API evolution and consistency model; #305's no-op builder fix is only a child slice. |
-| #235 | P2 | Keep, triage | Build an ADR index, ownership map and rollback records; do not claim bus-factor resolution from documentation alone. |
-| #229 | P2 | Split, ready | Extend #304's formula allowlist with the remaining developer-experience navigation and feedback-loop work. |
-| #226 | P2 | Keep, triage | Measure the dependency tree and feature-risk boundary before changing `wreq`/BoringSSL/rustls choices. |
-| #222 | P2 | Keep, triage | Measure one provider/repository extension and migration-drift path before a generic rewrite. |
-| #221 | P2 | Keep, triage | Produce a dependency/call graph and one tested extraction boundary; avoid a broad crate split without measurements. |
-| #215 | P2 | Keep, triage | Measure synchronous logging, SSE prefiltering and lock contention before optimization. |
-| #213 | P2 | Keep, triage | Split the giant handler and standardize error payload boundaries with API regression coverage. |
-| #212 | P2 | Keep, triage | Consolidate cross-cutting capacity/dependency/frontend tests and record duplicate-version evidence. |
-| #210 | P2 | Keep, triage | Verify cryptographic/OAuth contracts against current dependencies and add focused misuse tests. |
-| #209 | P2 | Keep, triage | Remove credential `Debug`/`Serialize` exposure and URL key residue with redaction tests. |
-| #208 | P2 | Split, triage | Keep the parent open while #316 inventories historical rows and records whether any reviewed backfill is needed. |
-| #316 | P2 | Split, active | Review PR #325's read-only historical NUMERIC inventory; decide explicitly whether an idempotent backfill is needed. |
-| #207 | P2 | Keep, triage | Bound internal error exposure and Windsurf buffering; add graceful shutdown coverage. |
-| #179 | P2 | Defer | Retain the automation-v2 roadmap; move actionable slices into bounded child Issues. |
-| #158 | P2 | Defer | Evaluate provider-scoped allowlists only against an updated upstream baseline. |
-| #157 | P2 | Defer | Refresh the upstream billing/quota registry before considering selective adoption. |
-| #52 | P2 | Blocked | Define a distributed HalfOpen probe lease contract before implementation. |
-| #48 | P2 | Blocked | Approve conversation-history capability contracts and compatibility rules. |
-| #47 | P2 | Blocked | Keep multi-instance acceptance under the #224 topology plan until its prerequisites exist. |
-| #45 | P2 | Blocked | Emit structured scheduling traces only after the lifecycle model is approved. |
-| #44 | P2 | Blocked | Defer the expiring deterministic emergency chain until scheduler contracts are stable. |
-| #1 | P2 | Blocked | Umbrella scheduler issue only; do not duplicate implementation in this parent. |
+| #276 | P1 | Keep blocked | resolve the real upstream sync conflict with a reviewed merge commit |
+| #268 | P1 | Keep | decide terminal telemetry semantics with scheduler failure-origin work |
+| #256 | P2 | Split | migrate runtime install URL only if fork artifacts are published |
+| #255 | P1 | Split | design durable audit writer and failure contract |
+| #254 | P1 | In progress | #290 merged; add chat/images compatibility fixtures and validate the status/error/envelope/retry matrix |
+| #253 | P1 | Keep | approve signup-credit, overdraft and abuse-control policy before code |
+| #247 | P1 | Split | finalize balance status/code/retry policy and notification triggers |
+| #241 | P2 | Split | #305 removes the silent `with_redis_url` no-op builder; parent remains open for broader architecture consistency |
+| #235 | P2 | Planned | create ADR index and ownership/rollback records |
+| #229 | P2 | Split | #304 merged the shared formula allowlist; add the remaining DX map and keep parent open |
+| #226 | P2 | Planned | measure dependency tree and pair allowlist work with #229 |
+| #225 | P1 | Split | generate tunnel env table and publish operations runbooks |
+| #224 | P1 | Split | #302 merged multi-node preflight; publish capacity smoke test and Redis failure runbook |
+| #223 | P1 | Split | #292 merged list/auth/idempotent redrive; run duplicate/poison, marker-TTL, capacity and real Redis replay drills |
+| #222 | P2 | Planned | measure one provider/repository extension slice before generic rewrite |
+| #221 | P2 | Planned | produce call/dependency graph and extract one tested boundary |
+| #220 | P1 | Split | add Cargo/npm advisory scan and explicit policy fixture |
+| #218 | P1 | Split | #297 merged JWT startup validation; decide non-loopback environment/TLS and Redis durability slices |
+| #217 | P1 | Split | reopened after accidental auto-close; deliver #307 metrics/alerts, #308 readiness, and #306 RED/log/trace contracts |
+| #312 | P1 | Ready | implement the durable Redis production overlay and replay drill under #218 |
+| #311 | P1 | Ready | implement remote PostgreSQL TLS default hardening under #218 |
+| #308 | P1 | Ready | define and implement readiness/health semantics under #217 |
+| #307 | P1 | In progress | PR implements runtime-owned billing/fail-open counters, Prometheus rule examples and the operator runbook; provider RED input remains #306 |
+| #306 | P1 | Ready | define request RED dimensions and log/trace telemetry under #217 |
+| #216 | P1 | Split | implement live-DB, VSCodex and build-performance child gates |
+| #215 | P2 | Planned | measure synchronous logging/SSE filtering/lock contention before changes |
+| #214 | P1 | Planned | add probe, graceful shutdown and accept-error acceptance tests |
+| #213 | P2 | Planned | split giant handler and standardize error payload boundaries |
+| #212 | P2 | Planned | consolidate cross-cutting capacity and dependency tests |
+| #211 | P0/P1 | Split | #293 merged debug/file protection; verify all sensitive-field persistence, registry bounds, lease failure semantics and clean-log evidence |
+| #210 | P2 | Planned | verify cryptographic/OAuth contracts with current dependency evidence |
+| #209 | P2 | Planned | remove credential Debug/Serialize exposure and URL key residue |
+| #208 | P2 | Planned | reproduce NUMERIC/f64 paths and add adapter regression coverage |
+| #207 | P2 | Planned | bound internal errors and Windsurf buffering; add graceful shutdown slice |
+| #206 | P1 | Split | #300 tracks image authorization cost bypass; implement fail-closed unknown paid-image estimate, then bounded pricing |
+| #205 | P1 | Split | #299 merged opt-in/default-off and anti-downgrade; design signed provenance and non-root service slices |
+| #315 | P1 | In progress | PR #320 defines ADR-0045; merge the decision gate, then implement the verifier and release signing slices |
+| #314 | P1 | Ready | implement least-privilege systemd/OpenRC service identities after the #315 trust/upgrade decision and permission audit |
+| #316 | P2 | Ready | audit historical NUMERIC rebate records and decide idempotent backfill under #208 |
+| #179 | P2 | Deferred | retain as roadmap; move actionable slices into child issues |
+| #158 | P2 | Deferred | upstream provider-scoped allowlist evaluation only |
+| #157 | P2 | Deferred | refresh upstream billing/quota registry; no blind cherry-pick |
+| #53 | P1 | Blocked | scheduler roadmap dependency; do not implement until contract is approved |
+| #52 | P2 | Blocked | scheduler roadmap dependency; define distributed probe lease contract |
+| #51 | P1 | Blocked | scheduler roadmap dependency; define admission revalidation contract |
+| #49 | P1 | Blocked | scheduler roadmap dependency; pair with #268 failure-origin decision |
+| #48 | P2 | Blocked | protocol capability contract remains deferred |
+| #47 | P2 | Blocked | multi-instance acceptance is covered by #224 plan |
+| #46 | P1 | Blocked | attempt/client lifecycle depends on scheduler contract |
+| #45 | P2 | Blocked | structured scheduling trace follows approved lifecycle model |
+| #44 | P2 | Blocked | emergency-chain behavior remains deferred and expiring |
+| #1 | P2 | Blocked | umbrella only; do not duplicate child implementation |
 
-## Closed child slices and residual scope
+## 2026-09-12 live checkpoint
 
-The following Issues are **closed** and intentionally absent from the open
-table: #311 (PostgreSQL TLS defaults), #312 (durable Redis profile and replay
-drill), #314 (least-privilege tunnel service), and #315 (signed tunnel release
-provenance). Their merge evidence and residual boundaries remain in their final
-Issue comments and linked PRs. Closing a child does not close #205 or #218.
+The fork main branch currently includes #290, #293, #294, #295, #297, #298,
+#299, #301, #302, #304 and #310. Their merge commits and required-check evidence are
+available from the linked PRs; each is a slice of its parent Issue. #305 is
+still open with squash auto-merge enabled and is being revalidated after the
+#304 base moved.
 
-Other merged child slices (#282–#310, #317–#322) likewise prove only their
-documented acceptance boundary. Parent Issues remain open wherever residual
-criteria are listed above.
+The observability parent #217 is OPEN again because #301 was a scope review
+that was accidentally treated as a closing reference. It now has three
+bounded children: #307 (metrics and alerts), #308 (readiness/health), and #306
+(RED dimensions and telemetry). #224 remains open for capacity and Redis
+recovery evidence after its #302 preflight slice.
 
-## #220 evidence note
+Issue #218 now has two ready children: #311 for remote PostgreSQL TLS defaults
+and #312 for the production Redis durability profile. These children capture
+the remaining P1 decisions without changing local development defaults.
 
-Source revalidation at `5b0999f4c0cc0ba588d1139715b8c8696c942b66` confirms
-`install.sh:1475-1476` downloads the canonical `SHA256SUMS` and calls
-`verify_release_checksum` before archive validation/extraction, including when
-the archive comes from a custom URL. `Dockerfile.app:13,30` pins BusyBox and
-distroless by digest. `bash tests/release_supply_chain_test.sh` passes for the
-production pins and provenance workflow. These are source/fixture checks;
-they do not establish the contents of a published image or release bundle.
+Issue #205 now has #314 (service identity) and #315 (signed provenance) ready
+children. Issue #208 has #316 ready for a read-only historical data audit after
+the new-write adapter fix.
 
-The same source explicitly uses `USER 0:0` in `Dockerfile.app`, and the current
-container security fixture locks that behavior. A change therefore needs a
-volume/upgrade compatibility decision and tests, not a blind USER edit.
-`.github/dependabot.yml` covers Cargo, frontend npm, automation npm and
-Actions; root/vscodex npm and Docker update coverage still need a bounded
-follow-up. The advisory workflow's broader lockfile scan is a separate
-capability already enforced by the fourth required context. #220 stays open
-for these evidenced residuals; duplicate checksum/digest implementation is
-not planned.
+The dependency gate #296 is held with auto-merge disabled. Its current review
+found that `Dependency Audit / check` is not yet in ruleset 21984327, and the
+RSA active-graph guard can miss a match when `rg -q` closes a pipe under
+`pipefail`. The exact evidence and remediation are recorded in the PR; no
+advisory is silently ignored.
 
-## Recordkeeping
+## Completed slices and residual links
 
-Every state change is recorded in the Issue/PR and, when the decision affects
-multiple Issues, in a linked ADR or note under `docs/issue-triage/`. The next
-refresh must repeat the live inventory command and replace this checkpoint in
-one edit; do not append contradictory historical snapshots.
+PRs #282–#310 include merged slices into the fork. They cover contributor entry
+points, watchdog health feedback (#92), finite billing formula values,
+governance records, TaskSupervisor drop cleanup, sparse OpenAI video polling,
+bounded DLQ retention, CI/release-gate decisions, the baseline OpenAI API error
+contract, and video-task secret protection. These merges are evidence for the
+corresponding child slices only; #211, #216, #220, #223, #247, #254 and #255
+remain open until their residual acceptance criteria above are met.
+
+PR #290 merged as `f29a393a44d36ccc16fc003b988e5cc5d8b7dfdd` after all required
+checks passed. PR #293 merged as
+`fe25a3545b8be0944f2f3e12b7206994407fc5cd` after all required checks passed.
+PR #294 is merged as `d08fe6ebe11951e9390037893efc8ef6b77ea4a7`; the durable
+audit parent #255 remains open for residual failure and integration semantics.
+
+## 2026-09-12 live checkpoint (after PRs #313, #317–#319)
+
+The authoritative remote inventory is **52 open issues**: 28 P1 and 24 P2.
+Their lifecycle labels are 15 `status:ready`, 26 `status:triage`, and 11
+`status:blocked`; no open issue is currently marked `status:in-progress`.
+This count is deliberately separate from the historical snapshot above.
+
+Completed fork-only slices since the previous checkpoint:
+
+- PR #313 merged the live delivery queue refresh (`dd43f597…`).
+- PR #317 merged remote PostgreSQL TLS defaults (`b2dfa30…`); #311 is closed
+  and its stale in-progress label was removed.
+- PR #318 merged the opt-in durable Redis profile (`0c022c0…`). Protected CI
+  ran the isolated Redis AOF kill/recovery and shipped-Lua idempotent redrive
+  drill; #312 is closed with the evidence recorded in its final comment.
+- PR #319 merged dependency-audit hardening (`6c92d879…`), including the
+  required `Dependency Audit / check` ruleset context. #220 remains open for
+  install checksum verification, image digest policy, container identity and
+  broader dependency coverage.
+
+Current delivery order:
+
+1. **#315 signed release provenance** — PR #320 is the ADR decision gate;
+   after it merges, implement the embedded-key verifier and protected release
+   signing as separate PRs with offline rejection fixtures.
+2. **#314 least-privilege tunnel service** — perform the systemd/OpenRC
+   permission and upgrade-path audit before changing service identities.
+3. **#306/#307/#308 observability** — keep the three bounded children ready;
+   do not close parent #217 until runtime readiness, metrics and alert evidence
+   exists.
+4. **#316 historical NUMERIC audit** — read-only inventory and an idempotent
+   dry-run decision under #208; no production backfill is implied.
+5. **#220 residual supply-chain slices** — install checksum consumption,
+   container digest/non-root decisions, and Dependabot/Docker coverage remain
+   independently planned after the merged CI gate.
+
+PRs are squash-only and fork-only. A parent issue is closed only when its full
+acceptance criteria have evidence; a merged child slice changes the parent to
+`status:triage` when residual scope remains. Every next slice must add focused
+tests, pass the four required contexts (Rust, Frontend, Automation Policy and
+Dependency Audit), and record the merge SHA and residual risks here and on its
+Issue.
+
+The merged API contract is a baseline only: balance notification behavior in
+#247 and the chat/images compatibility fixtures for #254 are intentionally not
+claimed by #290. Likewise, #293 does not close #211 until the residual
+registry, lease, persistence and end-to-end log checks are evidenced.
+
+## 2026-09-12 state-change record
+
+The maintainer comments carrying the above transitions are recorded on
+[#211](https://github.com/JinPengGeng/aeris-token/issues/211#issuecomment-5640656268),
+[#216](https://github.com/JinPengGeng/aeris-token/issues/216#issuecomment-5640656263),
+[#220](https://github.com/JinPengGeng/aeris-token/issues/220#issuecomment-5640656258),
+[#223](https://github.com/JinPengGeng/aeris-token/issues/223#issuecomment-5640656368),
+[#229](https://github.com/JinPengGeng/aeris-token/issues/229#issuecomment-5640656269),
+[#247](https://github.com/JinPengGeng/aeris-token/issues/247#issuecomment-5640656271),
+[#254](https://github.com/JinPengGeng/aeris-token/issues/254#issuecomment-5640656257),
+[#255](https://github.com/JinPengGeng/aeris-token/issues/255#issuecomment-5640656296),
+and [#256](https://github.com/JinPengGeng/aeris-token/issues/256#issuecomment-5640656260).
+
+The current PR evidence is [#290](https://github.com/JinPengGeng/aeris-token/pull/290),
+[#293](https://github.com/JinPengGeng/aeris-token/pull/293), and
+[#294](https://github.com/JinPengGeng/aeris-token/pull/294). On 2026-09-12,
+#294 received the import/format fix `cad0b0b33fc175ce03cf0cf9fd10a4fd4f043536`;
+GitHub reports the PR as open, auto-merge enabled, and merge state `BLOCKED`
+until the in-progress required checks complete. This record intentionally does
+not claim a merge or close #255.
