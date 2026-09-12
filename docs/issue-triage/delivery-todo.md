@@ -79,8 +79,8 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #207 | P2 | Planned | bound internal errors and Windsurf buffering; add graceful shutdown slice |
 | #206 | P1 | Split | #300 tracks image authorization cost bypass; implement fail-closed unknown paid-image estimate, then bounded pricing |
 | #205 | P1 | Split | #299 merged opt-in/default-off and anti-downgrade; design signed provenance and non-root service slices |
-| #315 | P1 | Ready | define the signed release provenance contract before implementing tunnel verification under #205 |
-| #314 | P1 | Ready | implement least-privilege systemd/OpenRC service identities after permission audit under #205 |
+| #315 | P1 | In progress | PR #320 defines ADR-0045; merge the decision gate, then implement the verifier and release signing slices |
+| #314 | P1 | Ready | implement least-privilege systemd/OpenRC service identities after the #315 trust/upgrade decision and permission audit |
 | #316 | P2 | Ready | audit historical NUMERIC rebate records and decide idempotent backfill under #208 |
 | #179 | P2 | Deferred | retain as roadmap; move actionable slices into child issues |
 | #158 | P2 | Deferred | upstream provider-scoped allowlist evaluation only |
@@ -139,6 +139,49 @@ checks passed. PR #293 merged as
 `fe25a3545b8be0944f2f3e12b7206994407fc5cd` after all required checks passed.
 PR #294 is merged as `d08fe6ebe11951e9390037893efc8ef6b77ea4a7`; the durable
 audit parent #255 remains open for residual failure and integration semantics.
+
+## 2026-09-12 live checkpoint (after PRs #313, #317–#319)
+
+The authoritative remote inventory is **52 open issues**: 28 P1 and 24 P2.
+Their lifecycle labels are 15 `status:ready`, 26 `status:triage`, and 11
+`status:blocked`; no open issue is currently marked `status:in-progress`.
+This count is deliberately separate from the historical snapshot above.
+
+Completed fork-only slices since the previous checkpoint:
+
+- PR #313 merged the live delivery queue refresh (`dd43f597…`).
+- PR #317 merged remote PostgreSQL TLS defaults (`b2dfa30…`); #311 is closed
+  and its stale in-progress label was removed.
+- PR #318 merged the opt-in durable Redis profile (`0c022c0…`). Protected CI
+  ran the isolated Redis AOF kill/recovery and shipped-Lua idempotent redrive
+  drill; #312 is closed with the evidence recorded in its final comment.
+- PR #319 merged dependency-audit hardening (`6c92d879…`), including the
+  required `Dependency Audit / check` ruleset context. #220 remains open for
+  install checksum verification, image digest policy, container identity and
+  broader dependency coverage.
+
+Current delivery order:
+
+1. **#315 signed release provenance** — PR #320 is the ADR decision gate;
+   after it merges, implement the embedded-key verifier and protected release
+   signing as separate PRs with offline rejection fixtures.
+2. **#314 least-privilege tunnel service** — perform the systemd/OpenRC
+   permission and upgrade-path audit before changing service identities.
+3. **#306/#307/#308 observability** — keep the three bounded children ready;
+   do not close parent #217 until runtime readiness, metrics and alert evidence
+   exists.
+4. **#316 historical NUMERIC audit** — read-only inventory and an idempotent
+   dry-run decision under #208; no production backfill is implied.
+5. **#220 residual supply-chain slices** — install checksum consumption,
+   container digest/non-root decisions, and Dependabot/Docker coverage remain
+   independently planned after the merged CI gate.
+
+PRs are squash-only and fork-only. A parent issue is closed only when its full
+acceptance criteria have evidence; a merged child slice changes the parent to
+`status:triage` when residual scope remains. Every next slice must add focused
+tests, pass the four required contexts (Rust, Frontend, Automation Policy and
+Dependency Audit), and record the merge SHA and residual risks here and on its
+Issue.
 
 The merged API contract is a baseline only: balance notification behavior in
 #247 and the chat/images compatibility fixtures for #254 are intentionally not
