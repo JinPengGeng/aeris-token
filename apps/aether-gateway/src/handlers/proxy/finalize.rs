@@ -114,6 +114,18 @@ pub(super) fn finalize_gateway_response(
             .get(PROVIDER_TYPE_HEADER)
             .and_then(|value| value.to_str().ok()),
     );
+    let request_outcome = if response.status().is_server_error() {
+        "error"
+    } else {
+        "success"
+    };
+    crate::request_metrics::global_request_metrics().record(
+        Some(route_class),
+        status_class,
+        Some(provider_type),
+        request_outcome,
+        elapsed_ms,
+    );
     let sanitized_path_and_query = sanitize_access_log_path(path_and_query);
     emit_admin_audit(
         &mut response,
