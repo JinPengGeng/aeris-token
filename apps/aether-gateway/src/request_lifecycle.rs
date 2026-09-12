@@ -59,24 +59,25 @@ where
     let diagnostics = Arc::new(RequestDiagnostics::default());
     let cancel_for_response = Arc::clone(&cancel);
     let producer_for_request = producer.clone();
-    let future = CANCEL_ON_CLIENT_DISCONNECT.scope(
-        Arc::clone(&cancel),
-        scope_request_diagnostics_with(Some(Arc::clone(&diagnostics)), async move {
-            let response = future.await?;
-            let complete_on_disconnect = !cancel_for_response.load(Ordering::Acquire);
-            if !complete_on_disconnect && producer.is_none() {
-                return Ok(response);
-            }
-            Ok(response.map(|body| {
-                Body::new(CompleteOnDisconnectBody {
-                    body: Some(body),
-                    diagnostics,
-                    complete_on_disconnect,
-                    producer,
-                })
-            }))
-        }),
-    );
+    let future =
+        crate::orchestration::scope_request_candidate_indices(CANCEL_ON_CLIENT_DISCONNECT.scope(
+            Arc::clone(&cancel),
+            scope_request_diagnostics_with(Some(Arc::clone(&diagnostics)), async move {
+                let response = future.await?;
+                let complete_on_disconnect = !cancel_for_response.load(Ordering::Acquire);
+                if !complete_on_disconnect && producer.is_none() {
+                    return Ok(response);
+                }
+                Ok(response.map(|body| {
+                    Body::new(CompleteOnDisconnectBody {
+                        body: Some(body),
+                        diagnostics,
+                        complete_on_disconnect,
+                        producer,
+                    })
+                }))
+            }),
+        ));
     CompleteOnDisconnectRequest {
         future: Some(Box::pin(future)),
         cancel,

@@ -2136,15 +2136,22 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
         .list_by_request_id("trace-claude-cli-usage-local-miss-123")
         .await
         .expect("request candidate trace should read");
-    assert_eq!(stored_candidates.len(), 1);
-    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Skipped);
-    assert_eq!(
-        stored_candidates[0].skip_reason.as_deref(),
-        Some("format_conversion_disabled")
-    );
+    // Each matching planner step preserves its own terminal observation.
+    assert_eq!(stored_candidates.len(), 2);
+    assert_ne!(stored_candidates[0].id, stored_candidates[1].id);
+    for (index, candidate) in stored_candidates.iter().enumerate() {
+        assert_eq!(candidate.candidate_index, index as u32);
+        assert_eq!(candidate.retry_index, 0);
+        assert_eq!(candidate.status, RequestCandidateStatus::Skipped);
+        assert_eq!(
+            candidate.skip_reason.as_deref(),
+            Some("format_conversion_disabled")
+        );
+        assert!(candidate.finished_at_unix_ms.is_some());
+    }
     assert_eq!(
         stored_usage.routing_candidate_id(),
-        Some(stored_candidates[0].id.as_str())
+        Some(stored_candidates[1].id.as_str())
     );
     assert_eq!(
         stored_usage.routing_candidate_skip_reason(),
@@ -2408,12 +2415,18 @@ fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_claude
             .list_by_request_id("trace-claude-cli-usage-local-miss-large-123")
             .await
             .expect("request candidate trace should read");
-        assert_eq!(stored_candidates.len(), 1);
-        assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Skipped);
-        assert_eq!(
-            stored_candidates[0].skip_reason.as_deref(),
-            Some("format_conversion_disabled")
-        );
+        assert_eq!(stored_candidates.len(), 2);
+        assert_ne!(stored_candidates[0].id, stored_candidates[1].id);
+        for (index, candidate) in stored_candidates.iter().enumerate() {
+            assert_eq!(candidate.candidate_index, index as u32);
+            assert_eq!(candidate.retry_index, 0);
+            assert_eq!(candidate.status, RequestCandidateStatus::Skipped);
+            assert_eq!(
+                candidate.skip_reason.as_deref(),
+                Some("format_conversion_disabled")
+            );
+            assert!(candidate.finished_at_unix_ms.is_some());
+        }
 
         gateway_handle.abort();
         execution_runtime_handle.abort();

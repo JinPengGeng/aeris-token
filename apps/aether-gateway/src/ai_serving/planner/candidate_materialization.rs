@@ -48,7 +48,10 @@ use crate::cache::{
 use crate::clock::current_unix_ms;
 use crate::dispatch::refs::dispatch_ref_for_local_candidate;
 use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_config_value;
-use crate::orchestration::{ExecutionAttemptIdentity, POOL_KEY_RETRY_INDEX_STRIDE};
+use crate::orchestration::{
+    current_request_candidate_indices, ExecutionAttemptIdentity, RequestCandidateIndices,
+    POOL_KEY_RETRY_INDEX_STRIDE,
+};
 use crate::scheduler::candidate::is_auth_api_key_concurrency_limit_skip_reason;
 use crate::scheduler::config::SchedulerSchedulingMode;
 use crate::stage_metrics::observe_gateway_stage_ms;
@@ -344,6 +347,7 @@ pub(crate) use aether_ai_serving::AiCandidateResolutionMode as LocalCandidateRes
 
 struct GatewayLocalCandidateMaterializationPort<'a, F, G> {
     state: PlannerAppState<'a>,
+    candidate_indices: Arc<RequestCandidateIndices>,
     trace_id: &'a str,
     client_api_format: &'a str,
     requested_model: Option<&'a str>,
@@ -362,6 +366,7 @@ struct GatewayLocalCandidateMaterializationPort<'a, F, G> {
 
 struct GatewayAvailableCandidatePersistencePort<'a, F> {
     state: PlannerAppState<'a>,
+    starting_candidate_index: u32,
     trace_id: &'a str,
     user_id: &'a str,
     api_key_id: &'a str,
@@ -391,7 +396,7 @@ where
     type Eligible = EligibleLocalExecutionCandidate;
     type Skipped = SkippedLocalExecutionCandidate;
     type Attempt = LocalExecutionCandidateAttempt;
-    type Error = Infallible;
+    type Error = GatewayError;
 
     async fn resolve_and_rank_candidates(
         &self,
@@ -437,6 +442,7 @@ where
         &self,
         candidates: Vec<Self::Eligible>,
     ) -> Result<Vec<Self::Attempt>, Self::Error> {
+        let starting_candidate_index = self.candidate_indices.reserve(candidates.len())?;
         Ok(materialize_logical_local_execution_candidate_attempts(
             self.state,
             self.trace_id,
@@ -445,6 +451,7 @@ where
                 .skipped
                 .record_runtime_miss_diagnostic,
             candidates,
+            starting_candidate_index,
             self.routing_policy,
             self.client_api_format,
             self.sticky_session_token,
@@ -457,9 +464,10 @@ where
 
     async fn persist_skipped_candidates(
         &self,
-        starting_candidate_index: u32,
+        _starting_candidate_index: u32,
         skipped_candidates: Vec<Self::Skipped>,
     ) -> Result<(), Self::Error> {
+        let starting_candidate_index = self.candidate_indices.reserve(skipped_candidates.len())?;
         let skipped_candidates = attach_routing_trace_to_skipped_candidates(
             self.routing_policy,
             self.client_api_format,
@@ -515,7 +523,7 @@ where
                 self.user_id,
                 self.api_key_id,
                 &candidate.candidate,
-                candidate_index,
+                self.starting_candidate_index + candidate_index,
                 effective_retry_index(retry_index, candidate.orchestration.pool_key_index),
                 generated_candidate_id,
                 self.required_capabilities,
@@ -537,7 +545,7 @@ where
             effective_retry_index(retry_index, candidate.orchestration.pool_key_index);
         LocalExecutionCandidateAttempt {
             eligible: candidate,
-            candidate_index,
+            candidate_index: self.starting_candidate_index + candidate_index,
             retry_index,
             candidate_id,
         }
@@ -618,6 +626,7 @@ where
         scheduler_cache_affinity_enabled(state, routing_policy).await;
     let port = GatewayLocalCandidateMaterializationPort {
         state,
+        candidate_indices: current_request_candidate_indices(),
         trace_id,
         client_api_format,
         requested_model,
@@ -636,7 +645,13 @@ where
 
     match run_ai_candidate_materialization(&port, candidates, preselection_skipped).await {
         Ok(outcome) => outcome,
-        Err(error) => match error {},
+        Err(error) => {
+            warn!(%trace_id, ?error, "candidate materialization failed");
+            AiCandidateMaterializationOutcome {
+                attempts: Vec::new(),
+                candidate_count: 0,
+            }
+        }
     }
 }
 
@@ -687,6 +702,20 @@ where
         .map(decorate_skipped_candidate)
         .collect::<Vec<_>>();
     let candidate_count = candidates.len() + skipped_candidate_count;
+    let starting_candidate_index =
+        match current_request_candidate_indices().reserve(candidate_count) {
+            Ok(index) => index,
+            Err(error) => {
+                warn!(%trace_id, ?error, "candidate materialization failed");
+                return (
+                    LocalExecutionCandidateAttemptSource::from_static_attempts_for_image_bridge(
+                        Vec::new(),
+                    ),
+                    0,
+                );
+            }
+        };
+    let skipped_starting_candidate_index = starting_candidate_index + candidates.len() as u32;
 
     if scheduler_cache_affinity_enabled {
         remember_first_local_candidate_affinity(
@@ -703,11 +732,11 @@ where
         state.app(),
         trace_id,
         persistence_policy.skipped,
-        u32::try_from(candidates.len()).unwrap_or(u32::MAX),
+        skipped_starting_candidate_index,
         attach_routing_trace_to_skipped_candidates(
             routing_policy,
             client_api_format,
-            u32::try_from(candidates.len()).unwrap_or(u32::MAX),
+            skipped_starting_candidate_index,
             skipped_candidates,
         ),
     )
@@ -716,7 +745,7 @@ where
     let (items, _) = build_logical_candidate_items(
         state,
         candidates,
-        0,
+        starting_candidate_index,
         Some(trace_id),
         persistence_policy.skipped.record_runtime_miss_diagnostic,
         sticky_session_token,
@@ -853,6 +882,7 @@ where
     .await;
     let mut cursor = RequestedModelAttemptPageCursor {
         state,
+        candidate_indices: current_request_candidate_indices(),
         trace_id: trace_id.to_string(),
         client_api_format: client_api_format.to_string(),
         requested_model: requested_model.to_string(),
@@ -875,7 +905,6 @@ where
         skipped_endpoint_ids: BTreeSet::new(),
         skipped_credential_ids: BTreeSet::new(),
         candidate_count: 0,
-        next_candidate_index: 0,
         remembered_affinity: false,
         scheduler_cache_affinity_enabled,
         auth_api_key_concurrency_wait_deadline: None,
@@ -906,6 +935,7 @@ where
 
 struct RequestedModelAttemptPageCursor<'a> {
     state: PlannerAppState<'a>,
+    candidate_indices: Arc<RequestCandidateIndices>,
     trace_id: String,
     client_api_format: String,
     requested_model: String,
@@ -928,7 +958,6 @@ struct RequestedModelAttemptPageCursor<'a> {
     skipped_endpoint_ids: BTreeSet<String>,
     skipped_credential_ids: BTreeSet<String>,
     candidate_count: usize,
-    next_candidate_index: u32,
     remembered_affinity: bool,
     scheduler_cache_affinity_enabled: bool,
     auth_api_key_concurrency_wait_deadline: Option<Instant>,
@@ -1006,7 +1035,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                     continue;
                 }
                 self.persist_final_auth_api_key_concurrency_skips(page.skipped_candidates)
-                    .await;
+                    .await?;
                 return Ok(false);
             }
 
@@ -1024,6 +1053,9 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 .map(|skipped| (self.decorate_skipped_candidate)(skipped))
                 .collect::<Vec<_>>();
             let skipped_candidate_count = skipped_candidates.len();
+            let starting_candidate_index = self
+                .candidate_indices
+                .reserve(candidates.len() + skipped_candidate_count)?;
             // `pending_items` is the materialized page snapshot. Skip sets
             // filter it in place; they never invoke ranking or fetch a new
             // page. A new resolved snapshot is loaded only after this queue
@@ -1049,7 +1081,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
             let (items, next_candidate_index) = build_logical_candidate_items(
                 self.state,
                 candidates,
-                self.next_candidate_index,
+                starting_candidate_index,
                 Some(&self.trace_id),
                 self.record_runtime_miss_diagnostic,
                 self.sticky_session_token.as_deref(),
@@ -1067,8 +1099,6 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                     routing_policy: self.routing_policy.clone(),
                 }),
             );
-            self.next_candidate_index = next_candidate_index
-                .saturating_add(u32::try_from(skipped_candidate_count).unwrap_or(u32::MAX));
             if !items.is_empty() {
                 self.pending_items = items;
                 return Ok(true);
@@ -1119,12 +1149,13 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
     async fn persist_final_auth_api_key_concurrency_skips(
         &mut self,
         skipped_candidates: Vec<SkippedLocalExecutionCandidate>,
-    ) {
+    ) -> Result<(), GatewayError> {
         let skipped_candidates = skipped_candidates
             .into_iter()
             .map(|skipped| (self.decorate_skipped_candidate)(skipped))
             .collect::<Vec<_>>();
         let skipped_candidate_count = skipped_candidates.len();
+        let starting_candidate_index = self.candidate_indices.reserve(skipped_candidate_count)?;
         self.candidate_count = self.candidate_count.saturating_add(skipped_candidate_count);
         let skipped_persistence = LocalSkippedCandidatePersistenceContext {
             user_id: self.skipped_user_id.as_str(),
@@ -1137,18 +1168,16 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
             self.state.app(),
             &self.trace_id,
             skipped_persistence,
-            self.next_candidate_index,
+            starting_candidate_index,
             attach_routing_trace_to_skipped_candidates(
                 self.routing_policy.as_ref(),
                 &self.client_api_format,
-                self.next_candidate_index,
+                starting_candidate_index,
                 skipped_candidates,
             ),
         )
         .await;
-        self.next_candidate_index = self
-            .next_candidate_index
-            .saturating_add(u32::try_from(skipped_candidate_count).unwrap_or(u32::MAX));
+        Ok(())
     }
 }
 
@@ -1501,6 +1530,15 @@ where
 {
     let port = GatewayAvailableCandidatePersistencePort {
         state,
+        starting_candidate_index: match current_request_candidate_indices()
+            .reserve(candidates.len())
+        {
+            Ok(index) => index,
+            Err(error) => {
+                warn!(%trace_id, ?error, "candidate materialization failed");
+                return Vec::new();
+            }
+        },
         trace_id,
         user_id,
         api_key_id,
@@ -1546,6 +1584,7 @@ async fn materialize_logical_local_execution_candidate_attempts<F>(
     context: LocalAvailableCandidatePersistenceContext<'_>,
     record_runtime_miss_diagnostic: bool,
     candidates: Vec<EligibleLocalExecutionCandidate>,
+    starting_candidate_index: u32,
     routing_policy: Option<&ResolvedRoutingPolicy>,
     client_api_format: &str,
     sticky_session_token: Option<&str>,
@@ -1559,7 +1598,7 @@ where
     let mut attempts = Vec::new();
 
     for (candidate_index, candidate) in candidates.into_iter().enumerate() {
-        let candidate_index = u32::try_from(candidate_index).unwrap_or(u32::MAX);
+        let candidate_index = starting_candidate_index + candidate_index as u32;
         match candidate.kind {
             LocalExecutionCandidateKind::SingleKey => {
                 attempts.extend(
@@ -2361,6 +2400,7 @@ mod tests {
         .await;
         let mut cursor = RequestedModelAttemptPageCursor {
             state: PlannerAppState::new(&app),
+            candidate_indices: current_request_candidate_indices(),
             trace_id: "trace-auth-wait".to_string(),
             client_api_format: "openai:chat".to_string(),
             requested_model: "gpt-5".to_string(),
@@ -2383,7 +2423,6 @@ mod tests {
             skipped_endpoint_ids: BTreeSet::new(),
             skipped_credential_ids: BTreeSet::new(),
             candidate_count: 0,
-            next_candidate_index: 0,
             remembered_affinity: false,
             scheduler_cache_affinity_enabled: false,
             auth_api_key_concurrency_wait_deadline: None,
@@ -2464,6 +2503,7 @@ mod tests {
         let auth_snapshot = sample_auth_snapshot();
         let port = GatewayLocalCandidateMaterializationPort {
             state: PlannerAppState::new(&app),
+            candidate_indices: current_request_candidate_indices(),
             trace_id: "trace-affinity-disabled",
             client_api_format: "openai:chat",
             requested_model: Some("gpt-5"),
@@ -2535,6 +2575,7 @@ mod tests {
         page_cursor.mark_priority_page_emitted_for_tests();
         let cursor = RequestedModelAttemptPageCursor {
             state: PlannerAppState::new(&app),
+            candidate_indices: current_request_candidate_indices(),
             trace_id: "trace-no-session-affinity".to_string(),
             client_api_format: "openai:chat".to_string(),
             requested_model: "gpt-5".to_string(),
@@ -2557,7 +2598,6 @@ mod tests {
             skipped_endpoint_ids: BTreeSet::new(),
             skipped_credential_ids: BTreeSet::new(),
             candidate_count: 0,
-            next_candidate_index: 0,
             remembered_affinity: false,
             scheduler_cache_affinity_enabled: false,
             auth_api_key_concurrency_wait_deadline: None,
@@ -2641,6 +2681,7 @@ mod tests {
         page_cursor.mark_priority_page_emitted_for_tests();
         let cursor = RequestedModelAttemptPageCursor {
             state: PlannerAppState::new(&fixed_order_app),
+            candidate_indices: current_request_candidate_indices(),
             trace_id: "trace-fixed-order".to_string(),
             client_api_format: "openai:chat".to_string(),
             requested_model: "gpt-5".to_string(),
@@ -2663,7 +2704,6 @@ mod tests {
             skipped_endpoint_ids: BTreeSet::new(),
             skipped_credential_ids: BTreeSet::new(),
             candidate_count: 0,
-            next_candidate_index: 0,
             remembered_affinity: false,
             scheduler_cache_affinity_enabled: false,
             auth_api_key_concurrency_wait_deadline: None,
@@ -2710,6 +2750,7 @@ mod tests {
             },
             false,
             vec![pool_group, sample_eligible("normal-key", None)],
+            0,
             None,
             "openai:chat",
             None,
