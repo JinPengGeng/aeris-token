@@ -2202,6 +2202,7 @@ install_compose_mode() {
     ensure_directory "${COMPOSE_DIR}"
     ensure_directory "${COMPOSE_DIR}/logs"
     install_project_file "docker-compose.yml" "${COMPOSE_DIR}/docker-compose.yml" "0644"
+    install_project_file "docker-compose.redis-durable.yml" "${COMPOSE_DIR}/docker-compose.redis-durable.yml" "0644"
     install_project_file ".env.example" "${COMPOSE_DIR}/.env.example" "0644"
     install_project_file "update.sh" "${COMPOSE_DIR}/update.sh" "0755"
     install_generate_keys_script "${COMPOSE_DIR}/generate_keys.sh"
@@ -2223,11 +2224,15 @@ install_compose_mode() {
 
 Docker Compose files are ready:
   ${COMPOSE_DIR}/docker-compose.yml
+  ${COMPOSE_DIR}/docker-compose.redis-durable.yml (opt-in production persistence overlay)
   ${COMPOSE_DIR}/.env
   ${COMPOSE_DIR}/.env.example
   ${COMPOSE_DIR}/update.sh
   ${COMPOSE_DIR}/generate_keys.sh
   ${COMPOSE_DIR}/logs
+
+To enable Redis persistence explicitly after reviewing the recovery runbook:
+  docker compose -f ${COMPOSE_DIR}/docker-compose.yml -f ${COMPOSE_DIR}/docker-compose.redis-durable.yml up -d
 EOF
 
     if [[ "${SKIP_START}" == "true" ]]; then
@@ -2247,6 +2252,7 @@ install_compose_single_node_mode() {
     ensure_directory "${COMPOSE_DIR}/logs"
 
     install_project_file "docker-compose.single-node.yml" "${COMPOSE_DIR}/docker-compose.yml" "0644"
+    install_project_file "docker-compose.redis-durable.yml" "${COMPOSE_DIR}/docker-compose.redis-durable.yml" "0644"
     install_project_file ".env.example" "${COMPOSE_DIR}/.env.example" "0644"
     install_project_file "update.sh" "${COMPOSE_DIR}/update.sh" "0755"
     install_generate_keys_script "${COMPOSE_DIR}/generate_keys.sh"
@@ -2269,11 +2275,15 @@ install_compose_single_node_mode() {
 
 Docker Compose single-node files are ready:
   ${COMPOSE_DIR}/docker-compose.yml
+  ${COMPOSE_DIR}/docker-compose.redis-durable.yml (opt-in production persistence overlay)
   ${COMPOSE_DIR}/.env
   ${COMPOSE_DIR}/.env.example
   ${COMPOSE_DIR}/update.sh
   ${COMPOSE_DIR}/generate_keys.sh
   ${COMPOSE_DIR}/logs
+
+To enable Redis persistence explicitly after reviewing the recovery runbook:
+  docker compose -f ${COMPOSE_DIR}/docker-compose.yml -f ${COMPOSE_DIR}/docker-compose.redis-durable.yml up -d
 EOF
 
     if [[ "${SKIP_START}" == "true" ]]; then

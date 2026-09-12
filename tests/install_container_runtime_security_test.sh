@@ -42,6 +42,10 @@ COMPOSE_FILES=(
     "${REPO_ROOT}/docker-compose.single-node.yml"
 )
 
+assert_line "${REPO_ROOT}/docker-compose.redis-durable.yml" "      - --appendfsync"
+assert_line "${REPO_ROOT}/docker-compose.redis-durable.yml" "      - everysec"
+assert_line "${REPO_ROOT}/docker-compose.redis-durable.yml" "      - redis_data:/data"
+
 assert_line "${APP_DOCKERFILE}" "USER 0:0"
 assert_line "${REPO_ROOT}/Dockerfile.app.local" "USER 0:0"
 assert_line "${REPO_ROOT}/Dockerfile.app.release-local" "USER 0:0"

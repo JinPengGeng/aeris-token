@@ -343,6 +343,7 @@ jobs:
             install -m 0755 update.sh "${root}/update.sh"
             install -m 0644 docker-compose.yml "${root}/docker-compose.yml"
             install -m 0644 docker-compose.single-node.yml "${root}/docker-compose.single-node.yml"
+            install -m 0644 docker-compose.redis-durable.yml "${root}/docker-compose.redis-durable.yml"
             install -m 0644 .env.example "${root}/.env.example"
             install -m 0755 generate_keys.sh "${root}/generate_keys.sh"
             install -m 0644 README.md "${root}/README.md"

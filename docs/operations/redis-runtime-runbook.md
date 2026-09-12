@@ -31,6 +31,54 @@ crash should restore persistence in the Redis command:
 Expect higher tail latency when Redis persistence shares disks with Postgres or
 application logs.
 
+### Durable production profile and recovery drill
+
+The fork ships an opt-in Compose overlay for deployments that need runtime
+streams and the usage DLQ to survive a Redis process or host restart. Apply it
+to either standard base file; the base and local profiles intentionally remain
+non-persistent:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.redis-durable.yml config
+docker compose -f docker-compose.yml -f docker-compose.redis-durable.yml up -d redis
+# or use docker-compose.single-node.yml in both commands
+```
+
+The overlay mounts the named `redis_data` volume at `/data`, enables AOF with
+`appendfsync everysec`, keeps an RDB preamble for rewrites, and retains a
+`60 1000` snapshot checkpoint. The health check verifies both authenticated
+`PING` and write access to `/data`. `everysec` gives an initial recovery point
+objective of at most roughly one second; it is not a zero-loss guarantee.
+
+Before first production use, record the Redis image UID/GID and verify that the
+mounted directory is writable by the Redis process. Size the volume for the
+configured usage and DLQ stream caps, payload overhead, and temporary AOF
+rewrite space. Monitor `aof_last_write_status`, `aof_rewrite_in_progress`,
+`aof_current_size`, `rdb_last_bgsave_status`, `used_memory_peak`, and
+`usage_queue_dlq_length`.
+
+The minimum recovery drill is:
+
+1. Start the overlay with a temporary Compose project and seed one authenticated
+   `usage:events` entry and one `usage:events:dlq` entry with `redis-cli`.
+2. Wait for `aof_last_write_status:ok` and at least two seconds of settled AOF
+   writes, then record `INFO persistence` and the stream IDs.
+3. Kill the Redis container with `docker compose kill -s KILL redis`, start it
+   again, and wait for the writable-directory and `PING` health check.
+4. Confirm the seeded entries remain. Exercise the authenticated DLQ redrive
+   endpoint twice: the first call must report `redriven`, the second
+   `already_redriven`; the source ID is deleted and the destination contains a
+   single entry.
+5. Record restart-to-healthy time as the measured RTO and retain the command
+   output with the Issue/PR. A write inside the final one-second AOF window may
+   be lost and must be reported through the existing dropped/loss telemetry.
+
+Back up with a completed `BGSAVE` plus a verified `dump.rdb`, or a consistent
+volume snapshot; validate copies with `redis-check-rdb`/`redis-check-aof` before
+retention. Never use `docker compose down -v` during recovery or rollback.
+Removing the overlay switches back to the local loss-accepting policy and does
+not automatically load data from `/data`, so back up the named volume first.
+
 ### Daily usage limit counters
 
 Daily usage limits intentionally remain compatible with the default
