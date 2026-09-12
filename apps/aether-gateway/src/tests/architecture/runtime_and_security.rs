@@ -52,6 +52,28 @@ fn gateway_production_body_collection_stays_bounded() {
 }
 
 #[test]
+fn workspace_dev_profile_optimizes_dependencies() {
+    let cargo = read_workspace_file("Cargo.toml");
+    let section = cargo
+        .split("[profile.dev.package.\"*\"]")
+        .nth(1)
+        .expect("workspace dev dependency profile should be declared")
+        .split("\n[")
+        .next()
+        .expect("workspace dev dependency profile should have a body");
+    let opt_level = section
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("opt-level ="))
+        .map(str::trim)
+        .expect("workspace dev dependency profile should set opt-level");
+    assert_eq!(
+        opt_level, "1",
+        "dependencies should use low-cost dev optimization"
+    );
+}
+
+#[test]
 fn tunnel_node_status_delivery_stays_bounded() {
     let source = read_workspace_file("apps/aether-gateway/src/tunnel/embedded/hub.rs");
     assert!(

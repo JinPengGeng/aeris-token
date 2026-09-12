@@ -146,6 +146,12 @@ zstd = "0.13"
 # generation on very large crates during local development builds.
 debug = "line-tables-only"
 
+[profile.dev.package."*"]
+# Compile dependencies with a small amount of optimization so incremental
+# development builds spend less time rebuilding large dependency graphs while
+# keeping workspace crates fast to iterate on.
+opt-level = 1
+
 [profile.test]
 # The gateway test target pulls in a very large in-crate test tree, so use the
 # lighter debug format here as well to reduce rustc peak memory.
