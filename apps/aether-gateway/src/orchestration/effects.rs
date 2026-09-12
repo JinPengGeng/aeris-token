@@ -2131,7 +2131,6 @@ mod tests {
         ProviderCatalogKeyAdaptiveState, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
         StoredProviderCatalogProvider,
     };
-    use aether_test_support::ManagedRedisServer;
     use aether_usage_runtime::GatewaySyncReportRequest;
     use serde_json::{json, Value};
 
@@ -2159,17 +2158,6 @@ mod tests {
         build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope,
         ClientSessionAffinity, SchedulerAffinityScope, SchedulerAffinityTarget,
     };
-
-    async fn start_managed_redis_or_skip() -> Option<ManagedRedisServer> {
-        match ManagedRedisServer::start().await {
-            Ok(server) => Some(server),
-            Err(err) if err.to_string().contains("No such file or directory") => {
-                eprintln!("skipping redis-backed orchestration effect test: {err}");
-                None
-            }
-            Err(err) => panic!("redis server should start: {err}"),
-        }
-    }
 
     fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
@@ -2532,16 +2520,14 @@ mod tests {
             )
     }
 
-    fn codex_state_with_redis(redis_url: &str, redis_key_prefix: &str) -> AppState {
+    fn codex_state_for_test() -> AppState {
         let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
             vec![sample_codex_provider()],
             vec![sample_codex_endpoint()],
             vec![sample_codex_key()],
         ));
         let data_state = GatewayDataState::from_config(
-            GatewayDataConfig::disabled()
-                .with_redis_url(redis_url, Some(redis_key_prefix))
-                .with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
+            GatewayDataConfig::disabled().with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
         )
         .expect("data state should build")
         .attach_provider_catalog_repository_for_tests(repository);
@@ -3688,10 +3674,7 @@ mod tests {
 
     #[tokio::test]
     async fn pool_account_error_does_not_open_key_circuit() {
-        let Some(redis) = start_managed_redis_or_skip().await else {
-            return;
-        };
-        let state = codex_state_with_redis(redis.redis_url(), "orchestration_pool_circuit");
+        let state = codex_state_for_test();
         let plan = sample_codex_plan();
         let legacy_circuit = json!({
             "openai:responses": {
