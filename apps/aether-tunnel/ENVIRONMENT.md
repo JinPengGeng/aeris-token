@@ -81,7 +81,7 @@ Rust CI 的 `Test (Workspace Rest)` 会运行同一校验；环境变量名、CL
 | `AETHER_TUNNEL_PUBLIC_IP` | `--public-ip` | 未设置 | IP 地址 | Public IP address of this node (auto-detected if omitted) |
 | `AETHER_TUNNEL_RECONNECT_BASE_MS` | `--tunnel-reconnect-base-ms` | `50` | 毫秒 | Tunnel reconnect base delay in milliseconds (used by exponential backoff) |
 | `AETHER_TUNNEL_RECONNECT_MAX_MS` | `--tunnel-reconnect-max-ms` | `250` | 毫秒 | Tunnel reconnect max delay in milliseconds (cap for exponential backoff) |
-| `AETHER_TUNNEL_REDIRECT_REPLAY_BUDGET_BYTES` | `--redirect-replay-budget-bytes` | 未设置 | 字节 | **隐藏兼容参数；输入被忽略。** Accepted only so older launch commands and environments keep working. Redirect request bodies are always replayed without a cumulative size limit |
+| `AETHER_TUNNEL_REDIRECT_REPLAY_BUDGET_BYTES` | `--redirect-replay-budget-bytes` | 未设置 | 字节 | **隐藏兼容参数；输入被忽略。** Accepted only so older launch commands and environments keep working. The input is ignored. Redirect replay uses fixed resource limits, including a 5 MiB per-request replay cache |
 | `AETHER_TUNNEL_REMOTE_UPGRADE_ENABLED` | `--remote-upgrade-enabled` | `false` | 布尔值 | Allow heartbeat ACKs to trigger a self-upgrade.  Remote upgrades are disabled by default until release artifact signature verification is configured for this installation. 可选值：`true`, `false`。 |
 | `AETHER_TUNNEL_SCALE_CHECK_INTERVAL_MS` | `--tunnel-scale-check-interval-ms` | `1000` | 毫秒 | Autoscale evaluation interval for the tunnel pool |
 | `AETHER_TUNNEL_SCALE_DOWN_GRACE_SECS` | `--tunnel-scale-down-grace-secs` | `15` | 秒 | Low-load grace window before a secondary tunnel is drained |

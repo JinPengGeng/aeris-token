@@ -55,6 +55,8 @@ Aether API 连接池等 clap 参数，且没有自动检查文档与实际参数
 备份恢复和多节点部署演练、API 行为文档、ADR 历史或其他失效引用已完成。
 它们需要按当前主干和各自关联 Issue 分别验收。
 
-另有一个既存旁支事实：README 的 5 MiB redirect 重放说明与当前 clap 隐藏兼容参数的
-“不设累计大小限制”说明不一致；本次生成器如实保留当前 clap 说明，不借文档任务修改
-重放行为。该差异需由父 Issue 或负责重放行为的任务另行核实和处置。
+本次已核实 redirect 重放说明：`src/tunnel/stream_handler.rs` 的固定上限为每请求 5 MiB、
+最多 1024 chunks、全局 256 MiB。README 的 5 MiB 说明正确；原 clap 隐藏兼容参数的
+“不设累计大小限制”说明已过期。本次修正该 help 文案为输入被忽略、重放受固定资源上限
+约束，并重新生成参考；未改变重放实现或 README 中正确的行为说明。
+修正文案后，两项文档校验、`cargo fmt --all --check` 和 `git diff --check` 均通过。
