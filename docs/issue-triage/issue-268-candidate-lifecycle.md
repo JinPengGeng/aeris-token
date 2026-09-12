@@ -48,6 +48,10 @@ candidate observations in one request.
 Success already takes precedence over skipped/failed observations in
 `derive_request_candidate_final_status`; preserving both rows therefore makes
 the request's aggregate status accurate without changing the aggregator.
+This also retains distinct failed or skipped observations when other matching
+planner steps revisit the same provider. Four existing sync fixtures previously
+expected those observations to collapse into one row; they now require both
+terminal rows with distinct sequential candidate indices.
 
 ## Alternatives considered
 
@@ -66,17 +70,42 @@ the request's aggregate status accurate without changing the aggregator.
   terminal concurrency skip, release the slot, verify HTTP 200 and a separate
   successful candidate. Verify the original skip ID, reason and finish time
   survive and aggregate final status is Success.
-- Exhaustion regression: keep the slot occupied through every step; verify HTTP
-  429, retained terminal skips and no second upstream execution.
+- Exhaustion regression: keep the slot occupied through every step; verify the
+  existing HTTP 503 runtime-miss response, retained terminal skips and no second
+  upstream execution. Auth-limit exhaustion currently follows
+  `local_execution_runtime_miss_status(false)`; this change does not redefine
+  that HTTP contract.
 - Request index tests: different planner handles share reservations, a captured
   lazy handle survives a task move, independent requests start at zero, and
   signed-index exhaustion never reuses a slot.
 - Heartbeat regression: reserve indices in the foreground and verify the real
   background planning closure continues the same sequence.
-- Existing candidate materialization, terminal-guard and retry tests continue
-  to validate pool retries and terminal preservation.
+- Existing candidate materialization and retry tests validate pool retries and
+  terminal preservation. The general terminal guard remains unchanged.
 
-Exact executed checks and their results are recorded in the PR before review.
+Local results:
+
+| Group | Result |
+| --- | --- |
+| `tests::ai_execute::sync` | 56 passed, including real wait exhaustion followed by success and all-step exhaustion |
+| `tests::ai_execute::stream` | 20 passed |
+| `candidate_materialization` | 14 passed |
+| `request_lifecycle` | 9 passed |
+| `heartbeat` | 39 passed |
+| `candidate_indices` | 4 passed, including the heartbeat propagation regression |
+
+The groups overlap. The final sync group was run through `cargo test -p
+aether-gateway --lib tests::ai_execute::sync -- --nocapture`; other groups were
+run directly against the same Cargo-built gateway unit-test executable, with
+the group name as its filter. All production code was identical across these
+runs; the last compilation updates the four existing sync fixtures and the
+exhaustion test's assertion to the existing HTTP 503 contract. These checks
+used `RUST_MIN_STACK=16777216` for gateway integration coverage: an initial
+unconfigured broad heartbeat run overflowed the default test-thread stack in
+an existing tunnel heartbeat integration test; the configured run passed all
+39 tests. macOS linking emitted the existing large `__eh_frame` unwind-table
+warning. No local Clippy or live PostgreSQL result is claimed; CI and final
+review remain required before merge.
 
 ## Boundaries and rollback
 

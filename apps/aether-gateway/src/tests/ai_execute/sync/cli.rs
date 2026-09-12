@@ -1477,12 +1477,17 @@ async fn assert_api_key_concurrency_wait_budget_outcome(release_for_later_step: 
     let response = second_request.await.expect("second request should join");
 
     if !release_for_later_step {
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        // Auth-limit exhaustion currently uses the local runtime-miss response.
+        // Candidate identity allocation must preserve that existing HTTP contract.
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let candidates = request_candidate_repository
             .list_by_request_id("trace-openai-cli-local-timeout-123")
             .await
             .expect("exhausted candidate trace should read");
-        assert!(!candidates.is_empty());
+        assert!(
+            candidates.len() >= 2,
+            "successive exhausted steps must retain separate observations: {candidates:?}"
+        );
         assert!(
             candidates.iter().all(|candidate| {
                 candidate.status == RequestCandidateStatus::Skipped
