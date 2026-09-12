@@ -79,7 +79,7 @@ Pretty remains the default to preserve local development and existing
 deployments.  Select structured output explicitly:
 
 ```sh
-AETHER_LOG_FORMAT=json docker compose up gateway
+AETHER_LOG_FORMAT=json docker compose up app
 ```
 
 The compose files already expose `AETHER_LOG_FORMAT` and retain
