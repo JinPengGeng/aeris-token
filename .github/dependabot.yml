@@ -38,7 +38,6 @@ updates:
   # version updates covered alongside the frontend and automation projects.
   - package-ecosystem: npm
     directories:
-      - "/"
       - "/aether-vscodex"
       - "/aether-vscodex/web"
       - "/aether-vscodex/vscode-extension"
