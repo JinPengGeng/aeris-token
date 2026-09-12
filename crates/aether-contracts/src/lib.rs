@@ -5,6 +5,7 @@ mod plan;
 mod result;
 pub mod tunnel;
 pub mod tunnel_security;
+pub mod tunnel_key_rotation;
 mod usage;
 
 pub use error::{ExecutionError, ExecutionErrorKind, ExecutionPhase};
