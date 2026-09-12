@@ -45,7 +45,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | --- | --- | --- | --- |
 | #276 | P1 | Keep blocked | resolve the real upstream sync conflict with a reviewed merge commit |
 | #268 | P1 | Keep | decide terminal telemetry semantics with scheduler failure-origin work |
-| #256 | P2 | Split, active | PR #331 records the no-fork-release policy and first-release migration gate; retain parent for release evidence |
+| #256 | P2 | Split, active | PR #331 merged the no-fork-release policy and first-release migration gate; retain parent for first fork release evidence |
 | #255 | P1 | Split, active | PR #329 persists audit after client disconnect; retain parent for broader mutation coverage and retry/reconciliation evidence |
 | #254 | P1 | Split | PR #335 merged the chat/images and Claude compatibility fixtures; retain parent for remaining endpoint coverage |
 | #253 | P1 | Keep | approve signup-credit, overdraft and abuse-control policy before code |
@@ -64,7 +64,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #217 | P1 | Split | reopened after accidental auto-close; #307 metrics slice merged, #308 readiness and #306 RED remain under review |
 | #308 | P1 | In progress | PR #327 merged bounded readiness probes; complete deployment drill and parent acceptance |
 | #307 | P1 | In progress | PR #323 merged runtime-owned billing/fail-open counters; complete Prometheus parse/alert drill and link #306 producer |
-| #306 | P1 | In progress | PR #324 adds bounded request RED producer and JSON/pretty evidence; complete provider source and lifecycle review |
+| #306 | P1 | In progress | PR #324 merged the bounded request RED producer and JSON/pretty evidence; complete provider source and lifecycle review |
 | #216 | P1 | Split, active | PR #332 adds the dev profile build-performance gate; #339 adds an isolated Postgres harness and three selected live tests; retain parent for VSCodex required-check evidence, integration baseline execution and remaining ignored-test coverage |
 | #215 | P2 | Planned | measure synchronous logging/SSE filtering/lock contention before changes |
 | #214 | P1 | Planned | add probe, graceful shutdown and accept-error acceptance tests |
@@ -165,11 +165,12 @@ Completed fork-only slices since the previous checkpoint:
 
 Current delivery order:
 
-1. **#324 / #306** — finish the provider production-source, cancellation,
-   retry and streaming lifecycle review; auto-merge remains enabled and the
-   parent stays open until the RED producer contract is consistent with #307.
-2. **#331 / #337** — finish the fork install-policy and credential error
-   redaction slices; both remain open with squash auto-merge enabled.
+1. **#306 / #307** — finish the provider production-source, cancellation,
+   retry and streaming lifecycle review; PR #324 is merged and the parent
+   stays open until the RED producer contract is consistent with #307.
+2. **#256 / #209** — verify first-release install evidence and credential
+   error redaction residuals; PRs #331 and #337 are merged and their parents
+   remain open only for the acceptance documented above.
 3. **#255, #211, #303 and #308 residual acceptance** — expand mutation-audit
    coverage, verify remaining sensitive-field paths, govern the RSA exception,
    and run readiness isolation drills.
@@ -283,3 +284,53 @@ documented residual acceptance is incomplete. The next queue is therefore
 #324/#331/#337 CI completion, followed by residual acceptance for #211, #217,
 #223, #247, #254, #255, #303 and #308; triage/blocked issues remain deferred
 until evidence and ownership are concrete.
+
+## 2026-09-13 authoritative live checkpoint (main `f663b48a90d65c148b827506cc8a4cb17c85ebba`)
+
+This section supersedes earlier live-checkpoint paragraphs when they conflict;
+those paragraphs remain as an audit trail. The inventory was re-read from the
+fork GitHub API on 2026-09-13: **49 open issues** (26 P1, 23 P2), with 28
+`status:triage`, 9 `status:in-progress`, 1 `status:ready`, and 11
+`status:blocked`. Project #1 retains the corresponding lifecycle cards. A
+secondary GraphQL rate limit prevented a fresh aggregate of all custom fields;
+individual Project field values therefore remain the authoritative record.
+
+There are **no open pull requests** in `JinPengGeng/aeris-token`. Recent
+fork-only squash merges and their merge SHAs are:
+
+- #346 `f663b48a90d65c148b827506cc8a4cb17c85ebba` — inject release key id for
+  manifest verification (2026-09-12 18:46 UTC).
+- #344 `a63a4a2f6d778e2e5f8d8e76a947ded62e3997be` — classify control dependency
+  failures (2026-09-12 17:48 UTC).
+- #342 `e7c17b6381aa40c1d2dda031e5ae145e4c84c073` — isolated PostgreSQL live
+  tests (2026-09-12 18:29 UTC).
+- #341 `bc9e20f41061fd425da85c997b964637318fc2de` — scope the RSA advisory
+  gate (2026-09-12 18:13 UTC).
+- #338 `931cc6be6f25c77a873eb8da865d2ba1cf794267`, #337
+  `c00b79d147a309c802a5cc2eb45e78245119ba9c`, #331
+  `276dde25d8cbbb21d571df903e5495eebf8a1a3b`, and #324
+  `a5bbfd4bfbe14ad3d92a40891fb889610f9a09fa` — delivery checkpoint,
+  OAuth redaction, fork install policy, and RED telemetry respectively.
+
+Issue #343 (`[247-A] 定义余额与配额拒绝的 OpenAI/Claude 兼容契约`) is OPEN,
+P1 and `status:ready` (Project `Ready`). Its maintainer decision records
+OpenAI wallet exhaustion as 429/`insufficient_quota` without `Retry-After`,
+Claude billing exhaustion as 402/`billing_error`, provider rate limits as
+429 with `Retry-After` only when a wait is known, and tenant permission as
+403/`permission_error`. The next slice is a table-driven contract PR covering
+the stated envelopes and fixtures; Gemini semantics remain out of scope.
+
+Issue #205 is OPEN/P1/`status:triage` with the critical upgrade, redirect,
+replay, private-target and service-identity slices implemented. Its remaining
+acceptance is limited to signing-key rotation overlap and recovery evidence,
+nightly tunnel artifacts, service UID non-root hardening, and the low-risk
+scheduler/admission design questions. Child #345 (release workflow key-id
+input) is closed after PR #346; the parent must stay open until these residual
+items have evidence. No duplicate security PR is warranted.
+
+Current delivery order is therefore: (1) implement and verify #343; (2) close
+residual acceptance for #205, #211, #217, #223, #247, #254, #255, #303 and
+#308; (3) finish the remaining ready/community adoption slice #229/#256; and
+(4) triage the remaining 28 triage and 11 blocked issues. Every new slice
+remains fork-only, squash-only, test-backed, reviewed under the required CI
+contexts, and recorded here plus on its parent Issue.
