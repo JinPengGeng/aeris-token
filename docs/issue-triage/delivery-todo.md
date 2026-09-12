@@ -150,6 +150,9 @@ Completed fork-only slices since the previous checkpoint:
 - PR #323 merged billing failure counters and the Prometheus alert contract
   (`883c3c78…`); #307 remains open for external parse/alert rehearsal and its
   dependency on the #306 producer.
+- PR #329 merged durable audit persistence across client disconnects
+  (`42d02830…`); #255 was intentionally reopened for broader mutation and
+  reconciliation acceptance.
 - PR #325 merged the read-only historical NUMERIC audit (`c58ccc85…`); #316
   remains open pending an explicitly reviewed backfill decision.
 - PR #326 merged this delivery TODO/workflow refresh (`042504cf…`).
@@ -158,9 +161,9 @@ Completed fork-only slices since the previous checkpoint:
 
 Current delivery order:
 
-1. **#328/#329** — finish required CI and squash auto-merge the video-retention
-   and audit-lifecycle slices; then record deployment/drill evidence before
-   changing parent Issue states. #327 is already merged.
+1. **#328** — finish required CI and squash auto-merge the video-retention
+   slice; then record deployment/drill evidence before changing parent Issue
+   state. #327 and #329 are already merged.
 2. **#324 / #306** — complete the provider production-source, cancellation,
    retry and streaming lifecycle review; enable auto-merge only after the
    RED producer contract is consistent with #307.
