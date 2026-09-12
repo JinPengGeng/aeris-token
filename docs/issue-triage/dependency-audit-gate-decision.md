@@ -24,7 +24,8 @@ Issue #220 中安装器 `SHA256SUMS` 消费和基础镜像 digest 已在当前 m
 `cargo-audit 0.21.2`；npm 使用 Node `22.14.0`，并将 registry 固定为
 `https://registry.npmjs.org`，避免继承本地或 runner 镜像配置。
 
-`cargo audit --locked` 对 Cargo advisory database 中的漏洞失败。npm 使用
+`cargo audit` 对 Cargo advisory database 中的漏洞失败；审计工具自身读取
+仓库锁文件，且 `cargo-audit 0.21.2` 不支持额外的 `--locked` 参数。npm 使用
 `npm audit --package-lock-only --audit-level=high`：high/critical 漏洞失败，
 moderate/low 仍会出现在审计输出中但不阻塞合并。网络、registry 或 advisory
 数据库不可用同样失败（fail closed），因为无法证明依赖安全。
