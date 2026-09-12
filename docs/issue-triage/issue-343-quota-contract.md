@@ -13,7 +13,7 @@ the transient `RateLimit` kind. OpenAI emitted
 Stream and finalize classifiers did not recognize exhausted credit, so simply
 changing the response builder would lose the distinction during conversion.
 
-Priority P1, benefit high, risk medium, size M: the change prevents account
+Priority P1, benefit high, compatibility risk high, size M: the change prevents account
 errors from masquerading as transient limits and removes balance disclosure
 from the supported public envelopes. Authorization, wallet arithmetic,
 settlement, notification and refund decisions are unchanged. Gemini remains
