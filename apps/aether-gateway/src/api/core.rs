@@ -27,6 +27,10 @@ fn current_gateway_version() -> &'static str {
         .unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
+pub(crate) async fn liveness() -> impl IntoResponse {
+    Json(crate::handlers::public::public_liveness_payload())
+}
+
 pub(crate) async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let request_concurrency = state.request_concurrency_snapshot().map(|snapshot| {
         json!({
@@ -88,43 +92,19 @@ pub(crate) async fn health(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-const READINESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
-
 pub(crate) async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
-    let database_configured = state.has_data_backends();
-    let redis_configured = state.has_redis_data_backend();
-    let database_ok = if database_configured {
-        tokio::time::timeout(READINESS_PROBE_TIMEOUT, state.data.ping_database())
-            .await
-            .is_ok_and(|result| result.is_ok())
-    } else {
-        true
-    };
-    let redis_ok = if redis_configured {
-        tokio::time::timeout(READINESS_PROBE_TIMEOUT, state.ping_runtime_state())
-            .await
-            .is_ok_and(|result| result.is_ok())
-    } else {
-        true
-    };
-    let ready = database_ok && redis_ok;
+    let snapshot = state.readiness_snapshot().await;
+    let ready = snapshot.ready;
     let payload = json!({
         "status": if ready { "ready" } else { "not_ready" },
         "component": "aether-gateway",
         "manifest_version": FRONTDOOR_MANIFEST_VERSION,
         "manifest_path": FRONTDOOR_MANIFEST_PATH,
-        "warmup_status": "disabled",
+        "warmup_status": if snapshot.lifecycle_status == "starting" { "starting" } else { "complete" },
+        "lifecycle_status": snapshot.lifecycle_status,
         "gate_readiness": ready,
-        "dependencies": {
-            "database": {
-                "status": if !database_configured { "disabled" } else if database_ok { "ok" } else { "failed" },
-                "required": database_configured,
-            },
-            "redis": {
-                "status": if !redis_configured { "disabled" } else if redis_ok { "ok" } else { "failed" },
-                "required": redis_configured,
-            },
-        },
+        "dependencies": snapshot.dependencies,
+        "workers": snapshot.workers,
     });
     if ready {
         (StatusCode::OK, Json(payload))
