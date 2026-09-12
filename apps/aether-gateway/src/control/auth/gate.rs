@@ -159,8 +159,30 @@ async fn execution_plan_balance_capacity_rejection_inner(
         Some(_) => Ok(Some(GatewayLocalAuthRejection::BalanceDenied {
             remaining: Some(available_usd),
         })),
+        None if is_image_authorization_plan(plan, report_context) => {
+            // A paid image request must never pass authorization with an
+            // unknown cost. Free-tier images are explicitly proven zero-cost
+            // and remain available without wallet balance.
+            if execution_plan_cost_is_proven_zero(state, plan, report_context).await {
+                Ok(None)
+            } else {
+                Ok(Some(GatewayLocalAuthRejection::BalanceDenied {
+                    remaining: Some(available_usd),
+                }))
+            }
+        }
         None => Ok(None),
     }
+}
+
+fn is_image_authorization_plan(
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+) -> bool {
+    plan.provider_api_format.eq_ignore_ascii_case("openai:image")
+        || report_context
+            .and_then(|context| context.get("image_request"))
+            .is_some()
 }
 
 async fn validate_execution_plan_pricing_configuration_for_plan(
@@ -1947,6 +1969,87 @@ mod tests {
             )
             .await
         );
+    }
+
+    #[tokio::test]
+    async fn paid_image_with_unknown_authorization_cost_is_rejected_with_positive_balance() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 0.0,
+                    "output_price_per_1m": 0.0
+                }]
+            })),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(10.0, false), context);
+        let decision = decision_with_allowed_models(vec!["gpt-image-1".to_string()]);
+        let plan = execution_plan(
+            json!({
+                "model": "gpt-image-1",
+                "prompt": "a small red circle",
+                "n": 10,
+                "size": "1024x1024",
+                "quality": "high"
+            }),
+            "openai:image",
+        );
+
+        let rejection = execution_plan_balance_capacity_rejection(
+            &state,
+            &decision,
+            &plan,
+            Some(&billing_report_context()),
+        )
+        .await
+        .expect("image capacity check should resolve");
+
+        assert_eq!(
+            rejection,
+            Some(GatewayLocalAuthRejection::BalanceDenied {
+                remaining: Some(10.0),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn free_tier_image_with_unknown_authorization_cost_is_allowed() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 100.0,
+                    "output_price_per_1m": 100.0
+                }]
+            })),
+            None,
+            None,
+            Some("free_tier"),
+        );
+        let state = state_with_quota_and_wallet(quota_availability(0.0, false), context);
+        let decision = decision_with_allowed_models(vec!["gpt-image-1".to_string()]);
+        let plan = execution_plan(
+            json!({
+                "model": "gpt-image-1",
+                "prompt": "a small red circle",
+                "n": 10
+            }),
+            "openai:image",
+        );
+
+        let rejection = execution_plan_balance_capacity_rejection(
+            &state,
+            &decision,
+            &plan,
+            Some(&billing_report_context()),
+        )
+        .await
+        .expect("free image capacity check should resolve");
+
+        assert_eq!(rejection, None);
     }
 
     #[tokio::test]
