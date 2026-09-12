@@ -77,7 +77,6 @@ jobs:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org
         run: |
           set -euo pipefail
-          test -f package.json
           test -f package-lock.json
           npm audit --package-lock-only --audit-level=high --registry="$NPM_CONFIG_REGISTRY"
 
