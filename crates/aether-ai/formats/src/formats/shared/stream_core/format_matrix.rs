@@ -674,12 +674,17 @@ impl ClientStreamEmitter {
             Value::String(value) => Some(value.as_str()),
             _ => None,
         });
-        let Some(error_body) = build_core_error_body_for_client_format(
-            self.api_format(),
-            message,
+        let kind = if LocalCoreSyncErrorKind::is_quota_exhausted_error(
+            error.get("type").and_then(Value::as_str),
             code,
-            LocalCoreSyncErrorKind::ServerError,
-        ) else {
+        ) {
+            LocalCoreSyncErrorKind::QuotaExhausted
+        } else {
+            LocalCoreSyncErrorKind::ServerError
+        };
+        let Some(error_body) =
+            build_core_error_body_for_client_format(self.api_format(), message, code, kind)
+        else {
             return Ok(Vec::new());
         };
         self.emit_error(error_body)
@@ -777,6 +782,12 @@ fn parse_openai_error(payload: &Value) -> Option<(String, Option<String>, LocalC
         .get("code")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    if LocalCoreSyncErrorKind::is_quota_exhausted_error(
+        error.get("type").and_then(Value::as_str),
+        code.as_deref(),
+    ) {
+        return Some((message, code, LocalCoreSyncErrorKind::QuotaExhausted));
+    }
     let kind = match error
         .get("type")
         .and_then(Value::as_str)
@@ -801,6 +812,12 @@ fn parse_claude_error(payload: &Value) -> Option<(String, Option<String>, LocalC
         .get("code")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    if LocalCoreSyncErrorKind::is_quota_exhausted_error(
+        error.get("type").and_then(Value::as_str),
+        code.as_deref(),
+    ) {
+        return Some((message, code, LocalCoreSyncErrorKind::QuotaExhausted));
+    }
     let kind = match error
         .get("type")
         .and_then(Value::as_str)
@@ -1398,6 +1415,67 @@ mod tests {
                 .finish(&report_context)
                 .expect("finish should succeed")
                 .is_empty());
+        }
+    }
+
+    #[test]
+    fn quota_stream_errors_preserve_billing_semantics_across_public_formats() {
+        for (provider, error_type, legacy_code) in [
+            (
+                "openai:chat",
+                "insufficient_quota",
+                "credit_balance_exhausted",
+            ),
+            ("openai:chat", "rate_limit_error", "insufficient_quota"),
+            (
+                "openai:responses",
+                "insufficient_quota",
+                "credit_balance_exhausted",
+            ),
+            ("claude:messages", "billing_error", "balance_exceeded"),
+        ] {
+            for (client, expected_type, expected_code) in [
+                (
+                    "openai:chat",
+                    "insufficient_quota",
+                    "credit_balance_exhausted",
+                ),
+                (
+                    "openai:responses",
+                    "insufficient_quota",
+                    "credit_balance_exhausted",
+                ),
+                ("claude:messages", "billing_error", "balance_exceeded"),
+            ] {
+                let error = json!({"type": error_type, "code": legacy_code, "message": "balance_remaining=-12.345678"});
+                let payload = if provider == "openai:responses" {
+                    json!({"type": "response.failed", "response": {"id": "resp-billing", "status": "failed", "error": error}})
+                } else {
+                    json!({"type": "error", "error": error})
+                };
+                let context = report_context(provider, client);
+                let mut matrix = StreamingStandardFormatMatrix::default();
+                let output = matrix
+                    .transform_line(&context, data_line(payload))
+                    .expect("quota error should convert");
+                let events = json_data_events(&output);
+                let error = events
+                    .iter()
+                    .find_map(|event| {
+                        event
+                            .get("error")
+                            .or_else(|| event.pointer("/response/error"))
+                    })
+                    .expect("stream must contain a terminal error");
+                assert_eq!(error["type"], expected_type, "{provider} -> {client}");
+                assert_eq!(error["code"], expected_code, "{provider} -> {client}");
+                assert_eq!(error["message"], "Insufficient quota");
+                assert!(!String::from_utf8(output).unwrap().contains("12.345678"));
+                assert!(matrix
+                    .finish(&context)
+                    .expect("finish should succeed")
+                    .is_empty());
+            }
         }
     }
 

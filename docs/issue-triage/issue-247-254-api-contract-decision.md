@@ -3,6 +3,11 @@
 Updated 2026-09-12. Scope is the fork `JinPengGeng/aeris-token`; the upstream
 repository is read-only.
 
+The historical wallet decision below is superseded by
+[Issue 343](issue-343-quota-contract.md): OpenAI now uses
+`429/insufficient_quota/credit_balance_exhausted` and Claude uses
+`402/billing_error/balance_exceeded`.
+
 ## Verification
 
 Issue 247 correctly identified that local wallet denial returned HTTP `429`
