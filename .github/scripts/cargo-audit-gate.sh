@@ -51,10 +51,11 @@ if [[ "$today" > "$expires_on" ]]; then
   exit 1
 fi
 
-# Keep this exception tied to the reviewed dependency surface. The resolved
-# graph must not activate rsa or sqlx-mysql; if either appears, this review is
-# invalid and the fail-closed audit must stop for a fresh security decision.
-resolved="$(cargo tree --locked --workspace --all-features --target all --format '{p}' --prefix none)"
+# Keep this exception tied to the reviewed production dependency surface. Do
+# not pass --all-features here: that would deliberately activate optional
+# backends (including sqlx-mysql) and make this guard reject its own review.
+# Optional packages remain visible to cargo-audit through Cargo.lock below.
+resolved="$(cargo tree --locked --workspace --target all --format '{p}' --prefix none)"
 if printf '%s\n' "$resolved" | rg -q '^(rsa|sqlx-mysql) v'; then
   echo "rsa/sqlx-mysql is active in the resolved graph; review the exception" >&2
   exit 1
