@@ -254,13 +254,45 @@ fn encrypted_video_task_store_bytes(
 }
 
 fn read_persisted_video_task_store(path: &Path) -> std::io::Result<PersistedVideoTaskStore> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(PersistedVideoTaskStore::Bytes(bytes)),
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            ensure_private_store_file(path, &metadata)?;
+            std::fs::read(path).map(PersistedVideoTaskStore::Bytes)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(PersistedVideoTaskStore::Missing)
         }
         Err(error) => Err(error),
     }
+}
+
+fn ensure_private_store_file(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "video task store must be a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let mode = metadata.mode();
+        if mode & 0o077 != 0 {
+            // Existing files may have been created by an older release with
+            // the process umask. Tighten them before any plaintext/ciphertext
+            // is consumed, while retaining only owner read/write bits.
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(mode & 0o600);
+            std::fs::set_permissions(path, permissions)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn replace_video_task_store_if_unchanged(
@@ -490,6 +522,50 @@ mod tests {
         assert!(!task.metadata.to_string().contains("private-debug"));
         assert!(record.request_metadata.is_none());
         drop(restored);
+        cleanup_store_path(&path);
+    }
+
+    #[test]
+    fn sensitive_video_snapshot_debug_is_redacted() {
+        let snapshot = sensitive_gemini_snapshot();
+        let debug = format!("{snapshot:?}");
+
+        for secret in [
+            "code-secret",
+            "error-secret",
+            "metadata-secret",
+            "metadata-query-secret",
+            "transport-key-required-for-resume",
+            "create a video",
+        ] {
+            assert!(!debug.contains(secret), "debug output leaked {secret}");
+        }
+        assert!(debug.contains("[redacted]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_store_permissions_are_tightened_before_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = temp_store_path("permission-tightening");
+        let bytes = encrypted_video_task_store_bytes(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            &VideoTaskRegistry::default(),
+        )
+        .expect("encrypted registry should serialize");
+        std::fs::write(&path, bytes).expect("store should be written");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("permissive mode should be applied");
+
+        let _store = FileVideoTaskStore::new(&path, DEVELOPMENT_ENCRYPTION_KEY)
+            .expect("permissive existing store should be readable");
+        let mode = std::fs::metadata(&path)
+            .expect("store metadata should be readable")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "store must not be group/world accessible");
+
         cleanup_store_path(&path);
     }
 

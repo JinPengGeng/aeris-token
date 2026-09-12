@@ -100,7 +100,7 @@
 
 | 子项 | 判定/优先级 | 证据/测试 | 建议 |
 | --- | --- | --- | --- |
-| upstream key/prompt 明文落盘 | 已修 | `video-tasks-core/src/store_backend.rs:116-174,210-253` 强制 Fernet；`:271-333` sidecar lock、CAS、0600；`:454-530` 加密 reload/legacy rewrite。 | 关闭旧 P0。 |
+| upstream key/prompt 明文落盘 | 已修 | `video-tasks-core/src/store_backend.rs` 强制 Fernet v2、拒绝明文并执行 legacy migration；sidecar lock、CAS、原子替换和 owner-only 文件权限；读取时收紧历史宽松权限并拒绝 symlink。`types.rs` 的 persistence/seed Debug 对原始请求体、prompt、provider diagnostics、metadata 和 video URL 脱敏。 | 关闭旧 P0；补强验收记录见 [`video-task-secrets-decision.md`](video-task-secrets-decision.md)。 |
 | 内存→磁盘失败分叉 | 已修 | `store_backend.rs:221-233` copy-on-write，持久化成功后替换内存。 | 关闭。 |
 | OpenAI `in_progress` 状态 | 当前成立，P1 | `video-tasks-core/src/openai.rs:94-108` 只识别 `processing`，未知（含 `in_progress`）回退 Submitted。 | 增加映射并补 provider 状态回归测试。 |
 | OpenAI 增量响应清空旧字段 | 当前成立，P1/P2 | `openai.rs:118-133` 在响应缺字段时无条件把 completed/expires/error/video URL 更新为 None。 | 缺少稀疏轮询响应保留字段测试。 | 仅在字段存在时更新，终态显式清理。 |
