@@ -330,7 +330,7 @@ impl BillingService {
                                 return Ok(None);
                             }
                             let Some(units) = ceil_cost_units(
-                                calculated.actual_total_cost * input.api_key_multiplier,
+                                calculated.cost_before_final_rounding(input.api_key_multiplier),
                             ) else {
                                 return Ok(None);
                             };
@@ -369,6 +369,10 @@ impl BillingService {
             || usage.cache_read_tokens < 0
             || usage.cache_creation_ephemeral_5m_tokens < 0
             || usage.cache_creation_ephemeral_1h_tokens < 0
+            || usage
+                .cache_creation_ephemeral_5m_tokens
+                .checked_add(usage.cache_creation_ephemeral_1h_tokens)
+                .is_none_or(|classified| classified > usage.cache_creation_tokens)
         {
             return Ok(None);
         }
@@ -386,13 +390,27 @@ impl BillingService {
         if usage.image_count > 0 && actual_output.is_none() {
             return Ok(None);
         }
+        let actual_format = usage.image_output_format.as_deref().map(|format| {
+            match format.trim().to_ascii_lowercase().as_str() {
+                "jpg" | "jpeg" => "jpeg",
+                "png" => "png",
+                "webp" => "webp",
+                _ => "",
+            }
+        });
+        if usage.image_count > 0
+            && (actual_format == Some("")
+                || quote.input.output_format.is_some() && actual_format.is_none())
+        {
+            return Ok(None);
+        }
         let calculation = self.calculate(&quote.pricing, usage)?;
         if !billing_computation_is_bounded(&calculation) {
             return Ok(None);
         }
-        let Some(calculated_units) =
-            settled_cost_units(calculation.actual_total_cost * quote.input.api_key_multiplier)
-        else {
+        let Some(calculated_units) = settled_cost_units(
+            calculation.cost_before_final_rounding(quote.input.api_key_multiplier),
+        ) else {
             return Ok(None);
         };
         let context = normalize_total_input_context_for_cache_hit_rate(
@@ -408,6 +426,12 @@ impl BillingService {
         let facts_exceeded = usage.image_count > i64::from(quote.input.image_count)
             || usage.request_count > i64::from(quote.input.image_count)
             || tokens_exceeded
+            || (usage.image_count > 0
+                && quote
+                    .input
+                    .output_format
+                    .as_deref()
+                    .is_some_and(|expected| actual_format != Some(expected)))
             || (usage.image_count > 0
                 && !quote
                     .input
@@ -504,6 +528,31 @@ mod tests {
             .quote_image_authorization(&pricing, &input)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn quote_and_frozen_cost_match_the_single_combined_multiplier_rounding() {
+        let service = BillingService::new();
+        for (price, expected_units) in [(0.050_000_04, 5_000_004), (0.000_000_01, 1)] {
+            let mut pricing = pricing(json!({"image_output_price_default": price}));
+            pricing.default_price_per_request = Some(0.0);
+            pricing.provider_api_key_rate_multipliers = Some(json!({"openai:image": 0.1}));
+            let mut input = input();
+            input.image_count = 1;
+            input.api_key_multiplier = 10.0;
+            let quote = service
+                .quote_image_authorization(&pricing, &input)
+                .unwrap()
+                .unwrap();
+            let actual = service
+                .calculate_image_with_quote(&quote, &usage())
+                .unwrap()
+                .unwrap();
+            assert_eq!(actual.calculated_units, expected_units);
+            assert!(quote.upper_bound_units() >= expected_units);
+            assert_eq!(actual.collectible_units, expected_units);
+            assert!(!actual.requires_reconciliation);
+        }
     }
 
     #[test]
@@ -621,6 +670,72 @@ mod tests {
                 .unwrap();
             assert!(settled.calculated_units <= quote.upper_bound_units());
             assert!(!settled.requires_reconciliation);
+        }
+    }
+
+    #[test]
+    fn inconsistent_cache_subtotals_keep_the_hold_for_reconciliation() {
+        let service = BillingService::new();
+        let pricing = pricing(json!({
+            "image_output_price_default": 0.05,
+            "tiers": [{"up_to": null, "input_price_per_1m": 1.0,
+                "output_price_per_1m": 0.0, "cache_creation_price_per_1m": 3.0}]
+        }));
+        let mut input = input();
+        input.token_bounds = Some(BillingImageTokenBounds {
+            max_total_input_tokens: 1000,
+            max_output_tokens: 0,
+        });
+        let quote = service
+            .quote_image_authorization(&pricing, &input)
+            .unwrap()
+            .unwrap();
+        for (aggregate, five_minute, hour) in
+            [(0, 2000, 0), (1000, 600, 500), (i64::MAX, i64::MAX, 1)]
+        {
+            let mut actual = usage();
+            actual.cache_creation_tokens = aggregate;
+            actual.cache_creation_ephemeral_5m_tokens = five_minute;
+            actual.cache_creation_ephemeral_1h_tokens = hour;
+            assert!(service
+                .calculate_image_with_quote(&quote, &actual)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn output_format_changes_are_audited_even_when_the_cost_does_not_change() {
+        let service = BillingService::new();
+        let quote = service
+            .quote_image_authorization(
+                &pricing(json!({"image_output_price_default": 0.05})),
+                &input(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut actual = usage();
+        actual.image_output_format = Some("jpeg".into());
+        let changed = service
+            .calculate_image_with_quote(&quote, &actual)
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.excess_units, 0);
+        assert!(changed.requires_reconciliation);
+        actual.image_output_format = Some(" PNG ".into());
+        assert!(
+            !service
+                .calculate_image_with_quote(&quote, &actual)
+                .unwrap()
+                .unwrap()
+                .requires_reconciliation
+        );
+        for format in [None, Some("unknown".into())] {
+            actual.image_output_format = format;
+            assert!(service
+                .calculate_image_with_quote(&quote, &actual)
+                .unwrap()
+                .is_none());
         }
     }
 

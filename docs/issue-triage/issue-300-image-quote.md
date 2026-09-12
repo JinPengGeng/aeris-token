@@ -39,6 +39,10 @@ The quote stores a version, the pricing snapshot and normalized inputs. Amounts 
 100,000,000 units per USD. Authorization rounds upward with checked integer bounds;
 normal settlement retains the existing eight-decimal rounding. The serialized
 quote belongs to a server-owned funds reservation and is not client authorization.
+Quote, frozen settlement and usage-event enrichment apply the provider and API-key
+multipliers together to the base cost before the final currency rounding. They
+share `BillingComputation::cost_before_final_rounding`; the provider-only rounded
+`actual_total_cost` is not used as an intermediate for the API-key multiplier.
 
 ## Actual output and financial integration
 
@@ -49,6 +53,10 @@ reconciliation. Fewer completed outputs incur only their actual charges. Priced
 overruns retain cost evidence and never silently increase the collectible amount.
 Missing or unpriced evidence returns no calculation: keep the funds hold pending
 reconciliation instead of inventing zero output or the requested count.
+Cache creation subtotals must sum without overflow and cannot exceed the aggregate
+creation total. Inconsistent subtotals, invalid output formats and missing formats
+when the quote fixes one return no calculation. A different valid output format
+retains the priced calculation and requires reconciliation even below the ceiling.
 
 The formats crate adds `NormalizedOpenAiImageRequest::authorization_dimensions()`.
 It reuses existing JSON/multipart normalization and exports count/limit, normalized
@@ -65,6 +73,15 @@ event-enrichment cancellation behavior is not changed by this API.
 
 ## Review and acceptance
 
+Independent review found a rounding mismatch: a USD 0.05000004 image with provider
+multiplier 0.1 and API-key multiplier 10 was quoted/settled at 5,000,000 units by
+the new API, whereas existing usage enrichment charged 5,000,004. A USD 0.00000001
+image could even receive a zero quote. The new Rust regression reproduced the
+5,000,000-versus-5,000,004 failure before the fix. Combined multiplier evaluation
+now matches actual usage enrichment at all three tested rounding boundaries.
+The review also identified the cache subtotal and output-format evidence gaps
+described above; focused regressions cover both, including subtotal overflow.
+
 Local verification covers count 1/10 and lower model limits; matrix/range/default
 precedence; complete auto sets and missing coverage; both multipliers; token/cache
 bounds and unusual TTLs; non-monotonic tiers and processing multipliers; frozen
@@ -72,10 +89,11 @@ pricing, partial output, overrun/capped collection; free/zero-cost cases; invali
 amounts, dimensions and integer overflow; JSON and multipart normalized dimensions.
 Full billing tests and relevant image-format tests must pass with Rust 1.95.0.
 
-Local evidence on 2026-09-13: all 109 billing library tests and 110 image-related
-format tests passed. Clippy for both crates and all targets passed with warnings
-denied; rustfmt and diff checks passed. Independent review and hosted required
-checks are still pending.
+Local evidence on 2026-09-13: all 113 billing library tests passed after the review
+fixes; the unchanged format extraction previously passed 110 image-related tests.
+Clippy for both crates and all targets passed with warnings denied, with billing
+Clippy rerun after the fixes; rustfmt and diff checks passed. Review confirmation
+of the fixes and hosted checks on the updated head are still pending.
 
 Keep this PR in draft until independent review and its required checks pass. Do
 not close #300 on this component: real PostgreSQL reservation races, every wallet
