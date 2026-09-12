@@ -13351,7 +13351,22 @@ mod tests {
             saturated_snapshot.enqueue_retry_scheduled_total,
         )
         .await;
-        let recovered_snapshot = runtime.metrics_snapshot();
+        // Terminal persistence can finish before the background barrier worker
+        // records its completion. Retry-queue drainage alone does not wait for
+        // that lifecycle accounting to settle.
+        let recovered_snapshot = timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = runtime.metrics_snapshot();
+                if snapshot.lifecycle_submission_pending == 0
+                    && snapshot.ordered_lifecycle_pending == 0
+                {
+                    break snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recovered terminal lifecycle barriers should drain");
 
         assert!(
             first_write_started.is_ok(),
