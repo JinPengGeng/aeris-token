@@ -1393,6 +1393,7 @@ mod tests {
             node_name: "tunnel-test".to_string(),
             tunnel_security: crate::config::TunnelSecurity::Off,
             tunnel_encryption_key: None,
+            remote_upgrade_enabled: false,
             node_region: None,
             heartbeat_interval: 1,
             allowed_ports: vec![80, 443],

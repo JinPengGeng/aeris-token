@@ -267,6 +267,17 @@ pub struct Config {
     #[arg(long, env = "AETHER_TUNNEL_ENCRYPTION_KEY")]
     pub tunnel_encryption_key: Option<String>,
 
+    /// Allow heartbeat ACKs to trigger a self-upgrade.
+    ///
+    /// Remote upgrades are disabled by default until release artifact
+    /// signature verification is configured for this installation.
+    #[arg(
+        long,
+        env = "AETHER_TUNNEL_REMOTE_UPGRADE_ENABLED",
+        default_value_t = false
+    )]
+    pub remote_upgrade_enabled: bool,
+
     /// Region label (e.g. ap-northeast-1)
     #[arg(long, env = "AETHER_TUNNEL_NODE_REGION")]
     pub node_region: Option<String>,
@@ -704,6 +715,7 @@ impl std::fmt::Debug for Config {
                 "tunnel_encryption_key",
                 &self.tunnel_encryption_key.as_ref().map(|_| "<redacted>"),
             )
+            .field("remote_upgrade_enabled", &self.remote_upgrade_enabled)
             .finish_non_exhaustive()
     }
 }
@@ -1057,6 +1069,8 @@ pub struct ConfigFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_private_targets: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_upgrade_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub aether_request_timeout_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aether_connect_timeout_secs: Option<u64>,
@@ -1248,6 +1262,10 @@ impl ConfigFile {
         set!("AETHER_TUNNEL_MANAGEMENT_TOKEN", management_token);
         set!("AETHER_TUNNEL_SECURITY", tunnel_security);
         set!("AETHER_TUNNEL_ENCRYPTION_KEY", tunnel_encryption_key);
+        set!(
+            "AETHER_TUNNEL_REMOTE_UPGRADE_ENABLED",
+            self.remote_upgrade_enabled
+        );
         set!("AETHER_TUNNEL_PUBLIC_IP", self.public_ip);
         set!("AETHER_TUNNEL_NODE_NAME", node_name);
         set!("AETHER_TUNNEL_NODE_REGION", self.node_region);
@@ -1950,6 +1968,28 @@ mod tests {
     fn config_file_deserializes_allow_private_targets() {
         let cfg: ConfigFile = toml::from_str("allow_private_targets = true").expect("bool toml");
         assert_eq!(cfg.allow_private_targets, Some(true));
+    }
+
+    #[test]
+    fn remote_upgrades_are_disabled_by_default() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+        ]);
+        assert!(!config.remote_upgrade_enabled);
+    }
+
+    #[test]
+    fn config_file_round_trips_remote_upgrade_opt_in() {
+        let cfg: ConfigFile = toml::from_str("remote_upgrade_enabled = true").expect("bool toml");
+        assert_eq!(cfg.remote_upgrade_enabled, Some(true));
+        let round_trip: ConfigFile = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(round_trip.remote_upgrade_enabled, Some(true));
     }
 
     #[test]

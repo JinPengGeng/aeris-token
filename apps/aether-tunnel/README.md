@@ -113,6 +113,8 @@ sudo aether-tunnel uninstall
 
 Linux/macOS 可运行 `sudo aether-tunnel upgrade [version]`。自更新只接受本仓库的非草稿 `tunnel-v*` / `proxy-v*` SemVer Release，下载当前平台的固定资产和同一 tag 下的 `SHA256SUMS.txt`，校验后在受保护的二进制目录内原子替换，并保留上一版本用于失败回滚。Windows 不执行进程内自更新；请重新运行上面的 PowerShell 安装脚本完成手工替换，避免二段重命名产生二进制缺失窗口。
 
+heartbeat ACK 触发的远程自动升级默认关闭，因为当前客户端只验证与制品同源的 SHA-256，尚未消费发布签名或 provenance。只有在已接受该信任边界、并确认管理面与发布资产受保护时，才显式设置 `AETHER_TUNNEL_REMOTE_UPGRADE_ENABLED=true`（或 `--remote-upgrade-enabled`）；这不会改变手工 `upgrade` 命令的行为。
+
 ## 配置
 
 配置按以下优先级加载（高优先级覆盖低优先级）：
@@ -226,6 +228,7 @@ upstream_proxy_remote_dns = true
 | 参数 | 环境变量 | 默认值 | 说明 |
 |------|----------|--------|------|
 | `--allow-private-targets` | `AETHER_TUNNEL_ALLOW_PRIVATE_TARGETS` | `false` | 默认拦截 private/reserved 目标地址；仅在明确需要访问内网服务时设为 `true`，且仅影响重启后的进程 |
+| `--remote-upgrade-enabled` | `AETHER_TUNNEL_REMOTE_UPGRADE_ENABLED` | `false` | 允许 heartbeat ACK 触发自动升级；仅在确认发布信任链后显式开启 |
 | `--dns-cache-ttl-secs` | `AETHER_TUNNEL_DNS_CACHE_TTL` | `60` | DNS 缓存 TTL（秒） |
 | `--dns-cache-capacity` | `AETHER_TUNNEL_DNS_CACHE_CAPACITY` | `1024` | DNS 缓存容量（条目数） |
 
