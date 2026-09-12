@@ -62,6 +62,11 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #220 | P1 | Split | add Cargo/npm advisory scan and explicit policy fixture |
 | #218 | P1 | Split | #297 merged JWT startup validation; decide non-loopback environment/TLS and Redis durability slices |
 | #217 | P1 | Split | reopened after accidental auto-close; deliver #307 metrics/alerts, #308 readiness, and #306 RED/log/trace contracts |
+| #312 | P1 | Ready | implement the durable Redis production overlay and replay drill under #218 |
+| #311 | P1 | Ready | implement remote PostgreSQL TLS default hardening under #218 |
+| #308 | P1 | Ready | define and implement readiness/health semantics under #217 |
+| #307 | P1 | Ready | define metrics, billing counters and alerting foundation under #217 |
+| #306 | P1 | Ready | define request RED dimensions and log/trace telemetry under #217 |
 | #216 | P1 | Split | implement live-DB, VSCodex and build-performance child gates |
 | #215 | P2 | Planned | measure synchronous logging/SSE filtering/lock contention before changes |
 | #214 | P1 | Planned | add probe, graceful shutdown and accept-error acceptance tests |
@@ -74,6 +79,9 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #207 | P2 | Planned | bound internal errors and Windsurf buffering; add graceful shutdown slice |
 | #206 | P1 | Split | #300 tracks image authorization cost bypass; implement fail-closed unknown paid-image estimate, then bounded pricing |
 | #205 | P1 | Split | #299 merged opt-in/default-off and anti-downgrade; design signed provenance and non-root service slices |
+| #315 | P1 | Ready | define the signed release provenance contract before implementing tunnel verification under #205 |
+| #314 | P1 | Ready | implement least-privilege systemd/OpenRC service identities after permission audit under #205 |
+| #316 | P2 | Ready | audit historical NUMERIC rebate records and decide idempotent backfill under #208 |
 | #179 | P2 | Deferred | retain as roadmap; move actionable slices into child issues |
 | #158 | P2 | Deferred | upstream provider-scoped allowlist evaluation only |
 | #157 | P2 | Deferred | refresh upstream billing/quota registry; no blind cherry-pick |
@@ -91,7 +99,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 ## 2026-09-12 live checkpoint
 
 The fork main branch currently includes #290, #293, #294, #295, #297, #298,
-#299, #301, #302 and #304. Their merge commits and required-check evidence are
+#299, #301, #302, #304 and #310. Their merge commits and required-check evidence are
 available from the linked PRs; each is a slice of its parent Issue. #305 is
 still open with squash auto-merge enabled and is being revalidated after the
 #304 base moved.
@@ -102,6 +110,14 @@ bounded children: #307 (metrics and alerts), #308 (readiness/health), and #306
 (RED dimensions and telemetry). #224 remains open for capacity and Redis
 recovery evidence after its #302 preflight slice.
 
+Issue #218 now has two ready children: #311 for remote PostgreSQL TLS defaults
+and #312 for the production Redis durability profile. These children capture
+the remaining P1 decisions without changing local development defaults.
+
+Issue #205 now has #314 (service identity) and #315 (signed provenance) ready
+children. Issue #208 has #316 ready for a read-only historical data audit after
+the new-write adapter fix.
+
 The dependency gate #296 is held with auto-merge disabled. Its current review
 found that `Dependency Audit / check` is not yet in ruleset 21984327, and the
 RSA active-graph guard can miss a match when `rg -q` closes a pipe under
@@ -110,7 +126,7 @@ advisory is silently ignored.
 
 ## Completed slices and residual links
 
-PRs #282–#304 include merged slices into the fork. They cover contributor entry
+PRs #282–#310 include merged slices into the fork. They cover contributor entry
 points, watchdog health feedback (#92), finite billing formula values,
 governance records, TaskSupervisor drop cleanup, sparse OpenAI video polling,
 bounded DLQ retention, CI/release-gate decisions, the baseline OpenAI API error
