@@ -1,3 +1,4 @@
+pub(crate) mod provenance;
 pub(crate) mod service;
 mod tui;
 pub(crate) mod upgrade;

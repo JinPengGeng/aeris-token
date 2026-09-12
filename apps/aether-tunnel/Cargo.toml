@@ -35,6 +35,7 @@ toml = "0.8"
 rustls = { version = "0.23", features = ["ring"] }
 ratatui = "0.30.2"
 crossterm = "0.28"
+ed25519-dalek.workspace = true
 url = "2"
 sysinfo = "0.32"
 libc = "0.2"
