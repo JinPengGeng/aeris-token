@@ -8,7 +8,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
 
-const FIXTURE: &str = include_str!("../../../../docs/api/fixtures/public-api-compatibility.json");
+pub(super) const FIXTURE: &str =
+    include_str!("../../../../docs/api/fixtures/public-api-compatibility.json");
 
 #[derive(Debug, Deserialize)]
 struct FixtureDocument {
@@ -47,6 +48,7 @@ enum ErrorKind {
     NotFound,
     RequestTooLarge,
     RateLimit,
+    QuotaExhausted,
     Overloaded,
     ServerError,
 }
@@ -60,6 +62,7 @@ impl ErrorKind {
             Self::NotFound => LocalCoreSyncErrorKind::NotFound,
             Self::RequestTooLarge => LocalCoreSyncErrorKind::RequestTooLarge,
             Self::RateLimit => LocalCoreSyncErrorKind::RateLimit,
+            Self::QuotaExhausted => LocalCoreSyncErrorKind::QuotaExhausted,
             Self::Overloaded => LocalCoreSyncErrorKind::Overloaded,
             Self::ServerError => LocalCoreSyncErrorKind::ServerError,
         }
@@ -74,6 +77,8 @@ fn public_api_compatibility_fixture_matches_error_formatters_and_retry_policy() 
 
     let mut ids = HashSet::new();
     let mut saw_openai_chat = false;
+    let mut saw_openai_responses = false;
+    let mut saw_openai_embeddings = false;
     let mut saw_openai_image_generations = false;
     let mut saw_openai_image_edits = false;
     let mut saw_claude = false;
@@ -103,6 +108,7 @@ fn public_api_compatibility_fixture_matches_error_formatters_and_retry_policy() 
                     | (404, LocalCoreSyncErrorKind::NotFound)
                     | (413, LocalCoreSyncErrorKind::RequestTooLarge)
                     | (429, LocalCoreSyncErrorKind::RateLimit)
+                    | (402 | 429, LocalCoreSyncErrorKind::QuotaExhausted)
                     | (503 | 529, LocalCoreSyncErrorKind::Overloaded)
                     | (500, LocalCoreSyncErrorKind::ServerError)
             ),
@@ -136,6 +142,14 @@ fn public_api_compatibility_fixture_matches_error_formatters_and_retry_policy() 
                 assert_eq!(case.client_format, "openai:image");
                 saw_openai_image_generations = true;
             }
+            "/v1/responses" => {
+                assert_eq!(case.client_format, "openai:responses");
+                saw_openai_responses = true;
+            }
+            "/v1/embeddings" => {
+                assert_eq!(case.client_format, "openai:embedding");
+                saw_openai_embeddings = true;
+            }
             "/v1/images/edits" => {
                 assert_eq!(case.client_format, "openai:image");
                 saw_openai_image_edits = true;
@@ -147,7 +161,11 @@ fn public_api_compatibility_fixture_matches_error_formatters_and_retry_policy() 
             endpoint => panic!("unsupported fixture endpoint {endpoint}"),
         }
 
-        if case.status == 429 && case.error_code.as_deref() == Some("insufficient_quota") {
+        if case.kind.to_local() == LocalCoreSyncErrorKind::QuotaExhausted {
+            assert_eq!(
+                case.status,
+                case.kind.to_local().http_status_code(&case.client_format)
+            );
             assert!(
                 !case.retryable,
                 "insufficient_quota must not request a retry"
@@ -195,6 +213,8 @@ fn public_api_compatibility_fixture_matches_error_formatters_and_retry_policy() 
     }
 
     assert!(saw_openai_chat, "fixture must cover chat completions");
+    assert!(saw_openai_responses, "fixture must cover Responses");
+    assert!(saw_openai_embeddings, "fixture must cover Embeddings");
     assert!(
         saw_openai_image_generations,
         "fixture must cover image generations"

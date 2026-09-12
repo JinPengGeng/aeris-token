@@ -61,13 +61,13 @@ Local validation errors use the OpenAI envelope:
 
 The status and error type are deterministic: `400` is invalid input,
 `401` is authentication failure, `403` is an access policy denial, `404` is a
-missing resource/model, `429` is a retryable rate or quota limit, and `503` is
+missing resource/model, `429` is a rate or quota limit, and `503` is
 provider/gateway overload. A missing public model is reported as
 `404` with `error.code=model_not_found`.
 
 An exhausted wallet is not a rate-limit retry signal even though the HTTP
 status remains `429` for compatibility with OpenAI clients. It is returned as
-`error.type=rate_limit_error`, `error.code=insufficient_quota`, and the
+`error.type=insufficient_quota`, `error.code=credit_balance_exhausted`, and the
 message `Insufficient quota`; it has no `Retry-After` header. Clients should
 stop retrying and restore quota instead of applying exponential backoff.
 
