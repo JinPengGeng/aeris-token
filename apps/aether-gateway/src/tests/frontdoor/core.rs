@@ -35,7 +35,7 @@ async fn gateway_exposes_readyz_without_proxying_upstream() {
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["status"], "ready");
     assert_eq!(payload["component"], "aether-gateway");
-    assert_eq!(payload["warmup_status"], "disabled");
+    assert_eq!(payload["warmup_status"], "complete");
     assert_eq!(payload["gate_readiness"], true);
     assert_eq!(payload["dependencies"]["database"]["status"], "disabled");
     assert_eq!(payload["dependencies"]["database"]["required"], false);

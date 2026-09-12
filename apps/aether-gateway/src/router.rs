@@ -117,7 +117,10 @@ where
 }
 
 pub fn build_router() -> Result<Router, reqwest::Error> {
-    Ok(build_router_with_state(AppState::new()?))
+    let state = AppState::new()?;
+    // This convenience entry point configures neither external data nor workers.
+    state.mark_startup_complete(false);
+    Ok(build_router_with_state(state))
 }
 
 #[derive(Clone, Debug)]
