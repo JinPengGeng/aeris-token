@@ -78,7 +78,7 @@ jobs:
         run: |
           set -euo pipefail
           expected_lockfiles=$'package-lock.json\nfrontend/package-lock.json\naether-vscodex/package-lock.json\naether-vscodex/web/package-lock.json\naether-vscodex/vscode-extension/package-lock.json\n.github/automation/package-lock.json'
-          actual_lockfiles="$(git ls-files | awk '/(^|\/)package-lock\.json$/ { print }' | sort)"
+          actual_lockfiles="$(git -C "$GITHUB_WORKSPACE" ls-files | awk '/(^|\/)package-lock\.json$/ { print }' | sort)"
           if [[ "$actual_lockfiles" != "$(printf '%s\n' "$expected_lockfiles" | sort)" ]]; then
             echo "tracked package-lock.json set differs from the audited matrix" >&2
             diff -u <(printf '%s\n' "$expected_lockfiles" | sort) <(printf '%s\n' "$actual_lockfiles") >&2 || true
