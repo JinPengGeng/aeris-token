@@ -141,6 +141,8 @@ async fn execution_plan_balance_capacity_rejection_inner(
         } else {
             1.0
         };
+    let image_cost_is_proven_zero = is_image_authorization_plan(plan, report_context)
+        && execution_plan_cost_is_proven_zero(state, plan, report_context).await;
     match estimate_execution_plan_cost_upper_bound_usd(state, plan, report_context)
         .await?
         .map(|value| value * api_key_billing_multiplier)
@@ -151,6 +153,7 @@ async fn execution_plan_balance_capacity_rejection_inner(
         {
             Ok(None)
         }
+        None if image_cost_is_proven_zero => Ok(None),
         Some(_) | None if available_usd <= DAILY_QUOTA_EPSILON_USD => {
             Ok(Some(GatewayLocalAuthRejection::BalanceDenied {
                 remaining: Some(0.0),
