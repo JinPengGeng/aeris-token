@@ -2,7 +2,8 @@ use super::super::shared::{
     admin_wallet_refund_ids_from_suffix_path, build_admin_wallet_not_found_response,
     build_admin_wallet_refund_not_found_response, build_admin_wallet_refund_payload,
     build_admin_wallets_bad_request_response, build_admin_wallets_data_unavailable_response,
-    normalize_admin_wallet_optional_text, resolve_admin_wallet_owner_summary,
+    normalize_admin_wallet_optional_text, notify_user_refund_status,
+    refund_status_notification_should_send, resolve_admin_wallet_owner_summary,
     AdminWalletRefundCompleteRequest, ADMIN_WALLETS_API_KEY_REFUND_DETAIL,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -356,6 +357,12 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
                     );
                     return Ok(build_admin_wallets_data_unavailable_response());
                 }
+            }
+            if refund_status_notification_should_send(
+                Some(&refund_before_complete.status),
+                &refund.status,
+            ) {
+                notify_user_refund_status(state, &refund).await;
             }
             let response = Json(json!({
                 "refund": build_admin_wallet_refund_payload(&wallet, &owner, &refund),

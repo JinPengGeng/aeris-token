@@ -23,6 +23,7 @@ pub(crate) const IMPORTANT_NOTIFICATION_DEFAULT_CHANNEL_KEY: &str =
     "module.important_notification.default_channel";
 pub(crate) const IMPORTANT_NOTIFICATION_ITEMS_KEY: &str = "module.important_notification.items";
 pub(crate) const PROVIDER_QUOTA_ALERT_ITEM_KEY: &str = "provider_quota_alert";
+pub(crate) const USER_REFUND_STATUS_ITEM_KEY: &str = "user_refund_status";
 
 // Notification configuration is administrator-controlled but is also read on
 // request paths. Bound fan-out and template materialization so a malformed or
@@ -514,6 +515,20 @@ fn default_notification_items() -> Vec<ImportantNotificationItemConfig> {
             text_template: Some("你的账户余额已低于提醒阈值，请及时处理。".to_string()),
             user_email_enabled: true,
         },
+        ImportantNotificationItemConfig {
+            key: USER_REFUND_STATUS_ITEM_KEY.to_string(),
+            name: "退款状态更新".to_string(),
+            enabled: true,
+            channel: Some(ImportantNotificationChannelFilter::Email),
+            title_template: Some("退款状态更新：{status}".to_string()),
+            markdown_template: Some(
+                "退款申请 `{refund_no}` 的状态已更新为 **{status}**。\n\n金额：${amount_usd}\n{failure_reason}".to_string(),
+            ),
+            text_template: Some(
+                "退款申请 {refund_no} 的状态已更新为 {status}。金额：${amount_usd}\n{failure_reason}".to_string(),
+            ),
+            user_email_enabled: true,
+        },
     ]
 }
 
@@ -847,7 +862,7 @@ mod tests {
         ImportantNotificationChannelFilter, IMPORTANT_NOTIFICATION_EMAIL_ENABLED_KEY,
         IMPORTANT_NOTIFICATION_EMAIL_RECIPIENTS_KEY, MAX_NOTIFICATION_ITEMS,
         MAX_NOTIFICATION_RECIPIENTS, MAX_NOTIFICATION_RECIPIENT_BYTES,
-        MAX_NOTIFICATION_TEMPLATE_BYTES,
+        MAX_NOTIFICATION_TEMPLATE_BYTES, USER_REFUND_STATUS_ITEM_KEY,
     };
     use crate::{data::GatewayDataState, AppState};
     use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
@@ -933,6 +948,25 @@ mod tests {
             Some(ImportantNotificationChannelFilter::Email)
         );
         assert!(items[0].user_email_enabled);
+    }
+
+    #[test]
+    fn default_items_include_user_refund_status_email_notification() {
+        let items = parse_notification_items(None);
+        let item = items
+            .iter()
+            .find(|item| item.key == USER_REFUND_STATUS_ITEM_KEY)
+            .expect("refund status notification item should be defined");
+        assert!(item.enabled);
+        assert_eq!(
+            item.channel,
+            Some(ImportantNotificationChannelFilter::Email)
+        );
+        assert!(item.user_email_enabled);
+        assert!(item
+            .title_template
+            .as_deref()
+            .is_some_and(|template| template.contains("{status}")));
     }
 
     #[test]
