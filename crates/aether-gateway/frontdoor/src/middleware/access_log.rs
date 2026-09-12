@@ -222,9 +222,13 @@ mod tests {
     struct SharedBufferWriter(Arc<Mutex<Vec<u8>>>);
 
     impl SharedBuffer {
-        fn lines(&self) -> Vec<serde_json::Value> {
+        fn snapshot(&self) -> String {
             String::from_utf8(self.0.lock().expect("buffer should lock").clone())
                 .expect("buffer should contain valid utf-8")
+        }
+
+        fn lines(&self) -> Vec<serde_json::Value> {
+            self.snapshot()
                 .lines()
                 .filter(|line| !line.trim().is_empty())
                 .map(|line| serde_json::from_str(line).expect("json log line should parse"))
@@ -675,6 +679,50 @@ mod tests {
         assert_eq!(logs[0]["request_id"], "req-stream");
         assert_eq!(logs[0]["route_class"], "ai_public");
         assert_eq!(logs[0]["execution_path"], "execution_runtime_stream");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn access_log_pretty_format_contains_redacted_terminal_fields() {
+        let writer = SharedBuffer::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .pretty()
+                .with_ansi(false)
+                .with_writer(writer.clone())
+                .with_filter(LevelFilter::INFO),
+        );
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                get(|| async {
+                    Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .header(CONTROL_ROUTE_CLASS_HEADER, "passthrough")
+                        .header(EXECUTION_PATH_HEADER, "execution_runtime_stream")
+                        .body(Body::empty())
+                        .expect("response should build")
+                }),
+            )
+            .layer(axum::middleware::from_fn(access_log_middleware));
+
+        let _response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/responses?api_key=secret")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let output = writer.snapshot();
+        assert!(output.contains("http_request_failed"));
+        assert!(output.contains("execution_runtime_stream"));
+        assert!(output.contains("/v1/responses"));
+        assert!(!output.contains("api_key=secret"));
     }
 
     #[tokio::test(flavor = "current_thread")]
