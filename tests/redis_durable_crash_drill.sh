@@ -56,8 +56,14 @@ second=( $(redis --raw EVAL "$lua" 3 usage:events:dlq usage:events "$marker" "$s
 echo "second redrive result: ${second[*]}"
 test "${second[0]}" = 2
 test "${second[1]}" = "$destination_id"
-test "$(redis XLEN usage:events)" = 1
-test "$(redis EXISTS "usage:events:dlq")" = 0
-test "$(redis GET "$marker")" = "$destination_id"
+target_after="$(redis XLEN usage:events)"
+source_after="$(redis EXISTS "usage:events:dlq")"
+marker_value="$(redis GET "$marker")"
+echo "target length after redrive: $target_after"
+echo "DLQ exists after redrive: $source_after"
+echo "redrive marker: $marker_value"
+test "$target_after" = 1
+test "$source_after" = 0
+test "$marker_value" = "$destination_id"
 
 echo "PASS: Redis durable kill/recovery and idempotent DLQ redrive ($source_id -> $destination_id)"
