@@ -55,7 +55,7 @@ MANAGED_MARKER='<!-- upstream-sync-minimal-managed -->'
 WAIT_ATTEMPTS="${AERIS_SYNC_WAIT_ATTEMPTS:-50}"
 WAIT_SECONDS="${AERIS_SYNC_WAIT_SECONDS:-60}"
 GITHUB_API_PAGE_BYTES=2097152
-REQUIRED_CONTEXTS=("Rust CI / check" "Frontend CI / check" "Automation Policy / gate")
+REQUIRED_CONTEXTS=("Rust CI / check" "Frontend CI / check" "Automation Policy / gate" "Dependency Audit / check")
 
 bounded_git() {
   aeris_bounded_run "${AERIS_FETCH_MAX_DIFF_BYTES}" git "$@"
@@ -655,6 +655,7 @@ fi
 
 ensure_check_dispatch rust-ci.yml "Rust CI / check"
 ensure_check_dispatch frontend-ci.yml "Frontend CI / check"
+ensure_check_dispatch dependency-audit.yml "Dependency Audit / check"
 # The gate evaluates the sync PR against the trusted policy at the current
 # main tip; both were validated earlier in this run and are pinned as inputs.
 ensure_check_dispatch automation-policy.yml "Automation Policy / gate" \
