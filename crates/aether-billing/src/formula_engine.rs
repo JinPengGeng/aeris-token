@@ -782,7 +782,9 @@ fn evaluate_function(name: &str, args: &[f64]) -> Result<f64, UnsafeExpressionEr
         "float" => args.first().copied().ok_or_else(|| {
             UnsafeExpressionError::Unsupported("float() requires one argument".to_string())
         }),
-        _ => unreachable!("allowed function list and evaluator must stay in sync"),
+        _ => Err(UnsafeExpressionError::Unsupported(format!(
+            "function has no evaluator: {name}"
+        ))),
     }
 }
 
@@ -807,11 +809,40 @@ mod tests {
     fn every_allowed_function_is_evaluated_by_the_formula_engine() {
         let engine = FormulaEngine::new();
         for function in FORMULA_ALLOWED_FUNCTIONS {
+            let (arguments, expected_cost) = match *function {
+                "min" => ("2, 3", 2.0),
+                "max" => ("2, 3", 3.0),
+                "abs" => ("-2", 2.0),
+                "round" => ("2.125, 2", 2.13),
+                "int" => ("2.75", 2.0),
+                "float" => ("2.75", 2.75),
+                other => panic!("add a result fixture for the new built-in {other}"),
+            };
             let result = engine
-                .evaluate(&format!("{function}(2, 3)"), None, None, None, true)
+                .evaluate(&format!("{function}({arguments})"), None, None, None, true)
                 .unwrap_or_else(|error| panic!("{function} must be executable: {error}"));
             assert_eq!(result.status, FormulaEvaluationStatus::Complete);
+            assert_eq!(
+                result.cost, expected_cost,
+                "unexpected result for {function}"
+            );
+            assert!(
+                engine
+                    .evaluate(&format!("{function}()"), None, None, None, true)
+                    .is_err(),
+                "{function} must reject missing arguments"
+            );
         }
+    }
+
+    #[test]
+    fn formula_engine_rejects_functions_outside_the_shared_allowlist() {
+        let error = FormulaEngine::new()
+            .evaluate("unapproved(2)", None, None, None, true)
+            .expect_err("unapproved functions must return an evaluation error");
+        assert!(error
+            .to_string()
+            .contains("function not allowed: unapproved"));
     }
 
     #[test]
