@@ -697,3 +697,29 @@ SHAs. All three retain squash auto-merge and require fresh checks before merge.
 
 This top checkpoint and the intake table below describe the latest verified
 state. Timestamped checkpoints after the intake table are historical records.
+
+## 2026-09-13 latest live checkpoint (fork-only)
+
+Remote state was re-read with `gh`: **44 open issues** (21 P1, 23 P2) and
+**15 open PRs**. Fourteen open PRs have squash auto-merge enabled; #388 is the
+sole Draft PR. These counts supersede earlier intake counts while preserving
+the historical records above.
+
+PR #387 merged after reviewed head `9c9880bf8673da2eadc1100ee038526bc6df0c61`
+passed all required checks; merge commit is
+`c7563fd962ab2b08dc9136be6ff8f38702e1290d`. It delivers release signing-key
+overlap/retirement fixtures and verifier dependency audit coverage. Remaining
+#205 recovery/nightly-artifact acceptance stays open.
+
+Draft PR #388 (head `c4f6647213c9d3566ba220bb0e632b2d3cfdec9b`) preserves usage
+rows needed for `prepared`, `dispatched`, `reconciliation_pending`,
+`insufficient_quota`, and outstanding recovery balances while allowing raw
+bodies/headers to expire normally. PostgreSQL 17.11/Rust 1.95 validation passed
+7 cleanup tests and 12 required live targets plus Clippy; independent review and
+current-head checks remain pending. This retention prerequisite does not claim
+merge or complete Gateway lifecycle integration (#300/#206/#223).
+
+Issue #216 has a parallel selective Rust CI regression repair in progress. The
+detector reports false normally, but execution jobs lose `needs`/`if`; the
+proposed correction restores conservative filtering and a fail-closed gate. No
+PR number is asserted until GitHub publishes one.

@@ -1,9 +1,9 @@
 # Issue 核验、排序与交付清单
 
 当前交付入口：[完整动态 TODO](issue-triage/delivery-todo.md)。2026-09-13 已核验
-fork main `1087c867e08aa517b28a5acfaf162c16ebf298e4`：44 个开放 Issue
-（21 P1 / 23 P2；16 进行中 / 18 待分诊 / 10 依赖阻塞），15 个开放 PR
-（全部启用受保护自动合并，无 Draft）。父子任务不能重复计数。
+fork main `1087c867e08aa517b28a5acfaf162c16ebf298e4`：当前实时为 44 个开放
+Issue（21 P1 / 23 P2），15 个开放 PR（14 个启用受保护自动合并，#388 为唯一
+Draft）。父子任务不能重复计数；以下历史统计保留但不代表当前状态。
 所有 44 个开放 Issue 的 Project 卡均有 Status、Priority、Area、Risk、Size、Decision。
 
 #276 已随 #386 的 merge commit 完成，重新 fetch 后验证指定上游 SHA 的祖先关系。
@@ -18,6 +18,22 @@ helper 的 required audit 和 Dependabot，等待当前主分支检查。#379 �
 剩余验收和排序以动态 TODO 与 GitHub 为准。
 
 以下保留 2026-09-12 原始分诊证据及历史阶段记录，不代表当前未完成数量或状态。
+
+## 2026-09-13 最新实时进展
+
+- PR #387 已在 reviewed head `9c9880bf8673da2eadc1100ee038526bc6df0c61` 全部
+  required checks 通过后合并，merge commit 为
+  `c7563fd962ab2b08dc9136be6ff8f38702e1290d`；其 release signing-key overlap/
+  retirement 与 verifier 依赖审计切片已交付，#205 的 recovery/nightly artifact
+  残余仍开放。
+- Draft PR #388（head `c4f6647213c9d3566ba220bb0e632b2d3cfdec9b`）保留
+  prepared/dispatched/reconciliation_pending、`insufficient_quota` 和未结清
+  recovery 记录，raw body/header 仍按策略过期；PG17.11、7 cleanup tests、12
+  required live targets、Clippy 已通过，独立 review/当前 head checks 待完成。
+  仅完成 usage-retention prerequisite，不宣称 Gateway 完整生命周期或已合并。
+- #216 正在并行修复 selective Rust CI 回归：detector 输出 false 正常但执行 jobs
+  丢失 `needs`/`if`，拟恢复保守过滤与 fail-closed gate；在 GitHub 生成 PR 前不填写
+  PR 编号。
 原始基线为 fork `main@12a1d265c090f2666e35ddbe7f13f5b842cf5ff5`。用户已授权
 自主选择方案、补齐环境和社区协作配置，并要求全过程留档。只修改
 [JinPengGeng/aeris-token](https://github.com/JinPengGeng/aeris-token)；误开的上游
