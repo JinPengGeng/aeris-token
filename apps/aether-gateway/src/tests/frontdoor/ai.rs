@@ -3627,6 +3627,92 @@ async fn gateway_does_not_locally_reject_image_model_name_on_chat_completions() 
 }
 
 #[tokio::test]
+async fn gateway_image_invalid_request_fixtures_match_real_router_responses() {
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let upstream_hits_for_handler = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/{*path}",
+        any(move |_request: Request| {
+            let hits = Arc::clone(&upstream_hits_for_handler);
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (StatusCode::OK, Json(json!({"unexpected_upstream": true})))
+            }
+        }),
+    );
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-image-contract")),
+        unrestricted_models_snapshot("key-image-contract", "user-image-contract"),
+    )]));
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(upstream_url)
+            .with_auth_api_key_data_reader_for_tests(auth_repository),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let fixture: serde_json::Value =
+        serde_json::from_str(crate::tests::api_contract_fixtures::FIXTURE)
+            .expect("compatibility fixture should parse");
+    let cases = fixture["cases"].as_array().expect("fixture cases");
+
+    for (id, expected_path, expected_message) in [
+        (
+            "openai-images-invalid-request",
+            "/v1/images/generations",
+            "Image generation or edit request requires prompt",
+        ),
+        (
+            "openai-images-edits-invalid-request",
+            "/v1/images/edits",
+            "Image edit request requires at least one input image",
+        ),
+    ] {
+        let case = cases
+            .iter()
+            .find(|case| case["id"] == id)
+            .unwrap_or_else(|| panic!("missing required image fixture {id}"));
+        assert_eq!(case["endpoint"], expected_path, "{id} endpoint");
+        assert_eq!(case["envelope"], "openai", "{id} envelope");
+        assert_eq!(case["retryable"], false, "{id} retry policy");
+        let trace_id = format!("trace-{id}");
+        let response = client
+            .post(format!("{gateway_url}{expected_path}"))
+            .header("authorization", "Bearer sk-image-contract")
+            .header("x-trace-id", &trace_id)
+            .json(&case["request"])
+            .send()
+            .await
+            .expect("image request should complete");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{id}");
+        assert_eq!(
+            u64::from(response.status().as_u16()),
+            case["status"].as_u64().expect("fixture HTTP status"),
+            "{id} fixture status"
+        );
+        assert_eq!(response.headers()["x-trace-id"], trace_id, "{id}");
+        assert_eq!(
+            response.headers()[EXECUTION_PATH_HEADER],
+            EXECUTION_PATH_LOCAL_AI_PUBLIC,
+            "{id} should fail in local image validation"
+        );
+        assert!(case["retry_after"].is_null(), "{id} fixture retry header");
+        assert!(!response.headers().contains_key("retry-after"), "{id}");
+        let payload: serde_json::Value = response.json().await.expect("OpenAI error JSON");
+        assert_eq!(payload["error"]["type"], case["error_type"], "{id}");
+        assert_eq!(payload["error"]["code"], case["error_code"], "{id}");
+        assert_eq!(payload["error"]["message"], expected_message, "{id}");
+        assert!(payload.get("type").is_none(), "{id} OpenAI envelope");
+        assert!(payload.get("detail").is_none(), "{id} legacy envelope");
+        assert_eq!(upstream_hits.load(Ordering::SeqCst), 0, "{id}");
+    }
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_rejects_image_request_above_gateway_limit_without_hitting_fallback_probe() {
     let fallback_probe_hits = Arc::new(Mutex::new(0usize));
     let fallback_probe_hits_clone = Arc::clone(&fallback_probe_hits);
@@ -3646,10 +3732,9 @@ async fn gateway_rejects_image_request_above_gateway_limit_without_hitting_fallb
         unrestricted_models_snapshot("key-openai-image-n", "user-openai-image-n"),
     )]));
 
-    let (_unused_fallback_probe_url, fallback_probe_handle) = start_server(fallback_probe).await;
+    let (fallback_probe_url, fallback_probe_handle) = start_server(fallback_probe).await;
     let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway should build")
+        build_state_with_execution_runtime_override(fallback_probe_url)
             .with_auth_api_key_data_reader_for_tests(auth_repository),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -3658,6 +3743,7 @@ async fn gateway_rejects_image_request_above_gateway_limit_without_hitting_fallb
         .post(format!("{gateway_url}/v1/images/generations"))
         .header("authorization", "Bearer sk-openai-image-n")
         .header(http::header::CONTENT_TYPE, "application/json")
+        .header("x-trace-id", "trace-image-n-limit")
         .body(
             serde_json::to_vec(&json!({
                 "model": "grok-imagine-image-lite",
@@ -3672,6 +3758,8 @@ async fn gateway_rejects_image_request_above_gateway_limit_without_hitting_fallb
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.headers()["x-trace-id"], "trace-image-n-limit");
+    assert!(!response.headers().contains_key("retry-after"));
     assert_eq!(
         response
             .headers()
@@ -3680,10 +3768,12 @@ async fn gateway_rejects_image_request_above_gateway_limit_without_hitting_fallb
         Some(EXECUTION_PATH_LOCAL_AI_PUBLIC)
     );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["error"]["type"], "invalid_request_error");
+    assert!(payload["error"]["code"].is_null());
     assert_eq!(
         payload["error"]["message"],
         format!(
-            "当前图片反代仅支持 n=1..{}",
+            "Image requests require n between 1 and {}",
             openai_image_gateway_max_generation_count()
         )
     );
