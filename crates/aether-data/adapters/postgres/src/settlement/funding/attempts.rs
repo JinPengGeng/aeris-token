@@ -286,16 +286,18 @@ pub(crate) async fn outcome(
                 identity: input.identity.request.clone(),
                 usage: UsageSettlementInput {
                     request_id: input.identity.request.request_id.clone(),
-                    user_id: input.identity.request.user_id.clone(), api_key_id: input.identity.request.api_key_id.clone(),
+                    user_id: input.identity.request.user_id.clone(),
+                    api_key_id: input.identity.request.api_key_id.clone(),
                     api_key_is_standalone: input.identity.request.api_key_is_standalone,
                     provider_id: Some(previous.provider.provider_id.clone()),
-                    status: "completed".to_string(), billing_status: "pending".to_string(),
+                    status: "completed".to_string(),
+                    billing_status: "pending".to_string(),
                     total_cost_usd: request_funds_usd(usage.total_cost_units),
                     actual_total_cost_usd: request_funds_usd(usage.actual_cost_units),
                     finalized_at_unix_secs: Some(input.finalized_at_unix_secs),
                 },
-                reconciliation_facts: (usage.actual_cost_units > previous.funds.quote.authorized_cost_units)
-                    .then(|| serde_json::json!({"reason":"authorization_exceeded", "excess_units": usage.actual_cost_units - previous.funds.quote.authorized_cost_units})),
+                reconciliation_facts: usage
+                    .reconciliation_facts(previous.funds.quote.authorized_cost_units),
             };
             finalize_inner(tx, settlement, Some(&input.identity.attempt_id))
                 .await?

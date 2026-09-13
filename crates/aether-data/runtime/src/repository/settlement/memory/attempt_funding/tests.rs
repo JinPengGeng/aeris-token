@@ -131,6 +131,63 @@ fn balance(repo: &InMemorySettlementRepository) -> f64 {
 }
 
 #[tokio::test]
+async fn priced_quote_mismatch_preserves_charge_and_pending_audit() {
+    let (repo, usage_repo) = fixture(0.20);
+    let q = quote("format-change");
+    repo.reserve_request_attempt_funds(q.clone()).await.unwrap();
+    repo.mark_request_attempt_funds_dispatched(q.identity())
+        .await
+        .unwrap();
+    let mut observed = facts(&q, Some(6_000_000));
+    let RequestAttemptFinancialOutcome::Charged { usage } = &mut observed.facts.outcome else {
+        unreachable!()
+    };
+    usage.requires_reconciliation = true;
+    let stored = repo
+        .record_request_attempt_funds_outcome(observed.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.funds.state, RequestFundsState::ReconciliationPending);
+    assert_eq!(stored.funds.actual_cost_units, Some(6_000_000));
+    assert_eq!(stored.funds.collected_cost_units, 6_000_000);
+    assert_eq!(
+        stored.funds.reconciliation_facts.as_ref().unwrap()["excess_units"],
+        0
+    );
+    let summary = repo
+        .close_request_funds_admission(CloseRequestFundsAdmissionInput {
+            identity: q.identity(),
+            closed_at_unix_secs: 102,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(summary.requires_reconciliation);
+    assert_eq!((summary.held_cost_units, summary.unknown_attempts), (0, 0));
+    assert_eq!(summary.known_actual_cost_units, 6_000_000);
+    let parent = usage_repo
+        .find_by_request_id("request")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(parent.billing_status, "pending");
+    repo.record_request_attempt_funds_outcome(observed.clone())
+        .await
+        .unwrap();
+    assert_eq!(balance(&repo), 0.14);
+    let RequestAttemptFinancialOutcome::Charged { usage } = &mut observed.facts.outcome else {
+        unreachable!()
+    };
+    usage.requires_reconciliation = false;
+    assert!(repo
+        .record_request_attempt_funds_outcome(observed)
+        .await
+        .is_err());
+    assert_eq!(balance(&repo), 0.14);
+}
+
+#[tokio::test]
 async fn attempts_keep_unknown_holds_across_retry_and_late_charge() {
     let (repo, usage) = fixture(0.20);
     let a = quote("a");

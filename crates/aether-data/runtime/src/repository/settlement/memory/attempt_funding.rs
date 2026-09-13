@@ -362,9 +362,8 @@ pub(super) fn outcome(
                             actual_total_cost_usd: request_funds_usd(usage.actual_cost_units),
                             finalized_at_unix_secs: Some(input.finalized_at_unix_secs),
                         },
-                        reconciliation_facts: (usage.actual_cost_units
-                            > stored.funds.quote.authorized_cost_units)
-                            .then(|| serde_json::json!({"reason":"authorization_exceeded"})),
+                        reconciliation_facts: usage
+                            .reconciliation_facts(stored.funds.quote.authorized_cost_units),
                     },
                     Some(&input.identity.attempt_id),
                 )?

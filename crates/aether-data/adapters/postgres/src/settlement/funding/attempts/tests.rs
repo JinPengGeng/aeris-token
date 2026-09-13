@@ -141,6 +141,90 @@ async fn cleanup(admin: PgPool, first: PgPool, second: PgPool, schema: String) {
 
 #[tokio::test]
 #[ignore = "requires an isolated AETHER_TEST_DATABASE_URL; runs real migrations"]
+async fn live_attempt_funds_quote_mismatch_preserves_known_charge_and_audit() {
+    let (admin, first, second, schema) = fixture().await;
+    let result = AssertUnwindSafe(async {
+        let repo = SqlxSettlementRepository::new(first.clone());
+        let usage_repo = SqlxUsageReadRepository::new(first.clone());
+        usage_repo.upsert(parent("quote-mismatch")).await.unwrap();
+        let q = quote("quote-mismatch", "a");
+        repo.reserve_request_attempt_funds(q.clone()).await.unwrap();
+        repo.mark_request_attempt_funds_dispatched(q.identity())
+            .await
+            .unwrap();
+        let mut observed = facts(&q, Some(6_000_000), true);
+        let RequestAttemptFinancialOutcome::Charged { usage } = &mut observed.facts.outcome else {
+            unreachable!()
+        };
+        usage.requires_reconciliation = true;
+        let stored = repo
+            .record_request_attempt_funds_outcome(observed.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.funds.state, RequestFundsState::ReconciliationPending);
+        assert_eq!(stored.funds.actual_cost_units, Some(6_000_000));
+        assert_eq!(stored.funds.collected_cost_units, 6_000_000);
+        assert_eq!(
+            stored.funds.reconciliation_facts.as_ref().unwrap()["excess_units"],
+            0
+        );
+        repo.close_request_funds_admission(CloseRequestFundsAdmissionInput {
+            identity: q.identity(),
+            closed_at_unix_secs: observed.finalized_at_unix_secs,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let audit = summary(&first, "quote-mismatch").await;
+        assert!(audit.requires_reconciliation);
+        assert_eq!((audit.held_cost_units, audit.unknown_attempts), (0, 0));
+        assert_eq!(audit.known_actual_cost_units, 6_000_000);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT billing_status FROM usage WHERE request_id='quote-mismatch'"
+            )
+            .fetch_one(&first)
+            .await
+            .unwrap(),
+            "pending"
+        );
+        usage_repo.flush_usage_counter_deltas(1000).await.unwrap();
+        usage_repo
+            .cleanup_processed_usage_counter_deltas(observed.finalized_at_unix_secs + 3600, 1000)
+            .await
+            .unwrap();
+        repo.record_request_attempt_funds_outcome(observed.clone())
+            .await
+            .unwrap();
+        assert_eq!(balance(&first).await, 0.14);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM usage_counter_deltas")
+                .fetch_one(&first)
+                .await
+                .unwrap(),
+            0
+        );
+        let RequestAttemptFinancialOutcome::Charged { usage } = &mut observed.facts.outcome else {
+            unreachable!()
+        };
+        usage.requires_reconciliation = false;
+        assert!(repo
+            .record_request_attempt_funds_outcome(observed)
+            .await
+            .is_err());
+        assert_eq!(balance(&first).await, 0.14);
+    })
+    .catch_unwind()
+    .await;
+    cleanup(admin, first, second, schema).await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated AETHER_TEST_DATABASE_URL; runs real migrations"]
 async fn live_attempt_funds_retry_late_charge_and_provider_rebuild_are_idempotent() {
     let (admin, first, second, schema) = fixture().await;
     let result = AssertUnwindSafe(async {

@@ -96,6 +96,10 @@ pub struct RequestAttemptExecutionFacts {
 pub struct RequestAttemptBilledUsage {
     pub total_cost_units: u64,
     pub actual_cost_units: u64,
+    /// The observation differs from the frozen quote, even when the price fits
+    /// its authorization. Older stored facts without the flag retain their meaning.
+    #[serde(default)]
+    pub requires_reconciliation: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
@@ -103,6 +107,17 @@ pub struct RequestAttemptBilledUsage {
 }
 
 impl RequestAttemptBilledUsage {
+    pub fn reconciliation_facts(&self, authorized_cost_units: u64) -> Option<serde_json::Value> {
+        let excess_units = self.actual_cost_units.saturating_sub(authorized_cost_units);
+        (self.requires_reconciliation || excess_units > 0).then(|| {
+            serde_json::json!({
+                "reason": if excess_units > 0 { "authorization_exceeded" } else { "quote_mismatch" },
+                "excess_units": excess_units,
+                "quote_requires_reconciliation": self.requires_reconciliation,
+            })
+        })
+    }
+
     pub fn total_tokens(&self) -> Option<u64> {
         self.input_tokens
             .checked_add(self.output_tokens)?
@@ -257,6 +272,7 @@ pub fn summarize_request_attempt_funds<'a>(
                 &mut summary.known_actual_cost_units,
                 usage.actual_cost_units,
             )?;
+            summary.requires_reconciliation |= usage.requires_reconciliation;
         }
         summary.requires_reconciliation |=
             attempt.funds.state == super::RequestFundsState::ReconciliationPending;

@@ -78,6 +78,22 @@ Gateway 实际调用计数和新 PostgreSQL 端到端验收仍未完成，不能
 
 新增 `defer_attempt_funds_event` 复用既有有界 enqueue、direct fallback 和重试 worker，返回明确的 `Persisted`、`Queued` 或 `BufferedForRetry`；后两者不代表金融提交，也不保证磁盘持久性。新增实测在 repository 故障时将同父两个不同 attempt 保留到真实 memory queue，恢复后逐条经 worker 写入且不合并、不走 legacy settlement、不关闭父生命周期；既无可用 queue 又无法提交时明确返回错误。普通 `record_terminal_event_direct` 只尝试数据库写入，不应被描述成 durable queue fallback。修复后全部 373 项 runtime 单元测试、Rust 1.95 Clippy `--all-targets -- -D warnings` 和定向 rustfmt 通过，零失败、零 ignored。
 
+### 报价差异与已知金额的对账语义（2026-09-13）
+
+主线程复审发现 Gateway 将 `BillingImageQuotedCalculation.requires_reconciliation` 丢弃。该标记还覆盖输出格式、尺寸或质量偏离冻结报价；既有 `output_format_changes_are_audited_even_when_the_cost_does_not_change` 回归证明 `excess_units == 0` 仍可能需要对账。仅按实际金额超授权判断，会把已知收费但输出不符的请求错误标为 settled。
+
+决定正式贯通合同：`RequestAttemptBilledUsage` 增加 `requires_reconciliation`，旧 JSON 缺省为 false。memory 和 PostgreSQL 都通过同一 `reconciliation_facts` 计算保留报价差异及金额超限原因；父汇总同时保留子事实标记。已知实际金额仍按授权封顶收取，结算后的 hold 为零，但 reservation 保持 ReconciliationPending、父 billing status 保持 pending，不能把已知金额退化成 Unknown 或直接消除审计要求。已有终态只接受一致重放，不能通过后续事件清除该标记；人工对账处置仍需独立、可审计的工作流。
+
+新增 memory 与真实 PostgreSQL 回归：授权 .08、实际 .06 且报价需对账，确认实际与已收 .06、差额 0、hold 0、父 pending；一致重放不双扣，清除对账标记的冲突重放被拒绝。PostgreSQL 用例进一步在真实 outbox flush/cleanup 后重放，余额仍 .14 且没有新增计数投递。已登记到 `tools/ci/run_postgres_live_tests.sh`，runner 增至 24 个 exact targets。
+
+本轮本地验证使用 Rust 1.95.0 和专属 socket-only PostgreSQL 17.11：
+
+- `cargo test --locked -p aether-data --all-features repository::settlement::memory:: --lib`：24 passed，0 failed / 0 ignored。
+- `cargo test --locked -p aether-data-postgres --all-features settlement::funding::attempts::tests:: --lib -- --include-ignored --test-threads=1 --nocapture`：3 passed，0 failed / 0 ignored，包括两个既有并发、重试、迟到收费和 provider 重建用例。
+- 三个 data crate 的 `clippy --locked --all-features --all-targets -- -D warnings` 通过，定向 rustfmt 与 diff 检查通过。
+
+工作树已快进整合远端 `9862905bf` 与 main `4a74b11ef`，保留全部未提交 Gateway 改动。Gateway 代理继续处理 reserve 提交时取消、异步作用域和实际入口等最终评审项；本节数据验证不代表该部分已经验收，也不将 #391 转为 Ready。
+
 ### 尚未完成的接线
 
 - 本文不代表 Gateway 的“资金 dispatch 持久化后才能调用上游”、请求结束 close admission、可靠结果写入或父持久化失败处理已经通过验收；正在实施的接线须通过真实 Gateway 与 PostgreSQL 测试后才能交付。实现状态另见 `issue-300-gateway-attempt-funds.md`。
