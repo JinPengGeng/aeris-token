@@ -29,6 +29,7 @@ run_test() {
 run_test aether-data lifecycle::migrate::tests::postgres_migrations_create_core_config_tables_when_url_is_set
 run_test aether-data-postgres usage::tests::live_first_byte_reads_provider_contribution_after_waiting_for_canonical_lock
 run_test aether-data-postgres settlement::tests::live_usage_policy_window_aggregates_preserve_exact_admission_and_idempotency
+run_test aether-data-postgres settlement::tests::live_daily_quota_serializes_each_entitlement_without_locking_shared_plan
 run_test aether-data-postgres usage::tests::live_stale_terminal_event_is_a_full_transaction_noop
 run_test aether-data-postgres pool::tests::live_session_deadlines_rollback_transactions_and_isolate_migration_overrides
 
