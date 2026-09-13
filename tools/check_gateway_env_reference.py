@@ -49,7 +49,7 @@ def default_for(name: str) -> str:
         re.S,
     )
     if not match:
-        return "runtime (source-defined)"
+        return "unset"
     attr = match.group(0)
     value = re.search(r"default_value(?:_t)?\s*=\s*([^,\)\n]+)", attr)
     return value.group(1).strip().strip('"') if value else "unset"

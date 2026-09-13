@@ -20,7 +20,7 @@ never printed by the checker.
 | --- | --- | --- | --- |
 | `AETHER_BACKUP_ENCRYPTION_KEY` | runtime-only | `unset` | string |
 | `AETHER_BACKUP_HISTORICAL_KEYS_JSON` | runtime-only | `unset` | count or enum (see source) |
-| `AETHER_BACKUP_KEYRING_FILE` | clap (global; subcommands inherit) | `runtime (source-defined)` | count or enum (see source) |
+| `AETHER_BACKUP_KEYRING_FILE` | clap (global; subcommands inherit) | `unset` | count or enum (see source) |
 | `AETHER_BARK_ALLOW_HTTP` | runtime-only | `unset` | boolean (true/false) |
 | `AETHER_BARK_ALLOW_PRIVATE_TARGETS` | runtime-only | `unset` | boolean (true/false) |
 | `AETHER_BASE_DIR` | runtime-only | `unset` | string |
