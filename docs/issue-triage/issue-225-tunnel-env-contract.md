@@ -2,7 +2,7 @@
 
 ## 准确性与范围
 
-2026-09-13 在 fork `JinPengGeng/aeris-token` 的 `5c620e7681cba50451847c3d163076614ddf8e83`
+2026-09-13 在 fork `JinPengGeng/aeris-token` 的 `c860eec66`（当前 `origin/main`）
 上复核。Issue 最初列出的七个 `_SECS` 环境变量名已在此前工作中更正；本次不再次声称修复这些名称。
 残余问题成立：README 参数表是人工维护的子集，缺少分布式 stream admission、diagnostics、
 Aether API 连接池等 clap 参数，且没有自动检查文档与实际参数的差异。
