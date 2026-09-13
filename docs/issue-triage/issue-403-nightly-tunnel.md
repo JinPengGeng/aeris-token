@@ -1,6 +1,8 @@
 # Issue #403：nightly tunnel 制品交接
 
-父项 #205；当前实现与离线验收已完成，仍待实际 cross 制品验证、独立评审和 hosted checks，PR 保持 Draft。
+父项 #205；实现、独立评审、离线签名与实际 cross 制品验收均已完成。
+代码 head `2e017db2e392cd1b7427414c701bc4f8485e05cb` 的四项 required checks 全部通过；
+最终合并仍须以最新 PR head 的门禁为准，正式签名启用保留下述配置边界。
 
 ## 当前实现
 
@@ -29,10 +31,8 @@ release Environment 允许 main 分支，但要求人工批准。全未配置时
 公开信任变量必须是 repository 级，供无 secrets 的构建 job 使用；不要仅放到 release Environment。
 公钥配置有效但缺私钥时签名 job 失败，整个已启用的发布路径中止。生成或替换正式密钥不属于离线测试。
 
-继续步骤：
-
-1. 验证实际 cross 构建的两个平台制品；现有 `Build aether-tunnel` workflow_dispatch 只构建、不发布，可用于同 SHA 的 musl 归档验证。
-2. 独立审查修订后的完整 workflow、权限、环境和 artifact 信任边界；四项 required checks 后再考虑合并。
+代码已通过独立 workflow/权限/密钥/artifact 边界评审。若合并前更新主干涉及 tunnel 源码，
+重新验证实际跨平台构建；文档状态更新本身不等于新二进制验证。
 
 当前 updater 只支持 stable `tunnel-v*`。本项先限定 nightly 人工下载与验证，不扩展远程升级通道。
 真实签名配置和 release Environment 审批保留各自边界；私钥不进仓库或日志。
@@ -52,4 +52,25 @@ git diff --check
 测试真正创建/读取 tarball，验证 gateway-only 与 signed 两套精确资产清单、Release 参数和失败告警。
 发布/通知中的 gh 由隔离 stub 接管，未访问真实 Release 或发送真实告警；fixture 二进制不是 cross 编译产物。
 
-未执行真实 cross 构建、线上签名发布或最终独立评审。回滚恢复 gateway-only nightly，不涉及数据迁移。
+## 实际 cross 制品证据
+
+[Build aether-tunnel run 34776139817](https://github.com/JinPengGeng/aeris-token/actions/runs/34776139817)
+固定在上述代码 head，七个平台均构建成功；tag-only preflight、release、update-readme 均 skipped，
+未创建 Release 或修改 README。本次分支 dispatch 复用 stable 构建入口，只作为编译/归档证据。
+
+主线程下载两个 musl artifact，确认各 tar 仅包含可执行的 `aether-tunnel`，实际文件分别为
+静态 x86-64 ELF 和静态 aarch64 ELF；不是单元测试的合成 binary。
+
+| 归档 | tar.gz SHA-256 | Actions artifact ID |
+| --- | --- | --- |
+| aether-tunnel-linux-musl-amd64.tar.gz | `d2504ffb106ee5b8b26e0e9309fd668975332f5b0ccc8c4bc80e381648fcd0d3` | 10323531749 |
+| aether-tunnel-linux-musl-arm64.tar.gz | `bc8cc0dbe06d4cb908e0b560de4680413791b70c1212d2512cd56d0efcd27fe8` | 10324041077 |
+
+对这两个真实归档生成 manifest，使用一次性 Ed25519 key 执行本 PR 的签名脚本，随后再次执行
+生产 Rust verifier 和 `sha256sum --strict -c SHA256SUMS.txt`，均通过；临时私钥已清理。
+manifest SHA-256 为 `344a0dd57923d122d9d77f3731a9ccfda88f2391c9b640945909558d31930644`。
+一次性测试 key 不属于正式信任链，不能将这次本地验签描述为已签名线上发布或二进制内置信任验收。
+
+Actions artifacts 保留期为一天，之后可从记录的提交在本 fork 构建分支重新 dispatch；
+本文件保留 run、提交、架构和摘要证据，交接不依赖原电脑的临时文件。
+未执行线上签名发布，也未在本机运行 Linux 二进制。回滚恢复 gateway-only nightly，不涉及数据迁移。
