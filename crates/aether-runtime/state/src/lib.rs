@@ -1206,6 +1206,13 @@ pub enum RuntimeQueueRedriveOutcome {
     NotFound,
 }
 
+/// Lifetime of an idempotency marker for a DLQ redrive operation.
+///
+/// The marker only protects retries within the operational recovery window.  A
+/// bounded lifetime prevents an unbounded Redis key (or memory-backend map)
+/// from accumulating when operators redrive a large number of entries.
+pub const RUNTIME_QUEUE_REDRIVE_MARKER_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeQueueReclaimPage {
     /// Resume the next reclaim scan here; `0-0` marks the end of the current scan.

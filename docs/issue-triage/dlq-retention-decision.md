@@ -32,4 +32,14 @@ DLQ 无上限会让 poison message 长期堆积并把 Redis 内存风险转化�
 - list 需要已认证的 `admin:usage:read`（或更高）；redrive 是写操作并提升到 `admin:usage:admin`，每次动作附加 admin audit。未配置 queue/backend 时 fail closed。
 - redrive 严格解析 DLQ 的 JSON `payload.fields`，不接受客户端提供的事件字段，避免通过管理 API 注入任意队列数据；目标 stream 继续使用既有 `stream_maxlen`。
 
+## Redrive marker lifecycle
+
+Idempotency markers are retained for a fixed seven-day recovery window
+(`RUNTIME_QUEUE_REDRIVE_MARKER_TTL_SECONDS`). Redis stores the marker with an
+`EX` expiry in the same Lua transaction; the in-memory backend lazily removes
+expired markers before each redrive. This bounds marker growth while preserving
+retries during the documented operator recovery window. A retry after expiry is
+treated as a new operation and therefore requires the source entry to still be
+present.
+
 后续仍需批量 redrive、失败重试/死信原因过滤和 durable audit 查询；这些属于独立高影响变更。另行建立 Postgres restore 演练和任务重试策略记录。
