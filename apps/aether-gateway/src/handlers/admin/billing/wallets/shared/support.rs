@@ -43,6 +43,31 @@ pub(in super::super) async fn notify_user_refund_status(
         return;
     };
 
+    // User preferences are the final consent gate for billing-related mail.
+    // Missing preferences retain the historical default (enabled), while a
+    // read failure fails closed so an unavailable preference store cannot
+    // unexpectedly send a message.
+    match state.app().read_user_preferences(user_id).await {
+        Ok(Some(preferences))
+            if !refund_notification_preferences_allow(
+                preferences.email_notifications,
+                preferences.usage_alerts,
+            ) =>
+        {
+            return;
+        }
+        Ok(Some(_)) | Ok(None) => {}
+        Err(err) => {
+            warn!(
+                error = %crate::error::redact_error_debug(&err),
+                user_id = %user_id,
+                refund_id = %refund.id,
+                "failed to load refund notification preferences"
+            );
+            return;
+        }
+    }
+
     let status = refund_status_notification_label(&refund.status);
     let failure_reason = refund
         .failure_reason
@@ -103,6 +128,10 @@ pub(in super::super) fn refund_status_notification_should_send(
         )
     });
     next_terminal && !previous_terminal
+}
+
+fn refund_notification_preferences_allow(email_notifications: bool, usage_alerts: bool) -> bool {
+    email_notifications && usage_alerts
 }
 
 fn refund_status_notification_label(status: &str) -> &'static str {
@@ -317,7 +346,10 @@ pub(in super::super) fn admin_wallet_build_order_no(now: chrono::DateTime<chrono
 
 #[cfg(test)]
 mod tests {
-    use super::{refund_status_notification_label, refund_status_notification_should_send};
+    use super::{
+        refund_notification_preferences_allow, refund_status_notification_label,
+        refund_status_notification_should_send,
+    };
 
     #[test]
     fn refund_notification_status_is_bounded_to_known_terminal_values() {
@@ -346,5 +378,13 @@ mod tests {
             Some("processing"),
             "processing"
         ));
+    }
+
+    #[test]
+    fn refund_notification_requires_billing_email_and_usage_preferences() {
+        assert!(refund_notification_preferences_allow(true, true));
+        assert!(!refund_notification_preferences_allow(false, true));
+        assert!(!refund_notification_preferences_allow(true, false));
+        assert!(!refund_notification_preferences_allow(false, false));
     }
 }
