@@ -10,8 +10,13 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "crates/**"
       - "apps/**"
+      - "docs/api/**"
+      - "docs/operations/referral-rebate-numeric-audit.sql"
+      - "docs/operations/fixtures/**"
+      - ".github/change-filters.yml"
       - "install.sh"
       - "deploy.sh"
       - "update.sh"
@@ -24,13 +29,7 @@ on:
       - "docker-compose.redis-durable.yml"
       - "docker-compose.local.yml"
       - "docker-compose.release-local.yml"
-      - "tests/compose_database_config_test.py"
-      - "tests/install_*_test.sh"
-      - "tests/deploy_*_test.sh"
-      - "tests/update_*_test.sh"
-      - "tests/release_supply_chain_test.sh"
-      - "tests/redis_durable_crash_drill.sh"
-      - "tests/tunnel_installer_config_security_test.sh"
+      - "tests/**"
       - "tools/ci/**"
       - ".github/workflows/build-tunnel.yml"
       - ".github/workflows/deploy-pages.yml"
@@ -56,8 +55,10 @@ jobs:
     name: Detect changes
     runs-on: ubuntu-latest
     outputs:
-      rust: ${{ steps.filter.outputs.rust || 'true' }}
-      data: ${{ steps.filter.outputs.data || 'true' }}
+      # Non-PR events always run the full suite. Missing PR outputs stay empty
+      # so the aggregate gates reject a broken detection step.
+      rust: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.rust }}
+      data: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.data }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         if: github.event_name == 'pull_request'
@@ -114,6 +115,8 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -131,6 +134,8 @@ jobs:
   clippy_gateway:
     name: Clippy (Gateway)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -167,6 +172,8 @@ jobs:
   clippy_data:
     name: Clippy (Data)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -203,6 +210,8 @@ jobs:
   clippy_rest:
     name: Clippy (Workspace Rest)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -240,23 +249,39 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     needs:
+      - changes
       - clippy_gateway
       - clippy_data
       - clippy_rest
     if: ${{ always() }}
     steps:
       - name: Verify clippy jobs
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
+          JOB_RESULTS: >-
+            clippy_gateway=${{ needs.clippy_gateway.result }}
+            clippy_data=${{ needs.clippy_data.result }}
+            clippy_rest=${{ needs.clippy_rest.result }}
         run: |
-          if [ "${{ needs.clippy_gateway.result }}" != "success" ] || \
-             [ "${{ needs.clippy_data.result }}" != "success" ] || \
-             [ "${{ needs.clippy_rest.result }}" != "success" ]; then
-            echo "Clippy failed"
-            exit 1
-          fi
+          case "$CHANGES_RESULT:$RUST_CHANGED" in
+            success:true) expected=success ;;
+            success:false) expected=skipped ;;
+            *) echo "Change detection failed or returned an invalid Rust scope"; exit 1 ;;
+          esac
+          for job_result in $JOB_RESULTS; do
+            if [ "${job_result#*=}" != "$expected" ]; then
+              echo "Unexpected result: $job_result (expected $expected)"
+              exit 1
+            fi
+          done
 
   test_gateway:
     name: Test (Gateway)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -334,6 +359,8 @@ jobs:
   test_data:
     name: Test (Data)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -377,6 +404,8 @@ jobs:
   check_data_features:
     name: Check (Data Feature - ${{ matrix.feature }})
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -416,6 +445,8 @@ jobs:
   test_rest:
     name: Test (Workspace Rest)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -476,6 +507,8 @@ jobs:
   test_data_adapters:
     name: Test (Data Adapter - ${{ matrix.package }})
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -517,6 +550,8 @@ jobs:
   check_integration_scenarios:
     name: Test (Integration Scenarios)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -554,6 +589,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     needs:
+      - changes
       - test_gateway
       - test_data
       - check_data_features
@@ -563,20 +599,35 @@ jobs:
     if: ${{ always() }}
     steps:
       - name: Verify test jobs
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
+          JOB_RESULTS: >-
+            test_gateway=${{ needs.test_gateway.result }}
+            test_data=${{ needs.test_data.result }}
+            check_data_features=${{ needs.check_data_features.result }}
+            test_rest=${{ needs.test_rest.result }}
+            test_data_adapters=${{ needs.test_data_adapters.result }}
+            check_integration_scenarios=${{ needs.check_integration_scenarios.result }}
         run: |
-          if [ "${{ needs.test_gateway.result }}" != "success" ] || \
-             [ "${{ needs.test_data.result }}" != "success" ] || \
-             [ "${{ needs.check_data_features.result }}" != "success" ] || \
-             [ "${{ needs.test_rest.result }}" != "success" ] || \
-             [ "${{ needs.test_data_adapters.result }}" != "success" ] || \
-             [ "${{ needs.check_integration_scenarios.result }}" != "success" ]; then
-            echo "Tests failed"
-            exit 1
-          fi
+          case "$CHANGES_RESULT:$RUST_CHANGED" in
+            success:true) expected=success ;;
+            success:false) expected=skipped ;;
+            *) echo "Change detection failed or returned an invalid Rust scope"; exit 1 ;;
+          esac
+          for job_result in $JOB_RESULTS; do
+            if [ "${job_result#*=}" != "$expected" ]; then
+              echo "Unexpected result: $job_result (expected $expected)"
+              exit 1
+            fi
+          done
 
   data_db_smoke_postgres:
     name: Data DB Smoke (Postgres)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     services:
       postgres:
         image: postgres:16
@@ -672,19 +723,34 @@ jobs:
     name: Data DB Smoke
     runs-on: ubuntu-latest
     needs:
+      - changes
       - data_db_smoke_postgres
     if: ${{ always() }}
     steps:
       - name: Verify database smoke jobs
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
+          JOB_RESULTS: data_db_smoke_postgres=${{ needs.data_db_smoke_postgres.result }}
         run: |
-          if [ "${{ needs.data_db_smoke_postgres.result }}" != "success" ]; then
-            echo "Data DB smoke failed"
-            exit 1
-          fi
+          case "$CHANGES_RESULT:$RUST_CHANGED" in
+            success:true) expected=success ;;
+            success:false) expected=skipped ;;
+            *) echo "Change detection failed or returned an invalid Rust scope"; exit 1 ;;
+          esac
+          for job_result in $JOB_RESULTS; do
+            if [ "${job_result#*=}" != "$expected" ]; then
+              echo "Unexpected result: $job_result (expected $expected)"
+              exit 1
+            fi
+          done
 
   data_db_ignored_postgres:
     name: Data DB Live (selected ignored tests)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     services:
       postgres:
         image: postgres:16
@@ -737,17 +803,36 @@ jobs:
     if: ${{ always() }}
     steps:
       - name: Verify required jobs
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
+          JOB_RESULTS: >-
+            fmt=${{ needs.fmt.result }}
+            data_db_ignored_postgres=${{ needs.data_db_ignored_postgres.result }}
+          REQUIRED_JOB_RESULTS: >-
+            clippy=${{ needs.clippy.result }}
+            test=${{ needs.test.result }}
+            data_db_smoke=${{ needs.data_db_smoke.result }}
+            shell_security=${{ needs.shell_security.result }}
         run: |
-          if [ "${{ needs.changes.result }}" != "success" ] || \
-             [ "${{ needs.fmt.result }}" != "success" ] || \
-             [ "${{ needs.clippy.result }}" != "success" ] || \
-             [ "${{ needs.test.result }}" != "success" ] || \
-             [ "${{ needs.data_db_smoke.result }}" != "success" ] || \
-             [ "${{ needs.data_db_ignored_postgres.result }}" != "success" ] || \
-             [ "${{ needs.shell_security.result }}" != "success" ]; then
-            echo "Rust CI failed"
-            exit 1
-          fi
+          case "$CHANGES_RESULT:$RUST_CHANGED" in
+            success:true) expected=success ;;
+            success:false) expected=skipped ;;
+            *) echo "Change detection failed or returned an invalid Rust scope"; exit 1 ;;
+          esac
+          for job_result in $JOB_RESULTS; do
+            if [ "${job_result#*=}" != "$expected" ]; then
+              echo "Unexpected result: $job_result (expected $expected)"
+              exit 1
+            fi
+          done
+          for job_result in $REQUIRED_JOB_RESULTS; do
+            if [ "${job_result#*=}" != "success" ]; then
+              echo "Required job did not succeed: $job_result"
+              exit 1
+            fi
+          done
 
   publish_dispatch_status:
     name: Publish dispatch status
