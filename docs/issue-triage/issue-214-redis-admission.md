@@ -33,9 +33,13 @@ git diff --check
 
 第二次真实演练发现 Redis 重启并通过独立 PING 后，Gateway readiness 仍超过原有 30 秒期限。根因为锁定 redis/backon 组合继承的 factor=100 会把第二次重连等待推到 60–120 秒；另建 [#410](https://github.com/JinPengGeng/aeris-token/issues/410) 修复，没有放宽恢复期限。本 PR 的运行时前置是 #410，详见[重连决定与验证](issue-410-redis-reconnect.md)。
 
-2026-09-14 03:52 北京时间，使用含 #410 补丁的真实 Gateway 运行初版脚本全部通过：初始三次 401；Redis stop/pause 各十次 503；恢复后各三次 401；原 PostgreSQL 停止/暂停、两依赖联合暂停、readiness 恢复、独立 liveness、SIGTERM 摘流/退出全部通过。所有 HTTP 观测均写入脚本 evidence，owned fixture 已清理。环境为 PostgreSQL 17.11、Redis 8.10.1；Gateway SHA-256 为 `4e0608384dad190e42486ea0d45a55b907f5a236be66c075e22e1345c28244f2`。这是 #409 脚本与 #410 运行时补丁的联合本地验收；后续需先同步含 #410 的主干，最新 head hosted evidence 待补。
+2026-09-14 03:52 北京时间，使用含 #410 补丁的真实 Gateway 运行初版脚本全部通过：初始三次 401；Redis stop/pause 各十次 503；恢复后各三次 401；原 PostgreSQL 停止/暂停、两依赖联合暂停、readiness 恢复、独立 liveness、SIGTERM 摘流/退出全部通过。所有 HTTP 观测均写入脚本 evidence，owned fixture 已清理。环境为 PostgreSQL 17.11、Redis 8.10.1；Gateway SHA-256 为 `4e0608384dad190e42486ea0d45a55b907f5a236be66c075e22e1345c28244f2`。这是 #409 脚本与 #410 运行时补丁的联合本地验收。
 
-独立评审指出，串行 401 只能排除所有本地许可耗尽，不能排除部分永久泄漏；已补齐既有健康端点的完整本地容量断言，不引入新运行时接口。增强后的完整真实演练通过，初始、Redis 重启后、Redis 恢复响应后三个阶段均读回本地 limit=8、in_flight=0、available_permits=8；所有原阶段继续通过。主线程已复核该断言与真实响应，修订稿复审及最新 hosted checks 尚待收集。
+独立评审指出，串行 401 只能排除所有本地许可耗尽，不能排除部分永久泄漏；已补齐既有健康端点的完整本地容量断言，不引入新运行时接口。增强后的完整真实演练通过，初始、Redis 重启后、Redis 恢复响应后三个阶段均读回本地 limit=8、in_flight=0、available_permits=8；所有原阶段继续通过。Redis 停止/暂停时十次公开请求最慢分别为 255.443ms / 257.797ms；暂停恢复后先有 23 次 503 等待孤立租约收敛，随后连续三次 401。修订稿独立复审已接受，评审核验脚本与保存的真实证据，独立运行 ShellCheck、bash 语法和 diff 检查；没有把该复审描述为再次运行完整演练。
+
+GitHub hosted 的 [Rust CI run 34779505761](https://github.com/JinPengGeng/aeris-token/actions/runs/34779505761) 在 head `37cf19fa35916650b086543f3b95da34f3fbb67d` 全部成功。主线程下载并核验 `readiness-withdrawal-recovery` artifact（ID `10324946850`）：Ubuntu、PostgreSQL 16.15、Redis 7.0.15，Gateway SHA-256 `e91e770fbc73549521af24e3bb7a21d7a9f2c7e7d767066ce40e7f51392ce961`；所有演练阶段通过，三个本地容量快照精确为 8/0/8，cleanup 为 exit=0、removed=true。[独立复审记录](https://github.com/JinPengGeng/aeris-token/pull/413#issuecomment-5655905838)和[hosted 证据核验](https://github.com/JinPengGeng/aeris-token/pull/413#issuecomment-5655942011)已保存在 PR。
+
+#410 已通过 [PR #411](https://github.com/JinPengGeng/aeris-token/pull/411) 合入主干 `44bd242e15572e17cb808d2b9db213a443ab16cd`；本分支已同步该基线，最终变更仅为此文档与演练脚本。同步后的最终 head 必须重新通过四项 required checks；先前 hosted 结果只证明上述明确的 head，最终运行和合并状态以 PR checks 为准。
 
 ## 剩余边界与回滚
 
