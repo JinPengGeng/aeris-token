@@ -2108,8 +2108,10 @@ impl DirectPassthroughFinalizer {
         );
     }
 
-    fn release_upstream_target_permit_after_first_yield(&mut self) {
-        let core = self.core_mut();
+    fn release_upstream_target_permit(&mut self) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
         if core._upstream_target_permit.take().is_some() {
             observe_gateway_stage_trace_ms(
                 &mut core.stage_trace,
@@ -2631,7 +2633,7 @@ impl DirectPassthroughInlineBodyState {
             .as_ref()
             .is_some_and(DirectPassthroughFinalizer::completed_native_anthropic_stream)
         {
-            self.upstream.take();
+            self.finish_upstream();
             self.finalized = true;
             drop(self.finalizer.take());
             return None;
@@ -2689,18 +2691,19 @@ impl DirectPassthroughInlineBodyState {
             {
                 self.prepare_client_chunk_yield(&client_chunk);
                 self.terminal_error_sent |= provider_error_detected;
-                if self
-                    .finalizer
-                    .as_ref()
-                    .is_some_and(DirectPassthroughFinalizer::completed_native_anthropic_stream)
+                if provider_error_detected
+                    || self
+                        .finalizer
+                        .as_ref()
+                        .is_some_and(DirectPassthroughFinalizer::completed_native_anthropic_stream)
                 {
-                    self.upstream.take();
-                    self.upstream_done = true;
+                    self.finish_upstream();
                 }
                 return Some((Ok(client_chunk), self));
             }
         }
 
+        self.finish_upstream();
         if let Some(finalizer) = self.finalizer.as_mut() {
             finalizer.fail_if_anthropic_message_stop_missing();
         }
@@ -2771,7 +2774,7 @@ impl DirectPassthroughInlineBodyState {
             match await_stream_idle_read(upstream.next(), self.stream_idle_timeout).await {
                 Ok(item) => item,
                 Err(timeout) => {
-                    self.upstream.take();
+                    self.finish_upstream();
                     if let Some(finalizer) = self.finalizer.as_mut() {
                         if finalizer.terminal_failure().is_none()
                             && !finalizer
@@ -2800,7 +2803,6 @@ impl DirectPassthroughInlineBodyState {
         finalizer.observe_client_chunk(chunk);
         if !self.observed_first_client_yield {
             self.observed_first_client_yield = true;
-            finalizer.release_upstream_target_permit_after_first_yield();
             finalizer.record_client_visible_stream_started_if_needed();
             finalizer.observe_first_client_yield();
         }
@@ -2841,12 +2843,23 @@ impl DirectPassthroughInlineBodyState {
         ));
     }
 
+    fn finish_upstream(&mut self) {
+        // Capacity follows the upstream resource, not the first client byte or
+        // terminal usage persistence. Drop the stream before returning its slot,
+        // including when the body is never polled or its finalizer is detached.
+        self.upstream.take();
+        self.upstream_done = true;
+        if let Some(finalizer) = self.finalizer.as_mut() {
+            finalizer.release_upstream_target_permit();
+        }
+    }
+
     async fn finalize(&mut self, downstream_dropped: bool) {
         if self.finalized {
             return;
         }
         self.finalized = true;
-        self.upstream.take();
+        self.finish_upstream();
         if let Some(finalizer) = self.finalizer.as_mut() {
             finalizer.finalize(downstream_dropped).await;
         }
@@ -2862,7 +2875,7 @@ impl Drop for DirectPassthroughInlineBodyState {
         if self.finalizer.is_none() {
             return;
         }
-        self.upstream.take();
+        self.finish_upstream();
         if let Some(finalizer) = self.finalizer.take() {
             observe_gateway_stage_ms("stream_finalizer_enqueue", 0);
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -9680,6 +9693,414 @@ mod tests {
             control_filter_flushed: false,
             terminal_error_sent: false,
             finalized: false,
+        }
+    }
+
+    mod target_lifetime_tests {
+        use super::*;
+        use crate::upstream_admission::UpstreamTargetAdmission;
+
+        const FIRST: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n";
+        const DONE: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+        struct Fixture {
+            state: DirectPassthroughInlineBodyState,
+            admission: Arc<UpstreamTargetAdmission>,
+            plan: ExecutionPlan,
+            sender: mpsc::UnboundedSender<Result<Bytes, String>>,
+            upstream_dropped: Arc<AtomicBool>,
+        }
+
+        impl Fixture {
+            fn new(request_id: &str) -> Self {
+                let mut state = direct_anthropic_inline_state(request_id, Vec::new());
+                let core = state.finalizer.as_mut().unwrap().core_mut();
+                core.requires_anthropic_message_stop = false;
+                core.plan.provider_api_format = "openai:chat".to_string();
+                core.plan.client_api_format = "openai:chat".to_string();
+                core.report_kind = Some(OPENAI_CHAT_STREAM_PLAN_KIND.to_string());
+                let context = json!({
+                    "provider_api_format": "openai:chat", "client_api_format": "openai:chat"
+                });
+                core.report_context = Some(context.clone());
+                core.stream_usage_report_context = Some(context);
+                core.stream_usage_observer =
+                    Some(super::super::StreamingStandardTerminalObserver::default());
+                core.lifecycle_seed = aether_usage_runtime::build_lifecycle_usage_seed(
+                    &core.plan,
+                    core.report_context.as_ref(),
+                );
+                let plan = core.plan.clone();
+                let admission = Arc::new(UpstreamTargetAdmission::new(
+                    Some(1),
+                    Duration::from_millis(1),
+                ));
+                core._upstream_target_permit =
+                    Some(admission.try_acquire_for_plan(&plan).unwrap().unwrap());
+                let (sender, mut receiver) = mpsc::unbounded_channel();
+                let upstream_dropped = Arc::new(AtomicBool::new(false));
+                let drop_guard = StreamDropFlag(Arc::clone(&upstream_dropped));
+                state.upstream = Some(
+                    stream! {
+                        // Construct outside the generator so even an unpolled
+                        // upstream owns this drop probe.
+                        let _drop_guard = drop_guard;
+                        while let Some(item) = receiver.recv().await {
+                            yield item;
+                        }
+                    }
+                    .boxed(),
+                );
+                Self {
+                    state,
+                    admission,
+                    plan,
+                    sender,
+                    upstream_dropped,
+                }
+            }
+        }
+
+        fn body(state: DirectPassthroughInlineBodyState) -> Body {
+            Body::from_stream(futures_util::stream::unfold(state, |state| async move {
+                state.next_item().await
+            }))
+        }
+
+        fn assert_held(admission: &UpstreamTargetAdmission, plan: &ExecutionPlan) {
+            assert_eq!(admission.snapshot_for_plan(plan).unwrap().in_flight, 1);
+            assert!(
+                admission.try_acquire_for_plan(plan).unwrap().is_none(),
+                "same target must remain saturated"
+            );
+            let mut other = plan.clone();
+            other.url = "https://other-target.example/v1/chat/completions".to_string();
+            assert!(
+                admission.try_acquire_for_plan(&other).unwrap().is_some(),
+                "another target must remain available"
+            );
+        }
+
+        fn assert_released(
+            admission: &UpstreamTargetAdmission,
+            plan: &ExecutionPlan,
+            dropped: &AtomicBool,
+        ) {
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "upstream must be dropped before its slot is returned"
+            );
+            assert_eq!(admission.snapshot_for_plan(plan).unwrap().in_flight, 0);
+            assert!(admission.try_acquire_for_plan(plan).unwrap().is_some());
+        }
+
+        #[tokio::test]
+        async fn first_byte_and_slow_client_keep_same_target_saturated_until_eof() {
+            let Fixture {
+                state,
+                admission,
+                plan,
+                sender,
+                upstream_dropped,
+            } = Fixture::new("target-lifetime-eof");
+            sender.send(Ok(Bytes::from_static(FIRST))).unwrap();
+            let mut body = body(state).into_data_stream();
+            assert_eq!(body.next().await.unwrap().unwrap(), FIRST);
+            assert_held(&admission, &plan);
+            assert!(admission
+                .acquire(&plan, "same-target-waiter")
+                .await
+                .is_err());
+
+            sender.send(Ok(Bytes::from_static(DONE))).unwrap();
+            // A ready upstream chunk does not end ownership while a slow client
+            // has not polled it. The gate follows the real body resource.
+            assert_held(&admission, &plan);
+            assert_eq!(body.next().await.unwrap().unwrap(), DONE);
+            assert_held(&admission, &plan);
+            drop(sender);
+            assert!(tokio::time::timeout(Duration::from_secs(2), body.next())
+                .await
+                .unwrap()
+                .is_none());
+            assert_released(&admission, &plan, &upstream_dropped);
+        }
+
+        #[tokio::test]
+        async fn read_error_and_idle_timeout_release_before_terminal_client_chunk() {
+            for idle_timeout in [false, true] {
+                let Fixture {
+                    mut state,
+                    admission,
+                    plan,
+                    sender,
+                    upstream_dropped,
+                } = Fixture::new("target-lifetime-error");
+                if idle_timeout {
+                    state.stream_idle_timeout = Some(Duration::from_millis(5));
+                }
+                sender.send(Ok(Bytes::from_static(FIRST))).unwrap();
+                let mut body = body(state).into_data_stream();
+                assert_eq!(body.next().await.unwrap().unwrap(), FIRST);
+                assert_held(&admission, &plan);
+                if !idle_timeout {
+                    sender
+                        .send(Err("injected upstream read error".to_string()))
+                        .unwrap();
+                }
+                let error = tokio::time::timeout(Duration::from_secs(1), body.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let error = std::str::from_utf8(&error).unwrap();
+                assert!(error.contains(if idle_timeout {
+                    "read_timeout"
+                } else {
+                    "execution_runtime_stream_read_error"
+                }));
+                assert_released(&admission, &plan, &upstream_dropped);
+                assert!(tokio::time::timeout(Duration::from_secs(2), body.next())
+                    .await
+                    .unwrap()
+                    .is_none());
+            }
+        }
+
+        #[tokio::test]
+        async fn first_byte_timeout_releases_without_waiting_for_client_to_poll_again() {
+            let Fixture {
+                mut state,
+                admission,
+                plan,
+                sender: _sender,
+                upstream_dropped,
+            } = Fixture::new("target-lifetime-first-timeout");
+            state.stream_first_byte_timeout = Some(Duration::from_millis(5));
+            let mut body = body(state).into_data_stream();
+            let error = tokio::time::timeout(Duration::from_secs(1), body.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(std::str::from_utf8(&error)
+                .unwrap()
+                .contains("first_byte_timeout"));
+            assert_released(&admission, &plan, &upstream_dropped);
+        }
+
+        #[tokio::test]
+        async fn provider_error_releases_while_forwarding_the_error_once() {
+            let Fixture {
+                state,
+                admission,
+                plan,
+                sender,
+                upstream_dropped,
+            } = Fixture::new("target-lifetime-provider-error");
+            sender.send(Ok(Bytes::from_static(FIRST))).unwrap();
+            let mut body = body(state).into_data_stream();
+            assert_eq!(body.next().await.unwrap().unwrap(), FIRST);
+            assert_held(&admission, &plan);
+            let error = Bytes::from_static(
+                b"data: {\"error\":{\"type\":\"server_error\",\"message\":\"busy\"}}\n\n",
+            );
+            sender.send(Ok(error.clone())).unwrap();
+            assert_eq!(body.next().await.unwrap().unwrap(), error);
+            assert_released(&admission, &plan, &upstream_dropped);
+            assert!(tokio::time::timeout(Duration::from_secs(2), body.next())
+                .await
+                .unwrap()
+                .is_none());
+        }
+
+        #[tokio::test]
+        async fn native_anthropic_stop_releases_at_upstream_teardown() {
+            let Fixture {
+                mut state,
+                admission,
+                plan,
+                sender,
+                upstream_dropped,
+            } = Fixture::new("target-lifetime-anthropic-stop");
+            let core = state.finalizer.as_mut().unwrap().core_mut();
+            core.requires_anthropic_message_stop = true;
+            core.plan.provider_api_format = "claude:messages".to_string();
+            core.plan.client_api_format = "claude:messages".to_string();
+            sender
+                .send(Ok(Bytes::from_static(
+                    b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n",
+                )))
+                .unwrap();
+            let mut body = body(state).into_data_stream();
+            assert!(body.next().await.unwrap().is_ok());
+            assert_held(&admission, &plan);
+            let stop =
+                Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+            sender.send(Ok(stop.clone())).unwrap();
+            assert_eq!(body.next().await.unwrap().unwrap(), stop);
+            assert_released(&admission, &plan, &upstream_dropped);
+            assert!(body.next().await.is_none());
+        }
+
+        #[tokio::test]
+        async fn body_drop_releases_synchronously_before_detached_finalizer_runs() {
+            for poll_first in [false, true] {
+                let Fixture {
+                    state,
+                    admission,
+                    plan,
+                    sender,
+                    upstream_dropped,
+                } = Fixture::new("target-lifetime-drop");
+                let mut body = body(state).into_data_stream();
+                if poll_first {
+                    sender.send(Ok(Bytes::from_static(FIRST))).unwrap();
+                    assert_eq!(body.next().await.unwrap().unwrap(), FIRST);
+                }
+                assert_held(&admission, &plan);
+                drop(body);
+                // No await: a current-thread runtime cannot have polled the
+                // detached usage finalizer between drop and this assertion.
+                assert_released(&admission, &plan, &upstream_dropped);
+            }
+        }
+
+        #[tokio::test]
+        async fn task_cancellation_while_reading_releases_target_and_upstream() {
+            let Fixture {
+                state,
+                admission,
+                plan,
+                sender,
+                upstream_dropped,
+            } = Fixture::new("target-lifetime-cancel");
+            sender.send(Ok(Bytes::from_static(FIRST))).unwrap();
+            let mut body = body(state).into_data_stream();
+            assert_eq!(body.next().await.unwrap().unwrap(), FIRST);
+            let reading = Arc::new(Notify::new());
+            let reading_task = Arc::clone(&reading);
+            let task = tokio::spawn(async move {
+                reading_task.notify_one();
+                body.next().await
+            });
+            reading.notified().await;
+            assert_held(&admission, &plan);
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert_released(&admission, &plan, &upstream_dropped);
+        }
+
+        #[tokio::test]
+        async fn usage_backpressure_does_not_hold_target_or_lose_cancelled_terminal_handoff() {
+            for eof in [false, true] {
+                let request_id = if eof {
+                    "target-lifetime-blocked-eof"
+                } else {
+                    "target-lifetime-blocked-drop"
+                };
+                let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+                let app = AppState::new()
+                    .unwrap()
+                    .with_data_state_for_tests(
+                        crate::data::GatewayDataState::with_usage_repository_for_tests(Arc::clone(
+                            &usage_repository,
+                        )),
+                    )
+                    .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                        enabled: true,
+                        worker_record_concurrency_limit: Some(1),
+                        terminal_submission_max_in_flight: 1,
+                        enqueue_retry_buffer_capacity: 1,
+                        ..UsageRuntimeConfig::default()
+                    });
+                let blocker = BlockingUsageAccess {
+                    policy_started: Arc::new(Notify::new()),
+                    release_policy: Arc::new(Notify::new()),
+                };
+                app.usage_runtime
+                    .submit_terminal_event(
+                        &blocker,
+                        UsageEvent::new(
+                            UsageEventType::Completed,
+                            format!("{request_id}-blocker"),
+                            UsageEventData {
+                                provider_name: "test".to_string(),
+                                model: "test-model".to_string(),
+                                status_code: Some(200),
+                                ..UsageEventData::default()
+                            },
+                        ),
+                    )
+                    .await;
+                tokio::time::timeout(Duration::from_secs(1), blocker.policy_started.notified())
+                    .await
+                    .unwrap();
+
+                let Fixture {
+                    mut state,
+                    admission,
+                    plan,
+                    sender,
+                    upstream_dropped,
+                } = Fixture::new(request_id);
+                state.finalizer.as_mut().unwrap().core_mut().state = app.clone();
+                sender.send(Ok(Bytes::from_static(FIRST))).unwrap();
+                let mut body = body(state).into_data_stream();
+                assert_eq!(body.next().await.unwrap().unwrap(), FIRST);
+                assert_held(&admission, &plan);
+                if eof {
+                    sender.send(Ok(Bytes::from_static(DONE))).unwrap();
+                    assert_eq!(body.next().await.unwrap().unwrap(), DONE);
+                    drop(sender);
+                    // The finalizer's reliable admission is deliberately full.
+                    // Dropping this poll then the body must preserve its task.
+                    assert!(tokio::time::timeout(Duration::from_millis(25), body.next())
+                        .await
+                        .is_err());
+                    assert_released(&admission, &plan, &upstream_dropped);
+                }
+                drop(body);
+                assert_released(&admission, &plan, &upstream_dropped);
+                assert_eq!(
+                    app.usage_runtime
+                        .metrics_snapshot()
+                        .terminal_submission_in_flight,
+                    1
+                );
+                if let Some(record) = usage_repository
+                    .find_by_request_id(request_id)
+                    .await
+                    .unwrap()
+                {
+                    assert!(matches!(record.status.as_str(), "pending" | "streaming"));
+                }
+
+                blocker.release_policy.notify_one();
+                let terminal = tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if let Some(record) = usage_repository
+                            .find_by_request_id(request_id)
+                            .await
+                            .unwrap()
+                        {
+                            if !matches!(record.status.as_str(), "pending" | "streaming") {
+                                break record;
+                            }
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("terminal handoff must persist after backpressure clears");
+                assert_eq!(terminal.status, if eof { "completed" } else { "cancelled" });
+                // This fixture installs only a usage writer, not a settlement
+                // writer. Completed usage awaits billing; cancellation is void.
+                assert_eq!(
+                    terminal.billing_status,
+                    if eof { "pending" } else { "void" }
+                );
+            }
         }
     }
 
