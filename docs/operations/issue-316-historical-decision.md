@@ -4,13 +4,16 @@ Decision date: 2026-09-13
 
 ## Evidence reviewed
 
-- `origin/main` at `c860eec66d9edfb39f7536111bd7e8f6d1b2ca66` contains merged PR
+- The recorded fork audit baseline `c860eec66d9edfb39f7536111bd7e8f6d1b2ca66` contains merged PR
   #325 (`c58ccc858e74b785686ef8857d6fc7c3d0b0337a`).
 - PR #325 adds the read-only, repeatable-read aggregate audit and a PostgreSQL
   NUMERIC cast regression fixture. Its isolated PostgreSQL test passed.
 - No production snapshot, read-replica export, or redacted aggregate output for
   `referral_rewards` and `wallet_transactions` is present in the repository or
   in the Issue #316 record reviewed on this date.
+- These conclusions were rechecked against fork commit
+  `bf03bbd65072e416975d16c129abe7e83105b07d` on the decision date. Both SHAs
+  identify historical evidence, not the moving main branch.
 
 ## Decision
 
