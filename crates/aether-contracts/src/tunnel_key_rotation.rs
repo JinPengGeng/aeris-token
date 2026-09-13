@@ -64,10 +64,15 @@ impl TunnelSigningKeySet {
     ) -> Result<Self, &'static str> {
         let mut set = Self::default();
         for key in keys {
+            if key.key_material().is_empty() {
+                return Err("tunnel signing key material is empty");
+            }
             if key.key_id.is_empty() || key.expires_at.is_some_and(|end| end <= key.not_before) {
                 return Err("invalid tunnel signing key interval");
             }
-            set.keys.insert(key.key_id.clone(), key);
+            if set.keys.insert(key.key_id.clone(), key).is_some() {
+                return Err("duplicate tunnel signing key id");
+            }
         }
         let active = active_signing_key_id.into();
         if !set.keys.contains_key(&active) {
@@ -143,5 +148,26 @@ mod tests {
         let rendered = format!("{key:?}");
         assert!(!rendered.contains("super-secret-key"));
         assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn duplicate_ids_are_rejected_in_either_configuration_order() {
+        let old = TunnelSigningKey::new("same-id", "old-secret", 0, Some(20));
+        let new = TunnelSigningKey::new("same-id", "new-secret", 10, None);
+        for keys in [[old.clone(), new.clone()], [new, old]] {
+            assert_eq!(
+                TunnelSigningKeySet::new(keys, "same-id").unwrap_err(),
+                "duplicate tunnel signing key id"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_key_material_cannot_be_used_for_signing() {
+        let empty = TunnelSigningKey::new("empty", "", 0, None);
+        assert_eq!(
+            TunnelSigningKeySet::new([empty], "empty").unwrap_err(),
+            "tunnel signing key material is empty"
+        );
     }
 }
