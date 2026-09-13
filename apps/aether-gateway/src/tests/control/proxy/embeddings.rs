@@ -1348,7 +1348,9 @@ fn embeddings_route_rejects_invalid_local_payloads() {
 }
 
 async fn embeddings_route_rejects_invalid_local_payloads_impl() {
-    let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
+    let (execution_runtime_url, execution_runtime_handle) =
+        start_server(embedding_execution_runtime()).await;
+    let gateway = build_router_with_state(embedding_success_state(execution_runtime_url));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
     let cases = [
@@ -1390,6 +1392,7 @@ async fn embeddings_route_rejects_invalid_local_payloads_impl() {
     for (body, expected_detail) in cases {
         let response = client
             .post(format!("{gateway_url}/v1/embeddings"))
+            .bearer_auth("sk-embedding-success")
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(body)
             .send()
@@ -1409,6 +1412,7 @@ async fn embeddings_route_rejects_invalid_local_payloads_impl() {
     }
 
     gateway_handle.abort();
+    execution_runtime_handle.abort();
 }
 
 #[test]
@@ -1420,11 +1424,14 @@ fn embeddings_route_rejects_non_json_content_type() {
 }
 
 async fn embeddings_route_rejects_non_json_content_type_impl() {
-    let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
+    let (execution_runtime_url, execution_runtime_handle) =
+        start_server(embedding_execution_runtime()).await;
+    let gateway = build_router_with_state(embedding_success_state(execution_runtime_url));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/embeddings"))
+        .bearer_auth("sk-embedding-success")
         .header(http::header::CONTENT_TYPE, "text/plain")
         .body(r#"{"model":"text-embedding-3-small","input":"hello"}"#)
         .send()
@@ -1439,6 +1446,7 @@ async fn embeddings_route_rejects_non_json_content_type_impl() {
     );
 
     gateway_handle.abort();
+    execution_runtime_handle.abort();
 }
 
 #[test]

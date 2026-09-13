@@ -1193,8 +1193,8 @@ async fn gateway_strips_forged_trusted_auth_headers_from_untrusted_ingress() {
 
     // A client connecting directly from an untrusted address must never ride
     // the trusted-header path: the HTTP ingress strips the forged identity
-    // headers before authentication, so the request proceeds as anonymous
-    // (no auth context) and never reaches the victim key's balance gate.
+    // headers before authentication, so the missing credential is rejected
+    // and never reaches the victim key's balance gate.
     let mut request = forged_request();
     request
         .extensions_mut()
@@ -1209,7 +1209,7 @@ async fn gateway_strips_forged_trusted_auth_headers_from_untrusted_ingress() {
         .expect("request should complete");
     assert_eq!(
         response.status(),
-        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::UNAUTHORIZED,
         "forged trusted headers must be stripped, so no auth context resolves"
     );
     assert_eq!(

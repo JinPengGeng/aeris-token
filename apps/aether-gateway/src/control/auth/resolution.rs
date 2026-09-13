@@ -246,6 +246,29 @@ pub(in super::super) async fn resolve_control_decision_auth_with_trusted_auth(
         apply_resolved_auth_context_to_decision(trace_id, &mut decision, auth_context);
     }
 
+    // Reject external credential absence at the authentication boundary.
+    // Keep existing credentials, resolved identities and internal missing
+    // route/context failures on their current resolution paths.
+    if decision.route_class.as_deref() == Some("ai_public")
+        && decision.auth_context.is_none()
+        && decision.local_auth_rejection.is_none()
+        && decision
+            .auth_endpoint_signature
+            .as_deref()
+            .filter(|signature| !signature.trim().is_empty())
+            .is_some_and(|signature| {
+                let extracted = extract_request_credentials_with_trusted_auth(
+                    headers,
+                    uri,
+                    signature,
+                    trusted_auth_verified,
+                );
+                extracted.primary.is_none() && extracted.trusted_headers.is_none()
+            })
+    {
+        decision.local_auth_rejection = Some(GatewayLocalAuthRejection::InvalidApiKey);
+    }
+
     if decision.local_auth_rejection.is_some() {
         log_local_auth_rejection(trace_id, &decision);
         return Ok(ControlDecisionAuthResolution::Resolved(decision));
@@ -1727,6 +1750,98 @@ mod tests {
             Some(new_value),
             "strong reads must reach the shared repository"
         );
+    }
+
+    #[tokio::test]
+    async fn control_auth_preserves_resolved_identity_when_headers_are_no_longer_present() {
+        let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key("sk-preserved-context")),
+            sample_snapshot("key-preserved-context", "user-preserved-context"),
+        )]));
+        let state = AppState::new()
+            .expect("state should build")
+            .with_auth_api_key_data_reader_for_tests(repository);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            "Bearer sk-preserved-context".parse().unwrap(),
+        );
+        let request_uri = uri("/v1/chat/completions");
+        let mut decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".into()),
+            Some("openai".into()),
+            Some("chat".into()),
+            Some("openai:chat".into()),
+        );
+        decision.auth_context =
+            resolve_data_backed_auth_context(&state, &headers, &request_uri, Some("openai:chat"))
+                .await
+                .expect("credential should resolve");
+        assert!(decision.auth_context.is_some());
+        let ControlDecisionAuthResolution::Resolved(resolved) = resolve_control_decision_auth(
+            &state,
+            &HeaderMap::new(),
+            &request_uri,
+            "trace-preserved-auth-context",
+            decision,
+        )
+        .await
+        .expect("resolved internal identity should remain valid");
+        assert!(resolved.local_auth_rejection.is_none());
+        assert_eq!(
+            resolved.auth_context.unwrap().api_key_id,
+            "key-preserved-context"
+        );
+    }
+
+    #[tokio::test]
+    async fn control_auth_missing_signature_and_deferred_credentials_remain_internal_resolution_cases(
+    ) {
+        let state = AppState::new().expect("state should build");
+        let request_uri = uri("/v1/chat/completions");
+        for (signature, header) in [
+            (None, None),
+            (Some(""), None),
+            (
+                Some("openai:chat"),
+                Some(("cookie", "session=deferred-cookie")),
+            ),
+            (
+                Some("antigravity:v1internal"),
+                Some(("authorization", "Bearer deferred-google-token")),
+            ),
+            (
+                Some("openai:chat"),
+                Some(("authorization", "Bearer sk-data-reader-unavailable")),
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            if let Some((name, value)) = header {
+                headers.insert(name, value.parse().unwrap());
+            }
+            let decision = GatewayControlDecision::synthetic(
+                "/v1/chat/completions",
+                Some("ai_public".into()),
+                Some("openai".into()),
+                Some("chat".into()),
+                signature.map(str::to_owned),
+            );
+            let ControlDecisionAuthResolution::Resolved(resolved) = resolve_control_decision_auth(
+                &state,
+                &headers,
+                &request_uri,
+                "trace-deferred-auth-context",
+                decision,
+            )
+            .await
+            .expect("internal resolution should remain unchanged");
+            assert!(resolved.auth_context.is_none());
+            assert!(
+                resolved.local_auth_rejection.is_none(),
+                "signature {signature:?}"
+            );
+        }
     }
 
     #[tokio::test]
