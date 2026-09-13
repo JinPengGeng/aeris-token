@@ -6,7 +6,9 @@ mod score_window;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use crate::redis::{
     RedisClientConfig, RedisConsumerGroup, RedisConsumerName, RedisKeyspace, RedisKvRunner,
@@ -2314,11 +2316,22 @@ fn env_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(test)]
 fn unix_time_ms() -> u64 {
+    if let Some(now_ms) = TEST_UNIX_TIME_MS.with(std::cell::Cell::get) {
+        return now_ms;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+std::thread_local! {
+    // Current-thread tests can model skewed gateway clocks without changing the
+    // host clock or affecting tests executing on other threads.
+    static TEST_UNIX_TIME_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 fn redis_stream_command_timeout_for_block(
@@ -2363,6 +2376,10 @@ mod tests {
 
     mod usage_limit_cleanup {
         include!("redis/usage_limit_cleanup_tests.rs");
+    }
+
+    mod semaphore_server_time {
+        include!("redis/semaphore_server_time_tests.rs");
     }
 
     #[tokio::test]
