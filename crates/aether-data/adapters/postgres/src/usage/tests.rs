@@ -30,7 +30,7 @@ fn normalize_newlines(value: &str) -> String {
     value.replace("\r\n", "\n")
 }
 
-fn fast_clear_usage_record(
+pub(crate) fn fast_clear_usage_record(
     request_id: &str,
     provider_name: &str,
     now_unix_secs: u64,
@@ -3094,8 +3094,14 @@ fn usage_sql_raw_aggregates_use_canonical_billing_facts() {
     assert!(
         super::REBUILD_API_KEY_USAGE_STATS_SQL.contains("FROM usage_billing_facts AS \"usage\"")
     );
-    assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
-        .contains("FROM usage_billing_facts AS \"usage\""));
+    for sql in [
+        super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL,
+        super::SUMMARIZE_PROVIDER_API_KEY_WINDOW_USAGE_SQL,
+    ] {
+        assert!(sql.contains("FROM usage_billing_facts AS facts"));
+        assert!(sql.contains("parent.billing_mode = 'legacy'"));
+        assert!(sql.contains("r.attempt_id IS NOT NULL AND r.dispatched_at IS NOT NULL"));
+    }
     assert!(super::SUMMARIZE_TOTAL_TOKENS_BY_API_KEY_IDS_SQL
         .contains("FROM usage_billing_facts AS \"usage\""));
     assert!(super::SUMMARIZE_USAGE_TOTALS_BY_USER_IDS_SQL

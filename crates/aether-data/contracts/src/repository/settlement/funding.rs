@@ -194,6 +194,8 @@ pub struct RequestFundsAllocation {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredRequestFundsReservation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     pub quote: ReserveRequestFundsInput,
     pub wallet_id: Option<String>,
     pub allocations: Vec<RequestFundsAllocation>,

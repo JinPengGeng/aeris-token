@@ -15,6 +15,7 @@ use super::{
 use crate::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
 use crate::DataLayerError;
 
+mod attempt_funding;
 mod funding;
 
 #[derive(Debug)]
@@ -63,6 +64,8 @@ pub struct InMemorySettlementRepository {
     funds: Arc<RwLock<BTreeMap<String, super::StoredRequestFundsReservation>>>,
     recoverable_usage: RwLock<BTreeMap<String, UsageSettlementInput>>,
     recovered_units: RwLock<BTreeMap<String, u64>>,
+    attempt_metadata: RwLock<BTreeMap<String, super::StoredRequestAttemptFunds>>,
+    usage: Option<Arc<crate::repository::usage::InMemoryUsageReadRepository>>,
 }
 
 impl InMemorySettlementRepository {
@@ -80,6 +83,8 @@ impl InMemorySettlementRepository {
             funds: Default::default(),
             recoverable_usage: Default::default(),
             recovered_units: Default::default(),
+            attempt_metadata: Default::default(),
+            usage: None,
         }
     }
 
@@ -95,12 +100,52 @@ impl InMemorySettlementRepository {
             funds,
             recoverable_usage: Default::default(),
             recovered_units: Default::default(),
+            attempt_metadata: Default::default(),
+            usage: None,
         }
+    }
+
+    pub fn with_usage_repository(
+        mut self,
+        usage: Arc<crate::repository::usage::InMemoryUsageReadRepository>,
+    ) -> Self {
+        self.usage = Some(usage);
+        self
     }
 }
 
 #[async_trait]
 impl SettlementWriteRepository for InMemorySettlementRepository {
+    async fn reserve_request_attempt_funds(
+        &self,
+        input: super::ReserveRequestAttemptFundsInput,
+    ) -> Result<super::ReserveRequestAttemptFundsOutcome, DataLayerError> {
+        attempt_funding::reserve(self, input)
+    }
+    async fn mark_request_attempt_funds_dispatched(
+        &self,
+        identity: super::RequestAttemptFundsIdentity,
+    ) -> Result<Option<super::StoredRequestAttemptFunds>, DataLayerError> {
+        attempt_funding::dispatch(self, identity)
+    }
+    async fn record_request_attempt_funds_outcome(
+        &self,
+        input: super::RecordRequestAttemptFundsOutcomeInput,
+    ) -> Result<Option<super::StoredRequestAttemptFunds>, DataLayerError> {
+        attempt_funding::outcome(self, input)
+    }
+    async fn read_request_attempt_funds(
+        &self,
+        identity: super::RequestAttemptFundsIdentity,
+    ) -> Result<Option<super::StoredRequestAttemptFunds>, DataLayerError> {
+        attempt_funding::read(self, identity)
+    }
+    async fn close_request_funds_admission(
+        &self,
+        input: super::CloseRequestFundsAdmissionInput,
+    ) -> Result<Option<super::RequestFundsSummary>, DataLayerError> {
+        attempt_funding::close(self, input)
+    }
     async fn reserve_request_funds(
         &self,
         input: super::ReserveRequestFundsInput,
@@ -413,6 +458,15 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
             .settlement_lock
             .lock()
             .expect("usage settlement transaction lock");
+        if self
+            .usage
+            .as_ref()
+            .is_some_and(|usage| usage.is_attempt_funds_request(&input.request_id))
+        {
+            return Err(DataLayerError::InvalidInput(
+                "attempt funds usage requires v2 financial settlement".to_string(),
+            ));
+        }
         if let Some(existing) = self
             .settlements
             .read()

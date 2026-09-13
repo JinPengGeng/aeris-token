@@ -988,6 +988,12 @@ type = "text"
 length = 128
 
 [[table.entitlement_usage_ledgers.columns]]
+name = "attempt_id"
+type = "text_id"
+nullable = true
+driver.postgres.type = "uuid"
+
+[[table.entitlement_usage_ledgers.columns]]
 name = "amount_usd"
 type = "float64"
 
@@ -1008,9 +1014,9 @@ length = 16
 name = "created_at"
 type = "unix_seconds"
 
-[[table.entitlement_usage_ledgers.uniques]]
-name = "uq_entitlement_usage_request"
-columns = ["user_entitlement_id", "request_id"]
+# Legacy and attempt-scoped partial unique indexes are maintained in migration
+# 20260914010000 and bootstrap/postgres/220_request_attempt_funds.sql; the logical
+# compiler cannot represent index predicates. Do not restore a full request unique.
 
 [[table.entitlement_usage_ledgers.indexes]]
 name = "idx_entitlement_usage_user_date"

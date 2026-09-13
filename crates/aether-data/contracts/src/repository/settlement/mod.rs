@@ -1,6 +1,8 @@
+mod attempt_funding;
 mod funding;
 mod types;
 
+pub use attempt_funding::*;
 pub use funding::*;
 
 pub use types::{

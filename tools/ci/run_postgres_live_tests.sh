@@ -39,6 +39,8 @@ run_test aether-data-postgres settlement::funding::tests::live_request_funds_adm
 run_test aether-data-postgres settlement::funding::tests::live_request_funds_preserve_decimal_holds_across_ordinary_settlement_and_postpaid
 run_test aether-data-postgres settlement::funding::tests::live_request_funds_sum_entitlement_decimals_without_phantom_debt
 run_test aether-data-postgres settlement::funding::tests::live_request_funds_retention_preserves_reconciliation_and_allows_later_settlement
+run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_retry_late_charge_and_provider_rebuild_are_idempotent
+run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_admission_entitlements_and_concurrent_settlement
 
 # Credit flows share the migrated schema but isolate their rows in pg_temp.
 # Keep each existing regression visible as an exact target in required CI.
