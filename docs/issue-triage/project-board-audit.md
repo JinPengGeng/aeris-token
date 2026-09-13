@@ -3,32 +3,37 @@
 Scope: GitHub Project v2 `JinPengGeng/aeris-token Development` (project 1,
 `PVT_kwHOAiijc84BgApR`), with no upstream changes.
 
-## 2026-09-13 current live refresh (after PRs #356, #358 and #361)
+## 2026-09-13 current live refresh (after PR #363 and new delivery slices)
 
 GitHub issue labels were re-read on 2026-09-13. The fork has **45 open issues**
 (22 P1, 23 P2): 13 `status:in-progress`, 21 `status:triage`, and 11
 `status:blocked`. Older counts below remain timestamped audit records.
 
-PR #361 merged as `1831852e9abecfdc267ddbf783d2203cd2d39e14`. PR #356 merged as
-`86bc4d8b88311ac3ddd400d9e72a2d68bdc4c9f6`; Issue #308 and its Project card
-are **Done**. PR #358 merged as `1bcff1a5271aebefa96253417f4707574a7a2994`
-from reviewed head `7de0188d44118f7e1c1fc2930bc6aacadfa01070`; its protected
-checks, including the Gateway test, passed.
+PR #361 merged as `1831852e9abecfdc267ddbf783d2203cd2d39e14`; #356 merged as
+`86bc4d8b88311ac3ddd400d9e72a2d68bdc4c9f6` and Issue #308 is **Done**.
+PR #358 merged as `1bcff1a5271aebefa96253417f4707574a7a2994`; PR #363 (Refs
+#205) merged as `e9ca10ab2d28a78cb4f265cace17260679b048bc`.
 
-Draft PR #362 remains open at head
-`27682e86ff50a18a69ec78f22ecb8c216df0305d`, with required CI and independent
-review pending. PR #363 (Refs #205) remains open with squash auto-merge enabled
-at head `7095bcca993aa541eca07fa4fe3f59c630aca745`; it is behind current main
-(`1bcff1a5271aebefa96253417f4707574a7a2994`) and its required checks are still
-running.
+There are **9 open PRs**: Draft #362 (head
+`a39bd31a24863466964ec3a395c7098ce84c8891`) and Draft #365 (head
+`d8994ffb63061d58ad93352d05f05f593be4d3a0`), plus seven non-draft PRs with
+squash auto-merge enabled: #364 (`19cf2cc0cd54ff40794e66f8f5e516ca3a3cf910`),
+#366 (`472484b325e5d85ba7841d71df9f2307bf8a3c29`), #367
+(`0b452aebce4f0d4f49b115b1e534439016a057ad`), #368
+(`03a12764a2f488c7c45fcf28bfdf5d492a7a7d76`), #369
+(`cc0fb5ddabe95924206022f687b840d97e95a362`), #370
+(`3a53d59c991ab581b145d6b450d07a93eeab0a8e`) and #371
+(`f9921213c07ce814643c58814f5c4e7413b04551`). All nine currently report
+`BLOCKED` while protected checks run; auto-merge remains enabled on #364 and
+#366–#371.
 
 Issues #300 and #206 remain **Open**; their Project cards must not be marked
 Done. PR #362 records the funds-reservation scope, while gateway
 admission/dispatch/terminal lifecycle, cancellation and partial-output
 behavior, retry/crash recovery, and recharge/retention remain to be accepted.
-Issue #205 remains open behind #363 for signing-key rotation/recovery, nightly
-artifacts and remaining upgrade evidence. #214 remains open behind merged #358.
-No Project schema, ruleset or upstream repository was changed by this refresh.
+The bounded slices #366–#371 retain their parents (#205/#214, #225, #300/#206,
+#223, #224 and #307/#217). No Project schema, ruleset or upstream repository
+was changed by this refresh.
 
 ## 2026-09-12 decisions
 
