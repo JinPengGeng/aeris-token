@@ -14,7 +14,7 @@ PR #361 merged as `1831852e9abecfdc267ddbf783d2203cd2d39e14`; #356 merged as
 PR #358 merged as `1bcff1a5271aebefa96253417f4707574a7a2994`; PR #363 (Refs
 #205) merged as `e9ca10ab2d28a78cb4f265cace17260679b048bc`.
 
-There are **9 open PRs**: Draft #362 (head
+There are **11 open PRs**: Draft #362 (head
 `a39bd31a24863466964ec3a395c7098ce84c8891`) and Draft #365 (head
 `d8994ffb63061d58ad93352d05f05f593be4d3a0`), plus seven non-draft PRs with
 squash auto-merge enabled: #364 (`19cf2cc0cd54ff40794e66f8f5e516ca3a3cf910`),
@@ -23,17 +23,21 @@ squash auto-merge enabled: #364 (`19cf2cc0cd54ff40794e66f8f5e516ca3a3cf910`),
 (`03a12764a2f488c7c45fcf28bfdf5d492a7a7d76`), #369
 (`cc0fb5ddabe95924206022f687b840d97e95a362`), #370
 (`3a53d59c991ab581b145d6b450d07a93eeab0a8e`) and #371
-(`f9921213c07ce814643c58814f5c4e7413b04551`). All nine currently report
-`BLOCKED` while protected checks run; auto-merge remains enabled on #364 and
-#366–#371.
+(`f9921213c07ce814643c58814f5c4e7413b04551`), plus #373
+(`c185a15570af455b849844c1245acc659496b20d`). #372 is also open (head
+`5db5675c63211136d6159ffbd385d52f037a72cf`) without auto-merge; all eleven
+currently report `BLOCKED` while protected checks run. Auto-merge remains
+enabled on #364, #366–#371 and #373.
 
 Issues #300 and #206 remain **Open**; their Project cards must not be marked
 Done. PR #362 records the funds-reservation scope, while gateway
 admission/dispatch/terminal lifecycle, cancellation and partial-output
 behavior, retry/crash recovery, and recharge/retention remain to be accepted.
 The bounded slices #366–#371 retain their parents (#205/#214, #225, #300/#206,
-#223, #224 and #307/#217). No Project schema, ruleset or upstream repository
-was changed by this refresh.
+#223, #224 and #307/#217). PR #372 redacts sensitive admin video fields (#211),
+but its targeted build is blocked by an unrelated existing refund-notification
+compile error. No Project schema, ruleset or upstream repository was changed by
+this refresh.
 
 ## 2026-09-12 decisions
 
