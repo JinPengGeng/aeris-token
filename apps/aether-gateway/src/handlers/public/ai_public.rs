@@ -635,9 +635,9 @@ fn maybe_build_local_openai_request_validation_response(
 
 fn openai_image_n_detail(max_generation_count: u64) -> String {
     if max_generation_count >= openai_image_gateway_max_generation_count() {
-        format!("当前图片反代仅支持 n=1..{max_generation_count}")
+        format!("Image requests require n between 1 and {max_generation_count}")
     } else {
-        format!("当前图片模型仅支持 n=1..{max_generation_count}")
+        format!("The selected image model requires n between 1 and {max_generation_count}")
     }
 }
 
@@ -2514,7 +2514,7 @@ mod tests {
         .expect("image payload should parse before count validation");
         assert_eq!(
             validate_openai_image_n(&excessive_validation).as_deref(),
-            Some("当前图片反代仅支持 n=1..10")
+            Some("Image requests require n between 1 and 10")
         );
     }
 }
