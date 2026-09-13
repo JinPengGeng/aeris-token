@@ -47,6 +47,10 @@ pub trait UsageBillingEventEnricher: Send + Sync {
     async fn enrich_usage_event(&self, event: &mut UsageEvent) -> Result<(), DataLayerError>;
 }
 
+#[cfg(test)]
+#[path = "attempt_funds_tests.rs"]
+mod attempt_funds_tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UsageRequestRecordLevel {
     #[default]
@@ -4229,6 +4233,42 @@ impl UsageRuntime {
         self.record_pending(data, seed);
     }
 
+    /// Await the financial repository write before acknowledging observed work.
+    /// Queue append success cannot establish this barrier: RuntimeQueueStore may
+    /// be memory-backed, and an accepted message has not yet committed its facts.
+    /// The financial transaction produces its own counter outbox; queue replay
+    /// remains supported by the worker without being a prerequisite for commit.
+    pub async fn persist_attempt_funds_event<T>(
+        &self,
+        data: &T,
+        event: UsageEvent,
+    ) -> Result<(), DataLayerError>
+    where
+        T: UsageRuntimeAccess,
+    {
+        let attempt = event.data.attempt_funds.as_ref().ok_or_else(|| {
+            DataLayerError::InvalidInput(
+                "financial event requires a typed attempt capability".to_string(),
+            )
+        })?;
+        attempt.validate(&event.request_id)?;
+        if !self.is_enabled() || !data.has_usage_settlement_writer() {
+            return Err(DataLayerError::InvalidConfiguration(
+                "attempt funds runtime writer is unavailable".to_string(),
+            ));
+        }
+        let _permit = if let Some(gate) = self.worker_record_gate.as_ref() {
+            Some(gate.acquire().await)
+        } else {
+            None
+        };
+        catch_usage_writer_panic(
+            "durable attempt funds write",
+            crate::worker::write_event_record(data, &event),
+        )
+        .await
+    }
+
     /// Persist a pending lifecycle row before admitting an externally-owned session.
     ///
     /// The normal `record_pending`/`record_pending_direct` APIs intentionally hand work to the
@@ -5237,7 +5277,7 @@ impl UsageRuntime {
             return false;
         };
 
-        let write_succeeded = if let Err(err) = data.enrich_usage_event(event).await {
+        let write_succeeded = if let Err(err) = enrich_terminal_event(data, event).await {
             aether_runtime::record_billing_enrichment_failure();
             warn!(
                 event_name = "usage_terminal_direct_fallback_enrichment_failed",
@@ -5286,6 +5326,20 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
+        if event.data.attempt_funds.is_some() {
+            return match catch_usage_writer_panic(
+                "attempt funds direct write",
+                crate::worker::write_event_record(data, event),
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(err) => {
+                    warn!(event_name="usage_attempt_funds_direct_failed", request_id=%event.request_id, error=%err, "attempt financial event was not persisted");
+                    false
+                }
+            };
+        }
         let reconciled = match reconcile_usage_policy_cost_for_event_with_result(data, event).await
         {
             Ok(reconciled) => reconciled,
@@ -5446,6 +5500,9 @@ async fn enrich_terminal_event<T>(data: &T, event: &mut UsageEvent) -> Result<()
 where
     T: UsageBillingEventEnricher + Send + Sync,
 {
+    if event.data.attempt_funds.is_some() {
+        return Ok(());
+    }
     if let Err(err) = data.enrich_usage_event(event).await {
         aether_runtime::record_billing_enrichment_failure();
         warn!(

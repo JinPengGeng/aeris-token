@@ -19,6 +19,18 @@ use crate::keyed_lock::KeyedAsyncLockPool;
 pub trait UsageSettlementWriter: Send + Sync {
     fn has_usage_settlement_writer(&self) -> bool;
 
+    /// Validate the server capability and price observed work from the stored
+    /// reservation quote. Unsupported writers fail closed.
+    async fn write_request_attempt_funds_event(
+        &self,
+        _event: &crate::UsageAttemptFundsEvent,
+        _finalized_at_unix_secs: u64,
+    ) -> Result<(), DataLayerError> {
+        Err(InvalidInput(
+            "attempt funds event writer is unavailable".to_string(),
+        ))
+    }
+
     async fn reconcile_usage_policy_cost(
         &self,
         _input: ReconcileUsagePolicyCostInput,

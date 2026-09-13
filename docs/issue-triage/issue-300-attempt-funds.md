@@ -4,7 +4,7 @@
 
 本变更实现数据层合同、PostgreSQL 与 memory 适配器、schema、usage 财务写入隔离和 provider 统计重建。一个真实外部 `usage.request_id` 对应一条父记录；每个可能独立收费的上游操作使用不同的 attempt UUID 与 reservation token。
 
-数据层实现基于历史快照 `7b415fd66`，已保存为本地提交 `40149b686`。主线程随后合入 `e730e1247`，包含 #388 retention 和 #390 钱包 live CI，并将两个新 attempt live 用例登记到 required runner（共 23 个 exact targets）。Gateway、usage runtime 事件接通及应用构造器共享 memory usage repository 仍待整合。尚未启用收费图片入口或推送本分支。
+数据层阶段已提交并推送至 Draft PR #391，集成提交 `73222d17cba56089609bb62266732cffdff1c2c4` 包含 #388 retention、#390 钱包 live CI 及 #367 主干变更。两个新 attempt live 用例已登记到 required runner（共 23 个 exact targets）。Gateway、usage runtime 事件接通及应用构造器共享 memory usage repository 属于后续集成阶段；收费图片入口尚未启用。
 
 ## 决定及依据
 
@@ -59,6 +59,22 @@
 主线程合入 `e730e1247` 后，在自有 socket-only PostgreSQL 17.11 的独立 `aether_attempt_funds_integration` 数据库执行 required live runner，23 个 exact targets 全部实际运行 `1 passed / 0 ignored`，包括原有 v1、#388 retention、两个新 attempt 用例和八个钱包 credit 用例。第一次运行发现 #388 已在共用 fixture 中创建 `usage_http_audits` / `usage_body_blobs`，attempt fixture 再建同名表失败；删除重复建表后完整 23 项通过，未跳过用例或使用 `IF NOT EXISTS` 掩盖隔离错误。ShellCheck 与 diff 检查通过。
 
 ## 集成边界
+
+### Gateway/runtime 事件集成开发记录（2026-09-13）
+
+新增独立 typed financial event，携带版本、完整 reservation identity 和可观察的图片输出 evidence；事件不提供可信价格或金额。Gateway writer 从数据库读取冻结 quote 定价。`Outcome` 仅写子 attempt 事实，`ParentLifecycle` 才更新唯一父请求生命周期，两类事件均跳过 ordinary settlement/enrichment。尚未实现从普通 request metadata 或内部报告 body 创建金融 capability 的入口。
+
+对于无法证明未计费的失败、取消或迟到观察，保持 Unknown；当前 `NoCharge` 仅接受尚未 dispatch 的 `prepared_cancelled`。空图片输出不能作为可证明免费或完成收费的证据。已确定收费后到达的旧 Unknown 不覆盖账务状态，避免队列乱序产生永久失败重试。
+
+初版 event 写入接口优先等待队列追加成功。主线程用真实 memory queue 和故障 writer 复现：队列成功会使 API 返回成功，金融 repository 未被调用，不能支持“已持久化”的承诺。改为等待金融 repository 直接提交后才确认观察结果；金融事务自己写入计数 outbox，worker 继续支持历史消息和重复投递，不把异步消费当作提交屏障。已有 `admit_pending_durable` 保留独立文档和父持久化屏障语义。
+
+代理开发阶段 `cargo check -p aether-usage-runtime` 与 `cargo check -p aether-gateway` 通过。主线程新增六项定向回归，初次执行五项通过、一项真实暴露上述队列确认漏洞；修复后六项全部通过，随后 runtime crate 的全部 371 项单元测试通过（零失败、零 ignored）。测试区分 worker/direct 的子 attempt 事实与父生命周期，验证无旧计费/动态价格 enrichment、父写入必须返回行、错误先于父/旧账务写入、Clone/裁剪后的 queue wire 保留完整 capability，拒绝事件提交价格字段和未知版本。
+
+主线程随后执行 Rust 1.95 Clippy，发现内联金融 payload 使所有 usage event 增大并触发 lifecycle seed 的 large-enum-variant。将可选金融 payload 改为 Box，仅金融事件需要该分配，保持既有 JSON wire 结构和 legacy event 的小尺寸；未添加 lint 豁免。runtime 的 `clippy --locked --all-targets -- -D warnings` 已通过。工具链验证显式设置 Rust 1.95 的 `RUSTC`、`RUSTDOC` 及 cargo/cargo-clippy 路径，避免 PATH 中 Homebrew 1.98 覆盖。
+
+Gateway 实际调用计数和新 PostgreSQL 端到端验收仍未完成，不能据编译或 runtime 回归放开收费入口。
+
+### 尚未完成的接线
 
 - 本文不代表 Gateway 已经实现“资金 dispatch 持久化后才能调用上游”、请求结束 close admission、可靠事件投递或父持久化失败处理；这些仍须主线程实现并验收。
 - 父 summary 已存储且 close API 可返回；用户界面/通用 read model 的 summary 展示不在本数据层范围。
