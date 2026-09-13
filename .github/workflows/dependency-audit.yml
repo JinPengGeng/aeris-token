@@ -53,6 +53,44 @@ jobs:
         # workspace's reviewed RSA exception must never apply to this tool.
         run: cargo audit --file tools/ci/tunnel-release-verifier/Cargo.lock
 
+      - name: Capture Cargo advisory evidence
+        if: always()
+        run: |
+          set +e
+          mkdir -p audit-artifacts/cargo
+          cargo audit --json --ignore RUSTSEC-2023-0071 \
+            > audit-artifacts/cargo/workspace.json \
+            2> audit-artifacts/cargo/workspace.stderr
+          workspace_status=$?
+          cargo audit --json --file tools/ci/tunnel-release-verifier/Cargo.lock \
+            > audit-artifacts/cargo/tunnel-release-verifier.json \
+            2> audit-artifacts/cargo/tunnel-release-verifier.stderr
+          tunnel_status=$?
+          cp .github/security/cargo-audit-exception.json \
+            audit-artifacts/cargo/cargo-audit-exception.json
+          jq -n \
+            --arg commit "$GITHUB_SHA" \
+            --arg generated_at "$(date -u +%FT%TZ)" \
+            --arg scanner "cargo-audit 0.22.2" \
+            --argjson workspace_status "$workspace_status" \
+            --argjson tunnel_status "$tunnel_status" \
+            '{commit: $commit, generated_at: $generated_at, scanner: $scanner,
+              workspace_exit_status: $workspace_status,
+              tunnel_exit_status: $tunnel_status}' \
+            > audit-artifacts/cargo/metadata.json
+          if [ "$workspace_status" -ne 0 ] || [ "$tunnel_status" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Upload Cargo advisory evidence
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: dependency-audit-cargo-${{ github.run_id }}
+          path: audit-artifacts/cargo
+          if-no-files-found: warn
+          retention-days: 30
+
   npm:
     name: npm advisory audit
     runs-on: ubuntu-latest
@@ -92,7 +130,33 @@ jobs:
             exit 1
           fi
           test -f package-lock.json
-          npm audit --package-lock-only --audit-level=high --registry="$NPM_CONFIG_REGISTRY"
+          mkdir -p audit-artifacts/npm
+          set +e
+          npm audit --package-lock-only --audit-level=high \
+            --registry="$NPM_CONFIG_REGISTRY" \
+            > audit-artifacts/npm/audit.json \
+            2> audit-artifacts/npm/audit.stderr
+          audit_status=$?
+          jq -n \
+            --arg directory "${{ matrix.directory }}" \
+            --arg commit "$GITHUB_SHA" \
+            --arg generated_at "$(date -u +%FT%TZ)" \
+            --arg scanner "npm $(npm --version)" \
+            --argjson exit_status "$audit_status" \
+            '{directory: $directory, commit: $commit,
+              generated_at: $generated_at, scanner: $scanner,
+              exit_status: $exit_status}' \
+            > audit-artifacts/npm/metadata.json
+          exit "$audit_status"
+
+      - name: Upload npm advisory evidence
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: dependency-audit-npm-${{ strategy.job-index }}-${{ github.run_id }}
+          path: ${{ matrix.directory }}/audit-artifacts/npm
+          if-no-files-found: warn
+          retention-days: 30
 
   check:
     name: Dependency Audit / check
