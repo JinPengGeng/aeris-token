@@ -87,6 +87,7 @@ if grep -ERq '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+[^[:space:]#]+@[^0-9
 fi
 
 VERIFY_FIXTURE="$(mktemp -d)"
+unset AETHER_TUNNEL_RELEASE_TRUST_KEYS AETHER_TUNNEL_RELEASE_KEY_ID AETHER_TUNNEL_RELEASE_PUBLIC_KEY
 cleanup_verify_fixture() { rm -rf -- "${VERIFY_FIXTURE}"; }
 trap cleanup_verify_fixture EXIT
 printf '%s\n' 'signed tunnel release fixture' >"${VERIFY_FIXTURE}/SHA256SUMS.txt"
@@ -116,5 +117,7 @@ AETHER_TUNNEL_RELEASE_KEY_ID=fixture-key AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${pub
     "${TUNNEL_VERIFY_SCRIPT}" "${VERIFY_FIXTURE}/SHA256SUMS.txt" \
     "${VERIFY_FIXTURE}/SHA256SUMS.txt.sig" >/dev/null \
     || fail_test "valid release signature was rejected"
+
+bash "${REPO_ROOT}/tests/tunnel_release_key_rotation_test.sh"
 
 echo "PASS: release supply-chain pins and provenance workflow"

@@ -196,10 +196,10 @@
                 :model-value="form.initial_gift_usd ?? ''"
                 type="number"
                 step="0.01"
-                min="0.01"
+                min="0"
                 :placeholder="legacyT('初始额度 (USD)')"
                 class="h-10"
-                @update:model-value="(v) => form.initial_gift_usd = parseNumberInput(v, { allowFloat: true, min: 0.01 })"
+                @update:model-value="(v) => form.initial_gift_usd = parseNumberInput(v, { allowFloat: true, min: 0 })"
               />
               <span
                 v-else
@@ -331,7 +331,7 @@ const form = ref({
   password: '',
   confirmPassword: '',
   email: '',
-  initial_gift_usd: 10 as number | undefined,
+  initial_gift_usd: 0 as number | undefined,
   role: 'user' as UserRole,
   unlimited: false,
   is_active: true,
@@ -358,7 +358,7 @@ function resetForm() {
     password: '',
     confirmPassword: '',
     email: '',
-    initial_gift_usd: 10,
+    initial_gift_usd: 0,
     role: 'user',
     unlimited: false,
     is_active: true,
@@ -435,7 +435,7 @@ const isFormValid = computed(() => {
     : true
   const initialGiftValid = isEditMode.value ||
     form.value.unlimited ||
-    (typeof form.value.initial_gift_usd === 'number' && form.value.initial_gift_usd >= 0.01)
+    (typeof form.value.initial_gift_usd === 'number' && form.value.initial_gift_usd >= 0)
   return hasUsername && usernameValid && passwordValid && passwordConfirmed && initialGiftValid
 })
 
@@ -520,7 +520,7 @@ watch(
     if (unlimited) {
       form.value.initial_gift_usd = undefined
     } else if (form.value.initial_gift_usd == null) {
-      form.value.initial_gift_usd = 10
+      form.value.initial_gift_usd = 0
     }
   }
 )
