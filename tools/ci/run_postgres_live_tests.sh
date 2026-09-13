@@ -40,4 +40,15 @@ run_test aether-data-postgres settlement::funding::tests::live_request_funds_pre
 run_test aether-data-postgres settlement::funding::tests::live_request_funds_sum_entitlement_decimals_without_phantom_debt
 run_test aether-data-postgres settlement::funding::tests::live_request_funds_retention_preserves_reconciliation_and_allows_later_settlement
 
+# Credit flows share the migrated schema but isolate their rows in pg_temp.
+# Keep each existing regression visible as an exact target in required CI.
+run_test aether-data-postgres wallet::tests::live_payment_callback_user_wallet_credits_once
+run_test aether-data-postgres wallet::tests::live_payment_callback_api_key_wallet_credits_once
+run_test aether-data-postgres wallet::tests::live_payment_callback_rejects_wrong_or_missing_wallet_owner
+run_test aether-data-postgres wallet::tests::live_manual_recharge_commits_wallet_order_and_transaction
+run_test aether-data-postgres wallet::tests::live_admin_order_state_changes_preserve_metadata
+run_test aether-data-postgres wallet::tests::live_admin_wallet_order_credit_commits_once
+run_test aether-data-postgres wallet::tests::live_admin_plan_order_credit_commits_once
+run_test aether-data-postgres wallet::tests::live_redeem_code_commits_order_and_wallet_once_for_each_bucket
+
 printf 'PASS: selected isolated PostgreSQL live-DB tests\n'
