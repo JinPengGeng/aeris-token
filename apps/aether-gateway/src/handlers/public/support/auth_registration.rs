@@ -13,6 +13,7 @@ use super::{
     GatewayError, Regex, Response, AUTH_REGISTER_RATE_LIMIT, AUTH_SEND_VERIFICATION_RATE_LIMIT,
     AUTH_VERIFICATION_STATUS_RATE_LIMIT, AUTH_VERIFY_EMAIL_RATE_LIMIT,
 };
+use aether_admin::system::DEFAULT_USER_INITIAL_GIFT_USD;
 use serde::Deserialize;
 use std::net::IpAddr;
 
@@ -638,7 +639,7 @@ pub(super) async fn handle_auth_register(
         .read_system_config_json_value("default_user_initial_gift_usd")
         .await
     {
-        Ok(value) => system_config_f64(value.as_ref(), 10.0),
+        Ok(value) => system_config_f64(value.as_ref(), DEFAULT_USER_INITIAL_GIFT_USD),
         Err(err) => {
             return build_auth_internal_error_response(
                 "auth_registration_initial_gift_lookup_failed",

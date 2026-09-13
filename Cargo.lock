@@ -218,6 +218,7 @@ dependencies = [
  "chrono-tz",
  "flate2",
  "futures-util",
+ "serde",
  "serde_json",
  "sha2",
  "sqlx",

@@ -43,11 +43,16 @@ test('Prometheus failure or skipped execution fails the required Rust aggregate'
   const aggregate = workflow.jobs.check;
   assert.equal(workflow.jobs.prometheus_contracts.uses, './.github/workflows/prometheus-ci.yml');
   assert.ok(aggregate.needs.includes('prometheus_contracts'));
-  const script = aggregate.steps.find((step) => step.name === 'Verify required jobs').run;
+  const step = aggregate.steps.find((step) => step.name === 'Verify required jobs');
   for (const result of ['success', 'failure', 'cancelled', 'skipped', '']) {
-    const rendered = script.replace(/\$\{\{\s*needs\.(\w+)\.result\s*\}\}/g,
-      (_, job) => job === 'prometheus_contracts' ? result : 'success');
-    const outcome = spawnSync('bash', ['-e', '-c', rendered], { encoding: 'utf8' });
+    const env = Object.fromEntries(Object.entries(step.env).map(([key, value]) => [key,
+      value.replace(/\$\{\{\s*needs\.(\w+)\.result\s*\}\}/g,
+        (_, job) => job === 'prometheus_contracts' ? result : 'success')
+        .replace(/\$\{\{\s*needs\.changes\.outputs\.rust\s*\}\}/g, 'true'),
+    ]));
+    const outcome = spawnSync('bash', ['-e', '-c', step.run], {
+      env: { PATH: process.env.PATH, ...env }, encoding: 'utf8',
+    });
     assert.equal(outcome.status, result === 'success' ? 0 : 1,
       `Prometheus result ${JSON.stringify(result)}: ${outcome.stdout} ${outcome.stderr}`);
   }

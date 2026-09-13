@@ -69,3 +69,19 @@ It does not validate Gateway RBAC: the actual Gateway metrics route remains
 operational deployment acceptance remain separately tracked by #307/#217.
 No maintained Prometheus/Alertmanager deployment is added to default Compose.
 Rollback of the drill is a code/CI revert; no application schema changes.
+
+## Integration with selective Rust CI (2026-09-13)
+
+The #389 change moved aggregate inputs into environment variables and allows
+the Rust/DB leaves to skip documentation-only PRs. This drill remains required
+on those PRs: `prometheus_contracts` is in `REQUIRED_JOB_RESULTS`, alongside
+the shell and aggregate jobs. Its failure, cancellation, missing result or
+unexpected skip blocks the required Rust check for either Rust scope.
+
+The integration was checked with 19 focused workflow tests and actionlint
+(including ShellCheck). These execute the actual YAML Bash gates with both
+selected and skipped Rust leaves. They preserve `force_full` for reusable
+callers and the broad `tests/**` push path. The existing hosted real scrape
+and firing/resolved delivery evidence remains
+[job 103661227086](https://github.com/JinPengGeng/aeris-token/actions/runs/34733709538/job/103661227086);
+the integration changes gate wiring and tests, not the drill implementation.
