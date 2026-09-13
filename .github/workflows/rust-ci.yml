@@ -2,6 +2,11 @@ name: Rust CI
 
 on:
   workflow_call:
+    inputs:
+      force_full:
+        description: Run the full Rust/DB graph for reusable workflow callers.
+        type: boolean
+        default: true
   workflow_dispatch:
   push:
     branches:
@@ -13,6 +18,9 @@ on:
       - "rust-toolchain.toml"
       - "crates/**"
       - "apps/**"
+      - "Dockerfile.app.local"
+      - "frontend/vite.config.ts"
+      - "frontend/src/**"
       - "docs/api/**"
       - "docs/operations/referral-rebate-numeric-audit.sql"
       - "docs/operations/fixtures/**"
@@ -55,19 +63,20 @@ jobs:
     name: Detect changes
     runs-on: ubuntu-latest
     outputs:
-      # Non-PR events always run the full suite. Missing PR outputs stay empty
-      # so the aggregate gates reject a broken detection step.
-      rust: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.rust }}
-      data: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.data }}
+      # Reusable calls retain the caller event name, so their default input
+      # requests full validation even when called by a pull_request workflow.
+      # Missing direct-PR outputs stay empty and fail the aggregate gates.
+      rust: ${{ (inputs.force_full || github.event_name != 'pull_request') && 'true' || steps.filter.outputs.rust }}
+      data: ${{ (inputs.force_full || github.event_name != 'pull_request') && 'true' || steps.filter.outputs.data }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        if: github.event_name == 'pull_request'
+        if: ${{ github.event_name == 'pull_request' && !inputs.force_full }}
         with:
           persist-credentials: false
           fetch-depth: 0
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36
         id: filter
-        if: github.event_name == 'pull_request'
+        if: ${{ github.event_name == 'pull_request' && !inputs.force_full }}
         with:
           token: ''
           base: ${{ github.base_ref }}
@@ -663,7 +672,7 @@ jobs:
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       - name: Add PostgreSQL server binaries to PATH
-        run: echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
+        run: pg_config --bindir >> "$GITHUB_PATH"
 
       - name: Run Postgres migration smoke test
         env:
@@ -780,7 +789,7 @@ jobs:
           workspaces: . -> target
 
       - name: Add PostgreSQL client binaries to PATH
-        run: echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
+        run: pg_config --bindir >> "$GITHUB_PATH"
 
       - name: Run selected isolated live-DB tests
         env:

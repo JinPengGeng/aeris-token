@@ -24,6 +24,10 @@ const EXPECTED_GROUPS = {
     'rust-toolchain.toml',
     'crates/**',
     'apps/**',
+    'Dockerfile.app.local',
+    'deploy.sh',
+    'frontend/vite.config.ts',
+    'frontend/src/**',
     'tools/ci/**',
     'tests/**',
     'docs/api/**',
@@ -97,7 +101,11 @@ test('matcher classifies representative paths exactly like the CI filters', () =
     [['docs/operations/referral-rebate-numeric-audit.sql'], ['rust']],
     [['docs/operations/fixtures/referral-numeric-specials.sql'], ['rust']],
     // Frontend changes.
-    [['frontend/src/app.ts'], ['frontend']],
+    [['frontend/src/app.ts'], ['frontend', 'rust']],
+    [['frontend/vite.config.ts'], ['frontend', 'rust']],
+    [['frontend/package.json'], ['frontend']],
+    [['Dockerfile.app.local'], ['rust']],
+    [['deploy.sh'], ['rust']],
     // Automation and workflow changes.
     [['.github/agents.yml'], ['automation']],
     [['.github/automation/src/engine.mjs'], ['automation']],

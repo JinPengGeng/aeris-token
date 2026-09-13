@@ -26,22 +26,31 @@ still skip it.
 
 ## Implementation contract
 
-- Ordinary documentation and frontend PRs skip all 12 Rust/database leaf jobs.
+- Ordinary documentation and unrelated frontend package changes skip all 12
+  Rust/database leaf jobs.
   Shell security fixtures still run for every PR.
 - Rust sources, Cargo/toolchain inputs, `tools/ci/**`, `tests/**`, the filter
   itself, and SQL/API fixtures outside the workspace trigger the entire Rust/DB
   graph. `docs/api/**` includes Markdown contracts read by Rust `include_str!`,
   so those files cannot be treated as ordinary documentation. Main-branch push
   routing covers these same inputs.
+- Gateway architecture tests also read `Dockerfile.app.local`, `deploy.sh`,
+  `frontend/vite.config.ts` and scan `frontend/src/**` for retired API aliases.
+  Independent review caught these extra inputs; they now select Rust on PR and
+  push. Frontend source changes therefore still require Rust verification.
 - Each aggregate always executes. Successful detection with canonical `true`
   requires every selected leaf to succeed; canonical `false` requires every
   leaf to be skipped. Failed/cancelled detection, missing or unknown output,
   unexpected execution, unexpected skips, and failed/cancelled leaves fail.
 - The final `Rust CI / check` also requires shell fixtures and all internal
   aggregates to succeed. A skipped aggregate never counts as passing.
-- Push, manual dispatch and reusable workflow calls keep full execution. Only
-  non-PR events supply the full-scope default; empty PR detector output is
-  preserved so the gates can reject it.
+- Push and manual dispatch keep full execution. Reusable workflows inherit
+  their caller's event name, including `pull_request`; review corrected the
+  initial mistaken test of an event named `workflow_call`. The reusable entry
+  now defaults its boolean `force_full` input to true, independently of caller
+  event or path-filter output. A caller may explicitly opt into normal path
+  selection with false. Direct PR events have no such input and preserve empty
+  detector output so the gates can reject it.
 - All existing test commands, live database services, feature/package matrices,
   immutable action references, and required check names remain intact. Branch
   protection and the other three required contexts are unchanged.
@@ -51,15 +60,19 @@ still skip it.
 The new automation tests parse the real workflow YAML, evaluate its restricted
 string/boolean output and leaf conditions, and execute the actual inline Bash
 gate scripts with synthetic dependency results. They cover the job graph,
-documentation/frontend selection, 17 Rust/DB/fixture inputs, non-PR full runs,
+documentation/frontend package selection, Rust/DB/fixture and cross-module
+inputs, non-PR full runs and reusable calls from a PR event,
 detector failures/cancellation/unknown outputs, and each leaf/aggregate failure
 or unexpected skip. Environment injection is exercised by rendering the
 workflow's actual `env` expressions rather than duplicating the gate logic.
 
 Local verification:
 
-- `npm test` in `.github/automation`: 217 tests passed, none skipped.
-- Focused change-filter, selection and action-pinning suite: 17 tests passed.
+- `npm test` in `.github/automation`: 218 tests passed, none skipped.
+- Focused change-filter and selection suite: 17 tests passed.
+- `actionlint` 1.7.12 (including ShellCheck 0.11.0): passed. Installed the
+  missing local validator; replaced two redundant `echo` wrappers around
+  `pg_config --bindir` without changing the configured PostgreSQL path.
 - `git diff --check`: passed.
 
 The expression harness models only the expressions used here; it does not

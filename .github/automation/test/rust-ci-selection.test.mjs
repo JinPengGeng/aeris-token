@@ -42,9 +42,10 @@ function expressionValue(expression, context) {
   }, { timeout: 1000 });
 }
 
-function contextFor(eventName, needs, filterOutput) {
+function contextFor(eventName, needs, filterOutput, inputs = {}) {
   return {
     github: { event_name: eventName },
+    inputs,
     needs,
     steps: { filter: { outputs: { rust: filterOutput, data: '' } } },
     always: () => true,
@@ -76,9 +77,10 @@ function runWorkflow({
   files = ['docs/guide.md'],
   changesResult = 'success',
   filterOutput = String(matchedChangeFilterGroups(filters, files).includes('rust')),
+  inputs = {},
   overrides = {},
 } = {}) {
-  const output = expressionValue(workflow.jobs.changes.outputs.rust, contextFor(eventName, {}, filterOutput));
+  const output = expressionValue(workflow.jobs.changes.outputs.rust, contextFor(eventName, {}, filterOutput, inputs));
   const needs = {
     changes: { result: changesResult, outputs: { rust: output } },
     shell_security: { result: overrides.shell_security ?? 'success' },
@@ -118,8 +120,8 @@ test('every Rust and database job consumes changes, while all aggregate gates an
   }
 });
 
-test('ordinary docs and frontend PRs skip all Rust/DB work and pass the actual aggregate scripts', () => {
-  for (const files of [['docs/guide.md'], ['README.md'], ['frontend/src/app.ts'], ['LICENSE']]) {
+test('ordinary docs and frontend package PRs skip all Rust/DB work and pass the actual aggregate scripts', () => {
+  for (const files of [['docs/guide.md'], ['README.md'], ['frontend/package.json'], ['LICENSE']]) {
     const observed = runWorkflow({ files });
     for (const jobId of leaves) assert.equal(observed[jobId].result, 'skipped', `${files}: ${jobId}`);
     for (const jobId of gates) assert.equal(observed[jobId].result, 'success', `${files}: ${jobId}: ${observed[jobId].output}`);
@@ -132,6 +134,7 @@ test('Rust, DB, CI harnesses, and external contract inputs run the whole existin
     'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
     'crates/aether-gateway/src/lib.rs', 'crates/aether-data/adapters/postgres/src/usage/cleanup.rs',
     'apps/aether-gateway/src/main.rs', 'tools/ci/run_postgres_live_tests.sh',
+    'Dockerfile.app.local', 'deploy.sh', 'frontend/vite.config.ts', 'frontend/src/api/example.ts',
     'tools/ci/run_readiness_drill.sh', 'tests/compose_database_config_test.py',
     'docs/api/fixtures/public-api-compatibility.json', 'docs/api/provider-interface-definitions.md',
     'docs/api/format-field-coverage-matrix.md', 'docs/api/format-conversion-audit.md',
@@ -146,14 +149,34 @@ test('Rust, DB, CI harnesses, and external contract inputs run the whole existin
   }
 });
 
-test('push, manual dispatch and reusable workflow calls run fully even without filter outputs', () => {
-  for (const eventName of ['push', 'workflow_dispatch', 'workflow_call']) {
+test('push and manual dispatch run fully even without filter outputs', () => {
+  for (const eventName of ['push', 'workflow_dispatch']) {
     for (const filterOutput of ['', 'false', 'true']) {
       const observed = runWorkflow({ eventName, filterOutput });
       assert.equal(observed.changes.outputs.rust, 'true');
       for (const jobId of [...leaves, ...gates]) assert.equal(observed[jobId].result, 'success', `${eventName}: ${jobId}`);
     }
   }
+});
+
+test('reusable workflows retain the caller event and default to full validation even for docs PRs', () => {
+  const fullInput = workflow.on.workflow_call.inputs.force_full;
+  assert.equal(fullInput.type, 'boolean');
+  assert.equal(fullInput.default, true);
+  for (const eventName of ['pull_request', 'push', 'workflow_dispatch']) {
+    for (const filterOutput of ['', 'false', 'true']) {
+      const inputs = { force_full: fullInput.default };
+      const observed = runWorkflow({ eventName, filterOutput, inputs });
+      assert.equal(observed.changes.outputs.rust, 'true');
+      for (const jobId of [...leaves, ...gates]) assert.equal(observed[jobId].result, 'success', `${eventName}: ${jobId}`);
+      for (const step of workflow.jobs.changes.steps) {
+        assert.equal(expressionValue(step.if, contextFor(eventName, {}, filterOutput, inputs)), false,
+          'full validation must not rely on a PR path-filter step');
+      }
+    }
+  }
+  const directPr = contextFor('pull_request', {}, 'false');
+  for (const step of workflow.jobs.changes.steps) assert.equal(expressionValue(step.if, directPr), true);
 });
 
 test('failed, cancelled or skipped detection cannot turn skipped work into a successful gate', () => {
