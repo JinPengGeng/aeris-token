@@ -29,12 +29,14 @@ The exact ignored Gateway target is
 `tests::audit::admin_persistence::live_admin_mutations_persist_before_response_and_protected_readback`.
 It is explicitly executed by the required Gateway CI job and verifies:
 
-- PostgreSQL-backed administrator and ordinary-user identities and sessions.
+- PostgreSQL-backed administrator, audit-administrator and ordinary-user
+  identities and sessions.
 - Public HTTP configuration mutation, successful business state and committed
   audit row immediately after the response, with no polling for persistence.
 - Protected audit API readback of the same event and joined user identity;
-  the sensitive read is itself audited. Anonymous access returns 401 and an
-  ordinary user receives 403.
+  the sensitive read is itself audited. Anonymous and ordinary-user access
+  return 401 under the existing admin-principal contract. An audit administrator
+  attempting full-admin forensic readback receives 403 and the required scope.
 - A rejected mutation records its failed outcome under the same principal.
 - Credentials, cookies, query tokens and request-body sentinels are absent
   from the stored audit record.
@@ -75,4 +77,34 @@ asserts the sensitive read
 instead of counting it as a mutation. The failed database is retained; no
 existing data is cleared to rerun the test.
 
-Final isolated-runner results and independent review are pending.
+The first isolated-runner execution then reached the joined-identity and
+readback assertions successfully, but failed at the ordinary-user status
+expectation (actual 401, expected 403). Source revalidation established that
+`resolve_local_admin_principal` deliberately rejects the `user` role before
+producing an admin principal. The test now locks that existing exact 401
+contract; it separately uses a real `audit_admin` session to prove the 403
+full-admin forensic permission boundary. No runtime authorization is changed.
+
+The corrected run then passed those authorization checks and exposed another
+fixture assumption: this generic configuration key accepts arbitrary JSON
+values, so an object-valued `value` is not rejected by its existing parser.
+The failure case now supplies an object-valued `description`, which the
+production parser explicitly rejects with 400, and additionally verifies that
+the configuration value is unchanged. No configuration validation policy is
+altered merely to make the audit test pass.
+
+The final isolated runner executed the exact target successfully:
+`1 passed; 0 failed; 0 ignored`, in 2.38 seconds after a 56.42-second incremental
+compile. Its private PostgreSQL instance was stopped and the evidence directory
+retained. Separate existing regressions passed: six audit tests (the new live
+target is intentionally ignored in that ordinary run and separately executed
+above) and sixteen operational authorization tests.
+
+`shellcheck`, `actionlint`, whole-workspace rustfmt and the complete PR
+whitespace check passed. Gateway all-features/all-targets Clippy with
+`-D warnings` passed in 3m29s. Independent review accepted integrated HEAD
+`055c051d` and then re-reviewed the final fixture corrections, successful
+live runner log and PostgreSQL cleanup evidence without finding a blocker.
+Final hosted verification is pending. The runner
+also rejects a zero-test result, so moving or renaming the ignored target
+cannot silently produce a green live gate.

@@ -34,4 +34,8 @@ export RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
 target="tests::audit::admin_persistence::live_admin_mutations_persist_before_response_and_protected_readback"
 cargo test --locked -p aether-gateway --lib "$target" -- \
   --exact --include-ignored --nocapture --test-threads=1 2>&1 | tee "$fixture_dir/audit.log"
+if ! grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$fixture_dir/audit.log"; then
+  printf 'Expected one executed administrator audit test; inspect %s\n' "$fixture_dir/audit.log" >&2
+  exit 1
+fi
 printf 'PASS: administrator HTTP mutation and PostgreSQL audit readback\n'

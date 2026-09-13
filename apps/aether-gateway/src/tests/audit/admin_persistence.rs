@@ -56,8 +56,11 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
         .without_auth_user_store_for_tests()
         .without_auth_session_store_for_tests()
         .with_data_state_for_tests(
-            GatewayDataState::from_config(GatewayDataConfig::from_postgres_url(database_url, false))
-                .unwrap(),
+            GatewayDataState::from_config(GatewayDataConfig::from_postgres_url(
+                database_url,
+                false,
+            ))
+            .unwrap(),
         );
     // Persist both identities and sessions in this PostgreSQL backend. The
     // default AppState test stores bypass PostgreSQL and cannot prove this join.
@@ -75,11 +78,18 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
             "user",
         )
         .await;
+    let (audit_admin_token, _) =
+        crate::tests::operational_auth::issue_operational_session_access_token_and_user(
+            &state,
+            OPERATIONAL_ADMIN_DEVICE_ID,
+            "audit_admin",
+        )
+        .await;
     let persisted_users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(persisted_users, 2);
+    assert_eq!(persisted_users, 3);
     let client = authenticated_operational_client(&token);
     let (gateway, server) = start_server(build_router_with_state(state.clone())).await;
     let endpoint = format!("{gateway}/api/admin/system/configs/enable_format_conversion");
@@ -152,17 +162,35 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
             .await
             .unwrap()
             .status(),
-        StatusCode::FORBIDDEN
+        // Existing admin-principal resolution does not accept ordinary users.
+        StatusCode::UNAUTHORIZED
     );
+    let restricted = authenticated_operational_client(&audit_admin_token)
+        .get(format!("{gateway}/_gateway/audit/request-audit/not-found"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restricted.status(), StatusCode::FORBIDDEN);
+    let restricted: Value = restricted.json().await.unwrap();
+    assert_eq!(restricted["required_permission"], "admin:monitoring:admin");
 
     // Invalid input still has an identified administrator and an audited final status.
     let invalid = client
         .put(&endpoint)
-        .json(&json!({"value": {"unsupported": true}}))
+        .json(&json!({"value": true, "description": {"unsupported": true}}))
         .send()
         .await
         .unwrap();
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        state
+            .data
+            .find_system_config_value_strong("enable_format_conversion")
+            .await
+            .unwrap(),
+        Some(json!(false)),
+        "rejected configuration input must not apply the business mutation"
+    );
     let failed_rows = audit_rows(&pool).await;
     assert_eq!(failed_rows.len(), 2);
     let failed = failed_rows
