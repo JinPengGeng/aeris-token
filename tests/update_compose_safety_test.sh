@@ -39,6 +39,7 @@ EOF
 
     if PATH="${fixture}/bin:${PATH}" AETHER_TEST_CALLS="${fixture}/calls" \
         "${fixture}/compose/update.sh" --compose-dir "${fixture}/compose" \
+        --skip-backup \
         >"${fixture}/stdout" 2>"${fixture}/stderr"; then
         fail_test "update succeeded after compose --wait reported an unhealthy app"
     fi
@@ -70,6 +71,7 @@ EOF
 
     PATH="${fixture}/bin:${PATH}" AETHER_TEST_CALLS="${fixture}/calls" \
         "${fixture}/compose/update.sh" --compose-dir "${fixture}/compose" \
+        --skip-backup \
         >"${fixture}/stdout" 2>"${fixture}/stderr"
 
     grep -Fq 'up -d app' "${fixture}/calls" \
@@ -103,6 +105,7 @@ EOF
 
     if PATH="${fixture}/bin:${PATH}" AETHER_TEST_CALLS="${fixture}/calls" \
         "${fixture}/compose/update.sh" --compose-dir "${fixture}/compose" \
+        --skip-backup \
         >"${fixture}/stdout" 2>"${fixture}/stderr"; then
         fail_test "legacy Compose update succeeded with an unhealthy app"
     fi
@@ -111,6 +114,96 @@ EOF
         || fail_test "legacy unhealthy app did not reach the health failure path"
     ! grep -Fq '>>> Done.' "${fixture}/stdout" \
         || fail_test "legacy unhealthy update was reported as successful"
+}
+
+test_floating_app_image_is_rejected() {
+    local fixture="${TEST_ROOT}/floating-image"
+    make_fixture "${fixture}"
+    cat >"${fixture}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+    "compose version"|"info") exit 0 ;;
+    *"config --services") printf 'postgres\napp\n' ;;
+    *"config") printf 'services:\n  postgres:\n    image: postgres:15\n  app:\n    image: ghcr.io/example/aether:latest\n' ;;
+esac
+exit 0
+EOF
+    chmod 0755 "${fixture}/bin/docker"
+
+    if PATH="${fixture}/bin:${PATH}" "${fixture}/compose/update.sh" \
+        --compose-dir "${fixture}/compose" >"${fixture}/stdout" 2>"${fixture}/stderr"; then
+        fail_test "floating app image tag was accepted"
+    fi
+    grep -Fq 'floating tag' "${fixture}/stderr" \
+        || fail_test "floating app image rejection was not reported"
+}
+
+test_backup_is_required_for_real_updates() {
+    local fixture="${TEST_ROOT}/missing-backup-service"
+    make_fixture "${fixture}"
+    cat >"${fixture}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+    "compose version"|"info") exit 0 ;;
+    *"config --services") printf 'app\n' ;;
+    *"config") printf 'services:\n  app:\n    image: ghcr.io/example/aether:0.8.0\n' ;;
+esac
+exit 0
+EOF
+    chmod 0755 "${fixture}/bin/docker"
+
+    if PATH="${fixture}/bin:${PATH}" "${fixture}/compose/update.sh" \
+        --compose-dir "${fixture}/compose" >"${fixture}/stdout" 2>"${fixture}/stderr"; then
+        fail_test "update proceeded without a backup service"
+    fi
+    grep -Fq "backup service 'postgres' not found" "${fixture}/stderr" \
+        || fail_test "missing backup service was not reported"
+}
+
+test_pre_update_backup_is_created_before_recreate() {
+    local fixture="${TEST_ROOT}/backup-order"
+    make_fixture "${fixture}"
+    cat >"${fixture}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${AETHER_TEST_CALLS}"
+case "$*" in
+    "compose version"|"info") exit 0 ;;
+    *"config --services") printf 'postgres\napp\n' ;;
+    *"config") printf 'services:\n  postgres:\n    image: postgres:15\n  app:\n    image: ghcr.io/example/aether:0.8.0\n' ;;
+    *"ps -q app") printf 'old-container\n' ;;
+    "inspect --format={{.Config.Image}} old-container") printf 'ghcr.io/example/aether:0.7.0\n' ;;
+    *"exec -T postgres pg_dump"*) printf 'PGDUMP-VALID\n' ;;
+    *"up --help") printf '%s\n' '      --wait  Wait for services' ;;
+    *"pull app"|*"up -d --wait --wait-timeout 120 app"|*" ps") exit 0 ;;
+esac
+exit 0
+EOF
+    chmod 0755 "${fixture}/bin/docker"
+
+    if ! PATH="${fixture}/bin:${PATH}" AETHER_TEST_CALLS="${fixture}/calls" \
+        "${fixture}/compose/update.sh" --compose-dir "${fixture}/compose" \
+        --backup-dir backups >"${fixture}/stdout" 2>"${fixture}/stderr"; then
+        cat "${fixture}/stdout" >&2
+        cat "${fixture}/stderr" >&2
+        fail_test "pre-update backup fixture update failed"
+    fi
+
+    local backup_file
+    backup_file="$(find "${fixture}/compose/backups" -name '*.dump' -type f -print -quit)"
+    [[ -n "${backup_file}" ]] || fail_test "pre-update PostgreSQL dump was not created"
+    grep -Fq 'PGDUMP-VALID' "${backup_file}" \
+        || fail_test "pre-update PostgreSQL dump did not contain pg_dump output"
+    [[ -f "${backup_file}.meta" ]] \
+        || fail_test "backup metadata sidecar was not created"
+
+    local backup_line recreate_line
+    backup_line="$(grep -n 'exec -T postgres pg_dump' "${fixture}/calls" | cut -d: -f1)"
+    recreate_line="$(grep -n 'up -d --wait --wait-timeout 120 app' "${fixture}/calls" | cut -d: -f1)"
+    [[ -n "${backup_line}" && -n "${recreate_line}" && ${backup_line} -lt ${recreate_line} ]] \
+        || fail_test "backup was not completed before app recreation"
 }
 
 test_option_like_service_name_is_rejected() {
@@ -130,5 +223,8 @@ test_wait_failure_is_not_ignored
 test_legacy_compose_uses_health_polling
 test_legacy_compose_health_failure_is_not_ignored
 test_option_like_service_name_is_rejected
+test_floating_app_image_is_rejected
+test_backup_is_required_for_real_updates
+test_pre_update_backup_is_created_before_recreate
 
 echo "PASS: compose updater failure and argument safety fixtures"
