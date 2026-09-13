@@ -5,7 +5,7 @@ Scope: GitHub Project v2 `JinPengGeng/aeris-token Development` (project 1,
 
 ## Current Project reconciliation — 2026-09-13
 
-Against fork main `ce1aebe492cf5bd444c69006e852610cb4b1ecf0` (#377 merged), a
+Against fork main `e710ac97d66f7ac4606dcc490b88aa684621904e` (#369 merged), a
 fresh fully paginated Project read returned **382 items**. All **44 open fork
 issues** have exactly one card with Status, Priority, Area, Risk, Size and
 Decision. No status/priority mismatch was found between these cards and live
@@ -16,9 +16,8 @@ The active implementation and documentation PRs are:
 
 | PR | Status | Priority | Area | Risk | Size | Decision |
 | --- | --- | --- | --- | --- | --- | --- |
-| #369 | In review | P1 | Operations | High | M | Accepted |
 | #391 | In progress | P1 | Billing | High | L | Accepted |
-| #392 | In progress | P2 | Docs | Low | S | Accepted |
+| #392 | In review | P2 | Docs | Low | S | Accepted |
 
 #369's authenticated restore CLI writes credentials/data, so its High/M
 classification is retained despite successful synthetic and hosted acceptance.
@@ -28,7 +27,7 @@ affect charges, holds and upstream admission, supporting High/L. Missing
 classification fields on these active PRs were populated using these scopes;
 their parent issues and existing field options were not reclassified.
 
-#376 and #377 are merged / Done, with all four required checks verified at the
+#369, #376 and #377 are merged / Done, with all four required checks verified at the
 merged heads. #367/#371/#372/#373/#378/#380/#388/#390 are also merged / Done. #374 is
 closed, unmerged, Done / Won't fix because it duplicates accepted notification
 work; it must not reappear as a pending delivery item. Parent #300 remains
@@ -36,11 +35,13 @@ In progress / Accepted and #206 remains Inbox / Accepted: #391 is still Draft
 and data-stage tests do not prove full Gateway funding acceptance. #316 remains
 Inbox / Planned with unknown production historical impact.
 
-#369 has protected squash auto-merge enabled and requires current-base checks
-after its update to `8890c7f25`. #392 remains Draft until the restore merge
-finishes. Its initial policy run observed #377 advancing main during evaluation
-and correctly failed the trusted-base equality check; synchronize the branch
-and run fresh checks without weakening that check. The [delivery TODO](delivery-todo.md) preserves the complete issue
+#369 merged from `8890c7f25` after a hosted runner-acquisition failure in its
+Test aggregate was resolved by retrying only failed jobs. #392 was synchronized
+after that merge and advances through current-base protected checks. Its first
+policy run observed #377 advancing main during evaluation and correctly failed
+the trusted-base equality check; the synchronized `72190dd8d` then passed all
+four required checks. The later restore merge requires another current-base
+verification. The [delivery TODO](delivery-todo.md) preserves the complete issue
 intake and names the remaining acceptance. No Project schema, ruleset or
 upstream repository was modified. Subsequent GitHub events supersede this
 timestamped audit; complete card fields are not proof of issue completion.

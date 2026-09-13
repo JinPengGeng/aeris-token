@@ -5,16 +5,16 @@ no upstream writes are part of this delivery workflow.
 
 ## Current delivery snapshot — 2026-09-13
 
-Verified main: `ce1aebe492cf5bd444c69006e852610cb4b1ecf0` (#377 merged).
+Verified main: `e710ac97d66f7ac4606dcc490b88aa684621904e` (#369 merged).
 The live intake has **44 open issues**: 21 P1 / 23 P2, with 16 in progress,
 18 triage and 10 blocked. These include overlapping parent/child scopes and
 long-term roadmap items; they are not 44 independent implementation packages.
 All 44 are represented exactly once in Project #1 with Status, Priority, Area,
 Risk, Size and Decision; card status and priority match issue labels.
 
-The implementation queue has **two open PRs**: #369 is In review with
-protected squash auto-merge enabled; #391 is Draft / In progress. The snapshot
-excludes documentation PR #392, which is Draft / In progress.
+The implementation queue has **one open PR**: #391 is Draft / In progress.
+The snapshot excludes documentation PR #392, which is In review and follows
+the protected squash merge process.
 GitHub events after the audit supersede the counts and commit states below.
 
 ### Current decisions and remaining acceptance
@@ -23,9 +23,11 @@ GitHub events after the audit supersede the counts and commit states below.
    schema, PostgreSQL/memory accounting, provider attribution and financial
    retention integration are implemented. Hosted job `103691795647` ran all
    23 selected PostgreSQL targets, each with one passed and zero ignored.
-   Runtime typed-event routing has 371 passing unit tests, including six new
+   Runtime typed-event routing has 373 passing unit tests, including eight new
    regressions. A reproduced queue-acknowledgement defect was fixed by waiting
-   for the financial repository commit; runtime Clippy passes with Rust 1.95.
+   for the financial repository commit. A second reproduced defect canceled
+   the parent lifecycle when a child outcome completed; outcome delivery and
+   bounded financial retry now preserve it. Runtime Clippy passes with Rust 1.95.
    Gateway orchestration is under active implementation. Still required:
    persist the one parent request, reserve and
    durably dispatch each independently billable attempt before upstream calls,
@@ -38,8 +40,11 @@ GitHub events after the audit supersede the counts and commit states below.
    original-password login/session, original API key, wallet and aggregate
    reconciliation, tampered ciphertext rejection and occupied-database replay
    refusal (`1 passed / 0 failed / 0 ignored`). Current-head code revalidation
-   is recorded on the PR. It is Ready / In review; head `8890c7f25` was updated
-   against main after #377 and awaits fresh required checks. Application backups omit full
+   is recorded on the PR. Head `8890c7f25` passed all four required checks and
+   merged as `e710ac97d`; Project is Done. The first aggregate Test job failed
+   to acquire a hosted runner before any step started; a failed-jobs-only retry
+   passed without changing the checks or repeating successful test leaves.
+   Application backups omit full
    ledger, raw usage and unresolved holds/attempts; this does not establish
    production backup acceptance or PostgreSQL full-database disaster recovery.
 3. **Listener recovery (#377 / #214), P1 / Low / S:** the reviewed two-test
@@ -66,9 +71,9 @@ GitHub events after the audit supersede the counts and commit states below.
    historical impact or authorize a repair. Preserve the explicit unknown
    conclusion and the documented production-evidence requirement.
 
-The merge queue advances #369, then this checkpoint, with current-base checks
-after each merge. #391 remains Draft until full integration and review.
-Project fields for both active implementation PRs and #392 are complete. No parent issue is
+The merge queue now advances this checkpoint against the accepted restore
+commit. #391 remains Draft until full integration and review. Project fields
+for #391 and #392 are complete. No parent issue is
 closed merely because an accepted slice or a checkpoint is merged.
 
 ### Historical delivery snapshot after #389
@@ -212,7 +217,7 @@ same decision; the repository currently has no `status:done` label.
 | 2 | DLQ operator lifecycle | #223 | recoverability and billing correctness / M | PR #292 covers bounded retention, authenticated listing and idempotent redrive; remaining acceptance is duplicate/poison-message verification, marker TTL policy, capacity evidence, and a real Redis replay drill | Merged slices (#333); residual acceptance |
 | 3 | CI and supply-chain gates | #216, #220 | catches regressions and CVEs / M | live DB tests are intentionally gated, VSCodex is a real required check, build fan-out is measured, and Cargo/npm advisory policy runs in CI | In progress (#296/#319; residual coverage pending) |
 | 4 | Public API compatibility matrix | #247, #254 | prevents client retries and integration breakage / S-M | PR #290 defines the baseline OpenAI error/endpoint contract; remaining acceptance is OpenAI/Claude status-code, error-code, envelope and retry-header fixtures plus explicit balance and notification transitions | In progress (#290/#334/#335 merged; duplicate #374 closed) |
-| 5 | Operations reference and recovery runbook | #217, #218, #224, #225 | reproducible deployment and observability / M | metrics/alerts, environment table, multi-node topology, Redis failure semantics and restore drill are executable from published docs | In progress (#367/#370/#371/#378 merged; #369 and residual production acceptance remain) |
+| 5 | Operations reference and recovery runbook | #217, #218, #224, #225 | reproducible deployment and observability / M | metrics/alerts, environment table, multi-node topology, Redis failure semantics and restore drill are executable from published docs | In progress (#367/#369/#370/#371/#378 merged; residual production acceptance remains) |
 | 6 | Billing integrity follow-up | #206, #253, #300 | protects revenue and abuse boundary / M-L | enrichment failure, cancellation, signup credit, quota and image authorization policies have explicit tests and owner sign-off | In progress (#362/#379/#388 merged; #391 Gateway/runtime integration and full acceptance remain) |
 | 7 | Scheduler and protocol roadmap slices | #179, #205 | correctness and upgrade safety / M-L | each slice has a bounded ADR, dependency/rollback plan and acceptance test | In progress (#365 contract and #363 identity guard merged; #268 and #276 completed; release-key integration and scheduler residuals remain) |
 | 8 | Developer and architecture debt | #221, #222, #226, #235, #241 | lowers long-term change cost / S-L | ADR index and one measured extraction slice are merged; #229 formula consistency and module navigation are accepted separately | In progress (#304/#305/#351 merged; residual architecture work) |
@@ -235,7 +240,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #226 | P2 | Planned | measure dependency tradeoffs against current source; #229 formula/allowlist consistency is already completed, not a pending dependency |
 | #225 | P1 | Split, active | #367 and #378 merged the Gateway environment reference and refreshed tunnel audit. Retain remaining runtime semantics, operations and ADR consistency acceptance. |
 | #224 | P1 | In progress | #302 and PR #370 (`c860eec66`) provide multi-node preflight/baseline; retain parent for capacity and Redis failure evidence |
-| #223 | P1 | Split, active | #333 redrive coverage is merged. #369's authenticated PostgreSQL restore and real HTTP/financial fixture reconciliation passed hosted CI; it is Ready/auto and awaits current-base checks. Full-database and production backup acceptance remain. |
+| #223 | P1 | Split, active | #333 redrive coverage is merged. #369's authenticated PostgreSQL restore and real HTTP/financial fixture reconciliation passed hosted CI and merged as e710ac97d after all required checks. Full-database and production backup acceptance remain. |
 | #222 | P2 | Planned | measure one provider/repository extension slice before generic rewrite |
 | #221 | P2 | Planned | produce call/dependency graph and extract one tested boundary |
 | #220 | P1 | Split, active | installer verification, Cargo/npm advisory gates and #373 residual-control decision are merged; container permissions, complete artifact evidence and hosted updater acceptance remain |
