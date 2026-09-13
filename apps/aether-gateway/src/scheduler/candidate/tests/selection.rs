@@ -1521,6 +1521,67 @@ async fn returns_none_when_auth_api_key_concurrent_limit_is_reached() {
 }
 
 #[tokio::test]
+async fn provider_rpm_reset_restores_selection_but_keeps_later_observations() {
+    for observed_at in [94, 95, 96] {
+        let mut observation = active_provider_key_candidate(
+            "rpm-observation",
+            "rpm-request",
+            "test-provider-a",
+            "endpoint-a",
+            "provider-key-a",
+            RequestCandidateStatus::Success,
+        );
+        observation.created_at_unix_ms = observed_at * 1000;
+        observation.started_at_unix_ms = Some(observed_at * 1000);
+        let state = provider_key_concurrency_state(
+            vec![provider_key_concurrency_row(
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-a",
+                "alpha",
+                0,
+                0,
+            )],
+            vec![sample_key("provider-key-a", "test-provider-a", Some(1))],
+            vec![observation],
+        );
+        assert!(select_candidate(
+            state.data.as_ref(),
+            &state,
+            "openai:chat",
+            "gpt-4.1",
+            false,
+            None,
+            100,
+        )
+        .await
+        .expect("selection should complete")
+        .is_none());
+
+        state.mark_provider_key_rpm_reset("provider-key-a", 95);
+        let selected = select_candidate(
+            state.data.as_ref(),
+            &state,
+            "openai:chat",
+            "gpt-4.1",
+            false,
+            None,
+            100,
+        )
+        .await
+        .expect("selection after reset should complete");
+        assert_eq!(
+            selected.is_some(),
+            observed_at <= 95,
+            "observation at {observed_at}"
+        );
+        if let Some(selected) = selected {
+            assert_eq!(selected.key_id, "provider-key-a");
+        }
+    }
+}
+
+#[tokio::test]
 async fn selects_next_candidate_when_first_provider_key_rpm_slots_are_reserved_for_new_user() {
     let mut first = sample_row();
     first.provider_id = "provider-a".to_string();
