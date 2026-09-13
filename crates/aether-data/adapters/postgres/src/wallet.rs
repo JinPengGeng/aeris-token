@@ -8,6 +8,9 @@ use aether_data_contracts::repository::billing::{
     checked_plan_duration_days_from_snapshot, entitlements_have_replacement_selector,
     entitlements_should_replace_existing,
 };
+use aether_data_contracts::repository::settlement::{
+    request_funds_available_units, request_funds_usd,
+};
 use aether_data_contracts::repository::wallet::{
     canonicalize_payment_method, canonicalize_wallet_refund_fields,
     payment_callback_amount_matches_order, payment_callback_method_matches_order,
@@ -4318,25 +4321,42 @@ FOR UPDATE
                             after_recharge += input.amount_usd;
                         }
                     } else {
-                        let mut remaining = -input.amount_usd;
-                        let consume_positive_bucket = |balance: &mut f64, to_consume: &mut f64| {
-                            if *to_consume <= 0.0 {
-                                return;
-                            }
-                            let available = (*balance).max(0.0);
-                            let consumed = available.min(*to_consume);
-                            *balance -= consumed;
-                            *to_consume -= consumed;
-                        };
+                        // Apply the same NUMERIC(20,8) scale as the adjustment ledger,
+                        // then subtract units so an exact hold boundary stays exact.
+                        let debit_usd: f64 = sqlx::query_scalar(
+                            "SELECT (-$1::double precision)::numeric(20,8)::double precision",
+                        )
+                        .bind(input.amount_usd)
+                        .fetch_one(&mut **tx)
+                        .await
+                        .map_postgres_err()?;
+                        let mut remaining = request_funds_available_units(debit_usd)?;
+                        let consume_positive_bucket =
+                            |balance: &mut f64,
+                             to_consume: &mut u64|
+                             -> Result<(), DataLayerError> {
+                                if *to_consume == 0 {
+                                    return Ok(());
+                                }
+                                let available = request_funds_available_units((*balance).max(0.0))?;
+                                let consumed = available.min(*to_consume);
+                                if consumed > 0 {
+                                    *balance = request_funds_usd(available - consumed);
+                                }
+                                *to_consume -= consumed;
+                                Ok(())
+                            };
                         if input.balance_type.eq_ignore_ascii_case("gift") {
-                            consume_positive_bucket(&mut after_gift, &mut remaining);
-                            consume_positive_bucket(&mut after_recharge, &mut remaining);
+                            consume_positive_bucket(&mut after_gift, &mut remaining)?;
+                            consume_positive_bucket(&mut after_recharge, &mut remaining)?;
                         } else {
-                            consume_positive_bucket(&mut after_recharge, &mut remaining);
-                            consume_positive_bucket(&mut after_gift, &mut remaining);
+                            consume_positive_bucket(&mut after_recharge, &mut remaining)?;
+                            consume_positive_bucket(&mut after_gift, &mut remaining)?;
                         }
-                        if remaining > 0.0 {
-                            after_recharge -= remaining;
+                        if remaining > 0 {
+                            // Administrator adjustments retain the existing ability to
+                            // record recharge debt after consuming both positive buckets.
+                            after_recharge -= request_funds_usd(remaining);
                         }
                     }
                     let after_total = after_recharge + after_gift;
@@ -4801,9 +4821,7 @@ FOR UPDATE
                     let before_gift: f64 = row_get(&wallet_row, "gift_balance")?;
                     let before_total_refunded: f64 = row_get(&wallet_row, "total_refunded")?;
                     let amount_usd = refund.amount_usd;
-                    let after_recharge = before_recharge - amount_usd;
                     let before_total = before_recharge + before_gift;
-                    let after_total = after_recharge + before_gift;
                     let after_total_refunded = before_total_refunded + amount_usd;
                     if !before_recharge.is_finite()
                         || before_recharge < 0.0
@@ -4812,19 +4830,21 @@ FOR UPDATE
                         || !before_total_refunded.is_finite()
                         || before_total_refunded < 0.0
                         || !before_total.is_finite()
-                        || !after_recharge.is_finite()
-                        || !after_total.is_finite()
                         || !after_total_refunded.is_finite()
                     {
                         return Ok(WalletMutationOutcome::Invalid(
                             "wallet balance is invalid".to_string(),
                         ));
                     }
-                    if after_recharge < 0.0 {
+                    let Some(after_recharge_units) =
+                        request_funds_available_units(before_recharge)?
+                            .checked_sub(request_funds_available_units(amount_usd)?)
+                    else {
                         return Ok(WalletMutationOutcome::Invalid(
                             "refund amount exceeds refundable recharge balance".to_string(),
                         ));
-                    }
+                    };
+                    let after_recharge = request_funds_usd(after_recharge_units);
                     match crate::settlement::funding::ensure_wallet_holds_preserved(
                         tx,
                         &input.wallet_id,

@@ -199,6 +199,49 @@ The complete local `aether-data --all-features --lib` suite passed afterward:
 363 passed, 0 failed, 1 explicitly ignored. The separate required PostgreSQL live
 harness supplies the previously documented database execution evidence.
 
+## Refund and adjustment boundary correction
+
+Independent review of head `2d5abae6` found one remaining decimal boundary in
+refunds and negative administrator adjustments. A USD 0.30 recharge balance with
+a USD 0.20 request hold must permit a USD 0.10 refund. The debit paths still
+calculated the remainder as `0.19999999999999998` before invoking the new hold
+guard, which converted that decimal to 19,999,999 units and incorrectly rejected
+the refund. NUMERIC writeback could not repair this case because the guard ran
+before the write. The new live regression reproduced exactly that rejection
+against an owned PostgreSQL 17.11 database before the implementation was changed.
+
+Refunds now subtract the already persisted refund amount from the recharge bucket
+in canonical units. Negative adjustments use the same unit subtraction for both
+positive buckets, preserving the requested bucket priority and existing explicit
+administrator debt behavior after those buckets are exhausted. Adjustment inputs
+are first converted with PostgreSQL's existing NUMERIC(20,8) scale, matching the
+ledger's persisted amount; this avoids introducing request-authorization round-up
+semantics for sub-unit administrator inputs. The hold guard remains strict, with
+no epsilon or rounding relaxation that could spend a reserved unit.
+
+The existing required decimal-hold live target now covers successful refunds,
+recharge adjustments and gift adjustments that leave exactly USD 0.20, including
+an administrator input that rounds to the ledger's eight-decimal scale. Every
+path rejects taking one unit beyond available funds before the allowed debit,
+then rejects taking one unit from the remaining hold afterward. Assertions check
+both wallet buckets, refund status and transaction counts after failed mutations;
+the original held request then settles all 20,000,000 units exactly once. A
+separate assertion preserves administrator adjustment spillover and explicit debt.
+
+Validation after the correction: all eleven exact targets in
+`tools/ci/run_postgres_live_tests.sh` passed against the disposable PostgreSQL 17.11
+database on Rust 1.95.0, each with one executed, non-skipped test. All twenty
+settlement memory tests also passed, including the existing recharge/gift boundary
+and postpaid debt regression. The memory wallet adapter does not implement admin
+refund or adjustment mutations, so these public mutation entry points are verified
+against PostgreSQL rather than claimed as memory-adapter behavior. An initial
+local harness invocation encountered a stale contracts artifact in the reused
+build cache; removing only that crate's generated build artifacts and rebuilding
+resolved the missing-symbol errors without source changes or relaxed checks.
+PostgreSQL adapter all-features/all-targets Clippy with warnings denied, changed
+Rust file formatting and `git diff --check` also passed. The isolated database was
+stopped after validation; its files were retained and no application data was used.
+
 ## Rollback
 
 Disable new reservations before reverting application code. Drain or explicitly

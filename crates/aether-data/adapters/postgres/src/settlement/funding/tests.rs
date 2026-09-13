@@ -134,14 +134,21 @@ async fn live_request_funds_preserve_decimal_holds_across_ordinary_settlement_an
     let (admin, first, second, schema) = fixture().await;
     let result = AssertUnwindSafe(async {
         let repo = SqlxSettlementRepository::new(first.clone());
-        for (bucket, recharge, gift) in [("recharge", 0.30, 0.0), ("gift", 0.0, 0.30)] {
+        for (case, bucket, recharge, gift) in [
+            ("ordinary-recharge", "recharge", 0.30, 0.0),
+            ("ordinary-gift", "gift", 0.0, 0.30),
+            ("refund", "recharge", 0.30, 0.0),
+            ("adjust-recharge", "recharge", 0.30, 0.0),
+            ("adjust-gift", "gift", 0.0, 0.30),
+            ("adjust-recharge-rounded", "recharge", 0.30, 0.0),
+        ] {
             sqlx::query("UPDATE wallets SET balance=$1, gift_balance=$2 WHERE id='wallet'")
                 .bind(recharge)
                 .bind(gift)
                 .execute(&first)
                 .await
                 .unwrap();
-            let reserved = quote(&format!("held-{bucket}"), "key-a", 20_000_000);
+            let reserved = quote(&format!("held-{case}"), "key-a", 20_000_000);
             assert!(matches!(
                 repo.reserve_request_funds(reserved.clone()).await.unwrap(),
                 ReserveRequestFundsOutcome::Reserved { .. }
@@ -150,11 +157,66 @@ async fn live_request_funds_preserve_decimal_holds_across_ordinary_settlement_an
                 .await
                 .unwrap()
                 .unwrap();
-            let ordinary = quote(&format!("ordinary-{bucket}"), "key-b", 10_000_000);
-            let usage = persist_usage(&first, &ordinary.identity, 0.10).await;
-            let settled = repo.settle_usage(usage).await.unwrap().unwrap();
-            assert_eq!(settled.billing_status, "settled");
-            assert_eq!(settled.wallet_balance_after, Some(0.20));
+            if case.starts_with("ordinary-") {
+                let ordinary = quote(case, "key-b", 10_000_000);
+                let usage = persist_usage(&first, &ordinary.identity, 0.10).await;
+                let settled = repo.settle_usage(usage).await.unwrap().unwrap();
+                assert_eq!(settled.billing_status, "settled");
+                assert_eq!(settled.wallet_balance_after, Some(0.20));
+            } else {
+                let wallet_repo = SqlxWalletRepository::new(first.clone());
+                // Reject crossing the hold by one unit, accept its exact boundary,
+                // then reject taking even one unit from the remaining hold.
+                let allowed_amount = if case.ends_with("-rounded") { 0.100_000_004 } else { 0.10 };
+                for (index, amount) in [0.100_000_01, allowed_amount, 0.000_000_01].into_iter().enumerate() {
+                    let should_apply = index == 1;
+                    let transaction_count: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM wallet_transactions WHERE wallet_id='wallet'",
+                    ).fetch_one(&first).await.unwrap();
+                    if case == "refund" {
+                        let refund_id = format!("boundary-refund-{index}");
+                        sqlx::query("INSERT INTO refund_requests (id,refund_no,wallet_id,user_id,amount_usd,status,source_type,refund_mode,created_at,updated_at) VALUES ($1,$1,'wallet','owner',$2,'approved','wallet','offline',NOW(),NOW())")
+                            .bind(&refund_id).bind(amount).execute(&first).await.unwrap();
+                        let outcome = wallet_repo.process_admin_wallet_refund(ProcessAdminWalletRefundInput {
+                            wallet_id: "wallet".to_string(), refund_id: refund_id.clone(), operator_id: None,
+                        }).await.unwrap();
+                        if should_apply {
+                            let WalletMutationOutcome::Applied((wallet, refund, transaction)) = outcome else {
+                                panic!("exact boundary refund must succeed: {outcome:?}");
+                            };
+                            assert_eq!(wallet.balance, 0.20);
+                            assert_eq!(refund.status, "processing");
+                            assert_eq!(transaction.recharge_balance_after, 0.20);
+                        } else {
+                            assert!(matches!(outcome, WalletMutationOutcome::Invalid(_)), "{outcome:?}");
+                        }
+                        let status: String = sqlx::query_scalar("SELECT status FROM refund_requests WHERE id=$1")
+                            .bind(refund_id).fetch_one(&first).await.unwrap();
+                        assert_eq!(status, if should_apply { "processing" } else { "approved" });
+                    } else {
+                        let outcome = wallet_repo.adjust_wallet_balance(AdjustWalletBalanceInput {
+                            wallet_id: "wallet".to_string(), amount_usd: -amount,
+                            balance_type: bucket.to_string(), operator_id: None, description: None,
+                        }).await;
+                        if should_apply {
+                            let (wallet, transaction) = outcome.expect("exact boundary adjustment must succeed").unwrap();
+                            assert_eq!(wallet.balance + wallet.gift_balance, 0.20);
+                            assert_eq!(transaction.recharge_balance_after + transaction.gift_balance_after, 0.20);
+                        } else {
+                            assert!(outcome.is_err(), "one-unit hold violation must fail: {outcome:?}");
+                        }
+                    }
+                    let (actual_recharge, actual_gift): (f64, f64) = sqlx::query_as(
+                        "SELECT balance::double precision, gift_balance::double precision FROM wallets WHERE id='wallet'",
+                    ).fetch_one(&first).await.unwrap();
+                    let expected = if index == 0 { 0.30 } else { 0.20 };
+                    assert_eq!((actual_recharge, actual_gift), if bucket == "recharge" { (expected, 0.0) } else { (0.0, expected) });
+                    let after_count: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM wallet_transactions WHERE wallet_id='wallet'",
+                    ).fetch_one(&first).await.unwrap();
+                    assert_eq!(after_count, transaction_count + i64::from(should_apply));
+                }
+            }
             let usage = persist_usage(&first, &reserved.identity, 0.20).await;
             let finalize = FinalizeRequestFundsInput {
                 identity: reserved.identity,
@@ -180,6 +242,16 @@ async fn live_request_funds_preserve_decimal_holds_across_ordinary_settlement_an
                 settled
             );
         }
+        // Explicit administrator adjustments still consume the selected bucket,
+        // spill into the other bucket, and may record debt when no hold is crossed.
+        let wallet_repo = SqlxWalletRepository::new(first.clone());
+        sqlx::query("UPDATE wallets SET balance=0.30, gift_balance=0.10 WHERE id='wallet'")
+            .execute(&first).await.unwrap();
+        let (adjusted, _) = wallet_repo.adjust_wallet_balance(AdjustWalletBalanceInput {
+            wallet_id: "wallet".to_string(), amount_usd: -0.50,
+            balance_type: "gift".to_string(), operator_id: None, description: None,
+        }).await.unwrap().unwrap();
+        assert_eq!((adjusted.balance, adjusted.gift_balance), (-0.10, 0.0));
         sqlx::query("UPDATE wallets SET balance=-0.10, gift_balance=0 WHERE id='wallet'")
             .execute(&first)
             .await
