@@ -21,27 +21,28 @@ PR #358 merged as `1bcff1a5271aebefa96253417f4707574a7a2994` from reviewed head
 `7de0188d44118f7e1c1fc2930bc6aacadfa01070`. PR #363 (Refs #205) merged as
 `e9ca10ab2d28a78cb4f265cace17260679b048bc`; #205 remains open for key rotation,
 recovery, nightly artifacts and remaining upgrade evidence.
+PR #370 merged as `c860eec66d9edfb39f7536111bd7e8f6d1b2ca66`; its three-node
+deployment slice is accepted and its Project card is Done.
 
-There are **12 open PRs**: Draft #362 (head
-`a39bd31a24863466964ec3a395c7098ce84c8891`), plus ten non-draft PRs with
-squash auto-merge enabled: #364 (`19cf2cc0cd54ff40794e66f8f5e516ca3a3cf910`),
-#365 (`d8994ffb63061d58ad93352d05f05f593be4d3a0`), #366
+There are **11 open PRs**: Draft #362 (head
+`2d5abae6143eeb931ebf96906aa5ba0681f22e17`), plus nine non-draft PRs with
+squash auto-merge enabled: #364 (`897b1ee9affc5c9ac45b5ccb98b03e00c99352a2`),
+#365 (`b2b99ed7b6273220b8666204b322ed0e2e2e8ed2`), #366
 (`472484b325e5d85ba7841d71df9f2307bf8a3c29`), #367
 (`0b452aebce4f0d4f49b115b1e534439016a057ad`), #368
 (`03a12764a2f488c7c45fcf28bfdf5d492a7a7d76`), #369
-(`cc0fb5ddabe95924206022f687b840d97e95a362`), #370
-(`3a53d59c991ab581b145d6b450d07a93eeab0a8e`) and #371
+(`cc0fb5ddabe95924206022f687b840d97e95a362`) and #371
 (`f9921213c07ce814643c58814f5c4e7413b04551`), plus #373
 (`c185a15570af455b849844c1245acc659496b20d`) and #374
 (`4474ae0b77070328483c1335c200f6c162912f5d`). #372 is also open (head
-`5db5675c63211136d6159ffbd385d52f037a72cf`) without auto-merge; all twelve
+`5db5675c63211136d6159ffbd385d52f037a72cf`) without auto-merge; all eleven
 currently report `BLOCKED` while protected checks run. Auto-merge remains
-enabled on #364–#371, #373 and #374.
+enabled on #364–#369, #371, #373 and #374.
 
 The bounded slices retain their parents: #366 covers tunnel response-relay
 admission (#205/#214), #367 the gateway environment reference (#225), #368
-the #300/#206 lifecycle boundary, #369 PostgreSQL backup/restore (#223), #370
-the three-node deployment baseline (#224), and #371 isolated metrics scrape
+the #300/#206 lifecycle boundary, #369 PostgreSQL backup/restore (#223), and
+#371 isolated metrics scrape
 and alert delivery (#307/#217). PR #372 redacts sensitive admin video fields
 (#211), but its targeted build is blocked by an unrelated existing refund
 notification compile error. PR #373 records #220 supply-chain residuals and
@@ -52,7 +53,7 @@ cancellation/partial output, retry and crash recovery. Parent issues remain
 open until residual acceptance has evidence.
 
 The next transition is current-head review and required checks for #362 and
-#364–#374; #372 needs the unrelated refund compile break resolved before it can
+#364–#369 and #371–#374; #372 needs the unrelated refund compile break resolved before it can
 be accepted. All transitions remain fork-only and are recorded on each PR, parent
 issue, Project card and this queue.
 
@@ -174,7 +175,7 @@ same decision; the repository currently has no `status:done` label.
 | 2 | DLQ operator lifecycle | #223 | recoverability and billing correctness / M | PR #292 covers bounded retention, authenticated listing and idempotent redrive; remaining acceptance is duplicate/poison-message verification, marker TTL policy, capacity evidence, and a real Redis replay drill | Merged slices (#333); residual acceptance |
 | 3 | CI and supply-chain gates | #216, #220 | catches regressions and CVEs / M | live DB tests are intentionally gated, VSCodex is a real required check, build fan-out is measured, and Cargo/npm advisory policy runs in CI | In progress (#296/#319; residual coverage pending) |
 | 4 | Public API compatibility matrix | #247, #254 | prevents client retries and integration breakage / S-M | PR #290 defines the baseline OpenAI error/endpoint contract; remaining acceptance is OpenAI/Claude status-code, error-code, envelope and retry-header fixtures plus explicit balance and notification transitions | In progress (#290/#334/#335 merged; #374 refund notification awaits checks) |
-| 5 | Operations reference and recovery runbook | #217, #218, #224, #225 | reproducible deployment and observability / M | metrics/alerts, environment table, multi-node topology, Redis failure semantics and restore drill are executable from published docs | In progress (#369–#371 add restore, multi-node and alert evidence; residual production acceptance remains) |
+| 5 | Operations reference and recovery runbook | #217, #218, #224, #225 | reproducible deployment and observability / M | metrics/alerts, environment table, multi-node topology, Redis failure semantics and restore drill are executable from published docs | In progress (#370 merged; #369/#371 and residual production acceptance remain) |
 | 6 | Billing integrity follow-up | #206, #253, #300 | protects revenue and abuse boundary / M-L | enrichment failure, cancellation, signup credit, quota and image authorization policies have explicit tests and owner sign-off | In progress (#362 funds slice is Draft; #368 records lifecycle boundary; #300/#206 integration remains) |
 | 7 | Scheduler and protocol roadmap slices | #268, #276, #179, #205 | correctness and upgrade safety / M-L | each slice has a bounded ADR, dependency/rollback plan and acceptance test; unresolved upstream sync conflict is handled separately | In progress (#365 review/auto-merge rotation contract; #363 identity guard merged) |
 | 8 | Developer and architecture debt | #221, #222, #226, #235, #241 | lowers long-term change cost / S-L | ADR index and one measured extraction slice are merged; #229 formula consistency and module navigation are accepted separately | In progress (#304/#305/#351 merged; residual architecture work) |
@@ -198,7 +199,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #235 | P2 | Planned | create ADR index and ownership/rollback records |
 | #226 | P2 | Planned | measure dependency tree and pair allowlist work with #229 |
 | #225 | P1 | Split, active | PR #354 generated the base reference; PR #367 adds drift checking and awaits protected checks; retain parent for backup/restore and remaining operations acceptance |
-| #224 | P1 | In progress | #302 merged multi-node preflight; PR #370 adds the three-node deployment baseline and awaits protected checks; retain parent for capacity and Redis failure evidence |
+| #224 | P1 | In progress | #302 and PR #370 (`c860eec66`) provide multi-node preflight/baseline; retain parent for capacity and Redis failure evidence |
 | #223 | P1 | Split, active | PR #333 merged Redis redrive idempotency/retention coverage; PR #369 adds the PostgreSQL backup/restore drill and awaits protected checks |
 | #222 | P2 | Planned | measure one provider/repository extension slice before generic rewrite |
 | #221 | P2 | Planned | produce call/dependency graph and extract one tested boundary |
