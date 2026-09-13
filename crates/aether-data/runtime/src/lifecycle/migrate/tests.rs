@@ -27,6 +27,7 @@ use crate::lifecycle::bootstrap::postgres::{
     EMPTY_DATABASE_SNAPSHOT_CUTOFF_VERSION, EMPTY_DATABASE_SNAPSHOT_SQL,
 };
 
+mod attempt_usage_policy;
 mod policy_nulls;
 mod referral_numeric_audit;
 

@@ -125,3 +125,40 @@ integration review remain pending.
 This does not complete the separate frontend/user-key daily actual-cost counter,
 stream/multistage images, recovery drills, or the whole issue 300. The daily
 counter design is recorded in [its separate decision](issue-300-daily-cost-ledger.md).
+
+## Hosted acceptance and migration review correction
+
+At `33a0e7b7e5dffdc8c251d4dcd0f10325c96dee93`, Rust run
+[`34755135839`](https://github.com/JinPengGeng/aeris-token/actions/runs/34755135839)
+passed, together with all four required PR checks. Its data live job
+`103718196525` ran all 29 selected targets, each with one passed and zero
+ignored. Gateway job `103718196456` ran all 14 PostgreSQL/HTTP funding targets,
+including all three hard-policy public tests, each with one passed and zero
+ignored. Gateway library/binary tests, readiness and authenticated restore
+drills also passed. These results apply to that commit; subsequent review fixes
+and the separate daily ledger still need their own current-head acceptance.
+
+Independent review found that the new migration's idempotency checks searched
+`pg_constraint` by name alone. PostgreSQL permits an unrelated table, including
+one in the same schema, to reuse each name. In an isolated PostgreSQL 17.11
+database, the uncorrected migration returned success but installed none of the
+three target constraints when such unrelated names existed. The correction
+also matches the target `conrelid`; it preserves both initial upgrade and
+bootstrap reapplication. Applying the corrected SQL twice installed the two
+CHECK constraints and the `ON DELETE RESTRICT` FK without touching the
+unrelated constraints.
+
+The new managed-PostgreSQL regression verifies the target relations, valid
+legacy/attempt rows, invalid policy and mismatched token rejection, missing
+funds rejection, and restricted deletion. It passed with local PostgreSQL
+required (one passed, zero ignored). A separate fresh database passed the
+actual bootstrap-plus-incremental startup smoke test (one passed, zero ignored),
+and its SQLx ledger contains successful `20260914010000` and `20260914020000`
+entries. No existing migration bookkeeping was edited. Local logs:
+`/private/tmp/aeris-quota-migration-scope-test-20260913.log` and
+`/private/tmp/aeris-quota-migration-startup-20260913.log`.
+
+The earlier pending-list failure was an omission introduced by adding this
+migration, not a pre-existing failure; `33a0e7b7e` corrected that expected list.
+The migration scope repair does not resolve the separately reviewed
+`WalletUnavailable` parent-terminal gap or complete the daily actual-cost ledger.
