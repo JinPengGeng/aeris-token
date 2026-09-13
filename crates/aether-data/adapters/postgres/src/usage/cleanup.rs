@@ -14,18 +14,37 @@ use tracing::warn;
 use super::SqlxUsageReadRepository;
 use crate::{error::postgres_error, DataLayerError, PostgresPool};
 
-const DELETE_OLD_USAGE_RECORDS_SQL: &str = r#"
-WITH doomed AS (
-    SELECT id
-    FROM usage
-    WHERE created_at < $1
-    ORDER BY created_at ASC, id ASC
-    LIMIT $2
+// The usage row carries identity and frozen pricing evidence needed by funds
+// finalization and recovery. Age alone cannot resolve a hold or forgive debt.
+// Reconciliation may remain outstanding even after its capped debit settled.
+const USAGE_FINANCIAL_RETENTION_SQL: &str = r#"
+usage.billing_status = 'insufficient_quota'
+OR EXISTS (
+    SELECT 1 FROM request_fund_reservations AS funds
+    WHERE funds.request_id = usage.request_id
+      AND funds.state IN ('prepared', 'dispatched', 'reconciliation_pending')
 )
-DELETE FROM usage AS usage_rows
-USING doomed
-WHERE usage_rows.id = doomed.id
+OR EXISTS (
+    SELECT 1 FROM request_fund_recoveries AS recovery
+    WHERE recovery.request_id = usage.request_id
+      AND recovery.prior_entitlement_cost_units + recovery.collected_cost_units
+          < recovery.frozen_actual_cost_units
+)
 "#;
+
+fn usage_record_cleanup_candidates_sql() -> String {
+    format!("SELECT id FROM usage WHERE created_at < $1 AND NOT ({USAGE_FINANCIAL_RETENTION_SQL})")
+}
+
+// Preview body/header counts against the rows that survive the selected record
+// cleanup, including old financial rows. Execution deletes records first, then
+// applies ordinary payload retention to all remaining rows.
+fn after_record_cleanup_sql(query: &str) -> String {
+    format!(
+        "WITH usage AS (SELECT * FROM usage WHERE $3::timestamptz IS NULL \
+         OR created_at >= $3 OR ({USAGE_FINANCIAL_RETENTION_SQL})) {query}"
+    )
+}
 const SELECT_USAGE_LEGACY_BODY_REF_METADATA_BATCH_SQL: &str = r#"
 SELECT id, request_id, request_metadata
 FROM usage
@@ -489,24 +508,13 @@ impl SqlxUsageReadRepository {
             0
         };
         let header_cleaned = if targets.headers {
-            cleanup_usage_header_fields(
-                &self.pool,
-                window.header_cutoff,
-                batch_size,
-                targets.records.then_some(window.log_cutoff),
-            )
-            .await?
+            cleanup_usage_header_fields(&self.pool, window.header_cutoff, batch_size, None).await?
         } else {
             0
         };
         let body_cleaned = if targets.compressed_body {
-            cleanup_usage_stale_body_fields(
-                &self.pool,
-                window.compressed_cutoff,
-                batch_size,
-                targets.records.then_some(window.log_cutoff),
-            )
-            .await?
+            cleanup_usage_stale_body_fields(&self.pool, window.compressed_cutoff, batch_size, None)
+                .await?
         } else {
             0
         };
@@ -583,43 +591,38 @@ pub async fn preview_usage_cleanup_impl(
         });
     }
 
+    let record_cutoff = targets.records.then_some(window.log_cutoff);
     let detail = if targets.detail_body {
         count_usage_detail_body_candidates(
             pool,
             window.detail_cutoff,
             detail_body_newer_than(window, targets),
+            record_cutoff,
         )
         .await?
     } else {
         0
     };
     let compressed = if targets.compressed_body {
-        count_usage_stale_body_candidates(
-            pool,
-            window.compressed_cutoff,
-            targets.records.then_some(window.log_cutoff),
-        )
-        .await?
+        count_usage_stale_body_candidates(pool, window.compressed_cutoff, None, record_cutoff)
+            .await?
     } else {
         0
     };
     let header = if targets.headers {
-        count_usage_header_candidates(
-            pool,
-            window.header_cutoff,
-            targets.records.then_some(window.log_cutoff),
-        )
-        .await?
+        count_usage_header_candidates(pool, window.header_cutoff, None, record_cutoff).await?
     } else {
         0
     };
     let log = if targets.records {
-        let log: i64 =
-            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM usage WHERE created_at < $1")
-                .bind(window.log_cutoff)
-                .fetch_one(pool)
-                .await
-                .map_err(postgres_error)?;
+        let candidates = usage_record_cleanup_candidates_sql();
+        let log: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*)::bigint FROM ({candidates}) AS candidates"
+        ))
+        .bind(window.log_cutoff)
+        .fetch_one(pool)
+        .await
+        .map_err(postgres_error)?;
         u64::try_from(log).unwrap_or(0)
     } else {
         0
@@ -769,13 +772,7 @@ fn detail_body_newer_than(
     window: &UsageCleanupWindow,
     targets: UsageCleanupTargets,
 ) -> Option<DateTime<Utc>> {
-    [
-        targets.compressed_body.then_some(window.compressed_cutoff),
-        targets.records.then_some(window.log_cutoff),
-    ]
-    .into_iter()
-    .flatten()
-    .max()
+    targets.compressed_body.then_some(window.compressed_cutoff)
 }
 
 async fn count_usage_raw_body_candidates(
@@ -846,11 +843,12 @@ async fn count_usage_detail_body_candidates(
     pool: &PostgresPool,
     cutoff_time: DateTime<Utc>,
     newer_than: Option<DateTime<Utc>>,
+    record_cutoff: Option<DateTime<Utc>>,
 ) -> Result<u64, DataLayerError> {
     if matches!(newer_than, Some(value) if value >= cutoff_time) {
         return Ok(0);
     }
-    let count: i64 = sqlx::query_scalar(
+    let count: i64 = sqlx::query_scalar(&after_record_cleanup_sql(
         r#"
 SELECT COUNT(*)::bigint
 FROM usage
@@ -876,9 +874,10 @@ WHERE created_at < $1
     )
   )
 "#,
-    )
+    ))
     .bind(cutoff_time)
     .bind(newer_than)
+    .bind(record_cutoff)
     .fetch_one(pool)
     .await
     .map_err(postgres_error)?;
@@ -889,11 +888,12 @@ async fn count_usage_stale_body_candidates(
     pool: &PostgresPool,
     cutoff_time: DateTime<Utc>,
     newer_than: Option<DateTime<Utc>>,
+    record_cutoff: Option<DateTime<Utc>>,
 ) -> Result<u64, DataLayerError> {
     if matches!(newer_than, Some(value) if value >= cutoff_time) {
         return Ok(0);
     }
-    let count: i64 = sqlx::query_scalar(
+    let count: i64 = sqlx::query_scalar(&after_record_cleanup_sql(
         r#"
 SELECT COUNT(*)::bigint
 FROM usage
@@ -926,9 +926,10 @@ WHERE created_at < $1
     )
   )
 "#,
-    )
+    ))
     .bind(cutoff_time)
     .bind(newer_than)
+    .bind(record_cutoff)
     .fetch_one(pool)
     .await
     .map_err(postgres_error)?;
@@ -939,11 +940,12 @@ async fn count_usage_header_candidates(
     pool: &PostgresPool,
     cutoff_time: DateTime<Utc>,
     newer_than: Option<DateTime<Utc>>,
+    record_cutoff: Option<DateTime<Utc>>,
 ) -> Result<u64, DataLayerError> {
     if matches!(newer_than, Some(value) if value >= cutoff_time) {
         return Ok(0);
     }
-    let count: i64 = sqlx::query_scalar(
+    let count: i64 = sqlx::query_scalar(&after_record_cleanup_sql(
         r#"
 SELECT COUNT(*)::bigint
 FROM usage
@@ -967,9 +969,10 @@ WHERE created_at < $1
     )
   )
 "#,
-    )
+    ))
     .bind(cutoff_time)
     .bind(newer_than)
+    .bind(record_cutoff)
     .fetch_one(pool)
     .await
     .map_err(postgres_error)?;
@@ -981,9 +984,14 @@ async fn delete_old_usage_records(
     cutoff_time: DateTime<Utc>,
     batch_size: usize,
 ) -> Result<usize, DataLayerError> {
+    let candidates = usage_record_cleanup_candidates_sql();
+    let delete_sql = format!(
+        "WITH doomed AS ({candidates} ORDER BY created_at ASC, id ASC LIMIT $2) \
+         DELETE FROM usage AS usage_rows USING doomed WHERE usage_rows.id = doomed.id"
+    );
     let mut total_deleted = 0usize;
     loop {
-        let deleted = sqlx::query(DELETE_OLD_USAGE_RECORDS_SQL)
+        let deleted = sqlx::query(&delete_sql)
             .bind(cutoff_time)
             .bind(i64::try_from(batch_size).unwrap_or(i64::MAX))
             .execute(pool)

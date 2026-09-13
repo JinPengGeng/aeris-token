@@ -47,6 +47,8 @@ async fn fixture() -> (PgPool, PgPool, PgPool, String) {
         "user_plan_entitlements",
         "entitlement_usage_ledgers",
         "usage",
+        "usage_http_audits",
+        "usage_body_blobs",
         "usage_settlement_snapshots",
         "usage_counter_deltas",
         "request_fund_reservations",
@@ -126,6 +128,132 @@ async fn balance(pool: &PgPool) -> f64 {
         .fetch_one(pool)
         .await
         .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated AETHER_TEST_DATABASE_URL; runs real migrations"]
+async fn live_request_funds_retention_preserves_reconciliation_and_allows_later_settlement() {
+    use aether_data_contracts::repository::usage::{
+        UsageCleanupExecutionMode, UsageCleanupTargets, UsageCleanupWindow,
+    };
+    use chrono::{Duration, Utc};
+
+    let (admin, first, second, schema) = fixture().await;
+    let result = AssertUnwindSafe(async {
+        let repo = SqlxSettlementRepository::new(first.clone());
+        let cleanup = crate::SqlxUsageReadRepository::new(first.clone());
+        sqlx::query("UPDATE wallets SET balance = 100 WHERE id = 'wallet'")
+            .execute(&first).await.unwrap();
+        for case in ["prepared", "dispatched", "unknown", "excess", "released", "settled"] {
+            let reserved = quote(case, "key-a", 8_000_000);
+            assert!(matches!(repo.reserve_request_funds(reserved.clone()).await.unwrap(),
+                ReserveRequestFundsOutcome::Reserved { .. }));
+            let usage = persist_usage(&first, &reserved.identity, if case == "excess" { 0.10 } else { 0.06 }).await;
+            if case == "released" {
+                repo.release_request_funds(ReleaseRequestFundsInput {
+                    identity: reserved.identity, terminal_no_charge: false,
+                }).await.unwrap().unwrap();
+            } else if case != "prepared" {
+                repo.mark_request_funds_dispatched(reserved.identity.clone()).await.unwrap().unwrap();
+                if matches!(case, "settled" | "excess") {
+                    repo.finalize_request_funds(FinalizeRequestFundsInput {
+                        identity: reserved.identity, usage, reconciliation_facts: None,
+                    }).await.unwrap().unwrap();
+                } else if case == "unknown" {
+                    // Persisted unresolved state with no settled financial result.
+                    sqlx::query("UPDATE request_fund_reservations SET state = 'reconciliation_pending' WHERE request_id = $1")
+                        .bind(case).execute(&first).await.unwrap();
+                }
+            }
+        }
+        for case in ["partial-debt", "legacy-debt", "misclassified-debt", "recovered", "plain", "recent"] {
+            let identity = quote(case, "key-b", 8_000_000).identity;
+            persist_usage(&first, &identity, 0.08).await;
+            sqlx::query("UPDATE usage SET billing_status = $2 WHERE request_id = $1")
+                .bind(case).bind(if matches!(case, "plain" | "recent" | "misclassified-debt") { "settled" } else { "insufficient_quota" })
+                .execute(&first).await.unwrap();
+        }
+        // Three unsettled reservations own USD 0.24. Recover one debt fully and
+        // another partially without spending any of their held capacity.
+        sqlx::query("UPDATE wallets SET balance = 0.34 WHERE id = 'wallet'")
+            .execute(&first).await.unwrap();
+        for (request, expected) in [("recovered", 8_000_000), ("partial-debt", 2_000_000)] {
+            let recovered = repo.recover_insufficient_quota(RecoverInsufficientQuotaInput {
+                request_id: request.to_string(),
+            }).await.unwrap().unwrap();
+            assert_eq!(recovered.collected_cost_units, expected);
+        }
+        // Recovery evidence wins over a stale terminal billing-status label.
+        sqlx::query("INSERT INTO request_fund_recoveries (request_id, wallet_id, frozen_actual_cost_units, prior_entitlement_cost_units, collected_cost_units) VALUES ('misclassified-debt', 'wallet', 8000000, 0, 2000000)")
+            .execute(&first).await.unwrap();
+        let now = Utc::now();
+        sqlx::query("UPDATE usage SET created_at = $1, response_body = $2, request_headers = $3 WHERE request_id <> 'recent'")
+            .bind(now - Duration::days(500)).bind(json!({"data": ["expired raw capture"]}))
+            .bind(json!({"x-request-id": "expired header capture"})).execute(&first).await.unwrap();
+        let window = UsageCleanupWindow {
+            detail_cutoff: now - Duration::days(7),
+            compressed_cutoff: now - Duration::days(30),
+            header_cutoff: now - Duration::days(90),
+            log_cutoff: now - Duration::days(365),
+        };
+        let targets = UsageCleanupTargets { expired_keys: false, ..UsageCleanupTargets::all_policy_targets() };
+        let preview = crate::cleanup::preview_usage_cleanup_impl(
+            &first, &window, targets, UsageCleanupExecutionMode::Policy,
+        ).await.unwrap();
+        assert_eq!(preview.log, 4, "only resolved financial records may expire");
+        assert_eq!(preview.compressed, 7, "retained financial rows still expire their raw bodies");
+        assert_eq!(preview.header, 7);
+        assert_eq!(preview.detail, 0);
+        let summary = cleanup.cleanup_usage(&window, 1, false, targets, UsageCleanupExecutionMode::Policy).await.unwrap();
+        assert_eq!(summary.records_deleted, 4);
+        assert_eq!(summary.body_cleaned, 7);
+        assert_eq!(summary.header_cleaned, 7);
+        let remaining: Vec<String> = sqlx::query_scalar("SELECT request_id FROM usage ORDER BY request_id")
+            .fetch_all(&first).await.unwrap();
+        assert_eq!(remaining, vec!["dispatched", "excess", "legacy-debt", "misclassified-debt", "partial-debt", "prepared", "recent", "unknown"]);
+        let retained_facts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage WHERE request_id <> 'recent' AND response_body IS NULL AND request_headers IS NULL AND request_metadata->'settlement_snapshot'->>'status' = 'complete'")
+            .fetch_one(&first).await.unwrap();
+        assert_eq!(retained_facts, 7);
+
+        // The real financial APIs can still complete after retention: no raw
+        // payload is required and neither the frozen quote nor usage was lost.
+        let prepared = quote("prepared", "key-a", 8_000_000);
+        repo.mark_request_funds_dispatched(prepared.identity.clone()).await.unwrap().unwrap();
+        let usage = UsageSettlementInput {
+            request_id: "prepared".to_string(), user_id: Some("owner".to_string()),
+            api_key_id: Some("key-a".to_string()), api_key_is_standalone: false,
+            provider_id: None, status: "completed".to_string(), billing_status: "pending".to_string(),
+            total_cost_usd: 0.06, actual_total_cost_usd: 0.06,
+            finalized_at_unix_secs: Some(now.timestamp() as u64),
+        };
+        repo.finalize_request_funds(FinalizeRequestFundsInput {
+            identity: prepared.identity, usage, reconciliation_facts: None,
+        }).await.unwrap().unwrap();
+        sqlx::query("UPDATE wallets SET balance = balance + 0.04 WHERE id = 'wallet'")
+            .execute(&first).await.unwrap();
+        let recovered = repo.recover_insufficient_quota(RecoverInsufficientQuotaInput {
+            request_id: "partial-debt".to_string(),
+        }).await.unwrap().unwrap();
+        assert_eq!(recovered.outstanding_cost_units, 0);
+        let records_only = UsageCleanupTargets {
+            detail_body: false, compressed_body: false, headers: false, records: true, expired_keys: false,
+        };
+        let summary = cleanup.cleanup_usage(&window, 1, false, records_only, UsageCleanupExecutionMode::Policy).await.unwrap();
+        assert_eq!(summary.records_deleted, 2, "resolved rows return to normal retention");
+        let replay = cleanup.cleanup_usage(&window, 1, false, records_only, UsageCleanupExecutionMode::Policy).await.unwrap();
+        assert_eq!(replay.records_deleted, 0);
+        assert_eq!(balance(&first).await, 0.16, "remaining holds are intact");
+    }).catch_unwind().await;
+    first.close().await;
+    second.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]
