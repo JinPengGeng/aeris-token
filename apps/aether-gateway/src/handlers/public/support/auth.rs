@@ -5,6 +5,7 @@ pub(super) use super::{
     read_admin_email_template_payload, render_admin_email_template_html, system_config_bool,
     system_config_string, AppState, GatewayError, GatewayPublicRequestContext,
 };
+use aether_admin::system::DEFAULT_USER_INITIAL_GIFT_USD;
 pub(super) use axum::{
     body::Body,
     http,
@@ -259,7 +260,7 @@ async fn handle_auth_login(
                 .read_system_config_json_value("default_user_initial_gift_usd")
                 .await
             {
-                Ok(value) => system_config_f64(value.as_ref(), 10.0),
+                Ok(value) => system_config_f64(value.as_ref(), DEFAULT_USER_INITIAL_GIFT_USD),
                 Err(err) => {
                     return build_auth_internal_error_response(
                         "auth_ldap_settings_lookup_failed",
