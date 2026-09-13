@@ -5,16 +5,16 @@ no upstream writes are part of this delivery workflow.
 
 ## Current delivery snapshot — 2026-09-13
 
-Verified main: `fe464264b9f45f6eeed31647825f059f260e405d` (#376 merged).
+Verified main: `ce1aebe492cf5bd444c69006e852610cb4b1ecf0` (#377 merged).
 The live intake has **44 open issues**: 21 P1 / 23 P2, with 16 in progress,
 18 triage and 10 blocked. These include overlapping parent/child scopes and
 long-term roadmap items; they are not 44 independent implementation packages.
 All 44 are represented exactly once in Project #1 with Status, Priority, Area,
 Risk, Size and Decision; card status and priority match issue labels.
 
-Before publishing this checkpoint, the implementation queue has **three open
-PRs**: #369 and #377 are In review with protected squash auto-merge enabled;
-#391 is Draft / In progress. The snapshot excludes this documentation branch.
+The implementation queue has **two open PRs**: #369 is In review with
+protected squash auto-merge enabled; #391 is Draft / In progress. The snapshot
+excludes documentation PR #392, which is Draft / In progress.
 GitHub events after the audit supersede the counts and commit states below.
 
 ### Current decisions and remaining acceptance
@@ -23,8 +23,11 @@ GitHub events after the audit supersede the counts and commit states below.
    schema, PostgreSQL/memory accounting, provider attribution and financial
    retention integration are implemented. Hosted job `103691795647` ran all
    23 selected PostgreSQL targets, each with one passed and zero ignored.
-   Gateway/runtime typed events and financial writer routing are under active
-   implementation. Still required: persist the one parent request, reserve and
+   Runtime typed-event routing has 371 passing unit tests, including six new
+   regressions. A reproduced queue-acknowledgement defect was fixed by waiting
+   for the financial repository commit; runtime Clippy passes with Rust 1.95.
+   Gateway orchestration is under active implementation. Still required:
+   persist the one parent request, reserve and
    durably dispatch each independently billable attempt before upstream calls,
    retain Unknown holds, close admission, accept late charge evidence using
    the stored quote, and prove worker/direct delivery plus real Gateway call
@@ -35,14 +38,15 @@ GitHub events after the audit supersede the counts and commit states below.
    original-password login/session, original API key, wallet and aggregate
    reconciliation, tampered ciphertext rejection and occupied-database replay
    refusal (`1 passed / 0 failed / 0 ignored`). Current-head code revalidation
-   is recorded on the PR. It is Ready / In review and awaits main
-   synchronization and fresh required checks. Application backups omit full
+   is recorded on the PR. It is Ready / In review; head `8890c7f25` was updated
+   against main after #377 and awaits fresh required checks. Application backups omit full
    ledger, raw usage and unresolved holds/attempts; this does not establish
    production backup acceptance or PostgreSQL full-database disaster recovery.
 3. **Listener recovery (#377 / #214), P1 / Low / S:** the reviewed two-test
    contract distinguishes immediate peer-error retry from resource-error
-   backoff. Updated head `56124709c9e907ddcb14c193263bea4b5df6973e` includes
-   main after #376 and has fresh CI running. Parent #214 retains remaining
+   backoff. Reviewed head `56124709c9e907ddcb14c193263bea4b5df6973e` passed
+   protected checks and merged as `ce1aebe49`; Project is Done.
+   Parent #214 retains remaining
    target-permit lifetime, Redis error-contract and client-side fault evidence.
 4. **Docker safety (#376 / #255):** merged as `fe464264b` after all four
    required checks; Project Done. Private pre-upgrade backups, immutable image
@@ -62,9 +66,9 @@ GitHub events after the audit supersede the counts and commit states below.
    historical impact or authorize a repair. Preserve the explicit unknown
    conclusion and the documented production-evidence requirement.
 
-The merge queue advances #377, then #369, with current-base checks after each
-merge. #391 remains Draft until full integration and review. Project fields
-for all three active implementation PRs are complete. No parent issue is
+The merge queue advances #369, then this checkpoint, with current-base checks
+after each merge. #391 remains Draft until full integration and review.
+Project fields for both active implementation PRs and #392 are complete. No parent issue is
 closed merely because an accepted slice or a checkpoint is merged.
 
 ### Historical delivery snapshot after #389
@@ -240,7 +244,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #307 | P1 | In progress | #371 merged as 904bb14b5 after real Prometheus/rules/Alertmanager firing and resolved delivery; #384 superseded. Retain production caller-path fault injection and deployment acceptance. |
 | #216 | P1 | Split, active | #382 daily quota, #389 selective Rust CI and #390 eight wallet credit targets are merged. Expanded #391 data-stage runner passed 23 real PostgreSQL targets. Retain broader ignored-test, integration and build-trigger acceptance. |
 | #215 | P2 | Planned | measure synchronous logging/SSE filtering/lock contention before changes |
-| #214 | P1 | Split, active | PR #366 merged tunnel response-relay permit lifetime as `8fb31ea6`; PR #377 adds peer-error timing coverage. Retain remaining sync/stream admission and Redis fault-contract acceptance. |
+| #214 | P1 | Split, active | PR #366 merged tunnel response-relay permit lifetime as `8fb31ea6`; #377 merged peer-error timing coverage as `ce1aebe49`. Retain remaining sync/stream admission and Redis fault-contract acceptance. |
 | #213 | P2 | Planned | split giant handler and standardize error payload boundaries |
 | #212 | P2 | Planned | consolidate cross-cutting capacity and dependency tests |
 | #211 | P1 | Split, active | #372 admin video-field redaction merged as 2e03b0086 after current-head checks. Retain persistence, lease and remaining secret-path acceptance. |
