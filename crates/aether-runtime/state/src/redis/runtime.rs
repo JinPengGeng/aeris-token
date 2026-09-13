@@ -15,6 +15,54 @@ use crate::{
 const SCORE_WINDOW_STATS_SCRIPT: &str = include_str!("score_window.lua");
 const SCORE_WINDOW_STATS_PIPELINE_KEY_LIMIT: usize = 16;
 
+// Lua numbers and sorted-set scores represent integers exactly only up to 2^53 - 1.
+const SEMAPHORE_MAX_EXACT_INTEGER: u64 = (1_u64 << 53) - 1;
+
+// TIME must run before any write: a denied TIME command fails closed without
+// pruning leases. Redis 7 uses effects replication, including for TIME scripts.
+const SEMAPHORE_SCRIPT: &str = r#"
+local operation = ARGV[1]
+local clock = redis.call('TIME')
+local now_ms = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+local ttl = 0
+if operation ~= 'snapshot' then
+    ttl = tonumber(ARGV[2])
+    if now_ms > 9007199254740991 - ttl then
+        return redis.error_reply('semaphore expiry exceeds exact integer range')
+    end
+end
+
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
+if operation == 'snapshot' then
+    return redis.call('ZCARD', KEYS[1])
+end
+if operation == 'renew' then
+    if not redis.call('ZSCORE', KEYS[1], ARGV[4]) then return 0 end
+    redis.call('ZADD', KEYS[1], 'XX', now_ms + ttl, ARGV[4])
+    redis.call('PEXPIRE', KEYS[1], ARGV[2])
+    return 1
+end
+
+local count = redis.call('ZCARD', KEYS[1])
+if count >= tonumber(ARGV[3]) then
+    redis.call('PEXPIRE', KEYS[1], ARGV[2])
+    return {0, count}
+end
+redis.call('ZADD', KEYS[1], now_ms + ttl, ARGV[4])
+count = redis.call('ZCARD', KEYS[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+return {1, count}
+"#;
+
+fn validate_semaphore_lease_ttl(lease_ttl_ms: u64) -> Result<(), RuntimeSemaphoreError> {
+    if lease_ttl_ms == 0 || lease_ttl_ms > SEMAPHORE_MAX_EXACT_INTEGER {
+        return Err(RuntimeSemaphoreError::InvalidConfiguration(format!(
+            "Redis semaphore lease_ttl_ms must be between 1 and {SEMAPHORE_MAX_EXACT_INTEGER}"
+        )));
+    }
+    Ok(())
+}
+
 const RATE_LIMIT_CHECK_AND_CONSUME_SCRIPT: &str = r#"
 local user_key = KEYS[1]
 local key_key = KEYS[2]
@@ -913,8 +961,7 @@ impl RedisRuntimeRunner {
         lease_ttl_ms: u64,
         timeout_ms: Option<u64>,
     ) -> Result<(i64, i64), RuntimeSemaphoreError> {
-        let now_ms = crate::unix_time_ms();
-        let expires_at_ms = now_ms.saturating_add(lease_ttl_ms);
+        validate_semaphore_lease_ttl(lease_ttl_ms)?;
         let key = self.keyspace.key(key);
         let timeout_ms = timeout_ms.or(self.command_timeout_ms);
         run_lane_with_timeout(
@@ -924,27 +971,15 @@ impl RedisRuntimeRunner {
             "runtime semaphore acquire",
             async {
                 let mut connection = self.connections.connection(RedisConnectionLane::Fast);
-                script(
-                    "redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1]); \
-                 local count = redis.call('ZCARD', KEYS[1]); \
-                 if count >= tonumber(ARGV[3]) then \
-                    redis.call('PEXPIRE', KEYS[1], ARGV[5]); \
-                    return {0, count}; \
-                 end; \
-                 redis.call('ZADD', KEYS[1], ARGV[2], ARGV[4]); \
-                 count = redis.call('ZCARD', KEYS[1]); \
-                 redis.call('PEXPIRE', KEYS[1], ARGV[5]); \
-                 return {1, count};",
-                )
-                .key(&key)
-                .arg(now_ms as i64)
-                .arg(expires_at_ms as i64)
-                .arg(limit as i64)
-                .arg(token)
-                .arg(lease_ttl_ms as i64)
-                .invoke_async::<(i64, i64)>(&mut connection)
-                .await
-                .map_redis_err()
+                script(SEMAPHORE_SCRIPT)
+                    .key(&key)
+                    .arg("acquire")
+                    .arg(lease_ttl_ms)
+                    .arg(limit)
+                    .arg(token)
+                    .invoke_async::<(i64, i64)>(&mut connection)
+                    .await
+                    .map_redis_err()
             },
         )
         .await
@@ -964,8 +999,7 @@ impl RedisRuntimeRunner {
         lease_ttl_ms: u64,
         timeout_ms: Option<u64>,
     ) -> Result<i64, RuntimeSemaphoreError> {
-        let now_ms = crate::unix_time_ms();
-        let expires_at_ms = now_ms.saturating_add(lease_ttl_ms);
+        validate_semaphore_lease_ttl(lease_ttl_ms)?;
         let key = self.keyspace.key(key);
         let timeout_ms = timeout_ms.or(self.command_timeout_ms);
         run_lane_with_timeout(
@@ -975,22 +1009,15 @@ impl RedisRuntimeRunner {
             "runtime semaphore renew",
             async {
                 let mut connection = self.connections.connection(RedisConnectionLane::Fast);
-                script(
-                    "redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1]); \
-                 local score = redis.call('ZSCORE', KEYS[1], ARGV[2]); \
-                 if not score then return 0; end; \
-                 redis.call('ZADD', KEYS[1], 'XX', ARGV[3], ARGV[2]); \
-                 redis.call('PEXPIRE', KEYS[1], ARGV[4]); \
-                 return 1;",
-                )
-                .key(&key)
-                .arg(now_ms as i64)
-                .arg(token)
-                .arg(expires_at_ms as i64)
-                .arg(lease_ttl_ms as i64)
-                .invoke_async::<i64>(&mut connection)
-                .await
-                .map_redis_err()
+                script(SEMAPHORE_SCRIPT)
+                    .key(&key)
+                    .arg("renew")
+                    .arg(lease_ttl_ms)
+                    .arg(limit)
+                    .arg(token)
+                    .invoke_async::<i64>(&mut connection)
+                    .await
+                    .map_redis_err()
             },
         )
         .await
@@ -1048,7 +1075,6 @@ impl RedisRuntimeRunner {
         key: &str,
         timeout_ms: Option<u64>,
     ) -> Result<usize, RuntimeSemaphoreError> {
-        let now_ms = crate::unix_time_ms();
         let key = self.keyspace.key(key);
         let timeout_ms = timeout_ms.or(self.command_timeout_ms);
         run_lane_with_timeout(
@@ -1058,16 +1084,13 @@ impl RedisRuntimeRunner {
             "runtime semaphore snapshot",
             async {
                 let mut connection = self.connections.connection(RedisConnectionLane::Fast);
-                script(
-                    "redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1]); \
-                 return redis.call('ZCARD', KEYS[1]);",
-                )
-                .key(&key)
-                .arg(now_ms as i64)
-                .invoke_async::<i64>(&mut connection)
-                .await
-                .map(|value| value.max(0) as usize)
-                .map_redis_err()
+                script(SEMAPHORE_SCRIPT)
+                    .key(&key)
+                    .arg("snapshot")
+                    .invoke_async::<i64>(&mut connection)
+                    .await
+                    .map(|value| value.max(0) as usize)
+                    .map_redis_err()
             },
         )
         .await
