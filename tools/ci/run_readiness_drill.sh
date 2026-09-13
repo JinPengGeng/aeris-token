@@ -214,11 +214,12 @@ assert_health() {
 
 observe_admission() {
   local phase="$1" attempt="$2"
+  local credential="${3:-sk-readiness-disposable-invalid-key}"
   local record="$evidence_dir/$phase-$attempt-admission"
   local trace_id="trace-admission-$phase-$attempt" measured error_type
   measured="$(curl --silent --show-error --noproxy '*' --connect-timeout 1 --max-time 2 \
     --header 'content-type: application/json' --header "x-trace-id: $trace_id" \
-    --header 'authorization: Bearer sk-readiness-disposable-invalid-key' \
+    --header "authorization: Bearer $credential" \
     --data '{"model":"admission-contract-probe","messages":[],"stream":false}' \
     --dump-header "$record.headers" --output "$record.json" \
     --write-out '%{http_code} %{time_total}' "$base_url/v1/chat/completions" 2>"$record.stderr")" || true
@@ -227,10 +228,10 @@ observe_admission() {
   printf '%s\t%s\t%s\t%s\t%s\n' "$phase" "$attempt" admission "$admission_status" "${admission_seconds:-0}" >>"$evidence_dir/http-observations.tsv"
   case "$admission_status" in
     401) error_type=authentication_error ;;
-    503) error_type=server_error ;;
+    502|503) error_type=server_error ;;
     *) printf 'Unexpected public admission status %s during %s.\n' "$admission_status" "$phase" >&2; return 1 ;;
   esac
-  # The fixture command timeout is 250 ms. Allow HTTP/scheduler overhead but
+  # Redis commands have 250 ms; the control context has 1000 ms. Allow overhead but
   # reject a dependency wait reaching the caller's two-second hard deadline.
   jq -en --argjson elapsed "$admission_seconds" '$elapsed < 1.5' >/dev/null
   jq -e --arg error_type "$error_type" '
@@ -239,7 +240,15 @@ observe_admission() {
     ([.. | strings] | all(test("postgres://|postgresql://|redis://|127\\.0\\.0\\.1|password|gateway_requests_distributed|connection refused"; "i") | not))
   ' "$record.json" >/dev/null
   [[ "$(awk 'tolower($1) == "x-trace-id:" {gsub("\r", "", $2); print $2}' "$record.headers")" == "$trace_id" ]]
-  [[ "$(awk 'tolower($1) == "retry-after:" {count++} END {print count+0}' "$record.headers")" == 0 ]]
+  if [[ "$admission_status" == 502 ]]; then
+    jq -e --arg trace_id "$trace_id" '
+      .error.code == "control_unavailable" and .error.trace_id == $trace_id and
+      .error.retryable == true and .error.failover_disposition == "retry_request"
+    ' "$record.json" >/dev/null
+    [[ "$(awk 'tolower($1) == "retry-after:" {gsub("\r", "", $2); print $2}' "$record.headers")" == 1 ]]
+  else
+    [[ "$(awk 'tolower($1) == "retry-after:" {count++} END {print count+0}' "$record.headers")" == 0 ]]
+  fi
 }
 
 assert_local_capacity_restored() {
@@ -263,10 +272,15 @@ assert_local_capacity_restored() {
 
 assert_distributed_admission() {
   local phase="$1" expected_status="$2" repetitions="$3"
+  local fresh_credential_prefix="${4:-}"
   local deadline=$((SECONDS + 8)) attempt=0 successes=0
   while (( SECONDS < deadline && successes < repetitions )); do
     attempt=$((attempt + 1))
-    observe_admission "$phase" "$attempt"
+    if [[ -n "$fresh_credential_prefix" ]]; then
+      observe_admission "$phase" "$attempt" "$fresh_credential_prefix-$attempt"
+    else
+      observe_admission "$phase" "$attempt"
+    fi
     if [[ "$admission_status" == "$expected_status" ]]; then
       successes=$((successes + 1))
     elif [[ "$expected_status" == 401 && "$admission_status" == 503 ]]; then
@@ -286,6 +300,22 @@ assert_distributed_admission() {
   fi
   assert_health "$phase" "$attempt"
   printf 'PASS %s: public admission=%s (%s repeated requests), liveness=200\n' "$phase" "$expected_status" "$repetitions" | tee -a "$evidence_dir/result.log"
+}
+
+assert_control_context_deadline() {
+  local phase="$1" attempt
+  for attempt in 1 2 3; do
+    # Each previously unseen key forces a fresh control/authentication lookup;
+    # a cached invalid-key rejection must not hide the paused database.
+    observe_admission "$phase" "$attempt" "sk-readiness-control-$phase-$attempt"
+    [[ "$admission_status" == 502 ]] || {
+      printf 'Public control context did not fail closed during %s.\n' "$phase" >&2
+      return 1
+    }
+  done
+  assert_local_capacity_restored "$phase"
+  assert_health "$phase" "$attempt"
+  printf 'PASS %s: three bounded public control failures, full local capacity, liveness=200\n' "$phase" | tee -a "$evidence_dir/result.log"
 }
 
 await_readiness() {
@@ -341,6 +371,7 @@ start_redis
     AETHER_GATEWAY_DISTRIBUTED_REQUEST_LEASE_TTL_MS=2000 \
     AETHER_GATEWAY_DISTRIBUTED_REQUEST_RENEW_INTERVAL_MS=500 \
     AETHER_GATEWAY_DISTRIBUTED_REQUEST_COMMAND_TIMEOUT_MS=250 \
+    AETHER_GATEWAY_CONTROL_CONTEXT_TIMEOUT_MS=1000 \
     AETHER_GATEWAY_DATA_POSTGRES_MIN_CONNECTIONS=1 AETHER_GATEWAY_DATA_POSTGRES_MAX_CONNECTIONS=8 \
     AETHER_GATEWAY_HTTP_SHUTDOWN_TIMEOUT_MS=1000 AETHER_GATEWAY_USAGE_SHUTDOWN_TIMEOUT_MS=1000 \
     AETHER_GATEWAY_READINESS_WITHDRAWAL_DELAY_MS=3000 \
@@ -350,14 +381,17 @@ gateway_pid=$!
 
 await_readiness initial 200 '^ok$' '^ok$' 180
 assert_distributed_admission admission_initial 401 3
+assert_distributed_admission control_initial 401 3 sk-readiness-control-initial
 stop_postgres
 await_readiness database_stopped 503 '^(failed|timeout)$' '^ok$' 20
 start_postgres
 await_readiness database_recovered 200 '^ok$' '^ok$' 30
 pause_postgres
 await_readiness database_unresponsive 503 '^timeout$' '^ok$' 20
+assert_control_context_deadline control_database_unresponsive
 resume_postgres
 await_readiness database_resumed 200 '^ok$' '^ok$' 30
+assert_distributed_admission control_database_resumed 401 3 sk-readiness-control-recovered
 stop_child "$redis_pid"
 redis_pid=""
 await_readiness redis_stopped 503 '^ok$' '^(failed|timeout)$' 20
@@ -404,4 +438,4 @@ if kill -0 "$gateway_pid" 2>/dev/null; then
 fi
 wait "$gateway_pid"
 gateway_pid=""
-printf 'PASS: real gateway readiness withdrawal, Redis request admission failure/recovery, both dependency deadlines, closing gate, and independent liveness\n' | tee -a "$evidence_dir/result.log"
+printf 'PASS: real gateway readiness withdrawal, public control deadline/recovery, Redis request admission failure/recovery, both dependency deadlines, closing gate, and independent liveness\n' | tee -a "$evidence_dir/result.log"

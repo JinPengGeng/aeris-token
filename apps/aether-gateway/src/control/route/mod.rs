@@ -191,6 +191,44 @@ pub(crate) async fn resolve_control_route_with_trusted_auth(
         return Ok(None);
     };
     decision.public_query_string = uri.query().map(ToOwned::to_owned);
+
+    let is_public_ai = decision.route_class.as_deref() == Some("ai_public");
+    let resolve = resolve_classified_control_route(
+        state,
+        headers,
+        uri,
+        trace_id,
+        decision,
+        trusted_auth_verified,
+    );
+    if is_public_ai {
+        match tokio::time::timeout(
+            state
+                .frontdoor_runtime_guards
+                .public_control_context_timeout,
+            resolve,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(GatewayError::ControlUnavailable {
+                trace_id: trace_id.to_string(),
+                message: "public control context resolution timed out".to_string(),
+            }),
+        }
+    } else {
+        resolve.await
+    }
+}
+
+async fn resolve_classified_control_route(
+    state: &AppState,
+    headers: &http::HeaderMap,
+    uri: &Uri,
+    trace_id: &str,
+    mut decision: GatewayControlDecision,
+    trusted_auth_verified: bool,
+) -> Result<Option<GatewayControlDecision>, GatewayError> {
     if decision.route_class.as_deref() == Some("ai_public") {
         decision.model_directive_policy =
             crate::system_features::ModelDirectivePolicySnapshot::load(state).await;
