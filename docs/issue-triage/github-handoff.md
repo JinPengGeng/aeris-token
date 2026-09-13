@@ -12,8 +12,8 @@
 
 以下内容覆盖并取代本文件下方的 02:29 历史快照，恢复时以本节和 GitHub 实时状态为准。
 
-- `origin/main`：`0ecfafe23e04f204f1c97e4db82660f1a506cb6a`，已包含 #401、#402、#407、#415、#416、#418、#420、#423 及本次 #424 交接刷新。上述 PR 的四项 required checks 均已成功并以 squash 合并；父 #205/#214/#215 保持开放。
-- 当前开放 PR：无。#424 head `0f23fe908746fbd7eb4d1bd7e8e45820fb3df7e4` 已通过 Rust CI、Frontend CI、Automation Policy、Dependency Audit 四项 required checks，并自动 squash 合并为 `0ecfafe23e04f204f1c97e4db82660f1a506cb6a`。
+- `origin/main`：`f502c3a5144724a0c3c62271c5ab21da27b1503c`，已包含 #401、#402、#407、#415、#416、#418、#420、#423、#424、#425、#426 及交接刷新。上述 PR 的四项 required checks 均已成功并以 squash 合并；父 #205/#214/#215 保持开放。
+- 当前开放 PR：无。#425 head `1409d5ed1e6944a2b2afbfb806ee19e68ab9db3a`、#426 head `c9faf377d85d2219682ce22e5d182895d664c905` 均通过 Rust CI、Frontend CI、Automation Policy、Dependency Audit 四项 required checks 后自动 squash 合并。
 - #419 已完成 P1/Core/High/M/Accepted 切片：`AETHER_GATEWAY_CONTROL_CONTEXT_TIMEOUT_MS`（默认 30000ms，正值 clamp 1..=120000）只覆盖 `ai_public` 控制上下文解析；真实 PostgreSQL 暂停 3 次 fresh key 502（约 1.004–1.006 秒），恢复 3 次 401，暂停期间 local permits 8/0/8、liveness 200。候选与最终 hosted 结果已写入 PR #420、Issue #419 及主干 `docs/issue-triage/issue-419-*`。
 - 实时开放 Issue 清点：44 个已标优先级的 Issue（21 个 P1、23 个 P2），父子需求重叠，数量不等于独立开发包。#254、#300、#303、#307、#214、#215、#220、#223、#224、#225、#235、#255 等父项仍需各自剩余验收。
 - 本轮没有写 upstream。主工作树 `/Users/fengying/workspace/aeris-token` 的 3 个已跟踪修改和多个未追踪文档/fixture 是用户现场，必须保留；交接文档已完整上传 fork，恢复以 `origin/main` 和对应 Issue/PR 记录为准。
