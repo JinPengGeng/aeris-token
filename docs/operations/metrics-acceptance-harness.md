@@ -1,33 +1,71 @@
-# Metrics acceptance harness
+# Metrics scrape and notification acceptance
 
-`tests/metrics_acceptance_harness.py` is a loopback-only smoke harness for the
-remaining Issue #307/#217 acceptance slice. It renders metrics through the
-production `aether-runtime` billing recorders, serves that payload from an
-isolated `/metrics` target, checks Prometheus exposition-family metadata, and
-posts `firing` followed by `resolved` payloads to a local Alertmanager fixture.
+The drill runs real Prometheus and Alertmanager processes on owned loopback
+ports. Prometheus scrapes the production Rust metrics renderer, evaluates a
+bounded alert rule, sends alerts through Alertmanager's v2 API, and Alertmanager
+delivers firing and resolved webhook v4 notifications to an isolated receiver.
+The harness never posts synthetic alerts itself.
 
-Run from the repository root:
+## Run and evidence
 
-```bash
-python3 tests/metrics_acceptance_harness.py
-python3 tests/metrics_acceptance_harness.py --token metrics-fixture-token
-# Gateway ingress route; the caller must hold admin:monitoring:read.
-python3 tests/metrics_acceptance_harness.py --endpoint http://127.0.0.1:9090/_gateway/metrics --token "$METRICS_TOKEN"
+Install the same Prometheus 3.14.0 and Alertmanager 0.34.0 versions pinned by
+`.github/workflows/prometheus-ci.yml`, verifying the release archive checksums.
+Run from the repository root with Rust 1.95 and Python 3:
+
+```sh
+python3 tests/metrics_acceptance_harness.py --evidence-dir /tmp/aether-metrics-evidence
 ```
 
-With `--endpoint`, the harness performs a real HTTP scrape and requires
-`text/plain` Prometheus content. The deployed gateway endpoint is
-`/_gateway/metrics` and is protected by the `admin:monitoring:read` permission;
-the local fixture itself intentionally serves `/metrics` and accepts the
-fixture bearer token. The endpoint is expected to be loopback or a deliberately
-isolated test deployment. No token is logged. The local mode proves the
-authentication negative/positive boundary and the local Alertmanager
-delivery/recovery sequence.
+The evidence directory must be new. Omit the option to allocate one
+automatically. For binaries outside PATH, pass `--prometheus-bin`,
+`--promtool-bin` and `--alertmanager-bin` with their absolute paths.
+No Docker daemon, production credentials, database or external receiver is
+needed. Missing tools or failed delivery fail the drill; no mock fallback is
+accepted. Child processes are terminated on success or failure, their temporary
+data directories are removed, and evidence is retained.
 
-This is intentionally not deployment evidence: it does not run Prometheus,
-exercise a production ingress, or prove delivery through an external
-Alertmanager. The billing fixture injects failures through real producer
-recorders, but it does not cover every production failure branch (usage,
-video-task, enrichment, retry and DLQ paths must still be fault-injected in a
-staging deployment before closing #307/#217). Preserve the command output and
-deployment scrape/webhook logs as separate acceptance artifacts.
+The artifact contains both exporter samples, parser output, tool versions,
+effective configs, process logs, final target health, actual webhook payloads
+and `result.json`. CI uploads these alongside the existing metrics/rule evidence.
+Configs contain only the fixed local fixture token, never a deployment secret.
+The Prometheus workflow is called by Rust CI; its result is an explicit input
+to the required `Rust CI / check`, so a missing tool or failed notification
+blocks that gate. The standalone manual dispatch remains available.
+
+## What is verified
+
+1. The runtime example renders a zero-counter baseline using `--healthy` and
+   the default failure sample through the real billing recorders. Promtool
+   parses both expositions.
+2. Missing and wrong bearer credentials are rejected by the owned metrics
+   fixture. Real Prometheus reports the authenticated target up and an otherwise
+   identical target without credentials down.
+3. After at least two zero samples, the fixture exposes the failure sample.
+   Prometheus observes increments for both `daily_quota` and `rpm`.
+4. Alertmanager delivers firing notifications for both operations. Counters
+   remain at one while their increases age out; the receiver must then observe
+   resolved notifications, in that order. Prometheus must have no firing
+   instances of the drill alert at the end.
+
+This transport drill uses the fail-open rule's aggregation with a **10-second
+increase window and 2-second for duration** in a temporary config. This keeps
+the live test short. The shipped rule's actual 10-minute window, 2-minute for
+duration, thresholds and other alert families continue to be checked unchanged
+by `promtool check rules` and `promtool test rules` in the preceding CI step.
+The accelerated drill does not prove those production timing values.
+
+## Review decision and remaining scope
+
+The earlier smoke harness posted JSON to a Python server named Alertmanager
+and checked its own captured requests. That did not exercise Prometheus, the
+Alertmanager API or notification delivery. The proposed external `/api/v1/alerts`
+extension also used synthetic status payloads incompatible with the current
+Alertmanager v2 lifecycle. Replace that approach with the real local chain.
+
+This tests producer recorders and transport, not every Gateway failure caller.
+It does not validate Gateway RBAC: the actual Gateway metrics route remains
+`/_gateway/metrics` with `admin:monitoring:read`, while the owned fixture uses
+`/metrics`. Production usage/video/enrichment/retry/DLQ event-path coverage and
+operational deployment acceptance remain separately tracked by #307/#217.
+No maintained Prometheus/Alertmanager deployment is added to default Compose.
+Rollback of the drill is a code/CI revert; no application schema changes.

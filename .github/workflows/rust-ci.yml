@@ -714,6 +714,9 @@ jobs:
           AETHER_TEST_DATABASE_URL: postgres://aether:aether@127.0.0.1:5432/aether_test
         run: bash tools/ci/run_postgres_live_tests.sh
 
+  prometheus_contracts:
+    uses: ./.github/workflows/prometheus-ci.yml
+
   check:
     name: Rust CI / check
     permissions:
@@ -727,6 +730,7 @@ jobs:
       - data_db_smoke
       - data_db_ignored_postgres
       - shell_security
+      - prometheus_contracts
     if: ${{ always() }}
     steps:
       - name: Verify required jobs
@@ -737,7 +741,8 @@ jobs:
              [ "${{ needs.test.result }}" != "success" ] || \
              [ "${{ needs.data_db_smoke.result }}" != "success" ] || \
              [ "${{ needs.data_db_ignored_postgres.result }}" != "success" ] || \
-             [ "${{ needs.shell_security.result }}" != "success" ]; then
+             [ "${{ needs.shell_security.result }}" != "success" ] || \
+             [ "${{ needs.prometheus_contracts.result }}" != "success" ]; then
             echo "Rust CI failed"
             exit 1
           fi
