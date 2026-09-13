@@ -44,7 +44,7 @@ aether-backup-restore \
 
 `database_applied=true` 仅表示认证恢复入口返回成功；`acceptance_verified=false` 明确表示尚未完成该下载对象的业务对账。需要根据真实备份中的用户、密钥、钱包、分组和聚合范围建立源/目标清单并逐项比较，再验证原密码登录和原 key。不能用合成演练通过替代某个生产备份的验收。
 
-应用 data 备份包含配置、非管理员用户、用户/API key 钱包、分组以及 usage aggregates；不包含所有原始 usage 行、完整 wallet ledger、管理员账户或完整数据库运行状态。不能据此声称已恢复每一笔原始请求或历史账本；有该需求时应另外配置并演练 PostgreSQL 原生备份/PITR。
+应用 data 备份包含配置、非管理员用户、用户/API key 钱包、分组以及 usage aggregates；不包含所有原始 usage 行、完整 wallet ledger、活动资金预留/未决 attempt、管理员账户或完整数据库运行状态。钱包余额恢复不能代替完整资金灾备；有该需求时应另外配置并演练 PostgreSQL 原生备份/PITR。
 
 ## RPO、RTO 与部分失败
 
@@ -61,5 +61,7 @@ RPO 是备份 `exported_at` 到故障点的时间差；生产目标由部署者�
 原脚本因使用 InteractiveUpload 和仅检查 JSON 字段真值而被拒绝；空对象/数组不能证明恢复成功。本实现改为真实认证 CLI、空隔离库约束和可失败的实质对账，默认解密行为保留。自动化覆盖合成的完整 data 容器中的用户/密钥/钱包和 daily aggregate；不声称已经演练生产备份、所有 provider 凭据或原始账本。父 #223 保持开放。
 
 本地验证（2026-09-13，Rust 1.95 / PostgreSQL 17.11）：完整 CI 包装器实际运行 `1 passed / 0 failed / 0 ignored`，测试耗时 3.02 秒，脚本含测试构建阶段耗时 46 秒，二进制构建另计。验收包括篡改密文拒绝且数据库未改、真实认证 apply、钱包和完整 fixture aggregate 相等、原密码登录及会话验证、原 key `/v1/models` 成功、错误 key 拒绝、占用数据库拒绝重复 apply。ShellCheck、actionlint 与 diff 检查通过。
+
+另有 12 项恢复 CLI 单元测试通过（包括新增显式 apply 参数组合和嵌套部分导入错误拒绝）；同步当前主干后，5 项环境参考测试及 12 项 Rust CI 选择/聚合合同测试通过，确认测试环境变量未混入运维参考，新增恢复步骤保留既有 required gate。
 
 演练开发时发现测试服务器未附带正式 `ConnectInfo`，HTTP 登录返回 500；改用已有 `tests::start_server`。随后真实 HTTP 分支触发 libtest 默认线程栈不足；采用 CI 已有的 16 MiB 设置后完整用例通过。两次失败均未输出演练成功，保留隔离库，没有修改认证或生产计费行为来迁就测试。
