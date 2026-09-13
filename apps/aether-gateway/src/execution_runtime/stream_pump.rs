@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::io::Error as IoError;
@@ -773,14 +774,14 @@ fn observe_stream_chunk(
 ) {
     let normalized = if let Some(normalizer) = private_stream_normalizer {
         match normalizer.push_chunk(chunk) {
-            Ok(normalized) => normalized,
+            Ok(normalized) => Cow::Owned(normalized),
             Err(_err) => {
                 observer.disable_with_error("provider stream normalization failed");
                 return;
             }
         }
     } else {
-        chunk.to_vec()
+        Cow::Borrowed(chunk)
     };
 
     observe_normalized_bytes(observer, report_context, observer_buffered, &normalized);
