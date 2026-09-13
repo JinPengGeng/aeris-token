@@ -793,8 +793,15 @@ impl AppState {
             .lock()
             .expect("provider key rpm reset cache should lock");
         let min_kept = now_unix_secs.saturating_sub(PROVIDER_KEY_RPM_WINDOW_SECS);
-        resets.retain(|_, reset_at| *reset_at >= min_kept);
-        resets.get(key_id).copied()
+        let reset_at = resets.get(key_id).copied()?;
+        if reset_at < min_kept {
+            // Candidate lookup must not scan unrelated keys. Administrative
+            // writes still sweep all expired markers, including idle keys.
+            resets.remove(key_id);
+            None
+        } else {
+            Some(reset_at)
+        }
     }
 
     pub(crate) fn admin_monitoring_error_stats_reset_at(&self) -> Option<u64> {
@@ -4243,6 +4250,9 @@ fn runtime_miss_diagnostic_has_candidate_signal(
         || diagnostic.skipped_candidate_count.unwrap_or(0) > 0
         || !diagnostic.skip_reasons.is_empty()
 }
+
+#[cfg(test)]
+mod rpm_reset_lookup_tests;
 
 #[cfg(test)]
 mod tests {
