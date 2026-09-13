@@ -77,7 +77,10 @@ fn apply_summary(
     attempts: &[StoredRequestAttemptFunds],
 ) -> Result<(), DataLayerError> {
     let closed = summary.as_ref().is_some_and(|s| s.admission_closed);
-    let next = summarize_request_attempt_funds(attempts, closed)?;
+    let mut next = summarize_request_attempt_funds(attempts, closed)?;
+    next.admission_closed_at_unix_secs = summary
+        .as_ref()
+        .and_then(|summary| summary.admission_closed_at_unix_secs);
     let mut tokens = RequestAttemptBilledUsage::default();
     for a in attempts {
         if let Some(RequestAttemptTerminalFacts {
@@ -213,6 +216,13 @@ pub(super) fn reserve(
         if previous_attempts.len() >= 64 {
             return Err(invalid("request attempt count exceeds 64"));
         }
+        // A new prepared hold must fit the parent aggregate before reserve_inner
+        // persists it. All other summary totals remain unchanged by admission.
+        summarize_request_attempt_funds(&previous_attempts, false)?
+            .held_cost_units
+            .checked_add(input.quote.authorized_cost_units)
+            .filter(|amount| *amount <= i64::MAX as u64)
+            .ok_or_else(|| invalid("attempt aggregate overflow"))?;
         // Holding this guard until both writes finish serializes joint funding
         // with ordinary quota-only writers. Validate before mutating either map.
         let mut quotas = repo
@@ -533,10 +543,13 @@ pub(super) fn close(
         if get(repo, &input.identity)?.is_none() {
             return Ok(None);
         }
-        summary
+        let current = summary
             .as_mut()
-            .ok_or_else(|| invalid("attempt parent mode missing"))?
-            .admission_closed = true;
+            .ok_or_else(|| invalid("attempt parent mode missing"))?;
+        current.admission_closed = true;
+        current
+            .admission_closed_at_unix_secs
+            .get_or_insert(input.closed_at_unix_secs);
         apply_summary(
             parent,
             summary,

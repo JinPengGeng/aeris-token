@@ -1,5 +1,6 @@
 mod capture_memory;
 mod compression;
+mod daily_cost;
 mod metadata_policy;
 mod policy;
 mod types;
@@ -10,6 +11,7 @@ pub use capture_memory::{
     UsageCaptureRetention,
 };
 pub use compression::{read_decompressed_usage_json, MAX_DECOMPRESSED_USAGE_JSON_BYTES};
+pub use daily_cost::*;
 pub use metadata_policy::*;
 pub use policy::*;
 pub use types::{

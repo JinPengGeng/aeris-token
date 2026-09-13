@@ -290,6 +290,9 @@ pub struct RequestFundsSummary {
     pub collected_cost_units: u64,
     pub held_cost_units: u64,
     pub admission_closed: bool,
+    /// First durable logical completion time, retained for late financial outcomes.
+    #[serde(default)]
+    pub admission_closed_at_unix_secs: Option<u64>,
     pub requires_reconciliation: bool,
 }
 

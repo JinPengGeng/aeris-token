@@ -1,15 +1,9 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aether_cache::ExpiringMap;
-use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
-use aether_data_contracts::repository::usage::UsageDailyActualCostRollupQuery;
-use aether_runtime_state::{
-    DailyUsageLimitCountInput, DailyUsageLimitIncrementInput, DailyUsageLimitRestoreEntry,
-    DailyUsageLimitRestoreInput, RuntimeState,
-};
+use aether_data_contracts::repository::usage::DailyActualCostQuery;
 use chrono::{DateTime, SecondsFormat, Utc};
 use tracing::warn;
 
@@ -22,12 +16,6 @@ const SYSTEM_DAILY_USAGE_LIMIT_CONFIG_KEY: &str = "daily_usage_limit_usd";
 const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(15);
 const LIMIT_EPSILON_USD: f64 = 0.000_000_01;
 const USD_UNITS_PER_DOLLAR: f64 = 100_000_000.0;
-const COUNTER_EXPIRY_GRACE_SECONDS: u64 = 60;
-const DAILY_USAGE_RUNTIME_STATE_KEY: &str = "daily_usage_limit:runtime_state";
-const DAILY_USAGE_RECOVERY_LOCK_KEY: &str = "daily_usage_limit:recovery";
-const DAILY_USAGE_RECOVERY_LOCK_OWNER: &str = "gateway-daily-usage-recovery";
-const DAILY_USAGE_RECOVERY_LOCK_TTL: Duration = Duration::from_secs(600);
-const DAILY_USAGE_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DailyUsageScopeStatus {
@@ -72,7 +60,6 @@ pub(crate) struct DailyUsageLimitedResponse;
 #[derive(Debug, Clone)]
 pub(crate) struct FrontdoorDailyUsageLimiter {
     system_default_cache: Arc<ExpiringMap<String, f64>>,
-    recovery_inflight: Arc<AtomicBool>,
     runtime_failures: Arc<AtomicU64>,
     #[cfg(test)]
     system_default_override: Arc<std::sync::Mutex<Option<f64>>>,
@@ -88,7 +75,6 @@ impl FrontdoorDailyUsageLimiter {
     pub(crate) fn new() -> Self {
         Self {
             system_default_cache: Arc::new(ExpiringMap::default()),
-            recovery_inflight: Arc::new(AtomicBool::new(false)),
             runtime_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             system_default_override: Arc::new(std::sync::Mutex::new(None)),
@@ -208,37 +194,22 @@ impl FrontdoorDailyUsageLimiter {
         let timezone = app_timezone();
         let now = Utc::now();
         let (_, start, end) = local_day_window(now, timezone);
-        let bucket = start.timestamp().max(0) as u64;
-        let user_scope_key = daily_usage_user_scope_key(&auth.user_id, bucket);
-        let key_scope_key = daily_usage_key_scope_key(&auth.api_key_id, bucket);
-        let runtime_started_at = Instant::now();
+        let read_started_at = Instant::now();
         let counts_result = state
-            .runtime_state
-            .daily_usage_limit_counts(DailyUsageLimitCountInput {
-                state_key: DAILY_USAGE_RUNTIME_STATE_KEY,
-                user_key: (!auth.api_key_is_standalone).then_some(user_scope_key.as_str()),
-                key_key: &key_scope_key,
-                bucket,
+            .data
+            .read_daily_actual_cost_units(&DailyActualCostQuery {
+                user_id: (!auth.api_key_is_standalone).then(|| auth.user_id.clone()),
+                api_key_id: auth.api_key_id.clone(),
+                start_unix_secs: start.timestamp().max(0) as u64,
+                end_unix_secs: end.timestamp().max(0) as u64,
             })
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()));
         observe_gateway_stage_ms(
-            "daily_usage_limit_runtime_read",
-            runtime_started_at.elapsed().as_millis() as u64,
+            "daily_usage_limit_persistent_read",
+            read_started_at.elapsed().as_millis() as u64,
         );
         let counts = counts_result?;
-        if !counts.state_ready {
-            self.trigger_runtime_recovery(state);
-            return Ok(Some(FrontdoorDailyUsageStatus {
-                available: false,
-                timezone: timezone.name().to_string(),
-                window_start: rfc3339(start),
-                window_end: rfc3339(end),
-                reset_at_unix_secs: end.timestamp().max(0) as u64,
-                user: None,
-                key: None,
-            }));
-        }
         let user = user_limit
             .map(|limit_usd| scope_status("user", limit_usd, units_to_usd(counts.user_units)));
         let key = key_limit
@@ -252,44 +223,6 @@ impl FrontdoorDailyUsageLimiter {
             user,
             key,
         }))
-    }
-
-    fn trigger_runtime_recovery(&self, state: &AppState) {
-        if self
-            .recovery_inflight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
-        let limiter = self.clone();
-        let state = state.clone();
-        tokio::spawn(async move {
-            let started_at = Instant::now();
-            let result = recover_daily_usage_runtime(&state).await;
-            observe_gateway_stage_ms(
-                "daily_usage_limit_recovery",
-                started_at.elapsed().as_millis() as u64,
-            );
-            match result {
-                Ok(true) => {}
-                Ok(false) => tokio::time::sleep(DAILY_USAGE_RECOVERY_RETRY_DELAY).await,
-                Err(err) => {
-                    aether_runtime::record_billing_fail_open_daily_quota();
-                    let failure_count =
-                        limiter.runtime_failures.fetch_add(1, Ordering::Relaxed) + 1;
-                    warn!(
-                        event_name = "frontdoor_daily_usage_recovery_failed",
-                        log_type = "ops",
-                        error = ?err,
-                        runtime_failures_total = failure_count,
-                        "daily usage runtime recovery failed; limits remain fail-open"
-                    );
-                    tokio::time::sleep(DAILY_USAGE_RECOVERY_RETRY_DELAY).await;
-                }
-            }
-            limiter.recovery_inflight.store(false, Ordering::Release);
-        });
     }
 
     async fn resolve_system_default_limit(&self, state: &AppState) -> Result<f64, GatewayError> {
@@ -328,172 +261,6 @@ impl FrontdoorDailyUsageLimiter {
     }
 }
 
-async fn recover_daily_usage_runtime(state: &AppState) -> Result<bool, GatewayError> {
-    let Some(lease) = state
-        .runtime_state
-        .lock_try_acquire(
-            DAILY_USAGE_RECOVERY_LOCK_KEY,
-            DAILY_USAGE_RECOVERY_LOCK_OWNER,
-            DAILY_USAGE_RECOVERY_LOCK_TTL,
-        )
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?
-    else {
-        return Ok(false);
-    };
-
-    let recovery_result = async {
-        state
-            .runtime_state
-            .kv_set(DAILY_USAGE_RUNTIME_STATE_KEY, "recovering", None)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-
-        let timezone = app_timezone();
-        let now = Utc::now();
-        let (_, start, end) = local_day_window(now, timezone);
-        let bucket = start.timestamp().max(0) as u64;
-        let rollups = state
-            .background_data
-            .summarize_usage_daily_actual_cost_rollups(&UsageDailyActualCostRollupQuery {
-                finalized_from_unix_secs: bucket,
-                finalized_until_unix_secs: end.timestamp().max(0) as u64,
-            })
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-
-        let mut user_totals = HashMap::<String, f64>::new();
-        let mut key_totals = HashMap::<String, (Option<String>, bool, f64)>::new();
-        for rollup in rollups {
-            let Some(api_key_id) = non_empty(&rollup.api_key_id) else {
-                continue;
-            };
-            let amount = rollup.actual_total_cost_usd;
-            if !amount.is_finite() || amount <= 0.0 {
-                continue;
-            }
-            let user_id = rollup
-                .user_id
-                .as_deref()
-                .and_then(non_empty)
-                .map(ToOwned::to_owned);
-            if !rollup.api_key_is_standalone {
-                if let Some(user_id) = user_id.as_ref() {
-                    *user_totals.entry(user_id.clone()).or_default() += amount;
-                }
-            }
-            let key_total = key_totals.entry(api_key_id.to_string()).or_insert((
-                user_id.clone(),
-                rollup.api_key_is_standalone,
-                0.0,
-            ));
-            key_total.2 += amount;
-        }
-
-        let entries = key_totals
-            .into_iter()
-            .map(|(api_key_id, (user_id, is_standalone, key_total))| {
-                let user_id = (!is_standalone).then_some(user_id).flatten();
-                let user_units = user_id
-                    .as_ref()
-                    .and_then(|user_id| user_totals.get(user_id))
-                    .copied()
-                    .map(usd_to_units)
-                    .unwrap_or_default();
-                DailyUsageLimitRestoreEntry {
-                    user_key: user_id
-                        .as_deref()
-                        .map(|user_id| daily_usage_user_scope_key(user_id, bucket)),
-                    key_key: daily_usage_key_scope_key(&api_key_id, bucket),
-                    user_units,
-                    key_units: usd_to_units(key_total),
-                }
-            })
-            .collect::<Vec<_>>();
-        let ttl_seconds = (end.timestamp().max(0) as u64)
-            .saturating_sub(Utc::now().timestamp().max(0) as u64)
-            .saturating_add(COUNTER_EXPIRY_GRACE_SECONDS)
-            .max(1);
-        state
-            .runtime_state
-            .restore_daily_usage_limits(DailyUsageLimitRestoreInput {
-                entries: &entries,
-                bucket,
-                ttl_seconds,
-            })
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        state
-            .runtime_state
-            .kv_set(DAILY_USAGE_RUNTIME_STATE_KEY, "ready", None)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        Ok::<(), GatewayError>(())
-    }
-    .await;
-
-    if let Err(err) = state.runtime_state.lock_release(&lease).await {
-        warn!(
-            event_name = "frontdoor_daily_usage_recovery_lock_release_failed",
-            log_type = "ops",
-            error = ?err,
-            "daily usage runtime recovery lock release failed"
-        );
-    }
-    recovery_result.map(|()| true)
-}
-
-pub(crate) async fn record_finalized_daily_usage(
-    runtime_state: &RuntimeState,
-    usage: &StoredRequestUsageAudit,
-) -> Result<(), aether_runtime_state::DataLayerError> {
-    if usage.status != "completed" {
-        return Ok(());
-    }
-    let amount_units = usd_to_units(usage.actual_total_cost_usd);
-    if amount_units == 0 {
-        return Ok(());
-    }
-    let Some(api_key_id) = usage.api_key_id.as_deref().and_then(non_empty) else {
-        return Ok(());
-    };
-    let finalized_at = usage
-        .finalized_at_unix_secs
-        .unwrap_or(usage.updated_at_unix_secs);
-    let Some(finalized_at) = DateTime::<Utc>::from_timestamp(finalized_at as i64, 0) else {
-        return Ok(());
-    };
-    let timezone = app_timezone();
-    let (_, start, end) = local_day_window(finalized_at, timezone);
-    let bucket = start.timestamp().max(0) as u64;
-    let key_scope_key = daily_usage_key_scope_key(api_key_id, bucket);
-    let is_standalone = usage
-        .request_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("api_key_is_standalone"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let user_scope_key = (!is_standalone)
-        .then(|| usage.user_id.as_deref().and_then(non_empty))
-        .flatten()
-        .map(|user_id| daily_usage_user_scope_key(user_id, bucket));
-    let now = Utc::now().timestamp().max(0) as u64;
-    let ttl_seconds = (end.timestamp().max(0) as u64)
-        .saturating_sub(now)
-        .saturating_add(COUNTER_EXPIRY_GRACE_SECONDS)
-        .max(1);
-    runtime_state
-        .increment_daily_usage_limit(DailyUsageLimitIncrementInput {
-            user_key: user_scope_key.as_deref(),
-            key_key: &key_scope_key,
-            bucket,
-            amount_units,
-            ttl_seconds,
-        })
-        .await?;
-    Ok(())
-}
-
 fn scope_status(scope: &'static str, limit_usd: f64, used_usd: f64) -> DailyUsageScopeStatus {
     DailyUsageScopeStatus {
         scope,
@@ -503,30 +270,8 @@ fn scope_status(scope: &'static str, limit_usd: f64, used_usd: f64) -> DailyUsag
     }
 }
 
-fn daily_usage_user_scope_key(user_id: &str, bucket: u64) -> String {
-    format!("daily_usage_limit:user:{user_id}:{bucket}")
-}
-
-fn daily_usage_key_scope_key(api_key_id: &str, bucket: u64) -> String {
-    format!("daily_usage_limit:key:{api_key_id}:{bucket}")
-}
-
-fn usd_to_units(value: f64) -> u64 {
-    if !value.is_finite() || value <= 0.0 {
-        return 0;
-    }
-    (value * USD_UNITS_PER_DOLLAR)
-        .round()
-        .clamp(0.0, u64::MAX as f64) as u64
-}
-
 fn units_to_usd(value: u64) -> f64 {
     value as f64 / USD_UNITS_PER_DOLLAR
-}
-
-fn non_empty(value: &str) -> Option<&str> {
-    let value = value.trim();
-    (!value.is_empty()).then_some(value)
 }
 
 pub(crate) fn parse_system_limit(value: Option<serde_json::Value>) -> Result<f64, GatewayError> {
@@ -579,16 +324,15 @@ fn rfc3339(value: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        daily_usage_key_scope_key, daily_usage_user_scope_key, parse_system_limit, positive_limit,
-        record_finalized_daily_usage, recover_daily_usage_runtime, resolve_scope_limits,
-        usd_to_units, FrontdoorDailyUsageLimiter, FrontdoorDailyUsageOutcome,
-        DAILY_USAGE_RUNTIME_STATE_KEY,
+        parse_system_limit, positive_limit, resolve_scope_limits, FrontdoorDailyUsageLimiter,
+        FrontdoorDailyUsageOutcome,
     };
     use crate::control::{GatewayControlAuthContext, GatewayControlDecision};
+    use crate::data::GatewayDataState;
     use crate::AppState;
     use aether_data::repository::usage::InMemoryUsageReadRepository;
     use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
-    use aether_runtime_state::DailyUsageLimitIncrementInput;
+    use aether_usage_runtime::UsageRecordWriter;
     use std::sync::Arc;
 
     fn sample_decision(user_limit: Option<f64>, key_limit: Option<f64>) -> GatewayControlDecision {
@@ -622,31 +366,19 @@ mod tests {
         decision
     }
 
-    async fn state_with_daily_usage(actual_cost_usd: f64) -> AppState {
-        let state = AppState::new().expect("state should build");
-        let now = chrono::Utc::now();
-        let (_, start, end) =
-            crate::app_timezone::local_day_window(now, crate::app_timezone::app_timezone());
-        let bucket = start.timestamp().max(0) as u64;
-        let user_key = daily_usage_user_scope_key("user-1", bucket);
-        let key_key = daily_usage_key_scope_key("key-1", bucket);
-        state
-            .runtime_state
-            .increment_daily_usage_limit(DailyUsageLimitIncrementInput {
-                user_key: Some(&user_key),
-                key_key: &key_key,
-                bucket,
-                amount_units: usd_to_units(actual_cost_usd),
-                ttl_seconds: (end - now).num_seconds().max(1) as u64,
-            })
-            .await
-            .expect("daily usage counter should update");
-        state
-            .runtime_state
-            .kv_set(DAILY_USAGE_RUNTIME_STATE_KEY, "ready", None)
-            .await
-            .expect("daily usage runtime should be ready");
-        state
+    fn state_with_usage(items: impl IntoIterator<Item = StoredRequestUsageAudit>) -> AppState {
+        AppState::new()
+            .expect("state should build")
+            .with_usage_data_reader_for_tests(Arc::new(InMemoryUsageReadRepository::seed(items)))
+    }
+
+    fn state_with_daily_usage(actual_cost_usd: f64) -> AppState {
+        state_with_usage([finalized_usage(
+            "request-1",
+            "user-1",
+            "key-1",
+            actual_cost_usd,
+        )])
     }
 
     fn finalized_usage(
@@ -771,12 +503,12 @@ mod tests {
 
         assert_eq!(
             FrontdoorDailyUsageLimiter::new()
-                .check(&state_with_daily_usage(0.99).await, &decision)
+                .check(&state_with_daily_usage(0.99), &decision)
                 .await,
             FrontdoorDailyUsageOutcome::Allowed
         );
         match FrontdoorDailyUsageLimiter::new()
-            .check(&state_with_daily_usage(1.0).await, &decision)
+            .check(&state_with_daily_usage(1.0), &decision)
             .await
         {
             FrontdoorDailyUsageOutcome::Rejected(rejection) => {
@@ -791,20 +523,39 @@ mod tests {
 
     #[tokio::test]
     async fn usage_is_accumulated_before_a_limit_is_enabled() {
-        let state = AppState::new().expect("state should build");
-        record_finalized_daily_usage(
-            &state.runtime_state,
-            &finalized_usage("request-before-limit", "user-1", "key-1", 1.0),
-        )
-        .await
-        .expect("daily usage should be recorded while unlimited");
-        state
-            .runtime_state
-            .kv_set(DAILY_USAGE_RUNTIME_STATE_KEY, "ready", None)
-            .await
-            .expect("daily usage runtime should be ready");
+        let repository = Arc::new(InMemoryUsageReadRepository::default());
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_repository_for_tests(
+                repository,
+            ));
+        let record: aether_data_contracts::repository::usage::UpsertUsageRecord =
+            serde_json::from_value(
+                serde_json::to_value(finalized_usage(
+                    "request-before-limit",
+                    "user-1",
+                    "key-1",
+                    1.0,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        for _ in 0..3 {
+            state
+                .data
+                .upsert_usage_record(record.clone())
+                .await
+                .expect("finalized usage replay should be accepted");
+        }
+        let limiter = FrontdoorDailyUsageLimiter::new();
+        assert_eq!(
+            limiter
+                .check(&state, &sample_decision(Some(0.0), None))
+                .await,
+            FrontdoorDailyUsageOutcome::NotApplicable
+        );
 
-        match FrontdoorDailyUsageLimiter::new()
+        match limiter
             .check(&state, &sample_decision(Some(1.0), None))
             .await
         {
@@ -817,22 +568,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lost_daily_usage_runtime_is_restored_with_one_grouped_recovery() {
-        let usage_repository = Arc::new(InMemoryUsageReadRepository::seed([finalized_usage(
-            "request-restore",
-            "user-1",
-            "key-1",
-            1.25,
-        )]));
-        let state = AppState::new()
-            .expect("state should build")
-            .with_usage_data_reader_for_tests(usage_repository);
+    async fn daily_usage_is_available_without_redis_recovery() {
+        let state = state_with_daily_usage(1.25);
         let decision = sample_decision(Some(1.0), None);
-
-        assert!(recover_daily_usage_runtime(&state)
-            .await
-            .expect("daily usage runtime recovery"));
-
         match FrontdoorDailyUsageLimiter::new()
             .check(&state, &decision)
             .await
@@ -841,8 +579,16 @@ mod tests {
                 assert_eq!(rejection.scope, "user");
                 assert_eq!(rejection.used_usd, 1.25);
             }
-            other => panic!("expected restored daily usage rejection, got {other:?}"),
+            other => panic!("expected persistent daily usage rejection, got {other:?}"),
         }
+        assert_eq!(
+            state
+                .runtime_state
+                .kv_get("daily_usage_limit:runtime_state")
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -850,10 +596,7 @@ mod tests {
         let limiter = FrontdoorDailyUsageLimiter::new();
         let decision = sample_decision(Some(10.0), Some(0.5));
 
-        match limiter
-            .check(&state_with_daily_usage(0.5).await, &decision)
-            .await
-        {
+        match limiter.check(&state_with_daily_usage(0.5), &decision).await {
             FrontdoorDailyUsageOutcome::Rejected(rejection) => {
                 assert_eq!(rejection.scope, "key");
                 assert_eq!(rejection.limit_usd, 0.5);
@@ -863,7 +606,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_and_ip_bypass_skip_daily_usage_runtime_reads() {
+    async fn admin_and_ip_bypass_skip_daily_usage_repository_reads() {
         for field in ["admin", "ip"] {
             let limiter = FrontdoorDailyUsageLimiter::new();
             let mut decision = sample_decision(Some(1.0), None);
@@ -877,6 +620,147 @@ mod tests {
                     .await,
                 FrontdoorDailyUsageOutcome::NotApplicable
             );
+            assert_eq!(limiter.runtime_failure_count(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn unlimited_scopes_do_not_require_a_usage_repository() {
+        let state = AppState::new().expect("state should build");
+        let limiter = FrontdoorDailyUsageLimiter::new().with_system_default_limit_for_tests(0.0);
+        for decision in [
+            sample_decision(Some(0.0), Some(0.0)),
+            sample_decision(None, None),
+        ] {
+            assert_eq!(
+                limiter.check(&state, &decision).await,
+                FrontdoorDailyUsageOutcome::NotApplicable
+            );
+        }
+        assert_eq!(limiter.runtime_failure_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_usage_repository_reports_an_error_and_checks_fail_open() {
+        let state = AppState::new().expect("state should build");
+        let limiter = FrontdoorDailyUsageLimiter::new();
+        let decision = sample_decision(Some(1.0), None);
+
+        let error = limiter.current_status(&state, &decision).await.unwrap_err();
+        assert!(
+            matches!(error, crate::error::GatewayError::Internal(message)
+            if message.contains("daily usage limits require a usage reader"))
+        );
+        assert_eq!(
+            limiter.check(&state, &decision).await,
+            FrontdoorDailyUsageOutcome::Allowed
+        );
+        assert_eq!(limiter.runtime_failure_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_persistent_usage_is_an_available_zero_balance() {
+        let state = state_with_usage([]);
+        let status = FrontdoorDailyUsageLimiter::new()
+            .current_status(&state, &sample_decision(Some(1.0), Some(0.5)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(status.available);
+        assert_eq!(status.user.unwrap().used_usd, 0.0);
+        assert_eq!(status.key.unwrap().used_usd, 0.0);
+    }
+
+    #[tokio::test]
+    async fn current_day_usage_excludes_neighboring_days_and_other_scopes() {
+        let (_, start, end) = crate::app_timezone::local_day_window(
+            chrono::Utc::now(),
+            crate::app_timezone::app_timezone(),
+        );
+        let mut previous = finalized_usage("previous-day", "user-1", "key-1", 3.0);
+        previous.created_at_unix_ms = ((start.timestamp() - 1) * 1000) as u64;
+        previous.updated_at_unix_secs = (start.timestamp() - 1) as u64;
+        previous.finalized_at_unix_secs = Some((start.timestamp() - 1) as u64);
+        let mut today = finalized_usage("today", "user-1", "key-1", 0.25);
+        today.created_at_unix_ms = start.timestamp_millis() as u64;
+        today.updated_at_unix_secs = start.timestamp() as u64;
+        today.finalized_at_unix_secs = Some(start.timestamp() as u64);
+        let mut next = finalized_usage("next-day", "user-1", "key-1", 4.0);
+        next.created_at_unix_ms = end.timestamp_millis() as u64;
+        next.updated_at_unix_secs = end.timestamp() as u64;
+        next.finalized_at_unix_secs = Some(end.timestamp() as u64);
+        let state = state_with_usage([
+            previous,
+            today,
+            next,
+            finalized_usage("other-key", "user-1", "key-2", 0.5),
+            finalized_usage("other-user", "user-2", "key-3", 8.0),
+        ]);
+        let status = FrontdoorDailyUsageLimiter::new()
+            .current_status(&state, &sample_decision(Some(1.0), Some(0.5)))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(status.available);
+        assert_eq!(status.user.unwrap().used_usd, 0.75);
+        assert_eq!(status.key.unwrap().used_usd, 0.25);
+        assert_eq!(status.reset_at_unix_secs, end.timestamp() as u64);
+    }
+
+    #[tokio::test]
+    async fn standalone_usage_only_applies_to_its_key_scope() {
+        let mut standalone = finalized_usage("standalone", "user-1", "key-1", 0.5);
+        standalone.request_metadata = Some(serde_json::json!({"api_key_is_standalone": true}));
+        let state = state_with_usage([
+            standalone,
+            finalized_usage("normal", "user-1", "key-2", 0.25),
+        ]);
+        let limiter = FrontdoorDailyUsageLimiter::new();
+        let mut decision = sample_decision(Some(0.1), Some(0.5));
+        decision
+            .auth_context
+            .as_mut()
+            .unwrap()
+            .api_key_is_standalone = true;
+        let status = limiter
+            .current_status(&state, &decision)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(status.user.is_none());
+        assert_eq!(status.key.unwrap().used_usd, 0.5);
+        assert!(matches!(limiter.check(&state, &decision).await,
+            FrontdoorDailyUsageOutcome::Rejected(rejection) if rejection.scope == "key"));
+
+        let mut normal = sample_decision(Some(1.0), Some(0.5));
+        normal.auth_context.as_mut().unwrap().api_key_id = "key-2".to_string();
+        let status = limiter
+            .current_status(&state, &normal)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.user.unwrap().used_usd, 0.25);
+        assert_eq!(status.key.unwrap().used_usd, 0.25);
+    }
+
+    #[tokio::test]
+    async fn persistent_sum_error_is_not_reported_as_zero_usage() {
+        let state = state_with_usage((0..3).map(|index| {
+            finalized_usage(
+                &format!("overflow-{index}"),
+                "user-1",
+                "key-1",
+                70_000_000_000.0,
+            )
+        }));
+        let limiter = FrontdoorDailyUsageLimiter::new();
+        let decision = sample_decision(Some(1.0), None);
+        assert!(limiter.current_status(&state, &decision).await.is_err());
+        assert_eq!(
+            limiter.check(&state, &decision).await,
+            FrontdoorDailyUsageOutcome::Allowed
+        );
+        assert_eq!(limiter.runtime_failure_count(), 1);
     }
 }

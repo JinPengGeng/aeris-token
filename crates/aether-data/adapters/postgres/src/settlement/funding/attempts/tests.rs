@@ -9,6 +9,8 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 
 #[path = "quota_tests.rs"]
 mod quota;
+#[path = "daily_cost_tests.rs"]
+mod daily_cost;
 
 async fn fixture() -> (PgPool, PgPool, PgPool, String) {
     let (admin, first, second, schema) = super::super::tests::fixture().await;

@@ -1592,6 +1592,7 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260913010000,
             20260914010000,
             20260914020000,
+            20260914030000,
         ]
     );
 }
@@ -1658,6 +1659,7 @@ async fn postgres_migrations_create_core_config_tables_when_url_is_set() {
         "proxy_nodes",
         "usage",
         "usage_settlement_snapshots",
+        "usage_daily_cost_contributions",
         "wallets",
         "wallet_transactions",
         "wallet_daily_usage_ledgers",

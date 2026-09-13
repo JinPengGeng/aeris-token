@@ -18,6 +18,7 @@ const STAGES: &[&str] = &[
     "frontdoor_rpm_system_default",
     "frontdoor_rpm_runtime_check",
     "frontdoor_rpm_memory_fallback",
+    "daily_usage_limit_persistent_read",
     "frontdoor_local_ai_public",
     "frontdoor_execute_stream",
     "frontdoor_stream_plan_kind",

@@ -42,11 +42,11 @@ use super::{
     WalletLookupKey, WalletMutationOutcome,
 };
 use aether_data_contracts::repository::usage::{
-    PendingUsageCleanupSummary, ProviderApiKeyWindowUsageRequest,
-    StoredProviderApiKeyWindowUsageSummary, StoredUsageDailyActualCostRollup,
+    DailyActualCostCounts, DailyActualCostQuery, PendingUsageCleanupSummary,
+    ProviderApiKeyWindowUsageRequest, StoredProviderApiKeyWindowUsageSummary,
     StoredUsageDailySummary, UsageAuditListQuery, UsageCleanupExecutionMode, UsageCleanupSummary,
     UsageCleanupTargets, UsageCleanupWindow, UsageCounterFlushSummary, UsageCounterHealthSnapshot,
-    UsageCounterPendingHealthSnapshot, UsageDailyActualCostRollupQuery, UsageDailyHeatmapQuery,
+    UsageCounterPendingHealthSnapshot, UsageDailyHeatmapQuery,
 };
 use aether_runtime_state::RuntimeQueueStore;
 use aether_video_tasks_core::{
@@ -1756,18 +1756,14 @@ impl GatewayDataState {
         }
     }
 
-    pub(crate) async fn summarize_usage_daily_actual_cost_rollups(
+    pub(crate) async fn read_daily_actual_cost_units(
         &self,
-        query: &UsageDailyActualCostRollupQuery,
-    ) -> Result<Vec<StoredUsageDailyActualCostRollup>, DataLayerError> {
+        query: &DailyActualCostQuery,
+    ) -> Result<DailyActualCostCounts, DataLayerError> {
         match &self.usage_reader {
-            Some(repository) => {
-                repository
-                    .summarize_usage_daily_actual_cost_rollups(query)
-                    .await
-            }
+            Some(repository) => repository.read_daily_actual_cost_units(query).await,
             None => Err(DataLayerError::InvalidConfiguration(
-                "daily usage recovery requires a usage reader".to_string(),
+                "daily usage limits require a usage reader".to_string(),
             )),
         }
     }

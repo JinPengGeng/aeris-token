@@ -1847,6 +1847,15 @@ pub trait UsageReadRepository: Send + Sync {
         query: &UsageDailyActualCostRollupQuery,
     ) -> Result<Vec<StoredUsageDailyActualCostRollup>, crate::DataLayerError>;
 
+    async fn read_daily_actual_cost_units(
+        &self,
+        _query: &super::DailyActualCostQuery,
+    ) -> Result<super::DailyActualCostCounts, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidConfiguration(
+            "daily actual cost ledger is unavailable".to_string(),
+        ))
+    }
+
     async fn summarize_usage_cache_affinity_hit_summary(
         &self,
         query: &UsageCacheAffinityHitSummaryQuery,

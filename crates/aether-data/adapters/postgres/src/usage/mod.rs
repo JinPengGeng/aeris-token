@@ -59,6 +59,7 @@ use aether_data_contracts::repository::usage::{
 use aether_data_contracts::DataLayerError;
 
 pub mod cleanup;
+mod daily_cost;
 mod preparation;
 
 use preparation::prepare_usage_in_background;
@@ -8876,6 +8877,7 @@ ORDER BY "usage".user_id ASC
                         stored.request_metadata = request_metadata_value;
                     }
 
+                    daily_cost::sync_in_tx(tx, &stored, None).await?;
                     let before_api_key_contribution =
                         previous_usage.as_ref().and_then(api_key_usage_contribution);
                     let after_api_key_contribution = api_key_usage_contribution(&stored);
@@ -9078,6 +9080,15 @@ ORDER BY "usage".user_id ASC
                 Self::insert_pending_usage_settlement_snapshots_batch(&mut tx, &inserted_rows)
                     .await?;
                 Self::insert_pending_usage_counter_deltas_batch(&mut tx, &inserted).await?;
+
+                daily_cost::freeze_pending_in_tx(
+                    &mut tx,
+                    &inserted
+                        .iter()
+                        .map(|row| row.request_id.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .await?;
 
                 inserted_request_ids.extend(inserted.into_iter().map(|row| row.request_id));
             }
@@ -9694,6 +9705,8 @@ removed_last_used_at_unix_secs, usage_created_at_unix_secs
             .map_postgres_err()?;
         if let Some(stored) = stored {
             let after = map_inserted_pending_usage(stored, "first-byte usage")?;
+            daily_cost::freeze_pending_in_tx(&mut tx, std::slice::from_ref(&usage.request_id))
+                .await?;
             let attempt_funds: bool = sqlx::query_scalar(
                 "SELECT billing_mode = 'attempt_funds' FROM usage WHERE request_id = $1",
             )
@@ -9752,6 +9765,14 @@ removed_last_used_at_unix_secs, usage_created_at_unix_secs
                     );
                 }
             }
+            daily_cost::freeze_pending_in_tx(
+                &mut tx,
+                &updated
+                    .iter()
+                    .map(|row| row.request_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
             let attempt_requests: Vec<String> = sqlx::query_scalar("SELECT request_id FROM usage WHERE request_id = ANY($1) AND billing_mode = 'attempt_funds'")
                 .bind(&request_ids).fetch_all(&mut *tx).await.map_postgres_err()?;
             updated.retain(|row| !attempt_requests.contains(&row.request_id));
@@ -10522,6 +10543,14 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         Self::summarize_usage_settled_cost(self, query).await
     }
 
+    async fn read_daily_actual_cost_units(
+        &self,
+        query: &aether_data_contracts::repository::usage::DailyActualCostQuery,
+    ) -> Result<aether_data_contracts::repository::usage::DailyActualCostCounts, DataLayerError>
+    {
+        daily_cost::read_scopes(&self.pool, query).await
+    }
+
     async fn summarize_usage_daily_actual_cost_rollups(
         &self,
         query: &UsageDailyActualCostRollupQuery,
@@ -10948,6 +10977,7 @@ pub(crate) async fn apply_attempt_funds_summary_in_tx(
     let after = find_usage_by_request_id_in_tx(tx, request)
         .await?
         .ok_or_else(|| DataLayerError::UnexpectedValue("attempt parent disappeared".to_string()))?;
+    daily_cost::sync_in_tx(tx, &after, Some(summary)).await?;
     if let (Some(before), Some(after)) = (
         api_key_usage_contribution(&previous),
         api_key_usage_contribution(&after),

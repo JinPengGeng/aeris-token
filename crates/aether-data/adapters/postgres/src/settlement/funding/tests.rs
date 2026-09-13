@@ -51,6 +51,7 @@ pub(super) async fn fixture() -> (PgPool, PgPool, PgPool, String) {
         "usage_body_blobs",
         "usage_settlement_snapshots",
         "usage_counter_deltas",
+        "usage_daily_cost_contributions",
         "request_fund_reservations",
         "request_fund_allocations",
         "request_fund_recoveries",

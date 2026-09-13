@@ -492,8 +492,8 @@ pub(crate) async fn refresh_summary(
     tx: &mut PostgresTransaction,
     request: &str,
 ) -> Result<RequestFundsSummary, DataLayerError> {
-    let closed: bool = sqlx::query_scalar(
-        "SELECT funds_admission_closed_at IS NOT NULL FROM usage WHERE request_id = $1",
+    let closed_at: Option<i64> = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM funds_admission_closed_at)::bigint FROM usage WHERE request_id = $1",
     )
     .bind(request)
     .fetch_one(&mut **tx)
@@ -509,7 +509,8 @@ pub(crate) async fn refresh_summary(
                 .ok_or_else(|| invalid("attempt summary lost row"))?,
         );
     }
-    let summary = summarize_request_attempt_funds(&attempts, closed)?;
+    let mut summary = summarize_request_attempt_funds(&attempts, closed_at.is_some())?;
+    summary.admission_closed_at_unix_secs = closed_at.map(|at| at.max(0) as u64);
     let mut usage = RequestAttemptBilledUsage::default();
     for attempt in &attempts {
         if let Some(RequestAttemptTerminalFacts {

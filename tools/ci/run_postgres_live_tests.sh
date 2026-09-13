@@ -43,6 +43,11 @@ run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt
 run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_admission_entitlements_and_concurrent_settlement
 run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_quote_mismatch_preserves_known_charge_and_audit
 run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_settled_parent_accepts_final_lifecycle_without_financial_mutation
+run_test aether-data-postgres settlement::funding::attempts::tests::daily_cost::live_daily_cost_late_attempts_replay_and_rollback
+run_test aether-data-postgres settlement::funding::attempts::tests::daily_cost::live_daily_cost_legacy_identity_scopes_and_concurrent_parents
+run_test aether-data-postgres settlement::funding::attempts::tests::daily_cost::live_daily_cost_backfill_replays_source_and_preserves_frozen_identity
+run_test aether-data-postgres settlement::funding::attempts::tests::daily_cost::live_daily_cost_pending_batches_freeze_identity_and_rollback_reuse
+run_test aether-data-postgres settlement::funding::attempts::tests::daily_cost::live_daily_cost_fractional_midnight_backfill_keeps_day_after_revision
 run_test aether-data-postgres settlement::funding::attempts::tests::quota::live_attempt_quota_unknown_retry_late_charge_and_replay
 run_test aether-data-postgres settlement::funding::attempts::tests::quota::live_attempt_quota_freezes_policy_and_survives_legacy_expiry
 run_test aether-data-postgres settlement::funding::attempts::tests::quota::live_attempt_quota_concurrent_requests_and_atomic_rollback

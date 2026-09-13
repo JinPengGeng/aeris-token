@@ -4,8 +4,9 @@ use std::sync::RwLock;
 
 use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_data_contracts::repository::usage::{
-    canonical_usage_body_ref_for, parse_usage_body_ref, sanitize_usage_request_metadata,
-    usage_body_ref, StoredUsageAuditAggregation, StoredUsageAuditSummary,
+    canonical_usage_body_ref_for, next_daily_cost_contribution, parse_usage_body_ref,
+    sanitize_usage_request_metadata, usage_body_ref, DailyActualCostCounts, DailyActualCostQuery,
+    DailyCostContribution, StoredUsageAuditAggregation, StoredUsageAuditSummary,
     StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
     StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
     StoredUsageDailyActualCostRollup, StoredUsageDashboardDailyBreakdownRow,
@@ -57,6 +58,8 @@ pub struct InMemoryUsageReadRepository {
         BTreeMap<String, aether_data_contracts::repository::settlement::RequestFundsSummary>,
     >,
     attempt_provider_contributions: RwLock<BTreeMap<String, ProviderApiKeyUsageContribution>>,
+    // Financial retention is independent of the parent audit and detached bodies.
+    daily_cost_contributions: RwLock<BTreeMap<String, DailyCostContribution>>,
 }
 
 impl InMemoryUsageReadRepository {
@@ -83,10 +86,25 @@ impl InMemoryUsageReadRepository {
         })?;
         let mut modes = self.attempt_funds.write().expect("attempt funds mode lock");
         let mut summary = modes.get(request).cloned();
+        let mut daily = self
+            .daily_cost_contributions
+            .write()
+            .expect("daily cost lock");
+        // The callback may mutate funds. Reject reused identities and legacy conversion
+        // before calling it, while the same parent and contribution locks remain held.
+        let empty_summary = Default::default();
+        next_daily_cost_contribution(
+            daily.get(request),
+            parent,
+            Some(summary.as_ref().unwrap_or(&empty_summary)),
+        )?;
         let before = parent.clone();
         let mut staged_parent = parent.clone();
         let result = f(&mut staged_parent, &mut summary)?;
+        let contribution =
+            next_daily_cost_contribution(daily.get(request), &staged_parent, summary.as_ref())?;
         *parent = staged_parent;
+        daily.insert(request.to_string(), contribution);
         if let Some(summary) = summary {
             if !modes.contains_key(request) {
                 if let (Some(catalog), Some(contribution)) = (
@@ -140,9 +158,17 @@ impl InMemoryUsageReadRepository {
         I: IntoIterator<Item = StoredRequestUsageAudit>,
     {
         let mut by_request_id = BTreeMap::new();
+        let mut daily_cost_contributions = BTreeMap::new();
         for mut item in items {
             hydrate_legacy_body_refs(&mut item);
             hydrate_client_family(&mut item);
+            let contribution = next_daily_cost_contribution(
+                daily_cost_contributions.get(&item.request_id),
+                &item,
+                None,
+            )
+            .expect("valid daily cost fixture");
+            daily_cost_contributions.insert(item.request_id.clone(), contribution);
             by_request_id.insert(item.request_id.clone(), item);
         }
         Self {
@@ -153,6 +179,7 @@ impl InMemoryUsageReadRepository {
             provider_catalog: None,
             attempt_funds: Default::default(),
             attempt_provider_contributions: Default::default(),
+            daily_cost_contributions: RwLock::new(daily_cost_contributions),
         }
     }
 
@@ -162,6 +189,7 @@ impl InMemoryUsageReadRepository {
     {
         let mut by_request_id = BTreeMap::new();
         let mut detached_bodies = BTreeMap::new();
+        let mut daily_cost_contributions = BTreeMap::new();
         for mut item in items {
             hydrate_legacy_body_refs(&mut item);
             hydrate_client_family(&mut item);
@@ -198,6 +226,13 @@ impl InMemoryUsageReadRepository {
             ) {
                 item.client_response_body_ref = Some(body_ref);
             }
+            let contribution = next_daily_cost_contribution(
+                daily_cost_contributions.get(&request_id),
+                &item,
+                None,
+            )
+            .expect("valid daily cost fixture");
+            daily_cost_contributions.insert(request_id.clone(), contribution);
             by_request_id.insert(request_id, item);
         }
         Self {
@@ -208,6 +243,7 @@ impl InMemoryUsageReadRepository {
             provider_catalog: None,
             attempt_funds: Default::default(),
             attempt_provider_contributions: Default::default(),
+            daily_cost_contributions: RwLock::new(daily_cost_contributions),
         }
     }
 
@@ -223,6 +259,7 @@ impl InMemoryUsageReadRepository {
             provider_catalog: self.provider_catalog,
             attempt_funds: self.attempt_funds,
             attempt_provider_contributions: self.attempt_provider_contributions,
+            daily_cost_contributions: self.daily_cost_contributions,
         }
     }
 
@@ -1240,6 +1277,52 @@ fn usage_provider_aggregation_identity(
 
 #[async_trait]
 impl UsageReadRepository for InMemoryUsageReadRepository {
+    async fn read_daily_actual_cost_units(
+        &self,
+        query: &DailyActualCostQuery,
+    ) -> Result<DailyActualCostCounts, DataLayerError> {
+        query.validate()?;
+        let daily = self
+            .daily_cost_contributions
+            .read()
+            .expect("daily cost lock");
+        let mut counts = DailyActualCostCounts::default();
+        for contribution in daily.values() {
+            if !contribution
+                .accounting_at_unix_secs
+                .is_some_and(|at| at >= query.start_unix_secs && at < query.end_unix_secs)
+            {
+                continue;
+            }
+            if contribution.api_key_id.as_deref() == Some(query.api_key_id.as_str()) {
+                counts.key_units = counts
+                    .key_units
+                    .checked_add(contribution.actual_cost_units)
+                    .filter(|units| *units <= i64::MAX as u64)
+                    .ok_or_else(|| {
+                        DataLayerError::InvalidInput("daily key cost overflow".into())
+                    })?;
+            }
+            if !contribution.api_key_is_standalone
+                && contribution
+                    .api_key_id
+                    .as_deref()
+                    .is_some_and(|key| !key.trim().is_empty())
+                && query.user_id.is_some()
+                && contribution.user_id == query.user_id
+            {
+                counts.user_units = counts
+                    .user_units
+                    .checked_add(contribution.actual_cost_units)
+                    .filter(|units| *units <= i64::MAX as u64)
+                    .ok_or_else(|| {
+                        DataLayerError::InvalidInput("daily user cost overflow".into())
+                    })?;
+            }
+        }
+        Ok(counts)
+    }
+
     async fn find_by_id(
         &self,
         id: &str,
@@ -3115,8 +3198,19 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
         let capture_usage = usage.clone();
         let mut usage = sanitize_usage_for_persistence(usage);
         let mut by_request_id = self.by_request_id.write().expect("usage repository lock");
-        let existing = by_request_id.get(&usage.request_id).cloned();
-        let attempt_funds = self.is_attempt_funds_request(&usage.request_id);
+        let mut existing = by_request_id.get(&usage.request_id).cloned();
+        let modes = self.attempt_funds.read().expect("attempt funds mode lock");
+        let funds_summary = modes.get(&usage.request_id);
+        let attempt_funds = funds_summary.is_some();
+        let mut daily = self
+            .daily_cost_contributions
+            .write()
+            .expect("daily cost lock");
+        if existing.is_none() && daily.contains_key(&usage.request_id) {
+            return Err(DataLayerError::InvalidInput(
+                "daily cost request identity was already used by a deleted audit".into(),
+            ));
+        }
         if attempt_funds {
             if let Some(previous) = &existing {
                 usage.user_id = previous.user_id.clone();
@@ -3164,12 +3258,12 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             }
         }
         let mut capture_usage = sanitize_usage_capture_controls_for_persistence(capture_usage);
-        if let Some(existing) = by_request_id.get_mut(&usage.request_id) {
+        if let Some(existing) = existing.as_mut() {
             existing.request_metadata =
                 sanitize_usage_request_metadata(existing.request_metadata.take());
         }
-        {
-            let mut detached_bodies = self.detached_bodies.write().expect("usage repository lock");
+        let detached_bodies_to_remove = {
+            let mut detached_bodies_to_remove = Vec::new();
             for (field, state, body) in [
                 (
                     UsageBodyField::RequestBody,
@@ -3202,10 +3296,11 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                         )
                     )
                 {
-                    detached_bodies.remove(&usage_body_ref(&usage.request_id, field));
+                    detached_bodies_to_remove.push(usage_body_ref(&usage.request_id, field));
                 }
             }
-        }
+            detached_bodies_to_remove
+        };
 
         let created_at_unix_ms = by_request_id
             .get(&usage.request_id)
@@ -3547,7 +3642,16 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             finalized_at_unix_secs: usage.finalized_at_unix_secs,
         };
 
+        let contribution =
+            next_daily_cost_contribution(daily.get(&stored.request_id), &stored, funds_summary)?;
+        {
+            let mut detached_bodies = self.detached_bodies.write().expect("usage repository lock");
+            for body_ref in detached_bodies_to_remove {
+                detached_bodies.remove(&body_ref);
+            }
+        }
         by_request_id.insert(stored.request_id.clone(), stored.clone());
+        daily.insert(stored.request_id.clone(), contribution);
         if let Some(auth_api_keys) = self.auth_api_keys.as_ref() {
             let before_contribution = existing.as_ref().and_then(api_key_usage_contribution);
             let after_contribution = api_key_usage_contribution(&stored);

@@ -3,6 +3,7 @@ use crate::repository::{
     usage::{InMemoryUsageReadRepository, UsageReadRepository},
     wallet::StoredWalletSnapshot,
 };
+use aether_data_contracts::repository::usage::{DailyActualCostCounts, DailyActualCostQuery};
 use std::sync::Arc;
 
 fn fixture(
@@ -11,7 +12,17 @@ fn fixture(
     InMemorySettlementRepository,
     Arc<InMemoryUsageReadRepository>,
 ) {
-    let parent = StoredRequestUsageAudit::new(
+    fixture_scope(balance, false)
+}
+
+fn fixture_scope(
+    balance: f64,
+    standalone: bool,
+) -> (
+    InMemorySettlementRepository,
+    Arc<InMemoryUsageReadRepository>,
+) {
+    let mut parent = StoredRequestUsageAudit::new(
         "usage".to_string(),
         "request".to_string(),
         Some("owner".to_string()),
@@ -50,11 +61,12 @@ fn fixture(
         None,
     )
     .unwrap();
+    parent.request_metadata = Some(serde_json::json!({"api_key_is_standalone": standalone}));
     let usage = Arc::new(InMemoryUsageReadRepository::seed([parent]));
     let wallet = StoredWalletSnapshot::new(
         "wallet".to_string(),
-        Some("owner".to_string()),
-        None,
+        (!standalone).then(|| "owner".to_string()),
+        standalone.then(|| "key".to_string()),
         balance,
         0.0,
         "finite".to_string(),
@@ -512,6 +524,19 @@ async fn attempts_keep_unknown_holds_across_retry_and_late_charge() {
         .unwrap()
         .unwrap();
     assert_eq!(balance(&repo), 0.14);
+    let first_day = DailyActualCostQuery {
+        user_id: Some("owner".into()),
+        api_key_id: "key".into(),
+        start_unix_secs: 0,
+        end_unix_secs: 86_400,
+    };
+    assert_eq!(
+        usage
+            .read_daily_actual_cost_units(&first_day)
+            .await
+            .unwrap(),
+        DailyActualCostCounts::default()
+    );
     let closed = repo
         .close_request_funds_admission(CloseRequestFundsAdmissionInput {
             identity: b.identity(),
@@ -528,13 +553,25 @@ async fn attempts_keep_unknown_holds_across_retry_and_late_charge() {
         ),
         (6_000_000, 8_000_000, 1)
     );
+    assert_eq!(closed.admission_closed_at_unix_secs, Some(102));
+    assert_eq!(
+        usage
+            .read_daily_actual_cost_units(&first_day)
+            .await
+            .unwrap(),
+        DailyActualCostCounts {
+            user_units: 6_000_000,
+            key_units: 6_000_000
+        }
+    );
     assert_eq!(
         repo.reserve_request_attempt_funds(quote("c"))
             .await
             .unwrap(),
         ReserveRequestAttemptFundsOutcome::AdmissionClosed
     );
-    let charged_a = facts(&a, Some(7_000_000));
+    let mut charged_a = facts(&a, Some(7_000_000));
+    charged_a.finalized_at_unix_secs = 86_500;
     repo.record_request_attempt_funds_outcome(charged_a.clone())
         .await
         .unwrap()
@@ -581,7 +618,7 @@ async fn attempts_keep_unknown_holds_across_retry_and_late_charge() {
     let done = repo
         .close_request_funds_admission(CloseRequestFundsAdmissionInput {
             identity: a.identity(),
-            closed_at_unix_secs: 103,
+            closed_at_unix_secs: 86_501,
         })
         .await
         .unwrap()
@@ -594,12 +631,34 @@ async fn attempts_keep_unknown_holds_across_retry_and_late_charge() {
         ),
         (13_000_000, 0, 0)
     );
+    assert_eq!(done.admission_closed_at_unix_secs, Some(102));
     repo.record_request_attempt_funds_outcome(charged_a)
         .await
         .unwrap();
     repo.record_request_attempt_funds_outcome(charged_b)
         .await
         .unwrap();
+    assert_eq!(
+        usage
+            .read_daily_actual_cost_units(&first_day)
+            .await
+            .unwrap(),
+        DailyActualCostCounts {
+            user_units: 13_000_000,
+            key_units: 13_000_000
+        }
+    );
+    assert_eq!(
+        usage
+            .read_daily_actual_cost_units(&DailyActualCostQuery {
+                start_unix_secs: 86_400,
+                end_unix_secs: 172_800,
+                ..first_day
+            })
+            .await
+            .unwrap(),
+        DailyActualCostCounts::default()
+    );
     assert_eq!(balance(&repo), 0.07);
     assert!(repo
         .release_request_funds(ReleaseRequestFundsInput {
@@ -614,6 +673,45 @@ async fn attempts_keep_unknown_holds_across_retry_and_late_charge() {
         })
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn attempt_daily_cost_standalone_only_counts_key_after_close() {
+    let (repo, usage) = fixture_scope(0.20, true);
+    let mut a = quote("standalone");
+    a.quote.identity.api_key_is_standalone = true;
+    repo.reserve_request_attempt_funds(a.clone()).await.unwrap();
+    repo.mark_request_attempt_funds_dispatched(a.identity())
+        .await
+        .unwrap();
+    let charged = facts(&a, Some(6_000_000));
+    repo.record_request_attempt_funds_outcome(charged.clone())
+        .await
+        .unwrap();
+    repo.close_request_funds_admission(CloseRequestFundsAdmissionInput {
+        identity: a.identity(),
+        closed_at_unix_secs: 102,
+    })
+    .await
+    .unwrap();
+    repo.record_request_attempt_funds_outcome(charged)
+        .await
+        .unwrap();
+    assert_eq!(
+        usage
+            .read_daily_actual_cost_units(&DailyActualCostQuery {
+                user_id: Some("owner".into()),
+                api_key_id: "key".into(),
+                start_unix_secs: 100,
+                end_unix_secs: 200,
+            })
+            .await
+            .unwrap(),
+        DailyActualCostCounts {
+            user_units: 0,
+            key_units: 6_000_000
+        }
+    );
 }
 
 #[tokio::test]
