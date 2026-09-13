@@ -139,6 +139,49 @@ test('nightly quality gate pins the push-lane required check contexts', () => {
   assert.match(snapshot.run, /echo "publish=true"/);
 });
 
+test('nightly publishes signed tunnel archives alongside the dated package', () => {
+  const document = workflow();
+  const source = workflowSource();
+  const tunnel = document.jobs.tunnel;
+  assert.ok(tunnel, 'nightly must build tunnel artifacts');
+  assert.match(tunnel.if, /needs\.source\.outputs\.publish == 'true'/);
+  assert.deepEqual(tunnel.strategy.matrix.include.map(({ name, target }) => ({ name, target })), [
+    { name: 'linux-musl-amd64', target: 'x86_64-unknown-linux-musl' },
+    { name: 'linux-musl-arm64', target: 'aarch64-unknown-linux-musl' },
+  ]);
+  assert.match(tunnelSource(tunnel), /aether-tunnel-\$\{\{ matrix\.name \}\}\.tar\.gz/);
+  assert.match(source, /sha256sum aether-tunnel-\*\.tar\.gz > SHA256SUMS\.txt/);
+
+  const signing = findStep(document, 'publish', (step) => step.name === 'Sign nightly tunnel manifest');
+  assert.match(signing.run, /AETHER_TUNNEL_RELEASE_PRIVATE_KEY_PEM/);
+  assert.match(signing.run, /SHA256SUMS\.txt/);
+  assert.match(signing.run, /verify-tunnel-release\.sh/);
+  assert.match(signing.run, /refusing to publish unsigned/);
+  for (const input of ['AETHER_TUNNEL_RELEASE_KEY_ID', 'AETHER_TUNNEL_RELEASE_PUBLIC_KEY', 'AETHER_TUNNEL_RELEASE_TRUST_KEYS']) {
+    assert.equal(signing.env[input], tunnel.env[input]);
+  }
+  assert.doesNotMatch(signing.run, /\$\{\{\s*(?:vars|secrets)\./);
+  assert.equal(document.jobs.publish.environment, 'release');
+  const steps = document.jobs.publish.steps;
+  assert.ok(steps.indexOf(signing) < steps.findIndex((step) => step.name === 'Build and push nightly image'));
+  assert.doesNotMatch(tunnelSource(tunnel), /--allow-unconfigured/);
+
+  const packageJob = document.jobs.package;
+  assert.ok(packageJob.needs.includes('tunnel'));
+  const publishJob = document.jobs.publish;
+  assert.ok(publishJob.needs.includes('tunnel'));
+  const notifyJob = document.jobs.notify;
+  assert.ok(notifyJob.needs.includes('tunnel'));
+  assert.match(source, /aether-tunnel-linux-musl-amd64\.tar\.gz/);
+  assert.match(source, /aether-tunnel-linux-musl-arm64\.tar\.gz/);
+  assert.match(source, /SHA256SUMS\.txt\.sig/);
+  assert.match(source, /release-provenance\.json/);
+});
+
+function tunnelSource(tunnelJob) {
+  return (tunnelJob.steps ?? []).map((step) => step.run ?? '').join('\n');
+}
+
 test('nightly release publish is draft-first and prerelease, never latest', () => {
   const document = workflow();
   const publish = findStep(document, 'publish', (step) => step.name === 'Publish GitHub Release');
