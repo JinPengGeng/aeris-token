@@ -84,6 +84,7 @@ jobs:
         shell: bash
         run: |
           python3 tests/compose_database_config_test.py
+          python3 tests/redis_production_profile_test.py
           bash tests/deploy_state_safety_test.sh
           bash tests/install_archive_safety_test.sh
           bash tests/install_container_runtime_security_test.sh

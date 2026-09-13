@@ -1,0 +1,22 @@
+# Redis production durability overlay.
+#
+# Apply explicitly with:
+#   docker compose -f docker-compose.yml -f docker-compose.redis-production.yml up -d
+#
+# The base compose file intentionally remains a disposable local-development
+# Redis. This overlay makes stream state durable on a named volume; it does not
+# provide Redis TLS, so a networked deployment must use a managed TLS Redis and
+# set REDIS_URL to rediss:// in the application environment instead.
+
+services:
+  redis:
+    command: >-
+      redis-server --dir /data --appendonly yes --appendfsync everysec
+      --save 900 1 --save 300 10
+      --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      --maxclients ${REDIS_MAXCLIENTS:-10000}
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
