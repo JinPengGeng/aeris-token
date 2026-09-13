@@ -1,9 +1,11 @@
 use super::*;
 use crate::{SqlxSettlementRepository, SqlxUsageReadRepository};
-use aether_data_contracts::repository::usage::{UpsertUsageRecord, UsageBodyCaptureState};
+use aether_data_contracts::repository::usage::{
+    usage_json_heap_estimate, UpsertUsageRecord, UsageBodyCaptureState, UsageCaptureMemoryBudget,
+};
 use futures_util::FutureExt;
 use sqlx::PgPool;
-use std::panic::AssertUnwindSafe;
+use std::{panic::AssertUnwindSafe, sync::Arc};
 
 async fn fixture() -> (PgPool, PgPool, PgPool, String) {
     let (admin, first, second, schema) = super::super::tests::fixture().await;
@@ -137,6 +139,168 @@ async fn cleanup(admin: PgPool, first: PgPool, second: PgPool, schema: String) {
         .await
         .unwrap();
     admin.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated AETHER_TEST_DATABASE_URL; runs real migrations"]
+async fn live_attempt_funds_settled_parent_accepts_final_lifecycle_without_financial_mutation() {
+    let (admin, first, second, schema) = fixture().await;
+    let result = AssertUnwindSafe(async {
+        let repo = SqlxSettlementRepository::new(first.clone());
+        let usage_repo = SqlxUsageReadRepository::new(first.clone());
+        for charged in [false, true] {
+            let request = if charged {
+                "settled-charge"
+            } else {
+                "settled-release"
+            };
+            let mut initial = parent(request);
+            initial.status = if charged { "streaming" } else { "pending" }.to_string();
+            let revision = initial.updated_at_unix_secs + 10;
+            usage_repo.upsert(initial).await.unwrap();
+            let q = quote(request, "a");
+            repo.reserve_request_attempt_funds(q.clone()).await.unwrap();
+            let mut outcome = facts(&q, Some(6_000_000), charged);
+            if charged {
+                repo.mark_request_attempt_funds_dispatched(q.identity())
+                    .await
+                    .unwrap();
+            } else {
+                outcome.facts.execution.status = RequestAttemptExecutionStatus::Cancelled;
+                outcome.facts.outcome = RequestAttemptFinancialOutcome::NoCharge;
+            }
+            repo.record_request_attempt_funds_outcome(outcome.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            repo.close_request_funds_admission(CloseRequestFundsAdmissionInput {
+                identity: q.identity(),
+                closed_at_unix_secs: outcome.finalized_at_unix_secs,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            let financial_before = summary(&first, request).await;
+            let balance_before = balance(&first).await;
+            let before = usage_repo
+                .find_by_request_id(request)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(before.billing_status, "settled");
+            assert_eq!(before.status, if charged { "streaming" } else { "pending" });
+
+            let mut terminal = parent(request);
+            terminal.status = if charged { "completed" } else { "cancelled" }.to_string();
+            terminal.status_code = Some(if charged { 200 } else { 499 });
+            terminal.response_time_ms = Some(123);
+            terminal.first_byte_time_ms = Some(42);
+            terminal.updated_at_unix_secs = revision;
+            terminal.finalized_at_unix_secs = Some(revision);
+            terminal.provider_id = Some("p-b".to_string());
+            terminal.provider_api_key_id = Some("pk-b".to_string());
+            terminal.provider_name = "final-provider".to_string();
+            terminal.target_model = Some("final-image-model".to_string());
+            terminal.user_id = Some("forged-owner".to_string());
+            terminal.api_key_id = Some("forged-key".to_string());
+            terminal.total_cost_usd = Some(999.0);
+            terminal.actual_total_cost_usd = Some(999.0);
+            terminal.input_tokens = Some(999);
+            terminal.output_tokens = Some(999);
+            terminal.total_tokens = Some(1998);
+            terminal.request_metadata = Some(serde_json::json!({"api_key_is_standalone": true}));
+            terminal.response_body = Some(serde_json::json!({"phase": "final-provider"}));
+            terminal.response_body_state = Some(UsageBodyCaptureState::Inline);
+            terminal.client_response_body = Some(serde_json::json!({"phase": "final-client"}));
+            terminal.client_response_body_state = Some(UsageBodyCaptureState::Inline);
+            let budget = Arc::new(UsageCaptureMemoryBudget::new(1024 * 1024));
+            let bytes = [
+                terminal.provider_request_body.as_ref(),
+                terminal.response_body.as_ref(),
+                terminal.client_response_body.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|body| std::mem::size_of::<Value>() + usage_json_heap_estimate(body))
+            .sum();
+            assert!(terminal.capture_retention.reserve(budget, bytes));
+            usage_repo.upsert(terminal.clone()).await.unwrap();
+            let stored = usage_repo
+                .find_by_request_id(request)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.status, terminal.status);
+            assert_eq!(stored.status_code, terminal.status_code);
+            assert_eq!(stored.response_time_ms, Some(123));
+            assert_eq!(stored.first_byte_time_ms, Some(42));
+            assert_eq!(stored.updated_at_unix_secs, revision);
+            assert_eq!(stored.finalized_at_unix_secs, Some(revision));
+            assert_eq!(stored.provider_id.as_deref(), Some("p-b"));
+            assert_eq!(stored.provider_api_key_id.as_deref(), Some("pk-b"));
+            assert_eq!(stored.target_model.as_deref(), Some("final-image-model"));
+            assert_eq!(stored.response_body, terminal.response_body);
+            assert_eq!(stored.client_response_body, terminal.client_response_body);
+            assert_eq!(
+                stored.response_body_state,
+                Some(UsageBodyCaptureState::Reference)
+            );
+            assert!(stored.response_body_ref.is_some());
+            assert_eq!(stored.user_id, before.user_id);
+            assert_eq!(stored.api_key_id, before.api_key_id);
+            assert_eq!(stored.billing_status, "settled");
+            assert_eq!(stored.total_cost_usd, before.total_cost_usd);
+            assert_eq!(stored.actual_total_cost_usd, before.actual_total_cost_usd);
+            assert_eq!(
+                (
+                    stored.input_tokens,
+                    stored.output_tokens,
+                    stored.total_tokens
+                ),
+                (
+                    before.input_tokens,
+                    before.output_tokens,
+                    before.total_tokens
+                )
+            );
+            assert_eq!(
+                stored.request_metadata.as_ref().unwrap()["api_key_is_standalone"],
+                false
+            );
+            assert_eq!(summary(&first, request).await, financial_before);
+            assert_eq!(balance(&first).await, balance_before);
+
+            // Both an old terminal revision and a newer nonterminal revision are full no-ops.
+            for stale_terminal in [true, false] {
+                let mut stale = terminal.clone();
+                stale.status = if stale_terminal { "failed" } else { "pending" }.to_string();
+                stale.updated_at_unix_secs = if stale_terminal {
+                    revision - 1
+                } else {
+                    revision + 1
+                };
+                stale.finalized_at_unix_secs = stale_terminal.then_some(revision - 1);
+                stale.provider_id = Some("p-a".to_string());
+                stale.response_body = Some(serde_json::json!({"phase": "stale"}));
+                usage_repo.upsert(stale).await.unwrap();
+                assert_eq!(
+                    usage_repo
+                        .find_by_request_id(request)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    stored
+                );
+                assert_eq!(summary(&first, request).await, financial_before);
+            }
+        }
+    })
+    .catch_unwind()
+    .await;
+    cleanup(admin, first, second, schema).await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]

@@ -94,6 +94,24 @@ Gateway 实际调用计数和新 PostgreSQL 端到端验收仍未完成，不能
 
 工作树已快进整合远端 `9862905bf` 与 main `4a74b11ef`，保留全部未提交 Gateway 改动。Gateway 代理继续处理 reserve 提交时取消、异步作用域和实际入口等最终评审项；本节数据验证不代表该部分已经验收，也不将 #391 转为 Ready。
 
+### 财务先完成时仍允许客户端生命周期收尾（2026-09-13）
+
+Gateway reserve/cancel 与 close 后父写入重试两项真实 PostgreSQL 回归暴露同一缺陷：子 reservation 已释放或收费、admission 已关闭、父 billing status 已 settled，但父 status 仍停在 pending/streaming。通用 upsert 返回了行，SQL 的 `billing_status = 'pending'` 条件却阻止了终态字段更新。延长等待或提前写父终态都不能修复生命周期与财务状态互相独立的约束。
+
+仅对服务器标记的 `billing_mode = 'attempt_funds'` 放开客户端状态、时间、最终路由与 capture 更新；继续先执行已有生命周期 revision gate，旧终态及终态后的非终态事件是完整事务 no-op。owner、billing status、费用和 token 仍取冻结父汇总，金融 setter 未放宽，provider 费用仍由子 attempt 独立计数。legacy settled 请求保持原有不可覆盖规则，无 schema 或公共 API 改动。
+
+新增真实 PostgreSQL target `live_attempt_funds_settled_parent_accepts_final_lifecycle_without_financial_mutation`，覆盖 Prepared NoCharge 与 dispatched 已收费两种先结账路径，随后 cancelled/completed 终态、时间、最终路由和 body 能保存；伪造 owner/API key/金额/token/standalone metadata 均不覆盖冻结事实，旧 terminal 与新 nonterminal 重放不修改存储。小 body 按现有存储策略转为 Reference，读取时还原原内容。四项 attempt live tests 全通过（0 ignored），113 项 usage 单元测试通过（12 个既有 live targets 在该单元调用中 ignored），PostgreSQL 全特性全目标 Clippy `-D warnings` 通过。required data runner 增至 25 个 exact targets；完整 runner 与 Gateway 回归结果后续补充。
+
+完整 required data runner 随后在同一专属 PostgreSQL 17.11 上通过，25 个 exact targets 每项均为 `1 passed / 0 failed / 0 ignored`，包含迁移、legacy 生命周期 no-op、并发 quota、既有资金/retention、四项 attempts 和八项 credit。定向 rustfmt、Bash 语法、ShellCheck 和 diff 检查通过。该数据层修复不会更新 Gateway 的最终验收状态。
+
+前一已推送 head `4a9b08673` 的四项 required checks 均已 SUCCESS，Rust CI run `34749410358` 和 CodeQL run `34749406815` 完成；Data DB Live job `103703097140` 已逐项核验原 24 个 target 各 `1 passed / 0 ignored`。这些 hosted 结果不代表本节新修复或未提交 Gateway 已验收。main `4a74b11ef` 的 CodeQL run `34748724974` 仍 queued/no jobs，不能以 PR 扫描替代。
+
+### Gateway 实测接入 required CI（2026-09-13，待最终集成）
+
+新增 `run_gateway_attempt_funds_live_tests.sh` 串行执行八个明确的 Gateway PostgreSQL/真实 HTTP 用例。沿用 `Test (Gateway)` 的构建、Rust 栈和 required 汇总规则，仅为该 job 增加一次性 PostgreSQL 16 service 与执行步骤；避免在 data job 重建整个 Gateway。脚本必须提供专属数据库 URL，每项 fixture 在真实迁移后的唯一 schema 中隔离；不会读取开发者默认连接。非 ignored 的 memory、报价投影和入口门禁测试仍由既有 nextest 执行。
+
+八个 target 已与当前测试声明逐一核对；Bash 语法、ShellCheck、actionlint 和 12 项既有 Rust CI 选择/固定引用测试通过。首次 Node 验证缺少 `js-yaml`，按已有 lockfile 安装 automation 依赖后通过，未修改依赖文件。此处只记录 CI 接线和静态验收，真实八项运行及完整 Gateway 审查结果另行补充；尚未提交的 CI 变更不能视为 hosted 验收。
+
 ### 尚未完成的接线
 
 - 本文不代表 Gateway 的“资金 dispatch 持久化后才能调用上游”、请求结束 close admission、可靠结果写入或父持久化失败处理已经通过验收；正在实施的接线须通过真实 Gateway 与 PostgreSQL 测试后才能交付。实现状态另见 `issue-300-gateway-attempt-funds.md`。

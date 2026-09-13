@@ -8584,7 +8584,10 @@ ORDER BY "usage".user_id ASC
                         clear_response_body,
                         clear_client_response_body,
                     } = prepared?;
-                    let capture_update_allowed = recovers_terminal_failure
+                    // Attempt accounting can settle before the final client response.
+                    // The lifecycle gate above still fences stale revisions; these
+                    // captures cannot replace the frozen attempt financial fields.
+                    let capture_update_allowed = attempt_funds || recovers_terminal_failure
                         || usage_capture_update_allowed(
                             previous_usage.as_ref().map(|stored| {
                                 (stored.status.as_str(), stored.billing_status.as_str())
