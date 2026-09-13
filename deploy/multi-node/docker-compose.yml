@@ -1,0 +1,33 @@
+name: aether-multi-node
+
+# Three gateway replicas share externally managed PostgreSQL and Redis.
+# Put an L7 load balancer in front of frontdoor-1/2; background is not public.
+x-gateway: &gateway
+  image: ${APP_IMAGE:-ghcr.io/jinpenggeng/aeris-token:latest}
+  read_only: true
+  cap_drop: [ALL]
+  cap_add: [DAC_OVERRIDE, FOWNER]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp:rw,nosuid,nodev,noexec,mode=1777]
+  expose: ["8084"]
+  restart: unless-stopped
+
+services:
+  frontdoor-1:
+    <<: *gateway
+    env_file: [.env.node-frontdoor-1]
+    environment:
+      AETHER_GATEWAY_NODE_ROLE: frontdoor
+      AETHER_GATEWAY_INSTANCE_ID: frontdoor-1
+  frontdoor-2:
+    <<: *gateway
+    env_file: [.env.node-frontdoor-2]
+    environment:
+      AETHER_GATEWAY_NODE_ROLE: frontdoor
+      AETHER_GATEWAY_INSTANCE_ID: frontdoor-2
+  background:
+    <<: *gateway
+    env_file: [.env.node-background]
+    environment:
+      AETHER_GATEWAY_NODE_ROLE: background
+      AETHER_GATEWAY_INSTANCE_ID: background-1
