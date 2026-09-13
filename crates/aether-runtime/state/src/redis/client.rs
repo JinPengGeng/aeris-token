@@ -494,7 +494,13 @@ fn update_atomic_max(target: &AtomicU64, value: u64) {
 fn connection_manager_config(
     command_timeout_ms: Option<u64>,
 ) -> redis::aio::ConnectionManagerConfig {
-    let mut config = redis::aio::ConnectionManagerConfig::new();
+    // redis 0.28 passes factor directly to backon's exponential multiplier.
+    // Its default 100 jumps from a 1s delay to the 60s cap on the second retry.
+    // Bound the base delay to 2s; jitter can add another 0-2s. Keep reconnects
+    // shared per lane and retain the existing retry count and connect deadline.
+    let mut config = redis::aio::ConnectionManagerConfig::new()
+        .set_factor(2)
+        .set_max_delay(2_000);
     if let Some(timeout_ms) = command_timeout_ms {
         config = config.set_connection_timeout(Duration::from_millis(timeout_ms));
     }

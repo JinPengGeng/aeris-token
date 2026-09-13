@@ -3456,6 +3456,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redis_connection_manager_recovers_after_sustained_outage() {
+        let Some(mut server) = TestRedisServer::start().await else {
+            return;
+        };
+        let runtime = RuntimeState::redis(
+            RedisClientConfig {
+                url: server.redis_url.clone(),
+                key_prefix: Some(format!("aether-sustained-outage-{}", std::process::id())),
+            },
+            Some(250),
+        )
+        .await
+        .expect("runtime should connect");
+        runtime.ping().await.expect("initial ping");
+        let gate = runtime
+            .semaphore("recovery", 1, RuntimeSemaphoreConfig::default())
+            .expect("gate should build");
+
+        server.stop();
+        // Keep the server down past the first jittered reconnect delay (1-2s).
+        // redis 0.28's default factor=100 otherwise makes the NEXT delay 60-120s;
+        // an immediate restart never exposes that broken recovery boundary.
+        let offline_until = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut failed_commands = 0;
+        while tokio::time::Instant::now() < offline_until {
+            assert!(runtime.ping().await.is_err(), "outage must remain visible");
+            failed_commands += 1;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(failed_commands >= 3, "exercise repeated command failure");
+        server.restart().await.expect("owned Redis should restart");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+        loop {
+            if runtime.ping().await.is_ok() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "same RuntimeState must recover after a sustained outage without waiting a minute"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        runtime
+            .kv_set("after-outage", "recovered", Some(Duration::from_secs(30)))
+            .await
+            .expect("writes recover on the same client");
+        assert_eq!(
+            runtime.kv_get("after-outage").await.unwrap().as_deref(),
+            Some("recovered")
+        );
+        let permit = gate.try_acquire().await.expect("admission should recover");
+        assert_eq!(gate.snapshot().await.unwrap().in_flight, 1);
+        permit.release().await.unwrap();
+        assert_eq!(gate.snapshot().await.unwrap().in_flight, 0);
+    }
+
+    #[tokio::test]
     async fn runtime_backends_share_kv_score_and_queue_contracts() {
         let memory = RuntimeState::memory(MemoryRuntimeStateConfig::default());
         assert_kv_score_and_queue_contract(&memory).await;
