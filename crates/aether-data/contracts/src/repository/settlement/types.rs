@@ -387,6 +387,51 @@ pub struct StoredUsageSettlement {
 
 #[async_trait]
 pub trait SettlementWriteRepository: Send + Sync {
+    async fn reserve_request_funds(
+        &self,
+        _input: super::ReserveRequestFundsInput,
+    ) -> Result<super::ReserveRequestFundsOutcome, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "request funds reservations are unsupported".to_string(),
+        ))
+    }
+
+    async fn mark_request_funds_dispatched(
+        &self,
+        _identity: super::RequestFundsIdentity,
+    ) -> Result<Option<super::StoredRequestFundsReservation>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "request funds dispatch is unsupported".to_string(),
+        ))
+    }
+
+    async fn release_request_funds(
+        &self,
+        _input: super::ReleaseRequestFundsInput,
+    ) -> Result<Option<super::StoredRequestFundsReservation>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "request funds release is unsupported".to_string(),
+        ))
+    }
+
+    async fn finalize_request_funds(
+        &self,
+        _input: super::FinalizeRequestFundsInput,
+    ) -> Result<Option<super::StoredRequestFundsReservation>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "request funds settlement is unsupported".to_string(),
+        ))
+    }
+
+    async fn recover_insufficient_quota(
+        &self,
+        _input: super::RecoverInsufficientQuotaInput,
+    ) -> Result<Option<super::RequestFundsRecoveryOutcome>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "insufficient quota recovery is unsupported".to_string(),
+        ))
+    }
+
     async fn reserve_usage_policy_request(
         &self,
         input: ReserveUsagePolicyRequestInput,
