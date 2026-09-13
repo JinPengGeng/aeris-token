@@ -517,6 +517,53 @@ async fn live_gateway_image_attempts_reject_second_upstream_when_held() {
 }
 
 #[tokio::test]
+#[ignore = "requires isolated PostgreSQL and real HTTP before wallet revocation"]
+async fn live_gateway_image_wallet_unavailable_preserves_prior_attempt_facts() {
+    for charged in [false, true] {
+        let fixture = Fixture::new(0.20).await;
+        let state = fixture.state();
+        let response = if charged {
+            (200, image(6))
+        } else {
+            (500, json!({"error":{"message":"unknown charge"}}))
+        };
+        let (url, count, server) = upstream(vec![response, (200, image(6))]).await;
+        let mut prior_facts = Value::Null;
+        request_scope(&state, async {
+            execute(&state, "gateway-wallet-revoked", "a", &url).await?;
+            prior_facts = sqlx::query_scalar("SELECT terminal_facts FROM request_fund_reservations WHERE request_id='gateway-wallet-revoked'")
+                .fetch_one(&fixture.pool).await.unwrap();
+            sqlx::query("UPDATE wallets SET status='disabled' WHERE id='wallet'")
+                .execute(&fixture.pool).await.unwrap();
+            assert!(execute(&state, "gateway-wallet-revoked", "b", &url).await.is_err());
+            Ok(())
+        }).await.unwrap();
+        assert_upstream_calls(&url, &count, 1).await;
+        let summary = fixture.summary("gateway-wallet-revoked").await;
+        assert!(summary.admission_closed);
+        assert_eq!(summary.attempt_count, 1);
+        assert_eq!(
+            summary.known_actual_cost_units,
+            if charged { 6_000_000 } else { 0 }
+        );
+        assert_eq!(summary.held_cost_units, if charged { 0 } else { 8_000_000 });
+        assert_eq!(summary.unknown_attempts, u64::from(!charged));
+        assert_eq!(fixture.balance().await, if charged { 0.14 } else { 0.20 });
+        let preserved: Value = sqlx::query_scalar("SELECT terminal_facts FROM request_fund_reservations WHERE request_id='gateway-wallet-revoked'")
+            .fetch_one(&fixture.pool).await.unwrap();
+        assert_eq!(preserved, prior_facts);
+        let parent: (String, i64) = sqlx::query_as("SELECT status,COALESCE(actual_total_cost_usd*100000000,0)::bigint FROM usage WHERE request_id='gateway-wallet-revoked'")
+            .fetch_one(&fixture.pool).await.unwrap();
+        assert_eq!(
+            parent,
+            ("failed".into(), if charged { 6_000_000 } else { 0 })
+        );
+        server.abort();
+        fixture.close(state).await;
+    }
+}
+
+#[tokio::test]
 #[ignore = "requires isolated AETHER_TEST_DATABASE_URL and performs actual local HTTP calls"]
 async fn live_gateway_image_attempts_persistence_failure_sends_no_upstream() {
     for target in ["parent", "dispatch"] {

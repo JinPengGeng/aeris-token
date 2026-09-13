@@ -8,6 +8,7 @@ export RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
 tests=(
   live_gateway_image_attempts_retry_late_charge_and_replay
   live_gateway_image_attempts_reject_second_upstream_when_held
+  live_gateway_image_wallet_unavailable_preserves_prior_attempt_facts
   live_gateway_image_attempts_persistence_failure_sends_no_upstream
   live_gateway_image_attempt_cancellation_preserves_dispatched_hold
   live_gateway_image_attempt_reserve_commit_after_cancellation_is_released
@@ -20,6 +21,7 @@ tests=(
   public_tests::live_public_image_hard_quota_retry_unknown_late_charge_and_replay
   public_tests::live_public_image_hard_quota_applies_to_user_unlimited_and_entitlement_only
   public_tests::live_public_image_hard_quota_serializes_distinct_requests
+  public_tests::live_public_image_wallet_disabled_after_auth_finishes_failed_parent
 )
 
 for test_name in "${tests[@]}"; do

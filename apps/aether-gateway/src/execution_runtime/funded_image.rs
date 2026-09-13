@@ -824,6 +824,20 @@ impl FundedImageAttempt {
                             policy.attempt_cost_rejection(window_index, limit_cost_units)?,
                         ));
                     }
+                    ReserveRequestAttemptFundsOutcome::WalletUnavailable => {
+                        request.record_rejection(
+                            &identity.request.request_id,
+                            fallback_data.clone(),
+                            402,
+                            "wallet_unavailable",
+                            "The funding wallet is unavailable for image authorization",
+                        );
+                        return Err(GatewayError::Client {
+                            status: http::StatusCode::PAYMENT_REQUIRED,
+                            message: "The funding wallet is unavailable for image authorization"
+                                .into(),
+                        });
+                    }
                     _ => return Err(unavailable("image funds reservation was denied")),
                 }
                 let mut financial = request

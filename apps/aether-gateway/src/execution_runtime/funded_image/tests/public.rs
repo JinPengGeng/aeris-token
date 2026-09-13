@@ -624,3 +624,42 @@ async fn live_public_image_hard_quota_serializes_distinct_requests() {
     upstream_server.abort();
     fixture.close(state).await;
 }
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL and public auth-to-reserve wallet state change"]
+async fn live_public_image_wallet_disabled_after_auth_finishes_failed_parent() {
+    let fixture = Fixture::new(0.20).await;
+    fixture.hard_cost_policy(0.20).await;
+    let (upstream_url, calls, upstream_server) = upstream(vec![(200, image(6))]).await;
+    let state = fixture.public_state(Account::User, &upstream_url).await;
+    // Durable pending is created only after public auth has admitted the request.
+    // The trigger commits the wallet change before the separate reserve starts.
+    sqlx::raw_sql(
+        "CREATE FUNCTION disable_wallet_after_pending() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN UPDATE wallets SET status='disabled' WHERE id='wallet'; RETURN NEW; END $$; CREATE TRIGGER disable_wallet_after_pending AFTER INSERT ON usage FOR EACH ROW EXECUTE FUNCTION disable_wallet_after_pending()",
+    )
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    let (gateway, gateway_server) = public_server(state.clone()).await;
+    let (_, body) = public_request(&gateway, "public-disabled-wallet", &request_body()).await;
+    assert!(body.get("error").is_some(), "{body}");
+    assert_upstream_calls(&upstream_url, &calls, 0).await;
+    let wallet_status: String = sqlx::query_scalar("SELECT status FROM wallets WHERE id='wallet'")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(wallet_status, "disabled");
+    let reservations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_fund_reservations")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(reservations, 0);
+    assert_eq!(fixture.quota_totals().await, (0, 0, 0));
+    assert_eq!(fixture.balance().await, 0.20);
+    let parent: (String, i64, bool) = sqlx::query_as("SELECT status,COALESCE(actual_total_cost_usd*100000000,0)::bigint,finalized_at IS NOT NULL FROM usage WHERE request_id='public-disabled-wallet'")
+        .fetch_one(&fixture.pool).await.unwrap();
+    assert_eq!(parent, ("failed".into(), 0, true));
+    gateway_server.abort();
+    upstream_server.abort();
+    fixture.close(state).await;
+}
