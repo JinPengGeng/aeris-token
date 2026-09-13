@@ -276,7 +276,7 @@ async fn live_request_funds_retention_preserves_reconciliation_and_allows_later_
         let cleaner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&second).await.unwrap();
         let racing_cleanup = crate::SqlxUsageReadRepository::new(second.clone());
-        let racing_window = window.clone();
+        let racing_window = window;
         let cleanup_task = tokio::spawn(async move {
             racing_cleanup.cleanup_usage(&racing_window, 1, false, records_only, UsageCleanupExecutionMode::Policy).await
         });
