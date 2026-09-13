@@ -1900,7 +1900,9 @@ async fn handle_stream_inner(
         body_rx,
         frame_tx,
         response_window,
-        mut admission_permit,
+        // The configured limit counts complete in-flight streams. Keep both
+        // local and distributed permits through body relay, errors and cancel.
+        admission_permit: _admission_permit,
     } = stream_io;
 
     let mut current_method: hyper::Method = parse_request_method(&meta.method);
@@ -2068,7 +2070,6 @@ async fn handle_stream_inner(
                     if let ReplayableRequestBody::Pending(state) = &prepared_body.replay_body {
                         state.discard();
                     }
-                    drop(admission_permit.take());
                     return relay_upstream_response(
                         server,
                         stream_id,
@@ -2120,7 +2121,6 @@ async fn handle_stream_inner(
                         if let ReplayableRequestBody::Pending(state) = &prepared_body.replay_body {
                             state.discard();
                         }
-                        drop(admission_permit.take());
                         return relay_upstream_response(
                             server,
                             stream_id,
@@ -2187,7 +2187,6 @@ async fn handle_stream_inner(
         if let ReplayableRequestBody::Pending(state) = &prepared_body.replay_body {
             state.discard();
         }
-        drop(admission_permit.take());
         return relay_upstream_response(
             server,
             stream_id,
@@ -3714,6 +3713,226 @@ mod tests {
             Some("/final")
         );
         assert!(result.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn admission_permit_covers_response_body_and_redirect_terminal_paths() {
+        for route in ["/direct", "/follow", "/unreplayable"] {
+            assert_response_body_keeps_admission(route, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_response_body_releases_local_and_distributed_admission() {
+        assert_response_body_keeps_admission("/direct", true).await;
+    }
+
+    async fn assert_response_body_keeps_admission(route: &str, cancel: bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let release_body = Arc::new(tokio::sync::Notify::new());
+        let stalled_response = |status, location: Option<&'static str>| {
+            let release_body = Arc::clone(&release_body);
+            move || {
+                let release_body = Arc::clone(&release_body);
+                async move {
+                    let mut response = Response::builder().status(status);
+                    if let Some(location) = location {
+                        response = response.header(header::LOCATION, location);
+                    }
+                    response
+                        .body(Body::from_stream(stream::once(async move {
+                            release_body.notified().await;
+                            Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"completed"))
+                        })))
+                        .unwrap()
+                }
+            }
+        };
+        let stalled_redirect = stalled_response(StatusCode::TEMPORARY_REDIRECT, Some("/final"));
+        let app = Router::new()
+            .route("/direct", get(stalled_response(StatusCode::OK, None)))
+            .route(
+                "/follow",
+                get(|| async {
+                    Response::builder()
+                        .status(StatusCode::FOUND)
+                        .header(header::LOCATION, "/final")
+                        .body(Body::empty())
+                        .unwrap()
+                }),
+            )
+            .route("/final", get(stalled_response(StatusCode::OK, None)))
+            .route(
+                "/unreplayable",
+                post(move |body: Bytes| {
+                    let response = stalled_redirect();
+                    async move {
+                        assert_eq!(body.len(), 5 * 1024 * 1024 + 1);
+                        response.await
+                    }
+                }),
+            )
+            .layer(axum::extract::DefaultBodyLimit::disable());
+        let upstream = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let local = Arc::new(ConcurrencyGate::new("tunnel_streams", 1));
+        let distributed = Arc::new(
+            RuntimeState::memory(MemoryRuntimeStateConfig::default())
+                .semaphore(
+                    "tunnel_streams_distributed",
+                    1,
+                    RuntimeSemaphoreConfig::default(),
+                )
+                .unwrap(),
+        );
+        let mut state = sample_state_for_port(addr.port());
+        let inner = Arc::get_mut(&mut state).unwrap();
+        inner.stream_gate = Some(Arc::clone(&local));
+        inner.distributed_stream_gate = Some(Arc::clone(&distributed));
+        let host = "admission-body.test";
+        cache_test_host(&state, host, addr).await;
+        let server = sample_server(&state);
+        let (frame_tx, sent, writer) = spawn_test_writer();
+        let (body_tx, body_rx) = mpsc::channel(4);
+        let oversized = route == "/unreplayable";
+        let upload = tokio::spawn(async move {
+            let size = if oversized { 5 * 1024 * 1024 + 1 } else { 0 };
+            let body = vec![b'x'; size];
+            let chunks = size.div_ceil(32 * 1024);
+            if size == 0 {
+                body_tx
+                    .send(TunnelFrame::new(
+                        41,
+                        MsgType::RequestBody,
+                        flags::END_STREAM,
+                        Bytes::new(),
+                    ))
+                    .await
+                    .unwrap();
+            } else {
+                for (index, chunk) in body.chunks(32 * 1024).enumerate() {
+                    body_tx
+                        .send(TunnelFrame::new(
+                            41,
+                            MsgType::RequestBody,
+                            if index + 1 == chunks {
+                                flags::END_STREAM
+                            } else {
+                                0
+                            },
+                            Bytes::copy_from_slice(chunk),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let mut meta = sample_request_meta();
+        meta.url = format!("http://{host}:{}{route}", addr.port());
+        meta.follow_redirects = Some(route != "/direct");
+        if oversized {
+            meta.method = "POST".to_string();
+        }
+        let stream_task = tokio::spawn(handle_stream(
+            Arc::clone(&state),
+            Arc::clone(&server),
+            41,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+            test_response_window(),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let received_headers = sent.lock().unwrap().iter().any(|message| {
+                    let Message::Binary(bytes) = message else {
+                        return false;
+                    };
+                    let frame = TunnelFrame::decode(bytes.clone().into()).unwrap();
+                    frame.stream_id == 41 && frame.msg_type == MsgType::ResponseHeaders
+                });
+                if received_headers {
+                    break;
+                }
+                assert!(
+                    !stream_task.is_finished(),
+                    "stream ended before response headers"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("real upstream response headers");
+        upload.await.unwrap();
+        assert!(
+            !stream_task.is_finished(),
+            "response body must still be pending"
+        );
+        assert!(
+            local.try_acquire().is_err(),
+            "headers cannot release local admission"
+        );
+        assert!(
+            distributed.try_acquire().await.is_err(),
+            "headers cannot release distributed admission"
+        );
+        assert_eq!(server.active_connections.load(Ordering::Acquire), 1);
+
+        let (next_tx, next_sent, next_writer) = spawn_test_writer();
+        let (_next_body_tx, next_body_rx) = mpsc::channel(1);
+        handle_stream(
+            Arc::clone(&state),
+            Arc::clone(&server),
+            42,
+            sample_request_meta(),
+            next_body_rx,
+            next_tx.clone(),
+            test_response_window(),
+        )
+        .await;
+        assert_eq!(
+            collect_stream_result(next_tx, next_sent, next_writer)
+                .await
+                .error
+                .as_deref(),
+            Some("tunnel overloaded")
+        );
+
+        if cancel {
+            stream_task.abort();
+            assert!(stream_task.await.unwrap_err().is_cancelled());
+        } else {
+            release_body.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), stream_task)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(server.active_connections.load(Ordering::Acquire), 0);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(permit) = state.try_acquire_stream_permit().await {
+                    drop(permit);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal stream must return both permits");
+        let result = collect_stream_result(frame_tx, sent, writer).await;
+        upstream.abort();
+        assert!(upstream.await.unwrap_err().is_cancelled());
+        if !cancel {
+            assert!(result.error.is_none());
+            assert_eq!(
+                result.response.unwrap().status,
+                if oversized { 307 } else { 200 }
+            );
+            assert_eq!(result.body, Bytes::from_static(b"completed"));
+        }
     }
 
     #[tokio::test]
