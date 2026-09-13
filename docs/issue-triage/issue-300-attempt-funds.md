@@ -4,7 +4,7 @@
 
 本变更实现数据层合同、PostgreSQL 与 memory 适配器、schema、usage 财务写入隔离和 provider 统计重建。一个真实外部 `usage.request_id` 对应一条父记录；每个可能独立收费的上游操作使用不同的 attempt UUID 与 reservation token。
 
-数据层阶段已提交并推送至 Draft PR #391，集成提交 `73222d17cba56089609bb62266732cffdff1c2c4` 包含 #388 retention、#390 钱包 live CI 及 #367 主干变更。两个新 attempt live 用例已登记到 required runner（共 23 个 exact targets）。Gateway、usage runtime 事件接通及应用构造器共享 memory usage repository 属于后续集成阶段；收费图片入口尚未启用。
+数据层阶段已提交并推送至 Draft PR #391，集成提交 `73222d17cba56089609bb62266732cffdff1c2c4` 包含 #388 retention、#390 钱包 live CI 及 #367 主干变更。两个新 attempt live 用例已登记到 required runner（共 23 个 exact targets）。usage runtime typed event、金融提交屏障和重试隔离已在本地实现并通过 373 项单元测试及 Clippy；Gateway 执行接线和应用构造器共享 memory usage repository 仍属于进行中的集成验收，收费图片入口尚未启用。
 
 ## 决定及依据
 
@@ -74,9 +74,13 @@
 
 Gateway 实际调用计数和新 PostgreSQL 端到端验收仍未完成，不能据编译或 runtime 回归放开收费入口。
 
+主线程继续检查 Gateway drop fallback 时发现第二个实际缺陷：子 Outcome 经 `record_terminal_event_direct` 写入成功后，会取消同一外部请求的父 lifecycle generation。新增回归先真实失败，再将 typed Outcome 的 submit/queue/direct 入口从父终态标记和合并器分离，保留后续 attempt 和父生命周期。
+
+新增 `defer_attempt_funds_event` 复用既有有界 enqueue、direct fallback 和重试 worker，返回明确的 `Persisted`、`Queued` 或 `BufferedForRetry`；后两者不代表金融提交，也不保证磁盘持久性。新增实测在 repository 故障时将同父两个不同 attempt 保留到真实 memory queue，恢复后逐条经 worker 写入且不合并、不走 legacy settlement、不关闭父生命周期；既无可用 queue 又无法提交时明确返回错误。普通 `record_terminal_event_direct` 只尝试数据库写入，不应被描述成 durable queue fallback。修复后全部 373 项 runtime 单元测试、Rust 1.95 Clippy `--all-targets -- -D warnings` 和定向 rustfmt 通过，零失败、零 ignored。
+
 ### 尚未完成的接线
 
-- 本文不代表 Gateway 已经实现“资金 dispatch 持久化后才能调用上游”、请求结束 close admission、可靠事件投递或父持久化失败处理；这些仍须主线程实现并验收。
+- 本文不代表 Gateway 的“资金 dispatch 持久化后才能调用上游”、请求结束 close admission、可靠结果写入或父持久化失败处理已经通过验收；正在实施的接线须通过真实 Gateway 与 PostgreSQL 测试后才能交付。实现状态另见 `issue-300-gateway-attempt-funds.md`。
 - 父 summary 已存储且 close API 可返回；用户界面/通用 read model 的 summary 展示不在本数据层范围。
 - memory 的既有钱包适配器没有 PostgreSQL entitlement 数据源；真实 entitlement 分配、并发锁与 ledger 验收以 PostgreSQL 为准。
 - #388 retention 已随主干合入，23 项 live 回归通过；该结果验证数据层集成，不替代 Gateway/runtime 的完整生命周期验收。

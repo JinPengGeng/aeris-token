@@ -4269,6 +4269,55 @@ impl UsageRuntime {
         .await
     }
 
+    /// Retain an observation for retry without finalizing the external request.
+    /// Only `Persisted` confirms the financial repository write. Queue acceptance
+    /// and a bounded local retry are not admission or dispatch commit barriers.
+    pub async fn defer_attempt_funds_event<T>(
+        &self,
+        data: &T,
+        mut event: UsageEvent,
+    ) -> Result<crate::UsageAttemptFundsRetention, DataLayerError>
+    where
+        T: UsageRuntimeAccess,
+    {
+        event
+            .data
+            .attempt_funds
+            .as_ref()
+            .ok_or_else(|| {
+                DataLayerError::InvalidInput(
+                    "financial retry requires a typed attempt capability".to_string(),
+                )
+            })?
+            .validate(&event.request_id)?;
+        if !self.is_enabled() {
+            return Err(DataLayerError::InvalidConfiguration(
+                "attempt funds runtime is unavailable".to_string(),
+            ));
+        }
+        prepare_event_capture_memory(
+            &mut event,
+            crate::event_capture_budget::shared_capture_memory_budget(),
+        );
+        // Reuse bounded enqueue admission, direct fallback and retry workers, but
+        // bypass parent terminal submission and lifecycle cancellation markers.
+        match self
+            .enqueue_or_write_event(data, event, "terminal", self.config.queue_terminal_events)
+            .await
+        {
+            TerminalPersistenceOutcome::PersistedDirectly => {
+                Ok(crate::UsageAttemptFundsRetention::Persisted)
+            }
+            TerminalPersistenceOutcome::Queued => Ok(crate::UsageAttemptFundsRetention::Queued),
+            TerminalPersistenceOutcome::BufferedForRetry => {
+                Ok(crate::UsageAttemptFundsRetention::BufferedForRetry)
+            }
+            TerminalPersistenceOutcome::Failed => Err(DataLayerError::TimedOut(
+                "attempt observation could not be committed or retained for retry".to_string(),
+            )),
+        }
+    }
+
     /// Persist a pending lifecycle row before admitting an externally-owned session.
     ///
     /// The normal `record_pending`/`record_pending_direct` APIs intentionally hand work to the
@@ -4582,6 +4631,15 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess + Clone + 'static,
     {
+        if event
+            .data
+            .attempt_funds
+            .as_ref()
+            .is_some_and(|attempt| attempt.is_outcome())
+        {
+            self.record_terminal_event(data, event).await;
+            return;
+        }
         if !self.is_enabled() {
             return;
         }
@@ -4592,6 +4650,17 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
+        if event
+            .data
+            .attempt_funds
+            .as_ref()
+            .is_some_and(|attempt| attempt.is_outcome())
+        {
+            if let Err(error) = self.defer_attempt_funds_event(data, event).await {
+                warn!(event_name = "usage_attempt_funds_retry_failed", error = %error, "attempt observation was not retained");
+            }
+            return;
+        }
         if !self.is_enabled() || self.lifecycle_submission.state.admission.is_closed() {
             return;
         }
@@ -4620,6 +4689,17 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
+        if event
+            .data
+            .attempt_funds
+            .as_ref()
+            .is_some_and(|attempt| attempt.is_outcome())
+        {
+            if let Err(error) = self.persist_attempt_funds_event(data, event).await {
+                warn!(event_name = "usage_attempt_funds_direct_failed", error = %error, "attempt observation was not committed");
+            }
+            return;
+        }
         if !self.is_enabled() || self.lifecycle_submission.state.admission.is_closed() {
             return;
         }

@@ -187,6 +187,30 @@ async fn attempt_parent_lifecycle_requires_a_returned_row_and_never_uses_legacy_
 }
 
 #[tokio::test]
+async fn direct_attempt_outcome_keeps_parent_lifecycle_open_for_later_attempts() {
+    let runtime = runtime();
+    let store = Store::default();
+    let generation = runtime
+        .lifecycle_coalescer
+        .register("request".to_string())
+        .await
+        .unwrap();
+    runtime.record_terminal_event_direct(&store, event()).await;
+    assert_eq!(store.financial.lock().unwrap().len(), 1);
+    assert!(
+        runtime
+            .lifecycle_coalescer
+            .should_emit("request", generation)
+            .await,
+        "one child outcome must not cancel the parent request's lifecycle"
+    );
+    runtime
+        .shutdown(std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn successful_queue_append_cannot_hide_a_failed_financial_repository_write() {
     let store = Store {
         queue: Some(Arc::new(RuntimeState::memory(
@@ -206,6 +230,76 @@ async fn successful_queue_append_cannot_hide_a_failed_financial_repository_write
         .await
         .unwrap();
     assert_eq!(store.financial.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn financial_retry_retains_distinct_attempts_without_closing_the_parent() {
+    let runtime = runtime();
+    let runner: Arc<dyn RuntimeQueueStore> =
+        Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+    let queue = crate::UsageQueue::new(runner.clone(), runtime.config.clone()).unwrap();
+    queue.ensure_consumer_group().await.unwrap();
+    let store = Store {
+        queue: Some(runner),
+        ..Default::default()
+    };
+    store.fail_financial.store(true, Ordering::Release);
+    let generation = runtime
+        .lifecycle_coalescer
+        .register("request".into())
+        .await
+        .unwrap();
+    let first = event();
+    let mut second = event();
+    let capability = second.data.attempt_funds.as_mut().unwrap();
+    capability.identity.attempt_id = "550e8400-e29b-41d4-a716-446655440001".into();
+    capability.identity.request.reservation_token = "server-token-b".into();
+    for observation in [first.clone(), second.clone()] {
+        assert_eq!(
+            runtime
+                .defer_attempt_funds_event(&store, observation)
+                .await
+                .unwrap(),
+            crate::UsageAttemptFundsRetention::Queued,
+        );
+    }
+    assert!(store.financial.lock().unwrap().is_empty());
+    assert!(
+        runtime
+            .lifecycle_coalescer
+            .should_emit("request", generation)
+            .await
+    );
+    let entries = queue.read_group("financial-retry").await.unwrap();
+    assert_eq!(entries.len(), 2);
+    store.fail_financial.store(false, Ordering::Release);
+    for entry in entries {
+        let observation = UsageEvent::from_stream_fields(&entry.fields).unwrap();
+        crate::worker::write_event_record(&store, &observation)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        *store.financial.lock().unwrap(),
+        vec![
+            *first.data.attempt_funds.unwrap(),
+            *second.data.attempt_funds.unwrap()
+        ],
+    );
+    assert_eq!(store.parents.load(Ordering::Relaxed), 0);
+    assert_eq!(store.legacy.load(Ordering::Relaxed), 0);
+    assert_eq!(store.enrichment.load(Ordering::Relaxed), 0);
+
+    let unavailable = Store::default();
+    unavailable.fail_financial.store(true, Ordering::Release);
+    assert!(runtime
+        .defer_attempt_funds_event(&unavailable, event())
+        .await
+        .is_err());
+    runtime
+        .shutdown(std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

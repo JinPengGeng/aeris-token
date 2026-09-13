@@ -22,7 +22,7 @@ pub mod write;
 
 pub use attempt_funds::{
     UsageAttemptChargeEvidence, UsageAttemptFundsAction, UsageAttemptFundsEvent,
-    UsageAttemptImageEvidence,
+    UsageAttemptFundsRetention, UsageAttemptImageEvidence,
 };
 pub use body_capture::{
     apply_usage_body_capture_policy_to_event, apply_usage_body_capture_policy_to_record,

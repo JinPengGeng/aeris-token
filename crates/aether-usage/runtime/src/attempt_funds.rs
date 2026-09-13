@@ -6,6 +6,15 @@ use aether_data_contracts::repository::settlement::{
 use aether_data_contracts::DataLayerError;
 use serde::{Deserialize, Serialize};
 
+/// Retention of a financial observation is separate from its database commit.
+/// Queued uses the configured backend; buffered retries exist only in memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageAttemptFundsRetention {
+    Persisted,
+    Queued,
+    BufferedForRetry,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageAttemptImageEvidence {
