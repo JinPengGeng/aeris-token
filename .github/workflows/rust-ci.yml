@@ -361,6 +361,14 @@ jobs:
           path: ${{ runner.temp }}/readiness-evidence
           if-no-files-found: warn
 
+      - name: Verify authenticated backup restore on isolated PostgreSQL
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          RUST_MIN_STACK: "16777216"
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        run: bash tools/ci/run_backup_restore_drill.sh
+
       - name: Show sccache stats
         if: always()
         env:
