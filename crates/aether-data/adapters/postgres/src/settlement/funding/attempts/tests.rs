@@ -8,9 +8,7 @@ use std::panic::AssertUnwindSafe;
 async fn fixture() -> (PgPool, PgPool, PgPool, String) {
     let (admin, first, second, schema) = super::super::tests::fixture().await;
     for table in [
-        "usage_http_audits",
         "usage_routing_snapshots",
-        "usage_body_blobs",
         "providers",
         "provider_api_keys",
         "global_models",

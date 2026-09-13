@@ -4,7 +4,7 @@
 
 本变更实现数据层合同、PostgreSQL 与 memory 适配器、schema、usage 财务写入隔离和 provider 统计重建。一个真实外部 `usage.request_id` 对应一条父记录；每个可能独立收费的上游操作使用不同的 attempt UUID 与 reservation token。
 
-本工作树基于 `7b415fd66`。Gateway、usage runtime 事件接通、应用构造器共享 memory usage repository、CI live 测试登记由主线程整合。本变更未启用收费图片入口，未提交、推送或修改 GitHub。
+数据层实现基于历史快照 `7b415fd66`，已保存为本地提交 `40149b686`。主线程随后合入 `e730e1247`，包含 #388 retention 和 #390 钱包 live CI，并将两个新 attempt live 用例登记到 required runner（共 23 个 exact targets）。Gateway、usage runtime 事件接通及应用构造器共享 memory usage repository 仍待整合。尚未启用收费图片入口或推送本分支。
 
 ## 决定及依据
 
@@ -54,9 +54,13 @@
 
 本代理临时 PostgreSQL 实例验证后已正常停止；数据目录与编译 target 保留供复核，没有清理用户数据。
 
+### 主干集成验证（2026-09-13）
+
+主线程合入 `e730e1247` 后，在自有 socket-only PostgreSQL 17.11 的独立 `aether_attempt_funds_integration` 数据库执行 required live runner，23 个 exact targets 全部实际运行 `1 passed / 0 ignored`，包括原有 v1、#388 retention、两个新 attempt 用例和八个钱包 credit 用例。第一次运行发现 #388 已在共用 fixture 中创建 `usage_http_audits` / `usage_body_blobs`，attempt fixture 再建同名表失败；删除重复建表后完整 23 项通过，未跳过用例或使用 `IF NOT EXISTS` 掩盖隔离错误。ShellCheck 与 diff 检查通过。
+
 ## 集成边界
 
 - 本文不代表 Gateway 已经实现“资金 dispatch 持久化后才能调用上游”、请求结束 close admission、可靠事件投递或父持久化失败处理；这些仍须主线程实现并验收。
 - 父 summary 已存储且 close API 可返回；用户界面/通用 read model 的 summary 展示不在本数据层范围。
 - memory 的既有钱包适配器没有 PostgreSQL entitlement 数据源；真实 entitlement 分配、并发锁与 ledger 验收以 PostgreSQL 为准。
-- #388 retention 整合由主线程处理；本工作树未合入其 SHA，不据此声称 retention 集成已完成。
+- #388 retention 已随主干合入，23 项 live 回归通过；该结果验证数据层集成，不替代 Gateway/runtime 的完整生命周期验收。
