@@ -12,7 +12,7 @@ Observed examples:
 
 | PR | Rust CI run / detection job | Detector result |
 | --- | --- | --- |
-| #367 | [34729324909 / 103649090569](https://github.com/JinPengGeng/aeris-token/actions/runs/34729324909/job/103649090569) | Four documentation files, `rust=false`, `data=false` |
+| #367 | [34729324909 / 103649090569](https://github.com/JinPengGeng/aeris-token/actions/runs/34729324909/job/103649090569) | Two documents plus a Python test/tool, `rust=false`, `data=false` under the previous filters |
 | #368 | [34729326268 / 103649093494](https://github.com/JinPengGeng/aeris-token/actions/runs/34729326268/job/103649093494) | One Markdown file, `rust=false`, `data=false` |
 | #381 | [34734898659 / 103664442747](https://github.com/JinPengGeng/aeris-token/actions/runs/34734898659/job/103664442747) | Three documentation files, `rust=false`, `data=false` |
 
@@ -20,6 +20,9 @@ This is an accepted CI-cost and queue-latency regression fix under #216. It
 restores the documented path selection policy with one conservative `rust`
 scope for all Rust and database jobs. A separate data-only optimization is
 deferred because callers and shared contracts cross crate boundaries.
+Under the expanded input coverage below, #367's root test change would now
+intentionally select Rust; the ordinary Markdown changes in #368/#381 would
+still skip it.
 
 ## Implementation contract
 
