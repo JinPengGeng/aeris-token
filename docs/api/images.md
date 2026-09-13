@@ -57,8 +57,16 @@ Successful responses use the OpenAI image response shape (`data[]`, with
 `url` or `b64_json` according to `response_format`). Streaming responses use
 OpenAI-compatible SSE image events.
 
-Validation failures return HTTP `400` and the OpenAI error envelope. Messages
-are English and identify the invalid field. Unsupported `style`, invalid
+Local image-field validation failures return HTTP `400` and the OpenAI error
+envelope, with English messages identifying the invalid field. Unsupported `style`, invalid
 `quality`/`background`/`moderation`/`input_fidelity`, invalid output format,
-and missing prompt or edit images are deterministic client errors. See
-`error-contract.md` for status, retry, quota, and model-not-found semantics.
+and missing prompt or edit images are deterministic client errors. These
+responses omit `Retry-After` and include `x-trace-id`. Generation-count overflow
+also returns an English `n` range message.
+
+The missing-prompt and missing-edit-images examples in the
+[compatibility fixtures](compatibility-fixtures.md) are checked through the
+actual authenticated Router. Authentication, policy and execution errors have
+their own message-language and model-lookup limits; this is not a promise that
+every Images error is English or that every unknown image model returns `404`.
+See the [public error contract](error-contract.md) for those boundaries.
