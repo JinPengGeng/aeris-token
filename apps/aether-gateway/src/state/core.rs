@@ -416,6 +416,7 @@ impl AppState {
             chat_pii_redaction_runtime_config_cache:
                 crate::privacy::new_chat_pii_redaction_runtime_config_cache(),
             fallback_metrics: Arc::new(fallback_metrics::GatewayFallbackMetrics::default()),
+            admin_audit_metrics: Arc::new(crate::audit::AdminAuditMetrics::default()),
             usage_counter_flush_metrics: Arc::new(
                 crate::maintenance::UsageCounterFlushRuntimeMetrics::default(),
             ),
@@ -1420,9 +1421,16 @@ impl AppState {
         if needs_refresh {
             self.spawn_metric_snapshot_refresh();
         }
-        snapshot
+        let mut samples = snapshot
             .map(|(_, samples)| samples)
-            .unwrap_or_else(|| vec![service_up_sample("aether-gateway")])
+            .unwrap_or_else(|| vec![service_up_sample("aether-gateway")]);
+        // Audit failures must be visible on the next scrape even when the
+        // expensive database/runtime snapshot is stale or not yet available.
+        samples.extend(
+            self.admin_audit_metrics
+                .metric_samples(self.data.durable_admin_audit_available()),
+        );
+        samples
     }
 
     pub async fn prewarm_metric_snapshot(&self) -> bool {
@@ -5094,7 +5102,12 @@ mod tests {
         let returned = tokio::time::timeout(Duration::from_millis(100), state.metric_samples())
             .await
             .expect("stale scrape should return without awaiting refresh I/O");
-        assert_eq!(returned, vec![stale_sample]);
+        assert_eq!(returned.first(), Some(&stale_sample));
+        assert_eq!(
+            returned.len(),
+            5,
+            "cached sample plus four live audit signals"
+        );
 
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -5128,7 +5141,11 @@ mod tests {
             .await
             .expect("contending scrape should not wait for the initial refresh");
 
-        assert_eq!(samples.len(), 1);
+        assert_eq!(
+            samples.len(),
+            5,
+            "service status plus four live audit signals"
+        );
         assert_eq!(samples[0].name, "service_up");
         assert_eq!(samples[0].value, 1);
         assert!(state.metric_snapshot.read().await.is_none());

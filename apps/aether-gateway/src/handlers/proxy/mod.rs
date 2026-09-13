@@ -1051,6 +1051,7 @@ pub(crate) async fn proxy_request(
     request: Request,
 ) -> Result<Response<Body>, GatewayError> {
     let data = state.data.clone();
+    let admin_audit_metrics = state.admin_audit_metrics.clone();
     // Keep audit persistence inside the lifecycle-owned future. When the
     // client disconnects, `run_request_with_usage` may finish this future in
     // the background after the handler itself has been dropped; persistence
@@ -1065,7 +1066,12 @@ pub(crate) async fn proxy_request(
                         .extensions_mut()
                         .remove::<crate::audit::PendingAdminAudit>()
                 {
-                    crate::audit::persist_admin_audit(data.as_ref(), record).await;
+                    crate::audit::persist_admin_audit(
+                        data.as_ref(),
+                        admin_audit_metrics.as_ref(),
+                        record,
+                    )
+                    .await;
                 }
                 Ok(response)
             } else {

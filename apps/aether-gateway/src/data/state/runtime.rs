@@ -164,6 +164,12 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) fn durable_admin_audit_available(&self) -> bool {
+        self.backends
+            .as_ref()
+            .is_some_and(|backends| backends.write().audit_logs().is_some())
+    }
+
     pub(crate) async fn create_admin_audit_log(
         &self,
         record: &CreateAdminAuditLog,

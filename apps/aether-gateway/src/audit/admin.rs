@@ -168,6 +168,7 @@ pub(crate) fn emit_admin_audit(
 
 pub(crate) async fn persist_admin_audit(
     data: &crate::data::GatewayDataState,
+    metrics: &super::AdminAuditMetrics,
     record: CreateAdminAuditLog,
 ) {
     use std::time::Duration;
@@ -185,22 +186,29 @@ pub(crate) async fn persist_admin_audit(
         .and_then(|metadata| metadata.get("action"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
+    metrics.record_attempt();
     match tokio::time::timeout(Duration::from_secs(2), data.create_admin_audit_log(&record)).await {
         Ok(Ok(_outcome)) => {}
-        Ok(Err(_error)) => warn!(
-            event_name = "admin_audit_persist_failed",
-            audit_event_id = %event_id,
-            audit_event = event_name,
-            action,
-            "admin audit persistence failed"
-        ),
-        Err(_elapsed) => warn!(
-            event_name = "admin_audit_persist_timeout",
-            audit_event_id = %event_id,
-            audit_event = event_name,
-            action,
-            "admin audit persistence timed out"
-        ),
+        Ok(Err(_error)) => {
+            metrics.record_failure(false);
+            warn!(
+                event_name = "admin_audit_persist_failed",
+                audit_event_id = %event_id,
+                audit_event = event_name,
+                action,
+                "admin audit persistence failed"
+            );
+        }
+        Err(_elapsed) => {
+            metrics.record_failure(true);
+            warn!(
+                event_name = "admin_audit_persist_timeout",
+                audit_event_id = %event_id,
+                audit_event = event_name,
+                action,
+                "admin audit persistence timed out"
+            );
+        }
     }
 }
 
