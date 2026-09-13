@@ -232,7 +232,10 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
             payload.insert("prompt".to_string(), json!(task.prompt));
             payload.insert(
                 "original_request_body".to_string(),
-                json!(task.original_request_body),
+                // Request bodies may contain bearer tokens, signed URLs, or provider-specific
+                // credentials. They are retained for private reconstruction, but never cross
+                // the admin JSON boundary.
+                serde_json::Value::Null,
             );
             payload.insert(
                 "converted_request_body".to_string(),
@@ -292,7 +295,9 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
                 "completed_at".to_string(),
                 json!(admin_video_task_timestamp(task.completed_at_unix_secs)),
             );
-            payload.insert("request_metadata".to_string(), json!(task.request_metadata));
+            // Runtime metadata can include transport headers and provider credentials. Keep it
+            // out of admin responses even when an encrypted store contains the field.
+            payload.insert("request_metadata".to_string(), serde_json::Value::Null);
 
             return Ok(Some(attach_admin_audit_response(
                 Json(serde_json::Value::Object(payload)).into_response(),

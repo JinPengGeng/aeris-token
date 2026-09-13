@@ -76,9 +76,19 @@ describe('useSystemConfig', () => {
     const state = useSystemConfig()
     await state.loadSystemConfig()
 
+    expect(state.systemConfig.value.default_user_initial_gift_usd).toBe(0)
     expect(state.systemConfig.value.request_record_level).toBe('basic')
     expect(state.systemConfig.value).not.toHaveProperty('max_request_body_size')
     expect(state.systemConfig.value).not.toHaveProperty('max_response_body_size')
+  })
+
+  it('preserves an explicitly configured signup gift', async () => {
+    getAllSystemConfigsMock.mockResolvedValue([
+      { key: 'default_user_initial_gift_usd', value: 12.5 },
+    ])
+    const state = useSystemConfig()
+    await state.loadSystemConfig()
+    expect(state.systemConfig.value.default_user_initial_gift_usd).toBe(12.5)
   })
 
   it('saves only the proxy node and ignores retired DNS allowlist settings', async () => {

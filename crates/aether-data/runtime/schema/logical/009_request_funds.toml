@@ -1,0 +1,179 @@
+[table.request_fund_reservations]
+domain = "request_funds"
+order = 10
+primary_key = ["reservation_token"]
+[[table.request_fund_reservations.columns]]
+name = "reservation_token"
+type = "text_id"
+length = 128
+[[table.request_fund_reservations.columns]]
+name = "request_id"
+type = "text_id"
+length = 128
+[[table.request_fund_reservations.columns]]
+name = "wallet_id"
+type = "text_id"
+length = 64
+nullable = true
+[[table.request_fund_reservations.columns]]
+name = "quote"
+type = "json"
+[[table.request_fund_reservations.columns]]
+name = "state"
+type = "text"
+length = 32
+[[table.request_fund_reservations.columns]]
+name = "actual_cost_units"
+type = "int64"
+nullable = true
+[[table.request_fund_reservations.columns]]
+name = "collected_cost_units"
+type = "int64"
+default = 0
+[[table.request_fund_reservations.columns]]
+name = "reconciliation_facts"
+type = "json"
+nullable = true
+[[table.request_fund_reservations.columns]]
+name = "settlement"
+type = "json"
+nullable = true
+[[table.request_fund_reservations.columns]]
+name = "created_at"
+type = "timestamp"
+default = { raw = "now()" }
+[[table.request_fund_reservations.columns]]
+name = "updated_at"
+type = "timestamp"
+default = { raw = "now()" }
+[[table.request_fund_reservations.uniques]]
+name = "request_fund_reservations_request_id_key"
+columns = ["request_id"]
+[[table.request_fund_reservations.indexes]]
+name = "request_fund_reservations_wallet_state_idx"
+columns = ["wallet_id", "state"]
+[[table.request_fund_reservations.foreign_keys]]
+name = "request_fund_reservations_wallet_id_fkey"
+columns = ["wallet_id"]
+references_table = "wallets"
+references_columns = ["id"]
+on_delete = "restrict"
+
+[table.request_fund_allocations]
+domain = "request_funds"
+order = 20
+primary_key = ["reservation_token", "ordinal"]
+[[table.request_fund_allocations.columns]]
+name = "reservation_token"
+type = "text_id"
+length = 128
+[[table.request_fund_allocations.columns]]
+name = "ordinal"
+type = "int32"
+[[table.request_fund_allocations.columns]]
+name = "source_kind"
+type = "text"
+length = 24
+[[table.request_fund_allocations.columns]]
+name = "source_id"
+type = "text_id"
+length = 128
+[[table.request_fund_allocations.columns]]
+name = "usage_date"
+type = "text"
+length = 10
+nullable = true
+[[table.request_fund_allocations.columns]]
+name = "quota_cost_units"
+type = "int64"
+nullable = true
+[[table.request_fund_allocations.columns]]
+name = "reserved_cost_units"
+type = "int64"
+[[table.request_fund_allocations.columns]]
+name = "collected_cost_units"
+type = "int64"
+default = 0
+[[table.request_fund_allocations.indexes]]
+name = "request_fund_allocations_source_idx"
+columns = ["source_id", "source_kind", "usage_date"]
+[[table.request_fund_allocations.foreign_keys]]
+name = "request_fund_allocations_reservation_token_fkey"
+columns = ["reservation_token"]
+references_table = "request_fund_reservations"
+references_columns = ["reservation_token"]
+on_delete = "restrict"
+
+[table.request_fund_recoveries]
+domain = "request_funds"
+order = 30
+primary_key = ["request_id"]
+[[table.request_fund_recoveries.columns]]
+name = "request_id"
+type = "text_id"
+length = 128
+[[table.request_fund_recoveries.columns]]
+name = "wallet_id"
+type = "text_id"
+length = 64
+[[table.request_fund_recoveries.columns]]
+name = "frozen_actual_cost_units"
+type = "int64"
+[[table.request_fund_recoveries.columns]]
+name = "prior_entitlement_cost_units"
+type = "int64"
+[[table.request_fund_recoveries.columns]]
+name = "collected_cost_units"
+type = "int64"
+default = 0
+[[table.request_fund_recoveries.columns]]
+name = "updated_at"
+type = "timestamp"
+default = { raw = "now()" }
+[[table.request_fund_recoveries.foreign_keys]]
+name = "request_fund_recoveries_wallet_id_fkey"
+columns = ["wallet_id"]
+references_table = "wallets"
+references_columns = ["id"]
+on_delete = "restrict"
+
+[table.request_fund_collection_receipts]
+domain = "request_funds"
+order = 40
+primary_key = ["id"]
+[[table.request_fund_collection_receipts.columns]]
+name = "id"
+type = "text_id"
+length = 64
+[[table.request_fund_collection_receipts.columns]]
+name = "request_id"
+type = "text_id"
+length = 128
+[[table.request_fund_collection_receipts.columns]]
+name = "collected_cost_units"
+type = "int64"
+[[table.request_fund_collection_receipts.columns]]
+name = "recharge_before"
+type = "float64"
+[[table.request_fund_collection_receipts.columns]]
+name = "recharge_after"
+type = "float64"
+[[table.request_fund_collection_receipts.columns]]
+name = "gift_before"
+type = "float64"
+[[table.request_fund_collection_receipts.columns]]
+name = "gift_after"
+type = "float64"
+[[table.request_fund_collection_receipts.columns]]
+name = "created_at"
+type = "timestamp"
+default = { raw = "now()" }
+[[table.request_fund_collection_receipts.indexes]]
+name = "request_fund_collection_receipts_request_idx"
+columns = ["request_id"]
+[[table.request_fund_collection_receipts.foreign_keys]]
+name = "request_fund_collection_receipts_request_id_fkey"
+columns = ["request_id"]
+references_table = "request_fund_recoveries"
+references_columns = ["request_id"]
+on_delete = "restrict"
