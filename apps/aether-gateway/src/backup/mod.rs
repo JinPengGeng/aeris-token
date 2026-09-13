@@ -6,6 +6,10 @@ pub(crate) mod store;
 pub(crate) mod task;
 pub(crate) mod worker;
 
+#[cfg(test)]
+#[path = "tests/restore_drill.rs"]
+mod restore_drill_tests;
+
 pub use executor::{
     restore_backup_json, BackupDecryptionKey, BackupRestoreError, BackupRestoreLimits,
     RestoredBackupJson, DEFAULT_BACKUP_MAX_ENCRYPTED_BYTES, DEFAULT_BACKUP_MAX_JSON_BYTES,

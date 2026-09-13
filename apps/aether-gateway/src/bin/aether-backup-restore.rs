@@ -5,8 +5,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use aether_gateway::{
-    restore_backup_json, BackupDecryptionKey, BackupRestoreLimits,
-    DEFAULT_BACKUP_MAX_ENCRYPTED_BYTES, DEFAULT_BACKUP_MAX_JSON_BYTES,
+    apply_restored_backup, restore_backup_json, AppState, BackupDecryptionKey, BackupRestoreLimits,
+    GatewayDataConfig, RestoredBackupJson, DEFAULT_BACKUP_MAX_ENCRYPTED_BYTES,
+    DEFAULT_BACKUP_MAX_JSON_BYTES,
 };
 use clap::Parser;
 use serde::Deserialize;
@@ -27,7 +28,7 @@ const AUTOMATIC_KEY_ENV_VARS: [(&str, bool); 3] = [
 #[derive(Debug, Parser)]
 #[command(
     name = "aether-backup-restore",
-    about = "Decrypt and verify an Aether S3 backup into a local JSON file"
+    about = "Authenticate an Aether backup, with optional apply to an empty isolated drill database"
 )]
 struct Args {
     /// Local encrypted .json.zst.aes256gcm file.
@@ -53,6 +54,18 @@ struct Args {
     /// Replace an existing output file atomically.
     #[arg(long)]
     overwrite: bool,
+
+    /// Apply authenticated contents to an empty aether_restore_drill_* PostgreSQL database.
+    #[arg(long, requires_all = ["database_url_file", "data_key_file"])]
+    apply_to_empty_drill_database: bool,
+
+    /// Protected file containing the isolated PostgreSQL URL; never pass credentials in arguments.
+    #[arg(long, requires = "apply_to_empty_drill_database")]
+    database_url_file: Option<PathBuf>,
+
+    /// Protected file containing the target database's encryption key.
+    #[arg(long, requires = "apply_to_empty_drill_database")]
+    data_key_file: Option<PathBuf>,
 
     /// Maximum encrypted input size in MiB.
     #[arg(long, default_value_t = mib(DEFAULT_BACKUP_MAX_ENCRYPTED_BYTES), value_parser = clap::value_parser!(u64).range(1..=4096))]
@@ -103,14 +116,15 @@ enum CliError {
     Restore(#[from] aether_gateway::BackupRestoreError),
 }
 
-fn main() {
-    if let Err(error) = run(Args::parse()) {
+#[tokio::main]
+async fn main() {
+    if let Err(error) = run(Args::parse()).await {
         eprintln!("{error}");
         std::process::exit(1);
     }
 }
 
-fn run(args: Args) -> Result<(), CliError> {
+async fn run(args: Args) -> Result<(), CliError> {
     reject_output_aliases(&args)?;
     let limits = BackupRestoreLimits {
         max_encrypted_bytes: checked_mib(args.max_encrypted_mib)?,
@@ -129,7 +143,7 @@ fn run(args: Args) -> Result<(), CliError> {
     write_atomic_private(&args.output, restored.json_bytes(), args.overwrite)?;
     let restored_scope = restored.scope().as_str();
 
-    let summary = serde_json::json!({
+    let mut summary = serde_json::json!({
         "status": "verified_json_written",
         "object_key": args.object_key,
         "output": args.output.display().to_string(),
@@ -141,6 +155,13 @@ fn run(args: Args) -> Result<(), CliError> {
         "scope": restored_scope,
         "database_applied": false,
     });
+    if args.apply_to_empty_drill_database {
+        apply_to_empty_drill_database(&args, restored).await?;
+        summary["status"] = serde_json::json!("authenticated_backup_applied");
+        summary["database_applied"] = serde_json::json!(true);
+        // Applying is not the same as reconciling the restored records or testing login.
+        summary["acceptance_verified"] = serde_json::json!(false);
+    }
     println!(
         "{}",
         serde_json::to_string(&summary).map_err(|error| {
@@ -160,12 +181,156 @@ fn reject_output_aliases(args: &Args) -> Result<(), CliError> {
     if let Some(keyring_file) = &args.keyring_file {
         protected_inputs.push(keyring_file);
     }
+    protected_inputs.extend(args.database_url_file.iter());
+    protected_inputs.extend(args.data_key_file.iter());
     for input in protected_inputs {
         if fs::canonicalize(input).is_ok_and(|canonical| canonical == output) {
             return Err(CliError::Message(format!(
                 "output {} must not replace the encrypted input or a key file",
                 args.output.display()
             )));
+        }
+    }
+    Ok(())
+}
+
+fn read_private_text(path: &Path) -> Result<String, CliError> {
+    let bytes = read_limited_file(path, MAX_SECRET_FILE_BYTES, true, true)?;
+    let value = String::from_utf8(bytes)
+        .map_err(|_| CliError::Message("protected configuration must be UTF-8".to_string()))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(CliError::Message(
+            "protected configuration must not be empty".to_string(),
+        ));
+    }
+    Ok(value.to_string())
+}
+
+async fn apply_to_empty_drill_database(
+    args: &Args,
+    restored: RestoredBackupJson,
+) -> Result<(), CliError> {
+    let database_url = read_private_text(args.database_url_file.as_deref().ok_or_else(|| {
+        CliError::Message("--database-url-file is required when applying a backup".to_string())
+    })?)?;
+    let encryption_key = read_private_text(args.data_key_file.as_deref().ok_or_else(|| {
+        CliError::Message("--data-key-file is required when applying a backup".to_string())
+    })?)?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect(&database_url)
+        .await
+        .map_err(|_| {
+            CliError::Message("could not connect to the isolated restore database".to_string())
+        })?;
+    let mut connection = pool.acquire().await.map_err(|_| {
+        CliError::Message("could not acquire the isolated restore connection".to_string())
+    })?;
+    validate_empty_drill_database(&mut connection).await?;
+    let scope = restored.scope();
+    let app = AppState::new()
+        .map_err(|_| CliError::Message("could not initialize restore state".to_string()))?
+        .with_data_config_and_background_isolation(
+            GatewayDataConfig::from_postgres_url(database_url, false)
+                .with_encryption_key(encryption_key),
+            false,
+        )
+        .map_err(|_| CliError::Message("could not initialize restore repositories".to_string()))?;
+    // The authenticated object is consumed directly. Plain JSON can never grant RecoveryBackup authority.
+    let result = apply_restored_backup(&app, restored, scope, None)
+        .await
+        .map_err(|_| CliError::Message("authenticated restore failed and may have partially applied; preserve the isolated database for diagnosis".to_string()))?;
+    if !result
+        .as_ref()
+        .is_ok_and(|value| !contains_import_errors(value))
+    {
+        return Err(CliError::Message("backup contents were rejected; no successful restore is claimed; preserve the isolated database for diagnosis".to_string()));
+    }
+    // Keep the advisory-lock connection alive throughout apply. Closing it releases the lock.
+    connection.close().await.map_err(|_| {
+        CliError::Message("backup applied but restore connection shutdown failed".to_string())
+    })?;
+    pool.close().await;
+    Ok(())
+}
+
+fn contains_import_errors(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+            if key == "errors" {
+                !value.as_array().is_some_and(Vec::is_empty)
+            } else {
+                contains_import_errors(value)
+            }
+        }),
+        serde_json::Value::Array(items) => items.iter().any(contains_import_errors),
+        _ => false,
+    }
+}
+
+async fn validate_empty_drill_database(
+    connection: &mut sqlx::PgConnection,
+) -> Result<(), CliError> {
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| CliError::Message("could not verify restore database identity".to_string()))?;
+    if !database.starts_with("aether_restore_drill_")
+        || database.len() <= "aether_restore_drill_".len()
+    {
+        return Err(CliError::Message(
+            "apply requires a separate database named aether_restore_drill_<suffix>".to_string(),
+        ));
+    }
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(192837465, 223)")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| CliError::Message("could not acquire restore lock".to_string()))?;
+    if !locked {
+        return Err(CliError::Message(
+            "another isolated restore is in progress".to_string(),
+        ));
+    }
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename::text FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+    ).fetch_all(&mut *connection).await.map_err(|_| {
+        CliError::Message("could not inspect restore schema".to_string())
+    })?;
+    if !["users", "api_keys", "wallets", "usage", "_sqlx_migrations"]
+        .iter()
+        .all(|required| tables.iter().any(|table| table == required))
+    {
+        return Err(CliError::Message(
+            "restore requires an already migrated PostgreSQL schema".to_string(),
+        ));
+    }
+    for table in tables {
+        if table == "_sqlx_migrations" {
+            continue;
+        }
+        // Only the two canonical bootstrap seed rows are allowed in an otherwise empty database.
+        let predicate = match table.as_str() {
+            "user_groups" => " WHERE NOT (id = '00000000-0000-0000-0000-000000000001' AND name = 'Default' AND normalized_name = 'default')",
+            "system_configs" => " WHERE NOT (id = '00000000-0000-0000-0000-000000000002' AND key = 'default_user_group_id' AND value::jsonb = '\"00000000-0000-0000-0000-000000000001\"'::jsonb)",
+            _ => "",
+        };
+        let query = format!(
+            "SELECT EXISTS (SELECT 1 FROM public.\"{}\"{predicate} LIMIT 1)",
+            table.replace('"', "\"\"")
+        );
+        let occupied: bool = sqlx::query_scalar(&query)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| {
+                CliError::Message("could not verify restore database emptiness".to_string())
+            })?;
+        if occupied {
+            return Err(CliError::Message(
+                "restore database contains application records; use a fresh isolated database"
+                    .to_string(),
+            ));
         }
     }
     Ok(())
@@ -791,9 +956,50 @@ fn safe_temp_file_component(file_name: &std::ffi::OsStr) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_automatic_environment_keys, deduplicate_and_validate_key_values, read_limited_file,
-        write_atomic_private, MAX_LEGACY_V1_KEY_CANDIDATES, MAX_V2_KEY_CANDIDATES,
+        append_automatic_environment_keys, contains_import_errors,
+        deduplicate_and_validate_key_values, read_limited_file, write_atomic_private,
+        MAX_LEGACY_V1_KEY_CANDIDATES, MAX_V2_KEY_CANDIDATES,
     };
+
+    #[test]
+    fn nested_partial_import_errors_prevent_success() {
+        assert!(!contains_import_errors(&serde_json::json!({
+            "config": {"stats": {"errors": []}},
+            "users": {"stats": {"errors": []}}
+        })));
+        assert!(contains_import_errors(&serde_json::json!({
+            "config": {"stats": {"errors": []}},
+            "users": {"stats": {"errors": ["one record failed"]}}
+        })));
+        assert!(contains_import_errors(
+            &serde_json::json!({"stats": {"errors": null}})
+        ));
+    }
+
+    #[test]
+    fn applying_requires_both_protected_configuration_files() {
+        use clap::Parser;
+        let base = [
+            "restore",
+            "--input",
+            "backup",
+            "--object-key",
+            "object",
+            "--output",
+            "result",
+        ];
+        assert!(super::Args::try_parse_from(base).is_ok());
+        let mut apply = base.to_vec();
+        apply.push("--apply-to-empty-drill-database");
+        assert!(super::Args::try_parse_from(&apply).is_err());
+        apply.extend(["--database-url-file", "url"]);
+        assert!(super::Args::try_parse_from(&apply).is_err());
+        apply.extend(["--data-key-file", "key"]);
+        assert!(super::Args::try_parse_from(&apply).is_ok());
+        let mut accidental = base.to_vec();
+        accidental.extend(["--database-url-file", "url"]);
+        assert!(super::Args::try_parse_from(&accidental).is_err());
+    }
 
     #[cfg(unix)]
     fn unix_test_directory(prefix: &str) -> std::path::PathBuf {
