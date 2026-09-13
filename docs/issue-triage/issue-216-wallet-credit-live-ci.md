@@ -44,7 +44,14 @@ Local validation on 2026-09-13 used Rust 1.95.0 and a disposable PostgreSQL
 and zero ignored. This includes all eight wallet tests above and the 12
 existing prerequisites/regressions. The temporary server was stopped normally
 after execution; its data files remain available for review. No application
-database was used. Independent review and hosted checks are still pending.
+database was used. Independent review passed on head `ca0994aea`.
+
+Hosted validation on head `f523ae2045a89dac1c200c89224ae89c4e6546dc`
+also ran all 20 targets with one passed, zero failed and zero ignored each:
+[Data DB Live job 103678549676](https://github.com/JinPengGeng/aeris-token/actions/runs/34740174692/job/103678549676).
+All four required checks passed for that head. Branch protection still
+requires validation against the current base before merge; the recorded run
+is evidence for this exact head, not a substitute for later required checks.
 
 The initial local attempt stopped at `pg_isready` because the restarted
 temporary cluster used the default port. The owned cluster was stopped and
