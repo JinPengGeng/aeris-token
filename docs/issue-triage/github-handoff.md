@@ -8,20 +8,19 @@
 
 ## 当前检查点
 
-### 最终现场 — 北京时间 2026-09-14 07:02
+### 当前现场 — 北京时间 2026-09-14 07:14
 
 以下内容覆盖并取代本文件下方的 02:29 历史快照，恢复时以本节和 GitHub 实时状态为准。
 
-- `origin/main`：`aaaefda2a733de790ce5d5525e9e0a3724ffa6c5`，已包含 #415、#416、#418、#420 及交接刷新 #421/#422。上述 PR 的四项 required checks 均已成功；#420 于北京时间 06:58:36 以 squash 合并，#419 已自动关闭为 COMPLETED，父 #214/#215 保持开放。
-- 当前开放 PR：无。#420 最终 head `c0f530aa72610bb23c19bc97f500996cfb14a9e0`，合并提交 `aaaefda2a733de790ce5d5525e9e0a3724ffa6c5`；Rust、Frontend、Automation Policy、Dependency Audit 四项 required checks 全部 SUCCESS。
+- `origin/main`：`0ecfafe23e04f204f1c97e4db82660f1a506cb6a`，已包含 #401、#402、#407、#415、#416、#418、#420、#423 及本次 #424 交接刷新。上述 PR 的四项 required checks 均已成功并以 squash 合并；父 #205/#214/#215 保持开放。
+- 当前开放 PR：无。#424 head `0f23fe908746fbd7eb4d1bd7e8e45820fb3df7e4` 已通过 Rust CI、Frontend CI、Automation Policy、Dependency Audit 四项 required checks，并自动 squash 合并为 `0ecfafe23e04f204f1c97e4db82660f1a506cb6a`。
 - #419 已完成 P1/Core/High/M/Accepted 切片：`AETHER_GATEWAY_CONTROL_CONTEXT_TIMEOUT_MS`（默认 30000ms，正值 clamp 1..=120000）只覆盖 `ai_public` 控制上下文解析；真实 PostgreSQL 暂停 3 次 fresh key 502（约 1.004–1.006 秒），恢复 3 次 401，暂停期间 local permits 8/0/8、liveness 200。候选与最终 hosted 结果已写入 PR #420、Issue #419 及主干 `docs/issue-triage/issue-419-*`。
 - 实时开放 Issue 清点：44 个已标优先级的 Issue（21 个 P1、23 个 P2），父子需求重叠，数量不等于独立开发包。#254、#300、#303、#307、#214、#215、#220、#223、#224、#225、#235、#255 等父项仍需各自剩余验收。
-- 本轮没有写 upstream。主工作树 `/Users/fengying/workspace/aeris-token` 的 3 个已跟踪修改和多个未追踪文档/fixture 是用户现场，必须保留；#419 已完整上传 fork，恢复以 `origin/main` 和对应 Issue/PR 记录为准。
+- 本轮没有写 upstream。主工作树 `/Users/fengying/workspace/aeris-token` 的 3 个已跟踪修改和多个未追踪文档/fixture 是用户现场，必须保留；交接文档已完整上传 fork，恢复以 `origin/main` 和对应 Issue/PR 记录为准。
 
 恢复顺序：先刷新 `origin/main`、开放 PR/Issue 和 Project #1；当前没有待合并 PR，继续工作时从父项和剩余 P1 队列选择下一项，重新建立独立 Issue/PR/评审/门禁证据链。#419 的实现、验证和边界已归档，不要重复开发。
 
-核验时间：北京时间 2026-09-14 02:29。计划持续开发至当日 07:00，之后停止启动新实现，
-整理、验证和同步现场；本检查点不是 07:00 的最终收尾结果。
+核验时间：北京时间 2026-09-14 07:14。已停止启动新的实现，当前只保留现场整理、验证和同步记录。
 
 ### 最终收尾 — 2026-09-14（fork 实时复核）
 

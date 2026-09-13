@@ -5,14 +5,15 @@ no upstream writes are part of this delivery workflow.
 
 ## 2026-09-14 final fork handoff checkpoint
 
-`origin/main` is `174afcc0ab9b1a91a7c305f1f806ffe12d5feeb1`; the fork has 44 open
+`origin/main` is `0ecfafe23e04f204f1c97e4db82660f1a506cb6a`; the fork has 44 open
 issues (21 P1 / 23 P2; 17 in progress, 17 triage, 10 blocked) and no open PRs.
 Project #1 remains the lifecycle record; merged child slices do not close parents.
+PR #424 is the latest handoff refresh and passed all four required checks before squash merge.
 
 Merged facts: #401 Redis server-time leases, #402 safe service configuration
 migration, #407 target permit lifetime through stream termination, #415 public
 missing-credential 401 contract, #416 key-scoped RPM reset, #418 Cow stream
-observer reuse, #420 bounded public control-context deadline, and #423 handoff
+observer reuse, #420 bounded public control-context deadline, #423 and #424 handoff
 refresh. Each passed the four required checks before squash merge.
 
 Remaining parent boundaries include #214, #215, #220, #223, #225, #255,
