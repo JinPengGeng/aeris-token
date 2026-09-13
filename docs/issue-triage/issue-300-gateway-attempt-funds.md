@@ -1,6 +1,33 @@
 # #300 Gateway 逐 attempt 资金接线
 
-状态：固定规格同步图片公共入口已接入每 attempt 资金与 hard plan quota 的联合准入。当前源码 **18 项专项通过、0 失败、0 ignored**，包括 14 项真实 PostgreSQL/HTTP 场景；另有 65 项本轮定向回归通过。最终全特性/全目标 Clippy（`-D warnings`）通过，耗时 3m05s；新 HEAD 的 Hosted 检查仍须在推送后确认。数据层独立 29 项 PostgreSQL runner 已通过，不能替代 Gateway 的 Hosted 验收。Draft #391 和父 #300 保持开放，前门每日实际费用计数与最终完整集成评审尚未完成。下文保留旧轮次的实测记录，其阶段性限制以本节最新状态为准。
+状态：固定规格同步图片公共入口已接入每 attempt 资金与 hard plan quota 的联合准入，每日实际费用账本已集成为 `b22ef5ff8`。集成树完整 data live runner **34 项全部通过，每项 1 passed / 0 ignored**；Gateway **21 项专项全部通过、0 failed / 0 ignored**，其中 17 项真实 PostgreSQL/HTTP，包括普通和 standalone 的迟到费用前门限额闭环。此前 `61f863137` 的四项 required checks 全绿，Hosted Gateway 16 个真实 PostgreSQL/HTTP exact targets 均实际通过；该结果不替代新账本集成后的 Hosted 验收。两项迁移/钱包修正及新账本的数据实现分别经独立复核接受。Draft #391 和父 #300 保持开放，最终完整评审及新 HEAD Hosted 尚须完成。下文保留旧轮次的实测记录，其阶段性限制以本节最新状态为准。
+
+最新钱包撤销红绿实测及已有 Charged/Unknown 保留证据见
+[钱包不可用决策](issue-300-wallet-unavailable.md)，迁移复现和新库启动验收见
+[hard quota 决策](issue-300-attempt-quota.md#hosted-acceptance-and-migration-review-correction)。
+
+## 每日实际费用集成验收
+
+新贡献账本与父 usage、child 资金事实在原数据库事务内更新，前门直接读取
+已提交的 user/key 日累计。操作顺序、backfill、保留策略和旧 writer 排空
+要求见[操作说明](../operations/daily-cost-ledger.md)，完整决策和数据测试
+证据见[每日账本决策](issue-300-daily-cost-ledger.md)。
+
+主线程新增公共 HTTP 场景，分别覆盖普通及 standalone key：首个上游返回
+Unknown，重试成功六张；已知实际费用为 `.06`，另 `.08` Unknown hold
+不计入日费用。经真实 usage runtime 连续投递两次迟到七张结果后，累计
+实测仅为 `.13`，下一请求受 `.10` 日限拒绝且不新增 reservation 或上游调用。
+测试 fixture 已克隆新账本，17 个真实 PG/HTTP exact targets 已接入
+required Gateway runner。第一次编译发现新测试缺少读取 trait import，
+已修正；该轮只有编译失败，不计为行为验收。修正后在 Rust 1.95 与原有
+16 MiB 栈下全部 21 项通过，日志为
+`/private/tmp/aeris-391-daily-integrated-gateway-fixed.log`。
+
+同一集成树另通过 16 项 daily limiter、两项自然日/DST 测试，以及 data
+contracts/PostgreSQL/runtime/Gateway 四个 crate 的严格全特性全目标
+Clippy（`-D warnings`，3m27s）。全仓 rustfmt、schema 漂移与新 migration
+表覆盖、Gateway 环境参考及五项 Python 回归、live runners ShellCheck
+通过；生成 SQL 的既有 EOF 格式提示及处置记录在每日账本决策文档。
 
 ## Hosted CI 测试目录修正
 

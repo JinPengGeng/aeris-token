@@ -7,10 +7,10 @@ use futures_util::FutureExt;
 use sqlx::PgPool;
 use std::{panic::AssertUnwindSafe, sync::Arc};
 
-#[path = "quota_tests.rs"]
-mod quota;
 #[path = "daily_cost_tests.rs"]
 mod daily_cost;
+#[path = "quota_tests.rs"]
+mod quota;
 
 async fn fixture() -> (PgPool, PgPool, PgPool, String) {
     let (admin, first, second, schema) = super::super::tests::fixture().await;

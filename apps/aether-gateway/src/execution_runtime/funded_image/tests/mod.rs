@@ -64,6 +64,7 @@ impl Fixture {
             "usage_body_blobs",
             "usage_routing_snapshots",
             "usage_settlement_snapshots",
+            "usage_daily_cost_contributions",
             "usage_counter_deltas",
             "usage_cost_reservations",
             "request_fund_reservations",

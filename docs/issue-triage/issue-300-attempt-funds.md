@@ -4,7 +4,16 @@
 
 本变更实现数据层合同、PostgreSQL 与 memory 适配器、schema、usage 财务写入隔离和 provider 统计重建。一个真实外部 `usage.request_id` 对应一条父记录；每个可能独立收费的上游操作使用不同的 attempt UUID 与 reservation token。
 
-数据层阶段已提交并推送至 Draft PR #391，集成提交 `73222d17cba56089609bb62266732cffdff1c2c4` 包含 #388 retention、#390 钱包 live CI 及 #367 主干变更。两个新 attempt live 用例已登记到 required runner（共 23 个 exact targets）。usage runtime typed event、金融提交屏障和重试隔离已在本地实现并通过 373 项单元测试及 Clippy；Gateway 执行接线和应用构造器共享 memory usage repository 仍属于进行中的集成验收，收费图片入口尚未启用。
+当前为 Draft PR #391：数据层、usage runtime 提交屏障与独立重试、固定规格
+同步 JSON 图片公共入口和 hard plan quota 已集成。每日实际费用贡献账本
+已整合为 `b22ef5ff8`，主线程在集成树验证完整 data live runner 34 项、
+Gateway 专项 21 项（含 17 个真实 PostgreSQL/HTTP 场景）、daily limiter
+16 项及自然日/DST 两项全部通过。旧推送 `61f863137` 的四项 required
+checks 全绿；新账本集成后的最终检查、Hosted 和完整评审仍须完成。
+最新边界与日志见[Gateway 接线](issue-300-gateway-attempt-funds.md)及
+[每日账本决策](issue-300-daily-cost-ledger.md)。下文各轮次的数字及待办是
+历史验收记录；不能据这些旧状态推断当前入口仍全关，也不能将固定规格
+切片等同于 #300/#206 的流式、完整恢复等全部父验收。
 
 ## 决定及依据
 

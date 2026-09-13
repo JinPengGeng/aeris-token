@@ -663,3 +663,126 @@ async fn live_public_image_wallet_disabled_after_auth_finishes_failed_parent() {
     upstream_server.abort();
     fixture.close(state).await;
 }
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL and public daily-cost admission after late evidence"]
+async fn live_public_image_daily_cost_counts_late_charge_once_and_limits_next_request() {
+    use aether_data_contracts::repository::usage::{DailyActualCostQuery, UsageReadRepository};
+
+    for account in [Account::User, Account::Standalone] {
+        let fixture = Fixture::new(1.0).await;
+        let (upstream_url, calls, upstream_server) = upstream(vec![
+            (500, json!({"error":{"message":"unknown upstream charge"}})),
+            (200, image(6)),
+            (200, image(6)),
+        ])
+        .await;
+        let state = fixture
+            .public_state(account, &upstream_url)
+            .await
+            .with_frontdoor_system_daily_usage_limit_for_tests(0.10);
+        let (gateway, gateway_server) = public_server(state.clone()).await;
+        let (_, body) = public_request(&gateway, "public-daily-late", &request_body()).await;
+        assert_eq!(body["data"].as_array().map(Vec::len), Some(6), "{body}");
+        assert_upstream_calls(&upstream_url, &calls, 2).await;
+
+        let (_, start, end) = crate::app_timezone::local_day_window(
+            chrono::Utc::now(),
+            crate::app_timezone::app_timezone(),
+        );
+        let query = DailyActualCostQuery {
+            user_id: Some("owner".into()),
+            api_key_id: "key-a".into(),
+            start_unix_secs: start.timestamp() as u64,
+            end_unix_secs: end.timestamp() as u64,
+        };
+        let usage = SqlxUsageReadRepository::new(fixture.pool.clone());
+        let counts = usage.read_daily_actual_cost_units(&query).await.unwrap();
+        assert_eq!(counts.key_units, 6_000_000);
+        assert_eq!(
+            counts.user_units,
+            if matches!(account, Account::User) {
+                6_000_000
+            } else {
+                0
+            }
+        );
+        assert_eq!(
+            fixture.summary("public-daily-late").await.held_cost_units,
+            8_000_000
+        );
+
+        let (attempt_id, token): (String, String) = sqlx::query_as("SELECT attempt_id::text,reservation_token FROM request_fund_reservations WHERE request_id='public-daily-late' AND terminal_facts->'outcome'->>'kind'='unknown'")
+            .fetch_one(&fixture.pool).await.unwrap();
+        let identity = RequestAttemptFundsIdentity {
+            attempt_id,
+            request: RequestFundsIdentity {
+                reservation_token: token,
+                request_id: "public-daily-late".into(),
+                user_id: Some("owner".into()),
+                api_key_id: Some("key-a".into()),
+                api_key_is_standalone: matches!(account, Account::Standalone),
+            },
+        };
+        let execution = state
+            .data
+            .read_request_attempt_funds(identity.clone())
+            .await
+            .unwrap()
+            .terminal_facts
+            .unwrap()
+            .execution;
+        let late = UsageEvent::new(
+            UsageEventType::Failed,
+            "public-daily-late",
+            UsageEventData {
+                attempt_funds: Some(Box::new(UsageAttemptFundsEvent {
+                    schema_version: 1,
+                    identity,
+                    action: UsageAttemptFundsAction::Outcome {
+                        execution,
+                        evidence: image_output_evidence(Some(&image(7))),
+                    },
+                })),
+                ..UsageEventData::default()
+            },
+        );
+        for _ in 0..2 {
+            state
+                .usage_runtime
+                .persist_attempt_funds_event(
+                    state.usage_lifecycle_data_state().as_ref(),
+                    late.clone(),
+                )
+                .await
+                .unwrap();
+        }
+        let counts = usage.read_daily_actual_cost_units(&query).await.unwrap();
+        assert_eq!(counts.key_units, 13_000_000);
+        assert_eq!(
+            counts.user_units,
+            if matches!(account, Account::User) {
+                13_000_000
+            } else {
+                0
+            }
+        );
+        assert_eq!(fixture.balance().await, 0.87);
+        let (_, denied) = public_request(&gateway, "public-daily-denied", &request_body()).await;
+        assert_eq!(
+            denied["error"]["type"], "daily_usage_limit_exceeded",
+            "{denied}"
+        );
+        assert_upstream_calls(&upstream_url, &calls, 2).await;
+        let reservations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM request_fund_reservations WHERE request_id='public-daily-denied'",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(reservations, 0);
+        gateway_server.abort();
+        upstream_server.abort();
+        fixture.close(state).await;
+    }
+}

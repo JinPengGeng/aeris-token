@@ -22,6 +22,7 @@ tests=(
   public_tests::live_public_image_hard_quota_applies_to_user_unlimited_and_entitlement_only
   public_tests::live_public_image_hard_quota_serializes_distinct_requests
   public_tests::live_public_image_wallet_disabled_after_auth_finishes_failed_parent
+  public_tests::live_public_image_daily_cost_counts_late_charge_once_and_limits_next_request
 )
 
 for test_name in "${tests[@]}"; do
