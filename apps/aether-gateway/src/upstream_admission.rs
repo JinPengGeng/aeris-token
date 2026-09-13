@@ -304,7 +304,7 @@ impl UpstreamTargetAdmission {
             samples.push(
                 MetricSample::new(
                     "upstream_target_in_flight",
-                    "Current number of pre-first-byte in-flight operations for an upstream target.",
+                    "Current number of in-flight operations holding upstream target capacity.",
                     MetricKind::Gauge,
                     snapshot.in_flight as u64,
                 )
@@ -313,7 +313,7 @@ impl UpstreamTargetAdmission {
             samples.push(
                 MetricSample::new(
                     "upstream_target_max_in_flight",
-                    "Highest observed pre-first-byte in-flight count for an upstream target.",
+                    "Highest observed number of operations holding upstream target capacity.",
                     MetricKind::Gauge,
                     snapshot.high_watermark as u64,
                 )
