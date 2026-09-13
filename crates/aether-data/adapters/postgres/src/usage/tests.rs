@@ -30,7 +30,7 @@ fn normalize_newlines(value: &str) -> String {
     value.replace("\r\n", "\n")
 }
 
-fn fast_clear_usage_record(
+pub(crate) fn fast_clear_usage_record(
     request_id: &str,
     provider_name: &str,
     now_unix_secs: u64,
@@ -3094,8 +3094,14 @@ fn usage_sql_raw_aggregates_use_canonical_billing_facts() {
     assert!(
         super::REBUILD_API_KEY_USAGE_STATS_SQL.contains("FROM usage_billing_facts AS \"usage\"")
     );
-    assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
-        .contains("FROM usage_billing_facts AS \"usage\""));
+    for sql in [
+        super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL,
+        super::SUMMARIZE_PROVIDER_API_KEY_WINDOW_USAGE_SQL,
+    ] {
+        assert!(sql.contains("FROM usage_billing_facts AS facts"));
+        assert!(sql.contains("parent.billing_mode = 'legacy'"));
+        assert!(sql.contains("r.attempt_id IS NOT NULL AND r.dispatched_at IS NOT NULL"));
+    }
     assert!(super::SUMMARIZE_TOTAL_TOKENS_BY_API_KEY_IDS_SQL
         .contains("FROM usage_billing_facts AS \"usage\""));
     assert!(super::SUMMARIZE_USAGE_TOTALS_BY_USER_IDS_SQL
@@ -3790,9 +3796,9 @@ fn usage_sql_settlement_pricing_snapshot_billing_values_use_authoritative_incomi
 #[test]
 fn usage_sql_upsert_recovers_missing_provider_links_after_billing_finalizes() {
     for assignment in [
-        "provider_id = CASE WHEN (\"usage\".billing_status = 'pending' AND $61) OR (\"usage\".billing_status <> 'pending' AND \"usage\".provider_id IS NULL AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id) AND (\"usage\".provider_api_key_id IS NULL OR \"usage\".provider_api_key_id = EXCLUDED.provider_api_key_id)) THEN COALESCE(EXCLUDED.provider_id, \"usage\".provider_id) ELSE \"usage\".provider_id END",
-        "provider_endpoint_id = CASE WHEN (\"usage\".billing_status = 'pending' AND $61) OR (\"usage\".billing_status <> 'pending' AND \"usage\".provider_endpoint_id IS NULL AND (\"usage\".provider_id IS NULL OR \"usage\".provider_id = EXCLUDED.provider_id) AND (\"usage\".provider_api_key_id IS NULL OR \"usage\".provider_api_key_id = EXCLUDED.provider_api_key_id)) THEN COALESCE(EXCLUDED.provider_endpoint_id, \"usage\".provider_endpoint_id) ELSE \"usage\".provider_endpoint_id END",
-        "provider_api_key_id = CASE WHEN (\"usage\".billing_status = 'pending' AND $61) OR (\"usage\".billing_status <> 'pending' AND \"usage\".provider_api_key_id IS NULL AND (\"usage\".provider_id IS NULL OR \"usage\".provider_id = EXCLUDED.provider_id) AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id)) THEN COALESCE(EXCLUDED.provider_api_key_id, \"usage\".provider_api_key_id) ELSE \"usage\".provider_api_key_id END",
+        "provider_id = CASE WHEN ((\"usage\".billing_status = 'pending' OR \"usage\".billing_mode = 'attempt_funds') AND $61) OR (\"usage\".billing_status <> 'pending' AND \"usage\".provider_id IS NULL AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id) AND (\"usage\".provider_api_key_id IS NULL OR \"usage\".provider_api_key_id = EXCLUDED.provider_api_key_id)) THEN COALESCE(EXCLUDED.provider_id, \"usage\".provider_id) ELSE \"usage\".provider_id END",
+        "provider_endpoint_id = CASE WHEN ((\"usage\".billing_status = 'pending' OR \"usage\".billing_mode = 'attempt_funds') AND $61) OR (\"usage\".billing_status <> 'pending' AND \"usage\".provider_endpoint_id IS NULL AND (\"usage\".provider_id IS NULL OR \"usage\".provider_id = EXCLUDED.provider_id) AND (\"usage\".provider_api_key_id IS NULL OR \"usage\".provider_api_key_id = EXCLUDED.provider_api_key_id)) THEN COALESCE(EXCLUDED.provider_endpoint_id, \"usage\".provider_endpoint_id) ELSE \"usage\".provider_endpoint_id END",
+        "provider_api_key_id = CASE WHEN ((\"usage\".billing_status = 'pending' OR \"usage\".billing_mode = 'attempt_funds') AND $61) OR (\"usage\".billing_status <> 'pending' AND \"usage\".provider_api_key_id IS NULL AND (\"usage\".provider_id IS NULL OR \"usage\".provider_id = EXCLUDED.provider_id) AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id)) THEN COALESCE(EXCLUDED.provider_api_key_id, \"usage\".provider_api_key_id) ELSE \"usage\".provider_api_key_id END",
     ] {
         assert!(
             super::UPSERT_SQL.contains(assignment),
@@ -3882,11 +3888,11 @@ fn usage_sql_detached_body_flags_clear_inline_and_compressed_columns() {
 #[test]
 fn usage_sql_capture_guard_covers_bodies_metadata_and_http_ref_tombstones() {
     for assignment in [
-        "request_body = CASE WHEN \"usage\".billing_status = 'pending' AND $61",
-        "provider_request_body = CASE WHEN \"usage\".billing_status = 'pending' AND $61",
-        "response_body = CASE WHEN \"usage\".billing_status = 'pending' AND $61",
-        "client_response_body = CASE WHEN \"usage\".billing_status = 'pending' AND $61",
-        "request_metadata = CASE WHEN \"usage\".billing_status = 'pending' AND $61",
+        "request_body = CASE WHEN (\"usage\".billing_status = 'pending' OR \"usage\".billing_mode = 'attempt_funds') AND $61",
+        "provider_request_body = CASE WHEN (\"usage\".billing_status = 'pending' OR \"usage\".billing_mode = 'attempt_funds') AND $61",
+        "response_body = CASE WHEN (\"usage\".billing_status = 'pending' OR \"usage\".billing_mode = 'attempt_funds') AND $61",
+        "client_response_body = CASE WHEN (\"usage\".billing_status = 'pending' OR \"usage\".billing_mode = 'attempt_funds') AND $61",
+        "request_metadata = CASE WHEN (\"usage\".billing_status = 'pending' OR \"usage\".billing_mode = 'attempt_funds') AND $61",
     ] {
         assert!(
             super::UPSERT_SQL.contains(assignment),
@@ -3912,7 +3918,7 @@ fn usage_sql_capture_guard_covers_bodies_metadata_and_http_ref_tombstones() {
 #[test]
 fn usage_sql_terminal_snapshots_replace_sparse_routing_and_settlement_facts() {
     assert!(super::UPSERT_SQL.contains(
-        "target_model = CASE WHEN \"usage\".billing_status = 'pending' AND $61 THEN CASE WHEN EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN EXCLUDED.target_model"
+        "target_model = CASE WHEN (\"usage\".billing_status = 'pending' OR \"usage\".billing_mode = 'attempt_funds') AND $61 THEN CASE WHEN EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN EXCLUDED.target_model"
     ));
     let routing = super::UPSERT_USAGE_ROUTING_SNAPSHOT_SQL;
     assert!(routing.contains("candidate_id = CASE WHEN $14 THEN EXCLUDED.candidate_id"));

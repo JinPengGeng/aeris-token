@@ -14,11 +14,11 @@ use crate::repository::usage::{
     UsageWriteRepository,
 };
 use aether_data_contracts::repository::usage::{
-    usage_body_ref, ProviderApiKeyWindowUsageRequest, UsageAuditAggregationGroupBy,
-    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditListQuery,
-    UsageAuditSummaryQuery, UsageBodyCaptureState, UsageBodyField, UsageDailyActualCostRollupQuery,
-    UsageDashboardSummaryQuery, UsageLeaderboardGroupBy, UsageLeaderboardQuery,
-    UsageProviderPerformanceQuery, UsageTimeSeriesGranularity,
+    usage_body_ref, DailyActualCostCounts, DailyActualCostQuery, ProviderApiKeyWindowUsageRequest,
+    UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery,
+    UsageAuditListQuery, UsageAuditSummaryQuery, UsageBodyCaptureState, UsageBodyField,
+    UsageDailyActualCostRollupQuery, UsageDashboardSummaryQuery, UsageLeaderboardGroupBy,
+    UsageLeaderboardQuery, UsageProviderPerformanceQuery, UsageTimeSeriesGranularity,
 };
 use serde_json::json;
 
@@ -184,6 +184,287 @@ async fn daily_actual_cost_rollups_filter_window_status_and_group_scopes() {
         .expect("standalone key rollup");
     assert!(standalone.api_key_is_standalone);
     assert_eq!(standalone.actual_total_cost_usd, 0.5);
+}
+
+fn daily_query(key: &str, start: u64, end: u64) -> DailyActualCostQuery {
+    DailyActualCostQuery {
+        user_id: Some("user-1".into()),
+        api_key_id: key.into(),
+        start_unix_secs: start,
+        end_unix_secs: end,
+    }
+}
+
+#[tokio::test]
+async fn daily_actual_cost_units_keep_integer_scopes_and_exclude_standalone_from_user() {
+    let mut first = sample_usage("first", 1);
+    first.actual_total_cost_usd = 0.06;
+    first.finalized_at_unix_secs = Some(100);
+    let mut second = sample_usage("second", 1);
+    second.actual_total_cost_usd = 0.07;
+    second.api_key_id = Some("other-key".into());
+    second.finalized_at_unix_secs = Some(100);
+    let mut standalone = sample_usage("standalone", 1);
+    standalone.actual_total_cost_usd = 0.5;
+    standalone.api_key_id = Some("standalone-key".into());
+    standalone.finalized_at_unix_secs = Some(100);
+    standalone.request_metadata = Some(json!({"api_key_is_standalone": true}));
+    let mut without_key = sample_usage("without-key", 1);
+    without_key.api_key_id = None;
+    without_key.actual_total_cost_usd = 9.0;
+    without_key.finalized_at_unix_secs = Some(100);
+    let repo = InMemoryUsageReadRepository::seed_with_detached_bodies([
+        first,
+        second,
+        standalone,
+        without_key,
+    ])
+    .with_provider_usage_windows([]);
+    assert_eq!(
+        repo.read_daily_actual_cost_units(&daily_query("api-key-1", 100, 200))
+            .await
+            .unwrap(),
+        DailyActualCostCounts {
+            user_units: 13_000_000,
+            key_units: 6_000_000
+        }
+    );
+    let mut query = daily_query("standalone-key", 100, 200);
+    query.user_id = None;
+    assert_eq!(
+        repo.read_daily_actual_cost_units(&query).await.unwrap(),
+        DailyActualCostCounts {
+            user_units: 0,
+            key_units: 50_000_000
+        }
+    );
+    assert_eq!(
+        repo.read_daily_actual_cost_units(&daily_query("api-key-1", 0, 100))
+            .await
+            .unwrap(),
+        DailyActualCostCounts::default()
+    );
+}
+
+#[tokio::test]
+async fn daily_legacy_cost_replaces_amount_at_first_completion_and_rejects_stale_updates() {
+    let repo = InMemoryUsageReadRepository::default();
+    let mut record = sample_upsert_usage_record("daily-legacy");
+    record.user_id = Some("user-1".into());
+    record.api_key_id = Some("api-key-1".into());
+    record.updated_at_unix_secs = 99;
+    record.actual_total_cost_usd = Some(0.9);
+    repo.upsert(record.clone()).await.unwrap();
+    let query = daily_query("api-key-1", 100, 200);
+    assert_eq!(
+        repo.read_daily_actual_cost_units(&query).await.unwrap(),
+        DailyActualCostCounts::default()
+    );
+    record.status = "completed".into();
+    record.billing_status = "settled".into();
+    record.updated_at_unix_secs = 100;
+    // Legacy rows without finalized_at use the accepted update time, once.
+    record.actual_total_cost_usd = Some(0.13);
+    repo.upsert(record.clone()).await.unwrap();
+    record.updated_at_unix_secs = 200;
+    record.finalized_at_unix_secs = Some(200);
+    record.actual_total_cost_usd = Some(0.06);
+    let corrected = repo.upsert(record.clone()).await.unwrap();
+    record.updated_at_unix_secs = 150;
+    record.finalized_at_unix_secs = Some(150);
+    record.actual_total_cost_usd = Some(0.8);
+    assert_eq!(repo.upsert(record.clone()).await.unwrap(), corrected);
+    record.updated_at_unix_secs = 201;
+    record.finalized_at_unix_secs = Some(201);
+    record.status = "failed".into();
+    record.actual_total_cost_usd = Some(0.0);
+    repo.upsert(record).await.unwrap();
+    assert_eq!(
+        repo.read_daily_actual_cost_units(&query).await.unwrap(),
+        DailyActualCostCounts {
+            user_units: 6_000_000,
+            key_units: 6_000_000
+        }
+    );
+    assert_eq!(
+        repo.read_daily_actual_cost_units(&daily_query("api-key-1", 200, 300))
+            .await
+            .unwrap(),
+        DailyActualCostCounts::default()
+    );
+}
+
+#[tokio::test]
+async fn daily_contribution_survives_audit_retention_and_rejects_request_id_reuse() {
+    let repo = InMemoryUsageReadRepository::default();
+    let mut record = sample_upsert_usage_record("daily-retained");
+    record.user_id = Some("user-1".into());
+    record.api_key_id = Some("api-key-1".into());
+    record.status = "completed".into();
+    record.billing_status = "settled".into();
+    record.updated_at_unix_secs = 100;
+    record.actual_total_cost_usd = Some(0.13);
+    let stored = repo.upsert(record.clone()).await.unwrap();
+    // Simulate audit retention independently of financial contribution retention.
+    repo.by_request_id
+        .write()
+        .unwrap()
+        .remove(&record.request_id);
+    repo.detached_bodies.write().unwrap().clear();
+    assert_eq!(
+        repo.read_daily_actual_cost_units(&daily_query("api-key-1", 100, 200))
+            .await
+            .unwrap(),
+        DailyActualCostCounts {
+            user_units: 13_000_000,
+            key_units: 13_000_000
+        }
+    );
+    // The legacy in-memory ID generator returns the same ID for the same request;
+    // even an identical incoming owner must not recreate an audit after retention.
+    assert!(repo.upsert(record.clone()).await.is_err());
+    record.user_id = Some("different-user".into());
+    record.api_key_id = Some("different-key".into());
+    assert!(repo.upsert(record).await.is_err());
+    assert!(repo.by_request_id.read().unwrap().is_empty());
+    let contribution = repo.daily_cost_contributions.read().unwrap();
+    assert_eq!(contribution["daily-retained"].usage_id, stored.id);
+    assert_eq!(contribution["daily-retained"].actual_cost_units, 13_000_000);
+}
+
+#[tokio::test]
+async fn daily_legacy_contribution_keeps_original_owner_key_and_standalone_scope() {
+    let mut parent = sample_usage("daily-frozen-owner", 1);
+    parent.updated_at_unix_secs = 100;
+    parent.finalized_at_unix_secs = Some(100);
+    let repo = InMemoryUsageReadRepository::seed([parent]);
+    let mut record = sample_upsert_usage_record("daily-frozen-owner");
+    record.user_id = Some("different-user".into());
+    record.api_key_id = Some("different-key".into());
+    record.request_metadata = Some(json!({"api_key_is_standalone": true}));
+    record.status = "completed".into();
+    record.billing_status = "settled".into();
+    record.actual_total_cost_usd = Some(0.06);
+    repo.upsert(record).await.unwrap();
+    assert_eq!(
+        repo.read_daily_actual_cost_units(&daily_query("api-key-1", 100, 200))
+            .await
+            .unwrap(),
+        DailyActualCostCounts {
+            user_units: 6_000_000,
+            key_units: 6_000_000
+        }
+    );
+    let mut different = daily_query("different-key", 100, 200);
+    different.user_id = Some("different-user".into());
+    assert_eq!(
+        repo.read_daily_actual_cost_units(&different).await.unwrap(),
+        DailyActualCostCounts::default()
+    );
+}
+
+#[tokio::test]
+async fn daily_cost_validation_failure_preserves_parent_and_detached_bodies() {
+    let mut parent = sample_usage("daily-overflow", 1);
+    parent.updated_at_unix_secs = 100;
+    parent.finalized_at_unix_secs = Some(100);
+    parent.request_body = Some(json!({"messages": ["retained"]}));
+    let repo = InMemoryUsageReadRepository::seed_with_detached_bodies([parent]);
+    let before = repo
+        .find_by_request_id("daily-overflow")
+        .await
+        .unwrap()
+        .unwrap();
+    let bodies = repo.detached_bodies.read().unwrap().clone();
+    let contributions = repo.daily_cost_contributions.read().unwrap().clone();
+    let mut record = sample_upsert_usage_record("daily-overflow");
+    record.user_id = before.user_id.clone();
+    record.api_key_id = before.api_key_id.clone();
+    record.status = "completed".into();
+    record.billing_status = "settled".into();
+    record.actual_total_cost_usd = Some(1.0e12);
+    record.request_body_state = Some(UsageBodyCaptureState::None);
+    assert!(repo.upsert(record).await.is_err());
+    assert_eq!(
+        repo.find_by_request_id("daily-overflow")
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert_eq!(*repo.detached_bodies.read().unwrap(), bodies);
+    assert_eq!(
+        *repo.daily_cost_contributions.read().unwrap(),
+        contributions
+    );
+}
+
+#[test]
+fn attempt_daily_identity_preflight_runs_before_financial_callback() {
+    let mut parent = sample_usage("daily-identity", 1);
+    parent.status = "pending".into();
+    parent.billing_status = "pending".into();
+    let repo = InMemoryUsageReadRepository::seed([parent]);
+    repo.by_request_id
+        .write()
+        .unwrap()
+        .get_mut("daily-identity")
+        .unwrap()
+        .id = "replacement-audit".into();
+    let invoked = std::cell::Cell::new(false);
+    assert!(repo
+        .with_attempt_parent("daily-identity", |_, _| {
+            invoked.set(true);
+            Ok(())
+        })
+        .is_err());
+    assert!(!invoked.get());
+    assert!(repo.attempt_funds.read().unwrap().is_empty());
+    assert_eq!(
+        repo.daily_cost_contributions.read().unwrap()["daily-identity"].usage_id,
+        "usage-1"
+    );
+}
+
+#[tokio::test]
+async fn attempt_daily_parent_stale_update_preserves_committed_financial_cost() {
+    let repo = InMemoryUsageReadRepository::default();
+    let mut record = sample_upsert_usage_record("daily-attempt-stale");
+    record.user_id = Some("user-1".into());
+    record.api_key_id = Some("api-key-1".into());
+    record.updated_at_unix_secs = 100;
+    repo.upsert(record.clone()).await.unwrap();
+    repo.with_attempt_parent(&record.request_id, |parent, summary| {
+        parent.actual_total_cost_usd = 0.13;
+        *summary = Some(
+            aether_data_contracts::repository::settlement::RequestFundsSummary {
+                admission_closed: true,
+                admission_closed_at_unix_secs: Some(102),
+                known_actual_cost_units: 13_000_000,
+                ..Default::default()
+            },
+        );
+        Ok(())
+    })
+    .unwrap();
+    let before = repo
+        .find_by_request_id(&record.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    record.updated_at_unix_secs = 99;
+    record.actual_total_cost_usd = Some(0.0);
+    record.status = "completed".into();
+    assert_eq!(repo.upsert(record).await.unwrap(), before);
+    assert_eq!(
+        repo.read_daily_actual_cost_units(&daily_query("api-key-1", 100, 200))
+            .await
+            .unwrap(),
+        DailyActualCostCounts {
+            user_units: 13_000_000,
+            key_units: 13_000_000
+        }
+    );
 }
 
 #[tokio::test]

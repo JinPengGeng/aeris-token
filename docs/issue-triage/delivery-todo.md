@@ -5,36 +5,41 @@ no upstream writes are part of this delivery workflow.
 
 ## Current delivery snapshot — 2026-09-13
 
-Verified main: `e710ac97d66f7ac4606dcc490b88aa684621904e` (#369 merged).
-The live intake has **44 open issues**: 21 P1 / 23 P2, with 16 in progress,
-18 triage and 10 blocked. These include overlapping parent/child scopes and
+Verified main: `cd84817f5ae633333ea071503cf8e93de5047bd1` (#394 merged).
+The live intake has **44 open issues**: 21 P1 / 23 P2, with 17 in progress,
+17 triage and 10 blocked. These include overlapping parent/child scopes and
 long-term roadmap items; they are not 44 independent implementation packages.
-All 44 are represented exactly once in Project #1 with Status, Priority, Area,
-Risk, Size and Decision; card status and priority match issue labels.
+The previous full board audit verified one Project #1 card per open issue with
+Status, Priority, Area, Risk, Size and Decision. This integration refresh re-read
+#300 and #391: both are In progress / P1 / Billing / High / L / Accepted.
 
 The implementation queue has **one open PR**: #391 is Draft / In progress.
-The snapshot excludes documentation PR #392, which is In review and follows
-the protected squash merge process.
+Documentation PRs #392, #393 and #394 are now merged. #393 records restore,
+tunnel compatibility and usage lifecycle ADRs; #394 records the accepted
+single-maintainer workflow without requiring another maintainer.
 GitHub events after the audit supersede the counts and commit states below.
 
 ### Current decisions and remaining acceptance
 
-1. **Attempt funding (#391 / #300 / #206), P1 / High / L:** the data contracts,
-   schema, PostgreSQL/memory accounting, provider attribution and financial
-   retention integration are implemented. Hosted job `103691795647` ran all
-   23 selected PostgreSQL targets, each with one passed and zero ignored.
-   Runtime typed-event routing has 373 passing unit tests, including eight new
-   regressions. A reproduced queue-acknowledgement defect was fixed by waiting
-   for the financial repository commit. A second reproduced defect canceled
-   the parent lifecycle when a child outcome completed; outcome delivery and
-   bounded financial retry now preserve it. Runtime Clippy passes with Rust 1.95.
-   Gateway orchestration is under active implementation. Still required:
-   persist the one parent request, reserve and
-   durably dispatch each independently billable attempt before upstream calls,
-   retain Unknown holds, close admission, accept late charge evidence using
-   the stored quote, and prove worker/direct delivery plus real Gateway call
-   counts and PostgreSQL reconciliation. Data tests and compilation do not
-   establish those remaining contracts. Paid image entry remains disabled.
+1. **Attempt funding (#391 / #300 / #206), P1 / High / L:** bounded synchronous
+   JSON image requests now use durable per-attempt funds and hard plan quota
+   admission before every upstream send. Unknown holds, retry, late evidence,
+   cancellation and parent lifecycle have real PostgreSQL/HTTP coverage across
+   user, standalone, unlimited and entitlement-only accounts. The latest pushed
+   head `61f863137` passed all four required checks; its 16 Gateway live targets
+   each ran with one passed and zero ignored. The daily actual-cost contribution
+   ledger is now integrated locally as `b22ef5ff8`, and independent data review
+   accepted its transaction, identity, accounting-day and backfill invariants.
+   The integrated tree passed all 34 data live targets and 21 funded Gateway
+   tests, including 17 real PostgreSQL/HTTP cases. The new public daily case
+   proves `.06 + late .07 = .13` exactly once, then rejects the next request at
+   a `.10` limit without another reservation or upstream call. All 16 daily
+   limiter and two natural-day/DST tests pass; four-crate all-features/all-targets
+   strict Clippy, formatting, schema and environment drift checks pass. Final
+   review and new-head hosted verification remain before protected merge. Paid streaming, unsupported
+   projections, full crash/recharge recovery and the broader parent acceptance
+   remain separate work; the currently bounded path does not complete #300 or
+   #206. Deployment must drain old writers before the ledger migration.
 2. **Restore (#369 / #223), P1 / High / M:** authenticated CLI apply and the
    synthetic restore drill passed hosted Gateway job `103692297443`, including
    original-password login/session, original API key, wallet and aggregate
@@ -71,9 +76,9 @@ GitHub events after the audit supersede the counts and commit states below.
    historical impact or authorize a repair. Preserve the explicit unknown
    conclusion and the documented production-evidence requirement.
 
-The merge queue now advances this checkpoint against the accepted restore
-commit. #391 remains Draft until full integration and review. Project fields
-for #391 and #392 are complete. No parent issue is
+This checkpoint includes the accepted single-maintainer documentation and the
+daily-ledger integration evidence. #391 remains Draft until final review and
+new-head required checks. No parent issue is
 closed merely because an accepted slice or a checkpoint is merged.
 
 ### Historical delivery snapshot after #389

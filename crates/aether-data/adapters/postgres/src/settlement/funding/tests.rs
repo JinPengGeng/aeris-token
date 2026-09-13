@@ -11,7 +11,7 @@ use aether_data_contracts::repository::wallet::{
     WalletWriteRepository,
 };
 
-async fn fixture() -> (PgPool, PgPool, PgPool, String) {
+pub(super) async fn fixture() -> (PgPool, PgPool, PgPool, String) {
     let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
         .expect("AETHER_TEST_DATABASE_URL must name a disposable PostgreSQL database");
     let admin = PgPoolOptions::new()
@@ -51,6 +51,7 @@ async fn fixture() -> (PgPool, PgPool, PgPool, String) {
         "usage_body_blobs",
         "usage_settlement_snapshots",
         "usage_counter_deltas",
+        "usage_daily_cost_contributions",
         "request_fund_reservations",
         "request_fund_allocations",
         "request_fund_recoveries",

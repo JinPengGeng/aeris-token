@@ -4,8 +4,9 @@ use std::sync::RwLock;
 
 use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_data_contracts::repository::usage::{
-    canonical_usage_body_ref_for, parse_usage_body_ref, sanitize_usage_request_metadata,
-    usage_body_ref, StoredUsageAuditAggregation, StoredUsageAuditSummary,
+    canonical_usage_body_ref_for, next_daily_cost_contribution, parse_usage_body_ref,
+    sanitize_usage_request_metadata, usage_body_ref, DailyActualCostCounts, DailyActualCostQuery,
+    DailyCostContribution, StoredUsageAuditAggregation, StoredUsageAuditSummary,
     StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
     StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
     StoredUsageDailyActualCostRollup, StoredUsageDashboardDailyBreakdownRow,
@@ -53,17 +54,121 @@ pub struct InMemoryUsageReadRepository {
     provider_usage_windows: RwLock<Vec<StoredProviderUsageWindow>>,
     auth_api_keys: Option<Arc<InMemoryAuthApiKeySnapshotRepository>>,
     provider_catalog: Option<Arc<InMemoryProviderCatalogReadRepository>>,
+    attempt_funds: RwLock<
+        BTreeMap<String, aether_data_contracts::repository::settlement::RequestFundsSummary>,
+    >,
+    attempt_provider_contributions: RwLock<BTreeMap<String, ProviderApiKeyUsageContribution>>,
+    // Financial retention is independent of the parent audit and detached bodies.
+    daily_cost_contributions: RwLock<BTreeMap<String, DailyCostContribution>>,
 }
 
 impl InMemoryUsageReadRepository {
+    pub(crate) fn is_attempt_funds_request(&self, request: &str) -> bool {
+        self.attempt_funds
+            .read()
+            .expect("attempt funds mode lock")
+            .contains_key(request)
+    }
+
+    pub(crate) fn with_attempt_parent<R>(
+        &self,
+        request: &str,
+        f: impl FnOnce(
+            &mut StoredRequestUsageAudit,
+            &mut Option<aether_data_contracts::repository::settlement::RequestFundsSummary>,
+        ) -> Result<R, DataLayerError>,
+    ) -> Result<R, DataLayerError> {
+        let mut rows = self.by_request_id.write().expect("usage parent lock");
+        let parent = rows.get_mut(request).ok_or_else(|| {
+            DataLayerError::InvalidInput(
+                "attempt admission requires persisted parent usage".to_string(),
+            )
+        })?;
+        let mut modes = self.attempt_funds.write().expect("attempt funds mode lock");
+        let mut summary = modes.get(request).cloned();
+        let mut daily = self
+            .daily_cost_contributions
+            .write()
+            .expect("daily cost lock");
+        // The callback may mutate funds. Reject reused identities and legacy conversion
+        // before calling it, while the same parent and contribution locks remain held.
+        let empty_summary = Default::default();
+        next_daily_cost_contribution(
+            daily.get(request),
+            parent,
+            Some(summary.as_ref().unwrap_or(&empty_summary)),
+        )?;
+        let before = parent.clone();
+        let mut staged_parent = parent.clone();
+        let result = f(&mut staged_parent, &mut summary)?;
+        let contribution =
+            next_daily_cost_contribution(daily.get(request), &staged_parent, summary.as_ref())?;
+        *parent = staged_parent;
+        daily.insert(request.to_string(), contribution);
+        if let Some(summary) = summary {
+            if !modes.contains_key(request) {
+                if let (Some(catalog), Some(contribution)) = (
+                    &self.provider_catalog,
+                    provider_api_key_usage_contribution(&before),
+                ) {
+                    catalog.apply_usage_stats_delta(
+                        &contribution.key_id,
+                        &ProviderApiKeyUsageDelta::removal(&contribution),
+                        None,
+                    );
+                }
+            }
+            modes.insert(request.to_string(), summary);
+        }
+        if let (Some(keys), Some(before), Some(after)) = (
+            &self.auth_api_keys,
+            api_key_usage_contribution(&before),
+            api_key_usage_contribution(parent),
+        ) {
+            keys.apply_usage_stats_delta(
+                &before.api_key_id,
+                &ApiKeyUsageDelta::between(&before, &after),
+                None,
+            );
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn apply_attempt_provider_contribution(
+        &self,
+        attempt_id: &str,
+        before: Option<&ProviderApiKeyUsageContribution>,
+        after: &ProviderApiKeyUsageContribution,
+    ) {
+        self.attempt_provider_contributions
+            .write()
+            .expect("attempt provider lock")
+            .insert(attempt_id.to_string(), after.clone());
+        if let Some(catalog) = &self.provider_catalog {
+            let delta = before.map_or_else(
+                || ProviderApiKeyUsageDelta::addition(after),
+                |before| ProviderApiKeyUsageDelta::between(before, after),
+            );
+            catalog.apply_usage_stats_delta(&after.key_id, &delta, None);
+        }
+    }
+
     pub fn seed<I>(items: I) -> Self
     where
         I: IntoIterator<Item = StoredRequestUsageAudit>,
     {
         let mut by_request_id = BTreeMap::new();
+        let mut daily_cost_contributions = BTreeMap::new();
         for mut item in items {
             hydrate_legacy_body_refs(&mut item);
             hydrate_client_family(&mut item);
+            let contribution = next_daily_cost_contribution(
+                daily_cost_contributions.get(&item.request_id),
+                &item,
+                None,
+            )
+            .expect("valid daily cost fixture");
+            daily_cost_contributions.insert(item.request_id.clone(), contribution);
             by_request_id.insert(item.request_id.clone(), item);
         }
         Self {
@@ -72,6 +177,9 @@ impl InMemoryUsageReadRepository {
             provider_usage_windows: RwLock::new(Vec::new()),
             auth_api_keys: None,
             provider_catalog: None,
+            attempt_funds: Default::default(),
+            attempt_provider_contributions: Default::default(),
+            daily_cost_contributions: RwLock::new(daily_cost_contributions),
         }
     }
 
@@ -81,6 +189,7 @@ impl InMemoryUsageReadRepository {
     {
         let mut by_request_id = BTreeMap::new();
         let mut detached_bodies = BTreeMap::new();
+        let mut daily_cost_contributions = BTreeMap::new();
         for mut item in items {
             hydrate_legacy_body_refs(&mut item);
             hydrate_client_family(&mut item);
@@ -117,6 +226,13 @@ impl InMemoryUsageReadRepository {
             ) {
                 item.client_response_body_ref = Some(body_ref);
             }
+            let contribution = next_daily_cost_contribution(
+                daily_cost_contributions.get(&request_id),
+                &item,
+                None,
+            )
+            .expect("valid daily cost fixture");
+            daily_cost_contributions.insert(request_id.clone(), contribution);
             by_request_id.insert(request_id, item);
         }
         Self {
@@ -125,6 +241,9 @@ impl InMemoryUsageReadRepository {
             provider_usage_windows: RwLock::new(Vec::new()),
             auth_api_keys: None,
             provider_catalog: None,
+            attempt_funds: Default::default(),
+            attempt_provider_contributions: Default::default(),
+            daily_cost_contributions: RwLock::new(daily_cost_contributions),
         }
     }
 
@@ -138,6 +257,9 @@ impl InMemoryUsageReadRepository {
             provider_usage_windows: RwLock::new(items.into_iter().collect()),
             auth_api_keys: self.auth_api_keys,
             provider_catalog: self.provider_catalog,
+            attempt_funds: self.attempt_funds,
+            attempt_provider_contributions: self.attempt_provider_contributions,
+            daily_cost_contributions: self.daily_cost_contributions,
         }
     }
 
@@ -1155,6 +1277,52 @@ fn usage_provider_aggregation_identity(
 
 #[async_trait]
 impl UsageReadRepository for InMemoryUsageReadRepository {
+    async fn read_daily_actual_cost_units(
+        &self,
+        query: &DailyActualCostQuery,
+    ) -> Result<DailyActualCostCounts, DataLayerError> {
+        query.validate()?;
+        let daily = self
+            .daily_cost_contributions
+            .read()
+            .expect("daily cost lock");
+        let mut counts = DailyActualCostCounts::default();
+        for contribution in daily.values() {
+            if !contribution
+                .accounting_at_unix_secs
+                .is_some_and(|at| at >= query.start_unix_secs && at < query.end_unix_secs)
+            {
+                continue;
+            }
+            if contribution.api_key_id.as_deref() == Some(query.api_key_id.as_str()) {
+                counts.key_units = counts
+                    .key_units
+                    .checked_add(contribution.actual_cost_units)
+                    .filter(|units| *units <= i64::MAX as u64)
+                    .ok_or_else(|| {
+                        DataLayerError::InvalidInput("daily key cost overflow".into())
+                    })?;
+            }
+            if !contribution.api_key_is_standalone
+                && contribution
+                    .api_key_id
+                    .as_deref()
+                    .is_some_and(|key| !key.trim().is_empty())
+                && query.user_id.is_some()
+                && contribution.user_id == query.user_id
+            {
+                counts.user_units = counts
+                    .user_units
+                    .checked_add(contribution.actual_cost_units)
+                    .filter(|units| *units <= i64::MAX as u64)
+                    .ok_or_else(|| {
+                        DataLayerError::InvalidInput("daily user cost overflow".into())
+                    })?;
+            }
+        }
+        Ok(counts)
+    }
+
     async fn find_by_id(
         &self,
         id: &str,
@@ -2561,7 +2729,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             let Some(provider_api_key_id) = item.provider_api_key_id.as_deref() else {
                 continue;
             };
-            if !provider_api_key_id_set.contains(&provider_api_key_id) {
+            if !provider_api_key_id_set.contains(&provider_api_key_id)
+                || self.is_attempt_funds_request(&item.request_id)
+            {
                 continue;
             }
             let entry = summaries
@@ -2581,6 +2751,32 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                     .unwrap_or_default()
                     .max(item.created_at_unix_ms),
             );
+        }
+        for contribution in self
+            .attempt_provider_contributions
+            .read()
+            .expect("attempt provider lock")
+            .values()
+        {
+            if !provider_api_key_id_set.contains(&contribution.key_id.as_str()) {
+                continue;
+            }
+            let entry = summaries
+                .entry(contribution.key_id.clone())
+                .or_insert_with(|| StoredProviderApiKeyUsageSummary {
+                    provider_api_key_id: contribution.key_id.clone(),
+                    ..Default::default()
+                });
+            entry.request_count = entry
+                .request_count
+                .saturating_add(contribution.request_count as u64);
+            entry.total_tokens = entry
+                .total_tokens
+                .saturating_add(contribution.total_tokens as u64);
+            entry.total_cost_usd += contribution.total_cost_usd;
+            entry.last_used_at_unix_secs = entry
+                .last_used_at_unix_secs
+                .max(contribution.last_used_at_unix_secs);
         }
         Ok(summaries)
     }
@@ -2618,7 +2814,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             };
 
             for item in usage.values() {
-                if item.provider_api_key_id.as_deref() != Some(provider_api_key_id) {
+                if item.provider_api_key_id.as_deref() != Some(provider_api_key_id)
+                    || self.is_attempt_funds_request(&item.request_id)
+                {
                     continue;
                 }
                 if item.created_at_unix_ms < request.start_unix_secs
@@ -2634,6 +2832,27 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 }
             }
 
+            for contribution in self
+                .attempt_provider_contributions
+                .read()
+                .expect("attempt provider lock")
+                .values()
+            {
+                if contribution.key_id != provider_api_key_id
+                    || !contribution.usage_created_at_unix_secs.is_some_and(|at| {
+                        at >= request.start_unix_secs && at < request.end_unix_secs
+                    })
+                {
+                    continue;
+                }
+                summary.request_count = summary
+                    .request_count
+                    .saturating_add(contribution.request_count as u64);
+                summary.total_tokens = summary
+                    .total_tokens
+                    .saturating_add(contribution.total_tokens as u64);
+                summary.total_cost_usd += contribution.total_cost_usd;
+            }
             summaries.push(summary);
         }
 
@@ -2977,9 +3196,41 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
     ) -> Result<StoredRequestUsageAudit, DataLayerError> {
         usage.validate()?;
         let capture_usage = usage.clone();
-        let usage = sanitize_usage_for_persistence(usage);
+        let mut usage = sanitize_usage_for_persistence(usage);
         let mut by_request_id = self.by_request_id.write().expect("usage repository lock");
-        let existing = by_request_id.get(&usage.request_id).cloned();
+        let mut existing = by_request_id.get(&usage.request_id).cloned();
+        let modes = self.attempt_funds.read().expect("attempt funds mode lock");
+        let funds_summary = modes.get(&usage.request_id);
+        let attempt_funds = funds_summary.is_some();
+        let mut daily = self
+            .daily_cost_contributions
+            .write()
+            .expect("daily cost lock");
+        if existing.is_none() && daily.contains_key(&usage.request_id) {
+            return Err(DataLayerError::InvalidInput(
+                "daily cost request identity was already used by a deleted audit".into(),
+            ));
+        }
+        if attempt_funds {
+            if let Some(previous) = &existing {
+                usage.user_id = previous.user_id.clone();
+                usage.api_key_id = previous.api_key_id.clone();
+                usage.billing_status = previous.billing_status.clone();
+                usage.total_cost_usd = Some(previous.total_cost_usd);
+                usage.actual_total_cost_usd = Some(previous.actual_total_cost_usd);
+                usage.input_tokens = Some(previous.input_tokens);
+                usage.output_tokens = Some(previous.output_tokens);
+                usage.total_tokens = Some(previous.total_tokens);
+                usage.cache_creation_input_tokens = Some(previous.cache_creation_input_tokens);
+                usage.cache_read_input_tokens = Some(previous.cache_read_input_tokens);
+                usage.cache_creation_ephemeral_5m_input_tokens =
+                    Some(previous.cache_creation_ephemeral_5m_input_tokens);
+                usage.cache_creation_ephemeral_1h_input_tokens =
+                    Some(previous.cache_creation_ephemeral_1h_input_tokens);
+                usage.cache_creation_cost_usd = Some(previous.cache_creation_cost_usd);
+                usage.cache_read_cost_usd = Some(previous.cache_read_cost_usd);
+            }
+        }
         if let Some(existing) = existing.as_ref() {
             if !usage_lifecycle_update_allowed(
                 &existing.status,
@@ -3007,12 +3258,12 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             }
         }
         let mut capture_usage = sanitize_usage_capture_controls_for_persistence(capture_usage);
-        if let Some(existing) = by_request_id.get_mut(&usage.request_id) {
+        if let Some(existing) = existing.as_mut() {
             existing.request_metadata =
                 sanitize_usage_request_metadata(existing.request_metadata.take());
         }
-        {
-            let mut detached_bodies = self.detached_bodies.write().expect("usage repository lock");
+        let detached_bodies_to_remove = {
+            let mut detached_bodies_to_remove = Vec::new();
             for (field, state, body) in [
                 (
                     UsageBodyField::RequestBody,
@@ -3045,10 +3296,11 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                         )
                     )
                 {
-                    detached_bodies.remove(&usage_body_ref(&usage.request_id, field));
+                    detached_bodies_to_remove.push(usage_body_ref(&usage.request_id, field));
                 }
             }
-        }
+            detached_bodies_to_remove
+        };
 
         let created_at_unix_ms = by_request_id
             .get(&usage.request_id)
@@ -3110,7 +3362,27 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                     .and_then(|existing| existing.request_metadata.clone())
             }
         });
-        let request_metadata = sanitize_memory_request_metadata(request_metadata);
+        let mut request_metadata = sanitize_memory_request_metadata(request_metadata);
+        if attempt_funds {
+            let mut metadata = request_metadata
+                .take()
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            metadata.insert(
+                "api_key_is_standalone".to_string(),
+                Value::Bool(
+                    existing
+                        .as_ref()
+                        .and_then(|r| r.request_metadata.as_ref())
+                        .and_then(|v| v.get("api_key_is_standalone"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                ),
+            );
+            metadata.insert("usage_available".to_string(), Value::Bool(true));
+            metadata.insert("usage_pricing_available".to_string(), Value::Bool(true));
+            request_metadata = Some(Value::Object(metadata));
+        }
         let (request_body, request_body_ref, request_body_state) = merge_usage_body_capture(
             capture_usage.request_body.take(),
             capture_usage.request_body_ref.take(),
@@ -3370,7 +3642,16 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             finalized_at_unix_secs: usage.finalized_at_unix_secs,
         };
 
+        let contribution =
+            next_daily_cost_contribution(daily.get(&stored.request_id), &stored, funds_summary)?;
+        {
+            let mut detached_bodies = self.detached_bodies.write().expect("usage repository lock");
+            for body_ref in detached_bodies_to_remove {
+                detached_bodies.remove(&body_ref);
+            }
+        }
         by_request_id.insert(stored.request_id.clone(), stored.clone());
+        daily.insert(stored.request_id.clone(), contribution);
         if let Some(auth_api_keys) = self.auth_api_keys.as_ref() {
             let before_contribution = existing.as_ref().and_then(api_key_usage_contribution);
             let after_contribution = api_key_usage_contribution(&stored);
@@ -3409,7 +3690,7 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                 }
             }
         }
-        if let Some(provider_catalog) = self.provider_catalog.as_ref() {
+        if let Some(provider_catalog) = self.provider_catalog.as_ref().filter(|_| !attempt_funds) {
             let before_contribution = existing
                 .as_ref()
                 .and_then(provider_api_key_usage_contribution);
@@ -3480,7 +3761,18 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             let Some(contribution) = provider_api_key_usage_contribution(usage) else {
                 continue;
             };
+            if self.is_attempt_funds_request(&usage.request_id) {
+                continue;
+            }
             accumulate_provider_api_key_usage_contribution(&mut aggregates, contribution);
+        }
+        for contribution in self
+            .attempt_provider_contributions
+            .read()
+            .expect("attempt provider lock")
+            .values()
+        {
+            accumulate_provider_api_key_usage_contribution(&mut aggregates, contribution.clone());
         }
         provider_catalog.rebuild_usage_stats(&aggregates);
         Ok(aggregates.len() as u64)

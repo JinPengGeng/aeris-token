@@ -18,9 +18,15 @@ SET
       AND EXTRACT(EPOCH FROM last_used_at)::BIGINT = $9::BIGINT
     THEN (
       SELECT MAX(created_at)
-      FROM "usage"
-      WHERE provider_api_key_id = $1
-        AND status NOT IN ('pending', 'streaming')
+      FROM (
+        SELECT created_at FROM "usage"
+        WHERE provider_api_key_id = $1 AND billing_mode = 'legacy'
+          AND status NOT IN ('pending', 'streaming')
+        UNION ALL
+        SELECT to_timestamp((quote ->> 'admitted_at_unix_secs')::double precision)
+        FROM request_fund_reservations
+        WHERE provider_api_key_id = $1 AND attempt_id IS NOT NULL AND dispatched_at IS NOT NULL
+      ) AS provider_facts
     )
     ELSE last_used_at
   END

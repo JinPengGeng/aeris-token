@@ -10,6 +10,7 @@ use crate::error::SqlxResultExt;
 use crate::PostgresTransaction;
 
 const ACTIVE_STATES: &str = "('prepared', 'dispatched', 'reconciliation_pending')";
+pub(super) mod attempts;
 
 #[cfg(test)]
 mod tests;
@@ -133,7 +134,7 @@ async fn find_reservation(
     token: &str,
 ) -> Result<Option<StoredRequestFundsReservation>, DataLayerError> {
     let row = sqlx::query(
-        "SELECT * FROM request_fund_reservations WHERE reservation_token = $1 FOR UPDATE",
+        "SELECT *, attempt_id::text AS funds_attempt_id FROM request_fund_reservations WHERE reservation_token = $1 FOR UPDATE",
     )
     .bind(token)
     .fetch_optional(&mut **tx)
@@ -172,6 +173,7 @@ async fn find_reservation(
     .collect::<Result<Vec<_>, DataLayerError>>()?;
     let state: String = row.try_get("state").map_postgres_err()?;
     Ok(Some(StoredRequestFundsReservation {
+        attempt_id: row.try_get("funds_attempt_id").map_postgres_err()?,
         quote: decode(row.try_get("quote").map_postgres_err()?)?,
         wallet_id: row.try_get("wallet_id").map_postgres_err()?,
         allocations,
@@ -204,7 +206,7 @@ async fn identity_reservation(
     let reservation = find_reservation(tx, &identity.reservation_token).await?;
     if reservation
         .as_ref()
-        .is_some_and(|stored| &stored.quote.identity != identity)
+        .is_some_and(|stored| &stored.quote.identity != identity || stored.attempt_id.is_some())
     {
         return Err(invalid("request funds reservation identity conflict"));
     }
@@ -306,17 +308,43 @@ pub(super) async fn reserve(
     tx: &mut PostgresTransaction,
     input: ReserveRequestFundsInput,
 ) -> Result<ReserveRequestFundsOutcome, DataLayerError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::BIGINT)")
+        .bind(&input.identity.request_id)
+        .execute(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    let mode: Option<String> =
+        sqlx::query_scalar("SELECT billing_mode FROM usage WHERE request_id = $1 FOR UPDATE")
+            .bind(&input.identity.request_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_postgres_err()?;
+    if mode.as_deref() == Some("attempt_funds") {
+        return Err(invalid("attempt funds request requires v2 admission"));
+    }
+    reserve_inner(tx, input, None).await
+}
+
+async fn reserve_inner(
+    tx: &mut PostgresTransaction,
+    input: ReserveRequestFundsInput,
+    attempt: Option<&ReserveRequestAttemptFundsInput>,
+) -> Result<ReserveRequestFundsOutcome, DataLayerError> {
     let wallet = locked_wallet(tx, &input.identity).await?;
     let (mut sources, allow_overage) =
         grant_capacity(tx, &input.identity, input.admitted_at_unix_secs).await?;
     if let Some(stored) = find_reservation(tx, &input.identity.reservation_token).await? {
-        return Ok(if stored.quote == input {
-            ReserveRequestFundsOutcome::Reserved {
-                reservation: Box::new(stored),
-            }
-        } else {
-            ReserveRequestFundsOutcome::Conflict
-        });
+        return Ok(
+            if stored.quote == input
+                && stored.attempt_id.as_deref() == attempt.map(|a| a.attempt_id.as_str())
+            {
+                ReserveRequestFundsOutcome::Reserved {
+                    reservation: Box::new(stored),
+                }
+            } else {
+                ReserveRequestFundsOutcome::Conflict
+            },
+        );
     }
     let wallet_id = wallet
         .as_ref()
@@ -393,18 +421,29 @@ pub(super) async fn reserve(
         });
     }
     let inserted = sqlx::query(
-        "INSERT INTO request_fund_reservations (reservation_token, request_id, wallet_id, quote, state) \
-         VALUES ($1, $2, $3, $4, 'prepared') ON CONFLICT DO NOTHING",
+        "INSERT INTO request_fund_reservations (reservation_token, request_id, wallet_id, quote, state, attempt_id, candidate_id, provider_id, provider_api_key_id, model_id) \
+         VALUES ($1, $2, $3, $4, 'prepared', $5::text::uuid, $6, $7, $8, $9) ON CONFLICT DO NOTHING",
     )
     .bind(&input.identity.reservation_token).bind(&input.identity.request_id)
     .bind(&wallet_id).bind(encode(&input)?)
+    .bind(attempt.map(|a| a.attempt_id.as_str()))
+    .bind(attempt.and_then(|a| a.provider.candidate_id.as_deref()))
+    .bind(attempt.map(|a| a.provider.provider_id.as_str()))
+    .bind(attempt.and_then(|a| a.provider.provider_api_key_id.as_deref()))
+    .bind(attempt.and_then(|a| a.provider.model_id.as_deref()))
     .execute(&mut **tx).await.map_postgres_err()?.rows_affected();
     if inserted == 0 {
         return Ok(
             match find_reservation(tx, &input.identity.reservation_token).await? {
-                Some(stored) if stored.quote == input => ReserveRequestFundsOutcome::Reserved {
-                    reservation: Box::new(stored),
-                },
+                Some(stored)
+                    if stored.quote == input
+                        && stored.attempt_id.as_deref()
+                            == attempt.map(|a| a.attempt_id.as_str()) =>
+                {
+                    ReserveRequestFundsOutcome::Reserved {
+                        reservation: Box::new(stored),
+                    }
+                }
                 _ => ReserveRequestFundsOutcome::Conflict,
             },
         );
@@ -434,6 +473,7 @@ pub(super) async fn reserve(
     }
     Ok(ReserveRequestFundsOutcome::Reserved {
         reservation: Box::new(StoredRequestFundsReservation {
+            attempt_id: attempt.map(|a| a.attempt_id.clone()),
             quote: input,
             wallet_id,
             allocations,
@@ -491,9 +531,17 @@ pub(super) async fn finalize(
     tx: &mut PostgresTransaction,
     input: FinalizeRequestFundsInput,
 ) -> Result<Option<StoredRequestFundsReservation>, DataLayerError> {
+    finalize_inner(tx, input, None).await
+}
+
+async fn finalize_inner(
+    tx: &mut PostgresTransaction,
+    input: FinalizeRequestFundsInput,
+    attempt_id: Option<&str>,
+) -> Result<Option<StoredRequestFundsReservation>, DataLayerError> {
     // This lock is acquired before all financial locks, matching legacy settlement.
     let usage = sqlx::query(
-        "SELECT user_id, api_key_id, provider_id, status, billing_status FROM \"usage\" WHERE request_id = $1 FOR UPDATE",
+        "SELECT user_id, api_key_id, provider_id, status, billing_status, billing_mode FROM \"usage\" WHERE request_id = $1 FOR UPDATE",
     ).bind(&input.identity.request_id).fetch_optional(&mut **tx).await.map_postgres_err()?;
     let Some(usage) = usage else { return Ok(None) };
     if usage
@@ -504,15 +552,24 @@ pub(super) async fn finalize(
             .try_get::<Option<String>, _>("api_key_id")
             .map_postgres_err()?
             != input.identity.api_key_id
-        || usage
-            .try_get::<Option<String>, _>("provider_id")
-            .map_postgres_err()?
-            != input.usage.provider_id
-        || usage.try_get::<String, _>("status").map_postgres_err()? != input.usage.status
+        || (attempt_id.is_none()
+            && (usage
+                .try_get::<Option<String>, _>("provider_id")
+                .map_postgres_err()?
+                != input.usage.provider_id
+                || usage.try_get::<String, _>("status").map_postgres_err()? != input.usage.status))
     {
         return Err(invalid(
             "persisted usage does not match request funds terminal identity",
         ));
+    }
+    if attempt_id.is_none()
+        && usage
+            .try_get::<String, _>("billing_mode")
+            .map_postgres_err()?
+            != "legacy"
+    {
+        return Err(invalid("attempt funds require attempt-bound settlement"));
     }
     let wallet_id: Option<String> = sqlx::query_scalar(
         "SELECT wallet_id FROM request_fund_reservations WHERE reservation_token = $1",
@@ -532,9 +589,15 @@ pub(super) async fn finalize(
         (SELECT source_id FROM request_fund_allocations WHERE reservation_token = $1 AND source_kind = 'entitlement') \
         ORDER BY e.expires_at, e.created_at, e.id FOR UPDATE")
         .bind(&input.identity.reservation_token).fetch_all(&mut **tx).await.map_postgres_err()?;
-    let Some(mut reservation) = identity_reservation(tx, &input.identity).await? else {
+    let Some(mut reservation) = find_reservation(tx, &input.identity.reservation_token).await?
+    else {
         return Ok(None);
     };
+    if reservation.quote.identity != input.identity
+        || reservation.attempt_id.as_deref() != attempt_id
+    {
+        return Err(invalid("request funds settlement identity conflict"));
+    }
     let actual = request_funds_authorized_units(input.usage.actual_total_cost_usd)?;
     if reservation.settlement.is_some() {
         if reservation.actual_cost_units != Some(actual)
@@ -544,11 +607,13 @@ pub(super) async fn finalize(
         }
         return Ok(Some(reservation));
     }
-    if reservation.state != RequestFundsState::Dispatched {
+    if reservation.state != RequestFundsState::Dispatched
+        && !(attempt_id.is_some() && reservation.state == RequestFundsState::ReconciliationPending)
+    {
         return Err(invalid("only dispatched funds may settle billable usage"));
     }
     let prior_status: String = usage.try_get("billing_status").map_postgres_err()?;
-    if matches!(prior_status.as_str(), "settled" | "void") {
+    if attempt_id.is_none() && matches!(prior_status.as_str(), "settled" | "void") {
         return Err(invalid(
             "usage has already settled outside its funds reservation",
         ));
@@ -583,8 +648,8 @@ pub(super) async fn finalize(
                 usage_date,
                 quota_cost_units,
             } if amount > 0 => {
-                let existing: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM entitlement_usage_ledgers WHERE user_entitlement_id = $1 AND request_id = $2)")
-                    .bind(entitlement_id).bind(&input.identity.request_id).fetch_one(&mut **tx).await.map_postgres_err()?;
+                let existing: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM entitlement_usage_ledgers WHERE user_entitlement_id = $1 AND request_id = $2 AND attempt_id IS NOT DISTINCT FROM $3::text::uuid)")
+                    .bind(entitlement_id).bind(&input.identity.request_id).bind(attempt_id).fetch_one(&mut **tx).await.map_postgres_err()?;
                 if existing {
                     return Err(invalid(
                         "request funds entitlement was already charged outside reservation",
@@ -598,11 +663,11 @@ pub(super) async fn finalize(
                 let balance_after = balance_before
                     .checked_sub(amount)
                     .ok_or_else(|| invalid("frozen entitlement funds are missing"))?;
-                sqlx::query("INSERT INTO entitlement_usage_ledgers (id, user_entitlement_id, user_id, request_id, amount_usd, balance_before, balance_after, usage_date, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())")
+                sqlx::query("INSERT INTO entitlement_usage_ledgers (id, user_entitlement_id, user_id, request_id, amount_usd, balance_before, balance_after, usage_date, attempt_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::text::uuid,NOW())")
                     .bind(uuid::Uuid::new_v4().to_string()).bind(entitlement_id).bind(&input.identity.user_id)
                     .bind(&input.identity.request_id).bind(request_funds_usd(amount))
                     .bind(request_funds_usd(balance_before))
-                    .bind(request_funds_usd(balance_after)).bind(usage_date)
+                    .bind(request_funds_usd(balance_after)).bind(usage_date).bind(attempt_id)
                     .execute(&mut **tx).await.map_postgres_err()?;
             }
             RequestFundingSource::Entitlement { .. } => {}
@@ -687,14 +752,16 @@ pub(super) async fn finalize(
         )
         .await?;
     }
-    super::sync_usage_settlement_snapshot(&mut **tx, &settlement).await?;
-    sqlx::query(super::FINALIZE_USAGE_BILLING_SQL)
-        .bind(&input.identity.request_id)
-        .bind("settled")
-        .bind(finalized_at as i64)
-        .execute(&mut **tx)
-        .await
-        .map_postgres_err()?;
+    if attempt_id.is_none() {
+        super::sync_usage_settlement_snapshot(&mut **tx, &settlement).await?;
+        sqlx::query(super::FINALIZE_USAGE_BILLING_SQL)
+            .bind(&input.identity.request_id)
+            .bind("settled")
+            .bind(finalized_at as i64)
+            .execute(&mut **tx)
+            .await
+            .map_postgres_err()?;
+    }
     reservation.state = if actual > collectible || input.reconciliation_facts.is_some() {
         RequestFundsState::ReconciliationPending
     } else {
@@ -712,6 +779,15 @@ pub(super) async fn recover(
     tx: &mut PostgresTransaction,
     input: RecoverInsufficientQuotaInput,
 ) -> Result<Option<RequestFundsRecoveryOutcome>, DataLayerError> {
+    let mode: Option<String> =
+        sqlx::query_scalar("SELECT billing_mode FROM usage WHERE request_id = $1 FOR UPDATE")
+            .bind(&input.request_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_postgres_err()?;
+    if mode.as_deref() == Some("attempt_funds") {
+        return Err(invalid("attempt funds cannot use legacy request recovery"));
+    }
     let row = sqlx::query(
         "SELECT u.user_id, u.api_key_id, u.provider_id, u.status, \
          COALESCE(s.billing_status, u.billing_status) AS billing_status, \

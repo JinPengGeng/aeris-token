@@ -1,3 +1,4 @@
+mod attempt_funds;
 mod body_capture;
 pub mod config;
 mod dead_letter_encoding;
@@ -19,6 +20,10 @@ pub mod usage_mapper;
 pub mod worker;
 pub mod write;
 
+pub use attempt_funds::{
+    UsageAttemptChargeEvidence, UsageAttemptFundsAction, UsageAttemptFundsEvent,
+    UsageAttemptFundsRetention, UsageAttemptImageEvidence,
+};
 pub use body_capture::{
     apply_usage_body_capture_policy_to_event, apply_usage_body_capture_policy_to_record,
     UsageBodyCaptureEngine,

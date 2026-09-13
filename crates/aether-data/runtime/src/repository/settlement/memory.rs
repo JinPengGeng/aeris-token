@@ -15,6 +15,7 @@ use super::{
 use crate::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
 use crate::DataLayerError;
 
+mod attempt_funding;
 mod funding;
 
 #[derive(Debug)]
@@ -63,9 +64,19 @@ pub struct InMemorySettlementRepository {
     funds: Arc<RwLock<BTreeMap<String, super::StoredRequestFundsReservation>>>,
     recoverable_usage: RwLock<BTreeMap<String, UsageSettlementInput>>,
     recovered_units: RwLock<BTreeMap<String, u64>>,
+    attempt_metadata: RwLock<BTreeMap<String, super::StoredRequestAttemptFunds>>,
+    usage: Option<Arc<crate::repository::usage::InMemoryUsageReadRepository>>,
 }
 
 impl InMemorySettlementRepository {
+    fn is_attempt_cost_token(&self, token: &str) -> bool {
+        self.attempt_metadata
+            .read()
+            .expect("attempt metadata lock")
+            .get(token)
+            .is_some_and(|attempt| attempt.usage_policy.is_some())
+    }
+
     pub fn seed<I>(items: I) -> Self
     where
         I: IntoIterator<Item = StoredWalletSnapshot>,
@@ -80,6 +91,8 @@ impl InMemorySettlementRepository {
             funds: Default::default(),
             recoverable_usage: Default::default(),
             recovered_units: Default::default(),
+            attempt_metadata: Default::default(),
+            usage: None,
         }
     }
 
@@ -95,12 +108,52 @@ impl InMemorySettlementRepository {
             funds,
             recoverable_usage: Default::default(),
             recovered_units: Default::default(),
+            attempt_metadata: Default::default(),
+            usage: None,
         }
+    }
+
+    pub fn with_usage_repository(
+        mut self,
+        usage: Arc<crate::repository::usage::InMemoryUsageReadRepository>,
+    ) -> Self {
+        self.usage = Some(usage);
+        self
     }
 }
 
 #[async_trait]
 impl SettlementWriteRepository for InMemorySettlementRepository {
+    async fn reserve_request_attempt_funds(
+        &self,
+        input: super::ReserveRequestAttemptFundsInput,
+    ) -> Result<super::ReserveRequestAttemptFundsOutcome, DataLayerError> {
+        attempt_funding::reserve(self, input)
+    }
+    async fn mark_request_attempt_funds_dispatched(
+        &self,
+        identity: super::RequestAttemptFundsIdentity,
+    ) -> Result<Option<super::StoredRequestAttemptFunds>, DataLayerError> {
+        attempt_funding::dispatch(self, identity)
+    }
+    async fn record_request_attempt_funds_outcome(
+        &self,
+        input: super::RecordRequestAttemptFundsOutcomeInput,
+    ) -> Result<Option<super::StoredRequestAttemptFunds>, DataLayerError> {
+        attempt_funding::outcome(self, input)
+    }
+    async fn read_request_attempt_funds(
+        &self,
+        identity: super::RequestAttemptFundsIdentity,
+    ) -> Result<Option<super::StoredRequestAttemptFunds>, DataLayerError> {
+        attempt_funding::read(self, identity)
+    }
+    async fn close_request_funds_admission(
+        &self,
+        input: super::CloseRequestFundsAdmissionInput,
+    ) -> Result<Option<super::RequestFundsSummary>, DataLayerError> {
+        attempt_funding::close(self, input)
+    }
     async fn reserve_request_funds(
         &self,
         input: super::ReserveRequestFundsInput,
@@ -253,6 +306,9 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
             .write()
             .expect("usage policy cost reservation lock");
         let existing = reservations.get(&input.reservation_token).cloned();
+        if self.is_attempt_cost_token(&input.reservation_token) {
+            return Ok(ReserveUsagePolicyCostOutcome::Conflict);
+        }
         if let Some(existing) = existing.as_ref() {
             if existing.request_id != input.request_id || existing.subject_id != input.subject_id {
                 return Ok(ReserveUsagePolicyCostOutcome::Conflict);
@@ -296,8 +352,9 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
                 .try_fold(0_u64, |used, reservation| {
                     let cost_units = match reservation.state {
                         UsagePolicyCostReservationState::Reserved
-                            if reservation.reservation_expires_at_unix_secs
-                                > input.admitted_at_unix_secs =>
+                            if self.is_attempt_cost_token(&reservation.reservation_token)
+                                || reservation.reservation_expires_at_unix_secs
+                                    > input.admitted_at_unix_secs =>
                         {
                             reservation.reserved_cost_units
                         }
@@ -363,6 +420,11 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
         let Some(reservation) = reservations.get_mut(&input.reservation_token) else {
             return Ok(None);
         };
+        if self.is_attempt_cost_token(&input.reservation_token) {
+            return Err(DataLayerError::InvalidInput(
+                "attempt usage policy requires its financial outcome writer".to_string(),
+            ));
+        }
         if reservation.request_id != input.request_id || reservation.subject_id != input.subject_id
         {
             // The server-issued token selects the reservation. Never let mismatched audit
@@ -391,7 +453,10 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
             .expect("usage policy cost reservation lock");
         let tokens = reservations
             .iter()
-            .filter(|(_, reservation)| reservation.retain_until_unix_secs <= now_unix_secs)
+            .filter(|(token, reservation)| {
+                reservation.retain_until_unix_secs <= now_unix_secs
+                    && !self.is_attempt_cost_token(token)
+            })
             .map(|(token, _)| token.clone())
             .take(batch_size)
             .collect::<Vec<_>>();
@@ -413,6 +478,15 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
             .settlement_lock
             .lock()
             .expect("usage settlement transaction lock");
+        if self
+            .usage
+            .as_ref()
+            .is_some_and(|usage| usage.is_attempt_funds_request(&input.request_id))
+        {
+            return Err(DataLayerError::InvalidInput(
+                "attempt funds usage requires v2 financial settlement".to_string(),
+            ));
+        }
         if let Some(existing) = self
             .settlements
             .read()

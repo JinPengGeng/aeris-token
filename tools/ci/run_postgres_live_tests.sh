@@ -39,6 +39,19 @@ run_test aether-data-postgres settlement::funding::tests::live_request_funds_adm
 run_test aether-data-postgres settlement::funding::tests::live_request_funds_preserve_decimal_holds_across_ordinary_settlement_and_postpaid
 run_test aether-data-postgres settlement::funding::tests::live_request_funds_sum_entitlement_decimals_without_phantom_debt
 run_test aether-data-postgres settlement::funding::tests::live_request_funds_retention_preserves_reconciliation_and_allows_later_settlement
+run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_retry_late_charge_and_provider_rebuild_are_idempotent
+run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_admission_entitlements_and_concurrent_settlement
+run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_quote_mismatch_preserves_known_charge_and_audit
+run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_settled_parent_accepts_final_lifecycle_without_financial_mutation
+run_test aether-data-postgres settlement::funding::attempts::tests::daily_cost::live_daily_cost_late_attempts_replay_and_rollback
+run_test aether-data-postgres settlement::funding::attempts::tests::daily_cost::live_daily_cost_legacy_identity_scopes_and_concurrent_parents
+run_test aether-data-postgres settlement::funding::attempts::tests::daily_cost::live_daily_cost_backfill_replays_source_and_preserves_frozen_identity
+run_test aether-data-postgres settlement::funding::attempts::tests::daily_cost::live_daily_cost_pending_batches_freeze_identity_and_rollback_reuse
+run_test aether-data-postgres settlement::funding::attempts::tests::daily_cost::live_daily_cost_fractional_midnight_backfill_keeps_day_after_revision
+run_test aether-data-postgres settlement::funding::attempts::tests::quota::live_attempt_quota_unknown_retry_late_charge_and_replay
+run_test aether-data-postgres settlement::funding::attempts::tests::quota::live_attempt_quota_freezes_policy_and_survives_legacy_expiry
+run_test aether-data-postgres settlement::funding::attempts::tests::quota::live_attempt_quota_concurrent_requests_and_atomic_rollback
+run_test aether-data-postgres settlement::funding::attempts::tests::quota::live_attempt_quota_entitlement_admission_and_outcome_rollback
 
 # Credit flows share the migrated schema but isolate their rows in pg_temp.
 # Keep each existing regression visible as an exact target in required CI.

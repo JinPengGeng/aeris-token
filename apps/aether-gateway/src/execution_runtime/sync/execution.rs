@@ -177,6 +177,7 @@ struct SyncAttemptTerminalGuard {
     candidate_started_unix_ms: u64,
     candidate_started_at: Instant,
     armed: bool,
+    funded_attempt: Option<Arc<crate::execution_runtime::funded_image::FundedImageAttempt>>,
 }
 
 /// Keep forced-terminal records useful for operations without copying an
@@ -228,6 +229,7 @@ impl SyncAttemptTerminalGuard {
             candidate_started_unix_ms,
             candidate_started_at,
             armed: true,
+            funded_attempt: None,
         }
     }
 
@@ -240,6 +242,14 @@ impl SyncAttemptTerminalGuard {
             return;
         }
         self.armed = false;
+        if let Some(attempt) = self.funded_attempt.as_ref() {
+            if attempt.finish_unobserved(false).await.is_err() {
+                warn!(
+                    event_name = "image_funds_outcome_failed",
+                    "failed image attempt requires financial reconciliation"
+                );
+            }
+        }
         record_sync_attempt_forced_terminal_state(
             self.state.clone(),
             self.plan.clone(),
@@ -252,6 +262,7 @@ impl SyncAttemptTerminalGuard {
             StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
             "local_sync_attempt_aborted",
             persisted_sync_abort_message(error),
+            self.funded_attempt.clone(),
         )
         .await;
     }
@@ -269,10 +280,16 @@ impl Drop for SyncAttemptTerminalGuard {
         let request_diagnostics = self.request_diagnostics.clone();
         let candidate_started_unix_ms = self.candidate_started_unix_ms;
         let candidate_started_at = self.candidate_started_at;
+        let funded_attempt = self.funded_attempt.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let usage_producer = state.usage_runtime.track_producer();
             handle.spawn(async move {
                 let _usage_producer = usage_producer;
+                if let Some(attempt) = funded_attempt.as_ref() {
+                    if attempt.finish_unobserved(true).await.is_err() {
+                        warn!(event_name="image_funds_cancellation_failed", "cancelled image attempt requires financial reconciliation");
+                    }
+                }
                 record_sync_attempt_forced_terminal_state(
                     state,
                     plan,
@@ -285,6 +302,7 @@ impl Drop for SyncAttemptTerminalGuard {
                     499,
                     "local_sync_attempt_cancelled",
                     "Local sync attempt was dropped before terminal finalization, usually because the client disconnected or the request task was cancelled.",
+                    funded_attempt,
                 )
                 .await;
             });
@@ -313,6 +331,7 @@ async fn record_sync_attempt_forced_terminal_state(
     status_code: u16,
     error_type: &'static str,
     error_message: impl Into<String>,
+    funded_attempt: Option<Arc<crate::execution_runtime::funded_image::FundedImageAttempt>>,
 ) {
     let error_message = error_message.into();
     let report_context =
@@ -361,6 +380,29 @@ async fn record_sync_attempt_forced_terminal_state(
     usage_data.response_body = Some(error_body.clone());
     usage_data.client_response_headers = Some(json!({"content-type": "application/json"}));
     usage_data.client_response_body = Some(error_body);
+
+    if let Some(attempt) = funded_attempt {
+        usage_data.attempt_funds = Some(Box::new(aether_usage_runtime::UsageAttemptFundsEvent {
+            schema_version: 1,
+            identity: attempt.identity.clone(),
+            action: aether_usage_runtime::UsageAttemptFundsAction::ParentLifecycle,
+        }));
+        if state
+            .usage_runtime
+            .persist_attempt_funds_event(
+                state.usage_lifecycle_data_state().as_ref(),
+                UsageEvent::new(usage_event_type, plan.request_id.clone(), usage_data),
+            )
+            .await
+            .is_err()
+        {
+            warn!(
+                event_name = "image_funds_parent_terminal_failed",
+                "image client lifecycle requires reconciliation"
+            );
+        }
+        return;
+    }
 
     state
         .usage_runtime
@@ -614,6 +656,19 @@ async fn record_sync_terminal_usage(
     candidate_started_at: Instant,
     candidate_first_byte_elapsed_ms: Option<u64>,
 ) {
+    if let Some(attempt) = crate::execution_runtime::funded_image::current_attempt() {
+        if attempt
+            .observe(plan, report_context, payload)
+            .await
+            .is_err()
+        {
+            warn!(
+                event_name = "image_funds_terminal_evidence_failed",
+                "image financial evidence requires reconciliation"
+            );
+        }
+        return;
+    }
     let report_context_with_diagnostics =
         attach_current_request_diagnostics_and_candidate_start_timing_to_report_context(
             report_context,
@@ -1746,7 +1801,7 @@ fn should_enable_openai_image_sync_json_heartbeat(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_openai_image_sync_json_heartbeat_response(
+pub(crate) fn build_openai_image_sync_json_heartbeat_response(
     state: AppState,
     request_path: String,
     plan: ExecutionPlan,
@@ -1773,26 +1828,33 @@ fn build_openai_image_sync_json_heartbeat_response(
     };
     let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(1);
 
-    tokio::spawn(async move {
-        let bytes = openai_image_sync_json_heartbeat_final_bytes(
-            execute_execution_runtime_sync_impl(
-                &state,
-                request_path.as_str(),
-                plan,
-                trace_id.as_str(),
-                &decision,
-                plan_kind.as_str(),
-                report_kind,
-                report_context,
-                false,
-                Some(progress_snapshot),
-                None,
-                None,
-            )
-            .await,
-        )
-        .await;
+    let cancel_on_disconnect = crate::request_lifecycle::cancel_on_client_disconnect();
+    crate::execution_runtime::funded_image::spawn_request_scope(&state.clone(), async move {
+        let execution = execute_execution_runtime_sync_impl(
+            &state,
+            request_path.as_str(),
+            plan,
+            trace_id.as_str(),
+            &decision,
+            plan_kind.as_str(),
+            report_kind,
+            report_context,
+            false,
+            Some(progress_snapshot),
+            None,
+            None,
+        );
+        let outcome = tokio::select! {
+            biased;
+            _ = tx.closed(), if cancel_on_disconnect => {
+                crate::execution_runtime::funded_image::mark_request_cancelled();
+                return Ok(());
+            },
+            result = execution => result,
+        };
+        let bytes = openai_image_sync_json_heartbeat_final_bytes(outcome).await;
         let _ = tx.send(Ok(Bytes::from(bytes))).await;
+        Ok(())
     });
 
     let headers = BTreeMap::from([(
@@ -1972,19 +2034,22 @@ pub(crate) async fn execute_execution_runtime_sync(
     report_kind: Option<String>,
     mut report_context: Option<serde_json::Value>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    execute_execution_runtime_sync_impl(
+    crate::execution_runtime::funded_image::request_scope(
         state,
-        request_path,
-        plan,
-        trace_id,
-        decision,
-        plan_kind,
-        report_kind,
-        report_context,
-        true,
-        None,
-        None,
-        None,
+        execute_execution_runtime_sync_impl(
+            state,
+            request_path,
+            plan,
+            trace_id,
+            decision,
+            plan_kind,
+            report_kind,
+            report_context,
+            true,
+            None,
+            None,
+            None,
+        ),
     )
     .await
 }
@@ -2002,19 +2067,22 @@ pub(crate) async fn execute_execution_runtime_sync_with_retry_scope(
 ) -> Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError> {
     let mut retry_scope = AiAttemptRetryScope::Candidate;
     let mut fallback_response = None;
-    let response = execute_execution_runtime_sync_impl(
+    let response = crate::execution_runtime::funded_image::request_scope(
         state,
-        request_path,
-        plan,
-        trace_id,
-        decision,
-        plan_kind,
-        report_kind,
-        report_context,
-        true,
-        None,
-        Some(&mut retry_scope),
-        Some(&mut fallback_response),
+        execute_execution_runtime_sync_impl(
+            state,
+            request_path,
+            plan,
+            trace_id,
+            decision,
+            plan_kind,
+            report_kind,
+            report_context,
+            true,
+            None,
+            Some(&mut retry_scope),
+            Some(&mut fallback_response),
+        ),
     )
     .await?;
     Ok(match response {
@@ -2105,12 +2173,21 @@ async fn execute_execution_runtime_sync_impl(
             return Ok(None);
         }
     };
-    let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
-    let usage_data = state.usage_lifecycle_data_state().as_ref().clone();
-    state
-        .usage_runtime
-        .record_pending_direct(&usage_data, lifecycle_seed)
-        .await;
+    let funded_attempt = crate::execution_runtime::funded_image::FundedImageAttempt::prepare(
+        state,
+        &plan,
+        decision,
+        report_context.as_ref(),
+    )
+    .await?;
+    if funded_attempt.is_none() {
+        let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
+        let usage_data = state.usage_lifecycle_data_state().as_ref().clone();
+        state
+            .usage_runtime
+            .record_pending_direct(&usage_data, lifecycle_seed)
+            .await;
+    }
     record_local_request_candidate_status(
         state,
         &plan,
@@ -2133,7 +2210,11 @@ async fn execute_execution_runtime_sync_impl(
         candidate_started_unix_secs,
         candidate_started_at,
     );
-    let result = (async {
+    terminal_guard.funded_attempt = funded_attempt.clone();
+    let result = crate::execution_runtime::funded_image::attempt_scope(funded_attempt.clone(), async {
+    if let Some(attempt) = funded_attempt.as_ref() {
+        attempt.dispatch().await?;
+    }
     record_sync_execution_active(
         state,
         &plan,
@@ -2715,6 +2796,7 @@ async fn execute_execution_runtime_sync_impl(
         );
 
         if result.status_code >= 400
+            && funded_attempt.is_none()
             && !oauth_retry_attempted
             && refresh_oauth_plan_auth_for_retry(
                 state,
@@ -3379,11 +3461,17 @@ async fn execute_execution_runtime_sync_impl(
     Ok(Some(response))
     })
     .await;
+    let funds_result = if let Some(attempt) = funded_attempt.as_ref() {
+        attempt.finish_unobserved(false).await
+    } else {
+        Ok(())
+    };
     if let Err(error) = result.as_ref() {
         terminal_guard.fail_and_disarm(error).await;
     } else {
         terminal_guard.disarm();
     }
+    funds_result?;
     result
 }
 
