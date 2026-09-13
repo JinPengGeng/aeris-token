@@ -863,8 +863,8 @@ fn ensure_service_identity() -> anyhow::Result<()> {
     }
     let uid = Command::new(id_bin()).args(["-u", SERVICE_USER]).output()?;
     let gid = Command::new(id_bin()).args(["-g", SERVICE_USER]).output()?;
-    if !uid.status.success()
-        || !gid.status.success()
+    validate_service_uid(uid.status.success(), &uid.stdout)?;
+    if !gid.status.success()
         || String::from_utf8_lossy(&gid.stdout).trim() != service_group_id()?.to_string()
     {
         anyhow::bail!("service identity '{SERVICE_USER}' must use primary group '{SERVICE_GROUP}'");
@@ -877,6 +877,20 @@ fn ensure_service_identity() -> anyhow::Result<()> {
             .any(|group| group != expected_gid)
     {
         anyhow::bail!("service identity '{SERVICE_USER}' has unexpected supplementary groups");
+    }
+    Ok(())
+}
+
+fn validate_service_uid(status_success: bool, output: &[u8]) -> anyhow::Result<()> {
+    if !status_success {
+        anyhow::bail!("cannot resolve service identity '{SERVICE_USER}' uid");
+    }
+    let uid = String::from_utf8_lossy(output)
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| anyhow::anyhow!("cannot parse service identity '{SERVICE_USER}' uid"))?;
+    if uid == 0 {
+        anyhow::bail!("service identity '{SERVICE_USER}' must not use uid 0");
     }
     Ok(())
 }
@@ -1165,7 +1179,7 @@ mod tests {
     use super::{
         ensure_private_service_directory, open_private_service_log, pick_bin, render_openrc_init,
         render_systemd_unit, systemd_quote, validate_root_managed_service_file,
-        validate_service_unit_path, write_service_definition,
+        validate_service_uid, validate_service_unit_path, write_service_definition,
     };
 
     #[test]
@@ -1206,6 +1220,19 @@ mod tests {
         );
         assert!(init.contains("--user \"aether-tunnel:aether-tunnel\""));
         assert!(!init.contains("--user root"));
+    }
+
+    #[test]
+    fn service_identity_uid_fixture_rejects_root() {
+        let fixtures = [
+            (b"1001\n".as_slice(), true),
+            (b"0\n".as_slice(), false),
+            (b"00\n".as_slice(), false),
+        ];
+        for (uid, accepted) in fixtures {
+            assert_eq!(validate_service_uid(true, uid).is_ok(), accepted);
+        }
+        assert!(validate_service_uid(false, b"1001\n").is_err());
     }
 
     #[test]
