@@ -14,9 +14,9 @@ Decision date: 2026-09-13
 
 ## Decision
 
-Historical impact remains **unknown**. No backfill is required or authorized at
-this time because there is no production evidence from which to determine
-whether a repair is needed. This is a fork-only decision record; it does not
+Historical impact remains **unknown**. Whether a repair is needed cannot be
+determined without production evidence; no backfill should run on the basis
+of the toolkit alone. This is a fork-only decision record; it does not
 write production data and does not close Issue #316 or parent Issue #208.
 
 Do not mark the issue complete based on the merged toolkit alone. A future
@@ -28,7 +28,9 @@ malformed counter requires a separately reviewed, idempotent repair proposal.
 
 ## Project status suggestion
 
-Keep the item in `Planned` (or move to `In Progress` when an operator has
-scheduled the snapshot audit). Keep `priority:P2`, `area:data`, and medium risk.
+Use Project `Decision: Planned`. The parent issue remains in `Inbox` while
+awaiting a scheduled snapshot audit; review of this document alone does not
+move the parent to `In review`. Move it to `In progress` when the snapshot
+audit starts. Keep `priority:P2`, `area:data`, and medium risk.
 Do not move it to `Done` until the redacted production aggregates and a
 reviewed repair/no-repair decision are attached to Issue #316.
