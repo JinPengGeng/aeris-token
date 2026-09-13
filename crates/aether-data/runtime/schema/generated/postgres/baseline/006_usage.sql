@@ -3,6 +3,8 @@
 
 CREATE TABLE IF NOT EXISTS public.usage (
     request_id character varying(128) NOT NULL,
+    billing_mode character varying(20) DEFAULT 'legacy' NOT NULL,
+    funds_admission_closed_at timestamp with time zone,
     id character varying(128),
     user_id character varying(64),
     api_key_id character varying(64),
@@ -204,6 +206,7 @@ CREATE INDEX IF NOT EXISTS ix_usage_counter_deltas_request_kind ON public.usage_
 CREATE TABLE IF NOT EXISTS public.usage_settlement_snapshots (
     request_id character varying(128) NOT NULL,
     billing_status character varying(64) NOT NULL,
+    request_funds_summary jsonb,
     wallet_id character varying(64),
     wallet_balance_before double precision,
     wallet_balance_after double precision,

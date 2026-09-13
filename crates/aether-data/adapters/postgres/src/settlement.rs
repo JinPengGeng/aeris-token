@@ -20,6 +20,7 @@ pub(crate) mod funding;
 const FIND_USAGE_FOR_SETTLEMENT_SQL: &str = r#"
 SELECT
   usage_record.request_id,
+  usage_record.billing_mode,
   COALESCE(usage_settlement_snapshots.wallet_id, usage_record.wallet_id) AS wallet_id,
   COALESCE(usage_settlement_snapshots.billing_status, usage_record.billing_status) AS billing_status,
   COALESCE(
@@ -669,7 +670,7 @@ INSERT INTO entitlement_usage_ledgers (
   balance_before, balance_after, usage_date, created_at
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-ON CONFLICT (user_entitlement_id, request_id) DO NOTHING
+ON CONFLICT (user_entitlement_id, request_id) WHERE attempt_id IS NULL DO NOTHING
             "#,
         )
         .bind(uuid::Uuid::new_v4().to_string())
@@ -694,6 +695,71 @@ ON CONFLICT (user_entitlement_id, request_id) DO NOTHING
 
 #[async_trait]
 impl SettlementWriteRepository for SqlxSettlementRepository {
+    async fn reserve_request_attempt_funds(
+        &self,
+        input: aether_data_contracts::repository::settlement::ReserveRequestAttemptFundsInput,
+    ) -> Result<
+        aether_data_contracts::repository::settlement::ReserveRequestAttemptFundsOutcome,
+        DataLayerError,
+    > {
+        input.validate()?;
+        self.tx_runner
+            .run_read_write(|tx| Box::pin(funding::attempts::reserve(tx, input)))
+            .await
+    }
+    async fn mark_request_attempt_funds_dispatched(
+        &self,
+        identity: aether_data_contracts::repository::settlement::RequestAttemptFundsIdentity,
+    ) -> Result<
+        Option<aether_data_contracts::repository::settlement::StoredRequestAttemptFunds>,
+        DataLayerError,
+    > {
+        identity.validate()?;
+        self.tx_runner
+            .run_read_write(|tx| Box::pin(funding::attempts::dispatch(tx, identity)))
+            .await
+    }
+    async fn record_request_attempt_funds_outcome(
+        &self,
+        input: aether_data_contracts::repository::settlement::RecordRequestAttemptFundsOutcomeInput,
+    ) -> Result<
+        Option<aether_data_contracts::repository::settlement::StoredRequestAttemptFunds>,
+        DataLayerError,
+    > {
+        input.validate()?;
+        self.tx_runner
+            .run_read_write(|tx| Box::pin(funding::attempts::outcome(tx, input)))
+            .await
+    }
+    async fn read_request_attempt_funds(
+        &self,
+        identity: aether_data_contracts::repository::settlement::RequestAttemptFundsIdentity,
+    ) -> Result<
+        Option<aether_data_contracts::repository::settlement::StoredRequestAttemptFunds>,
+        DataLayerError,
+    > {
+        identity.validate()?;
+        self.tx_runner
+            .run_read_write(|tx| Box::pin(funding::attempts::read(tx, identity)))
+            .await
+    }
+    async fn close_request_funds_admission(
+        &self,
+        input: aether_data_contracts::repository::settlement::CloseRequestFundsAdmissionInput,
+    ) -> Result<
+        Option<aether_data_contracts::repository::settlement::RequestFundsSummary>,
+        DataLayerError,
+    > {
+        input.identity.validate()?;
+        if input.closed_at_unix_secs > i64::MAX as u64 {
+            return Err(DataLayerError::InvalidInput(
+                "admission close time overflow".to_string(),
+            ));
+        }
+        self.tx_runner
+            .run_read_write(|tx| Box::pin(funding::attempts::close(tx, input)))
+            .await
+    }
     async fn reserve_request_funds(
         &self,
         input: aether_data_contracts::repository::settlement::ReserveRequestFundsInput,
@@ -1218,6 +1284,9 @@ WHERE retain_until <= TO_TIMESTAMP($1::double precision)
                     let Some(usage_row) = row else {
                         return Ok(None);
                     };
+                    if usage_row.try_get::<String, _>("billing_mode").map_postgres_err()? == "attempt_funds" {
+                        return Err(DataLayerError::InvalidInput("attempt funds usage requires v2 financial settlement".to_string()));
+                    }
 
                     let current_billing_status: String =
                         usage_row.try_get("billing_status").map_postgres_err()?;

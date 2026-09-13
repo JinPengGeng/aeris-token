@@ -9,6 +9,19 @@ type = "text"
 length = 128
 
 [[table.usage.columns]]
+name = "billing_mode"
+type = "text"
+length = 20
+default = "legacy"
+# CHECK (legacy / attempt_funds) is maintained in migration 20260914010000
+# and bootstrap/postgres/220_request_attempt_funds.sql.
+
+[[table.usage.columns]]
+name = "funds_admission_closed_at"
+type = "timestamp"
+nullable = true
+
+[[table.usage.columns]]
 name = "id"
 type = "text"
 length = 128
@@ -942,6 +955,11 @@ length = 128
 name = "billing_status"
 type = "text"
 length = 64
+
+[[table.usage_settlement_snapshots.columns]]
+name = "request_funds_summary"
+type = "json"
+nullable = true
 
 [[table.usage_settlement_snapshots.columns]]
 name = "wallet_id"

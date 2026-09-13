@@ -252,6 +252,7 @@ CREATE TABLE IF NOT EXISTS public.entitlement_usage_ledgers (
     user_entitlement_id character varying(64) NOT NULL,
     user_id character varying(64) NOT NULL,
     request_id character varying(128) NOT NULL,
+    attempt_id uuid,
     amount_usd double precision NOT NULL,
     balance_before double precision NOT NULL,
     balance_after double precision NOT NULL,
@@ -260,7 +261,6 @@ CREATE TABLE IF NOT EXISTS public.entitlement_usage_ledgers (
 );
 
 ALTER TABLE ONLY public.entitlement_usage_ledgers ADD CONSTRAINT entitlement_usage_ledgers_pkey PRIMARY KEY (id);
-ALTER TABLE ONLY public.entitlement_usage_ledgers ADD CONSTRAINT uq_entitlement_usage_request UNIQUE (user_entitlement_id, request_id);
 CREATE INDEX IF NOT EXISTS idx_entitlement_usage_user_date ON public.entitlement_usage_ledgers USING btree (user_id, usage_date);
 CREATE INDEX IF NOT EXISTS idx_entitlement_usage_entitlement_date ON public.entitlement_usage_ledgers USING btree (user_entitlement_id, usage_date);
 

@@ -8497,7 +8497,7 @@ ORDER BY "usage".user_id ASC
         usage.validate()?;
         // Move the event before cloning or compressing captures, and do not hold a connection
         // while preparing them. Stale lifecycle updates still ignore preparation errors below.
-        let (usage, prepared) =
+        let (mut usage, prepared) =
             prepare_usage_in_background(move || Ok(prepare_usage_for_persistence(usage))).await?;
         self.tx_runner
             .run_read_write(|tx| {
@@ -8506,6 +8506,25 @@ ORDER BY "usage".user_id ASC
 
                     let previous_usage =
                         find_usage_by_request_id_in_tx(tx, &usage.request_id).await?;
+                    let attempt_funds: bool = sqlx::query_scalar("SELECT COALESCE((SELECT billing_mode = 'attempt_funds' FROM usage WHERE request_id = $1), false)")
+                        .bind(&usage.request_id).fetch_one(&mut **tx).await.map_postgres_err()?;
+                    if attempt_funds {
+                        let previous = previous_usage.as_ref().ok_or_else(|| DataLayerError::UnexpectedValue("attempt parent disappeared".to_string()))?;
+                        usage.user_id = previous.user_id.clone();
+                        usage.api_key_id = previous.api_key_id.clone();
+                        usage.billing_status = previous.billing_status.clone();
+                        usage.total_cost_usd = Some(previous.total_cost_usd);
+                        usage.actual_total_cost_usd = Some(previous.actual_total_cost_usd);
+                        usage.input_tokens = Some(previous.input_tokens);
+                        usage.output_tokens = Some(previous.output_tokens);
+                        usage.total_tokens = Some(previous.total_tokens);
+                        usage.cache_creation_input_tokens = Some(previous.cache_creation_input_tokens);
+                        usage.cache_creation_ephemeral_5m_input_tokens = Some(previous.cache_creation_ephemeral_5m_input_tokens);
+                        usage.cache_creation_ephemeral_1h_input_tokens = Some(previous.cache_creation_ephemeral_1h_input_tokens);
+                        usage.cache_read_input_tokens = Some(previous.cache_read_input_tokens);
+                        usage.cache_creation_cost_usd = Some(previous.cache_creation_cost_usd);
+                        usage.cache_read_cost_usd = Some(previous.cache_read_cost_usd);
+                    }
                     if let Some(previous) = previous_usage.as_ref() {
                         if !usage_lifecycle_update_allowed(
                             &previous.status,
@@ -8605,6 +8624,15 @@ ORDER BY "usage".user_id ASC
                             )
                             .unwrap_or_else(|| Value::Object(Map::new())),
                         );
+                        request_metadata_json = json_bind_text(request_metadata_value.as_ref())?;
+                    }
+                    if attempt_funds {
+                        let previous_metadata = previous_usage.as_ref().and_then(|row| row.request_metadata.as_ref());
+                        let mut metadata = request_metadata_value.take().or_else(|| previous_metadata.cloned()).and_then(|v| v.as_object().cloned()).unwrap_or_default();
+                        metadata.insert("api_key_is_standalone".to_string(), Value::Bool(previous_metadata.and_then(|v| v.get("api_key_is_standalone")).and_then(Value::as_bool).unwrap_or(false)));
+                        metadata.insert("usage_available".to_string(), Value::Bool(true));
+                        metadata.insert("usage_pricing_available".to_string(), Value::Bool(true));
+                        request_metadata_value = Some(Value::Object(metadata));
                         request_metadata_json = json_bind_text(request_metadata_value.as_ref())?;
                     }
                     let _row = sqlx::query(UPSERT_SQL)
@@ -8754,13 +8782,13 @@ ORDER BY "usage".user_id ASC
                             replace_terminal_snapshots,
                         )
                         .await?;
-                        sync_usage_settlement_pricing_snapshot_storage(
+                        if !attempt_funds { sync_usage_settlement_pricing_snapshot_storage(
                             &mut **tx,
                             &usage.request_id,
                             &settlement_pricing_snapshot,
                             replace_terminal_snapshots,
                         )
-                        .await?;
+                        .await?; }
                     }
 
                     let mut stored = find_usage_by_request_id_in_tx(tx, &usage.request_id)
@@ -8927,6 +8955,7 @@ ORDER BY "usage".user_id ASC
                         }
                     }
 
+                    if !attempt_funds {
                     let before_provider_contribution = previous_usage
                         .as_ref()
                         .and_then(provider_api_key_usage_contribution);
@@ -8969,6 +8998,7 @@ ORDER BY "usage".user_id ASC
                         }
                     }
 
+                    }
                     Ok(stored)
                 }) as BoxFuture<'_, Result<StoredRequestUsageAudit, DataLayerError>>
             })
@@ -9661,12 +9691,21 @@ removed_last_used_at_unix_secs, usage_created_at_unix_secs
             .map_postgres_err()?;
         if let Some(stored) = stored {
             let after = map_inserted_pending_usage(stored, "first-byte usage")?;
-            enqueue_first_byte_provider_contribution_transition_in_tx(
-                &mut tx,
-                before.as_ref(),
-                &after,
+            let attempt_funds: bool = sqlx::query_scalar(
+                "SELECT billing_mode = 'attempt_funds' FROM usage WHERE request_id = $1",
             )
-            .await?;
+            .bind(&usage.request_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            if !attempt_funds {
+                enqueue_first_byte_provider_contribution_transition_in_tx(
+                    &mut tx,
+                    before.as_ref(),
+                    &after,
+                )
+                .await?;
+            }
         }
         tx.commit().await.map_postgres_err()?;
         Ok(())
@@ -9710,6 +9749,9 @@ removed_last_used_at_unix_secs, usage_created_at_unix_secs
                     );
                 }
             }
+            let attempt_requests: Vec<String> = sqlx::query_scalar("SELECT request_id FROM usage WHERE request_id = ANY($1) AND billing_mode = 'attempt_funds'")
+                .bind(&request_ids).fetch_all(&mut *tx).await.map_postgres_err()?;
+            updated.retain(|row| !attempt_requests.contains(&row.request_id));
             let counter_deltas =
                 prepare_first_byte_provider_contribution_transitions(&before, &updated)?;
             insert_usage_counter_deltas_batch_in_tx(&mut tx, &counter_deltas).await?;
@@ -9784,8 +9826,8 @@ removed_last_used_at_unix_secs, usage_created_at_unix_secs
             r#"
 ON CONFLICT (request_id)
 DO UPDATE SET
-  user_id = COALESCE(EXCLUDED.user_id, "usage".user_id),
-  api_key_id = COALESCE(EXCLUDED.api_key_id, "usage".api_key_id),
+  user_id = CASE WHEN "usage".billing_mode = 'legacy' THEN COALESCE(EXCLUDED.user_id, "usage".user_id) ELSE "usage".user_id END,
+  api_key_id = CASE WHEN "usage".billing_mode = 'legacy' THEN COALESCE(EXCLUDED.api_key_id, "usage".api_key_id) ELSE "usage".api_key_id END,
   provider_name = EXCLUDED.provider_name,
   model = EXCLUDED.model,
   target_model = COALESCE(EXCLUDED.target_model, "usage".target_model),
@@ -10838,6 +10880,84 @@ fn resolve_stale_pending_status_code(candidate: Option<&FailedCandidateCleanupIn
     candidate
         .and_then(|info| info.status_code)
         .unwrap_or(if candidate.is_some() { 502 } else { 504 })
+}
+
+/// Called exactly once while changing a still-pending request to attempt mode.
+pub(crate) async fn remove_parent_provider_contribution_for_attempts(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    request: &str,
+) -> Result<(), DataLayerError> {
+    if let Some(previous) = find_usage_by_request_id_in_tx(tx, request).await? {
+        if let Some(contribution) = provider_api_key_usage_contribution(&previous) {
+            enqueue_provider_api_key_usage_delta_in_tx(
+                tx,
+                request,
+                &contribution.key_id,
+                &ProviderApiKeyUsageDelta::removal(&contribution),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Financial values are written only here for attempt-mode parents. Caller owns
+/// the request advisory/usage locks and has completed the child ledger writes.
+pub(crate) async fn apply_attempt_funds_summary_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    request: &str,
+    summary: &aether_data_contracts::repository::settlement::RequestFundsSummary,
+    billed: &aether_data_contracts::repository::settlement::RequestAttemptBilledUsage,
+) -> Result<(), DataLayerError> {
+    use aether_data_contracts::repository::settlement::request_funds_usd;
+    let previous = find_usage_by_request_id_in_tx(tx, request)
+        .await?
+        .ok_or_else(|| DataLayerError::InvalidInput("attempt parent usage missing".to_string()))?;
+    let status = if summary.admission_closed
+        && summary.unknown_attempts == 0
+        && summary.prepared_attempts == 0
+        && !summary.requires_reconciliation
+    {
+        "settled"
+    } else {
+        "pending"
+    };
+    let total = billed
+        .total_tokens()
+        .and_then(|n| i32::try_from(n).ok())
+        .ok_or_else(|| {
+            DataLayerError::InvalidInput("attempt aggregate tokens overflow".to_string())
+        })?;
+    sqlx::query("UPDATE usage SET total_cost_usd = $2, actual_total_cost_usd = $3, input_tokens = $4, output_tokens = $5, cache_creation_input_tokens = $6, cache_read_input_tokens = $7, cache_creation_input_tokens_5m = 0, cache_creation_input_tokens_1h = 0, total_tokens = $8, input_output_total_tokens = $4 + $5, input_context_tokens = $4 + $6 + $7, billing_status = $9 WHERE request_id = $1 AND billing_mode = 'attempt_funds'")
+        .bind(request).bind(request_funds_usd(summary.known_total_cost_units)).bind(request_funds_usd(summary.known_actual_cost_units))
+        .bind(billed.input_tokens as i32).bind(billed.output_tokens as i32).bind(billed.cache_creation_tokens as i32).bind(billed.cache_read_tokens as i32).bind(total).bind(status)
+        .execute(&mut **tx).await.map_postgres_err()?;
+    sqlx::query("UPDATE usage SET request_metadata = (COALESCE(request_metadata::jsonb, '{}'::jsonb) || '{\"usage_available\":true,\"usage_pricing_available\":true}'::jsonb)::json WHERE request_id = $1")
+        .bind(request).execute(&mut **tx).await.map_postgres_err()?;
+    // Parent cost columns are a projection, not one of the attempt price rules.
+    // Fill every authoritative billing token/cost override so stale legacy
+    // enrichment fields cannot mask the aggregate in usage_billing_facts.
+    sqlx::query("INSERT INTO usage_settlement_snapshots (request_id,billing_status,request_funds_summary,billing_input_tokens,billing_effective_input_tokens,billing_output_tokens,billing_cache_creation_tokens,billing_cache_creation_5m_tokens,billing_cache_creation_1h_tokens,billing_cache_read_tokens,billing_total_input_context,billing_total_cost_usd,billing_actual_total_cost_usd) VALUES ($1,$2,$3,$4,$4,$5,$6,0,0,$7,$4+$6+$7,$8,$9) ON CONFLICT (request_id) DO UPDATE SET billing_status=EXCLUDED.billing_status, request_funds_summary=EXCLUDED.request_funds_summary, billing_input_tokens=EXCLUDED.billing_input_tokens, billing_effective_input_tokens=EXCLUDED.billing_effective_input_tokens,billing_output_tokens=EXCLUDED.billing_output_tokens,billing_cache_creation_tokens=EXCLUDED.billing_cache_creation_tokens,billing_cache_creation_5m_tokens=0,billing_cache_creation_1h_tokens=0,billing_cache_read_tokens=EXCLUDED.billing_cache_read_tokens,billing_total_input_context=EXCLUDED.billing_total_input_context,billing_total_cost_usd=EXCLUDED.billing_total_cost_usd,billing_actual_total_cost_usd=EXCLUDED.billing_actual_total_cost_usd,wallet_balance_before=NULL,wallet_balance_after=NULL,wallet_recharge_balance_before=NULL,wallet_recharge_balance_after=NULL,wallet_gift_balance_before=NULL,wallet_gift_balance_after=NULL,updated_at=NOW()")
+        .bind(request).bind(status).bind(serde_json::to_value(summary).map_err(|_| DataLayerError::InvalidInput("invalid funds summary".to_string()))?)
+        .bind(billed.input_tokens as i64).bind(billed.output_tokens as i64).bind(billed.cache_creation_tokens as i64).bind(billed.cache_read_tokens as i64)
+        .bind(request_funds_usd(summary.known_total_cost_units)).bind(request_funds_usd(summary.known_actual_cost_units))
+        .execute(&mut **tx).await.map_postgres_err()?;
+    let after = find_usage_by_request_id_in_tx(tx, request)
+        .await?
+        .ok_or_else(|| DataLayerError::UnexpectedValue("attempt parent disappeared".to_string()))?;
+    if let (Some(before), Some(after)) = (
+        api_key_usage_contribution(&previous),
+        api_key_usage_contribution(&after),
+    ) {
+        enqueue_api_key_usage_delta_in_tx(
+            tx,
+            request,
+            &before.api_key_id,
+            &ApiKeyUsageDelta::between(&before, &after),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn find_usage_by_request_id_in_tx(
@@ -13966,4 +14086,4 @@ fn usage_body_sql_columns(field: UsageBodyField) -> (&'static str, &'static str)
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

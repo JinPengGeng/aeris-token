@@ -4,6 +4,13 @@
 CREATE TABLE IF NOT EXISTS public.request_fund_reservations (
     reservation_token character varying(128) NOT NULL,
     request_id character varying(128) NOT NULL,
+    attempt_id uuid,
+    candidate_id character varying(128),
+    provider_id character varying(128),
+    provider_api_key_id character varying(128),
+    model_id character varying(128),
+    dispatched_at timestamp with time zone,
+    terminal_facts jsonb,
     wallet_id character varying(64),
     quote jsonb NOT NULL,
     state character varying(32) NOT NULL,
@@ -16,7 +23,7 @@ CREATE TABLE IF NOT EXISTS public.request_fund_reservations (
 );
 
 ALTER TABLE ONLY public.request_fund_reservations ADD CONSTRAINT request_fund_reservations_pkey PRIMARY KEY (reservation_token);
-ALTER TABLE ONLY public.request_fund_reservations ADD CONSTRAINT request_fund_reservations_request_id_key UNIQUE (request_id);
+CREATE INDEX IF NOT EXISTS request_fund_reservations_request_id_idx ON public.request_fund_reservations USING btree (request_id);
 CREATE INDEX IF NOT EXISTS request_fund_reservations_wallet_state_idx ON public.request_fund_reservations USING btree (wallet_id, state);
 ALTER TABLE ONLY public.request_fund_reservations ADD CONSTRAINT request_fund_reservations_wallet_id_fkey FOREIGN KEY (wallet_id) REFERENCES public.wallets(id) ON DELETE RESTRICT;
 

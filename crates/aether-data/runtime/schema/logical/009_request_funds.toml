@@ -11,6 +11,39 @@ name = "request_id"
 type = "text_id"
 length = 128
 [[table.request_fund_reservations.columns]]
+name = "attempt_id"
+type = "text_id"
+nullable = true
+driver.postgres.type = "uuid"
+[[table.request_fund_reservations.columns]]
+name = "candidate_id"
+type = "text_id"
+length = 128
+nullable = true
+[[table.request_fund_reservations.columns]]
+name = "provider_id"
+type = "text_id"
+length = 128
+nullable = true
+[[table.request_fund_reservations.columns]]
+name = "provider_api_key_id"
+type = "text_id"
+length = 128
+nullable = true
+[[table.request_fund_reservations.columns]]
+name = "model_id"
+type = "text_id"
+length = 128
+nullable = true
+[[table.request_fund_reservations.columns]]
+name = "dispatched_at"
+type = "timestamp"
+nullable = true
+[[table.request_fund_reservations.columns]]
+name = "terminal_facts"
+type = "json"
+nullable = true
+[[table.request_fund_reservations.columns]]
 name = "wallet_id"
 type = "text_id"
 length = 64
@@ -46,8 +79,12 @@ default = { raw = "now()" }
 name = "updated_at"
 type = "timestamp"
 default = { raw = "now()" }
-[[table.request_fund_reservations.uniques]]
-name = "request_fund_reservations_request_id_key"
+# Partial unique indexes and CHECK constraints are maintained in migration
+# 20260914010000 and bootstrap/postgres/220_request_attempt_funds.sql. The logical
+# compiler cannot represent predicates or CHECKs: attempts require provider_id,
+# and terminal_facts must be a schema_version=1 object no larger than 20 KiB.
+[[table.request_fund_reservations.indexes]]
+name = "request_fund_reservations_request_id_idx"
 columns = ["request_id"]
 [[table.request_fund_reservations.indexes]]
 name = "request_fund_reservations_wallet_state_idx"
