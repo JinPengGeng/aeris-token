@@ -21,6 +21,7 @@ const groups = {
 const directLeaves = ['fmt', 'data_db_ignored_postgres'];
 const leaves = [...directLeaves, ...Object.values(groups).flat()];
 const gates = [...Object.keys(groups), 'check'];
+const alwaysRequired = ['shell_security', 'prometheus_contracts'];
 
 // Execute the workflow's restricted boolean expressions with the same string
 // truthiness and case-insensitive string equality as Actions (notably, the
@@ -84,6 +85,7 @@ function runWorkflow({
   const needs = {
     changes: { result: changesResult, outputs: { rust: output } },
     shell_security: { result: overrides.shell_security ?? 'success' },
+    prometheus_contracts: { result: overrides.prometheus_contracts ?? 'success' },
   };
   for (const jobId of leaves) {
     const selected = expressionValue(workflow.jobs[jobId].if, contextFor(eventName, needs, filterOutput));
@@ -98,10 +100,12 @@ function runWorkflow({
 
 test('every Rust and database job consumes changes, while all aggregate gates and shell fixtures remain required', () => {
   assert.deepEqual(new Set(Object.keys(workflow.jobs)), new Set([
-    'changes', 'shell_security', ...leaves, ...gates, 'publish_dispatch_status',
+    'changes', ...alwaysRequired, ...leaves, ...gates, 'publish_dispatch_status',
   ]), 'new jobs must be accounted for in the required graph');
   assert.equal(workflow.jobs.shell_security.if, undefined);
   assert.equal(workflow.jobs.shell_security.needs, undefined);
+  assert.equal(workflow.jobs.prometheus_contracts.if, undefined);
+  assert.equal(workflow.jobs.prometheus_contracts.needs, undefined);
   assert.equal(workflow.jobs.check.name, 'Rust CI / check');
   assert.equal(workflow.jobs.publish_dispatch_status.needs, 'check');
   for (const jobId of leaves) {
@@ -111,7 +115,7 @@ test('every Rust and database job consumes changes, while all aggregate gates an
     const job = workflow.jobs[jobId];
     assert.equal(job.if, '${{ always() }}', jobId);
     const expected = jobId === 'check'
-      ? ['changes', ...directLeaves, ...Object.keys(groups), 'shell_security']
+      ? ['changes', ...directLeaves, ...Object.keys(groups), ...alwaysRequired]
       : ['changes', ...groups[jobId]];
     assert.deepEqual(new Set(job.needs), new Set(expected), jobId);
     const referenced = [...Object.values(job.steps[0].env).join(' ').matchAll(/needs\.([a-z_]+)\.result/g)]
@@ -218,9 +222,9 @@ test('docs-only skips must be planned; unexpected execution or failure blocks th
   }
 });
 
-test('shell fixtures and every internal aggregate must succeed for both selected and skipped Rust work', () => {
+test('shell fixtures, Prometheus and every internal aggregate must succeed for both selected and skipped Rust work', () => {
   for (const filterOutput of ['true', 'false']) {
-    for (const jobId of ['shell_security', ...Object.keys(groups)]) {
+    for (const jobId of [...alwaysRequired, ...Object.keys(groups)]) {
       for (const result of ['skipped', 'failure', 'cancelled', '']) {
         const observed = runWorkflow({ filterOutput, overrides: { [jobId]: result } });
         assert.equal(observed.check.result, 'failure', `${filterOutput}: ${jobId}: ${result}`);
