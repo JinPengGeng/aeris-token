@@ -94,11 +94,17 @@ pub(crate) async fn maybe_execute_via_sync_decision_path(
         transfer_tracker: ProviderTransferTracker::for_request(parts),
     };
 
-    crate::execution_runtime::funded_image::request_scope(state, async {
-        Ok(from_ai_serving_outcome(
-            run_ai_sync_execution_path(&port).await?,
-        ))
-    })
+    crate::execution_runtime::funded_image::request_scope_with_policy(
+        state,
+        parts
+            .extensions
+            .get::<crate::plan_usage_policy::PlanUsageReservationContext>(),
+        async {
+            Ok(from_ai_serving_outcome(
+                run_ai_sync_execution_path(&port).await?,
+            ))
+        },
+    )
     .await
 }
 

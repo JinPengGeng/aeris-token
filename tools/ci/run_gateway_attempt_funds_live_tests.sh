@@ -17,6 +17,9 @@ tests=(
   public_tests::live_public_images_fund_user_standalone_unlimited_and_no_wallet_entitlement
   public_tests::live_public_images_reject_unbounded_and_stream_before_every_account_shortcut
   public_tests::live_public_image_retry_reserves_each_send_and_retains_unknown_hold
+  public_tests::live_public_image_hard_quota_retry_unknown_late_charge_and_replay
+  public_tests::live_public_image_hard_quota_applies_to_user_unlimited_and_entitlement_only
+  public_tests::live_public_image_hard_quota_serializes_distinct_requests
 )
 
 for test_name in "${tests[@]}"; do

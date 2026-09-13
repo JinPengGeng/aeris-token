@@ -1,6 +1,6 @@
 # #300 Gateway 逐 attempt 资金接线
 
-状态：主线程统一执行后，固定规格同步图片公共入口及相关资金专项 **15 项通过、0 失败、0 ignored**，其中包括原 8 项真实 PostgreSQL/HTTP 场景和新增 3 项公共 router HTTP 场景。另有 125 项定向回归及最终全特性/全目标 Clippy 通过。新 Gateway 代码的 Hosted 检查仍须在推送后确认；不能将此前数据层的 Hosted checks 当作这些新代码的验收。数据层已有 25 项 PostgreSQL runner 通过。Draft #391 和父 #300 保持开放，每日硬额度及前门每日计数尚未完成。
+状态：固定规格同步图片公共入口已接入每 attempt 资金与 hard plan quota 的联合准入。当前源码 **18 项专项通过、0 失败、0 ignored**，包括 14 项真实 PostgreSQL/HTTP 场景；另有 65 项本轮定向回归通过。最终全特性/全目标 Clippy（`-D warnings`）通过，耗时 3m05s；新 HEAD 的 Hosted 检查仍须在推送后确认。数据层独立 29 项 PostgreSQL runner 已通过，不能替代 Gateway 的 Hosted 验收。Draft #391 和父 #300 保持开放，前门每日实际费用计数与最终完整集成评审尚未完成。下文保留旧轮次的实测记录，其阶段性限制以本节最新状态为准。
 
 ## Hosted CI 测试目录修正
 
@@ -15,6 +15,45 @@ CI exact targets 不变；未改生产环境参考或扩大生成器排除逻辑
 纯目录移动重复执行；新 HEAD 的 Hosted checks 仍须单独核验。
 
 ## 公共入口接线修订
+
+### Hard plan quota 接入（本地行为验收通过）
+
+已将独立数据层提交 `acf916f39` 集成到当前分支为 `2eff2e037`。
+公共 HTTP 的 `PlanUsageReservationContext` 从可信 request extensions 进入
+同步请求作用域，并由候选循环及 heartbeat 后台工作继承；policy 的 subject、
+token、原 admission 时间和窗口不从 report metadata 获取。metadata 中的
+token 仅用于一致性检查，缺少可信上下文或不匹配时拒绝。
+
+已授权的付费图片跳过 legacy 单父 cost reservation，prepare 使用冻结的
+policy 与每次独立报价在同一数据库事务中预留 quota 和资金。配额不足沿用
+`PlanUsageLimited`；standalone 不继承创建用户的 hard plan，unlimited
+钱包和 entitlement 不绕过用户 hard plan。首个 reserve 被明确拒绝时也
+持久写入零费用失败父终态，避免 durable pending 遗留；已有 attempt 的拒绝
+使用此前持久身份更新父展示状态，不覆盖 Unknown hold 或实际费用。
+
+新增三个真实公共 HTTP/PostgreSQL 测试：现金均为 `.20` 时对比 `.10/.20`
+配额重试；Unknown、`.06 + .07 = .13` 迟到收费与清理后重放；四类账户
+配额边界；并发不同请求共享 `.10` 配额仅发送一次。首次诊断执行这三个
+新测试全部通过。随后使用原有 16 MiB 测试栈重新执行全部 18 项专项，
+全部通过且零 ignored；原 policy 10、candidate loop 34、sync execution 21
+项回归也全部通过，共 83 项。本轮日志为
+`/private/tmp/aeris-gateway-hard-quota-final-20260913.log` 及同日
+`aeris-quota-policy/candidate/sync-regressions` 日志。新的三个 live exact targets
+已加入 required Gateway runner，Hosted 结果单独跟进。
+
+首次整组执行暴露新增 `request_scope` 转发层使调试 future 栈溢出；已移除
+这个额外 async 层，沿用原有嵌套作用域路径，未上调 CI 的测试栈配置。
+32 MiB 仅用于已有产物的三个公共新场景诊断，不作为最终验收。
+
+Hosted 原 run `34752956043` 的 Gateway job `103712483998` 实际通过前三个
+live targets，在取消场景因 `terminal_facts` 为 NULL 失败。原因是
+`unknown_attempts` 在 dispatched、尚未写取消事实时已经为 1，原测试
+过早结束等待。现等待真实 `terminal_facts.execution.status=cancelled`
+与 admission closed 同时可见，保留后续严格状态断言。该修正未修改生产
+取消语义。环境文档修复 `cc62835c3` 的 Hosted shell fixtures 已通过。
+
+前门每日实际费用计数仍未完成，后续方案与验收见
+[每日费用账本决策](issue-300-daily-cost-ledger.md)。
 
 ### 主线程实测修正
 

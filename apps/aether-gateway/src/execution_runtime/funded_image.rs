@@ -25,6 +25,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::control::{GatewayControlAuthContext, GatewayControlDecision};
+use crate::plan_usage_policy::PlanUsageReservationContext;
 use crate::usage::GatewaySyncReportRequest;
 use crate::{AppState, GatewayError};
 
@@ -115,11 +116,7 @@ async fn resolve_image_quote(
     if pricing.is_free_tier() {
         return Ok(None);
     }
-    if field("plan_usage_reservation_token").is_some() {
-        return Err(unsupported(
-            "Paid image attempts do not yet support hard-cost quota policies",
-        ));
-    }
+    request_policy_context(context)?;
     if field("provider_type").is_some_and(|kind| {
         matches!(
             kind.to_ascii_lowercase().as_str(),
@@ -199,11 +196,48 @@ struct RequestFinancialState {
 
 struct RequestAdmission {
     state: AppState,
+    usage_policy: Option<PlanUsageReservationContext>,
     financial: Mutex<RequestFinancialState>,
     preparation_finished: tokio::sync::Notify,
 }
 
 impl RequestAdmission {
+    fn record_rejection(
+        &self,
+        request_id: &str,
+        mut data: UsageEventData,
+        status: u16,
+        category: &str,
+        message: &str,
+    ) {
+        let mut financial = self.financial.lock().expect("request funds mutex poisoned");
+        // A denied reservation has sent no work. When earlier attempts exist,
+        // use their durable identity and keep their financial facts authoritative.
+        data.attempt_funds = financial.latest.as_ref().map(|identity| {
+            Box::new(UsageAttemptFundsEvent {
+                schema_version: 1,
+                identity: identity.clone(),
+                action: UsageAttemptFundsAction::ParentLifecycle,
+            })
+        });
+        if data.attempt_funds.is_none() {
+            if let Some(metadata) = data
+                .request_metadata
+                .as_mut()
+                .and_then(Value::as_object_mut)
+            {
+                metadata.remove("plan_usage_reservation_token");
+            }
+            data.total_cost_usd = Some(0.0);
+            data.actual_total_cost_usd = Some(0.0);
+        }
+        data.status_code = Some(status);
+        data.error_category = Some(category.to_string());
+        data.error_message = Some(message.to_string());
+        financial.terminal = Some(UsageEvent::new(UsageEventType::Failed, request_id, data));
+        financial.terminal_timestamp_ms = None;
+    }
+
     async fn close(&self, cancelled: bool) -> Result<(), GatewayError> {
         loop {
             let notified = self.preparation_finished.notified();
@@ -232,16 +266,15 @@ impl RequestAdmission {
             )
         };
         let cancelled = cancelled || scope_cancelled;
-        let Some(identity) = identity else {
-            return Ok(());
-        };
         // Close is awaited even if the final public usage update fails. Unknown
         // dispatched holds remain owned by their persisted reservations.
-        self.state
-            .data
-            .close_request_attempt_admission(identity)
-            .await
-            .map_err(GatewayError::from_data_layer_error)?;
+        if let Some(identity) = identity {
+            self.state
+                .data
+                .close_request_attempt_admission(identity)
+                .await
+                .map_err(GatewayError::from_data_layer_error)?;
+        }
         if let Some(mut event) = terminal {
             // This is the terminal observation for the entire request, after
             // all candidate sources and admission close. A reserve-time fallback
@@ -258,14 +291,25 @@ impl RequestAdmission {
                 event.data.error_category = Some("cancelled".to_string());
                 event.data.error_message = Some("Image request was cancelled".to_string());
             }
-            self.state
-                .usage_runtime
-                .persist_attempt_funds_event(
+            if event.data.attempt_funds.is_some() {
+                self.state
+                    .usage_runtime
+                    .persist_attempt_funds_event(
+                        self.state.usage_lifecycle_data_state().as_ref(),
+                        event,
+                    )
+                    .await
+                    .map_err(GatewayError::from_data_layer_error)?;
+            } else {
+                // The persisted pending row still needs a terminal when the
+                // first reservation is denied. No financial attempt exists.
+                aether_usage_runtime::write_event_record(
                     self.state.usage_lifecycle_data_state().as_ref(),
-                    event,
+                    &event,
                 )
                 .await
                 .map_err(GatewayError::from_data_layer_error)?;
+            }
             self.financial
                 .lock()
                 .expect("request funds mutex poisoned")
@@ -363,9 +407,13 @@ impl Drop for PreparationGuard {
     }
 }
 
-fn new_request(state: &AppState) -> Arc<RequestAdmission> {
+fn new_request(
+    state: &AppState,
+    usage_policy: Option<PlanUsageReservationContext>,
+) -> Arc<RequestAdmission> {
     Arc::new(RequestAdmission {
         state: state.clone(),
+        usage_policy,
         financial: Mutex::new(RequestFinancialState::default()),
         preparation_finished: tokio::sync::Notify::new(),
     })
@@ -379,7 +427,7 @@ pub(crate) fn spawn_request_scope<T: Send + 'static>(
 ) -> tokio::task::JoinHandle<Result<T, GatewayError>> {
     let request = REQUEST
         .try_with(Arc::clone)
-        .unwrap_or_else(|_| new_request(state));
+        .unwrap_or_else(|_| new_request(state, None));
     let guard = RequestAdmissionGuard::new(request.clone());
     tokio::spawn(owned_request_scope(request, guard, future))
 }
@@ -392,9 +440,76 @@ pub(crate) async fn request_scope<T>(
     if REQUEST.try_with(|_| ()).is_ok() {
         return future.await;
     }
-    let request = new_request(state);
+    let request = new_request(state, None);
     let guard = RequestAdmissionGuard::new(request.clone());
     owned_request_scope(request, guard, future).await
+}
+
+/// Only request extensions supply policy authority. Nested scopes and heartbeat
+/// tasks inherit it; report metadata cannot replace the original context.
+pub(crate) async fn request_scope_with_policy<T>(
+    state: &AppState,
+    usage_policy: Option<&PlanUsageReservationContext>,
+    future: impl Future<Output = Result<T, GatewayError>>,
+) -> Result<T, GatewayError> {
+    if let Ok(request) = REQUEST.try_with(Arc::clone) {
+        if usage_policy.is_some() && request.usage_policy.as_ref() != usage_policy {
+            return Err(unavailable(
+                "image request policy context changed within admission",
+            ));
+        }
+        return future.await;
+    }
+    let request = new_request(state, usage_policy.cloned());
+    let guard = RequestAdmissionGuard::new(request.clone());
+    owned_request_scope(request, guard, future).await
+}
+
+fn request_policy_context(
+    context: Option<&Value>,
+) -> Result<Option<PlanUsageReservationContext>, GatewayError> {
+    let policy = REQUEST
+        .try_with(|request| request.usage_policy.clone())
+        .ok()
+        .flatten();
+    if let Some(token) = context
+        .and_then(|value| value.get("plan_usage_reservation_token"))
+        .and_then(Value::as_str)
+    {
+        if policy.as_ref().is_none_or(|policy| policy.token() != token) {
+            return Err(unsupported(
+                "Paid image quota requires the trusted request admission context",
+            ));
+        }
+    }
+    Ok(policy)
+}
+
+/// A quote admitted by the image gate owns atomic attempt quota admission.
+/// Legacy candidate cost reservation must not also own this operation.
+pub(crate) fn has_funded_image_quote(
+    plan: &ExecutionPlan,
+    decision: &GatewayControlDecision,
+    context: Option<&Value>,
+) -> Result<bool, GatewayError> {
+    let Some(auth) = decision
+        .auth_context
+        .as_ref()
+        .filter(|_| is_image_plan(plan, context))
+    else {
+        return Ok(false);
+    };
+    let key = quote_key(plan, auth, context)?;
+    Ok(REQUEST
+        .try_with(|request| {
+            request
+                .financial
+                .lock()
+                .expect("request funds mutex poisoned")
+                .quotes
+                .contains_key(&key)
+        })
+        .unwrap_or(false))
 }
 
 async fn owned_request_scope<T>(
@@ -561,11 +676,6 @@ impl FundedImageAttempt {
         REQUEST
             .try_with(|_| ())
             .map_err(|_| unavailable("image operation requires a request admission scope"))?;
-        let field = |name| {
-            report_context
-                .and_then(|v| v.get(name))
-                .and_then(Value::as_str)
-        };
         let key = quote_key(plan, auth, report_context)?;
         let frozen = REQUEST
             .try_with(|request| {
@@ -578,22 +688,25 @@ impl FundedImageAttempt {
             })
             .map_err(|_| unavailable("image operation requires a request admission scope"))?;
         let frozen = match frozen {
-            Some(frozen) => {
-                // Candidate quota admission can run after the projection gate.
-                // Never mix a frozen paid quote with legacy request-only quota.
-                if field("plan_usage_reservation_token").is_some() {
-                    return Err(unsupported(
-                        "Paid image attempts do not yet support hard-cost quota policies",
-                    ));
-                }
-                frozen
-            }
+            Some(frozen) => frozen,
             None => match resolve_image_quote(state, plan, auth, report_context).await? {
                 Some(frozen) => frozen,
                 None => return Ok(None),
             },
         };
         let FrozenImageQuote { quote, model_id } = frozen;
+        let usage_policy_context = request_policy_context(report_context)?;
+        let usage_policy = match usage_policy_context.as_ref() {
+            Some(policy) if !auth.admin_bypass_limits && !auth.api_key_is_standalone => {
+                if policy.subject_id() != auth.user_id {
+                    return Err(unavailable(
+                        "image quota subject does not match request owner",
+                    ));
+                }
+                Some(policy.attempt_funds_policy()?)
+            }
+            _ => None,
+        };
         let mut seed = build_lifecycle_usage_seed(plan, report_context);
         // Standalone keys still belong to their creating user. The standalone
         // flag selects the key wallet; removing the owner breaks the repository
@@ -610,6 +723,7 @@ impl FundedImageAttempt {
                 Value::Bool(auth.api_key_is_standalone),
             );
         let input = ReserveRequestAttemptFundsInput {
+            usage_policy,
             attempt_id: uuid::Uuid::new_v4().to_string(),
             provider: RequestAttemptProvider {
                 provider_id: plan.provider_id.clone(),
@@ -678,11 +792,37 @@ impl FundedImageAttempt {
                 {
                     ReserveRequestAttemptFundsOutcome::Reserved { .. } => {}
                     ReserveRequestAttemptFundsOutcome::Insufficient { .. } => {
+                        request.record_rejection(
+                            &identity.request.request_id,
+                            fallback_data.clone(),
+                            402,
+                            "insufficient_quota",
+                            "Insufficient available balance for image authorization",
+                        );
                         return Err(GatewayError::Client {
                             status: http::StatusCode::PAYMENT_REQUIRED,
                             message: "Insufficient available balance for image authorization"
                                 .into(),
                         });
+                    }
+                    ReserveRequestAttemptFundsOutcome::UsagePolicyRejected {
+                        window_index,
+                        limit_cost_units,
+                        ..
+                    } => {
+                        let policy = usage_policy_context.as_ref().ok_or_else(|| {
+                            unavailable("image quota rejection has no admitted policy")
+                        })?;
+                        request.record_rejection(
+                            &identity.request.request_id,
+                            fallback_data.clone(),
+                            429,
+                            "plan_usage_limit_exceeded",
+                            "Plan cost allowance is insufficient for image authorization",
+                        );
+                        return Err(GatewayError::PlanUsageLimited(
+                            policy.attempt_cost_rejection(window_index, limit_cost_units)?,
+                        ));
                     }
                     _ => return Err(unavailable("image funds reservation was denied")),
                 }

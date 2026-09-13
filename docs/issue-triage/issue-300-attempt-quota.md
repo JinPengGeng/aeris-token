@@ -112,6 +112,16 @@ refusal; insertion/outcome rollback; entitlement sources; prepared cancellation;
 charged failed/cancelled work; quote overrun; policy omission/change; legacy
 reconcile/expiry/cleanup; and replay after counter delivery cleanup.
 
-This does not complete the separate frontend/user-key Redis daily counter,
-Gateway public hard-policy wiring, stream/multistage images, recovery drills, or
-the whole issue 300.
+The validated data commit `acf916f39` was subsequently integrated into the Gateway
+branch as `2eff2e037`. Gateway now supplies this policy from the trusted HTTP
+admission context and skips the legacy parent cost reservation for funded images.
+Eighteen Gateway funding tests passed locally, including fourteen real
+PostgreSQL/HTTP targets and three new public hard-policy targets. Their cash/quota
+matrix, late evidence, replay and concurrent request results are recorded in
+[the Gateway integration decision](issue-300-gateway-attempt-funds.md). Sixty-five
+legacy policy/candidate/sync regressions also passed. Hosted validation and final
+integration review remain pending.
+
+This does not complete the separate frontend/user-key daily actual-cost counter,
+stream/multistage images, recovery drills, or the whole issue 300. The daily
+counter design is recorded in [its separate decision](issue-300-daily-cost-ledger.md).

@@ -8,7 +8,7 @@ use aether_data::repository::{
     provider_catalog::InMemoryProviderCatalogReadRepository,
 };
 use aether_data_contracts::repository::{
-    billing::{BillingReadRepository, UserDailyQuotaAvailabilityRecord},
+    billing::{BillingReadRepository, UserDailyQuotaAvailabilityRecord, UserPlanEntitlementRecord},
     candidate_selection::StoredMinimalCandidateSelectionRow,
     provider_catalog::{
         StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
@@ -30,6 +30,13 @@ struct PublicBilling {
 
 #[async_trait::async_trait]
 impl BillingReadRepository for PublicBilling {
+    async fn list_user_plan_entitlements(
+        &self,
+        user: &str,
+    ) -> Result<Option<Vec<UserPlanEntitlementRecord>>, aether_data::DataLayerError> {
+        self.grants.list_user_plan_entitlements(user).await
+    }
+
     async fn find_model_context(
         &self,
         provider: &str,
@@ -93,6 +100,19 @@ fn candidate() -> StoredMinimalCandidateSelectionRow {
 }
 
 impl Fixture {
+    async fn hard_cost_policy(&self, limit: f64) {
+        let policy = json!([{"type":"usage_policy","rules":[{"metric":"actual_cost_usd","window":{"kind":"calendar_day","timezone":"UTC"},"limit":limit}]}]);
+        sqlx::query("INSERT INTO billing_plans(id,title,price_amount,duration_unit,duration_value,entitlements_json,created_at,updated_at) VALUES('cost-plan','cost-plan',1,'day',1,$1,NOW(),NOW())")
+            .bind(&policy).execute(&self.pool).await.unwrap();
+        sqlx::query("INSERT INTO user_plan_entitlements(id,user_id,plan_id,payment_order_id,starts_at,expires_at,entitlements_snapshot,status,created_at,updated_at) VALUES('cost-grant','owner','cost-plan','cost-order',NOW()-INTERVAL '1 hour',NOW()+INTERVAL '1 hour',$1,'active',NOW(),NOW())")
+            .bind(&policy).execute(&self.pool).await.unwrap();
+    }
+
+    async fn quota_totals(&self) -> (i64, i64, i64) {
+        sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(reserved_cost_units) FILTER (WHERE state='reserved'),0)::bigint,COALESCE(SUM(actual_cost_units) FILTER (WHERE state='finalized'),0)::bigint FROM usage_cost_reservations")
+            .fetch_one(&self.pool).await.unwrap()
+    }
+
     async fn public_state(&self, account: Account, upstream: &str) -> AppState {
         match account {
             Account::User => (),
@@ -408,4 +428,199 @@ async fn live_public_image_retry_reserves_each_send_and_retains_unknown_hold() {
         upstream_server.abort();
         fixture.close(state).await;
     }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL and real public Gateway quota admission"]
+async fn live_public_image_hard_quota_retry_unknown_late_charge_and_replay() {
+    for (limit, expected_calls) in [(0.10, 1_usize), (0.20, 2_usize)] {
+        // Both cases have enough cash for two attempts. Only hard quota differs.
+        let fixture = Fixture::new(0.20).await;
+        fixture.hard_cost_policy(limit).await;
+        let (upstream_url, calls, upstream_server) = upstream(vec![
+            (500, json!({"error":{"message":"temporarily unavailable"}})),
+            (200, image(6)),
+        ])
+        .await;
+        let state = fixture.public_state(Account::User, &upstream_url).await;
+        let (gateway, gateway_server) = public_server(state.clone()).await;
+        let (_, body) = public_request(&gateway, "public-quota-retry", &request_body()).await;
+        if expected_calls == 2 {
+            assert_eq!(body["data"].as_array().map(Vec::len), Some(6), "{body}");
+        } else {
+            assert_eq!(body["error"]["type"], "plan_usage_limit_exceeded", "{body}");
+        }
+        assert_upstream_calls(&upstream_url, &calls, expected_calls).await;
+        let actual = if expected_calls == 2 { 6_000_000 } else { 0 };
+        assert_eq!(
+            fixture.quota_totals().await,
+            (expected_calls as i64, 8_000_000, actual)
+        );
+        let summary = fixture.summary("public-quota-retry").await;
+        assert!(summary.admission_closed);
+        assert_eq!(
+            (summary.held_cost_units, summary.known_actual_cost_units),
+            (8_000_000, actual as u64)
+        );
+        let linked: (i64, i64, i64) = sqlx::query_as("SELECT COUNT(*),COUNT(DISTINCT r.usage_policy),COUNT(*) FILTER (WHERE q.reservation_token=q.attempt_reservation_token AND q.reservation_token<>r.usage_policy->>'reservation_token' AND q.subject_id=r.usage_policy->>'subject_id') FROM usage_cost_reservations q JOIN request_fund_reservations r ON r.reservation_token=q.attempt_reservation_token")
+            .fetch_one(&fixture.pool).await.unwrap();
+        assert_eq!(linked, (expected_calls as i64, 1, expected_calls as i64));
+
+        if expected_calls == 2 {
+            let (attempt_id, token): (String, String) = sqlx::query_as("SELECT attempt_id::text,reservation_token FROM request_fund_reservations WHERE request_id='public-quota-retry' AND terminal_facts->'outcome'->>'kind'='unknown'")
+                .fetch_one(&fixture.pool).await.unwrap();
+            let identity = RequestAttemptFundsIdentity {
+                attempt_id,
+                request: RequestFundsIdentity {
+                    reservation_token: token,
+                    request_id: "public-quota-retry".into(),
+                    user_id: Some("owner".into()),
+                    api_key_id: Some("key-a".into()),
+                    api_key_is_standalone: false,
+                },
+            };
+            let execution = state
+                .data
+                .read_request_attempt_funds(identity.clone())
+                .await
+                .unwrap()
+                .terminal_facts
+                .unwrap()
+                .execution;
+            let late = UsageEvent::new(
+                UsageEventType::Failed,
+                "public-quota-retry",
+                UsageEventData {
+                    attempt_funds: Some(Box::new(UsageAttemptFundsEvent {
+                        schema_version: 1,
+                        identity,
+                        action: UsageAttemptFundsAction::Outcome {
+                            execution,
+                            evidence: image_output_evidence(Some(&image(7))),
+                        },
+                    })),
+                    ..UsageEventData::default()
+                },
+            );
+            state
+                .usage_runtime
+                .persist_attempt_funds_event(
+                    state.usage_lifecycle_data_state().as_ref(),
+                    late.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(fixture.quota_totals().await, (2, 0, 13_000_000));
+            assert_eq!(fixture.balance().await, 0.07);
+            let usage = SqlxUsageReadRepository::new(fixture.pool.clone());
+            usage.flush_usage_counter_deltas(1000).await.unwrap();
+            usage
+                .cleanup_processed_usage_counter_deltas(
+                    crate::clock::current_unix_ms() / 1000 + 3600,
+                    1000,
+                )
+                .await
+                .unwrap();
+            state
+                .usage_runtime
+                .persist_attempt_funds_event(state.usage_lifecycle_data_state().as_ref(), late)
+                .await
+                .unwrap();
+            assert_eq!(fixture.quota_totals().await, (2, 0, 13_000_000));
+            assert_eq!(fixture.balance().await, 0.07);
+        }
+        gateway_server.abort();
+        upstream_server.abort();
+        fixture.close(state).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL and real public Gateway quota admission"]
+async fn live_public_image_hard_quota_applies_to_user_unlimited_and_entitlement_only() {
+    for account in [
+        Account::User,
+        Account::Unlimited,
+        Account::Entitlement,
+        Account::Standalone,
+    ] {
+        let fixture = Fixture::new(0.20).await;
+        fixture.hard_cost_policy(0.05).await;
+        let (upstream_url, calls, upstream_server) = upstream(vec![(200, image(6))]).await;
+        let state = fixture.public_state(account, &upstream_url).await;
+        let (gateway, gateway_server) = public_server(state.clone()).await;
+        let (_, body) = public_request(&gateway, "public-quota-owner", &request_body()).await;
+        let expected_calls = usize::from(matches!(account, Account::Standalone));
+        if expected_calls == 1 {
+            assert_eq!(
+                body["data"].as_array().map(Vec::len),
+                Some(6),
+                "{account:?}: {body}"
+            );
+        } else {
+            assert_eq!(
+                body["error"]["type"], "plan_usage_limit_exceeded",
+                "{account:?}: {body}"
+            );
+        }
+        assert_eq!(fixture.quota_totals().await, (0, 0, 0));
+        let funded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_fund_reservations")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        assert_eq!(funded, expected_calls as i64);
+        let parent: (String, i64) = sqlx::query_as("SELECT status,COALESCE(actual_total_cost_usd*100000000,0)::bigint FROM usage WHERE request_id='public-quota-owner'")
+            .fetch_one(&fixture.pool).await.unwrap();
+        assert_eq!(
+            parent,
+            if expected_calls == 1 {
+                ("completed".into(), 6_000_000)
+            } else {
+                ("failed".into(), 0)
+            }
+        );
+        assert_upstream_calls(&upstream_url, &calls, expected_calls).await;
+        gateway_server.abort();
+        upstream_server.abort();
+        fixture.close(state).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL and concurrent public Gateway requests"]
+async fn live_public_image_hard_quota_serializes_distinct_requests() {
+    let fixture = Fixture::new(0.20).await;
+    fixture.hard_cost_policy(0.10).await;
+    let (upstream_url, calls, upstream_server) =
+        upstream(vec![(200, image(6)), (200, image(6))]).await;
+    let state = fixture.public_state(Account::User, &upstream_url).await;
+    let (gateway, gateway_server) = public_server(state.clone()).await;
+    let body = request_body();
+    let (a, b) = tokio::join!(
+        public_request(&gateway, "public-quota-a", &body),
+        public_request(&gateway, "public-quota-b", &body)
+    );
+    let bodies = [a.1, b.1];
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body["data"].as_array().is_some_and(|data| data.len() == 6))
+            .count(),
+        1,
+        "{bodies:?}"
+    );
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body["error"]["type"] == "plan_usage_limit_exceeded")
+            .count(),
+        1,
+        "{bodies:?}"
+    );
+    assert_upstream_calls(&upstream_url, &calls, 1).await;
+    assert_eq!(fixture.quota_totals().await, (1, 0, 6_000_000));
+    assert_eq!(fixture.balance().await, 0.14);
+    gateway_server.abort();
+    upstream_server.abort();
+    fixture.close(state).await;
 }

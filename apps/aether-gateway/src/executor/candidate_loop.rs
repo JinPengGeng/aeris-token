@@ -127,8 +127,9 @@ where
         candidate_count,
     );
 
-    crate::execution_runtime::funded_image::request_scope(
+    crate::execution_runtime::funded_image::request_scope_with_policy(
         state,
+        transfer_tracker.usage_policy_reservation.as_ref(),
         async move {
             tracing::debug!(
                 event_name = "candidate_loop_started",
@@ -218,8 +219,9 @@ where
 {
     let span = tracing::debug_span!("candidates", trace_id = %trace_id, plan_kind);
 
-    crate::execution_runtime::funded_image::request_scope(
+    crate::execution_runtime::funded_image::request_scope_with_policy(
         state,
+        transfer_tracker.usage_policy_reservation.as_ref(),
         async move {
             tracing::debug!(
                 event_name = "candidate_loop_started",
@@ -1650,6 +1652,13 @@ async fn execution_plan_cost_capacity_response(
     report_context: Option<&serde_json::Value>,
     transfer_tracker: &ProviderTransferTracker,
 ) -> Result<Option<Response<Body>>, GatewayError> {
+    if crate::execution_runtime::funded_image::has_funded_image_quote(
+        plan,
+        decision,
+        report_context,
+    )? {
+        return Ok(None);
+    }
     let outcome = match crate::plan_usage_policy::reserve_admitted_http_plan_usage_policy_cost(
         state,
         decision,

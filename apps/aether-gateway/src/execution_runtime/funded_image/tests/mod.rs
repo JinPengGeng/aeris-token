@@ -65,6 +65,7 @@ impl Fixture {
             "usage_routing_snapshots",
             "usage_settlement_snapshots",
             "usage_counter_deltas",
+            "usage_cost_reservations",
             "request_fund_reservations",
             "request_fund_allocations",
             "request_fund_recoveries",
@@ -593,7 +594,11 @@ async fn live_gateway_image_attempt_cancellation_preserves_dispatched_hold() {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let summary = fixture.summary("gateway-cancel").await;
-            if summary.admission_closed && summary.unknown_attempts == 1 {
+            // A dispatched reservation is already counted as Unknown before
+            // the asynchronous cancellation observation commits terminal facts.
+            let terminal: Option<String> = sqlx::query_scalar("SELECT terminal_facts->'execution'->>'status' FROM request_fund_reservations WHERE request_id='gateway-cancel'")
+                .fetch_one(&fixture.pool).await.unwrap();
+            if summary.admission_closed && summary.unknown_attempts == 1 && terminal.as_deref() == Some("cancelled") {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -926,7 +931,7 @@ async fn memory_gateway_image_attempt_uses_shared_parent_usage_repository() {
 }
 
 #[tokio::test]
-async fn paid_image_rejects_legacy_hard_quota_before_funds_admission() {
+async fn paid_image_rejects_untrusted_quota_metadata_before_funds_admission() {
     use aether_data_contracts::repository::usage::UsageReadRepository;
     let (state, usage) = memory_state();
     let (url, count, server) = upstream(vec![(200, image(6))]).await;
