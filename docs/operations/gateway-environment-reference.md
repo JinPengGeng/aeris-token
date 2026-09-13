@@ -236,6 +236,7 @@ from variable names. Request candidate persistence is a mode (`full`, `terminal`
 | `AETHER_GATEWAY_CANDIDATE_PAGE_CACHE_STALE_TTL_MS` | [cache/candidate_page.rs](../../apps/aether-gateway/src/cache/candidate_page.rs) |
 | `AETHER_GATEWAY_CANDIDATE_PAGE_CACHE_TTL_MS` | [cache/candidate_page.rs](../../apps/aether-gateway/src/cache/candidate_page.rs) |
 | `AETHER_GATEWAY_CANDIDATE_PLANNING_GATE_LIMIT` | [state/app.rs](../../apps/aether-gateway/src/state/app.rs) |
+| `AETHER_GATEWAY_CONTROL_CONTEXT_TIMEOUT_MS` | [state/app.rs](../../apps/aether-gateway/src/state/app.rs) |
 | `AETHER_GATEWAY_DIRECT_H2C_ADAPTIVE_WINDOW` | [execution_runtime/transport.rs](../../apps/aether-gateway/src/execution_runtime/transport.rs) |
 | `AETHER_GATEWAY_DIRECT_H2C_CLIENT_SHARDS` | [execution_runtime/transport.rs](../../apps/aether-gateway/src/execution_runtime/transport.rs) |
 | `AETHER_GATEWAY_DIRECT_H2C_DRIVER_RUNTIME_THREADS` | [execution_runtime/transport.rs](../../apps/aether-gateway/src/execution_runtime/transport.rs) |

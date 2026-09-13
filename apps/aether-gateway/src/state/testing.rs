@@ -95,6 +95,16 @@ impl AppState {
         self
     }
 
+    pub(crate) fn with_public_control_context_timeout_for_tests(
+        mut self,
+        timeout: Duration,
+    ) -> Self {
+        let mut config = (*self.frontdoor_runtime_guards).clone();
+        config.public_control_context_timeout = timeout;
+        self.frontdoor_runtime_guards = Arc::new(config);
+        self
+    }
+
     pub(crate) fn with_tunnel_identity_for_tests(
         mut self,
         instance_id: &str,

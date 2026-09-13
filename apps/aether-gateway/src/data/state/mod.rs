@@ -221,6 +221,8 @@ pub(super) struct SystemConfigValueCacheState {
     pub(super) inflight: std::sync::Mutex<HashMap<String, Arc<SystemConfigValueInflightState>>>,
     pub(super) mutation: std::sync::Mutex<()>,
     pub(super) admission: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    pub(super) read_delay_millis: std::sync::atomic::AtomicU64,
 }
 
 pub(super) struct SystemConfigValueInflightState {

@@ -142,6 +142,7 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 - `AETHER_GATEWAY_MAX_HTTP_CONNECTIONS`：二进制入口全部监听分片共用的入站 TCP 连接上限，包含握手、空闲 keep-alive 和 HTTP 升级后仍存活的 socket。未设置或 `0` 时使用请求上限与 WebSocket 上限之和；自动及显式值均最多 `65536`，已知 FD soft limit 时进一步限制为 `max(1, (FD - 256) / 2)`。接入后立即尝试取得额度，满额时关闭新连接，不创建 HTTP 处理任务、不等待额度，不返回 HTTP 状态码；取消、解析失败和连接释放归还，WebSocket 升级不会提前归还。HTTP/2 多流共用一个 TCP 许可，原请求和 WebSocket 准入仍独立有效。`gateway_http_connections_*` 导出配置上限、当前数、高水位、拒绝数及 accept 错误数。该限制不包含 kernel backlog、上游、Redis 或数据库连接，也不是整个进程 FD/内存硬上限。临时 accept 错误重试，资源类错误退避一秒后重试，避免单次错误停止监听
 - `AETHER_GATEWAY_REQUEST_BODY_BUFFER_BUDGET_MB`：单实例同时读取和解压请求体的加权内存预算，默认 `256MB`；压缩和未知长度上传按实际缓冲增长申请额度，解压时计入同时存活的输入和输出。额度不足返回 `503`；接近单请求上限的压缩上传需要为输入和解压输出预留额外预算
 - `AETHER_GATEWAY_REQUEST_BODY_READ_TIMEOUT_MS`：请求体完整读取超时，默认 `120000ms`；显式设为 `0` 时关闭，非零值限制在 `1000-600000ms`
+- `AETHER_GATEWAY_CONTROL_CONTEXT_TIMEOUT_MS`：`ai_public` 控制上下文解析总期限，覆盖路由分类后的模型指令策略读取与认证解析，默认 `30000ms`，正值限制在 `1-120000ms`；超时 fail-closed 返回安全 `502 control_unavailable`，不覆盖管理员写入、上游执行或请求体流
 - `AETHER_GATEWAY_UPSTREAM_STREAM_IDLE_TIMEOUT_MS`：上游流首包后的空闲超时，默认 `300000ms`；请求执行配置中的 `read_ms` 优先，显式 `0` 关闭对应超时。网关生成的 keepalive 不会重置计时
 - `AETHER_GATEWAY_STREAM_CAPTURE_MEMORY_BUDGET_BYTES`：进程内流式响应诊断捕获的共享字节预算，默认 `134217728`（128 MiB）；包含 provider/client 捕获容量和扩容时的新旧分配。额度不足时仅截断审计副本，显式 `0` 关闭此类捕获；协议解析、客户端传输和计费观察继续执行。该预算不包含协议解析缓冲、终态编码及 usage 队列副本，不是进程总内存上限
 - `AETHER_MAX_REQUEST_BODY_MB`：单请求解压后请求体上限，默认 `256MB`；显式设为 `0` 表示不再收紧默认值，但仍受 `256MB` 安全硬上限约束

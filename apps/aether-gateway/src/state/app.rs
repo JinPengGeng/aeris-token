@@ -51,6 +51,10 @@ const MIN_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS: u64 = 500;
 const MAX_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS: u64 = 120_000;
 const LOCAL_EXECUTION_PLANNING_TIMEOUT_MS_ENV: &str =
     "AETHER_GATEWAY_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS";
+const DEFAULT_PUBLIC_CONTROL_CONTEXT_TIMEOUT_MS: u64 = 30_000;
+const MIN_PUBLIC_CONTROL_CONTEXT_TIMEOUT_MS: u64 = 1;
+const MAX_PUBLIC_CONTROL_CONTEXT_TIMEOUT_MS: u64 = 120_000;
+const PUBLIC_CONTROL_CONTEXT_TIMEOUT_MS_ENV: &str = "AETHER_GATEWAY_CONTROL_CONTEXT_TIMEOUT_MS";
 const DEFAULT_AUTH_SNAPSHOT_LOAD_GATE_LIMIT: usize = 64;
 const DEFAULT_CANDIDATE_PLANNING_GATE_LIMIT: usize = 1024;
 const DEFAULT_UPSTREAM_EXECUTION_GATE_LIMIT: usize = 10_000;
@@ -102,6 +106,7 @@ pub(crate) struct FrontdoorRuntimeGuardConfig {
     pub(crate) request_body_buffer_budget_bytes: usize,
     pub(crate) request_body_buffer_budget_permits: usize,
     pub(crate) local_execution_planning_timeout: Duration,
+    pub(crate) public_control_context_timeout: Duration,
     pub(crate) internal_gate_queue_budget: Duration,
     pub(crate) auth_capacity_cache_ttl: Duration,
     pub(crate) auth_snapshot_load_gate_limit: Option<usize>,
@@ -130,6 +135,12 @@ impl FrontdoorRuntimeGuardConfig {
                 DEFAULT_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS,
                 MIN_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS,
                 MAX_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS,
+            ),
+            public_control_context_timeout: env_duration_ms(
+                PUBLIC_CONTROL_CONTEXT_TIMEOUT_MS_ENV,
+                DEFAULT_PUBLIC_CONTROL_CONTEXT_TIMEOUT_MS,
+                MIN_PUBLIC_CONTROL_CONTEXT_TIMEOUT_MS,
+                MAX_PUBLIC_CONTROL_CONTEXT_TIMEOUT_MS,
             ),
             internal_gate_queue_budget: env_duration_ms(
                 INTERNAL_GATE_QUEUE_BUDGET_MS_ENV,
@@ -164,6 +175,9 @@ impl FrontdoorRuntimeGuardConfig {
             request_body_buffer_budget_bytes: DEFAULT_REQUEST_BODY_BUFFER_BUDGET_MB * 1024 * 1024,
             request_body_buffer_budget_permits: DEFAULT_REQUEST_BODY_BUFFER_BUDGET_MB * 16,
             local_execution_planning_timeout,
+            public_control_context_timeout: Duration::from_millis(
+                DEFAULT_PUBLIC_CONTROL_CONTEXT_TIMEOUT_MS,
+            ),
             internal_gate_queue_budget: Duration::from_millis(
                 DEFAULT_INTERNAL_GATE_QUEUE_BUDGET_MS,
             ),
