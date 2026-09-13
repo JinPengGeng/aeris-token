@@ -4,6 +4,93 @@ Snapshot: 2026-09-13, fork `JinPengGeng/aeris-token`. This queue is based on
 the current fork tree and GitHub issue state; it does not modify upstream
 `fawney19/Aether`.
 
+## 2026-09-13 current live refresh (after PR #363 and new delivery slices)
+
+The fork inventory was re-read from GitHub on 2026-09-13: **45 open issues**
+(22 P1, 23 P2), with 15 labelled `status:in-progress`, 19 `status:triage`,
+and 11 `status:blocked`. Counts include parent and child issues and are not a
+count of independent implementation packages.
+
+Labels were synchronized after review: #217 and #224 moved from `status:triage`
+to `status:in-progress`; closed #345 has no stale lifecycle label and its
+Project card is Done.
+
+PR #361 merged as `1831852e9abecfdc267ddbf783d2203cd2d39e14`; #356 merged as
+`86bc4d8b88311ac3ddd400d9e72a2d68bdc4c9f6` and closed #308 (Project **Done**).
+PR #358 merged as `1bcff1a5271aebefa96253417f4707574a7a2994` from reviewed head
+`7de0188d44118f7e1c1fc2930bc6aacadfa01070`. PR #363 (Refs #205) merged as
+`e9ca10ab2d28a78cb4f265cace17260679b048bc`; #205 remains open for key rotation,
+recovery, nightly artifacts and remaining upgrade evidence.
+PR #370 merged as `c860eec66d9edfb39f7536111bd7e8f6d1b2ca66`; its three-node
+deployment slice is accepted and its Project card is Done.
+
+There are **11 open PRs**: Draft #362 (head
+`2d5abae6143eeb931ebf96906aa5ba0681f22e17`), plus nine non-draft PRs with
+squash auto-merge enabled: #364 (`897b1ee9affc5c9ac45b5ccb98b03e00c99352a2`),
+#365 (`b2b99ed7b6273220b8666204b322ed0e2e2e8ed2`), #366
+(`472484b325e5d85ba7841d71df9f2307bf8a3c29`), #367
+(`0b452aebce4f0d4f49b115b1e534439016a057ad`), #368
+(`03a12764a2f488c7c45fcf28bfdf5d492a7a7d76`), #369
+(`cc0fb5ddabe95924206022f687b840d97e95a362`) and #371
+(`f9921213c07ce814643c58814f5c4e7413b04551`), plus #373
+(`c185a15570af455b849844c1245acc659496b20d`) and #374
+(`4474ae0b77070328483c1335c200f6c162912f5d`). #372 is also open (head
+`5db5675c63211136d6159ffbd385d52f037a72cf`) without auto-merge; all eleven
+currently report `BLOCKED` while protected checks run. Auto-merge remains
+enabled on #364–#369, #371, #373 and #374.
+
+The bounded slices retain their parents: #366 covers tunnel response-relay
+admission (#205/#214), #367 the gateway environment reference (#225), #368
+the #300/#206 lifecycle boundary, #369 PostgreSQL backup/restore (#223), and
+#371 isolated metrics scrape
+and alert delivery (#307/#217). PR #372 redacts sensitive admin video fields
+(#211), but its targeted build is blocked by an unrelated existing refund
+notification compile error. PR #373 records #220 supply-chain residuals and
+PR #374 adds the #247 refund-notification slice; both await protected checks.
+Draft #362 still needs independent review and required
+CI before funds-hold integration with gateway admission/dispatch/terminal,
+cancellation/partial output, retry and crash recovery. Parent issues remain
+open until residual acceptance has evidence.
+
+The next transition is current-head review and required checks for #362 and
+#364–#369 and #371–#374; #372 needs the unrelated refund compile break resolved before it can
+be accepted. All transitions remain fork-only and are recorded on each PR, parent
+issue, Project card and this queue.
+
+### Earlier checkpoint after PRs #356, #358 and #361
+
+The fork inventory was re-read from GitHub on 2026-09-13: **45 open issues**
+(22 P1, 23 P2), with 13 labelled `status:in-progress`, 21 `status:triage`,
+and 11 `status:blocked`. Counts include parent and child issues and are not a
+count of independent implementation packages.
+
+PR #361 merged as `1831852e9abecfdc267ddbf783d2203cd2d39e14`. PR #356 merged as
+`86bc4d8b88311ac3ddd400d9e72a2d68bdc4c9f6`; Issue #308 is closed and its
+Project card is **Done**. PR #358 merged as
+`1bcff1a5271aebefa96253417f4707574a7a2994` from reviewed head
+`7de0188d44118f7e1c1fc2930bc6aacadfa01070`; its protected checks, including
+the Gateway test, passed.
+
+Draft PR #362 remains open at head `27682e86ff50a18a69ec78f22ecb8c216df0305d`;
+its required CI and independent review are pending. #362 is the
+funds-reservation slice for both #300 and #206, but it does not close either
+parent. Remaining #300/#206 acceptance is gateway admission/dispatch/terminal
+lifecycle integration, cancellation and partial-output handling, retry and
+crash recovery, plus the documented recharge/retention follow-up.
+
+PR #363 (Refs #205) remains open with squash auto-merge enabled at head
+`7095bcca993aa541eca07fa4fe3f59c630aca745`; it is behind current main
+(`1bcff1a5271aebefa96253417f4707574a7a2994`) and its required checks are still
+running. Its root-service-identity guard is a bounded residual; signing-key
+rotation/recovery, nightly artifacts and remaining upgrade evidence stay open
+in #205. Keep all parent issues open until their residual acceptance has tests,
+review and protected-check evidence.
+
+The next transition is to finish current-head review and required checks for
+#362 and #363, then integrate #362's funds hold with gateway lifecycle behavior.
+All transitions remain fork-only and are recorded on the PRs, parent issues,
+Project cards and this queue.
+
 ## 2026-09-13 status refresh after PR #353
 
 Current intake: 47 open issues (24 P1, 23 P2), with 13 in progress, 23 triage
@@ -87,10 +174,10 @@ same decision; the repository currently has no `status:done` label.
 | 1 | Durable privileged-mutation audit | #255 | incident accountability / L | each mutation writes a queryable `audit_logs` row before success is returned; timeout/failure semantics, authorization coverage, and integration tests are documented | In progress (#294/#329 merged; residual acceptance) |
 | 2 | DLQ operator lifecycle | #223 | recoverability and billing correctness / M | PR #292 covers bounded retention, authenticated listing and idempotent redrive; remaining acceptance is duplicate/poison-message verification, marker TTL policy, capacity evidence, and a real Redis replay drill | Merged slices (#333); residual acceptance |
 | 3 | CI and supply-chain gates | #216, #220 | catches regressions and CVEs / M | live DB tests are intentionally gated, VSCodex is a real required check, build fan-out is measured, and Cargo/npm advisory policy runs in CI | In progress (#296/#319; residual coverage pending) |
-| 4 | Public API compatibility matrix | #247, #254 | prevents client retries and integration breakage / S-M | PR #290 defines the baseline OpenAI error/endpoint contract; remaining acceptance is OpenAI/Claude status-code, error-code, envelope and retry-header fixtures plus explicit balance and notification transitions | In progress (#290/#334/#335 merged; residual fixtures pending) |
-| 5 | Operations reference and recovery runbook | #217, #218, #224, #225 | reproducible deployment and observability / M | metrics/alerts, environment table, multi-node topology, Redis failure semantics and restore drill are executable from published docs | In progress (#217 split to #306–#308; #323/#327 merged) |
-| 6 | Billing integrity follow-up | #206, #253 | protects revenue and abuse boundary / M-L | enrichment failure, cancellation, signup credit, quota and image authorization policies have explicit tests and owner sign-off | Planned |
-| 7 | Scheduler and protocol roadmap slices | #268, #276, #179, #205 | correctness and upgrade safety / M-L | each slice has a bounded ADR, dependency/rollback plan and acceptance test; unresolved upstream sync conflict is handled separately | Deferred / blocked |
+| 4 | Public API compatibility matrix | #247, #254 | prevents client retries and integration breakage / S-M | PR #290 defines the baseline OpenAI error/endpoint contract; remaining acceptance is OpenAI/Claude status-code, error-code, envelope and retry-header fixtures plus explicit balance and notification transitions | In progress (#290/#334/#335 merged; #374 refund notification awaits checks) |
+| 5 | Operations reference and recovery runbook | #217, #218, #224, #225 | reproducible deployment and observability / M | metrics/alerts, environment table, multi-node topology, Redis failure semantics and restore drill are executable from published docs | In progress (#370 merged; #369/#371 and residual production acceptance remain) |
+| 6 | Billing integrity follow-up | #206, #253, #300 | protects revenue and abuse boundary / M-L | enrichment failure, cancellation, signup credit, quota and image authorization policies have explicit tests and owner sign-off | In progress (#362 funds slice is Draft; #368 records lifecycle boundary; #300/#206 integration remains) |
+| 7 | Scheduler and protocol roadmap slices | #268, #276, #179, #205 | correctness and upgrade safety / M-L | each slice has a bounded ADR, dependency/rollback plan and acceptance test; unresolved upstream sync conflict is handled separately | In progress (#365 review/auto-merge rotation contract; #363 identity guard merged) |
 | 8 | Developer and architecture debt | #221, #222, #226, #235, #241 | lowers long-term change cost / S-L | ADR index and one measured extraction slice are merged; #229 formula consistency and module navigation are accepted separately | In progress (#304/#305/#351 merged; residual architecture work) |
 | 9 | Fork installation URL | #256 | avoids wrong-origin installs / S | runtime installer points to fork only when the fork publishes the artifact; otherwise documented as intentionally upstream | Planned |
 
@@ -107,32 +194,32 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #255 | P1 | Split, active | PR #329 persists audit after client disconnect; retain parent for broader mutation coverage and retry/reconciliation evidence |
 | #254 | P1 | Split | PR #335 merged the chat/images and Claude compatibility fixtures; retain parent for remaining endpoint coverage |
 | #253 | P1 | Keep | approve signup-credit, overdraft and abuse-control policy before code |
-| #247 | P1 | Split, active | PR #334 merged idempotent refund terminal notifications; retain parent for balance and notification transition coverage |
+| #247 | P1 | Split, active | PR #334 merged idempotent refund terminal notifications; PR #374 adds user refund-completion notification and awaits protected checks; retain parent for balance and transition coverage |
 | #241 | P2 | Split | #305 merged removal of the silent `with_redis_url` no-op builder; parent remains open for broader architecture consistency |
 | #235 | P2 | Planned | create ADR index and ownership/rollback records |
 | #226 | P2 | Planned | measure dependency tree and pair allowlist work with #229 |
-| #225 | P1 | Split, active | PR #354 generates and checks the complete tunnel clap reference; retain parent for remaining gateway env and operations acceptance |
-| #224 | P1 | Split | #302 merged multi-node preflight; publish capacity smoke test and Redis failure runbook |
-| #223 | P1 | Split, active | PR #333 merged Redis redrive idempotency/retention coverage and a recovery drill; retain parent for restore/backup evidence |
+| #225 | P1 | Split, active | PR #354 generated the base reference; PR #367 adds drift checking and awaits protected checks; retain parent for backup/restore and remaining operations acceptance |
+| #224 | P1 | In progress | #302 and PR #370 (`c860eec66`) provide multi-node preflight/baseline; retain parent for capacity and Redis failure evidence |
+| #223 | P1 | Split, active | PR #333 merged Redis redrive idempotency/retention coverage; PR #369 adds the PostgreSQL backup/restore drill and awaits protected checks |
 | #222 | P2 | Planned | measure one provider/repository extension slice before generic rewrite |
 | #221 | P2 | Planned | produce call/dependency graph and extract one tested boundary |
-| #220 | P1 | Split, active | installer checksum/signature and Cargo/npm advisory gates are merged; PR #357 fills updater coverage, while container permissions, remaining image supply-chain work, dependency exception and hosted updater evidence remain |
+| #220 | P1 | Split, active | installer checksum/signature and Cargo/npm advisory gates are merged; PR #373 records residual supply-chain controls and awaits protected checks, while container permissions and hosted updater evidence remain |
 | #218 | P2 | Split | JWT/TLS/Redis-profile slices are merged; document remaining environment settings and mandatory production encryption-key policy |
-| #217 | P1 | Split | #306 RED is closed; #307 alert event-path/deployment and #308 readiness recovery acceptance remain open |
-| #308 | P1 | In progress | draft PR #356 implements shared probes, cache, one overall deadline, lifecycle and critical-worker gates; 12-phase local real dependency drill passed, with final review and CI pending |
-| #307 | P1 | In progress | #323 and #350 merged counters and Prometheus contract/alert verification; retain production producer fault injection, scraping and actual alert delivery evidence |
+| #217 | P1 | In progress | #306 RED is closed; PR #371 adds isolated scrape/alert delivery evidence for #307, while external deployment and producer fault injection remain |
+| #308 | P1 | Closed | PR #356 merged as `86bc4d8b88311ac3ddd400d9e72a2d68bdc4c9f6`; Issue and Project card are Done |
+| #307 | P1 | In progress | #323 and #350 merged counters and Prometheus contract verification; PR #371 adds isolated scrape/alert delivery and awaits protected checks; retain production producer fault injection and deployment evidence |
 | #216 | P1 | Split, active | PR #332 adds the dev profile build-performance gate; #339 adds an isolated Postgres harness and three selected live tests; retain parent for VSCodex required-check evidence, integration baseline execution and remaining ignored-test coverage |
 | #215 | P2 | Planned | measure synchronous logging/SSE filtering/lock contention before changes |
-| #214 | P1 | Split, active | PR #358 binds automatic per-target capacity to the per-process request cap; #356 covers readiness; retain stream/sync/tunnel permit lifetime, Redis fault-contract and SQL live-timeout acceptance |
+| #214 | P1 | Split, active | PR #358 merged as `1bcff1a5271aebefa96253417f4707574a7a2994`; PR #366 holds admission through response relay and awaits protected checks; retain the parent for stream/sync/tunnel and shutdown/error acceptance |
 | #213 | P2 | Planned | split giant handler and standardize error payload boundaries |
 | #212 | P2 | Planned | consolidate cross-cutting capacity and dependency tests |
-| #211 | P1 | Split, active | PR #328 merged bounded terminal registry retention; verify lease failure semantics and remaining sensitive-field paths |
+| #211 | P1 | Split, active | PR #328 merged bounded terminal registry retention; PR #372 redacts sensitive admin video fields but is blocked by an unrelated refund-notification compile error; verify remaining sensitive-field paths |
 | #210 | P2 | Planned | verify cryptographic/OAuth contracts with current dependency evidence |
 | #208 | P2 | Planned | reproduce NUMERIC/f64 paths and add adapter regression coverage |
 | #207 | P2 | Planned | bound internal errors and Windsurf buffering; add graceful shutdown slice |
-| #206 | P1 | Split | #300 tracks image authorization cost bypass; implement fail-closed unknown paid-image estimate, then bounded pricing |
-| #300 | P1 | Keep | validate bounded image cost estimation and wallet credit checks before changing authorization behavior |
-| #205 | P1 | Split | signed provenance and verifier fixes are merged; verify rotation/recovery evidence, nightly artifacts and non-root service identity |
+| #206 | P1 | Split | Keep parent open; Draft PR #362 (head `a39bd31a`) supplies the funds hold needed by #300 and PR #368 records the gateway lifecycle boundary; admission/dispatch/terminal, cancellation/partial output, retry and crash recovery remain |
+| #300 | P1 | Keep | Draft PR #362 (head `a39bd31a`) adds reservation and wallet-hold contracts; PR #368 records the integration boundary; finish CI/review and gateway admission/dispatch/terminal, cancellation/partial output, retry and crash recovery before closing |
+| #205 | P1 | Split, active | PR #363 merged the non-root service-identity guard as `e9ca10ab`; Draft PR #365 defines signing-key rotation overlap; retain the parent for recovery, nightly artifacts and remaining upgrade evidence |
 | #316 | P2 | Split | PR #325 merged the read-only audit tool; obtain real redacted historical aggregates before deciding whether backfill is needed |
 | #303 | P1 | Split, active | reviewed RSA Marvin exception is time-bounded and fail-closed; retain parent for dependency release/removal evidence |
 | #179 | P2 | Deferred | retain as roadmap; move actionable slices into child issues |
@@ -488,3 +575,36 @@ missing-binary/startup/connection failures, an explicit optional local skip,
 AOF persistence after kill/restart and idempotent redrive to one final stream
 entry with an empty DLQ. Issue #348 and its PR card are Done; #223 remains open
 for marker retention/capacity, PostgreSQL restore and end-to-end billing recovery.
+
+## 2026-09-13 live delivery checkpoint (fork-only)
+
+The fork was re-read with `gh` on 2026-09-13. The repository has **45 open
+issues**: 22 P1 and 23 P2, with 15 `status:in-progress`, 19 `status:triage`,
+and 11 `status:blocked`. This supersedes earlier 47/49/50-item counts while
+keeping them above as history. The delivery queue tracks **15 open
+implementation/documentation PRs** (#362 and #365-#379); prior checkpoint PR
+#364 and this refresh PR are excluded from that queue count.
+
+### Focused issue and PR mapping
+
+| Issue | Current fork evidence | Delivery state |
+| --- | --- | --- |
+| #253 | Open/P1/triage. Audit PR #379 records configurable $10 gift and Turnstile defaults, reservation/row-lock evidence, and the `insufficient_quota` accounting gap. | #379 is draft and blocked by current-head required checks; keep policy and production evidence open. |
+| #255 | Open/P1/in-progress. Unauthenticated audit finding is disproved; durable mutation audit, retry/reconciliation, broader events and Docker safety remain. | #376 is non-draft but blocked while checks run; do not close parent on partial persistence slices. |
+| #225 | Open/P1/in-progress. Tunnel env/reference and ADR consistency work is split across delivered and pending slices. | #378 is non-draft and blocked by required checks; review before acceptance. |
+| #214 | Open/P1/in-progress. Listener/accept recovery and probe/lifecycle contract remains under implementation. | #377 is draft/blocked; its test contract is not full recovery acceptance. |
+| #205 | Open/P1/triage. Key rotation overlap, recovery evidence, nightly artifacts and non-root identity hardening remain. | #375 is draft and behind `main`; rebase and rerun required checks. |
+| #300 | Open/P1/in-progress. Quote slice #361 merged; funds data slice #362 is draft. Gateway lifecycle façade remains unintegrated. | #368 records the lifecycle boundary; #362 and gateway admission/dispatch/terminal integration remain open. |
+
+All five focused PRs (#375-#379) remain open. Required checks are current-head
+gates; a green subset, draft PR or blocked merge state is not acceptance. No PR
+is auto-merged by this refresh.
+
+### #300 façade boundary (revalidated)
+
+`origin/main` still has no verified gateway calls to `reserve_request_funds`,
+`mark_request_funds_dispatched`, or `finalize_request_funds`. The façade must
+connect admission, retry, sync/stream terminal finalization, unknown-dispatch
+hold retention, and recharge recovery/crash evidence. Keep #300 and #206 open
+until those paths are integrated and exercised against real PostgreSQL and
+failure/recovery scenarios.
