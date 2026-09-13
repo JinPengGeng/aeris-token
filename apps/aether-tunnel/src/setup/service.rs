@@ -292,7 +292,7 @@ fn install_systemd_service(config_path: &Path) -> anyhow::Result<()> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("binary path contains invalid UTF-8"))?;
 
-    let config_abs = std::fs::canonicalize(config_path)?;
+    let config_abs = prepare_service_config_path(config_path)?;
     let config_str = config_abs
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("config path contains invalid UTF-8"))?;
@@ -395,7 +395,7 @@ fn install_openrc_service(config_path: &Path) -> anyhow::Result<()> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("binary path contains invalid UTF-8"))?;
 
-    let config_abs = std::fs::canonicalize(config_path)?;
+    let config_abs = prepare_service_config_path(config_path)?;
     let config_str = config_abs
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("config path contains invalid UTF-8"))?;
@@ -733,6 +733,136 @@ fn validate_service_unit_path(value: &str, label: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Check the supplied path without resolving symlinks or collapsing `..`.
+#[cfg(unix)]
+fn prepare_service_config_path(path: &Path) -> anyhow::Result<std::path::PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    open_service_config(&absolute)?;
+    Ok(absolute)
+}
+
+#[cfg(unix)]
+struct ServiceConfigFile {
+    ancestors: Vec<std::fs::File>,
+    parent: std::fs::File,
+    name: std::ffi::CString,
+    source: std::fs::File,
+}
+
+#[cfg(unix)]
+fn open_config_entry(
+    parent: &std::fs::File,
+    name: &std::ffi::CStr,
+    flags: i32,
+    mode: libc::mode_t,
+) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    // Every component is opened relative to a checked directory FD. Nonblocking
+    // prevents a swapped FIFO from hanging before its file type can be checked.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            mode as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+}
+
+#[cfg(unix)]
+fn check_config_directory(directory: &std::fs::File, owner: u32) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || metadata.uid() != owner || metadata.mode() & 0o022 != 0 {
+        anyhow::bail!("service config ancestors must be root-owned and not group/other writable (including sticky directories)");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn check_config_source(source: &std::fs::File, owner: u32) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = source.metadata()?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != owner
+        || metadata.mode() & 0o022 != 0
+    {
+        anyhow::bail!(
+            "service config must be a root-owned, non-writable, single-link regular file"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_service_config_at(
+    mut directory: std::fs::File,
+    relative: &Path,
+    owner: u32,
+) -> anyhow::Result<ServiceConfigFile> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut names = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(name) => {
+                names.push(std::ffi::CString::new(name.as_bytes())?)
+            }
+            std::path::Component::CurDir => {}
+            _ => anyhow::bail!("service config path must not contain '..' or a path prefix"),
+        }
+    }
+    let name = names
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("service config has no file name"))?;
+    check_config_directory(&directory, owner)?;
+    let mut ancestors = Vec::new();
+    for component in names {
+        let next = open_config_entry(
+            &directory,
+            &component,
+            libc::O_RDONLY | libc::O_DIRECTORY,
+            0,
+        )?;
+        ancestors.push(directory);
+        directory = next;
+        check_config_directory(&directory, owner)?;
+    }
+    let source = open_config_entry(&directory, &name, libc::O_RDONLY, 0)?;
+    check_config_source(&source, owner)?;
+    Ok(ServiceConfigFile {
+        ancestors,
+        parent: directory,
+        name,
+        source,
+    })
+}
+
+#[cfg(unix)]
+fn open_service_config(path: &Path) -> anyhow::Result<ServiceConfigFile> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let root = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open("/")?;
+    open_service_config_at(root, path.strip_prefix("/")?, 0)
+}
+
+#[cfg(not(unix))]
+fn prepare_service_config_path(path: &Path) -> anyhow::Result<std::path::PathBuf> {
+    let _ = path;
+    anyhow::bail!("managed tunnel services require Unix filesystem checks")
+}
+
 fn validate_root_managed_service_file(
     path: &Path,
     label: &str,
@@ -907,26 +1037,140 @@ fn service_group_id() -> anyhow::Result<u32> {
 
 fn migrate_service_permissions(config: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-    let parent = config
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("config has no parent"))?;
-    let parent_str = parent
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("config parent is not UTF-8"))?;
-    run_cmd(chown_bin(), &[&format!("root:{SERVICE_GROUP}"), parent_str])?;
-    #[cfg(unix)]
-    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))?;
-    run_cmd(
-        chown_bin(),
-        &[
-            &format!("root:{SERVICE_GROUP}"),
-            config.to_str().unwrap_or_default(),
-        ],
+    {
+        // Only the documented dedicated config directory may be migrated.
+        // Other root-managed directories keep their ownership and permissions.
+        let migrate_parent = config.parent() == Some(Path::new("/etc/aether-tunnel"));
+        migrate_service_config(
+            open_service_config(config)?,
+            0,
+            service_group_id()?,
+            migrate_parent,
+        )
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = config;
+        anyhow::bail!("managed tunnel services require Unix filesystem checks")
+    }
+}
+
+#[cfg(unix)]
+fn migrate_service_config(
+    mut config: ServiceConfigFile,
+    owner: u32,
+    group: u32,
+    migrate_parent: bool,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::io::{self, Read};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    for directory in config
+        .ancestors
+        .iter()
+        .chain(std::iter::once(&config.parent))
+    {
+        check_config_directory(directory, owner)?;
+    }
+    // No root-owned source inode is ever chmod/chowned: all permission changes
+    // apply to a new private inode. Root is trusted; concurrent root setup/save
+    // is unsupported (the final identity check is detection, not a rename CAS).
+    check_config_source(&config.source, owner)?;
+    let original = config.source.metadata()?;
+    let max_bytes = crate::config::MAX_CONFIG_FILE_BYTES;
+    if original.len() > max_bytes {
+        anyhow::bail!("service config exceeds the {max_bytes} byte limit");
+    }
+    for directory in config
+        .ancestors
+        .iter()
+        .chain((!migrate_parent).then_some(&config.parent))
+    {
+        let metadata = directory.metadata()?;
+        if metadata.mode() & 0o001 == 0
+            && !(metadata.gid() == group && metadata.mode() & 0o010 != 0)
+        {
+            anyhow::bail!("service account cannot traverse config directory; use /etc/aether-tunnel or provision custom directory access explicitly");
+        }
+    }
+
+    let temporary_name = std::ffi::CString::new(format!(
+        ".aether-tunnel-config-{}.tmp",
+        uuid::Uuid::new_v4()
+    ))?;
+    let mut temporary = open_config_entry(
+        &config.parent,
+        &temporary_name,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        0o600,
     )?;
-    #[cfg(unix)]
-    std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o640))?;
-    Ok(())
+    let mut committed = false;
+    let result = (|| -> anyhow::Result<()> {
+        let copied = io::copy(
+            &mut Read::by_ref(&mut config.source).take(max_bytes + 1),
+            &mut temporary,
+        )?;
+        if copied > max_bytes {
+            anyhow::bail!("service config exceeds the {max_bytes} byte limit");
+        }
+        let current = open_config_entry(&config.parent, &config.name, libc::O_RDONLY, 0)?;
+        check_config_source(&current, owner)?;
+        let metadata = current.metadata()?;
+        if metadata.dev() != original.dev()
+            || metadata.ino() != original.ino()
+            || metadata.len() != original.len()
+            || copied != original.len()
+            || metadata.mtime() != original.mtime()
+            || metadata.mtime_nsec() != original.mtime_nsec()
+            || metadata.ctime() != original.ctime()
+            || metadata.ctime_nsec() != original.ctime_nsec()
+        {
+            anyhow::bail!("service config changed during migration; refusing replacement");
+        }
+        if unsafe { libc::fchown(temporary.as_raw_fd(), owner, group) } != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        temporary.set_permissions(std::fs::Permissions::from_mode(0o640))?;
+        temporary.sync_all()?;
+        if unsafe {
+            libc::renameat(
+                config.parent.as_raw_fd(),
+                temporary_name.as_ptr(),
+                config.parent.as_raw_fd(),
+                config.name.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        committed = true;
+        // The rename is the commit point. Errors after it explicitly report
+        // partial completion; no unsafe path-based rollback is attempted.
+        if migrate_parent {
+            if unsafe { libc::fchown(config.parent.as_raw_fd(), owner, group) } != 0 {
+                return Err(io::Error::last_os_error()).context("config replaced, but dedicated directory ownership migration failed; service installation aborted");
+            }
+            config.parent.set_permissions(std::fs::Permissions::from_mode(0o750))
+                .context("config replaced, but dedicated directory mode migration failed; service installation aborted")?;
+        }
+        config.parent.sync_all().context("config replaced, but directory durability is unconfirmed; service installation aborted")?;
+        Ok(())
+    })();
+    if result.is_err() && !committed {
+        // Reduce exposure if cleanup itself fails; report both failures rather
+        // than silently leaving a credential-bearing temporary file behind.
+        let restrict = temporary.set_permissions(std::fs::Permissions::from_mode(0o600));
+        if unsafe { libc::unlinkat(config.parent.as_raw_fd(), temporary_name.as_ptr(), 0) } != 0 {
+            let cleanup = io::Error::last_os_error();
+            return result.context(format!(
+                "temporary config cleanup failed: {cleanup}; owner-only restriction: {restrict:?}"
+            ));
+        }
+    }
+    result
 }
 
 fn migrate_service_log_permissions() -> anyhow::Result<()> {
@@ -1233,6 +1477,289 @@ mod tests {
             assert_eq!(validate_service_uid(true, uid).is_ok(), accepted);
         }
         assert!(validate_service_uid(false, b"1001\n").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_config_fd_walk_rejects_links_and_ambiguous_paths_without_mutation() {
+        use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+
+        let fixture = ConfigFixture::new();
+        let directory = &fixture.path;
+
+        let target = directory.join("target.toml");
+        std::fs::write(&target, b"sentinel").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let target_before = std::fs::symlink_metadata(&target).unwrap();
+
+        let symlink_path = directory.join("symlink.toml");
+        symlink(&target, &symlink_path).unwrap();
+        assert!(fixture.open(Path::new("symlink.toml")).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"sentinel");
+        let target_after_symlink = std::fs::symlink_metadata(&target).unwrap();
+        assert_eq!(target_after_symlink.ino(), target_before.ino());
+        assert_eq!(target_after_symlink.mode() & 0o777, 0o644);
+
+        let hardlink_path = directory.join("hardlink.toml");
+        std::fs::hard_link(&target, &hardlink_path).unwrap();
+        assert!(fixture.open(Path::new("hardlink.toml")).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"sentinel");
+        assert_eq!(
+            std::fs::symlink_metadata(&target).unwrap().nlink(),
+            2,
+            "preflight must not unlink or rewrite a hard-linked target"
+        );
+
+        let real_directory = directory.join("real");
+        std::fs::create_dir(&real_directory).unwrap();
+        std::fs::set_permissions(&real_directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let nested_target = real_directory.join("nested.toml");
+        std::fs::write(&nested_target, b"nested sentinel").unwrap();
+        let linked_directory = directory.join("linked");
+        symlink(&real_directory, &linked_directory).unwrap();
+        assert!(fixture.open(Path::new("linked/nested.toml")).is_err());
+        assert!(fixture
+            .open(Path::new("linked/../real/nested.toml"))
+            .is_err());
+        assert_eq!(std::fs::read(&nested_target).unwrap(), b"nested sentinel");
+        assert!(
+            fixture.open(Path::new("real/nested.toml")).is_ok(),
+            "the same fixture must accept the actual safe path"
+        );
+    }
+
+    #[cfg(unix)]
+    use std::path::{Path, PathBuf};
+
+    #[cfg(unix)]
+    struct ConfigFixture {
+        path: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl ConfigFixture {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            // Test the exact FD walker from a private fixture root. Production
+            // always starts at / and requires uid 0; no test weakens that rule
+            // or relies on a rejection from macOS's common /tmp symlink.
+            let path = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("aether-config-migration-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Self { path }
+        }
+
+        fn open(&self, relative: &Path) -> anyhow::Result<super::ServiceConfigFile> {
+            super::open_service_config_at(std::fs::File::open(&self.path)?, relative, unsafe {
+                libc::geteuid()
+            })
+        }
+
+        fn config(&self, parent: &str, mode: u32) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let directory = self.path.join(parent);
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(mode)).unwrap();
+            let path = directory.join("config.toml");
+            std::fs::write(&path, b"management_token = 'fixture-only'\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            Path::new(parent).join("config.toml")
+        }
+
+        fn migrate(&self, relative: &Path, dedicated: bool) -> anyhow::Result<()> {
+            super::migrate_service_config(
+                self.open(relative)?,
+                unsafe { libc::geteuid() },
+                unsafe { libc::getegid() },
+                dedicated,
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ConfigFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_config_migration_preserves_contents_and_source_inode() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = ConfigFixture::new();
+        let relative = fixture.config("dedicated", 0o700);
+        let path = fixture.path.join(&relative);
+        let source = std::fs::File::open(&path).unwrap();
+        let original = source.metadata().unwrap();
+        fixture.migrate(&relative, true).unwrap();
+        let migrated = std::fs::metadata(&path).unwrap();
+        assert_ne!(migrated.ino(), original.ino());
+        assert_eq!(source.metadata().unwrap().mode(), original.mode());
+        assert_eq!(migrated.uid(), unsafe { libc::geteuid() });
+        assert_eq!(migrated.gid(), unsafe { libc::getegid() });
+        assert_eq!(migrated.mode() & 0o777, 0o640);
+        assert_eq!(migrated.nlink(), 1);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"management_token = 'fixture-only'\n"
+        );
+        let parent = std::fs::metadata(path.parent().unwrap()).unwrap();
+        assert_eq!(parent.mode() & 0o777, 0o750);
+        assert_eq!(parent.gid(), unsafe { libc::getegid() });
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+        fixture.migrate(&relative, true).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_config_migration_preserves_custom_parent_and_rejects_sticky_parent() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = ConfigFixture::new();
+        let custom = fixture.config("custom", 0o755);
+        let parent = fixture.path.join("custom");
+        let before = std::fs::metadata(&parent).unwrap();
+        fixture.migrate(&custom, false).unwrap();
+        let after = std::fs::metadata(&parent).unwrap();
+        assert_eq!(
+            (after.uid(), after.gid(), after.mode()),
+            (before.uid(), before.gid(), before.mode())
+        );
+        let sticky = fixture.config("sticky", 0o1777);
+        let before = std::fs::metadata(fixture.path.join("sticky")).unwrap();
+        let source_before = std::fs::metadata(fixture.path.join(&sticky)).unwrap();
+        assert!(fixture.migrate(&sticky, true).is_err());
+        let after = std::fs::metadata(fixture.path.join("sticky")).unwrap();
+        let source_after = std::fs::metadata(fixture.path.join(&sticky)).unwrap();
+        assert_eq!(
+            (after.uid(), after.gid(), after.mode()),
+            (before.uid(), before.gid(), before.mode())
+        );
+        assert_eq!(
+            (source_before.ino(), source_before.mode()),
+            (source_after.ino(), source_after.mode())
+        );
+        assert_eq!(
+            std::fs::read_dir(fixture.path.join("sticky"))
+                .unwrap()
+                .count(),
+            1
+        );
+        let private = fixture.config("private-custom", 0o700);
+        assert!(fixture
+            .migrate(&private, false)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot traverse"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_config_migration_stays_in_pinned_directory_after_ancestor_swap() {
+        use std::os::unix::fs::symlink;
+        let fixture = ConfigFixture::new();
+        let original = fixture.config("original", 0o700);
+        let target = fixture.config("target", 0o700);
+        std::fs::write(fixture.path.join(&target), b"unrelated target").unwrap();
+        let opened = fixture.open(&original).unwrap();
+        std::fs::rename(fixture.path.join("original"), fixture.path.join("moved")).unwrap();
+        symlink(fixture.path.join("target"), fixture.path.join("original")).unwrap();
+        super::migrate_service_config(
+            opened,
+            unsafe { libc::geteuid() },
+            unsafe { libc::getegid() },
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(fixture.path.join(&target)).unwrap(),
+            b"unrelated target"
+        );
+        assert_eq!(
+            std::fs::read(fixture.path.join("moved/config.toml")).unwrap(),
+            b"management_token = 'fixture-only'\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_config_migration_rejects_fifo_and_changed_entry_and_cleans_temporary_file() {
+        use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+        let fixture = ConfigFixture::new();
+        let path = fixture.config("dedicated", 0o700);
+        let opened = fixture.open(&path).unwrap();
+        let parent_before = std::fs::metadata(fixture.path.join("dedicated")).unwrap();
+        let actual = fixture.path.join(&path);
+        std::fs::rename(&actual, actual.with_extension("old")).unwrap();
+        let name = std::ffi::CString::new(actual.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(fixture.open(&path).is_err());
+        let error = super::migrate_service_config(
+            opened,
+            unsafe { libc::geteuid() },
+            unsafe { libc::getegid() },
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("regular file"));
+        let parent_after = std::fs::metadata(fixture.path.join("dedicated")).unwrap();
+        assert_eq!(parent_before.mode(), parent_after.mode());
+        assert_eq!(
+            std::fs::read_dir(fixture.path.join("dedicated"))
+                .unwrap()
+                .count(),
+            2,
+            "failed migration must remove its private temp file"
+        );
+        std::fs::remove_file(&actual).unwrap();
+        std::fs::write(&actual, b"replacement").unwrap();
+        let opened = fixture.open(&path).unwrap();
+        std::fs::rename(&actual, actual.with_extension("new")).unwrap();
+        std::fs::write(&actual, b"replacement").unwrap();
+        assert!(super::migrate_service_config(
+            opened,
+            unsafe { libc::geteuid() },
+            unsafe { libc::getegid() },
+            true
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("changed during migration"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_config_migration_rejects_oversized_source_before_mutation() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = ConfigFixture::new();
+        let path = fixture.config("dedicated", 0o700);
+        let actual = fixture.path.join(&path);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&actual)
+            .unwrap();
+        file.set_len(crate::config::MAX_CONFIG_FILE_BYTES + 1)
+            .unwrap();
+        let before = file.metadata().unwrap();
+        assert!(fixture
+            .migrate(&path, true)
+            .unwrap_err()
+            .to_string()
+            .contains("byte limit"));
+        let after = std::fs::metadata(&actual).unwrap();
+        assert_eq!((before.ino(), before.mode()), (after.ino(), after.mode()));
+        assert_eq!(
+            std::fs::read_dir(fixture.path.join("dedicated"))
+                .unwrap()
+                .count(),
+            1
+        );
     }
 
     #[test]
