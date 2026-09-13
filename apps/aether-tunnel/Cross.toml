@@ -1,0 +1,7 @@
+[build.env]
+# Only public trust inputs enter the cross container. Never forward the signer secret.
+passthrough = [
+    "AETHER_TUNNEL_RELEASE_KEY_ID",
+    "AETHER_TUNNEL_RELEASE_PUBLIC_KEY",
+    "AETHER_TUNNEL_RELEASE_TRUST_KEYS",
+]
