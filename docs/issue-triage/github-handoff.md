@@ -23,6 +23,23 @@
 核验时间：北京时间 2026-09-14 02:29。计划持续开发至当日 07:00，之后停止启动新实现，
 整理、验证和同步现场；本检查点不是 07:00 的最终收尾结果。
 
+### 最终收尾 — 2026-09-14（fork 实时复核）
+
+当前 `origin/main` 为 `174afcc0ab9b1a91a7c305f1f806ffe12d5feeb1`，开放 PR 为 0。
+开放 Issue 为 44（P1 21、P2 23；`status:in-progress` 17、`status:triage` 17、
+`status:blocked` 10）。Project #1 仍以 Issue 生命周期标签为状态来源；合并子切片
+不自动关闭父项。
+
+已合并代表交付：#401 Redis TIME 租约、#402 安全配置迁移、#407 流终止前持有
+target 许可、#415 缺凭据 401 契约、#416 key-scoped RPM reset、#418 stream
+observer 借用 chunk、#420 公共控制上下文总期限，以及 #423 交接刷新；均通过四项
+required checks 后进入 main。父 #205/#214/#215/#254 等剩余范围仍开放。
+
+下一步继续处理 #214、#215、#220、#223、#225、#255、#300/#206、#307/#217 的
+剩余验收（故障契约、日志/SSE、供应链、备份恢复、文档一致性、mutation audit、
+Gateway 资金生命周期和生产告警）。恢复仅需 `git fetch origin --prune`、读取 main、
+开放 PR/Issue 与 Project；本轮未修改 upstream、保护规则、生产数据或用户主工作树。
+
 - 已核验主干：`d071e55068fed700f45fa91cedccf809226e010c`，最近合并 PR #397。
 - 开放需求库存：47 个 Issue，23 P1 / 24 P2；父子范围重叠，不能当作 47 个独立开发包。
 - 开放 PR 为 #400、#401、#402、#404；#401 已启用受保护 squash auto-merge，#402/#404 保持 Draft。
