@@ -7,9 +7,10 @@ use aether_data_contracts::repository::billing::{
     UsagePolicyWindow, UserPlanEntitlementRecord, USAGE_POLICY_COST_UNITS_PER_USD,
 };
 use aether_data_contracts::repository::settlement::{
-    ReconcileUsagePolicyCostInput, ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome,
-    ReserveUsagePolicyRequestInput, ReserveUsagePolicyRequestOutcome,
-    UsagePolicyCostReservationState, UsagePolicyCostWindow, UsagePolicyRequestWindow,
+    ReconcileUsagePolicyCostInput, RequestFundsUsagePolicy, ReserveUsagePolicyCostInput,
+    ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
+    ReserveUsagePolicyRequestOutcome, UsagePolicyCostReservationState, UsagePolicyCostWindow,
+    UsagePolicyRequestWindow,
 };
 use aether_runtime::AdmissionPermit;
 use aether_runtime_state::{
@@ -28,7 +29,7 @@ const DEFAULT_CALENDAR_TIMEZONE: &str = "Asia/Shanghai";
 const COST_RESERVATION_TTL_SECS: u64 = 24 * 60 * 60;
 const COST_RESERVATION_SAFE_HISTORY_SECS: u64 = 32 * 24 * 60 * 60;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PlanUsagePolicySnapshot {
     pub(crate) admitted_at_unix_secs: u64,
     subject_id: Arc<str>,
@@ -67,7 +68,7 @@ impl PlanUsagePolicySnapshot {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PlanUsageReservationContext {
     policy_snapshot: PlanUsagePolicySnapshot,
     token: Arc<str>,
@@ -105,6 +106,51 @@ impl PlanUsageReservationContext {
 
     pub(crate) const fn admitted_at_unix_secs(&self) -> u64 {
         self.policy_snapshot.admitted_at_unix_secs
+    }
+
+    /// Freeze the original windows for atomic quota and funds admission per attempt.
+    pub(crate) fn attempt_funds_policy(&self) -> Result<RequestFundsUsagePolicy, GatewayError> {
+        let admitted_at_unix_secs = self.admitted_at_unix_secs();
+        let rules = self
+            .policy()
+            .cost_rules
+            .iter()
+            .map(|rule| runtime_cost_rule(rule, admitted_at_unix_secs))
+            .collect::<Result<Vec<_>, _>>()?;
+        let retain_until_unix_secs = rules
+            .iter()
+            .map(|rule| rule.influence_ends_at_unix_secs)
+            .chain(std::iter::once(
+                admitted_at_unix_secs.saturating_add(COST_RESERVATION_SAFE_HISTORY_SECS),
+            ))
+            .max()
+            .expect("safe history always supplies a retention bound");
+        Ok(RequestFundsUsagePolicy {
+            subject_id: self.subject_id().to_string(),
+            reservation_token: self.token().to_string(),
+            admitted_at_unix_secs,
+            retain_until_unix_secs,
+            windows: rules.into_iter().map(|rule| rule.window).collect(),
+        })
+    }
+
+    pub(crate) fn attempt_cost_rejection(
+        &self,
+        window_index: usize,
+        limit_cost_units: u64,
+    ) -> Result<PlanUsagePolicyRejection, GatewayError> {
+        let rule = self.policy().cost_rules.get(window_index).ok_or_else(|| {
+            GatewayError::Internal(
+                "attempt cost reservation returned an invalid window index".into(),
+            )
+        })?;
+        let rule = runtime_cost_rule(rule, self.admitted_at_unix_secs())?;
+        Ok(PlanUsagePolicyRejection {
+            metric: "actual_cost_usd",
+            limit: limit_cost_units as f64 / USAGE_POLICY_COST_UNITS_PER_USD as f64,
+            retry_after: rule.retry_after,
+            window: rule.label,
+        })
     }
 }
 

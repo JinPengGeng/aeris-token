@@ -1,0 +1,43 @@
+[table.usage_daily_cost_contributions]
+domain = "usage"
+order = 30
+primary_key = ["request_id"]
+
+[[table.usage_daily_cost_contributions.columns]]
+name = "request_id"
+type = "text_id"
+length = 128
+[[table.usage_daily_cost_contributions.columns]]
+name = "usage_id"
+type = "text_id"
+length = 36
+[[table.usage_daily_cost_contributions.columns]]
+name = "user_id"
+type = "text_id"
+length = 128
+nullable = true
+[[table.usage_daily_cost_contributions.columns]]
+name = "api_key_id"
+type = "text_id"
+length = 128
+nullable = true
+[[table.usage_daily_cost_contributions.columns]]
+name = "api_key_is_standalone"
+type = "bool"
+[[table.usage_daily_cost_contributions.columns]]
+name = "attempt_funds"
+type = "bool"
+[[table.usage_daily_cost_contributions.columns]]
+name = "actual_cost_units"
+type = "int64"
+[[table.usage_daily_cost_contributions.columns]]
+name = "accounting_at"
+type = "timestamp"
+nullable = true
+[[table.usage_daily_cost_contributions.columns]]
+name = "updated_at"
+type = "timestamp"
+default = { raw = "now()" }
+
+# Financial CHECK, partial covering indexes and repeatable backfill function
+# are maintained by migration 20260914030000. There are no cascading FKs.

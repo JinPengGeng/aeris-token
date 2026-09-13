@@ -387,6 +387,7 @@ impl fmt::Debug for GatewayDataState {
     }
 }
 
+mod attempt_funds;
 mod auth;
 pub(crate) use auth::resolve_group_effective_daily_usage_limit_policy;
 mod auth_api_key_cache;

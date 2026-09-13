@@ -88,7 +88,9 @@ async fn resolve_wallet_auth_gate_with_cache(
         };
         if let Some(quota) = quota.filter(|quota| quota.has_active_daily_quota) {
             let has_remaining_quota = quota.remaining_usd > DAILY_QUOTA_EPSILON_USD;
-            if decision.failure == Some(WalletAccessFailure::BalanceDenied) && has_remaining_quota {
+            if (decision.failure == Some(WalletAccessFailure::BalanceDenied) || wallet.is_none())
+                && has_remaining_quota
+            {
                 return Ok(Some(WalletAccessDecision::allowed(Some(
                     quota.remaining_usd,
                 ))));
@@ -361,6 +363,20 @@ mod tests {
         assert!(decision.allowed);
         assert_eq!(decision.failure, None);
         assert_eq!(decision.remaining, Some(4.0));
+    }
+
+    #[tokio::test]
+    async fn ordinary_user_key_with_remaining_quota_keeps_inactive_wallet_denied() {
+        let mut wallet = empty_user_wallet();
+        wallet.status = "inactive".into();
+        let state = state_with_wallet_and_quota(wallet, Some(quota_availability(10.0, 4.0, false)));
+        let decision = resolve_wallet_auth_gate(&state, &ordinary_user_api_key_snapshot())
+            .await
+            .expect("wallet gate should resolve")
+            .expect("wallet gate should return a decision");
+
+        assert!(!decision.allowed);
+        assert_ne!(decision.failure, Some(WalletAccessFailure::BalanceDenied));
     }
 
     #[tokio::test]

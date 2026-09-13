@@ -194,30 +194,6 @@ fn admin_billing_validate_safe_expression(expression: &str) -> Result<(), String
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::admin_billing_validate_safe_expression;
-    use aether_billing::FORMULA_ALLOWED_FUNCTIONS;
-
-    #[test]
-    fn admin_validation_accepts_every_shared_formula_function() {
-        for function in FORMULA_ALLOWED_FUNCTIONS {
-            assert!(
-                admin_billing_validate_safe_expression(&format!("{function}(input_cost, tax)"))
-                    .is_ok(),
-                "{function} must be accepted by admin validation"
-            );
-        }
-    }
-
-    #[test]
-    fn admin_validation_rejects_functions_outside_the_shared_allowlist() {
-        let error = admin_billing_validate_safe_expression("unapproved(input_cost)")
-            .expect_err("unapproved functions must be rejected");
-        assert_eq!(error, "Function not allowed: unapproved");
-    }
-}
-
 pub(crate) async fn maybe_build_local_admin_billing_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
@@ -329,4 +305,28 @@ pub(crate) async fn maybe_build_local_admin_billing_response(
 
     let _ = decision.route_kind.as_deref();
     Ok(Some(build_admin_billing_data_unavailable_response()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admin_billing_validate_safe_expression;
+    use aether_billing::FORMULA_ALLOWED_FUNCTIONS;
+
+    #[test]
+    fn admin_validation_accepts_every_shared_formula_function() {
+        for function in FORMULA_ALLOWED_FUNCTIONS {
+            assert!(
+                admin_billing_validate_safe_expression(&format!("{function}(input_cost, tax)"))
+                    .is_ok(),
+                "{function} must be accepted by admin validation"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_validation_rejects_functions_outside_the_shared_allowlist() {
+        let error = admin_billing_validate_safe_expression("unapproved(input_cost)")
+            .expect_err("unapproved functions must be rejected");
+        assert_eq!(error, "Function not allowed: unapproved");
+    }
 }

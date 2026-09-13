@@ -294,6 +294,20 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: ${{ needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: aether_gateway_test
+          POSTGRES_USER: aether
+          POSTGRES_PASSWORD: aether
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -h 127.0.0.1 -U aether -d aether_gateway_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -338,6 +352,15 @@ jobs:
           RUST_MIN_STACK: "16777216"
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         run: cargo nextest run -p aether-gateway --bins
+
+      - name: Verify attempt funds with isolated PostgreSQL and real upstream calls
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          RUST_MIN_STACK: "16777216"
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          AETHER_TEST_DATABASE_URL: postgres://aether:aether@127.0.0.1:5432/aether_gateway_test
+        run: bash tools/ci/run_gateway_attempt_funds_live_tests.sh
 
       - name: Install readiness drill dependencies
         run: sudo apt-get update && sudo apt-get install -y redis-server

@@ -3,6 +3,8 @@
 
 CREATE TABLE IF NOT EXISTS public.usage (
     request_id character varying(128) NOT NULL,
+    billing_mode character varying(20) DEFAULT 'legacy' NOT NULL,
+    funds_admission_closed_at timestamp with time zone,
     id character varying(128),
     user_id character varying(64),
     api_key_id character varying(64),
@@ -204,6 +206,7 @@ CREATE INDEX IF NOT EXISTS ix_usage_counter_deltas_request_kind ON public.usage_
 CREATE TABLE IF NOT EXISTS public.usage_settlement_snapshots (
     request_id character varying(128) NOT NULL,
     billing_status character varying(64) NOT NULL,
+    request_funds_summary jsonb,
     wallet_id character varying(64),
     wallet_balance_before double precision,
     wallet_balance_after double precision,
@@ -255,6 +258,7 @@ CREATE TABLE IF NOT EXISTS public.usage_cost_reservations (
     subject_id character varying(128) NOT NULL,
     reservation_token character varying(128) NOT NULL,
     admitted_at timestamp with time zone NOT NULL,
+    attempt_reservation_token character varying(128),
     reserved_cost_units bigint NOT NULL,
     actual_cost_units bigint,
     state character varying(20) NOT NULL,
@@ -270,7 +274,9 @@ CREATE INDEX IF NOT EXISTS usage_cost_reservations_request_id_idx ON public.usag
 CREATE INDEX IF NOT EXISTS usage_cost_reservations_subject_admitted_at_idx ON public.usage_cost_reservations USING btree (subject_id, admitted_at);
 CREATE INDEX IF NOT EXISTS usage_cost_reservations_reservation_expires_at_idx ON public.usage_cost_reservations USING btree (reservation_expires_at);
 CREATE INDEX IF NOT EXISTS usage_cost_reservations_retain_until_token_idx ON public.usage_cost_reservations USING btree (retain_until, reservation_token);
+CREATE UNIQUE INDEX IF NOT EXISTS usage_cost_reservations_attempt_token_idx ON public.usage_cost_reservations USING btree (attempt_reservation_token);
 ALTER TABLE ONLY public.usage_cost_reservations ADD CONSTRAINT usage_cost_reservations_subject_id_fkey FOREIGN KEY (subject_id) REFERENCES public.users(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.usage_cost_reservations ADD CONSTRAINT usage_cost_reservations_attempt_token_fkey FOREIGN KEY (attempt_reservation_token) REFERENCES public.request_fund_reservations(reservation_token) ON DELETE RESTRICT;
 
 CREATE TABLE IF NOT EXISTS public.usage_request_admissions (
     request_id character varying(128) NOT NULL,

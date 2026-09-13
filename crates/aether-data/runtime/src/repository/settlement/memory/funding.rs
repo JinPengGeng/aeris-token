@@ -66,22 +66,40 @@ pub(super) fn reserve(
     repo: &InMemorySettlementRepository,
     input: ReserveRequestFundsInput,
 ) -> Result<ReserveRequestFundsOutcome, DataLayerError> {
+    if repo
+        .usage
+        .as_ref()
+        .is_some_and(|usage| usage.is_attempt_funds_request(&input.identity.request_id))
+    {
+        return Err(invalid("attempt funds request requires v2 admission"));
+    }
+    reserve_inner(repo, input, None)
+}
+
+pub(super) fn reserve_inner(
+    repo: &InMemorySettlementRepository,
+    input: ReserveRequestFundsInput,
+    attempt_id: Option<&str>,
+) -> Result<ReserveRequestFundsOutcome, DataLayerError> {
     input.validate()?;
     repo.wallets.with_mut(|wallets| {
         let mut funds = repo.funds.write().expect("request funds lock");
         if let Some(stored) = funds.get(&input.identity.reservation_token) {
-            return Ok(if stored.quote == input {
-                ReserveRequestFundsOutcome::Reserved {
-                    reservation: Box::new(stored.clone()),
-                }
-            } else {
-                ReserveRequestFundsOutcome::Conflict
-            });
+            return Ok(
+                if stored.quote == input && stored.attempt_id.as_deref() == attempt_id {
+                    ReserveRequestFundsOutcome::Reserved {
+                        reservation: Box::new(stored.clone()),
+                    }
+                } else {
+                    ReserveRequestFundsOutcome::Conflict
+                },
+            );
         }
-        if funds
-            .values()
-            .any(|stored| stored.quote.identity.request_id == input.identity.request_id)
-        {
+        if funds.values().any(|stored| {
+            (stored.quote.identity.request_id == input.identity.request_id
+                && (stored.attempt_id.is_none() || attempt_id.is_none()))
+                || (attempt_id.is_some() && stored.attempt_id.as_deref() == attempt_id)
+        }) {
             return Ok(ReserveRequestFundsOutcome::Conflict);
         }
         let id = wallet_id(wallets, &input.identity);
@@ -138,6 +156,7 @@ pub(super) fn reserve(
             });
         }
         let reservation = StoredRequestFundsReservation {
+            attempt_id: attempt_id.map(ToOwned::to_owned),
             quote: input,
             wallet_id: id,
             allocations,
@@ -166,7 +185,7 @@ pub(super) fn dispatch(
     let Some(reservation) = funds.get_mut(&identity.reservation_token) else {
         return Ok(None);
     };
-    if reservation.quote.identity != identity {
+    if reservation.quote.identity != identity || reservation.attempt_id.is_some() {
         return Err(invalid("request funds identity conflict"));
     }
     match reservation.state {
@@ -187,7 +206,7 @@ pub(super) fn release(
     let Some(reservation) = funds.get_mut(&input.identity.reservation_token) else {
         return Ok(None);
     };
-    if reservation.quote.identity != input.identity {
+    if reservation.quote.identity != input.identity || reservation.attempt_id.is_some() {
         return Err(invalid("request funds identity conflict"));
     }
     match reservation.state {
@@ -210,12 +229,22 @@ pub(super) fn finalize(
 ) -> Result<Option<StoredRequestFundsReservation>, DataLayerError> {
     input.validate()?;
     let _guard = repo.settlement_lock.lock().expect("settlement lock");
+    finalize_inner(repo, input, None)
+}
+
+pub(super) fn finalize_inner(
+    repo: &InMemorySettlementRepository,
+    input: FinalizeRequestFundsInput,
+    attempt_id: Option<&str>,
+) -> Result<Option<StoredRequestFundsReservation>, DataLayerError> {
     repo.wallets.with_mut(|wallets| {
         let mut funds = repo.funds.write().expect("request funds lock");
         let Some(reservation) = funds.get(&input.identity.reservation_token) else {
             return Ok(None);
         };
-        if reservation.quote.identity != input.identity {
+        if reservation.quote.identity != input.identity
+            || reservation.attempt_id.as_deref() != attempt_id
+        {
             return Err(invalid("request funds identity conflict"));
         }
         let actual = request_funds_authorized_units(input.usage.actual_total_cost_usd)?;
@@ -227,7 +256,9 @@ pub(super) fn finalize(
             }
             return Ok(Some(reservation.clone()));
         }
-        if reservation.state != RequestFundsState::Dispatched
+        if (reservation.state != RequestFundsState::Dispatched
+            && !(attempt_id.is_some()
+                && reservation.state == RequestFundsState::ReconciliationPending))
             || !matches!(input.usage.status.as_str(), "completed" | "cancelled")
         {
             return Err(invalid("only dispatched billable usage may settle funds"));
@@ -336,10 +367,12 @@ pub(super) fn finalize(
         } else {
             RequestFundsState::Settled
         };
-        repo.settlements
-            .write()
-            .expect("settlement snapshot lock")
-            .insert(settlement.request_id.clone(), settlement);
+        if attempt_id.is_none() {
+            repo.settlements
+                .write()
+                .expect("settlement snapshot lock")
+                .insert(settlement.request_id.clone(), settlement);
+        }
         funds.insert(input.identity.reservation_token, next.clone());
         Ok(Some(next))
     })
@@ -350,6 +383,13 @@ pub(super) fn recover(
     input: RecoverInsufficientQuotaInput,
 ) -> Result<Option<RequestFundsRecoveryOutcome>, DataLayerError> {
     let _guard = repo.settlement_lock.lock().expect("settlement lock");
+    if repo
+        .usage
+        .as_ref()
+        .is_some_and(|usage| usage.is_attempt_funds_request(&input.request_id))
+    {
+        return Err(invalid("attempt funds cannot use legacy recovery"));
+    }
     let Some(usage) = repo
         .recoverable_usage
         .read()

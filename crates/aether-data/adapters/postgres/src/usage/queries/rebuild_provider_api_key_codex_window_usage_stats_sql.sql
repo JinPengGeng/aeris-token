@@ -1,4 +1,24 @@
-WITH target_keys AS (
+WITH provider_facts AS (
+  SELECT facts.id, facts.provider_api_key_id, facts.total_tokens,
+         facts.total_cost_usd, facts.created_at
+  FROM usage_billing_facts AS facts
+  JOIN usage AS parent ON parent.request_id = facts.request_id
+  WHERE parent.billing_mode = 'legacy'
+  UNION ALL
+  SELECT r.reservation_token, r.provider_api_key_id,
+         CASE WHEN r.terminal_facts #>> '{outcome,kind}' = 'charged' THEN
+           COALESCE((r.terminal_facts #>> '{outcome,usage,input_tokens}')::bigint, 0)
+           + COALESCE((r.terminal_facts #>> '{outcome,usage,output_tokens}')::bigint, 0)
+           + COALESCE((r.terminal_facts #>> '{outcome,usage,cache_creation_tokens}')::bigint, 0)
+           + COALESCE((r.terminal_facts #>> '{outcome,usage,cache_read_tokens}')::bigint, 0)
+         ELSE 0 END,
+         CASE WHEN r.terminal_facts #>> '{outcome,kind}' = 'charged'
+              THEN (r.terminal_facts #>> '{outcome,usage,total_cost_units}')::numeric / 100000000
+              ELSE 0 END,
+         to_timestamp((r.quote ->> 'admitted_at_unix_secs')::double precision)
+  FROM request_fund_reservations r
+  WHERE r.attempt_id IS NOT NULL AND r.dispatched_at IS NOT NULL
+), target_keys AS (
   SELECT
     id,
     COALESCE(status_snapshot::jsonb, '{}'::jsonb) AS snapshot
@@ -111,7 +131,7 @@ aggregated AS (
     COALESCE(SUM(GREATEST(COALESCE("usage".total_tokens, 0), 0)::BIGINT), 0)::BIGINT AS total_tokens,
     CAST(COALESCE(SUM(COALESCE("usage".total_cost_usd, 0)), 0) AS DOUBLE PRECISION) AS total_cost_usd
   FROM window_bounds
-  LEFT JOIN usage_billing_facts AS "usage"
+  LEFT JOIN provider_facts AS "usage"
     ON window_bounds.window_start IS NOT NULL
    AND window_bounds.window_end IS NOT NULL
    AND "usage".provider_api_key_id = window_bounds.id

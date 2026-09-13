@@ -387,6 +387,46 @@ pub struct StoredUsageSettlement {
 
 #[async_trait]
 pub trait SettlementWriteRepository: Send + Sync {
+    async fn reserve_request_attempt_funds(
+        &self,
+        _input: super::ReserveRequestAttemptFundsInput,
+    ) -> Result<super::ReserveRequestAttemptFundsOutcome, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "attempt funds reservations are unsupported".to_string(),
+        ))
+    }
+    async fn mark_request_attempt_funds_dispatched(
+        &self,
+        _identity: super::RequestAttemptFundsIdentity,
+    ) -> Result<Option<super::StoredRequestAttemptFunds>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "attempt funds dispatch is unsupported".to_string(),
+        ))
+    }
+    async fn record_request_attempt_funds_outcome(
+        &self,
+        _input: super::RecordRequestAttemptFundsOutcomeInput,
+    ) -> Result<Option<super::StoredRequestAttemptFunds>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "attempt funds outcome is unsupported".to_string(),
+        ))
+    }
+    async fn read_request_attempt_funds(
+        &self,
+        _identity: super::RequestAttemptFundsIdentity,
+    ) -> Result<Option<super::StoredRequestAttemptFunds>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "attempt funds read is unsupported".to_string(),
+        ))
+    }
+    async fn close_request_funds_admission(
+        &self,
+        _input: super::CloseRequestFundsAdmissionInput,
+    ) -> Result<Option<super::RequestFundsSummary>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "attempt funds admission close is unsupported".to_string(),
+        ))
+    }
     async fn reserve_request_funds(
         &self,
         _input: super::ReserveRequestFundsInput,

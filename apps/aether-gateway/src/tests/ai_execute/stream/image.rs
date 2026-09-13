@@ -339,7 +339,7 @@ async fn gateway_executes_codex_image_stream_via_local_decision_gate_after_oauth
                 provider_catalog_repository,
                 Arc::new(InMemoryRequestCandidateRepository::default()),
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            ).with_explicit_free_image_pricing_for_tests(&sample_candidate_row()),
         )
         .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
     let gateway = build_router_with_state(gateway_state);
@@ -697,7 +697,7 @@ async fn gateway_bridges_codex_image_sync_json_to_streaming_image_sse_impl() {
                 provider_catalog_repository,
                 Arc::new(InMemoryRequestCandidateRepository::default()),
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            ).with_explicit_free_image_pricing_for_tests(&sample_candidate_row()),
         )
         .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
     let gateway = build_router_with_state(gateway_state);
@@ -975,7 +975,7 @@ async fn start_image_bridge_gateway(
                 provider_catalog_repository,
                 Arc::clone(&request_candidate_repository),
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            ).with_explicit_free_image_pricing_for_tests(&image_bridge_candidate_row(prefix, provider_name, provider_type)),
         );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;

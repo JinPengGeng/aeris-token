@@ -9,6 +9,7 @@ pub(crate) mod attempt_lifecycle;
 mod chatgpt_web_image;
 mod constants;
 mod fallback;
+pub(crate) mod funded_image;
 mod grok;
 mod kiro_cache;
 mod kiro_web_search;

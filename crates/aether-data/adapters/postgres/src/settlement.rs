@@ -20,6 +20,7 @@ pub(crate) mod funding;
 const FIND_USAGE_FOR_SETTLEMENT_SQL: &str = r#"
 SELECT
   usage_record.request_id,
+  usage_record.billing_mode,
   COALESCE(usage_settlement_snapshots.wallet_id, usage_record.wallet_id) AS wallet_id,
   COALESCE(usage_settlement_snapshots.billing_status, usage_record.billing_status) AS billing_status,
   COALESCE(
@@ -262,6 +263,7 @@ SELECT
   request_id,
   subject_id,
   reservation_token,
+  attempt_reservation_token,
   CAST(EXTRACT(EPOCH FROM admitted_at) AS BIGINT) AS admitted_at_unix_secs,
   reserved_cost_units,
   actual_cost_units,
@@ -363,9 +365,9 @@ async fn usage_policy_cost_window_totals(
         .push(" AND admitted_at >= TO_TIMESTAMP(").push_bind(earliest)
         .push("::double precision) AND admitted_at < TO_TIMESTAMP(").push_bind(latest)
         .push("::double precision) AND reservation_token <> ").push_bind(input.reservation_token.clone())
-        .push(" AND (state = 'finalized' OR (state = 'reserved' AND reservation_expires_at > TO_TIMESTAMP(")
+        .push(" AND (state = 'finalized' OR (state = 'reserved' AND (attempt_reservation_token IS NOT NULL OR reservation_expires_at > TO_TIMESTAMP(")
         .push_bind(usage_policy_cost_i64(input.admitted_at_unix_secs, "usage policy admitted_at")?)
-        .push("::double precision)))");
+        .push("::double precision))))");
     query.build().fetch_one(&mut **tx).await.map_postgres_err()
 }
 
@@ -669,7 +671,7 @@ INSERT INTO entitlement_usage_ledgers (
   balance_before, balance_after, usage_date, created_at
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-ON CONFLICT (user_entitlement_id, request_id) DO NOTHING
+ON CONFLICT (user_entitlement_id, request_id) WHERE attempt_id IS NULL DO NOTHING
             "#,
         )
         .bind(uuid::Uuid::new_v4().to_string())
@@ -694,6 +696,71 @@ ON CONFLICT (user_entitlement_id, request_id) DO NOTHING
 
 #[async_trait]
 impl SettlementWriteRepository for SqlxSettlementRepository {
+    async fn reserve_request_attempt_funds(
+        &self,
+        input: aether_data_contracts::repository::settlement::ReserveRequestAttemptFundsInput,
+    ) -> Result<
+        aether_data_contracts::repository::settlement::ReserveRequestAttemptFundsOutcome,
+        DataLayerError,
+    > {
+        input.validate()?;
+        self.tx_runner
+            .run_read_write(|tx| Box::pin(funding::attempts::reserve(tx, input)))
+            .await
+    }
+    async fn mark_request_attempt_funds_dispatched(
+        &self,
+        identity: aether_data_contracts::repository::settlement::RequestAttemptFundsIdentity,
+    ) -> Result<
+        Option<aether_data_contracts::repository::settlement::StoredRequestAttemptFunds>,
+        DataLayerError,
+    > {
+        identity.validate()?;
+        self.tx_runner
+            .run_read_write(|tx| Box::pin(funding::attempts::dispatch(tx, identity)))
+            .await
+    }
+    async fn record_request_attempt_funds_outcome(
+        &self,
+        input: aether_data_contracts::repository::settlement::RecordRequestAttemptFundsOutcomeInput,
+    ) -> Result<
+        Option<aether_data_contracts::repository::settlement::StoredRequestAttemptFunds>,
+        DataLayerError,
+    > {
+        input.validate()?;
+        self.tx_runner
+            .run_read_write(|tx| Box::pin(funding::attempts::outcome(tx, input)))
+            .await
+    }
+    async fn read_request_attempt_funds(
+        &self,
+        identity: aether_data_contracts::repository::settlement::RequestAttemptFundsIdentity,
+    ) -> Result<
+        Option<aether_data_contracts::repository::settlement::StoredRequestAttemptFunds>,
+        DataLayerError,
+    > {
+        identity.validate()?;
+        self.tx_runner
+            .run_read_write(|tx| Box::pin(funding::attempts::read(tx, identity)))
+            .await
+    }
+    async fn close_request_funds_admission(
+        &self,
+        input: aether_data_contracts::repository::settlement::CloseRequestFundsAdmissionInput,
+    ) -> Result<
+        Option<aether_data_contracts::repository::settlement::RequestFundsSummary>,
+        DataLayerError,
+    > {
+        input.identity.validate()?;
+        if input.closed_at_unix_secs > i64::MAX as u64 {
+            return Err(DataLayerError::InvalidInput(
+                "admission close time overflow".to_string(),
+            ));
+        }
+        self.tx_runner
+            .run_read_write(|tx| Box::pin(funding::attempts::close(tx, input)))
+            .await
+    }
     async fn reserve_request_funds(
         &self,
         input: aether_data_contracts::repository::settlement::ReserveRequestFundsInput,
@@ -1001,6 +1068,12 @@ WHERE retain_until <= TO_TIMESTAMP($1::double precision)
                         .as_ref()
                         .map(usage_policy_cost_reservation_from_postgres_row)
                         .transpose()?;
+                    if existing_row.as_ref().is_some_and(|row| {
+                        row.get::<Option<String>, _>("attempt_reservation_token")
+                            .is_some()
+                    }) {
+                        return Ok(ReserveUsagePolicyCostOutcome::Conflict);
+                    }
                     if let Some(existing) = existing.as_ref() {
                         if existing.request_id != input.request_id
                             || existing.subject_id != input.subject_id
@@ -1124,6 +1197,16 @@ ON CONFLICT (reservation_token) DO UPDATE SET
                         return Ok(None);
                     };
                     let mut reservation = usage_policy_cost_reservation_from_postgres_row(&row)?;
+                    if row
+                        .try_get::<Option<String>, _>("attempt_reservation_token")
+                        .map_postgres_err()?
+                        .is_some()
+                    {
+                        return Err(DataLayerError::InvalidInput(
+                            "attempt usage policy requires its financial outcome writer"
+                                .to_string(),
+                        ));
+                    }
                     if reservation.request_id != input.request_id
                         || reservation.subject_id != input.subject_id
                     {
@@ -1184,10 +1267,12 @@ WHERE reservation_token = $1
             r#"
 DELETE FROM usage_cost_reservations
 WHERE retain_until <= TO_TIMESTAMP($1::double precision)
+  AND attempt_reservation_token IS NULL
   AND reservation_token IN (
   SELECT reservation_token
   FROM usage_cost_reservations
   WHERE retain_until <= TO_TIMESTAMP($1::double precision)
+    AND attempt_reservation_token IS NULL
   ORDER BY retain_until, reservation_token
   LIMIT $2
 )
@@ -1218,6 +1303,9 @@ WHERE retain_until <= TO_TIMESTAMP($1::double precision)
                     let Some(usage_row) = row else {
                         return Ok(None);
                     };
+                    if usage_row.try_get::<String, _>("billing_mode").map_postgres_err()? == "attempt_funds" {
+                        return Err(DataLayerError::InvalidInput("attempt funds usage requires v2 financial settlement".to_string()));
+                    }
 
                     let current_billing_status: String =
                         usage_row.try_get("billing_status").map_postgres_err()?;

@@ -28,7 +28,6 @@ use aether_usage_runtime::{
 use aether_video_tasks_core::StoredVideoTaskReadSide;
 use async_trait::async_trait;
 use serde_json::Value;
-use tracing::warn;
 
 use super::GatewayDataState;
 use crate::data::candidate_selection::MinimalCandidateSelectionRowSource;
@@ -227,6 +226,15 @@ impl UsageSettlementWriter for GatewayDataState {
         GatewayDataState::has_settlement_writer(self)
     }
 
+    async fn write_request_attempt_funds_event(
+        &self,
+        event: &aether_usage_runtime::UsageAttemptFundsEvent,
+        finalized_at_unix_secs: u64,
+    ) -> Result<(), DataLayerError> {
+        self.apply_request_attempt_funds_event(event, finalized_at_unix_secs)
+            .await
+    }
+
     async fn reconcile_usage_policy_cost(
         &self,
         input: ReconcileUsagePolicyCostInput,
@@ -383,25 +391,7 @@ impl UsageRecordWriter for GatewayDataState {
         &self,
         record: UpsertUsageRecord,
     ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
-        let stored = GatewayDataState::upsert_usage(self, record).await?;
-        if let (Some(runtime_state), Some(usage)) =
-            (self.daily_usage_runtime_state.as_ref(), stored.as_ref())
-        {
-            if let Err(err) =
-                crate::daily_usage_limit::record_finalized_daily_usage(runtime_state, usage).await
-            {
-                warn!(
-                    event_name = "daily_usage_limit_increment_failed",
-                    log_type = "ops",
-                    request_id = %usage.request_id,
-                    user_id = usage.user_id.as_deref().unwrap_or("-"),
-                    api_key_id = usage.api_key_id.as_deref().unwrap_or("-"),
-                    error = ?err,
-                    "daily usage limit increment failed; usage recording continues"
-                );
-            }
-        }
-        Ok(stored)
+        GatewayDataState::upsert_usage(self, record).await
     }
 
     async fn upsert_first_byte_usage_record(

@@ -69,8 +69,8 @@ INSERT INTO "usage" (
 )
 ON CONFLICT (request_id)
 DO UPDATE SET
-  user_id = COALESCE(EXCLUDED.user_id, "usage".user_id),
-  api_key_id = COALESCE(EXCLUDED.api_key_id, "usage".api_key_id),
+  user_id = CASE WHEN "usage".billing_mode = 'legacy' THEN COALESCE(EXCLUDED.user_id, "usage".user_id) ELSE "usage".user_id END,
+  api_key_id = CASE WHEN "usage".billing_mode = 'legacy' THEN COALESCE(EXCLUDED.api_key_id, "usage".api_key_id) ELSE "usage".api_key_id END,
   provider_name = EXCLUDED.provider_name,
   model = EXCLUDED.model,
   target_model = COALESCE(EXCLUDED.target_model, "usage".target_model),

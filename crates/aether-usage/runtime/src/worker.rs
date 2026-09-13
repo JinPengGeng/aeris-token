@@ -796,6 +796,24 @@ pub async fn write_event_record<T>(data: &T, event: &UsageEvent) -> Result<(), D
 where
     T: UsageRecordWriter + UsageSettlementWriter + Send + Sync,
 {
+    if let Some(attempt) = &event.data.attempt_funds {
+        attempt.validate(&event.request_id)?;
+        data.write_request_attempt_funds_event(attempt, event.timestamp_ms / 1_000)
+            .await?;
+        if attempt.is_outcome() {
+            return Ok(());
+        }
+        let record = build_upsert_usage_record_from_event(event)?;
+        return data
+            .upsert_usage_record(record)
+            .await?
+            .map(|_| ())
+            .ok_or_else(|| {
+                DataLayerError::UnexpectedValue(
+                    "attempt parent usage writer returned no row".to_string(),
+                )
+            });
+    }
     let reconciled = reconcile_usage_policy_cost_for_event_with_result(data, event).await?;
     let record = build_upsert_usage_record_from_event(event)?;
     if let Some(stored) = data.upsert_usage_record(record).await? {
@@ -813,6 +831,9 @@ async fn enrich_terminal_event<T>(data: &T, event: &mut UsageEvent) -> Result<()
 where
     T: UsageBillingEventEnricher + Send + Sync,
 {
+    if event.data.attempt_funds.is_some() {
+        return Ok(());
+    }
     if !matches!(
         event.event_type,
         UsageEventType::Completed | UsageEventType::Failed | UsageEventType::Cancelled

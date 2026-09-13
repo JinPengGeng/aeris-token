@@ -41,6 +41,9 @@ pub struct UsageEventData {
     pub api_key_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_billing_multiplier: Option<f64>,
+    /// Server capability, never synthesized from request_metadata or bodies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_funds: Option<Box<crate::UsageAttemptFundsEvent>>,
     pub provider_name: String,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -253,6 +256,7 @@ impl Clone for UsageEventData {
             username: self.username.clone(),
             api_key_name: self.api_key_name.clone(),
             api_key_billing_multiplier: self.api_key_billing_multiplier,
+            attempt_funds: self.attempt_funds.clone(),
             provider_name: self.provider_name.clone(),
             model: self.model.clone(),
             target_model: self.target_model.clone(),

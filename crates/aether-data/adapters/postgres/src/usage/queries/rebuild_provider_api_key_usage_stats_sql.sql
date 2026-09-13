@@ -1,4 +1,27 @@
-WITH aggregated AS (
+WITH provider_facts AS (
+  SELECT facts.provider_api_key_id, facts.status, facts.status_code, facts.error_message,
+         facts.total_tokens, facts.total_cost_usd, facts.response_time_ms, facts.created_at
+  FROM usage_billing_facts AS facts
+  JOIN usage AS parent ON parent.request_id = facts.request_id
+  WHERE parent.billing_mode = 'legacy'
+  UNION ALL
+  SELECT r.provider_api_key_id,
+         COALESCE(r.terminal_facts #>> '{execution,status}', 'pending'),
+         NULL::integer, NULL::text,
+         CASE WHEN r.terminal_facts #>> '{outcome,kind}' = 'charged' THEN
+           COALESCE((r.terminal_facts #>> '{outcome,usage,input_tokens}')::bigint, 0)
+           + COALESCE((r.terminal_facts #>> '{outcome,usage,output_tokens}')::bigint, 0)
+           + COALESCE((r.terminal_facts #>> '{outcome,usage,cache_creation_tokens}')::bigint, 0)
+           + COALESCE((r.terminal_facts #>> '{outcome,usage,cache_read_tokens}')::bigint, 0)
+         ELSE 0 END,
+         CASE WHEN r.terminal_facts #>> '{outcome,kind}' = 'charged'
+              THEN (r.terminal_facts #>> '{outcome,usage,total_cost_units}')::numeric / 100000000
+              ELSE 0 END,
+         (r.terminal_facts #>> '{execution,response_time_ms}')::bigint,
+         to_timestamp((r.quote ->> 'admitted_at_unix_secs')::double precision)
+  FROM request_fund_reservations r
+  WHERE r.attempt_id IS NOT NULL AND r.dispatched_at IS NOT NULL
+), aggregated AS (
   SELECT
     provider_api_key_id,
     COUNT(*)::BIGINT AS request_count,
@@ -49,7 +72,7 @@ WITH aggregated AS (
       END
     ), 0)::BIGINT AS total_response_time_ms,
     MAX(created_at) AS last_used_at
-  FROM usage_billing_facts AS "usage"
+  FROM provider_facts AS "usage"
   WHERE provider_api_key_id IS NOT NULL
     AND BTRIM(provider_api_key_id) <> ''
   GROUP BY provider_api_key_id
