@@ -45,6 +45,9 @@ use crate::DataLayerError;
 
 #[derive(Debug, Default)]
 pub struct InMemoryWalletRepository {
+    pub(crate) request_funds: std::sync::Arc<
+        RwLock<BTreeMap<String, crate::repository::settlement::StoredRequestFundsReservation>>,
+    >,
     wallets_by_id: RwLock<BTreeMap<String, StoredWalletSnapshot>>,
     payment_orders_by_id: RwLock<BTreeMap<String, StoredAdminPaymentOrder>>,
     payment_callbacks_by_id: RwLock<BTreeMap<String, StoredAdminPaymentCallback>>,
@@ -289,6 +292,7 @@ impl InMemoryWalletRepository {
             refund_idempotency_to_id: RwLock::new(BTreeMap::new()),
             refund_creation_lock: Mutex::new(()),
             wallet_lifecycle_lock: Mutex::new(()),
+            request_funds: Default::default(),
         }
     }
 
@@ -340,6 +344,7 @@ impl InMemoryWalletRepository {
             refund_idempotency_to_id: RwLock::new(refund_idempotency_to_id),
             refund_creation_lock: Mutex::new(()),
             wallet_lifecycle_lock: Mutex::new(()),
+            request_funds: Default::default(),
         }
     }
 
@@ -388,23 +393,43 @@ fn update_wallet_by_owner(
 
 fn update_wallet_snapshot_by_owner(
     wallets_by_id: &RwLock<BTreeMap<String, StoredWalletSnapshot>>,
+    request_funds: &RwLock<
+        BTreeMap<String, crate::repository::settlement::StoredRequestFundsReservation>,
+    >,
     matches_owner: impl Fn(&StoredWalletSnapshot) -> bool,
     update: WalletSnapshotUpdate<'_>,
 ) -> Result<Option<StoredWalletSnapshot>, DataLayerError> {
-    update_wallet_by_owner(wallets_by_id, matches_owner, |wallet| {
-        wallet.balance = update.balance;
-        wallet.gift_balance = update.gift_balance;
-        wallet.limit_mode = update.limit_mode.to_string();
-        wallet.currency = update.currency.to_string();
-        wallet.status = update.status.to_string();
-        wallet.total_recharged = update.total_recharged;
-        wallet.total_consumed = update.total_consumed;
-        wallet.total_refunded = update.total_refunded;
-        wallet.total_adjusted = update.total_adjusted;
-        wallet.updated_at_unix_secs = update
-            .updated_at_unix_secs
-            .unwrap_or_else(current_unix_secs);
-    })
+    let mut wallets = wallets_by_id.write().expect("wallet repo lock");
+    let Some(wallet) = wallets.values_mut().find(|wallet| matches_owner(wallet)) else {
+        return Ok(None);
+    };
+    let funds = request_funds.read().expect("request funds lock");
+    let (recharge, gift) =
+        crate::repository::settlement::request_funds_wallet_held_units(funds.values(), &wallet.id)?;
+    if recharge
+        > crate::repository::settlement::request_funds_available_units(update.balance.max(0.0))?
+        || gift
+            > crate::repository::settlement::request_funds_available_units(
+                update.gift_balance.max(0.0),
+            )?
+    {
+        return Err(DataLayerError::InvalidInput(
+            "wallet snapshot would consume reserved request funds".to_string(),
+        ));
+    }
+    wallet.balance = update.balance;
+    wallet.gift_balance = update.gift_balance;
+    wallet.limit_mode = update.limit_mode.to_string();
+    wallet.currency = update.currency.to_string();
+    wallet.status = update.status.to_string();
+    wallet.total_recharged = update.total_recharged;
+    wallet.total_consumed = update.total_consumed;
+    wallet.total_refunded = update.total_refunded;
+    wallet.total_adjusted = update.total_adjusted;
+    wallet.updated_at_unix_secs = update
+        .updated_at_unix_secs
+        .unwrap_or_else(current_unix_secs);
+    Ok(Some(wallet.clone()))
 }
 
 fn initialize_auth_wallet_in_memory(
@@ -724,6 +749,7 @@ impl WalletReadRepository for InMemoryWalletRepository {
     ) -> Result<Option<StoredWalletSnapshot>, DataLayerError> {
         update_wallet_snapshot_by_owner(
             &self.wallets_by_id,
+            &self.request_funds,
             |wallet| wallet.user_id.as_deref() == Some(user_id),
             WalletSnapshotUpdate {
                 balance,
@@ -756,6 +782,7 @@ impl WalletReadRepository for InMemoryWalletRepository {
     ) -> Result<Option<StoredWalletSnapshot>, DataLayerError> {
         update_wallet_snapshot_by_owner(
             &self.wallets_by_id,
+            &self.request_funds,
             |wallet| wallet.api_key_id.as_deref() == Some(api_key_id),
             WalletSnapshotUpdate {
                 balance,
@@ -1523,6 +1550,22 @@ impl WalletWriteRepository for InMemoryWalletRepository {
         };
         if current != after || !owner_matches(current) || !owner_matches(before) {
             return Ok(false);
+        }
+        let funds = self.request_funds.read().expect("request funds lock");
+        let (recharge, gift) = crate::repository::settlement::request_funds_wallet_held_units(
+            funds.values(),
+            &before.id,
+        )?;
+        if recharge
+            > crate::repository::settlement::request_funds_available_units(before.balance.max(0.0))?
+            || gift
+                > crate::repository::settlement::request_funds_available_units(
+                    before.gift_balance.max(0.0),
+                )?
+        {
+            return Err(DataLayerError::InvalidInput(
+                "wallet restore would consume reserved request funds".to_string(),
+            ));
         }
         wallets.insert(before.id.clone(), before.clone());
         Ok(true)

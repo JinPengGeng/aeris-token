@@ -9538,89 +9538,95 @@ async fn gateway_handles_auth_ldap_login_locally_without_proxying_upstream() {
 }
 
 #[tokio::test]
-async fn gateway_handles_auth_register_locally_without_proxying_upstream() {
-    let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
-        start_auth_gateway_with_builder(|| {
-            let data_state = crate::data::GatewayDataState::disabled()
-                .with_system_config_values_for_tests(vec![
+async fn gateway_register_uses_zero_default_and_preserves_configured_gift() {
+    for (configured_gift, expected_gift) in [(None, 0.0), (Some(12.5), 12.5)] {
+        let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
+            start_auth_gateway_with_builder(|| {
+                let mut config = vec![
                     ("enable_registration".to_string(), json!(true)),
                     ("require_email_verification".to_string(), json!(true)),
                     ("smtp_host".to_string(), json!("smtp.example.com")),
                     ("smtp_from_email".to_string(), json!("ops@example.com")),
-                    ("default_user_initial_gift_usd".to_string(), json!(12.5)),
-                ]);
-            AppState::new()
-                .expect("gateway should build")
-                .with_data_state_for_tests(data_state)
-                .with_auth_email_verified_for_tests(
-                    "alice@example.com",
-                    TEST_EMAIL_VERIFICATION_TOKEN,
-                )
-        })
-        .await;
+                ];
+                if let Some(amount) = configured_gift {
+                    config.push(("default_user_initial_gift_usd".to_string(), json!(amount)));
+                }
+                let data_state = crate::data::GatewayDataState::disabled()
+                    .with_system_config_values_for_tests(config);
+                AppState::new()
+                    .expect("gateway should build")
+                    .with_data_state_for_tests(data_state)
+                    .with_auth_email_verified_for_tests(
+                        "alice@example.com",
+                        TEST_EMAIL_VERIFICATION_TOKEN,
+                    )
+            })
+            .await;
 
-    let client = reqwest::Client::new();
-    let register_response = client
-        .post(format!("{gateway_url}/api/auth/register"))
-        .json(&json!({
-            "email": "alice@example.com",
-            "username": "alice",
-            "password": "secret123",
-            "email_verification_token": TEST_EMAIL_VERIFICATION_TOKEN,
-        }))
-        .send()
-        .await
-        .expect("register request should succeed");
+        let client = reqwest::Client::new();
+        let register_response = client
+            .post(format!("{gateway_url}/api/auth/register"))
+            .json(&json!({
+                "email": "alice@example.com",
+                "username": "alice",
+                "password": "secret123",
+                "email_verification_token": TEST_EMAIL_VERIFICATION_TOKEN,
+            }))
+            .send()
+            .await
+            .expect("register request should succeed");
 
-    assert_eq!(register_response.status(), StatusCode::OK);
-    let register_payload: serde_json::Value = register_response
-        .json()
-        .await
-        .expect("json body should parse");
-    assert_eq!(register_payload["email"], "alice@example.com");
-    assert_eq!(register_payload["username"], "alice");
-    assert_eq!(register_payload["message"], "注册成功");
+        assert_eq!(register_response.status(), StatusCode::OK);
+        let register_payload: serde_json::Value = register_response
+            .json()
+            .await
+            .expect("json body should parse");
+        assert_eq!(register_payload["email"], "alice@example.com");
+        assert_eq!(register_payload["username"], "alice");
+        assert_eq!(register_payload["message"], "注册成功");
 
-    let login_response = client
-        .post(format!("{gateway_url}/api/auth/login"))
-        .header("x-client-device-id", "device-auth-register")
-        .header("user-agent", "AetherTest/1.0")
-        .json(&json!({
-            "email": "alice@example.com",
-            "password": "secret123",
-            "auth_type": "local",
-        }))
-        .send()
-        .await
-        .expect("login request should succeed");
+        let login_response = client
+            .post(format!("{gateway_url}/api/auth/login"))
+            .header("x-client-device-id", "device-auth-register")
+            .header("user-agent", "AetherTest/1.0")
+            .json(&json!({
+                "email": "alice@example.com",
+                "password": "secret123",
+                "auth_type": "local",
+            }))
+            .send()
+            .await
+            .expect("login request should succeed");
 
-    assert_eq!(login_response.status(), StatusCode::OK);
-    let login_payload: serde_json::Value =
-        login_response.json().await.expect("json body should parse");
-    let access_token = login_payload["access_token"]
-        .as_str()
-        .expect("access token should exist")
-        .to_string();
+        assert_eq!(login_response.status(), StatusCode::OK);
+        let login_payload: serde_json::Value =
+            login_response.json().await.expect("json body should parse");
+        let access_token = login_payload["access_token"]
+            .as_str()
+            .expect("access token should exist")
+            .to_string();
 
-    let me_response = client
-        .get(format!("{gateway_url}/api/auth/me"))
-        .header("authorization", format!("Bearer {access_token}"))
-        .header("x-client-device-id", "device-auth-register")
-        .header("user-agent", "AetherTest/1.0")
-        .send()
-        .await
-        .expect("me request should succeed");
+        let me_response = client
+            .get(format!("{gateway_url}/api/auth/me"))
+            .header("authorization", format!("Bearer {access_token}"))
+            .header("x-client-device-id", "device-auth-register")
+            .header("user-agent", "AetherTest/1.0")
+            .send()
+            .await
+            .expect("me request should succeed");
 
-    assert_eq!(me_response.status(), StatusCode::OK);
-    let me_payload: serde_json::Value = me_response.json().await.expect("json body should parse");
-    assert_eq!(me_payload["email"], "alice@example.com");
-    assert_eq!(me_payload["username"], "alice");
-    assert_eq!(me_payload["billing"]["gift_balance"], 12.5);
-    assert_eq!(me_payload["billing"]["total_adjusted"], 12.5);
-    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+        assert_eq!(me_response.status(), StatusCode::OK);
+        let me_payload: serde_json::Value =
+            me_response.json().await.expect("json body should parse");
+        assert_eq!(me_payload["email"], "alice@example.com");
+        assert_eq!(me_payload["username"], "alice");
+        assert_eq!(me_payload["billing"]["gift_balance"], expected_gift);
+        assert_eq!(me_payload["billing"]["total_adjusted"], expected_gift);
+        assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
-    gateway_handle.abort();
-    upstream_handle.abort();
+        gateway_handle.abort();
+        upstream_handle.abort();
+    }
 }
 
 #[tokio::test]

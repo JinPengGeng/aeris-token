@@ -20,6 +20,7 @@ jobs:
     env:
       AETHER_TUNNEL_RELEASE_KEY_ID: ${{ vars.AETHER_TUNNEL_RELEASE_KEY_ID }}
       AETHER_TUNNEL_RELEASE_PUBLIC_KEY: ${{ vars.AETHER_TUNNEL_RELEASE_PUBLIC_KEY }}
+      AETHER_TUNNEL_RELEASE_TRUST_KEYS: ${{ vars.AETHER_TUNNEL_RELEASE_TRUST_KEYS }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -45,10 +46,7 @@ jobs:
             exit 1
           fi
 
-          if [ -z "${AETHER_TUNNEL_RELEASE_KEY_ID:-}" ] || [ -z "${AETHER_TUNNEL_RELEASE_PUBLIC_KEY:-}" ]; then
-            echo "AETHER_TUNNEL_RELEASE_KEY_ID and AETHER_TUNNEL_RELEASE_PUBLIC_KEY must be configured for tagged releases" >&2
-            exit 1
-          fi
+          cargo run --quiet --locked --manifest-path tools/ci/tunnel-release-verifier/Cargo.toml -- check
 
   build:
     needs: preflight
@@ -58,6 +56,8 @@ jobs:
     env:
       AETHER_TUNNEL_RELEASE_KEY_ID: ${{ vars.AETHER_TUNNEL_RELEASE_KEY_ID }}
       AETHER_TUNNEL_RELEASE_PUBLIC_KEY: ${{ vars.AETHER_TUNNEL_RELEASE_PUBLIC_KEY }}
+      AETHER_TUNNEL_RELEASE_TRUST_KEYS: ${{ vars.AETHER_TUNNEL_RELEASE_TRUST_KEYS }}
+      CROSS_CONFIG: ${{ github.workspace }}/apps/aether-tunnel/Cross.toml
     strategy:
       fail-fast: false
       matrix:
@@ -118,6 +118,7 @@ jobs:
         working-directory: apps/aether-tunnel
         shell: bash
         run: |
+          cargo run --quiet --locked --manifest-path ../../tools/ci/tunnel-release-verifier/Cargo.toml -- check --allow-unconfigured
           if [ "${{ matrix.use_cross }}" = "true" ]; then
             cross build --release --locked --target ${{ matrix.target }}
           else
@@ -160,6 +161,10 @@ jobs:
       contents: write
       id-token: write
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
       - name: Download all artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -222,6 +227,7 @@ jobs:
         env:
           AETHER_TUNNEL_RELEASE_KEY_ID: ${{ vars.AETHER_TUNNEL_RELEASE_KEY_ID }}
           AETHER_TUNNEL_RELEASE_PUBLIC_KEY: ${{ vars.AETHER_TUNNEL_RELEASE_PUBLIC_KEY }}
+          AETHER_TUNNEL_RELEASE_TRUST_KEYS: ${{ vars.AETHER_TUNNEL_RELEASE_TRUST_KEYS }}
         shell: bash
         run: |
           "${GITHUB_WORKSPACE}/.github/workflows/scripts/verify-tunnel-release.sh"
