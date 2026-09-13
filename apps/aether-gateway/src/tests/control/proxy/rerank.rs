@@ -241,7 +241,9 @@ fn rerank_route_rejects_invalid_local_payloads() {
 }
 
 async fn rerank_route_rejects_invalid_local_payloads_impl() {
-    let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
+    let (execution_runtime_url, execution_runtime_handle) =
+        start_server(rerank_execution_runtime()).await;
+    let gateway = build_router_with_state(rerank_success_state(execution_runtime_url));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
     let cases = [
@@ -275,6 +277,7 @@ async fn rerank_route_rejects_invalid_local_payloads_impl() {
     for (body, expected_detail) in cases {
         let response = client
             .post(format!("{gateway_url}/v1/rerank"))
+            .bearer_auth("sk-rerank-success")
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(body)
             .send()
@@ -294,6 +297,7 @@ async fn rerank_route_rejects_invalid_local_payloads_impl() {
     }
 
     gateway_handle.abort();
+    execution_runtime_handle.abort();
 }
 
 #[test]
@@ -305,11 +309,14 @@ fn rerank_route_rejects_non_json_content_type() {
 }
 
 async fn rerank_route_rejects_non_json_content_type_impl() {
-    let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
+    let (execution_runtime_url, execution_runtime_handle) =
+        start_server(rerank_execution_runtime()).await;
+    let gateway = build_router_with_state(rerank_success_state(execution_runtime_url));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/rerank"))
+        .bearer_auth("sk-rerank-success")
         .header(http::header::CONTENT_TYPE, "text/plain")
         .body(r#"{"model":"bge-reranker-base","query":"hello","documents":["doc"]}"#)
         .send()
@@ -324,6 +331,7 @@ async fn rerank_route_rejects_non_json_content_type_impl() {
     );
 
     gateway_handle.abort();
+    execution_runtime_handle.abort();
 }
 
 #[test]

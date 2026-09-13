@@ -5,6 +5,10 @@ use super::{
     EXECUTION_PATH_HEADER, EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS, TRACE_ID_HEADER,
 };
 
+// These fixtures deliberately omit the auth reader to exercise an internal
+// unresolved context, after a credential has been supplied by the caller.
+const INTERNAL_AUTH_CONTEXT_TEST_BEARER: &str = "Bearer sk-context-reader-unavailable";
+
 fn run_async_test_on_large_stack<F>(name: &'static str, future: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
@@ -121,6 +125,10 @@ async fn gateway_locally_denies_sync_ai_control_execute_when_opted_in_and_execut
 
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/chat/completions"))
+        .header(
+            http::header::AUTHORIZATION,
+            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
+        )
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .header(TRACE_ID_HEADER, "trace-sync-123")
@@ -256,6 +264,10 @@ async fn gateway_locally_denies_stream_ai_control_execute_when_opted_in_and_exec
 
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/chat/completions"))
+        .header(
+            http::header::AUTHORIZATION,
+            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
+        )
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .header(TRACE_ID_HEADER, "trace-stream-123")
@@ -404,6 +416,10 @@ async fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_exec
 
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/chat/completions"))
+        .header(
+            http::header::AUTHORIZATION,
+            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
+        )
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .body("{\"model\":\"gpt-5\",\"messages\":[]}")
@@ -545,6 +561,10 @@ async fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_exec
 
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/chat/completions"))
+        .header(
+            http::header::AUTHORIZATION,
+            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
+        )
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
