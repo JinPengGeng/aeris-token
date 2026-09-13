@@ -109,3 +109,129 @@ tests:
       - expr: 'ALERTS{alertstate="firing"}'
         eval_time: 30m
         exp_samples: []
+
+  - name: administrator audit successes and idle instances do not alert
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_admin_audit_persist_attempts_total{component="gateway",job="aether",instance="successful"}'
+        values: '0+1x30'
+      - series: 'aether_gateway_admin_audit_persist_failures_total{component="gateway",job="aether",instance="successful"}'
+        values: '0+0x30'
+      - series: 'aether_gateway_admin_audit_persist_timeouts_total{component="gateway",job="aether",instance="successful"}'
+        values: '0+0x30'
+      - series: 'aether_gateway_admin_audit_persist_attempts_total{component="gateway",job="aether",instance="idle"}'
+        values: '0+0x30'
+      - series: 'aether_gateway_admin_audit_persist_failures_total{component="gateway",job="aether",instance="idle"}'
+        values: '0+0x30'
+      - series: 'aether_gateway_admin_audit_persist_timeouts_total{component="gateway",job="aether",instance="idle"}'
+        values: '0+0x30'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures"}'
+        eval_time: 1m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures"}'
+        eval_time: 30m
+        exp_samples: []
+
+  - name: a single audit failure alerts without further requests and repeated scrapes retain one incident
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_admin_audit_persist_attempts_total{component="gateway",job="aether",instance="gateway-a"}'
+        values: '0 1+0x29'
+      - series: 'aether_gateway_admin_audit_persist_failures_total{component="gateway",job="aether",instance="gateway-a"}'
+        values: '0 1+0x29'
+      - series: 'aether_gateway_admin_audit_persist_timeouts_total{component="gateway",job="aether",instance="gateway-a"}'
+        values: '0+0x30'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing"}'
+        eval_time: 0m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing",component="gateway",job="aether",instance="gateway-a",severity="warning"}'
+            value: 1
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing"}'
+        eval_time: 9m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing",component="gateway",job="aether",instance="gateway-a",severity="warning"}'
+            value: 1
+      # The activation timestamp stays at the first observed failure; scrapes
+      # of the unchanged counter do not create another alert activation.
+      - expr: 'ALERTS_FOR_STATE{alertname="AetherAdminAuditPersistenceFailures"}'
+        eval_time: 9m
+        exp_samples:
+          - labels: 'ALERTS_FOR_STATE{alertname="AetherAdminAuditPersistenceFailures",component="gateway",job="aether",instance="gateway-a",severity="warning"}'
+            value: 60
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures"}'
+        eval_time: 10m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures"}'
+        eval_time: 30m
+        exp_samples: []
+
+  - name: a single audit timeout is one failure incident rather than two alerts
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_admin_audit_persist_attempts_total{component="gateway",job="aether",instance="gateway-a"}'
+        values: '0 1+0x19'
+      - series: 'aether_gateway_admin_audit_persist_failures_total{component="gateway",job="aether",instance="gateway-a"}'
+        values: '0 1+0x19'
+      - series: 'aether_gateway_admin_audit_persist_timeouts_total{component="gateway",job="aether",instance="gateway-a"}'
+        values: '0 1+0x19'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing",component="gateway",job="aether",instance="gateway-a",severity="warning"}'
+            value: 1
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures"}'
+        eval_time: 10m
+        exp_samples: []
+
+  - name: historical audit failures and a counter reset do not create new incidents
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_admin_audit_persist_failures_total{component="gateway",job="aether",instance="gateway-a"}'
+        values: '4+0x3 0+0x26'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures"}'
+        eval_time: 3m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures"}'
+        eval_time: 4m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures"}'
+        eval_time: 30m
+        exp_samples: []
+
+  - name: audit alerts isolate instances and jobs and preserve deployment routing labels
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_admin_audit_persist_failures_total{component="gateway",job="aether-a",instance="gateway:8080",cluster="production"}'
+        values: '0 1+0x19'
+      - series: 'aether_gateway_admin_audit_persist_failures_total{component="gateway",job="aether-b",instance="gateway:8080",cluster="production"}'
+        values: '0+0x4 1+0x15'
+      - series: 'aether_gateway_admin_audit_persist_failures_total{component="gateway",job="aether-a",instance="healthy:8080",cluster="production"}'
+        values: '0+0x20'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing"}'
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing",component="gateway",job="aether-a",instance="gateway:8080",cluster="production",severity="warning"}'
+            value: 1
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing",component="gateway",job="aether-a",instance="gateway:8080",cluster="production",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing",component="gateway",job="aether-b",instance="gateway:8080",cluster="production",severity="warning"}'
+            value: 1
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing"}'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures",alertstate="firing",component="gateway",job="aether-b",instance="gateway:8080",cluster="production",severity="warning"}'
+            value: 1
+      - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures"}'
+        eval_time: 15m
+        exp_samples: []

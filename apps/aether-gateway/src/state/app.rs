@@ -483,6 +483,7 @@ pub struct AppState {
     pub(crate) chat_pii_redaction_runtime_config_cache:
         crate::privacy::ChatPiiRedactionRuntimeConfigCacheHandle,
     pub(crate) fallback_metrics: Arc<fallback_metrics::GatewayFallbackMetrics>,
+    pub(crate) admin_audit_metrics: Arc<crate::audit::AdminAuditMetrics>,
     pub(crate) usage_counter_flush_metrics: Arc<UsageCounterFlushRuntimeMetrics>,
     pub(crate) task_supervisor_metrics: TaskSupervisorMetrics,
     pub(crate) process_resource_monitor: Arc<crate::process_metrics::GatewayProcessResourceMonitor>,

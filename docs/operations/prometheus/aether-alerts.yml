@@ -60,3 +60,19 @@ groups:
           runbook: docs/operations/observability-runbook.md#provider-5xx
           deduplication: Group by alertname and provider; inhibit while a provider maintenance silence is active.
           rollback: Roll back only a release-correlated regression; otherwise fail over or contact the provider.
+
+  - name: aether-admin-audit
+    rules:
+      - alert: AetherAdminAuditPersistenceFailures
+        # Administrator mutations can be rare. A ratio, minimum request count
+        # or pending window must not hide an isolated failed audit write.
+        # Keep scrape labels so one unhealthy replica cannot hide in a sum.
+        expr: increase(aether_gateway_admin_audit_persist_failures_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Administrator audit persistence failed
+          description: An administrator audit write failed or timed out in the last 10 minutes; the business operation may already be committed.
+          runbook: docs/operations/admin-audit-persistence.md#incident-response
+          deduplication: Group by alertname, component, job and instance; retain deployment or cluster labels and use Alertmanager repeat suppression.
+          rollback: Restore the audit database or writer first; preserve event IDs and verify committed state before any replay or release rollback.

@@ -5,7 +5,7 @@ no upstream writes are part of this delivery workflow.
 
 ## Current delivery snapshot — 2026-09-13
 
-Verified main: `acf02288d5c37220313a9aed8ec6c277009252a1` (#391 merged).
+Verified main: `544feec1737b65305b99de901013cb8671c3ea93` (#395 merged).
 The live intake has **44 open issues**: 21 P1 / 23 P2, with 17 in progress,
 17 triage and 10 blocked. These include overlapping parent/child scopes and
 long-term roadmap items; they are not 44 independent implementation packages.
@@ -13,9 +13,10 @@ The previous full board audit verified one Project #1 card per open issue with
 Status, Priority, Area, Risk, Size and Decision. This integration refresh re-read
 #391: Done / P1 / Billing / High / L / Accepted. Parent #300 remains In progress.
 
-The live PR queue was empty immediately after #391 merged. The next active
-implementation is the #255 administrator audit HTTP/PostgreSQL acceptance
-slice, currently in local verification on `test/issue-255-audit-readback`.
+The live PR queue was empty immediately after #395 merged. The next active
+implementation is #255's audit failure metrics, writer wiring and sparse-operation
+alerts on `feat/issue-255-audit-observability`. Its final local live, authorization,
+AppState, Prometheus and strict Clippy checks passed; protected hosted checks remain.
 Documentation PRs #392, #393 and #394 are now merged. #393 records restore,
 tunnel compatibility and usage lifecycle ADRs; #394 records the accepted
 single-maintainer workflow without requiring another maintainer.
@@ -86,12 +87,18 @@ GitHub events after the audit supersede the counts and commit states below.
    ignored in 2.38 seconds, including the real two-second audit timeout.
    Six existing audit regressions and sixteen operational authorization tests
    also passed. Fixture corrections and their failed evidence are documented in
-   [the acceptance decision](issue-255-audit-readback.md). Final hosted
-   validation is pending; parent #255 retains the full mutation inventory,
-   durable failure policy and asynchronous/cross-store final-outcome work.
+   [the acceptance decision](issue-255-audit-readback.md). #395 passed all four
+   required checks and merged at 2026-09-13 14:38:00 UTC as `544feec17`.
+   Hosted Gateway job `103737114309` actually executed the exact live target:
+   one passed, zero failed/ignored, 2.57 seconds. Project #395 is Done / Accepted.
+   The [next audit observability slice](issue-255-audit-observability.md) adds
+   failure counters, per-instance alerts and missing-writer checks; its local
+   exact live target passed in 2.51 seconds with stricter HTTP timeout bounds.
+   Parent #255 retains the full mutation inventory, durable failure policy
+   and asynchronous/cross-store final-outcome work.
 
 This checkpoint includes the accepted single-maintainer documentation, final
-#391 merge/hosted evidence and the next #255 acceptance slice. No parent issue is
+#391/#395 merge/hosted evidence and the next #255 observability slice. No parent issue is
 closed merely because an accepted slice or a checkpoint is merged.
 
 ### Historical delivery snapshot after #389

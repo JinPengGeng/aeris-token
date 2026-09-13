@@ -25,9 +25,104 @@ async fn audit_rows(pool: &PgPool) -> Vec<Value> {
     .expect("committed audit rows should be readable")
 }
 
+async fn assert_audit_metrics(
+    client: &reqwest::Client,
+    gateway: &str,
+    attempts: u64,
+    failures: u64,
+    timeouts: u64,
+) {
+    let response = client
+        .get(format!("{gateway}/_gateway/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body = response.text().await.unwrap();
+    let mut observed = Vec::new();
+    for (name, kind, value) in [
+        ("admin_audit_persist_attempts_total", "counter", attempts),
+        ("admin_audit_persist_failures_total", "counter", failures),
+        ("admin_audit_persist_timeouts_total", "counter", timeouts),
+        ("durable_admin_audit_available", "gauge", 1),
+    ] {
+        let name = format!("aether_gateway_{name}");
+        let declarations: Vec<_> = body
+            .lines()
+            .filter(|line| line.starts_with(&format!("# TYPE {name} ")))
+            .collect();
+        assert_eq!(declarations, [format!("# TYPE {name} {kind}")]);
+        let samples: Vec<_> = body
+            .lines()
+            .filter(|line| line.starts_with(&format!("{name}{{")))
+            .collect();
+        assert_eq!(
+            samples,
+            [format!("{name}{{component=\"gateway\"}} {value}")]
+        );
+        observed.extend(body.lines().filter(|line| {
+            line.starts_with(&format!("# HELP {name} "))
+                || line.starts_with(&format!("# TYPE {name} "))
+                || line.starts_with(&format!("{name}{{"))
+        }));
+    }
+    // Keep bounded, real HTTP exposition for independent promtool validation.
+    println!(
+        "\nAUDIT_METRICS_BEGIN\n{}\nAUDIT_METRICS_END",
+        observed.join("\n")
+    );
+}
+
+#[tokio::test]
+async fn missing_audit_writer_is_visible_across_app_state_clones() {
+    let state = AppState::new().unwrap().with_data_state_for_tests(
+        GatewayDataState::from_config(GatewayDataConfig::default()).unwrap(),
+    );
+    let request_state = state.clone();
+    let record = CreateAdminAuditLog {
+        id: uuid::Uuid::now_v7().to_string(),
+        event_type: "admin_mutation".into(),
+        user_id: None,
+        api_key_id: None,
+        description: "unavailable writer fixture".into(),
+        ip_address: None,
+        user_agent: None,
+        request_id: None,
+        event_metadata: None,
+        status_code: Some(200),
+        error_message: None,
+        created_at: chrono::Utc::now(),
+    };
+    crate::audit::persist_admin_audit(
+        &request_state.data,
+        &request_state.admin_audit_metrics,
+        record,
+    )
+    .await;
+    let samples = state.metric_samples().await;
+    for (name, value) in [
+        ("admin_audit_persist_attempts_total", 1),
+        ("admin_audit_persist_failures_total", 1),
+        ("admin_audit_persist_timeouts_total", 0),
+        ("durable_admin_audit_available", 0),
+    ] {
+        let matching: Vec<_> = samples
+            .iter()
+            .filter(|sample| sample.name == name)
+            .collect();
+        assert_eq!(matching.len(), 1, "each family appears once");
+        assert_eq!(matching[0].value, value, "{name}");
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires a fresh task-owned aether_admin_audit_* PostgreSQL database"]
 async fn live_admin_mutations_persist_before_response_and_protected_readback() {
+    aether_runtime::metrics::init_metrics(
+        aether_runtime::ServiceRuntimeConfig::new("gateway", "warn")
+            .with_metrics_namespace("aether_gateway"),
+    );
     let database_url = std::env::var("AETHER_TEST_AUDIT_DATABASE_URL")
         .expect("explicit disposable administrator audit database is required");
     let pool = PgPool::connect(&database_url)
@@ -96,6 +191,7 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     let query_secret = "audit-fixture-query-secret";
     let cookie_secret = "audit-fixture-cookie-secret";
     let body_secret = "audit-fixture-description-secret";
+    assert_audit_metrics(&client, &gateway, 0, 0, 0).await;
 
     let response = client
         .put(format!("{endpoint}?token={query_secret}"))
@@ -128,6 +224,7 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     }
     assert!(rows[0]["user_agent"].is_null());
     assert!(rows[0]["error_message"].is_null());
+    assert_audit_metrics(&client, &gateway, 1, 0, 0).await;
 
     let audit_url = format!("{gateway}/api/admin/monitoring/audit-logs?event_type=admin_mutation");
     let readback = client.get(&audit_url).send().await.unwrap();
@@ -146,6 +243,7 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     .await
     .unwrap();
     assert_eq!(sensitive_reads, 1, "protected readback itself is audited");
+    assert_audit_metrics(&client, &gateway, 2, 0, 0).await;
     assert_eq!(
         reqwest::Client::new()
             .get(&audit_url)
@@ -199,6 +297,7 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
         .unwrap();
     assert_eq!(failed["user_id"], rows[0]["user_id"]);
     assert_eq!(failed["event_metadata"]["status"], "failed");
+    assert_audit_metrics(&client, &gateway, 3, 0, 0).await;
 
     let record: CreateAdminAuditLog = serde_json::from_value(rows[0].clone()).unwrap();
     let repository = PostgresAuditLogReadRepository::new(pool.clone());
@@ -206,7 +305,7 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
         repository.create_admin_audit_log(&record).await.unwrap(),
         AuditLogWriteOutcome::AlreadyExists
     );
-    let mut conflicting_replay = record;
+    let mut conflicting_replay = record.clone();
     conflicting_replay.description = "must not replace the original event".into();
     assert_eq!(
         repository
@@ -216,6 +315,11 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
         AuditLogWriteOutcome::AlreadyExists
     );
     assert_eq!(audit_rows(&pool).await, failed_rows);
+    // Repository-only replay above is outside the observed persistence boundary.
+    assert_audit_metrics(&client, &gateway, 3, 0, 0).await;
+    crate::audit::persist_admin_audit(&state.data, &state.admin_audit_metrics, record).await;
+    assert_eq!(audit_rows(&pool).await, failed_rows);
+    assert_audit_metrics(&client, &gateway, 4, 0, 0).await;
 
     // A real database error must not turn an applied mutation into a retryable 5xx.
     sqlx::raw_sql(
@@ -248,6 +352,8 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
         Some(json!(true))
     );
     assert_eq!(audit_rows(&pool).await, failed_rows);
+    // A configured writer remains available as a capability even when INSERT fails.
+    assert_audit_metrics(&client, &gateway, 5, 1, 0).await;
 
     // Hold the writer in a real PostgreSQL BEFORE INSERT trigger until after
     // the HTTP response. This proves the production timeout, without a mock
@@ -267,8 +373,10 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
         .execute(&mut *lock)
         .await
         .unwrap();
+    let timeout_client = client.clone();
+    let request_started = std::time::Instant::now();
     let request = tokio::spawn(async move {
-        client
+        timeout_client
             .put(&endpoint)
             .json(&json!({"value": false}))
             .send()
@@ -293,10 +401,18 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     })
     .await
     .expect("audit writer should reach the database lock");
-    let response = tokio::time::timeout(Duration::from_secs(5), request)
+    // The writer is known to be blocked. Bound both the remaining wait and
+    // the total HTTP duration (including persistence) around two seconds;
+    // this is not a measurement of database lock time alone.
+    let response = tokio::time::timeout(Duration::from_millis(2800), request)
         .await
         .expect("two-second audit timeout must return while the database remains blocked")
         .unwrap();
+    let elapsed = request_started.elapsed();
+    assert!(
+        (Duration::from_millis(1800)..Duration::from_millis(2800)).contains(&elapsed),
+        "the blocked request must preserve the two-second timeout; observed {elapsed:?}"
+    );
     assert_eq!(response.status(), StatusCode::OK);
     let _ = response.bytes().await.unwrap();
     assert_eq!(
@@ -309,6 +425,7 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     );
     // Absence is provable only while this BEFORE INSERT lock is held.
     assert_eq!(audit_rows(&pool).await, failed_rows);
+    assert_audit_metrics(&client, &gateway, 6, 2, 1).await;
     lock.rollback().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -339,6 +456,8 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
         assert_eq!(late["status_code"], 200);
         assert_eq!(late["event_metadata"]["status"], "completed");
     }
+    // A possible late commit does not erase the timeout, and scrapes add no attempts.
+    assert_audit_metrics(&client, &gateway, 6, 2, 1).await;
 
     server.abort();
     let _ = server.await;
