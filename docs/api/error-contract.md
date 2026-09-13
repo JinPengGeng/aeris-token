@@ -28,11 +28,11 @@ gateway's generic mapping is:
 | 400/405/422 | `invalid_request_error` | Fix the request; do not retry unchanged. |
 | 401 | `authentication_error` | Replace credentials. |
 | 403 | `permission_error` | Change policy, key, or model access. |
-| 404 | `not_found_error` | Check the path/resource; a missing model uses `model_not_found`. |
+| 404 | `not_found_error` | Check the path/resource; model-detail lookup uses `model_not_found`. See the inference distinction below. |
 | 413 | `context_length_exceeded` | Reduce request size. |
 | 429 | `rate_limit_error` | Retry only when the response identifies a transient rate/quota window. |
 | 429 | `insufficient_quota` | Restore account credit; do not retry unchanged. |
-| 503/529 | `server_error` | Retry with bounded backoff when `Retry-After` is present. |
+| 503/529 | `server_error` | For transient unavailability, use bounded backoff and honor `Retry-After` when present. Empty candidate lists can also reflect configuration problems; see below. |
 
 ## Quota versus rate limit
 
@@ -114,6 +114,24 @@ credential or internal URL disclosure.
 
 Cross-format conversion is fail-closed. A field with no audited lossless
 mapping returns a structured conversion error instead of being silently
-dropped. Unknown public models return HTTP `404` with
-`error.code=model_not_found`. These outcomes are permanent request/configuration
-failures and must not be retried as overload.
+dropped. Correct the request or select a provider with an audited mapping;
+retrying the same unsupported conversion does not resolve the problem.
+
+Model-detail lookup (`GET /v1/models/:id`) returns HTTP `404` with
+`error.code=model_not_found` when no visible model matches. Inference POST
+requests do not yet distinguish all unknown-model cases from an empty candidate
+list caused by unavailable providers or configuration. That path can still
+return HTTP `503`; the existing Chat/Images model-not-found fixture rows are
+target contracts, not proof of inference route behavior. This classification
+gap remains tracked in Issue #254. Clients should check the requested model
+and provider configuration, and use bounded retries only when the cause is
+transient.
+
+## Message language and correlation
+
+Local image-field validation and exhausted-credit messages are English. Other
+authentication, access-policy and execution messages may still be Chinese;
+the gateway does not provide `Accept-Language` negotiation for this contract.
+Clients should branch on status and available type/code fields, not translated
+message text. `x-trace-id` is the correlation contract; a `trace_id` body field
+is present only on some error paths and must not be assumed for every response.

@@ -59,11 +59,15 @@ Local validation errors use the OpenAI envelope:
 }
 ```
 
-The status and error type are deterministic: `400` is invalid input,
-`401` is authentication failure, `403` is an access policy denial, `404` is a
-missing resource/model, `429` is a rate or quota limit, and `503` is
-provider/gateway overload. A missing public model is reported as
-`404` with `error.code=model_not_found`.
+The public status categories include `400` for invalid input,
+`401` for authentication failure, `403` for an access policy denial, `404` for a
+missing resource/model, `429` for a rate or quota limit, and `503` for
+provider/gateway unavailability. The model-detail endpoint
+`GET /v1/models/:id` reports `404` with `error.code=model_not_found` when no
+visible model matches. Chat inference does not yet make that distinction for
+every missing-model case: an empty candidate list can still return `503`.
+Check the model name and configured provider availability before repeatedly
+retrying such a response; see the [model error boundary](error-contract.md#conversion-and-model-errors).
 
 An exhausted wallet is not a rate-limit retry signal even though the HTTP
 status remains `429` for compatibility with OpenAI clients. It is returned as
@@ -72,5 +76,6 @@ message `Insufficient quota`; it has no `Retry-After` header. Clients should
 stop retrying and restore quota instead of applying exponential backoff.
 
 For conversion failures, the gateway fails closed rather than silently
-dropping fields. See `format-conversion-audit.md` for the supported mapping
-and `error-contract.md` for the complete public error matrix.
+dropping fields. See [the conversion audit](format-conversion-audit.md) for the
+supported mapping and [the public error contract](error-contract.md) for retry
+guidance, message-language limits and remaining classification gaps.
