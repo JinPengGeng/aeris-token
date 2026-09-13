@@ -6,6 +6,11 @@ use super::{
     TRACE_ID_HEADER,
 };
 
+// These fixtures deliberately omit the authentication data reader while
+// supplying a credential. They exercise unresolved internal auth context;
+// external credential absence is covered by the public authentication tests.
+const INTERNAL_AUTH_CONTEXT_TEST_BEARER: &str = "Bearer sk-context-reader-unavailable";
+
 #[tokio::test]
 async fn gateway_locally_denies_openai_chat_after_repeated_execution_runtime_misses_without_control_execute_opt_in(
 ) {
@@ -91,6 +96,10 @@ async fn gateway_locally_denies_openai_chat_after_repeated_execution_runtime_mis
     for trace_id in ["trace-openai-chat-bypass-1", "trace-openai-chat-bypass-2"] {
         let response = client
             .post(format!("{gateway_url}/v1/chat/completions"))
+            .header(
+                http::header::AUTHORIZATION,
+                INTERNAL_AUTH_CONTEXT_TEST_BEARER,
+            )
             .header(http::header::CONTENT_TYPE, "application/json")
             .header(TRACE_ID_HEADER, trace_id)
             .body("{\"model\":\"gpt-5\",\"messages\":[]}")
@@ -218,6 +227,10 @@ async fn gateway_locally_denies_openai_chat_when_control_api_is_configured_witho
 
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/chat/completions"))
+        .header(
+            http::header::AUTHORIZATION,
+            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
+        )
         .header(http::header::CONTENT_TYPE, "application/json")
         .body("{\"model\":\"gpt-5\",\"messages\":[]}")
         .send()
@@ -330,6 +343,10 @@ async fn gateway_locally_denies_openai_chat_stream_after_execution_runtime_miss_
 
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/chat/completions"))
+        .header(
+            http::header::AUTHORIZATION,
+            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
+        )
         .header(http::header::CONTENT_TYPE, "application/json")
         .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
         .send()
@@ -492,8 +509,12 @@ async fn assert_ai_route_locally_denied_after_execution_runtime_miss_with_reques
 
     let is_gemini_files_local_read =
         method == reqwest::Method::GET && route_family == "gemini" && route_kind == "files";
-    let mut request =
-        reqwest::Client::new().request(method, format!("{gateway_url}{request_path}"));
+    let mut request = reqwest::Client::new()
+        .request(method, format!("{gateway_url}{request_path}"))
+        .header(
+            http::header::AUTHORIZATION,
+            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
+        );
     if let Some(request_body) = request_body {
         request = request
             .header(http::header::CONTENT_TYPE, "application/json")

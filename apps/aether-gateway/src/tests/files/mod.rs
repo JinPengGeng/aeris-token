@@ -87,6 +87,23 @@ fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnap
     .expect("auth snapshot should build")
 }
 
+fn authenticated_files_state() -> AppState {
+    // File existence tests must reach the local lookup after authenticating.
+    let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("client-files-local-key")),
+        sample_auth_snapshot("key-files-local-123", "user-files-local-123"),
+    )]));
+    AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_request_candidate_and_gemini_file_mapping_repository_for_tests(
+                Arc::new(InMemoryRequestCandidateRepository::default()),
+                Arc::new(InMemoryGeminiFileMappingRepository::default()),
+            )
+            .with_auth_api_key_reader(repository),
+        )
+}
+
 fn sample_files_candidate_row() -> StoredMinimalCandidateSelectionRow {
     StoredMinimalCandidateSelectionRow {
         provider_id: "provider-gemini-files-local-1".to_string(),
@@ -301,13 +318,14 @@ async fn gateway_locally_denies_gemini_files_download_control_sync_even_with_opt
         );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router().expect("gateway should build");
+    let gateway = build_router_with_state(authenticated_files_state());
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
         .get(format!(
             "{gateway_url}/v1beta/files/file-123:download?alt=media"
         ))
+        .header("x-goog-api-key", "client-files-local-key")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .header(TRACE_ID_HEADER, "trace-files-download-123")
         .send()
@@ -381,13 +399,14 @@ async fn gateway_locally_denies_gemini_files_download_control_sync_without_opt_i
         );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router().expect("gateway should build");
+    let gateway = build_router_with_state(authenticated_files_state());
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
         .get(format!(
             "{gateway_url}/v1beta/files/file-123:download?alt=media"
         ))
+        .header("x-goog-api-key", "client-files-local-key")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .header(TRACE_ID_HEADER, "trace-files-download-public-123")
         .send()
@@ -457,13 +476,14 @@ async fn gateway_skips_gemini_files_download_control_sync_without_opt_in_header_
         );
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let gateway = build_router().expect("gateway should build");
+    let gateway = build_router_with_state(authenticated_files_state());
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
         .get(format!(
             "{gateway_url}/v1beta/files/file-123:download?alt=media"
         ))
+        .header("x-goog-api-key", "client-files-local-key")
         .header(TRACE_ID_HEADER, "trace-files-download-local-only-123")
         .send()
         .await
