@@ -62,3 +62,33 @@ test('only the signing step receives private key material', () => {
     }
   }
 });
+
+test('the independent verifier lockfile is audited without the root RSA exception', () => {
+  const document = yaml.load(read('.github/workflows/dependency-audit.yml'));
+  const cargo = document.jobs.cargo;
+  const root = cargo.steps.find((step) => step.name === 'Audit Cargo.lock');
+  const verifier = cargo.steps.find((step) => step.name === 'Audit tunnel release verifier Cargo.lock');
+  assert.equal(root.run, '.github/scripts/cargo-audit-gate.sh');
+  assert.equal(verifier.run, 'cargo audit --file tools/ci/tunnel-release-verifier/Cargo.lock');
+  assert.equal(verifier.if, undefined);
+  assert.equal(verifier['continue-on-error'], undefined);
+  assert.equal(cargo['continue-on-error'], undefined);
+  assert.ok(document.jobs.check.needs.includes('cargo'));
+  assert.match(document.jobs.check.steps[0].run, /needs\.cargo\.result.*!= "success"/);
+});
+
+test('verifier manifest and lockfile changes trigger audit and have a dedicated Cargo updater', () => {
+  const document = yaml.load(read('.github/workflows/dependency-audit.yml'));
+  for (const file of ['Cargo.lock', 'Cargo.toml']) {
+    assert.ok(document.on.push.paths.includes(`tools/ci/tunnel-release-verifier/${file}`));
+  }
+  const dependabot = yaml.load(read('.github/dependabot.yml'));
+  const cargo = dependabot.updates.filter((update) => update['package-ecosystem'] === 'cargo');
+  for (const directory of ['/', '/tools/ci/tunnel-release-verifier']) {
+    const matches = cargo.filter((update) => update.directory === directory
+      || update.directories?.includes(directory));
+    assert.equal(matches.length, 1, `Cargo updater coverage for ${directory}`);
+    assert.equal(matches[0].schedule.interval, 'weekly');
+    assert.equal(matches[0]['open-pull-requests-limit'], 5);
+  }
+});

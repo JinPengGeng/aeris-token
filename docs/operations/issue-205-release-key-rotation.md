@@ -164,3 +164,25 @@ Test private keys are generated in a private temporary directory and removed
 when the test exits. No production key, release upload, or production setting
 is needed. Local fixture success does not replace per-platform release builds
 and approved deployment evidence.
+
+The verifier has an independent `Cargo.lock`, so the required Dependency Audit
+Cargo job runs `cargo audit --file tools/ci/tunnel-release-verifier/Cargo.lock`
+in addition to the existing root audit. The root workspace's temporary
+`RUSTSEC-2023-0071` exception does not apply to this tool: any vulnerability or
+audit/database error fails its audit and the aggregate required check. Changes
+to either verifier manifest or lockfile trigger the audit on main/master pushes;
+pull requests and the weekly audit remain covered. A dedicated weekly Cargo
+Dependabot entry proposes verifier updates with the existing five-PR limit and
+minor/patch grouping. These proposals still use the ordinary review and CI gates.
+
+Workflow regressions check the exact independent audit command, failure
+propagation, push paths, and one Cargo updater per workspace. The local
+verification also runs the pinned CI auditor (`cargo-audit 0.22.2`) against the
+actual verifier lockfile; advisory results describe that database snapshot and
+must be refreshed by CI for future dependency changes.
+
+On 2026-09-13, cargo-audit 0.22.2 scanned all 43 verifier dependencies against
+1,243 advisories at database commit
+`b50980aad8b8f14f77e25a97b32dd94bf008b0af` and exited successfully with no
+vulnerability findings or ignored advisories. The nine targeted workflow
+regressions and the existing root RSA exception fixture also passed.
