@@ -38,5 +38,6 @@ run_test aether-data-postgres settlement::funding::tests::live_request_funds_fre
 run_test aether-data-postgres settlement::funding::tests::live_request_funds_admission_time_controls_grant_eligibility_and_frozen_day
 run_test aether-data-postgres settlement::funding::tests::live_request_funds_preserve_decimal_holds_across_ordinary_settlement_and_postpaid
 run_test aether-data-postgres settlement::funding::tests::live_request_funds_sum_entitlement_decimals_without_phantom_debt
+run_test aether-data-postgres settlement::funding::tests::live_request_funds_retention_preserves_reconciliation_and_allows_later_settlement
 
 printf 'PASS: selected isolated PostgreSQL live-DB tests\n'
