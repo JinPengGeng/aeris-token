@@ -4,19 +4,48 @@
 //! verifier receives the key id from the wire and never falls back to another
 //! key, which makes rollback and revocation deterministic.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TunnelSigningKey {
     pub key_id: String,
-    pub key: String,
+    key: String,
     /// Inclusive start of validity, in unix seconds.
     pub not_before: u64,
     /// Exclusive end of validity, in unix seconds. `None` means no expiry.
     pub expires_at: Option<u64>,
 }
 
+impl fmt::Debug for TunnelSigningKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TunnelSigningKey")
+            .field("key_id", &self.key_id)
+            .field("key", &"<redacted>")
+            .field("not_before", &self.not_before)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 impl TunnelSigningKey {
+    pub fn new(
+        key_id: impl Into<String>,
+        key: impl Into<String>,
+        not_before: u64,
+        expires_at: Option<u64>,
+    ) -> Self {
+        Self {
+            key_id: key_id.into(),
+            key: key.into(),
+            not_before,
+            expires_at,
+        }
+    }
+
+    pub fn key_material(&self) -> &str {
+        &self.key
+    }
+
     pub fn valid_at(&self, now: u64) -> bool {
         now >= self.not_before && self.expires_at.is_none_or(|end| now < end)
     }
@@ -106,5 +135,13 @@ mod tests {
         assert!(set.verification_key("old", 11).is_some());
         set.set_active_signing_key("old", 11).unwrap();
         assert_eq!(set.signing_key(11).unwrap().key_id, "old");
+    }
+
+    #[test]
+    fn debug_redacts_key_material() {
+        let key = TunnelSigningKey::new("id", "super-secret-key", 0, None);
+        let rendered = format!("{key:?}");
+        assert!(!rendered.contains("super-secret-key"));
+        assert!(rendered.contains("<redacted>"));
     }
 }

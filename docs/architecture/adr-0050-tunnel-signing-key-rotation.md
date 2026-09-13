@@ -13,3 +13,8 @@ whose validity window has not started cannot sign, and a revoked key is removed
 from verification immediately. The contract is implemented by
 `aether_contracts::tunnel_key_rotation::TunnelSigningKeySet`; persistence and
 wire header plumbing can adopt it without changing the HMAC transcript.
+
+Key material is an opaque secret owned by the deployment secret store. The
+contracts type keeps it private and its `Debug` implementation emits only
+`<redacted>`; callers must not log or serialize `key_material()`. IDs and
+validity metadata may be persisted separately from the secret.
