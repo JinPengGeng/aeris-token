@@ -89,16 +89,18 @@ redis_url="redis://127.0.0.1:$redis_port/0"
 base_url="http://127.0.0.1:$gateway_port"
 printf 'phase\tattempt\tendpoint\tstatus\tseconds\n' >"$evidence_dir/http-observations.tsv"
 printf 'gateway=%s\nstarted_at=%s\n' "$gateway_bin" "$(date -u +%FT%TZ)" >"$evidence_dir/run.txt"
-node -e '
+{
+  node -e '
 const fs = require("node:fs");
 const hash = require("node:crypto").createHash("sha256");
 const input = fs.createReadStream(process.argv[1]);
 input.on("error", error => { console.error(error.message); process.exit(1); });
 input.on("data", chunk => hash.update(chunk));
 input.on("end", () => console.log("gateway_sha256=" + hash.digest("hex")));
-' "$gateway_bin" >>"$evidence_dir/run.txt"
-"$postgres_bin" --version >>"$evidence_dir/run.txt"
-"$redis_bin" --version >>"$evidence_dir/run.txt"
+' "$gateway_bin"
+  "$postgres_bin" --version
+  "$redis_bin" --version
+} >>"$evidence_dir/run.txt"
 
 "$initdb_bin" -D "$fixture_dir/postgres" -U aether --auth=trust --encoding=UTF8 --no-instructions >"$evidence_dir/initdb.log" 2>&1
 
@@ -149,6 +151,8 @@ start_redis() {
   # An actual RESP PING avoids a TCP-open check accepting an unrelated service.
   for _ in {1..100}; do
     kill -0 "$redis_pid" 2>/dev/null || { printf 'Owned Redis process exited.\n' >&2; return 1; }
+    # RESP PING contains a literal $4, not a shell variable.
+    # shellcheck disable=SC2016
     if node -e '
 const net = require("node:net");
 const socket = net.connect({host: "127.0.0.1", port: Number(process.argv[1])});
@@ -168,7 +172,7 @@ socket.on("data", data => { response += data; if (response.includes("\r\n")) pro
 
 observe() {
   local phase="$1" attempt="$2" endpoint="$3"
-  local record="$evidence_dir/$phase-$attempt-$endpoint"
+  local record="$evidence_dir/$phase-$attempt-${endpoint//\//-}"
   local measured
   measured="$(curl --silent --show-error --noproxy '*' --connect-timeout 1 --max-time 2 \
     --dump-header "$record.headers" --output "$record.json" \
@@ -206,6 +210,82 @@ assert_health() {
   local phase="$1" attempt="$2"
   observe "$phase" "$attempt" health
   [[ "$observed_status" == 200 ]] && jq -e '.status == "healthy"' "$observed_body" >/dev/null
+}
+
+observe_admission() {
+  local phase="$1" attempt="$2"
+  local record="$evidence_dir/$phase-$attempt-admission"
+  local trace_id="trace-admission-$phase-$attempt" measured error_type
+  measured="$(curl --silent --show-error --noproxy '*' --connect-timeout 1 --max-time 2 \
+    --header 'content-type: application/json' --header "x-trace-id: $trace_id" \
+    --header 'authorization: Bearer sk-readiness-disposable-invalid-key' \
+    --data '{"model":"admission-contract-probe","messages":[],"stream":false}' \
+    --dump-header "$record.headers" --output "$record.json" \
+    --write-out '%{http_code} %{time_total}' "$base_url/v1/chat/completions" 2>"$record.stderr")" || true
+  read -r admission_status admission_seconds <<<"$measured"
+  admission_status="${admission_status:-000}"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$phase" "$attempt" admission "$admission_status" "${admission_seconds:-0}" >>"$evidence_dir/http-observations.tsv"
+  case "$admission_status" in
+    401) error_type=authentication_error ;;
+    503) error_type=server_error ;;
+    *) printf 'Unexpected public admission status %s during %s.\n' "$admission_status" "$phase" >&2; return 1 ;;
+  esac
+  # The fixture command timeout is 250 ms. Allow HTTP/scheduler overhead but
+  # reject a dependency wait reaching the caller's two-second hard deadline.
+  jq -en --argjson elapsed "$admission_seconds" '$elapsed < 1.5' >/dev/null
+  jq -e --arg error_type "$error_type" '
+    .error.type == $error_type and (.error.message | type == "string") and
+    .error.details == null and .detail == null and
+    ([.. | strings] | all(test("postgres://|postgresql://|redis://|127\\.0\\.0\\.1|password|gateway_requests_distributed|connection refused"; "i") | not))
+  ' "$record.json" >/dev/null
+  [[ "$(awk 'tolower($1) == "x-trace-id:" {gsub("\r", "", $2); print $2}' "$record.headers")" == "$trace_id" ]]
+  [[ "$(awk 'tolower($1) == "retry-after:" {count++} END {print count+0}' "$record.headers")" == 0 ]]
+}
+
+assert_local_capacity_restored() {
+  local phase="$1" deadline=$((SECONDS + 3)) attempt=0
+  while (( SECONDS < deadline )); do
+    attempt=$((attempt + 1))
+    observe "$phase" "$attempt" _gateway/health
+    if [[ "$observed_status" == 200 ]] && jq -e '
+      .request_concurrency.limit == 8 and
+      .request_concurrency.in_flight == 0 and
+      .request_concurrency.available_permits == 8
+    ' "$observed_body" >/dev/null; then
+      printf 'PASS %s: all 8 local request permits restored\n' "$phase" | tee -a "$evidence_dir/result.log"
+      return 0
+    fi
+    sleep 0.05
+  done
+  printf 'Local request capacity was not fully restored during %s.\n' "$phase" >&2
+  return 1
+}
+
+assert_distributed_admission() {
+  local phase="$1" expected_status="$2" repetitions="$3"
+  local deadline=$((SECONDS + 8)) attempt=0 successes=0
+  while (( SECONDS < deadline && successes < repetitions )); do
+    attempt=$((attempt + 1))
+    observe_admission "$phase" "$attempt"
+    if [[ "$admission_status" == "$expected_status" ]]; then
+      successes=$((successes + 1))
+    elif [[ "$expected_status" == 401 && "$admission_status" == 503 ]]; then
+      # Timed-out Redis commands may complete after the server resumes. Any
+      # resulting orphan lease must expire before admission recovers; readiness
+      # PING alone does not prove that shared request capacity is available.
+      successes=0
+    else
+      printf 'Distributed admission failed open during %s.\n' "$phase" >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+  (( successes == repetitions )) || { printf 'Public admission did not recover during %s.\n' "$phase" >&2; return 1; }
+  if [[ "$expected_status" == 401 ]]; then
+    assert_local_capacity_restored "$phase"
+  fi
+  assert_health "$phase" "$attempt"
+  printf 'PASS %s: public admission=%s (%s repeated requests), liveness=200\n' "$phase" "$expected_status" "$repetitions" | tee -a "$evidence_dir/result.log"
 }
 
 await_readiness() {
@@ -257,6 +337,10 @@ start_redis
     ADMIN_PASSWORD=ReadinessDisposablePassword123! \
     AETHER_DATABASE_DRIVER=postgres AETHER_DATABASE_URL="$database_url" \
     AETHER_GATEWAY_DATA_REDIS_URL="$redis_url" AETHER_RUNTIME_BACKEND=redis \
+    AETHER_GATEWAY_DISTRIBUTED_REQUEST_LIMIT=2 \
+    AETHER_GATEWAY_DISTRIBUTED_REQUEST_LEASE_TTL_MS=2000 \
+    AETHER_GATEWAY_DISTRIBUTED_REQUEST_RENEW_INTERVAL_MS=500 \
+    AETHER_GATEWAY_DISTRIBUTED_REQUEST_COMMAND_TIMEOUT_MS=250 \
     AETHER_GATEWAY_DATA_POSTGRES_MIN_CONNECTIONS=1 AETHER_GATEWAY_DATA_POSTGRES_MAX_CONNECTIONS=8 \
     AETHER_GATEWAY_HTTP_SHUTDOWN_TIMEOUT_MS=1000 AETHER_GATEWAY_USAGE_SHUTDOWN_TIMEOUT_MS=1000 \
     AETHER_GATEWAY_READINESS_WITHDRAWAL_DELAY_MS=3000 \
@@ -265,6 +349,7 @@ start_redis
 gateway_pid=$!
 
 await_readiness initial 200 '^ok$' '^ok$' 180
+assert_distributed_admission admission_initial 401 3
 stop_postgres
 await_readiness database_stopped 503 '^(failed|timeout)$' '^ok$' 20
 start_postgres
@@ -276,12 +361,16 @@ await_readiness database_resumed 200 '^ok$' '^ok$' 30
 stop_child "$redis_pid"
 redis_pid=""
 await_readiness redis_stopped 503 '^ok$' '^(failed|timeout)$' 20
+assert_distributed_admission admission_redis_stopped 503 10
 start_redis
 await_readiness redis_recovered 200 '^ok$' '^ok$' 30
+assert_distributed_admission admission_redis_recovered 401 3
 kill -STOP "$redis_pid"
 await_readiness redis_unresponsive 503 '^ok$' '^timeout$' 20
+assert_distributed_admission admission_redis_unresponsive 503 10
 kill -CONT "$redis_pid"
 await_readiness redis_resumed 200 '^ok$' '^ok$' 30
+assert_distributed_admission admission_redis_resumed 401 3
 pause_postgres
 kill -STOP "$redis_pid"
 await_readiness both_unresponsive 503 '^timeout$' '^timeout$' 20
@@ -315,4 +404,4 @@ if kill -0 "$gateway_pid" 2>/dev/null; then
 fi
 wait "$gateway_pid"
 gateway_pid=""
-printf 'PASS: real gateway readiness withdrawal, recovery, both dependency deadlines, closing gate, and independent liveness\n' | tee -a "$evidence_dir/result.log"
+printf 'PASS: real gateway readiness withdrawal, Redis request admission failure/recovery, both dependency deadlines, closing gate, and independent liveness\n' | tee -a "$evidence_dir/result.log"
