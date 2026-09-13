@@ -7,6 +7,8 @@ RELEASE_WORKFLOW="${REPO_ROOT}/.github/workflows/release.yml"
 TUNNEL_RELEASE_WORKFLOW="${REPO_ROOT}/.github/workflows/build-tunnel.yml"
 TUNNEL_VERIFY_SCRIPT="${REPO_ROOT}/.github/workflows/scripts/verify-tunnel-release.sh"
 APP_DOCKERFILE="${REPO_ROOT}/Dockerfile.app"
+INSTALLER="${REPO_ROOT}/install.sh"
+TUNNEL_INSTALLER="${REPO_ROOT}/apps/aether-tunnel/install.sh"
 
 fail_test() {
     echo "FAIL: $*" >&2
@@ -33,6 +35,9 @@ assert_line "${APP_DOCKERFILE}" \
     "FROM busybox:1.37.0-musl@sha256:fc6dddc4c44b1bfe37f41cae8e67d1693828e8f42a91862816d7953e2c9d3f23 AS layout"
 assert_line "${APP_DOCKERFILE}" \
     "FROM gcr.io/distroless/static-debian12@sha256:6447365a6337c3732f412d1b74357b30a633831955b2bc45552b0086be907687"
+
+grep -Fq 'verify_release_checksum "${archive_file}" "${TMP_ROOT}/SHA256SUMS" "${asset}"' "${INSTALLER}" || fail_test "gateway installer does not verify SHA256SUMS"
+grep -Fq 'verify_checksum "$archive" "$TMP_DIR/SHA256SUMS.txt" "$asset"' "${TUNNEL_INSTALLER}" || fail_test "tunnel installer does not verify SHA256SUMS.txt"
 
 if grep -Eq '^FROM[[:space:]]+[^[:space:]@]+(:[^[:space:]@]+)?([[:space:]]+AS[[:space:]]+[^[:space:]]+)?$' "${APP_DOCKERFILE}"; then
     fail_test "production Dockerfile contains an unpinned base image"
@@ -82,6 +87,7 @@ if grep -ERq '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+[^[:space:]#]+@[^0-9
 fi
 
 VERIFY_FIXTURE="$(mktemp -d)"
+unset AETHER_TUNNEL_RELEASE_TRUST_KEYS AETHER_TUNNEL_RELEASE_KEY_ID AETHER_TUNNEL_RELEASE_PUBLIC_KEY
 cleanup_verify_fixture() { rm -rf -- "${VERIFY_FIXTURE}"; }
 trap cleanup_verify_fixture EXIT
 printf '%s\n' 'signed tunnel release fixture' >"${VERIFY_FIXTURE}/SHA256SUMS.txt"
@@ -111,5 +117,7 @@ AETHER_TUNNEL_RELEASE_KEY_ID=fixture-key AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${pub
     "${TUNNEL_VERIFY_SCRIPT}" "${VERIFY_FIXTURE}/SHA256SUMS.txt" \
     "${VERIFY_FIXTURE}/SHA256SUMS.txt.sig" >/dev/null \
     || fail_test "valid release signature was rejected"
+
+bash "${REPO_ROOT}/tests/tunnel_release_key_rotation_test.sh"
 
 echo "PASS: release supply-chain pins and provenance workflow"

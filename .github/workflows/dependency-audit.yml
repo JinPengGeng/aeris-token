@@ -10,6 +10,8 @@ on:
     paths:
       - "Cargo.lock"
       - "Cargo.toml"
+      - "tools/ci/tunnel-release-verifier/Cargo.lock"
+      - "tools/ci/tunnel-release-verifier/Cargo.toml"
       - "package-lock.json"
       - "frontend/**"
       - "aether-vscodex/**"
@@ -45,6 +47,11 @@ jobs:
 
       - name: Audit Cargo.lock
         run: .github/scripts/cargo-audit-gate.sh
+
+      - name: Audit tunnel release verifier Cargo.lock
+        # This independent lockfile has no advisory exceptions. The root
+        # workspace's reviewed RSA exception must never apply to this tool.
+        run: cargo audit --file tools/ci/tunnel-release-verifier/Cargo.lock
 
   npm:
     name: npm advisory audit

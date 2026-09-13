@@ -115,7 +115,7 @@ function createDefaultConfig(): SystemConfig {
     // 网络代理
     system_proxy_node_id: null,
     // 基础配置
-    default_user_initial_gift_usd: 10.0,
+    default_user_initial_gift_usd: 0.0,
     rate_limit_per_minute: 0,
     daily_usage_limit_usd: 0,
     enable_registration: false,

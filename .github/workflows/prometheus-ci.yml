@@ -1,16 +1,14 @@
 name: Prometheus Contracts
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: prometheus-contracts-${{ github.event.pull_request.number || github.ref }}
+  group: prometheus-contracts-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -41,8 +39,18 @@ jobs:
             f665c6da19eb7ba399c915d30c7d9793c9b417bf8a749b504bc470678631478d \
             "$tool_dir/prometheus.tar.gz" | sha256sum --check
           tar -xzf "$tool_dir/prometheus.tar.gz" -C "$tool_dir" \
-            prometheus-3.14.0.linux-amd64/promtool
+            prometheus-3.14.0.linux-amd64/promtool \
+            prometheus-3.14.0.linux-amd64/prometheus
           echo "$tool_dir/prometheus-3.14.0.linux-amd64" >> "$GITHUB_PATH"
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/prometheus/alertmanager/releases/download/v0.34.0/alertmanager-0.34.0.linux-amd64.tar.gz \
+            --output "$tool_dir/alertmanager.tar.gz"
+          printf '%s  %s\n' \
+            19c75a11d8c03dc4ade7abdbddfb3a8f28c9e7b000d0849cda0cd71dffd74a03 \
+            "$tool_dir/alertmanager.tar.gz" | sha256sum --check
+          tar -xzf "$tool_dir/alertmanager.tar.gz" -C "$tool_dir" \
+            alertmanager-0.34.0.linux-amd64/alertmanager
+          echo "$tool_dir/alertmanager-0.34.0.linux-amd64" >> "$GITHUB_PATH"
       - name: Validate real exposition and alert lifecycle
         shell: bash
         env:
@@ -58,6 +66,13 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/prometheus-evidence/rules.txt"
           promtool test rules docs/operations/prometheus/aether-alerts.test.yml \
             2>&1 | tee "$RUNNER_TEMP/prometheus-evidence/alert-lifecycle.txt"
+      - name: Verify real scrape and notification delivery
+        shell: bash
+        env:
+          CARGO_PROFILE_DEV_DEBUG: '0'
+        run: |
+          python3 tests/metrics_acceptance_harness.py \
+            --evidence-dir "$RUNNER_TEMP/prometheus-evidence/delivery"
       - name: Upload reproducible validation evidence
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5

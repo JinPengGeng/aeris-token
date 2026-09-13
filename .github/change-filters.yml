@@ -5,13 +5,24 @@
 # content. Patterns are limited to exact paths and directory-recursive
 # `dir/**` prefixes so both consumers agree on their meaning. The automation
 # group covers this file itself so filter-only changes still run the
-# automation contracts.
+# automation contracts. Rust also covers test fixtures outside the workspace
+# and the filter itself; a filter edit must validate the full Rust job graph.
 rust:
   - 'Cargo.toml'
   - 'Cargo.lock'
   - 'rust-toolchain.toml'
   - 'crates/**'
   - 'apps/**'
+  - 'Dockerfile.app.local'
+  - 'deploy.sh'
+  - 'frontend/vite.config.ts'
+  - 'frontend/src/**'
+  - 'tools/ci/**'
+  - 'tests/**'
+  - 'docs/api/**'
+  - 'docs/operations/referral-rebate-numeric-audit.sql'
+  - 'docs/operations/fixtures/**'
+  - '.github/change-filters.yml'
   - '.github/workflows/rust-ci.yml'
 data:
   - 'Cargo.toml'

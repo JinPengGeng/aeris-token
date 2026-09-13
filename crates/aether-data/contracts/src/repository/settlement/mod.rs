@@ -1,4 +1,7 @@
+mod funding;
 mod types;
+
+pub use funding::*;
 
 pub use types::{
     finite_wallet_available_usd, plan_finite_wallet_debit, settlement_billable_cost_usd,
