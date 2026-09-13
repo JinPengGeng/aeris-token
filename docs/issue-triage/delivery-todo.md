@@ -5,15 +5,17 @@ no upstream writes are part of this delivery workflow.
 
 ## Current delivery snapshot — 2026-09-13
 
-Verified main: `cd84817f5ae633333ea071503cf8e93de5047bd1` (#394 merged).
+Verified main: `acf02288d5c37220313a9aed8ec6c277009252a1` (#391 merged).
 The live intake has **44 open issues**: 21 P1 / 23 P2, with 17 in progress,
 17 triage and 10 blocked. These include overlapping parent/child scopes and
 long-term roadmap items; they are not 44 independent implementation packages.
 The previous full board audit verified one Project #1 card per open issue with
 Status, Priority, Area, Risk, Size and Decision. This integration refresh re-read
-#300 and #391: both are In progress / P1 / Billing / High / L / Accepted.
+#391: Done / P1 / Billing / High / L / Accepted. Parent #300 remains In progress.
 
-The implementation queue has **one open PR**: #391 is Draft / In progress.
+The live PR queue was empty immediately after #391 merged. The next active
+implementation is the #255 administrator audit HTTP/PostgreSQL acceptance
+slice, currently in local verification on `test/issue-255-audit-readback`.
 Documentation PRs #392, #393 and #394 are now merged. #393 records restore,
 tunnel compatibility and usage lifecycle ADRs; #394 records the accepted
 single-maintainer workflow without requiring another maintainer.
@@ -25,10 +27,12 @@ GitHub events after the audit supersede the counts and commit states below.
    JSON image requests now use durable per-attempt funds and hard plan quota
    admission before every upstream send. Unknown holds, retry, late evidence,
    cancellation and parent lifecycle have real PostgreSQL/HTTP coverage across
-   user, standalone, unlimited and entitlement-only accounts. The latest pushed
-   head `61f863137` passed all four required checks; its 16 Gateway live targets
-   each ran with one passed and zero ignored. The daily actual-cost contribution
-   ledger is now integrated locally as `b22ef5ff8`, and independent data review
+   user, standalone, unlimited and entitlement-only accounts. Final
+   head `f4d60b77e` passed all four required checks and merged at
+   2026-09-13 13:37:42 UTC as `acf02288d`. Hosted Rust run `34759350159`
+   executed 34 data live targets and 17 Gateway PostgreSQL/HTTP targets,
+   each with one passed and zero failed/ignored. The daily actual-cost contribution
+   ledger was integrated as `b22ef5ff8`, and independent data review
    accepted its transaction, identity, accounting-day and backfill invariants.
    The integrated tree passed all 34 data live targets and 21 funded Gateway
    tests, including 17 real PostgreSQL/HTTP cases. The new public daily case
@@ -36,7 +40,7 @@ GitHub events after the audit supersede the counts and commit states below.
    a `.10` limit without another reservation or upstream call. All 16 daily
    limiter and two natural-day/DST tests pass; four-crate all-features/all-targets
    strict Clippy, formatting, schema and environment drift checks pass. Final
-   review and new-head hosted verification remain before protected merge. Paid streaming, unsupported
+   independent review accepted `f4d60b77e` before its protected merge. Paid streaming, unsupported
    projections, full crash/recharge recovery and the broader parent acceptance
    remain separate work; the currently bounded path does not complete #300 or
    #206. Deployment must drain old writers before the ledger migration.
@@ -75,10 +79,19 @@ GitHub events after the audit supersede the counts and commit states below.
    The PostgreSQL 15/17 audit toolkit passes, but cannot prove absence of
    historical impact or authorize a repair. Preserve the explicit unknown
    conclusion and the documented production-evidence requirement.
+7. **Administrator audit (#255), P1 / M:** the next acceptance slice exercises
+   a real HTTP mutation, lifecycle persistence, PostgreSQL and protected audit
+   API readback. It includes replay/redaction and real database reject/timeout
+   injection. The isolated runner passed one exact target with zero failed or
+   ignored in 2.38 seconds, including the real two-second audit timeout.
+   Six existing audit regressions and sixteen operational authorization tests
+   also passed. Fixture corrections and their failed evidence are documented in
+   [the acceptance decision](issue-255-audit-readback.md). Final hosted
+   validation is pending; parent #255 retains the full mutation inventory,
+   durable failure policy and asynchronous/cross-store final-outcome work.
 
-This checkpoint includes the accepted single-maintainer documentation and the
-daily-ledger integration evidence. #391 remains Draft until final review and
-new-head required checks. No parent issue is
+This checkpoint includes the accepted single-maintainer documentation, final
+#391 merge/hosted evidence and the next #255 acceptance slice. No parent issue is
 closed merely because an accepted slice or a checkpoint is merged.
 
 ### Historical delivery snapshot after #389

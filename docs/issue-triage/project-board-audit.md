@@ -5,6 +5,23 @@ Scope: GitHub Project v2 `JinPengGeng/aeris-token Development` (project 1,
 
 ## Current Project reconciliation — 2026-09-13
 
+Fork main is now `acf02288d5c37220313a9aed8ec6c277009252a1` (#391 merged).
+A focused Project read confirmed #391 is Done / P1 / Billing / High / L /
+Accepted, while #300 remains In progress with the same priority, area, risk,
+size and decision. #391's final head `f4d60b77e` passed all four required
+checks; hosted logs prove 34 data and 17 Gateway PostgreSQL/HTTP exact targets
+actually ran. This is the bounded synchronous-image slice, not completion of
+the broader #300/#206 lifecycle and recovery requirements.
+
+PRs #392/#393/#394 have also merged. The next active implementation is #255's
+administrator audit HTTP/PostgreSQL acceptance slice. The live issue intake
+still contains 44 open issues, 21 P1 / 23 P2. This focused refresh does not
+claim a new full pagination audit of every Project item; the earlier full
+audit below retains its original timestamp and counts. The current
+[delivery TODO](delivery-todo.md) records the latest acceptance boundaries.
+
+### Historical reconciliation after #369
+
 Against fork main `e710ac97d66f7ac4606dcc490b88aa684621904e` (#369 merged), a
 fresh fully paginated Project read returned **382 items**. All **44 open fork
 issues** have exactly one card with Status, Priority, Area, Risk, Size and
