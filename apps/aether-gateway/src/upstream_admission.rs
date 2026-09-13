@@ -601,6 +601,123 @@ mod tests {
         assert_eq!(snapshot.saturated_total, 1);
     }
 
+    fn state_with_automatic_target_capacity(global: usize) -> crate::AppState {
+        let mut config =
+            crate::state::FrontdoorRuntimeGuardConfig::for_tests(None, Duration::from_secs(1));
+        config.upstream_target_gate_limit = Some(10_000);
+        config.upstream_target_gate_is_auto = true;
+        crate::AppState::new()
+            .unwrap()
+            .with_frontdoor_runtime_guard_config_for_tests(config)
+            .with_request_concurrency_limit(global)
+    }
+
+    #[tokio::test]
+    async fn target_auto_saturation_preserves_other_target_capacity_and_recovers() {
+        let state = state_with_automatic_target_capacity(8);
+        let target_a = test_plan("https://a.example.invalid/v1/chat/completions");
+        let target_b = test_plan("https://b.example.invalid/v1/chat/completions");
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            let global = state.try_acquire_request_permit().await.unwrap().unwrap();
+            let target = state
+                .upstream_target_admission
+                .acquire(&target_a, "a")
+                .await
+                .unwrap()
+                .unwrap();
+            held.push((global, target));
+        }
+        let rejected_global = state.try_acquire_request_permit().await.unwrap().unwrap();
+        assert!(matches!(
+            state
+                .upstream_target_admission
+                .acquire(&target_a, "a-saturated")
+                .await,
+            Err(GatewayError::AdmissionTimeout {
+                gate: "gateway_upstream_target",
+                ..
+            })
+        ));
+        drop(rejected_global);
+        let other_global = state.try_acquire_request_permit().await.unwrap().unwrap();
+        let other_target = state
+            .upstream_target_admission
+            .acquire(&target_b, "b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state
+                .upstream_target_admission
+                .snapshot_for_plan(&target_a)
+                .unwrap()
+                .in_flight,
+            2
+        );
+        drop((held, other_global, other_target));
+        assert_eq!(
+            state
+                .upstream_target_admission
+                .snapshot_for_plan(&target_a)
+                .unwrap()
+                .in_flight,
+            0
+        );
+        assert!(state
+            .upstream_target_admission
+            .acquire(&target_a, "a-recovered")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn target_auto_task_cancellation_releases_global_and_target_permits() {
+        let state = state_with_automatic_target_capacity(8);
+        let target = test_plan("https://a.example.invalid/v1/chat/completions");
+        let worker_state = state.clone();
+        let worker_target = target.clone();
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _global = worker_state
+                .try_acquire_request_permit()
+                .await
+                .unwrap()
+                .unwrap();
+            let _target = worker_state
+                .upstream_target_admission
+                .acquire(&worker_target, "cancel")
+                .await
+                .unwrap()
+                .unwrap();
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        observed.await.unwrap();
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            state
+                .upstream_target_admission
+                .snapshot_for_plan(&target)
+                .unwrap()
+                .in_flight,
+            0
+        );
+        assert!(state
+            .upstream_target_admission
+            .acquire(&target, "recovered")
+            .await
+            .unwrap()
+            .is_some());
+        let mut global = Vec::new();
+        for _ in 0..8 {
+            global.push(state.try_acquire_request_permit().await.unwrap().unwrap());
+        }
+        assert!(state.try_acquire_request_permit().await.is_err());
+    }
+
     #[test]
     fn try_acquire_returns_none_when_target_is_saturated() {
         let admission = UpstreamTargetAdmission::new(Some(1), Duration::from_millis(1));
