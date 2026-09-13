@@ -50,6 +50,13 @@ class GatewayEnvironmentReferenceTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported clap env declaration"):
                 CHECKER.collect(source)
 
+    def test_repeated_slashes_are_scanned_as_one_comment(self) -> None:
+        comment = "///" * 20_000
+        self.assertIsNone(CHECKER.field_after_attribute(comment, 0))
+        field = CHECKER.field_after_attribute(comment + "\n timeout: u64,\n", 0)
+        self.assertIsNotNone(field)
+        self.assertEqual(field.group(1), "u64")
+
 
 if __name__ == "__main__":
     unittest.main()

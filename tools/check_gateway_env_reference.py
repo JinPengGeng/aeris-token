@@ -15,7 +15,7 @@ SRC = ROOT / "apps" / "aether-gateway" / "src"
 DOC = ROOT / "docs" / "operations" / "gateway-environment-reference.md"
 NAME = r"[A-Z][A-Z0-9_]+"
 ARG = re.compile(r"#\[arg\((.*?)\)\]", re.S)
-FIELD = re.compile(r"(?:\s*///[^\n]*)*\s*(?:pub(?:\([^)]*\))?\s+)?\w+\s*:\s*([^,\n]+)")
+FIELD = re.compile(r"(?:pub(?:\([^)]*\))?\s+)?\w+\s*:\s*([^,\n]+)")
 READ = re.compile(
     r"(?:env::var(?:_os)?|var_os|env_[a-z0-9_]+|[a-z0-9_]+_from_env)"
     r"\s*\(\s*\"(" + NAME + r")\""
@@ -55,6 +55,20 @@ def source_files(source: Path) -> list[Path]:
                   if "tests" not in path.relative_to(source).parts)
 
 
+def field_after_attribute(text: str, cursor: int):
+    # Comments and whitespace are scanned once, without nested regex repeats.
+    while cursor < len(text):
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if not text.startswith("///", cursor):
+            return FIELD.match(text, cursor)
+        newline = text.find("\n", cursor)
+        if newline == -1:
+            return None
+        cursor = newline + 1
+    return None
+
+
 def collect(source: Path = SRC) -> tuple[dict[str, dict[str, str]], dict[str, list[str]]]:
     clap, runtime = {}, {}
     for path in source_files(source):
@@ -65,7 +79,7 @@ def collect(source: Path = SRC) -> tuple[dict[str, dict[str, str]], dict[str, li
             if "env" not in values:
                 continue
             name_match = re.fullmatch(r'"(' + NAME + r')"', values["env"])
-            field = FIELD.match(text, match.end())
+            field = field_after_attribute(text, match.end())
             if name_match is None or field is None:
                 line = text.count("\n", 0, match.start()) + 1
                 raise ValueError(f"unsupported clap env declaration in {relative}:{line}; extend the checker explicitly")

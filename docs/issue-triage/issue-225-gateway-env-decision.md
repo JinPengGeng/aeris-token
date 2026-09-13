@@ -28,8 +28,14 @@ types, missing update-timeout helpers and name-only drift check. The revised
 projection corrects these issues and includes the exact declaration beside
 each clap row. Tests change defaults, Rust types and scope without changing
 the variable name, and add a helper-reader variable; each stale document fails.
-The original source projection passes after regeneration. Four focused tests
+The original source projection passes after regeneration. Five focused tests
 passed, including the real 13-global-argument check and both update timeouts.
+
+Hosted CodeQL identified exponential backtracking in the initial expression
+for doc comments between an argument and its field. Replace that repetition
+with a single forward scan. A 60,000-slash regression checks both an unterminated
+comment and a following field; no regex suppression or security exception is
+used. Hosted CodeQL must verify the correction on the updated PR head.
 
 This is a bounded source reference, not an evaluation of all runtime defaults
 or an inventory of dependency/crate-level environment settings. The parent
