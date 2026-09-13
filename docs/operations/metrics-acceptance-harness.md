@@ -11,14 +11,18 @@ Run from the repository root:
 ```bash
 python3 tests/metrics_acceptance_harness.py
 python3 tests/metrics_acceptance_harness.py --token metrics-fixture-token
-python3 tests/metrics_acceptance_harness.py --endpoint http://127.0.0.1:9090/metrics --token "$METRICS_TOKEN"
+# Gateway ingress route; the caller must hold admin:monitoring:read.
+python3 tests/metrics_acceptance_harness.py --endpoint http://127.0.0.1:9090/_gateway/metrics --token "$METRICS_TOKEN"
 ```
 
 With `--endpoint`, the harness performs a real HTTP scrape and requires
-`text/plain` Prometheus content. The endpoint is expected to be loopback or a
-deliberately isolated test deployment. No token is logged. The local mode
-proves the authentication negative/positive boundary and the local
-Alertmanager delivery/recovery sequence.
+`text/plain` Prometheus content. The deployed gateway endpoint is
+`/_gateway/metrics` and is protected by the `admin:monitoring:read` permission;
+the local fixture itself intentionally serves `/metrics` and accepts the
+fixture bearer token. The endpoint is expected to be loopback or a deliberately
+isolated test deployment. No token is logged. The local mode proves the
+authentication negative/positive boundary and the local Alertmanager
+delivery/recovery sequence.
 
 This is intentionally not deployment evidence: it does not run Prometheus,
 exercise a production ingress, or prove delivery through an external
