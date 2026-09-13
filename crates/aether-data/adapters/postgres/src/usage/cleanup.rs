@@ -18,7 +18,11 @@ use crate::{error::postgres_error, DataLayerError, PostgresPool};
 // finalization and recovery. Age alone cannot resolve a hold or forgive debt.
 // Reconciliation may remain outstanding even after its capped debit settled.
 const USAGE_FINANCIAL_RETENTION_SQL: &str = r#"
-usage.billing_status = 'insufficient_quota'
+COALESCE(
+    (SELECT snapshot.billing_status FROM usage_settlement_snapshots AS snapshot
+     WHERE snapshot.request_id = usage.request_id),
+    usage.billing_status
+) = 'insufficient_quota'
 OR EXISTS (
     SELECT 1 FROM request_fund_reservations AS funds
     WHERE funds.request_id = usage.request_id
@@ -985,24 +989,40 @@ async fn delete_old_usage_records(
     batch_size: usize,
 ) -> Result<usize, DataLayerError> {
     let candidates = usage_record_cleanup_candidates_sql();
+    let lock_sql = format!(
+        "{candidates} ORDER BY created_at ASC, id ASC LIMIT $2 FOR UPDATE OF usage SKIP LOCKED"
+    );
     let delete_sql = format!(
-        "WITH doomed AS ({candidates} ORDER BY created_at ASC, id ASC LIMIT $2) \
-         DELETE FROM usage AS usage_rows USING doomed WHERE usage_rows.id = doomed.id"
+        "DELETE FROM usage WHERE id = ANY($1) AND created_at < $2 \
+         AND NOT ({USAGE_FINANCIAL_RETENTION_SQL})"
     );
     let mut total_deleted = 0usize;
     loop {
-        let deleted = sqlx::query(&delete_sql)
+        // Settlement/finalization/recovery lock usage before changing financial
+        // state. Do not wait behind such a writer and then delete its new debt
+        // using an earlier statement snapshot. Lock a batch, skipping active
+        // writers, and recheck eligibility in the next statement's snapshot.
+        let mut tx = pool.begin().await.map_err(postgres_error)?;
+        let ids: Vec<String> = sqlx::query_scalar(&lock_sql)
             .bind(cutoff_time)
             .bind(i64::try_from(batch_size).unwrap_or(i64::MAX))
-            .execute(pool)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(postgres_error)?;
+        if ids.is_empty() {
+            tx.commit().await.map_err(postgres_error)?;
+            break;
+        }
+        let deleted = sqlx::query(&delete_sql)
+            .bind(&ids)
+            .bind(cutoff_time)
+            .execute(&mut *tx)
             .await
             .map_err(postgres_error)?
             .rows_affected();
+        tx.commit().await.map_err(postgres_error)?;
         let deleted = usize::try_from(deleted).unwrap_or(usize::MAX);
         total_deleted += deleted;
-        if deleted < batch_size {
-            break;
-        }
     }
     Ok(total_deleted)
 }

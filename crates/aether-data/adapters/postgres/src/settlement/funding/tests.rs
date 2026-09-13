@@ -142,6 +142,10 @@ async fn live_request_funds_retention_preserves_reconciliation_and_allows_later_
     let result = AssertUnwindSafe(async {
         let repo = SqlxSettlementRepository::new(first.clone());
         let cleanup = crate::SqlxUsageReadRepository::new(first.clone());
+        // LIKE INCLUDING ALL does not copy foreign keys; restore this production
+        // cascade so deleting a usage row also exercises loss of its snapshot.
+        sqlx::query("ALTER TABLE usage_settlement_snapshots ADD FOREIGN KEY (request_id) REFERENCES usage(request_id) ON DELETE CASCADE")
+            .execute(&first).await.unwrap();
         sqlx::query("UPDATE wallets SET balance = 100 WHERE id = 'wallet'")
             .execute(&first).await.unwrap();
         for case in ["prepared", "dispatched", "unknown", "excess", "released", "settled"] {
@@ -166,13 +170,17 @@ async fn live_request_funds_retention_preserves_reconciliation_and_allows_later_
                 }
             }
         }
-        for case in ["partial-debt", "legacy-debt", "misclassified-debt", "recovered", "plain", "recent"] {
+        for case in ["partial-debt", "legacy-debt", "misclassified-debt", "snapshot-debt", "snapshot-settled", "recovered", "plain", "recent"] {
             let identity = quote(case, "key-b", 8_000_000).identity;
             persist_usage(&first, &identity, 0.08).await;
             sqlx::query("UPDATE usage SET billing_status = $2 WHERE request_id = $1")
-                .bind(case).bind(if matches!(case, "plain" | "recent" | "misclassified-debt") { "settled" } else { "insufficient_quota" })
+                .bind(case).bind(if matches!(case, "plain" | "recent" | "misclassified-debt" | "snapshot-debt") { "settled" } else { "insufficient_quota" })
                 .execute(&first).await.unwrap();
         }
+        // The normalized snapshot is authoritative; the legacy usage mirror
+        // can disagree in either direction before the first recovery attempt.
+        sqlx::query("INSERT INTO usage_settlement_snapshots (request_id, billing_status) VALUES ('snapshot-debt', 'insufficient_quota'), ('snapshot-settled', 'settled')")
+            .execute(&first).await.unwrap();
         // Three unsettled reservations own USD 0.24. Recover one debt fully and
         // another partially without spending any of their held capacity.
         sqlx::query("UPDATE wallets SET balance = 0.34 WHERE id = 'wallet'")
@@ -200,20 +208,23 @@ async fn live_request_funds_retention_preserves_reconciliation_and_allows_later_
         let preview = crate::cleanup::preview_usage_cleanup_impl(
             &first, &window, targets, UsageCleanupExecutionMode::Policy,
         ).await.unwrap();
-        assert_eq!(preview.log, 4, "only resolved financial records may expire");
-        assert_eq!(preview.compressed, 7, "retained financial rows still expire their raw bodies");
-        assert_eq!(preview.header, 7);
+        assert_eq!(preview.log, 5, "only resolved financial records may expire");
+        assert_eq!(preview.compressed, 8, "retained financial rows still expire their raw bodies");
+        assert_eq!(preview.header, 8);
         assert_eq!(preview.detail, 0);
         let summary = cleanup.cleanup_usage(&window, 1, false, targets, UsageCleanupExecutionMode::Policy).await.unwrap();
-        assert_eq!(summary.records_deleted, 4);
-        assert_eq!(summary.body_cleaned, 7);
-        assert_eq!(summary.header_cleaned, 7);
+        assert_eq!(summary.records_deleted, 5);
+        assert_eq!(summary.body_cleaned, 8);
+        assert_eq!(summary.header_cleaned, 8);
         let remaining: Vec<String> = sqlx::query_scalar("SELECT request_id FROM usage ORDER BY request_id")
             .fetch_all(&first).await.unwrap();
-        assert_eq!(remaining, vec!["dispatched", "excess", "legacy-debt", "misclassified-debt", "partial-debt", "prepared", "recent", "unknown"]);
+        assert_eq!(remaining, vec!["dispatched", "excess", "legacy-debt", "misclassified-debt", "partial-debt", "prepared", "recent", "snapshot-debt", "unknown"]);
+        let normalized: Vec<String> = sqlx::query_scalar("SELECT request_id FROM usage_settlement_snapshots WHERE request_id LIKE 'snapshot-%' ORDER BY request_id")
+            .fetch_all(&first).await.unwrap();
+        assert_eq!(normalized, vec!["snapshot-debt"], "resolved snapshot cascades while the authoritative debt survives");
         let retained_facts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage WHERE request_id <> 'recent' AND response_body IS NULL AND request_headers IS NULL AND request_metadata->'settlement_snapshot'->>'status' = 'complete'")
             .fetch_one(&first).await.unwrap();
-        assert_eq!(retained_facts, 7);
+        assert_eq!(retained_facts, 8);
 
         // The real financial APIs can still complete after retention: no raw
         // payload is required and neither the frozen quote nor usage was lost.
@@ -235,14 +246,63 @@ async fn live_request_funds_retention_preserves_reconciliation_and_allows_later_
             request_id: "partial-debt".to_string(),
         }).await.unwrap().unwrap();
         assert_eq!(recovered.outstanding_cost_units, 0);
+        sqlx::query("UPDATE wallets SET balance = balance + 0.08 WHERE id = 'wallet'")
+            .execute(&first).await.unwrap();
+        let recovered = repo.recover_insufficient_quota(RecoverInsufficientQuotaInput {
+            request_id: "snapshot-debt".to_string(),
+        }).await.unwrap().unwrap();
+        assert_eq!(recovered.collected_cost_units, 8_000_000);
+        assert_eq!(recovered.outstanding_cost_units, 0);
         let records_only = UsageCleanupTargets {
             detail_body: false, compressed_body: false, headers: false, records: true, expired_keys: false,
         };
         let summary = cleanup.cleanup_usage(&window, 1, false, records_only, UsageCleanupExecutionMode::Policy).await.unwrap();
-        assert_eq!(summary.records_deleted, 2, "resolved rows return to normal retention");
+        assert_eq!(summary.records_deleted, 3, "resolved rows return to normal retention");
         let replay = cleanup.cleanup_usage(&window, 1, false, records_only, UsageCleanupExecutionMode::Policy).await.unwrap();
         assert_eq!(replay.records_deleted, 0);
         assert_eq!(balance(&first).await, 0.16, "remaining holds are intact");
+
+        // Settlement owns the usage row before changing it from pending to
+        // insufficient_quota. Cleanup must not delete a stale selected version
+        // after waiting for that transaction. Observe the real lock barrier,
+        // or the cleanup finishing because it safely skips the locked row.
+        let racing = quote("settlement-race", "key-a", 8_000_000).identity;
+        persist_usage(&first, &racing, 0.08).await;
+        sqlx::query("UPDATE usage SET created_at = $1 WHERE request_id = 'settlement-race'")
+            .bind(now - Duration::days(500)).execute(&first).await.unwrap();
+        let mut settlement_tx = first.begin().await.unwrap();
+        sqlx::query("SELECT id FROM usage WHERE request_id = 'settlement-race' FOR UPDATE")
+            .execute(&mut *settlement_tx).await.unwrap();
+        let cleaner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&second).await.unwrap();
+        let racing_cleanup = crate::SqlxUsageReadRepository::new(second.clone());
+        let racing_window = window.clone();
+        let cleanup_task = tokio::spawn(async move {
+            racing_cleanup.cleanup_usage(&racing_window, 1, false, records_only, UsageCleanupExecutionMode::Policy).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                    .bind(cleaner_pid).fetch_one(&admin).await.unwrap();
+                if blocked || cleanup_task.is_finished() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("cleanup must reach the locked row or finish without waiting");
+        sqlx::query("UPDATE usage SET billing_status = 'insufficient_quota' WHERE request_id = 'settlement-race'")
+            .execute(&mut *settlement_tx).await.unwrap();
+        sqlx::query("INSERT INTO usage_settlement_snapshots (request_id, billing_status) VALUES ('settlement-race', 'insufficient_quota')")
+            .execute(&mut *settlement_tx).await.unwrap();
+        settlement_tx.commit().await.unwrap();
+        let raced = tokio::time::timeout(std::time::Duration::from_secs(5), cleanup_task)
+            .await.unwrap().unwrap().unwrap();
+        assert_eq!(raced.records_deleted, 0, "cleanup must preserve the newly committed liability");
+        let replay = cleanup.cleanup_usage(&window, 1, false, records_only, UsageCleanupExecutionMode::Policy).await.unwrap();
+        assert_eq!(replay.records_deleted, 0);
+        let race_preserved: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM usage WHERE request_id = 'settlement-race')")
+            .fetch_one(&first).await.unwrap();
+        assert!(race_preserved);
     }).catch_unwind().await;
     first.close().await;
     second.close().await;
