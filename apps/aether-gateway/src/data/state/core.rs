@@ -46,6 +46,21 @@ impl SystemConfigValueInflightState {
 }
 
 impl SystemConfigValueCacheState {
+    #[cfg(test)]
+    fn set_read_delay_for_tests(&self, delay: Duration) {
+        let millis = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        self.read_delay_millis
+            .store(millis, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn read_delay_for_tests(&self) -> Option<Duration> {
+        let millis = self
+            .read_delay_millis
+            .load(std::sync::atomic::Ordering::Acquire);
+        (millis > 0).then(|| Duration::from_millis(millis))
+    }
+
     fn get(&self, key: &str) -> Option<Option<serde_json::Value>> {
         self.entries.get_fresh(key, SYSTEM_CONFIG_VALUE_CACHE_TTL)
     }
@@ -214,6 +229,8 @@ impl Default for SystemConfigValueCacheState {
             admission: Arc::new(tokio::sync::Semaphore::new(
                 SYSTEM_CONFIG_VALUE_CACHE_MAX_INFLIGHT,
             )),
+            #[cfg(test)]
+            read_delay_millis: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -868,6 +885,11 @@ impl GatewayDataState {
         &self,
         key: &str,
     ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        #[cfg(test)]
+        if let Some(delay) = self.system_config_value_cache.read_delay_for_tests() {
+            tokio::time::sleep(delay).await;
+        }
+
         let Some(backends) = self.backends.as_ref() else {
             return Ok(None);
         };
@@ -899,6 +921,12 @@ impl GatewayDataState {
             backends.find_system_config_value(key),
         )
         .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_system_config_read_delay_for_tests(&self, delay: Duration) {
+        self.system_config_value_cache
+            .set_read_delay_for_tests(delay);
     }
 
     pub(crate) async fn compare_and_set_system_config_string_value(
