@@ -7,35 +7,60 @@ no production rows are modified and no automatic backfill is proposed.
 
 ## Procedure
 
-Run `referral-rebate-numeric-audit.sql` with a PostgreSQL role that has only
+Run the whole file in a fresh session with a PostgreSQL role that has only
 `SELECT` on `referral_rewards` and `wallet_transactions`. Export only the
 aggregate result sets. The queries report row counts, time bounds, status/type
 breakdowns, amount totals, missing ledger links, ledger mismatches, and invalid
-counter totals. They never return user/order identifiers or notes.
+counter totals. They never return user/order identifiers or notes. The script
+uses a repeatable-read, read-only transaction so all four reports share one
+snapshot, with a 30-second statement timeout and a 2-second lock timeout.
+Use a restored snapshot or a read replica for large datasets. A timeout is an
+incomplete audit, never evidence of zero impact.
 
-The linked-ledger comparison uses `NUMERIC` arithmetic and a one-cent-in-100M
-tolerance (`0.00000001`) matching the schema scale. A non-zero mismatch or
+```sh
+psql --no-psqlrc --set ON_ERROR_STOP=1 --dbname 'service=aether-audit' \
+  --file docs/operations/referral-rebate-numeric-audit.sql
+```
+
+Configure the service and credentials locally; do not put passwords in this
+command, terminal transcripts, Issues or PRs.
+
+The linked-ledger comparison uses exact, signed `NUMERIC` arithmetic at the
+schema scale of eight decimal places. A difference of `0.00000001` USD is
+reported, as is a debit linked to a positive reward. Missing links include
+dangling IDs, because this column has no foreign key. Ledger category, reason
+and reward identity are also checked. A non-zero mismatch or
 missing applied link requires a separately reviewed, idempotent repair plan;
 this audit does not infer that a row should be re-issued.
 
-`fixtures/referral-numeric-regression.sql` is the adapter regression fixture.
-It exercises the smallest and largest representative `numeric(20,8)` values
-through the production cast shape, including an 8-decimal value that would
-have failed under a direct sqlx `f64` decode.
+`fixtures/referral-numeric-regression.sql` exercises representative
+`numeric(20,8)` values through the production cast shape in a transaction that
+rolls back. The Rust PostgreSQL integration test verifies that the raw NUMERIC
+column fails direct `sqlx` `f64` decoding while the explicit cast succeeds;
+the SQL output alone cannot establish driver decoding behavior. Converting to
+`f64` is an API compatibility fix and does not preserve every decimal digit
+of large amounts, which is why the audit keeps all comparisons in NUMERIC.
 
-`fixtures/referral-numeric-special-values.sql` is the boundary fixture for
-PostgreSQL's `NUMERIC` special values. PostgreSQL's unconstrained `numeric`
-type can represent `Infinity`, `-Infinity`, and `NaN`, but the application's
-`numeric(20,8)` money columns must reject them. The fixture uses
-`pg_input_is_valid` so the rejection check is non-throwing and does not touch
-application tables. All three `accepted_by_money_typmod` results must be
-`false`; a different result requires reviewing the PostgreSQL major version
-and the deployed column type before relying on this audit.
+`fixtures/referral-numeric-special-values.sql` checks PostgreSQL's special
+values in a read-only transaction. Unconstrained `numeric` accepts `Infinity`,
+`-Infinity`, and `NaN`; `numeric(20,8)` rejects infinities but still accepts
+`NaN`. The fixture raises an error if these expectations change. Query 4 of
+the historical audit therefore explicitly counts NaN in all three reward
+amount fields; the precision/scale declaration does not provide that guard.
+Run the fixture with `psql --no-psqlrc --set ON_ERROR_STOP=1 --file` against an
+isolated PostgreSQL instance. It does not write application tables or prove
+that production contains any nonfinite amounts.
 
 ## Decision record
 
 Until an operator runs the aggregate queries against a production snapshot,
 the historical impact is **unknown** and no backfill is authorized. If all
 four result sets are empty/consistent, record “no repair required” on Issue
-#316. Otherwise create a follow-up migration issue with an idempotency key,
+#316, including snapshot time, fork SHA, query version and all four aggregate
+results. The audit cannot prove that a reward row was never created for an
+eligible order; cross-check pending/failed rewards and historical incident
+windows before concluding that no repair is needed. Otherwise create a
+follow-up migration issue with an idempotency key,
 bounded batches, audit logging, and a rollback query before changing data.
+The toolkit PR does not close #316 or parent #208; production impact remains
+unverified until the above evidence and a reviewed decision are recorded.

@@ -10,6 +10,10 @@ const CAST_FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../docs/operations/fixtures/referral-numeric-regression.sql"
 ));
+const SPECIAL_VALUES_FIXTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../docs/operations/fixtures/referral-numeric-special-values.sql"
+));
 
 #[tokio::test]
 async fn postgres_referral_numeric_audit_detects_missing_and_incorrect_credits() {
@@ -151,6 +155,19 @@ FROM (VALUES
             .await
             .unwrap();
     assert!(temporary_table.is_none());
+    let special_values = sqlx::raw_sql(SPECIAL_VALUES_FIXTURE)
+        .fetch_all(&mut connection)
+        .await
+        .expect("numeric typmod must reject infinities while preserving detectable NaN");
+    assert_eq!(special_values.len(), 3);
+    for row in special_values {
+        let value: String = row.get("value");
+        assert_eq!(
+            row.get::<bool, _>("accepted_by_money_typmod"),
+            value == "NaN",
+            "{value}"
+        );
+    }
     connection.close().await.unwrap();
     pool.close().await;
 }

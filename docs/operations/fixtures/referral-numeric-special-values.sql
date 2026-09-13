@@ -1,30 +1,35 @@
--- PostgreSQL NUMERIC special-value boundary fixture.
--- Read-only: pg_input_is_valid validates typmod acceptance without inserting
--- values into application tables or raising an expected conversion error.
+-- PostgreSQL NUMERIC special-value boundary fixture. Run with ON_ERROR_STOP=1.
+-- Read-only: no application rows, schema, or persistent settings are changed.
+BEGIN READ ONLY;
+SET LOCAL statement_timeout = '5s';
 
--- NUMERIC without precision/scale accepts the PostgreSQL special values.
-WITH special_values(value) AS (
-  VALUES ('Infinity'::numeric), ('-Infinity'::numeric), ('NaN'::numeric)
-)
-SELECT
-  value::text AS value,
-  value = 'Infinity'::numeric AS is_positive_infinity,
-  value = '-Infinity'::numeric AS is_negative_infinity,
-  value = 'NaN'::numeric AS is_nan
-FROM special_values
-ORDER BY value::text;
+DO $fixture$
+DECLARE
+  candidate record;
+BEGIN
+  FOR candidate IN
+    SELECT * FROM (VALUES
+      ('Infinity', false), ('-Infinity', false), ('NaN', true)
+    ) AS expected(value, accepted_by_money_typmod)
+  LOOP
+    IF NOT pg_input_is_valid(candidate.value, 'numeric') THEN
+      RAISE EXCEPTION 'unconstrained numeric rejected %', candidate.value;
+    END IF;
+    IF pg_input_is_valid(candidate.value, 'numeric(20,8)')
+        IS DISTINCT FROM candidate.accepted_by_money_typmod THEN
+      RAISE EXCEPTION 'unexpected numeric(20,8) acceptance for %', candidate.value;
+    END IF;
+  END LOOP;
+  -- The cast proves NaN can inhabit the actual money typmod; precision alone
+  -- cannot replace the historical audit's explicit nonfinite-value check.
+  IF ('NaN'::numeric(20,8) = 'NaN'::numeric) IS NOT TRUE THEN
+    RAISE EXCEPTION 'NaN must remain detectable by the historical audit';
+  END IF;
+END
+$fixture$;
 
--- Application money columns use numeric(20,8). These values must be rejected
--- by the declared precision/scale contract. This query is non-throwing.
-WITH special_values(value) AS (
-  VALUES ('Infinity'), ('-Infinity'), ('NaN')
-)
-SELECT
-  value,
-  pg_input_is_valid(value, 'numeric(20,8)') AS accepted_by_money_typmod
-FROM special_values
+SELECT value, pg_input_is_valid(value, 'numeric(20,8)') AS accepted_by_money_typmod
+FROM (VALUES ('Infinity'), ('-Infinity'), ('NaN')) AS special_values(value)
 ORDER BY value;
 
--- Expected: all three accepted_by_money_typmod values are false. If any is
--- true, review the database major version and the schema typmod before using
--- the historical NUMERIC audit conclusions.
+ROLLBACK;
