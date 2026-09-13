@@ -96,3 +96,14 @@ Size and Decision populated; #356 remains draft during final review and CI.
 The repository's four required checks remain Rust CI / check, Frontend CI /
 check, Automation Policy / gate, and Dependency Audit / check; no gate was
 weakened or changed in this reconciliation.
+
+## Checkpoint after PR #353 and #214 implementation
+
+PR #353 merged as `b2d2b0fca0bb96916880f8061e5d03d2c79fa501`; its card is
+Done. #214 is now In progress / Accepted, bringing the 47 open issues to
+13 in progress, 23 triage and 11 blocked (24 P1 / 23 P2). Draft PR #358 carries
+the bounded per-process target-capacity slice for independent review and CI;
+the parent retains its lifecycle and failure/recovery acceptance. #356 is now
+Ready after code review and hosted drill verification, with protected checks
+required again after main synchronization. #355's hosted fixture failures were
+corrected and the failed run is retained as evidence; it is not marked Done.

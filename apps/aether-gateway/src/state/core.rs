@@ -634,6 +634,12 @@ impl AppState {
     pub fn with_request_concurrency_limit(mut self, limit: usize) -> Self {
         let limit = limit.max(1);
         self.request_gate = Some(Arc::new(ConcurrencyGate::new("gateway_requests", limit)));
+        self.upstream_target_admission =
+            Arc::new(crate::upstream_admission::UpstreamTargetAdmission::new(
+                self.frontdoor_runtime_guards
+                    .target_limit_for_request_capacity(limit),
+                self.frontdoor_runtime_guards.internal_gate_queue_budget,
+            ));
         if self.websocket_connection_gate.is_none() {
             self.websocket_connection_gate = Some(Arc::new(ConcurrencyGate::new(
                 "gateway_websocket_connections",
