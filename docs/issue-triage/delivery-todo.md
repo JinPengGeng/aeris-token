@@ -19,7 +19,7 @@ refresh. Each passed the four required checks before squash merge.
 Remaining parent boundaries include #214, #215, #220, #223, #225, #255,
 #300/#206 and #307/#217. No new PR is implied by this checkpoint.
 
-## 当前交付检查点 — 2026-09-14
+## 历史交付检查点 — 2026-09-14（已被上方最终现场覆盖）
 
 跨电脑恢复从 [GitHub 交接入口](github-handoff.md) 开始；它列出主干 SHA、在制范围、
 恢复命令及 07:00 后收尾要求。北京时间 02:29 读回主干为
