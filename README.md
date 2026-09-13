@@ -115,6 +115,11 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 
 ## API 文档
 
+配置好 API Key 和允许访问的模型后，可从 [Chat 快速调用示例](docs/api/chat-completions.md#quick-start) 或 [图片生成示例](docs/api/images.md#generate) 开始。
+
+- Chat Completions: [OpenAI compatible `POST /v1/chat/completions`](docs/api/chat-completions.md)
+- Images: [OpenAI compatible generations / edits](docs/api/images.md)
+- 错误与重试：[公共 API 错误契约](docs/api/error-contract.md) · [兼容性验证范围](docs/api/compatibility-fixtures.md)
 - Embeddings: [OpenAI compatible `POST /v1/embeddings`](docs/api/embeddings.md)
 - Rerank: [OpenAI/Jina compatible `POST /v1/rerank`](docs/api/rerank.md)
 - Responses WebSocket mode: [protocol and Aether behavior](docs/WebSocket-Mode.md)
