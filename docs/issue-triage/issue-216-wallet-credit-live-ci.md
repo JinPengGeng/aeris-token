@@ -21,11 +21,11 @@ ignored tests by a broad name filter.
 | Existing test suffix | Behavior asserted |
 | --- | --- |
 | `live_payment_callback_user_wallet_credits_once` | Repeated callbacks for a user wallet credit once and retain one ledger entry. |
-| `live_payment_callback_api_key_wallet_credits_once` | The same guarantee for a standalone API key wallet. |
+| `live_payment_callback_api_key_wallet_credits_once` | The same guarantee for an API key-owned wallet. |
 | `live_payment_callback_rejects_wrong_or_missing_wallet_owner` | Invalid ownership leaves the order pending and balances unchanged; the failed callback is persisted. |
 | `live_manual_recharge_commits_wallet_order_and_transaction` | Wallet, order and ledger commit together; duplicate orders and invalid amounts are rejected. |
 | `live_admin_order_state_changes_preserve_metadata` | Administrator state transitions preserve order metadata. |
-| `live_admin_wallet_order_credit_commits_once` | Wallet credit is idempotent and rejects incompatible order states. |
+| `live_admin_wallet_order_credit_commits_once` | Wallet credit is idempotent; credited orders reject subsequent expire/fail transitions. |
 | `live_admin_plan_order_credit_commits_once` | Plan entitlement and gift credit commit once. |
 | `live_redeem_code_commits_order_and_wallet_once_for_each_bucket` | Recharge and gift redemption preserve bucket/refund semantics and do not duplicate orders or transactions. |
 
