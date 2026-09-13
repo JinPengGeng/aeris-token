@@ -131,6 +131,12 @@ Gateway **all-targets Clippy passed** with `-D warnings` in 3 minutes 49 seconds
 integration onto current `main`, and all four protected GitHub contexts remain
 required before merge.
 
+The main thread subsequently merged main `44bd242e15572e17cb808d2b9db213a443ab16cd`
+(Images Router contracts and Redis reconnection fix) without conflicts. The
+public error guide now describes the 401 boundary and Redis-admission priority.
+Final-head regression checks and independent review are recorded in the PR;
+the earlier local counts above refer to their stated baseline.
+
 ## Compatibility, remaining scope and rollback
 
 Clients that retried anonymous Chat requests on `503` now receive the existing

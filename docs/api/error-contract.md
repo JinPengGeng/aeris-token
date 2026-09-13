@@ -34,6 +34,22 @@ gateway's generic mapping is:
 | 429 | `insufficient_quota` | Restore account credit; do not retry unchanged. |
 | 503/529 | `server_error` | For transient unavailability, use bounded backoff and honor `Retry-After` when present. Empty candidate lists can also reflect configuration problems; see below. |
 
+## Missing or invalid credentials
+
+At the public AI authentication boundary, missing credentials or credential
+carriers that the existing extractor cannot accept produce the same HTTP
+`401` rejection as an unknown API key. OpenAI-family routes use
+`authentication_error`, retain `x-trace-id`, and omit `Retry-After`. This applies
+to both normal requests and streaming requests rejected before commitment.
+Provide accepted credentials before retrying; an unchanged anonymous request
+does not become valid through backoff.
+
+Request admission runs before authentication. If the configured distributed
+request gate cannot acquire a Redis lease, its existing `503/server_error`
+response can therefore take precedence even for a request without credentials.
+This does not reclassify missing internal execution/authentication context as
+a client error, or change deferred cookie/Google Bearer resolution.
+
 ## Quota versus rate limit
 
 Wallet denial is a permanent account state, not a temporary RPM window. For
