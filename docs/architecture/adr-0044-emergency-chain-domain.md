@@ -1,6 +1,10 @@
 # ADR-0044: Emergency chain domain boundary
 
-Status: Proposed
+Status: Accepted (domain scaffold only)
+
+This decision accepts the isolated domain contract that is present in the
+repository. It does not claim Gateway wiring, persistence, audit integration,
+or production scheduling support; those remain deferred as recorded below.
 
 ## Context
 
