@@ -69,6 +69,14 @@ pub struct InMemorySettlementRepository {
 }
 
 impl InMemorySettlementRepository {
+    fn is_attempt_cost_token(&self, token: &str) -> bool {
+        self.attempt_metadata
+            .read()
+            .expect("attempt metadata lock")
+            .get(token)
+            .is_some_and(|attempt| attempt.usage_policy.is_some())
+    }
+
     pub fn seed<I>(items: I) -> Self
     where
         I: IntoIterator<Item = StoredWalletSnapshot>,
@@ -298,6 +306,9 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
             .write()
             .expect("usage policy cost reservation lock");
         let existing = reservations.get(&input.reservation_token).cloned();
+        if self.is_attempt_cost_token(&input.reservation_token) {
+            return Ok(ReserveUsagePolicyCostOutcome::Conflict);
+        }
         if let Some(existing) = existing.as_ref() {
             if existing.request_id != input.request_id || existing.subject_id != input.subject_id {
                 return Ok(ReserveUsagePolicyCostOutcome::Conflict);
@@ -341,8 +352,9 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
                 .try_fold(0_u64, |used, reservation| {
                     let cost_units = match reservation.state {
                         UsagePolicyCostReservationState::Reserved
-                            if reservation.reservation_expires_at_unix_secs
-                                > input.admitted_at_unix_secs =>
+                            if self.is_attempt_cost_token(&reservation.reservation_token)
+                                || reservation.reservation_expires_at_unix_secs
+                                    > input.admitted_at_unix_secs =>
                         {
                             reservation.reserved_cost_units
                         }
@@ -408,6 +420,11 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
         let Some(reservation) = reservations.get_mut(&input.reservation_token) else {
             return Ok(None);
         };
+        if self.is_attempt_cost_token(&input.reservation_token) {
+            return Err(DataLayerError::InvalidInput(
+                "attempt usage policy requires its financial outcome writer".to_string(),
+            ));
+        }
         if reservation.request_id != input.request_id || reservation.subject_id != input.subject_id
         {
             // The server-issued token selects the reservation. Never let mismatched audit
@@ -436,7 +453,10 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
             .expect("usage policy cost reservation lock");
         let tokens = reservations
             .iter()
-            .filter(|(_, reservation)| reservation.retain_until_unix_secs <= now_unix_secs)
+            .filter(|(token, reservation)| {
+                reservation.retain_until_unix_secs <= now_unix_secs
+                    && !self.is_attempt_cost_token(token)
+            })
             .map(|(token, _)| token.clone())
             .take(batch_size)
             .collect::<Vec<_>>();

@@ -75,6 +75,7 @@ fn fixture(
 
 fn quote(suffix: &str) -> ReserveRequestAttemptFundsInput {
     ReserveRequestAttemptFundsInput {
+        usage_policy: None,
         attempt_id: uuid::Uuid::new_v4().to_string(),
         provider: RequestAttemptProvider {
             provider_id: format!("provider-{suffix}"),
@@ -95,6 +96,299 @@ fn quote(suffix: &str) -> ReserveRequestAttemptFundsInput {
             admitted_at_unix_secs: 100,
         },
     }
+}
+
+fn policy_quote(suffix: &str, limit_cost_units: u64) -> ReserveRequestAttemptFundsInput {
+    let mut q = quote(suffix);
+    q.usage_policy = Some(RequestFundsUsagePolicy {
+        subject_id: "owner".into(),
+        reservation_token: "request-policy-context".into(),
+        admitted_at_unix_secs: 100,
+        retain_until_unix_secs: 1_000_000,
+        windows: vec![UsagePolicyCostWindow {
+            window_id: "month".into(),
+            starts_at_unix_secs: 0,
+            ends_at_unix_secs: 1_000_000,
+            limit_cost_units,
+        }],
+    });
+    q
+}
+
+#[tokio::test]
+async fn attempt_quota_retries_count_known_actual_plus_unknown_holds() {
+    for limit in [10_000_000, 20_000_000] {
+        let (repo, _) = fixture(0.20);
+        let a = policy_quote("a", limit);
+        let b = policy_quote("b", limit);
+        assert!(matches!(
+            repo.reserve_request_attempt_funds(a.clone()).await.unwrap(),
+            ReserveRequestAttemptFundsOutcome::Reserved { .. }
+        ));
+        repo.mark_request_attempt_funds_dispatched(a.identity())
+            .await
+            .unwrap();
+        repo.record_request_attempt_funds_outcome(facts(&a, None))
+            .await
+            .unwrap();
+        let admission = repo.reserve_request_attempt_funds(b.clone()).await.unwrap();
+        if limit == 10_000_000 {
+            assert_eq!(
+                admission,
+                ReserveRequestAttemptFundsOutcome::UsagePolicyRejected {
+                    window_index: 0,
+                    limit_cost_units: limit,
+                    used_cost_units: 8_000_000,
+                }
+            );
+            assert_eq!(repo.funds.read().unwrap().len(), 1);
+            assert_eq!(repo.cost_reservations.read().unwrap().len(), 1);
+            continue;
+        }
+        assert!(matches!(
+            admission,
+            ReserveRequestAttemptFundsOutcome::Reserved { .. }
+        ));
+        repo.mark_request_attempt_funds_dispatched(b.identity())
+            .await
+            .unwrap();
+        let mut b_facts = facts(&b, Some(6_000_000));
+        b_facts.facts.execution.status = RequestAttemptExecutionStatus::Cancelled;
+        repo.record_request_attempt_funds_outcome(b_facts)
+            .await
+            .unwrap();
+        repo.close_request_funds_admission(CloseRequestFundsAdmissionInput {
+            identity: b.identity(),
+            closed_at_unix_secs: 102,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.cost_reservations.read().unwrap()[&a.quote.identity.reservation_token].state,
+            UsagePolicyCostReservationState::Reserved
+        );
+        let late = facts(&a, Some(7_000_000));
+        repo.record_request_attempt_funds_outcome(late.clone())
+            .await
+            .unwrap();
+        let quotas = repo.cost_reservations.read().unwrap().clone();
+        assert_eq!(
+            quotas
+                .values()
+                .map(|r| r.actual_cost_units.unwrap())
+                .sum::<u64>(),
+            13_000_000
+        );
+        assert!(quotas
+            .values()
+            .all(|r| r.state == UsagePolicyCostReservationState::Finalized));
+        repo.record_request_attempt_funds_outcome(late)
+            .await
+            .unwrap();
+        assert_eq!(*repo.cost_reservations.read().unwrap(), quotas);
+        assert!(matches!(
+            repo.reserve_request_attempt_funds(a).await.unwrap(),
+            ReserveRequestAttemptFundsOutcome::Reserved { .. }
+        ));
+        assert_eq!(*repo.cost_reservations.read().unwrap(), quotas);
+    }
+}
+
+#[tokio::test]
+async fn attempt_quota_freezes_policy_absence_and_owns_legacy_retention() {
+    let (repo, _) = fixture(0.20);
+    let a = policy_quote("a", 10_000_000);
+    repo.reserve_request_attempt_funds(a.clone()).await.unwrap();
+    repo.mark_request_attempt_funds_dispatched(a.identity())
+        .await
+        .unwrap();
+    repo.record_request_attempt_funds_outcome(facts(&a, None))
+        .await
+        .unwrap();
+    for change in 0..4 {
+        let mut b = policy_quote("b", 10_000_000);
+        match change {
+            0 => b.usage_policy = None,
+            1 => b.usage_policy.as_mut().unwrap().reservation_token = "changed-context".into(),
+            2 => b.usage_policy.as_mut().unwrap().windows[0].limit_cost_units = 20_000_000,
+            _ => b.usage_policy.as_mut().unwrap().admitted_at_unix_secs = 99,
+        }
+        assert_eq!(
+            repo.reserve_request_attempt_funds(b).await.unwrap(),
+            ReserveRequestAttemptFundsOutcome::Conflict
+        );
+    }
+    let legacy = a.usage_policy.as_ref().unwrap().cost_reservation(&a.quote);
+    assert_eq!(
+        repo.reserve_usage_policy_cost(legacy.clone())
+            .await
+            .unwrap(),
+        ReserveUsagePolicyCostOutcome::Conflict
+    );
+    assert!(repo
+        .reconcile_usage_policy_cost(ReconcileUsagePolicyCostInput {
+            request_id: legacy.request_id.clone(),
+            subject_id: legacy.subject_id.clone(),
+            reservation_token: legacy.reservation_token.clone(),
+            actual_cost_units: 0,
+            terminal_state: UsagePolicyCostReservationState::Released,
+            finalized_at_unix_secs: 200,
+        })
+        .await
+        .is_err());
+    // Simulate both old TTL/retention dates being elapsed. The linked Unknown
+    // must still influence a later admission in the same calendar window.
+    {
+        let mut quotas = repo.cost_reservations.write().unwrap();
+        let quota = quotas.get_mut(&legacy.reservation_token).unwrap();
+        quota.reservation_expires_at_unix_secs = 101;
+        quota.retain_until_unix_secs = 101;
+    }
+    assert_eq!(
+        repo.cleanup_usage_policy_cost_reservations(200_000, 100)
+            .await
+            .unwrap(),
+        0
+    );
+    let mut next = legacy;
+    next.request_id = "another-request".into();
+    next.reservation_token = "another-token".into();
+    next.admitted_at_unix_secs = 200_000;
+    assert_eq!(
+        repo.reserve_usage_policy_cost(next).await.unwrap(),
+        ReserveUsagePolicyCostOutcome::Rejected {
+            window_index: 0,
+            limit_cost_units: 10_000_000,
+            used_cost_units: 8_000_000,
+        }
+    );
+    let (no_policy_repo, _) = fixture(0.20);
+    no_policy_repo
+        .reserve_request_attempt_funds(quote("a"))
+        .await
+        .unwrap();
+    assert_eq!(
+        no_policy_repo
+            .reserve_request_attempt_funds(policy_quote("b", 20_000_000))
+            .await
+            .unwrap(),
+        ReserveRequestAttemptFundsOutcome::Conflict
+    );
+}
+
+#[tokio::test]
+async fn attempt_quota_wallet_rejection_and_prepared_cancellation_leave_no_leak() {
+    let (repo, _) = fixture(0.01);
+    let a = policy_quote("a", 20_000_000);
+    assert!(matches!(
+        repo.reserve_request_attempt_funds(a.clone()).await.unwrap(),
+        ReserveRequestAttemptFundsOutcome::Insufficient { .. }
+    ));
+    assert!(repo.cost_reservations.read().unwrap().is_empty());
+    assert!(repo.funds.read().unwrap().is_empty());
+    let (repo, _) = fixture(0.20);
+    repo.reserve_request_attempt_funds(a.clone()).await.unwrap();
+    let mut cancelled = facts(&a, None);
+    cancelled.facts.execution.status = RequestAttemptExecutionStatus::Cancelled;
+    cancelled.facts.outcome = RequestAttemptFinancialOutcome::NoCharge;
+    repo.record_request_attempt_funds_outcome(cancelled.clone())
+        .await
+        .unwrap();
+    repo.record_request_attempt_funds_outcome(cancelled)
+        .await
+        .unwrap();
+    let quota = repo.cost_reservations.read().unwrap()[&a.quote.identity.reservation_token].clone();
+    assert_eq!(
+        (quota.state, quota.actual_cost_units),
+        (UsagePolicyCostReservationState::Released, Some(0))
+    );
+    let mut b = policy_quote("b", 20_000_000);
+    b.quote.authorized_cost_units = 20_000_000;
+    assert!(matches!(
+        repo.reserve_request_attempt_funds(b).await.unwrap(),
+        ReserveRequestAttemptFundsOutcome::Reserved { .. }
+    ));
+}
+
+#[tokio::test]
+async fn attempt_quota_counts_over_quote_actual_without_refusing_incurred_cost() {
+    let (repo, _) = fixture(0.20);
+    let a = policy_quote("a", 10_000_000);
+    repo.reserve_request_attempt_funds(a.clone()).await.unwrap();
+    repo.mark_request_attempt_funds_dispatched(a.identity())
+        .await
+        .unwrap();
+    repo.record_request_attempt_funds_outcome(facts(&a, Some(12_000_000)))
+        .await
+        .unwrap();
+    let quota = repo.cost_reservations.read().unwrap()[&a.quote.identity.reservation_token].clone();
+    assert_eq!(quota.actual_cost_units, Some(12_000_000));
+    assert_eq!(
+        repo.funds.read().unwrap()[&a.quote.identity.reservation_token].collected_cost_units,
+        8_000_000
+    );
+    assert_eq!(
+        repo.reserve_request_attempt_funds(policy_quote("b", 10_000_000))
+            .await
+            .unwrap(),
+        ReserveRequestAttemptFundsOutcome::UsagePolicyRejected {
+            window_index: 0,
+            limit_cost_units: 10_000_000,
+            used_cost_units: 12_000_000,
+        }
+    );
+}
+
+#[tokio::test]
+async fn attempt_quota_serializes_distinct_external_requests() {
+    let (repo, initial_usage) = fixture(0.20);
+    let a_parent = initial_usage
+        .find_by_request_id("request")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut b_parent = a_parent.clone();
+    b_parent.id = "usage-b".into();
+    b_parent.request_id = "request-b".into();
+    let usage = Arc::new(InMemoryUsageReadRepository::seed([a_parent, b_parent]));
+    let repo = Arc::new(repo.with_usage_repository(usage));
+    let a = policy_quote("a", 10_000_000);
+    let mut b = policy_quote("b", 10_000_000);
+    b.quote.identity.request_id = "request-b".into();
+    b.usage_policy.as_mut().unwrap().reservation_token = "context-b".into();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let run = |q| {
+        let repo = Arc::clone(&repo);
+        let barrier = Arc::clone(&barrier);
+        tokio::task::spawn_blocking(move || {
+            barrier.wait();
+            super::reserve(&repo, q).unwrap()
+        })
+    };
+    let (a, b) = tokio::join!(run(a), run(b));
+    let outcomes = [a.unwrap(), b.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|r| matches!(r, ReserveRequestAttemptFundsOutcome::Reserved { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|r| matches!(
+                r,
+                ReserveRequestAttemptFundsOutcome::UsagePolicyRejected {
+                    used_cost_units: 8_000_000,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(repo.funds.read().unwrap().len(), 1);
+    assert_eq!(repo.cost_reservations.read().unwrap().len(), 1);
 }
 
 fn facts(

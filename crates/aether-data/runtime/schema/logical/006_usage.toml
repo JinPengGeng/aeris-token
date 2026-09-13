@@ -1197,6 +1197,12 @@ name = "admitted_at"
 type = "timestamp"
 
 [[table.usage_cost_reservations.columns]]
+name = "attempt_reservation_token"
+type = "text"
+length = 128
+nullable = true
+
+[[table.usage_cost_reservations.columns]]
 name = "reserved_cost_units"
 type = "int64"
 
@@ -1253,6 +1259,18 @@ columns = ["subject_id"]
 references_table = "users"
 references_columns = ["id"]
 on_delete = "cascade"
+
+[[table.usage_cost_reservations.indexes]]
+name = "usage_cost_reservations_attempt_token_idx"
+columns = ["attempt_reservation_token"]
+unique = true
+
+[[table.usage_cost_reservations.foreign_keys]]
+name = "usage_cost_reservations_attempt_token_fkey"
+columns = ["attempt_reservation_token"]
+references_table = "request_fund_reservations"
+references_columns = ["reservation_token"]
+on_delete = "restrict"
 
 [table.usage_request_admissions]
 domain = "usage"

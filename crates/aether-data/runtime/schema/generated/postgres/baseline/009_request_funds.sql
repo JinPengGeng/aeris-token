@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS public.request_fund_reservations (
     model_id character varying(128),
     dispatched_at timestamp with time zone,
     terminal_facts jsonb,
+    usage_policy jsonb,
     wallet_id character varying(64),
     quote jsonb NOT NULL,
     state character varying(32) NOT NULL,

@@ -183,9 +183,19 @@ pub(super) fn reserve(
         .ok_or_else(|| invalid("attempt admission requires usage repository"))?;
     usage.with_attempt_parent(&input.quote.identity.request_id, |parent, summary| {
         parent_matches(parent, &input.quote.identity)?;
+        let previous_attempts = all(repo, &input.quote.identity.request_id);
+        if previous_attempts
+            .iter()
+            .any(|attempt| attempt.usage_policy != input.usage_policy)
+        {
+            return Ok(ReserveRequestAttemptFundsOutcome::Conflict);
+        }
         if let Some(existing) = get(repo, &input.identity())? {
             return Ok(
-                if existing.provider == input.provider && existing.funds.quote == input.quote {
+                if existing.provider == input.provider
+                    && existing.funds.quote == input.quote
+                    && existing.usage_policy == input.usage_policy
+                {
                     ReserveRequestAttemptFundsOutcome::Reserved {
                         reservation: Box::new(existing),
                     }
@@ -200,8 +210,59 @@ pub(super) fn reserve(
         if summary.is_none() && parent.billing_status != "pending" {
             return Ok(ReserveRequestAttemptFundsOutcome::Conflict);
         }
-        if all(repo, &input.quote.identity.request_id).len() >= 64 {
+        if previous_attempts.len() >= 64 {
             return Err(invalid("request attempt count exceeds 64"));
+        }
+        // Holding this guard until both writes finish serializes joint funding
+        // with ordinary quota-only writers. Validate before mutating either map.
+        let mut quotas = repo
+            .cost_reservations
+            .write()
+            .expect("cost reservations lock");
+        let quota = input
+            .usage_policy
+            .as_ref()
+            .map(|policy| policy.cost_reservation(&input.quote));
+        if let Some(quota) = &quota {
+            if quotas.contains_key(&quota.reservation_token) {
+                return Ok(ReserveRequestAttemptFundsOutcome::Conflict);
+            }
+            for (window_index, window) in quota.windows.iter().enumerate() {
+                let used_cost_units = quotas
+                    .values()
+                    .filter(|reservation| {
+                        reservation.subject_id == quota.subject_id
+                            && reservation.admitted_at_unix_secs >= window.starts_at_unix_secs
+                            && reservation.admitted_at_unix_secs < window.ends_at_unix_secs
+                    })
+                    .try_fold(0_u64, |sum, reservation| {
+                        let amount = match reservation.state {
+                            UsagePolicyCostReservationState::Finalized => {
+                                reservation.actual_cost_units.unwrap_or(0)
+                            }
+                            UsagePolicyCostReservationState::Reserved
+                                if repo.is_attempt_cost_token(&reservation.reservation_token)
+                                    || reservation.reservation_expires_at_unix_secs
+                                        > quota.admitted_at_unix_secs =>
+                            {
+                                reservation.reserved_cost_units
+                            }
+                            _ => 0,
+                        };
+                        sum.checked_add(amount)
+                            .ok_or_else(|| invalid("attempt policy cost overflow"))
+                    })?;
+                if used_cost_units
+                    .checked_add(quota.reserved_cost_units)
+                    .is_none_or(|total| total > window.limit_cost_units)
+                {
+                    return Ok(ReserveRequestAttemptFundsOutcome::UsagePolicyRejected {
+                        window_index,
+                        limit_cost_units: window.limit_cost_units,
+                        used_cost_units,
+                    });
+                }
+            }
         }
         match funding::reserve_inner(repo, input.quote.clone(), Some(&input.attempt_id))? {
             ReserveRequestFundsOutcome::Reserved { reservation } => {
@@ -211,6 +272,7 @@ pub(super) fn reserve(
                     funds: *reservation,
                     dispatched_at_unix_secs: None,
                     terminal_facts: None,
+                    usage_policy: input.usage_policy.clone(),
                 };
                 repo.attempt_metadata
                     .write()
@@ -224,6 +286,24 @@ pub(super) fn reserve(
                     summary,
                     &all(repo, &input.quote.identity.request_id),
                 )?;
+                if let Some(quota) = quota {
+                    quotas.insert(
+                        quota.reservation_token.clone(),
+                        StoredUsagePolicyCostReservation {
+                            request_id: quota.request_id,
+                            subject_id: quota.subject_id,
+                            reservation_token: quota.reservation_token,
+                            admitted_at_unix_secs: quota.admitted_at_unix_secs,
+                            reserved_cost_units: quota.reserved_cost_units,
+                            actual_cost_units: None,
+                            state: UsagePolicyCostReservationState::Reserved,
+                            reservation_expires_at_unix_secs: quota
+                                .reservation_expires_at_unix_secs,
+                            retain_until_unix_secs: quota.retain_until_unix_secs,
+                            finalized_at_unix_secs: None,
+                        },
+                    );
+                }
                 Ok(ReserveRequestAttemptFundsOutcome::Reserved {
                     reservation: Box::new(stored),
                 })
@@ -329,6 +409,23 @@ pub(super) fn outcome(
             candidate.terminal_facts = Some(input.facts.clone());
         }
         apply_summary(&mut parent.clone(), &mut summary.clone(), &candidates)?;
+        let mut quotas = repo
+            .cost_reservations
+            .write()
+            .expect("cost reservations lock");
+        if let Some(policy) = &stored.usage_policy {
+            let quota = quotas
+                .get(&input.identity.request.reservation_token)
+                .ok_or_else(|| invalid("attempt usage policy reservation is missing"))?;
+            if quota.subject_id != policy.subject_id
+                || quota.request_id != input.identity.request.request_id
+                || quota.state != UsagePolicyCostReservationState::Reserved
+            {
+                return Err(invalid(
+                    "attempt usage policy reservation is not owned or active",
+                ));
+            }
+        }
         match &input.facts.outcome {
             RequestAttemptFinancialOutcome::Unknown => {
                 if stored.dispatched_at_unix_secs.is_none() {
@@ -368,6 +465,26 @@ pub(super) fn outcome(
                     Some(&input.identity.attempt_id),
                 )?
                 .ok_or_else(|| invalid("attempt funds missing"))?;
+            }
+        }
+        if stored.usage_policy.is_some() {
+            let terminal = match &input.facts.outcome {
+                RequestAttemptFinancialOutcome::Unknown => None,
+                RequestAttemptFinancialOutcome::NoCharge => {
+                    Some((UsagePolicyCostReservationState::Released, 0))
+                }
+                RequestAttemptFinancialOutcome::Charged { usage } => Some((
+                    UsagePolicyCostReservationState::Finalized,
+                    usage.actual_cost_units,
+                )),
+            };
+            if let Some((state, amount)) = terminal {
+                let quota = quotas
+                    .get_mut(&input.identity.request.reservation_token)
+                    .expect("quota validated before financial mutation");
+                quota.state = state;
+                quota.actual_cost_units = Some(amount);
+                quota.finalized_at_unix_secs = Some(input.finalized_at_unix_secs);
             }
         }
         stored.terminal_facts = Some(input.facts.clone());

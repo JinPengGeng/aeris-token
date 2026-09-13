@@ -258,6 +258,7 @@ CREATE TABLE IF NOT EXISTS public.usage_cost_reservations (
     subject_id character varying(128) NOT NULL,
     reservation_token character varying(128) NOT NULL,
     admitted_at timestamp with time zone NOT NULL,
+    attempt_reservation_token character varying(128),
     reserved_cost_units bigint NOT NULL,
     actual_cost_units bigint,
     state character varying(20) NOT NULL,
@@ -273,7 +274,9 @@ CREATE INDEX IF NOT EXISTS usage_cost_reservations_request_id_idx ON public.usag
 CREATE INDEX IF NOT EXISTS usage_cost_reservations_subject_admitted_at_idx ON public.usage_cost_reservations USING btree (subject_id, admitted_at);
 CREATE INDEX IF NOT EXISTS usage_cost_reservations_reservation_expires_at_idx ON public.usage_cost_reservations USING btree (reservation_expires_at);
 CREATE INDEX IF NOT EXISTS usage_cost_reservations_retain_until_token_idx ON public.usage_cost_reservations USING btree (retain_until, reservation_token);
+CREATE UNIQUE INDEX IF NOT EXISTS usage_cost_reservations_attempt_token_idx ON public.usage_cost_reservations USING btree (attempt_reservation_token);
 ALTER TABLE ONLY public.usage_cost_reservations ADD CONSTRAINT usage_cost_reservations_subject_id_fkey FOREIGN KEY (subject_id) REFERENCES public.users(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.usage_cost_reservations ADD CONSTRAINT usage_cost_reservations_attempt_token_fkey FOREIGN KEY (attempt_reservation_token) REFERENCES public.request_fund_reservations(reservation_token) ON DELETE RESTRICT;
 
 CREATE TABLE IF NOT EXISTS public.usage_request_admissions (
     request_id character varying(128) NOT NULL,

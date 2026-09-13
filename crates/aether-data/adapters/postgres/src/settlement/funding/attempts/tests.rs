@@ -7,6 +7,9 @@ use futures_util::FutureExt;
 use sqlx::PgPool;
 use std::{panic::AssertUnwindSafe, sync::Arc};
 
+#[path = "quota_tests.rs"]
+mod quota;
+
 async fn fixture() -> (PgPool, PgPool, PgPool, String) {
     let (admin, first, second, schema) = super::super::tests::fixture().await;
     for table in [
@@ -14,6 +17,7 @@ async fn fixture() -> (PgPool, PgPool, PgPool, String) {
         "providers",
         "provider_api_keys",
         "global_models",
+        "usage_cost_reservations",
     ] {
         sqlx::query(&format!(
             "CREATE TABLE {table} (LIKE public.{table} INCLUDING ALL)"
@@ -57,6 +61,7 @@ fn parent(request: &str) -> UpsertUsageRecord {
 
 fn quote(request: &str, suffix: &str) -> ReserveRequestAttemptFundsInput {
     ReserveRequestAttemptFundsInput {
+        usage_policy: None,
         attempt_id: uuid::Uuid::new_v4().to_string(),
         provider: RequestAttemptProvider {
             provider_id: format!("p-{suffix}"),

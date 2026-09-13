@@ -263,6 +263,7 @@ SELECT
   request_id,
   subject_id,
   reservation_token,
+  attempt_reservation_token,
   CAST(EXTRACT(EPOCH FROM admitted_at) AS BIGINT) AS admitted_at_unix_secs,
   reserved_cost_units,
   actual_cost_units,
@@ -364,9 +365,9 @@ async fn usage_policy_cost_window_totals(
         .push(" AND admitted_at >= TO_TIMESTAMP(").push_bind(earliest)
         .push("::double precision) AND admitted_at < TO_TIMESTAMP(").push_bind(latest)
         .push("::double precision) AND reservation_token <> ").push_bind(input.reservation_token.clone())
-        .push(" AND (state = 'finalized' OR (state = 'reserved' AND reservation_expires_at > TO_TIMESTAMP(")
+        .push(" AND (state = 'finalized' OR (state = 'reserved' AND (attempt_reservation_token IS NOT NULL OR reservation_expires_at > TO_TIMESTAMP(")
         .push_bind(usage_policy_cost_i64(input.admitted_at_unix_secs, "usage policy admitted_at")?)
-        .push("::double precision)))");
+        .push("::double precision))))");
     query.build().fetch_one(&mut **tx).await.map_postgres_err()
 }
 
@@ -1067,6 +1068,12 @@ WHERE retain_until <= TO_TIMESTAMP($1::double precision)
                         .as_ref()
                         .map(usage_policy_cost_reservation_from_postgres_row)
                         .transpose()?;
+                    if existing_row.as_ref().is_some_and(|row| {
+                        row.get::<Option<String>, _>("attempt_reservation_token")
+                            .is_some()
+                    }) {
+                        return Ok(ReserveUsagePolicyCostOutcome::Conflict);
+                    }
                     if let Some(existing) = existing.as_ref() {
                         if existing.request_id != input.request_id
                             || existing.subject_id != input.subject_id
@@ -1190,6 +1197,16 @@ ON CONFLICT (reservation_token) DO UPDATE SET
                         return Ok(None);
                     };
                     let mut reservation = usage_policy_cost_reservation_from_postgres_row(&row)?;
+                    if row
+                        .try_get::<Option<String>, _>("attempt_reservation_token")
+                        .map_postgres_err()?
+                        .is_some()
+                    {
+                        return Err(DataLayerError::InvalidInput(
+                            "attempt usage policy requires its financial outcome writer"
+                                .to_string(),
+                        ));
+                    }
                     if reservation.request_id != input.request_id
                         || reservation.subject_id != input.subject_id
                     {
@@ -1250,10 +1267,12 @@ WHERE reservation_token = $1
             r#"
 DELETE FROM usage_cost_reservations
 WHERE retain_until <= TO_TIMESTAMP($1::double precision)
+  AND attempt_reservation_token IS NULL
   AND reservation_token IN (
   SELECT reservation_token
   FROM usage_cost_reservations
   WHERE retain_until <= TO_TIMESTAMP($1::double precision)
+    AND attempt_reservation_token IS NULL
   ORDER BY retain_until, reservation_token
   LIMIT $2
 )

@@ -43,6 +43,10 @@ run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt
 run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_admission_entitlements_and_concurrent_settlement
 run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_quote_mismatch_preserves_known_charge_and_audit
 run_test aether-data-postgres settlement::funding::attempts::tests::live_attempt_funds_settled_parent_accepts_final_lifecycle_without_financial_mutation
+run_test aether-data-postgres settlement::funding::attempts::tests::quota::live_attempt_quota_unknown_retry_late_charge_and_replay
+run_test aether-data-postgres settlement::funding::attempts::tests::quota::live_attempt_quota_freezes_policy_and_survives_legacy_expiry
+run_test aether-data-postgres settlement::funding::attempts::tests::quota::live_attempt_quota_concurrent_requests_and_atomic_rollback
+run_test aether-data-postgres settlement::funding::attempts::tests::quota::live_attempt_quota_entitlement_admission_and_outcome_rollback
 
 # Credit flows share the migrated schema but isolate their rows in pg_temp.
 # Keep each existing regression visible as an exact target in required CI.

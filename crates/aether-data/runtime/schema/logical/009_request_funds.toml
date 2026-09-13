@@ -44,6 +44,10 @@ name = "terminal_facts"
 type = "json"
 nullable = true
 [[table.request_fund_reservations.columns]]
+name = "usage_policy"
+type = "json"
+nullable = true
+[[table.request_fund_reservations.columns]]
 name = "wallet_id"
 type = "text_id"
 length = 64

@@ -45,7 +45,7 @@ async fn load_attempt(
     let Some(attempt_id) = funds.attempt_id.clone() else {
         return Err(invalid("legacy reservation is not an attempt"));
     };
-    let row = sqlx::query("SELECT candidate_id, provider_id, provider_api_key_id, model_id, terminal_facts, EXTRACT(EPOCH FROM dispatched_at)::bigint AS dispatched_at_unix_secs FROM request_fund_reservations WHERE reservation_token = $1")
+    let row = sqlx::query("SELECT candidate_id, provider_id, provider_api_key_id, model_id, terminal_facts, usage_policy, EXTRACT(EPOCH FROM dispatched_at)::bigint AS dispatched_at_unix_secs FROM request_fund_reservations WHERE reservation_token = $1")
         .bind(token).fetch_one(&mut **tx).await.map_postgres_err()?;
     Ok(Some(StoredRequestAttemptFunds {
         attempt_id,
@@ -62,6 +62,11 @@ async fn load_attempt(
             .map(|v| v as u64),
         terminal_facts: row
             .try_get::<Option<Value>, _>("terminal_facts")
+            .map_postgres_err()?
+            .map(decode)
+            .transpose()?,
+        usage_policy: row
+            .try_get::<Option<Value>, _>("usage_policy")
             .map_postgres_err()?
             .map(decode)
             .transpose()?,
@@ -94,9 +99,23 @@ pub(crate) async fn reserve(
     tx: &mut PostgresTransaction,
     input: ReserveRequestAttemptFundsInput,
 ) -> Result<ReserveRequestAttemptFundsOutcome, DataLayerError> {
+    // Joint admission and outcomes lock parent -> policy subject -> financial
+    // sources -> reservations. Legacy quota transactions lock only subject and
+    // quota; no path may acquire a parent/financial lock after that legacy call.
     let Some(parent) = lock_parent(tx, &input.quote.identity).await? else {
         return Err(invalid("attempt admission requires persisted parent usage"));
     };
+    let policy_json = input.usage_policy.as_ref().map(encode).transpose()?;
+    let changed_policy: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM request_fund_reservations WHERE request_id = $1 AND attempt_id IS NOT NULL AND usage_policy IS DISTINCT FROM $2::jsonb)")
+        .bind(&input.quote.identity.request_id).bind(&policy_json).fetch_one(&mut **tx).await.map_postgres_err()?;
+    if changed_policy {
+        return Ok(ReserveRequestAttemptFundsOutcome::Conflict);
+    }
+    if let Some(policy) = &input.usage_policy {
+        if !super::super::lock_usage_policy_subject_postgres(tx, &policy.subject_id).await? {
+            return Err(super::super::usage_policy_subject_missing());
+        }
+    }
     let mode: String = parent.try_get("billing_mode").map_postgres_err()?;
     if mode == "legacy" {
         let prior: bool = sqlx::query_scalar(
@@ -130,7 +149,10 @@ pub(crate) async fn reserve(
             return Ok(ReserveRequestAttemptFundsOutcome::Conflict);
         };
         return Ok(
-            if stored.funds.quote == input.quote && stored.provider == input.provider {
+            if stored.funds.quote == input.quote
+                && stored.provider == input.provider
+                && stored.usage_policy == input.usage_policy
+            {
                 ReserveRequestAttemptFundsOutcome::Reserved {
                     reservation: Box::new(stored),
                 }
@@ -154,8 +176,50 @@ pub(crate) async fn reserve(
     if count >= 64 {
         return Err(invalid("request attempt count exceeds 64"));
     }
+    if let Some(policy) = &input.usage_policy {
+        let quota = policy.cost_reservation(&input.quote);
+        let collision: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM usage_cost_reservations WHERE reservation_token = $1)",
+        )
+        .bind(&quota.reservation_token)
+        .fetch_one(&mut **tx)
+        .await
+        .map_postgres_err()?;
+        if collision {
+            return Ok(ReserveRequestAttemptFundsOutcome::Conflict);
+        }
+        let totals = super::super::usage_policy_cost_window_totals(tx, &quota).await?;
+        for (window_index, window) in quota.windows.iter().enumerate() {
+            let used_cost_units = super::super::usage_policy_cost_u64(
+                totals.try_get(window_index).map_postgres_err()?,
+                "attempt policy used cost",
+            )?;
+            if used_cost_units
+                .checked_add(quota.reserved_cost_units)
+                .is_none_or(|total| total > window.limit_cost_units)
+            {
+                return Ok(ReserveRequestAttemptFundsOutcome::UsagePolicyRejected {
+                    window_index,
+                    limit_cost_units: window.limit_cost_units,
+                    used_cost_units,
+                });
+            }
+        }
+    }
     match reserve_inner(tx, input.quote.clone(), Some(&input)).await? {
         ReserveRequestFundsOutcome::Reserved { .. } => {
+            sqlx::query("UPDATE request_fund_reservations SET usage_policy = $2 WHERE reservation_token = $1")
+                .bind(&input.quote.identity.reservation_token).bind(&policy_json)
+                .execute(&mut **tx).await.map_postgres_err()?;
+            if let Some(policy) = &input.usage_policy {
+                let quota = policy.cost_reservation(&input.quote);
+                // Same transaction as the financial hold; no compensation or
+                // cancellation window exists between these durable writes.
+                sqlx::query("INSERT INTO usage_cost_reservations (request_id, subject_id, reservation_token, attempt_reservation_token, admitted_at, reserved_cost_units, state, reservation_expires_at, retain_until) VALUES ($1,$2,$3,$3,to_timestamp($4::double precision),$5,'reserved',to_timestamp($6::double precision),to_timestamp($6::double precision))")
+                    .bind(&quota.request_id).bind(&quota.subject_id).bind(&quota.reservation_token)
+                    .bind(quota.admitted_at_unix_secs as i64).bind(quota.reserved_cost_units as i64)
+                    .bind(quota.retain_until_unix_secs as i64).execute(&mut **tx).await.map_postgres_err()?;
+            }
             sqlx::query("UPDATE usage SET billing_mode = 'attempt_funds' WHERE request_id = $1")
                 .bind(&input.quote.identity.request_id)
                 .execute(&mut **tx)
@@ -243,6 +307,20 @@ pub(crate) async fn outcome(
     if lock_parent(tx, &input.identity.request).await?.is_none() {
         return Ok(None);
     }
+    let policy: Option<Value> = sqlx::query_scalar(
+        "SELECT usage_policy FROM request_fund_reservations WHERE reservation_token = $1",
+    )
+    .bind(&input.identity.request.reservation_token)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_postgres_err()?
+    .flatten();
+    if let Some(policy) = policy {
+        let policy: RequestFundsUsagePolicy = decode(policy)?;
+        if !super::super::lock_usage_policy_subject_postgres(tx, &policy.subject_id).await? {
+            return Err(super::super::usage_policy_subject_missing());
+        }
+    }
     lock_finances(tx, &input.identity.request.reservation_token).await?;
     let Some(mut previous) = owned_attempt(tx, &input.identity).await? else {
         return Ok(None);
@@ -262,6 +340,16 @@ pub(crate) async fn outcome(
     }
     if previous.funds.settlement.is_some() || previous.funds.state == RequestFundsState::Released {
         return Err(invalid("attempt is already financially terminal"));
+    }
+    if let Some(policy) = &previous.usage_policy {
+        let owned: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM usage_cost_reservations WHERE reservation_token=$1 AND attempt_reservation_token=$1 AND subject_id=$2 AND request_id=$3 AND state='reserved')")
+            .bind(&input.identity.request.reservation_token).bind(&policy.subject_id)
+            .bind(&input.identity.request.request_id).fetch_one(&mut **tx).await.map_postgres_err()?;
+        if !owned {
+            return Err(invalid(
+                "attempt usage policy reservation is missing or terminal",
+            ));
+        }
     }
     match &input.facts.outcome {
         RequestAttemptFinancialOutcome::Unknown => {
@@ -302,6 +390,25 @@ pub(crate) async fn outcome(
             finalize_inner(tx, settlement, Some(&input.identity.attempt_id))
                 .await?
                 .ok_or_else(|| invalid("attempt finalize lost parent usage"))?;
+        }
+    }
+    if previous.usage_policy.is_some() {
+        let terminal = match &input.facts.outcome {
+            RequestAttemptFinancialOutcome::Unknown => None,
+            RequestAttemptFinancialOutcome::NoCharge => Some(("released", 0)),
+            RequestAttemptFinancialOutcome::Charged { usage } => {
+                Some(("finalized", usage.actual_cost_units))
+            }
+        };
+        if let Some((state, amount)) = terminal {
+            let updated = sqlx::query("UPDATE usage_cost_reservations SET state=$2, actual_cost_units=$3, finalized_at=to_timestamp($4::double precision), updated_at=NOW() WHERE attempt_reservation_token=$1 AND reservation_token=$1 AND state='reserved'")
+                .bind(&input.identity.request.reservation_token).bind(state).bind(amount as i64)
+                .bind(input.finalized_at_unix_secs as i64).execute(&mut **tx).await.map_postgres_err()?.rows_affected();
+            if updated != 1 {
+                return Err(invalid(
+                    "attempt usage policy reservation is missing or terminal",
+                ));
+            }
         }
     }
     if previous.dispatched_at_unix_secs.is_some() {

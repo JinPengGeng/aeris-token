@@ -2,8 +2,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    RequestFundsIdentity, ReserveRequestFundsInput, StoredRequestFundsReservation,
-    MAX_REQUEST_FUNDS_UNITS,
+    RequestFundsIdentity, ReserveRequestFundsInput, ReserveUsagePolicyCostInput,
+    StoredRequestFundsReservation, UsagePolicyCostWindow, MAX_REQUEST_FUNDS_UNITS,
 };
 use crate::DataLayerError;
 
@@ -44,6 +44,68 @@ pub struct ReserveRequestAttemptFundsInput {
     pub attempt_id: String,
     pub provider: RequestAttemptProvider,
     pub quote: ReserveRequestFundsInput,
+    /// Frozen server admission policy. Absence is also frozen for this request.
+    #[serde(default)]
+    pub usage_policy: Option<RequestFundsUsagePolicy>,
+}
+
+/// Hard usage-policy cost is independent of wallet and entitlement funding.
+/// The context token identifies the original server admission, while each child
+/// quota reservation uses its own attempt funds token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestFundsUsagePolicy {
+    pub subject_id: String,
+    pub reservation_token: String,
+    pub admitted_at_unix_secs: u64,
+    pub retain_until_unix_secs: u64,
+    pub windows: Vec<UsagePolicyCostWindow>,
+}
+
+impl RequestFundsUsagePolicy {
+    pub fn cost_reservation(
+        &self,
+        quote: &ReserveRequestFundsInput,
+    ) -> ReserveUsagePolicyCostInput {
+        ReserveUsagePolicyCostInput {
+            request_id: quote.identity.request_id.clone(),
+            subject_id: self.subject_id.clone(),
+            reservation_token: quote.identity.reservation_token.clone(),
+            admitted_at_unix_secs: self.admitted_at_unix_secs,
+            reserved_cost_units: quote.authorized_cost_units,
+            // Linked unresolved attempts do not expire. The field preserves the
+            // legacy shape; their explicit linkage owns accounting and retention.
+            reservation_expires_at_unix_secs: self.retain_until_unix_secs,
+            retain_until_unix_secs: self.retain_until_unix_secs,
+            windows: self.windows.clone(),
+        }
+    }
+
+    fn validate(&self, quote: &ReserveRequestFundsInput) -> Result<(), DataLayerError> {
+        if quote.identity.api_key_is_standalone
+            || quote.identity.user_id.as_deref() != Some(self.subject_id.as_str())
+            || self.reservation_token.trim().is_empty()
+            || self.reservation_token.len() > 128
+            || self.reservation_token == quote.identity.reservation_token
+            || self.admitted_at_unix_secs > quote.admitted_at_unix_secs
+            || self.retain_until_unix_secs > i64::MAX as u64
+            || self.windows.iter().any(|window| {
+                window.ends_at_unix_secs > self.retain_until_unix_secs
+                    || window.ends_at_unix_secs > i64::MAX as u64
+            })
+        {
+            return Err(invalid(
+                "attempt usage policy has an invalid owner, context or window",
+            ));
+        }
+        if serde_json::to_vec(self)
+            .map_err(|_| invalid("attempt usage policy cannot be serialized"))?
+            .len()
+            > 32_768
+        {
+            return Err(invalid("attempt usage policy exceeds the storage bound"));
+        }
+        self.cost_reservation(quote).validate()
+    }
 }
 
 impl ReserveRequestAttemptFundsInput {
@@ -57,6 +119,9 @@ impl ReserveRequestAttemptFundsInput {
     pub fn validate(&self) -> Result<(), DataLayerError> {
         self.identity().validate()?;
         self.quote.validate()?;
+        if let Some(policy) = &self.usage_policy {
+            policy.validate(&self.quote)?;
+        }
         for value in [
             Some(self.provider.provider_id.as_str()),
             self.provider.provider_api_key_id.as_deref(),
@@ -191,6 +256,8 @@ pub struct StoredRequestAttemptFunds {
     pub funds: StoredRequestFundsReservation,
     pub dispatched_at_unix_secs: Option<u64>,
     pub terminal_facts: Option<RequestAttemptTerminalFacts>,
+    #[serde(default)]
+    pub usage_policy: Option<RequestFundsUsagePolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -201,6 +268,11 @@ pub enum ReserveRequestAttemptFundsOutcome {
     },
     Insufficient {
         available_cost_units: u64,
+    },
+    UsagePolicyRejected {
+        window_index: usize,
+        limit_cost_units: u64,
+        used_cost_units: u64,
     },
     WalletUnavailable,
     Conflict,
@@ -278,4 +350,85 @@ pub fn summarize_request_attempt_funds<'a>(
             attempt.funds.state == super::RequestFundsState::ReconciliationPending;
     }
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input() -> ReserveRequestAttemptFundsInput {
+        ReserveRequestAttemptFundsInput {
+            attempt_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            provider: RequestAttemptProvider {
+                provider_id: "provider".into(),
+                provider_api_key_id: None,
+                model_id: None,
+                candidate_id: None,
+            },
+            quote: ReserveRequestFundsInput {
+                identity: RequestFundsIdentity {
+                    reservation_token: "child-token".into(),
+                    request_id: "request".into(),
+                    user_id: Some("owner".into()),
+                    api_key_id: Some("key".into()),
+                    api_key_is_standalone: false,
+                },
+                authorized_cost_units: 8_000_000,
+                pricing_snapshot: serde_json::json!({"version":1}),
+                admitted_at_unix_secs: 101,
+            },
+            usage_policy: Some(RequestFundsUsagePolicy {
+                subject_id: "owner".into(),
+                reservation_token: "parent-context".into(),
+                admitted_at_unix_secs: 100,
+                retain_until_unix_secs: 200,
+                windows: vec![UsagePolicyCostWindow {
+                    window_id: "day".into(),
+                    starts_at_unix_secs: 0,
+                    ends_at_unix_secs: 200,
+                    limit_cost_units: 10_000_000,
+                }],
+            }),
+        }
+    }
+
+    #[test]
+    fn attempt_policy_capability_preserves_child_token_and_original_day() {
+        let input = input();
+        input.validate().unwrap();
+        let quota = input
+            .usage_policy
+            .as_ref()
+            .unwrap()
+            .cost_reservation(&input.quote);
+        assert_eq!(quota.reservation_token, "child-token");
+        assert_eq!(quota.admitted_at_unix_secs, 100);
+        assert_eq!(quota.reserved_cost_units, 8_000_000);
+        let mut legacy = serde_json::to_value(&input).unwrap();
+        legacy.as_object_mut().unwrap().remove("usage_policy");
+        let legacy: ReserveRequestAttemptFundsInput = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.usage_policy.is_none());
+        legacy.validate().unwrap();
+    }
+
+    #[test]
+    fn attempt_policy_rejects_foreign_owner_reused_context_and_truncated_retention() {
+        for change in 0..7 {
+            let mut input = input();
+            let policy = input.usage_policy.as_mut().unwrap();
+            match change {
+                0 => policy.subject_id = "other".into(),
+                1 => policy.reservation_token = "child-token".into(),
+                2 => policy.admitted_at_unix_secs = 102,
+                3 => policy.retain_until_unix_secs = 199,
+                4 => policy.windows.clear(),
+                5 => policy.windows[0].limit_cost_units = 0,
+                _ => input.quote.identity.api_key_is_standalone = true,
+            }
+            assert!(
+                input.validate().is_err(),
+                "mutation {change} must not be admitted"
+            );
+        }
+    }
 }
