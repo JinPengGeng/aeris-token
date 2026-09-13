@@ -349,6 +349,8 @@ async fn gateway_locally_denies_gemini_files_upload_control_sync_with_opt_in_hea
         .post(format!(
             "{gateway_url}/upload/v1beta/files?uploadType=resumable"
         ))
+        // Deliberately no auth reader: retain internal unresolved-context coverage.
+        .header("x-goog-api-key", "sk-context-reader-unavailable")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .header(http::header::CONTENT_TYPE, "application/octet-stream")
         .body("upload-body-bytes")
@@ -422,6 +424,8 @@ async fn gateway_locally_denies_gemini_files_upload_control_sync_without_opt_in_
         .post(format!(
             "{gateway_url}/upload/v1beta/files?uploadType=resumable"
         ))
+        // Deliberately no auth reader: retain internal unresolved-context coverage.
+        .header("x-goog-api-key", "sk-context-reader-unavailable")
         .header(http::header::CONTENT_TYPE, "application/octet-stream")
         .body("upload-body-bytes")
         .send()

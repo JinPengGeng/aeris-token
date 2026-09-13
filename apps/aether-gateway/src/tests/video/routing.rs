@@ -13,6 +13,10 @@ use crate::constants::{
 
 use super::{build_router, start_server};
 
+// Keep these runtime-miss fixtures in the unresolved internal context case:
+// the caller supplies a credential, while the gateway has no auth reader.
+const INTERNAL_AUTH_CONTEXT_TEST_BEARER: &str = "Bearer sk-context-reader-unavailable";
+
 #[tokio::test]
 async fn gateway_locally_denies_video_control_sync_even_with_opt_in_headers_when_execution_runtime_missing(
 ) {
@@ -61,6 +65,10 @@ async fn gateway_locally_denies_video_control_sync_even_with_opt_in_headers_when
 
     let response = reqwest::Client::new()
         .get(format!("{gateway_url}/v1/videos/task-123"))
+        .header(
+            http::header::AUTHORIZATION,
+            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
+        )
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .send()
         .await
@@ -137,6 +145,10 @@ async fn gateway_locally_denies_video_control_sync_without_opt_in_header_when_ex
 
     let response = reqwest::Client::new()
         .get(format!("{gateway_url}/v1/videos/task-123"))
+        .header(
+            http::header::AUTHORIZATION,
+            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
+        )
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .send()
         .await
@@ -207,6 +219,10 @@ async fn gateway_skips_video_get_control_sync_without_opt_in_header() {
 
     let response = reqwest::Client::new()
         .get(format!("{gateway_url}/v1/videos/task-123"))
+        .header(
+            http::header::AUTHORIZATION,
+            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
+        )
         .send()
         .await
         .expect("request should succeed");
