@@ -4,6 +4,7 @@ pub mod internal_gateway;
 mod plan;
 mod result;
 pub mod tunnel;
+pub mod tunnel_key_rotation;
 pub mod tunnel_security;
 mod usage;
 
