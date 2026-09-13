@@ -5,6 +5,33 @@ Scope: GitHub Project v2 `JinPengGeng/aeris-token Development` (project 1,
 
 ## Current Project reconciliation — 2026-09-13
 
+After #389 merged as `7b415fd6689d230c45a6f44da5e81bb98855b160`, a fresh
+paginated read returned 379 Project items. All 44 open fork issues have cards
+with Status, Priority, Area, Risk, Size and Decision. Issue labels show
+21 P1 / 23 P2 and 16 in progress / 18 triage / 10 blocked.
+
+The comparison found one lifecycle mismatch: #208's card still said In
+progress after its NUMERIC fixes were merged, while its remaining intake was
+labelled triage / Planned. The card was moved to Inbox to match that residual
+scope. #216's stale Planned decision was moved to Accepted for its active
+CI implementation. #253 is In progress / Accepted; #316 remains Inbox /
+Planned, with historical production impact still unknown.
+
+PR #379, #382, #387 and #389 cards are Done / Accepted. #388 has all six fields,
+is Ready with protected auto-merge, and awaits the checks for its updated head
+`4c5e2f85624f144ce085fc28ffdd4800573448cc`. #376's fixes passed independent
+review and earlier hosted checks; it still needs current-main synchronization.
+The snapshot has 13 open PRs, all non-draft with protected squash auto-merge.
+The [delivery TODO](delivery-todo.md) records the full queue and acceptance
+limits. Subsequent GitHub events supersede these counts.
+
+## Historical observations
+
+The sections below preserve earlier snapshots only. Current GitHub state and
+the reconciliation above govern subsequent transitions.
+
+### Earlier Project reconciliation before #362 and #383 merged
+
 The paginated Project inventory was read with `--limit 1000` (the CLI default
 returns only 30 items). All 45 open fork issues have cards. Issue labels show
 22 P1 / 23 P2 and 15 in progress / 19 triage / 11 blocked. Counts distinguish
@@ -34,10 +61,10 @@ and recreated in the fork as #385 before the redundant work was rejected.
 The incident is recorded; all subsequent mutations require an explicit fork
 repository argument.
 
-## Historical observations
+### Historical observations before consolidation
 
 The sections below preserve earlier snapshots only. The current inventory and
-review decisions above govern subsequent transitions.
+review decisions at the top of this document govern subsequent transitions.
 
 ## Earlier 2026-09-13 refresh (after PR #363 and new delivery slices)
 
