@@ -74,3 +74,20 @@ manifest SHA-256 为 `344a0dd57923d122d9d77f3731a9ccfda88f2391c9b640945909558d31
 Actions artifacts 保留期为一天，之后可从记录的提交在本 fork 构建分支重新 dispatch；
 本文件保留 run、提交、架构和摘要证据，交接不依赖原电脑的临时文件。
 未执行线上签名发布，也未在本机运行 Linux 二进制。回滚恢复 gateway-only nightly，不涉及数据迁移。
+
+### 合入 #402 后重新验证
+
+PR #402 修改了 tunnel 服务配置迁移，因此在合入主干后对
+`fa23cb537a177d38a1fb4026d8022c4dd4ccbc30` 重新 dispatch
+[run 34776917186](https://github.com/JinPengGeng/aeris-token/actions/runs/34776917186)。
+nightly 需要的两个 musl 平台均构建成功；下载后的 tar 内容、可执行位和静态 ELF 架构再次通过。
+
+| 归档 | 新 tar.gz SHA-256 | Actions artifact ID |
+| --- | --- | --- |
+| aether-tunnel-linux-musl-amd64.tar.gz | `5c20d0353bf30e56361b73929213401a6b97012be0e049c93845e190e9def79c` | 10324196798 |
+| aether-tunnel-linux-musl-arm64.tar.gz | `e62ea91b9e5a13bdaf565ed3e2e9a2baaa816738336d277e351aeafaadb8e587` | 10323688367 |
+
+两个新归档再次通过一次性 key 签名、生产 verifier 和严格归档摘要验证；manifest SHA-256 为
+`4d02fb1f42cbe6c0ff0802a4c515c6c08f333112a63e040b5a0a05070a1639eb`。测试私钥已清理。
+后续合入 #400 仅新增交接文档，未改变上述已编译源码、构建配置或签名实现；最终 PR head
+的 required checks 仍单独核验，不复用旧 head 状态。
