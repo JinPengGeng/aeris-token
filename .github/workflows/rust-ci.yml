@@ -30,12 +30,15 @@ on:
       - "tests/update_*_test.sh"
       - "tests/release_supply_chain_test.sh"
       - "tests/redis_durable_crash_drill.sh"
+      - "tests/metrics_acceptance_harness.py"
       - "tests/tunnel_installer_config_security_test.sh"
+      - "docs/operations/prometheus/**"
       - "tools/ci/**"
       - ".github/workflows/build-tunnel.yml"
       - ".github/workflows/deploy-pages.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/rust-ci.yml"
+      - ".github/workflows/prometheus-ci.yml"
   pull_request:
 
 concurrency:
