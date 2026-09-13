@@ -3,6 +3,110 @@
 Scope: GitHub Project v2 `JinPengGeng/aeris-token Development` (project 1,
 `PVT_kwHOAiijc84BgApR`), with no upstream changes.
 
+## Current Project reconciliation — 2026-09-13
+
+After #389 merged as `7b415fd6689d230c45a6f44da5e81bb98855b160`, a fresh
+paginated read returned 379 Project items. All 44 open fork issues have cards
+with Status, Priority, Area, Risk, Size and Decision. Issue labels show
+21 P1 / 23 P2 and 16 in progress / 18 triage / 10 blocked.
+
+The comparison found one lifecycle mismatch: #208's card still said In
+progress after its NUMERIC fixes were merged, while its remaining intake was
+labelled triage / Planned. The card was moved to Inbox to match that residual
+scope. #216's stale Planned decision was moved to Accepted for its active
+CI implementation. #253 is In progress / Accepted; #316 remains Inbox /
+Planned, with historical production impact still unknown.
+
+PR #379, #382, #387 and #389 cards are Done / Accepted. #388 has all six fields,
+is Ready with protected auto-merge, and awaits the checks for its updated head
+`4c5e2f85624f144ce085fc28ffdd4800573448cc`. #376's fixes passed independent
+review and earlier hosted checks; it still needs current-main synchronization.
+The snapshot has 13 open PRs, all non-draft with protected squash auto-merge.
+The [delivery TODO](delivery-todo.md) records the full queue and acceptance
+limits. Subsequent GitHub events supersede these counts.
+
+## Historical observations
+
+The sections below preserve earlier snapshots only. Current GitHub state and
+the reconciliation above govern subsequent transitions.
+
+### Earlier Project reconciliation before #362 and #383 merged
+
+The paginated Project inventory was read with `--limit 1000` (the CLI default
+returns only 30 items). All 45 open fork issues have cards. Issue labels show
+22 P1 / 23 P2 and 15 in progress / 19 triage / 11 blocked. Counts distinguish
+parent issues from individual implementation slices; no open issue is Done.
+
+- #253 and #316 use Status Inbox and Decision Planned. A review of their child
+  audit documents (#379/#380) does not put the whole parent In review.
+- #300/#206 remain open for Gateway lifecycle and recovery integration. #362
+  remains Draft pending the reviewed held-funds arithmetic correction.
+- #255 remains In progress. #376 auto-merge is paused for the reviewed backup,
+  rollback and health-verification defects.
+- PR #366 merged as `8fb31ea620c3cc98ff06fb2ca148dd6da8429b96`; #205/#214
+  retain their remaining acceptance criteria.
+- Duplicate PR #364 is superseded by #381; redundant Redis PR #385 is closed
+  in favor of merged #318/#312. Both PR cards are Done with closure reasons.
+- #383 now tests the actual PostgreSQL NaN boundary and preserves the existing
+  historical-audit contract. Its local real-schema test executed and passed;
+  hosted checks remain necessary. Historical production impact is unknown.
+
+The repository currently has 19 open PRs (including #381), seven Draft and ten
+with native protected squash auto-merge enabled. #376 is paused for fixes and
+#381 awaits consolidation review. This snapshot follows main `8fb31ea6`;
+subsequent GitHub events supersede these timestamped counts.
+
+One subagent mistakenly opened upstream PR #816. It was closed without merging
+and recreated in the fork as #385 before the redundant work was rejected.
+The incident is recorded; all subsequent mutations require an explicit fork
+repository argument.
+
+### Historical observations before consolidation
+
+The sections below preserve earlier snapshots only. The current inventory and
+review decisions at the top of this document govern subsequent transitions.
+
+## Earlier 2026-09-13 refresh (after PR #363 and new delivery slices)
+
+GitHub issue labels were re-read on 2026-09-13. The fork has **45 open issues**
+(22 P1, 23 P2): 15 `status:in-progress`, 19 `status:triage`, and 11
+`status:blocked`. Issues #217 and #224 moved from triage to in-progress;
+closed #345 has its stale lifecycle label removed and its Project card is Done.
+Older counts below remain timestamped audit records.
+
+PR #361 merged as `1831852e9abecfdc267ddbf783d2203cd2d39e14`; #356 merged as
+`86bc4d8b88311ac3ddd400d9e72a2d68bdc4c9f6` and Issue #308 is **Done**.
+PR #358 merged as `1bcff1a5271aebefa96253417f4707574a7a2994`; PR #363 (Refs
+#205) merged as `e9ca10ab2d28a78cb4f265cace17260679b048bc`.
+PR #370 merged as `c860eec66d9edfb39f7536111bd7e8f6d1b2ca66`; its three-node
+deployment slice is accepted and its Project card is Done.
+
+There are **11 open PRs**: Draft #362 (head
+`2d5abae6143eeb931ebf96906aa5ba0681f22e17`), plus nine non-draft PRs with
+squash auto-merge enabled: #364 (`897b1ee9affc5c9ac45b5ccb98b03e00c99352a2`),
+#365 (`b2b99ed7b6273220b8666204b322ed0e2e2e8ed2`), #366
+(`472484b325e5d85ba7841d71df9f2307bf8a3c29`), #367
+(`0b452aebce4f0d4f49b115b1e534439016a057ad`), #368
+(`03a12764a2f488c7c45fcf28bfdf5d492a7a7d76`), #369
+(`cc0fb5ddabe95924206022f687b840d97e95a362`) and #371
+(`f9921213c07ce814643c58814f5c4e7413b04551`), plus #373
+(`c185a15570af455b849844c1245acc659496b20d`) and #374
+(`4474ae0b77070328483c1335c200f6c162912f5d`). #372 is also open (head
+`5db5675c63211136d6159ffbd385d52f037a72cf`) without auto-merge; all eleven
+currently report `BLOCKED` while protected checks run. Auto-merge remains
+enabled on #364–#369, #371, #373 and #374.
+
+Issues #300 and #206 remain **Open**; their Project cards must not be marked
+Done. PR #362 records the funds-reservation scope, while gateway
+admission/dispatch/terminal lifecycle, cancellation and partial-output
+behavior, retry/crash recovery, and recharge/retention remain to be accepted.
+The bounded slices #366–#371 retain their parents (#205/#214, #225, #300/#206,
+#223 and #307/#217); #370 is merged as recorded above. PR #372 redacts sensitive admin video fields (#211),
+but its targeted build is blocked by an unrelated existing refund-notification
+compile error; PR #374 adds user refund-completion notification for #247 and
+awaits protected checks. No Project schema, ruleset or upstream repository was
+changed by this refresh.
+
 ## 2026-09-12 decisions
 
 Issue labels are the source for project synchronization: `status:blocked` maps
@@ -107,3 +211,29 @@ the parent retains its lifecycle and failure/recovery acceptance. #356 is now
 Ready after code review and hosted drill verification, with protected checks
 required again after main synchronization. #355's hosted fixture failures were
 corrected and the failed run is retained as evidence; it is not marked Done.
+
+## Earlier 2026-09-13 Project reconciliation (fork-only)
+
+Remote revalidation found **45 open issues** in Project #1: 22 P1 and 23 P2;
+15 In progress, 19 Triage and 11 Blocked by lifecycle labels. No open issue is
+marked Done. The 18-item active delivery queue is #362, #365-#369, #371-#380,
+and #382-#383. Historical checkpoint PR #364, merged PR #370 and this refresh
+PR #381 are excluded from that queue count. These counts supersede earlier
+47/49/50-item observations without rewriting history.
+
+Focused cards remain linked to live state: #253 -> draft #379 (revenue-risk
+audit), #255 -> #376 (Docker safety and durable-audit residuals), #225 -> #378
+(tunnel audit baseline), #214 -> draft #377 (listener recovery), and #205 ->
+draft #375 (key-rotation boundary, behind main). Each remains subject to the
+four required checks and review; none is a terminal Done transition.
+
+Issue #300 remains Open/P1/In progress. Quote #361 is merged, funds contracts
+are in draft #362, and #368 documents the gateway lifecycle boundary, but no
+current-main evidence shows reserve/dispatch/finalize calls wired through
+admission, retries and sync/stream terminal paths. Keep the Project card In
+progress until integration, unknown-dispatch retention, recharge recovery and
+real PostgreSQL failure/recovery evidence are recorded. #206 remains open.
+
+This is a timestamped fork-only audit. Re-read GitHub before changing cards,
+labels or merge state; do not infer completion from a partial PR or green
+subset of checks, and do not modify upstream.

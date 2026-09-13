@@ -394,10 +394,15 @@ pub(super) fn normalize_admin_user_group_ids(values: Vec<String>) -> Vec<String>
 }
 
 pub(super) fn admin_default_user_initial_gift(value: Option<&serde_json::Value>) -> f64 {
+    use aether_admin::system::DEFAULT_USER_INITIAL_GIFT_USD;
     match value {
-        Some(serde_json::Value::Number(number)) => number.as_f64().unwrap_or(10.0),
-        Some(serde_json::Value::String(value)) => value.parse::<f64>().unwrap_or(10.0),
-        _ => 10.0,
+        Some(serde_json::Value::Number(number)) => {
+            number.as_f64().unwrap_or(DEFAULT_USER_INITIAL_GIFT_USD)
+        }
+        Some(serde_json::Value::String(value)) => value
+            .parse::<f64>()
+            .unwrap_or(DEFAULT_USER_INITIAL_GIFT_USD),
+        _ => DEFAULT_USER_INITIAL_GIFT_USD,
     }
 }
 
