@@ -22,6 +22,9 @@ LOCAL_BUILD=false
 PREPARE_ONLY=false
 SKIP_BACKUP=false
 ALLOW_FLOATING_TAG=false
+ROLLBACK_COMPATIBLE=false
+BACKUP_STAGING_DIR=""
+ROLLBACK_OVERRIDE=""
 COMPOSE_FILES=()
 COMPOSE=()
 COMPOSE_ARGS=()
@@ -44,6 +47,8 @@ Options:
   --prepare               pull the latest app image only, do not recreate app
   --skip-backup           skip the pre-update PostgreSQL backup (explicitly unsafe)
   --allow-floating-tag    allow rolling image tags such as :latest or :nightly
+  --rollback-compatible   allow automatic app rollback after verifying that the
+                          target database migrations support the previous app
   --force-recreate        force recreate the app container
   --logs                  follow app logs after update
   -h, --help              show help
@@ -107,6 +112,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --allow-floating-tag)
             ALLOW_FLOATING_TAG=true
+            shift
+            ;;
+        --rollback-compatible)
+            ROLLBACK_COMPATIBLE=true
             shift
             ;;
         --force-recreate)
@@ -249,18 +258,30 @@ if ! grep -Fqx -- "${APP_SERVICE}" <<< "${services}"; then
     die "service '${APP_SERVICE}' not found in compose config"
 fi
 
-configured_app_image="$(compose_config | awk -v service="${APP_SERVICE}" '
+compose_configuration="$(compose_config)"
+configured_app_image="$(awk -v service="${APP_SERVICE}" '
     $0 == "  " service ":" { in_service = 1; next }
     in_service && $0 ~ /^  [^[:space:]]/ { exit }
-    in_service && $1 == "image:" { print $2; exit }
-')"
+    in_service && $0 ~ /^    image:/ { print $2; exit }
+' <<<"${compose_configuration}")"
+configured_app_pull_policy="$(awk -v service="${APP_SERVICE}" '
+    $0 == "  " service ":" { in_service = 1; next }
+    in_service && $0 ~ /^  [^[:space:]]/ { exit }
+    in_service && $0 ~ /^    pull_policy:/ { print $2; exit }
+' <<<"${compose_configuration}")"
+unset compose_configuration
 configured_app_image="${configured_app_image%\"}"
 configured_app_image="${configured_app_image#\"}"
+configured_app_image="${configured_app_image%\'}"
+configured_app_image="${configured_app_image#\'}"
+[[ -n "${configured_app_image}" ]] || die "app service must configure an image; use local-build mode for source builds"
 
 is_floating_image_tag() {
     local image_ref="$1"
     [[ "${image_ref}" != *@* ]] || return 1
-    local image_tag="${image_ref##*:}"
+    local image_name="${image_ref##*/}"
+    [[ "${image_name}" == *:* ]] || return 0
+    local image_tag="${image_name##*:}"
     [[ "${image_tag}" == "latest" || "${image_tag}" == "nightly" ]]
 }
 
@@ -270,10 +291,16 @@ if [[ -n "${configured_app_image}" ]] \
     die "app image '${configured_app_image}' is a floating tag; set APP_IMAGE to an explicit version or pass --allow-floating-tag"
 fi
 
-previous_container_id="$(compose ps -q "${APP_SERVICE}" 2>/dev/null | head -n 1 || true)"
-previous_image_ref=""
+previous_container_id="$(compose ps -q "${APP_SERVICE}" 2>/dev/null)" \
+    || die "could not inspect the existing app service; update was not attempted"
+[[ "${previous_container_id}" != *$'\n'* ]] \
+    || die "this updater requires a single app container; use the multi-node rollout procedure for replicas"
+previous_image_id=""
 if [[ -n "${previous_container_id}" ]]; then
-    previous_image_ref="$(docker inspect --format='{{.Config.Image}}' "${previous_container_id}" 2>/dev/null || true)"
+    previous_image_id="$(docker inspect --format='{{.Image}}' "${previous_container_id}" 2>/dev/null)" \
+        || die "could not inspect the previous app image; update was not attempted"
+    [[ "${previous_image_id}" =~ ^sha256:[a-f0-9]{64}$ ]] \
+        || die "could not resolve the previous container to an immutable image ID"
 fi
 
 echo ">>> Compose directory: ${COMPOSE_DIR}"
@@ -282,47 +309,84 @@ if [[ -n "${configured_app_image}" ]]; then
     echo ">>> Target app image: ${configured_app_image}"
 fi
 
+cleanup_update_files() {
+    if [[ -n "${BACKUP_STAGING_DIR}" ]]; then
+        rm -f -- "${BACKUP_STAGING_DIR}/postgres.dump" "${BACKUP_STAGING_DIR}/metadata"
+        rmdir -- "${BACKUP_STAGING_DIR}" || true
+    fi
+    if [[ -n "${ROLLBACK_OVERRIDE}" ]]; then
+        rm -f -- "${ROLLBACK_OVERRIDE}"
+    fi
+}
+trap cleanup_update_files EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 create_pre_update_backup() {
-    local timestamp backup_file temp_file
+    local timestamp backup_bundle temp_file
+    # The dump contains credentials and personal data. Never inherit a public
+    # umask, and publish the dump plus metadata as one private, unique bundle.
+    umask 077
     mkdir -p -- "${BACKUP_DIR}"
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    backup_file="${BACKUP_DIR}/aether-postgres-${timestamp}.dump"
-    temp_file="${backup_file}.tmp.$$"
-    echo ">>> Creating PostgreSQL pre-update backup: ${backup_file}"
-    if ! compose exec -T "${BACKUP_SERVICE}" pg_dump \
-        --format=custom --no-owner --no-acl \
-        -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-aether}" \
+    BACKUP_STAGING_DIR="$(mktemp -d "${BACKUP_DIR}/.aether-postgres-${timestamp}.XXXXXX")"
+    backup_bundle="${BACKUP_DIR}/$(basename -- "${BACKUP_STAGING_DIR}" | sed 's/^\.//')"
+    temp_file="${BACKUP_STAGING_DIR}/postgres.dump"
+    echo ">>> Creating PostgreSQL pre-update backup: ${backup_bundle}/postgres.dump"
+    # Expand database settings inside the service. Host environment variables
+    # can differ from Compose's .env and from the running database container.
+    if ! compose exec -T "${BACKUP_SERVICE}" sh -c '
+        export PGPASSWORD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
+        exec pg_dump --format=custom --no-owner --no-acl --no-password \
+            -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-aether}"
+    ' \
         >"${temp_file}"; then
-        rm -f -- "${temp_file}"
         die "pre-update PostgreSQL backup failed; update was not attempted"
     fi
     if [[ ! -s "${temp_file}" ]]; then
-        rm -f -- "${temp_file}"
         die "pre-update PostgreSQL backup was empty; update was not attempted"
     fi
-    mv -- "${temp_file}" "${backup_file}"
-    printf 'created_at=%s\napp_image=%s\nbackup_file=%s\n' \
-        "${timestamp}" "${configured_app_image:-unknown}" "${backup_file}" \
-        >"${backup_file}.meta"
-    echo ">>> PostgreSQL backup completed. Metadata: ${backup_file}.meta"
+    if ! compose exec -T "${BACKUP_SERVICE}" pg_restore --list <"${temp_file}" >/dev/null; then
+        die "pre-update PostgreSQL backup archive is invalid; update was not attempted"
+    fi
+    printf 'created_at=%s\nprevious_image_id=%s\ntarget_image=%s\n' \
+        "${timestamp}" "${previous_image_id:-unavailable}" "${configured_app_image}" \
+        >"${BACKUP_STAGING_DIR}/metadata"
+    mv -- "${BACKUP_STAGING_DIR}" "${backup_bundle}"
+    BACKUP_STAGING_DIR=""
+    echo ">>> PostgreSQL backup completed: ${backup_bundle}"
 }
 
 rollback_app() {
-    if [[ -z "${previous_image_ref}" ]]; then
+    if [[ "${ROLLBACK_COMPATIBLE}" != "true" ]]; then
+        echo ">>> WARNING: automatic rollback requires --rollback-compatible after checking migration compatibility. Previous image: ${previous_image_id:-unavailable}. Preserve the backup and inspect the database before restoring an app image." >&2
+        return 1
+    fi
+    if [[ -z "${previous_image_id}" ]]; then
         echo ">>> WARNING: previous app image is unavailable; automatic rollback skipped." >&2
         return 1
     fi
-    echo ">>> Updated app failed health verification; restoring ${previous_image_ref}..."
+    echo ">>> Updated app failed health verification; restoring ${previous_image_id}..."
+    ROLLBACK_OVERRIDE="$(mktemp "${COMPOSE_DIR}/.aether-rollback.XXXXXX")" || return 1
+    printf 'services:\n  %s:\n    image: "%s"\n' "${APP_SERVICE}" "${previous_image_id}" >"${ROLLBACK_OVERRIDE}" || return 1
+    if [[ -n "${configured_app_pull_policy}" ]]; then
+        # Early Compose v2 supports pull_policy but not the up --pull flag.
+        # Only emit the field when the original model already uses it, keeping
+        # compatibility with Compose v1 versions that reject this field.
+        printf '    pull_policy: never\n' >>"${ROLLBACK_OVERRIDE}" || return 1
+    fi
     (
-        export APP_IMAGE="${previous_image_ref}"
+        # The last file overrides even a hard-coded image in an operator's
+        # additional Compose file. Never resolve a mutable old tag after pull.
+        COMPOSE_ARGS+=(-f "${ROLLBACK_OVERRIDE}")
         if compose_supports_wait; then
-            compose_up_app true
+            compose_up_app true || return 1
         else
-            compose_up_app false
-            wait_healthy || return 1
+            compose_up_app false || return 1
         fi
+        wait_healthy || return 1
     ) || {
-        echo ">>> WARNING: automatic app rollback failed; restore from the pre-update backup and inspect Compose state." >&2
+        echo ">>> WARNING: automatic app rollback failed; inspect Compose state and migration compatibility before choosing a database restore. A restore discards writes made after the backup." >&2
         return 1
     }
     echo ">>> Previous app image restored and healthy. Database migrations are not automatically reversed."
@@ -334,7 +398,15 @@ compose_pull_app() {
 
 compose_up_app() {
     local wait_for_health="${1:-false}"
-    local -a up_args=(up -d)
+    local -a up_args=(up -d --no-deps --no-build)
+
+    local help
+    help="$(compose up --help)" || return 1
+    if grep -Fq -- '--pull' <<<"${help}"; then
+        # Pulling is an explicit earlier step. Do not let inherited
+        # pull_policy: always change the image during up or rollback.
+        up_args+=(--pull never)
+    fi
 
     if [[ "${FORCE_RECREATE}" == "true" ]]; then
         up_args+=(--force-recreate)
@@ -360,17 +432,25 @@ wait_healthy() {
     while (( elapsed < timeout )); do
         local container_id
         local state
-        container_id="$(compose ps -q "${APP_SERVICE}" 2>/dev/null | head -n 1)"
+        container_id="$(compose ps -q "${APP_SERVICE}" 2>/dev/null)" || return 1
+        if [[ "${container_id}" == *$'\n'* ]]; then
+            echo ">>> WARNING: expected a single app container; cannot verify a multi-replica rollout." >&2
+            return 1
+        fi
         if [[ -z "${container_id}" ]]; then
             sleep "${COMPOSE_HEALTHCHECK_POLL_INTERVAL_SECS}"
             elapsed=$(( elapsed + COMPOSE_HEALTHCHECK_POLL_INTERVAL_SECS ))
             continue
         fi
-        state="$(docker inspect --format='{{.State.Health.Status}}' \
+        state="$(docker inspect --format='{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
             "${container_id}" 2>/dev/null || true)"
-        if [[ "${state}" == "healthy" ]]; then
+        if [[ "${state}" == "running healthy" ]]; then
             echo ">>> Container is healthy."
             return 0
+        fi
+        if [[ "${state}" == *" missing" ]]; then
+            echo ">>> WARNING: app container has no healthcheck; cannot verify update health." >&2
+            return 1
         fi
         sleep "${COMPOSE_HEALTHCHECK_POLL_INTERVAL_SECS}"
         elapsed=$(( elapsed + COMPOSE_HEALTHCHECK_POLL_INTERVAL_SECS ))
@@ -408,9 +488,11 @@ else
     echo ">>> Compose does not support --wait; using explicit health polling..."
     compose_up_app false \
         || { rollback_app || true; die "updated app failed to start; inspect the container and backup before retrying"; }
-    wait_healthy \
-        || { rollback_app || true; die "updated app failed to become healthy; inspect the container and backup before retrying"; }
 fi
+# Compose --wait accepts running containers without healthchecks. Require the
+# app's own healthcheck on modern and legacy Compose alike.
+wait_healthy \
+    || { rollback_app || true; die "updated app failed to become healthy; inspect the container and backup before retrying"; }
 
 echo ">>> Current services:"
 compose ps
