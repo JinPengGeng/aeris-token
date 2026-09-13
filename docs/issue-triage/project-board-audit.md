@@ -3,7 +3,43 @@
 Scope: GitHub Project v2 `JinPengGeng/aeris-token Development` (project 1,
 `PVT_kwHOAiijc84BgApR`), with no upstream changes.
 
-## 2026-09-13 current live refresh (after PR #363 and new delivery slices)
+## Current Project reconciliation — 2026-09-13
+
+The paginated Project inventory was read with `--limit 1000` (the CLI default
+returns only 30 items). All 45 open fork issues have cards. Issue labels show
+22 P1 / 23 P2 and 15 in progress / 19 triage / 11 blocked. Counts distinguish
+parent issues from individual implementation slices; no open issue is Done.
+
+- #253 and #316 use Status Inbox and Decision Planned. A review of their child
+  audit documents (#379/#380) does not put the whole parent In review.
+- #300/#206 remain open for Gateway lifecycle and recovery integration. #362
+  remains Draft pending the reviewed held-funds arithmetic correction.
+- #255 remains In progress. #376 auto-merge is paused for the reviewed backup,
+  rollback and health-verification defects.
+- PR #366 merged as `8fb31ea620c3cc98ff06fb2ca148dd6da8429b96`; #205/#214
+  retain their remaining acceptance criteria.
+- Duplicate PR #364 is superseded by #381; redundant Redis PR #385 is closed
+  in favor of merged #318/#312. Both PR cards are Done with closure reasons.
+- #383 now tests the actual PostgreSQL NaN boundary and preserves the existing
+  historical-audit contract. Its local real-schema test executed and passed;
+  hosted checks remain necessary. Historical production impact is unknown.
+
+The repository currently has 19 open PRs (including #381), seven Draft and ten
+with native protected squash auto-merge enabled. #376 is paused for fixes and
+#381 awaits consolidation review. This snapshot follows main `8fb31ea6`;
+subsequent GitHub events supersede these timestamped counts.
+
+One subagent mistakenly opened upstream PR #816. It was closed without merging
+and recreated in the fork as #385 before the redundant work was rejected.
+The incident is recorded; all subsequent mutations require an explicit fork
+repository argument.
+
+## Historical observations
+
+The sections below preserve earlier snapshots only. The current inventory and
+review decisions above govern subsequent transitions.
+
+## Earlier 2026-09-13 refresh (after PR #363 and new delivery slices)
 
 GitHub issue labels were re-read on 2026-09-13. The fork has **45 open issues**
 (22 P1, 23 P2): 15 `status:in-progress`, 19 `status:triage`, and 11
@@ -149,7 +185,7 @@ Ready after code review and hosted drill verification, with protected checks
 required again after main synchronization. #355's hosted fixture failures were
 corrected and the failed run is retained as evidence; it is not marked Done.
 
-## 2026-09-13 live Project reconciliation (fork-only)
+## Earlier 2026-09-13 Project reconciliation (fork-only)
 
 Remote revalidation found **45 open issues** in Project #1: 22 P1 and 23 P2;
 15 In progress, 19 Triage and 11 Blocked by lifecycle labels. No open issue is

@@ -1,151 +1,56 @@
 # Issue delivery TODO and community workflow
 
-Snapshot: 2026-09-13, fork `JinPengGeng/aeris-token`. This queue is based on
-the current fork tree and GitHub issue state; it does not modify upstream
-`fawney19/Aether`.
+Scope: fork `JinPengGeng/aeris-token`. Runtime changes go through reviewed PRs;
+no upstream writes are part of this delivery workflow.
 
-## 2026-09-13 current live refresh (after PR #363 and new delivery slices)
+## Current delivery snapshot — 2026-09-13
 
-The fork inventory was re-read from GitHub on 2026-09-13: **45 open issues**
-(22 P1, 23 P2), with 15 labelled `status:in-progress`, 19 `status:triage`,
-and 11 `status:blocked`. Counts include parent and child issues and are not a
-count of independent implementation packages.
+Verified main: `8fb31ea620c3cc98ff06fb2ca148dd6da8429b96` (PR #366 merged).
+There are **45 open issues**: 22 P1 and 23 P2; lifecycle labels are
+15 in progress, 19 triage, and 11 blocked. Parent and child issues overlap, so
+these are inventory counts, not 45 independent implementation packages.
 
-Labels were synchronized after review: #217 and #224 moved from `status:triage`
-to `status:in-progress`; closed #345 has no stale lifecycle label and its
-Project card is Done.
+There are **19 open PRs**, including this checkpoint: #362, #365, #367–#369,
+and #371–#384. Ten have protected squash auto-merge enabled; seven are Draft;
+#376 is paused for fixes and #381 awaits this consolidation review. The latest
+main merge makes the remaining branches require synchronization and fresh
+checks. GitHub is authoritative after this timestamp.
 
-PR #361 merged as `1831852e9abecfdc267ddbf783d2203cd2d39e14`; #356 merged as
-`86bc4d8b88311ac3ddd400d9e72a2d68bdc4c9f6` and closed #308 (Project **Done**).
-PR #358 merged as `1bcff1a5271aebefa96253417f4707574a7a2994` from reviewed head
-`7de0188d44118f7e1c1fc2930bc6aacadfa01070`. PR #363 (Refs #205) merged as
-`e9ca10ab2d28a78cb4f265cace17260679b048bc`; #205 remains open for key rotation,
-recovery, nightly artifacts and remaining upgrade evidence.
-PR #370 merged as `c860eec66d9edfb39f7536111bd7e8f6d1b2ca66`; its three-node
-deployment slice is accepted and its Project card is Done.
+### Review decisions and next delivery actions
 
-There are **11 open PRs**: Draft #362 (head
-`2d5abae6143eeb931ebf96906aa5ba0681f22e17`), plus nine non-draft PRs with
-squash auto-merge enabled: #364 (`897b1ee9affc5c9ac45b5ccb98b03e00c99352a2`),
-#365 (`b2b99ed7b6273220b8666204b322ed0e2e2e8ed2`), #366
-(`472484b325e5d85ba7841d71df9f2307bf8a3c29`), #367
-(`0b452aebce4f0d4f49b115b1e534439016a057ad`), #368
-(`03a12764a2f488c7c45fcf28bfdf5d492a7a7d76`), #369
-(`cc0fb5ddabe95924206022f687b840d97e95a362`) and #371
-(`f9921213c07ce814643c58814f5c4e7413b04551`), plus #373
-(`c185a15570af455b849844c1245acc659496b20d`) and #374
-(`4474ae0b77070328483c1335c200f6c162912f5d`). #372 is also open (head
-`5db5675c63211136d6159ffbd385d52f037a72cf`) without auto-merge; all eleven
-currently report `BLOCKED` while protected checks run. Auto-merge remains
-enabled on #364–#369, #371, #373 and #374.
+1. **Money correctness (#362/#300/#206):** the reviewed head passed all required
+   checks, including eleven live PostgreSQL targets, but review found a valid
+   0.30 − 0.10 debit can be rejected when it should retain a 0.20 hold. Correct
+   checked-unit arithmetic and test exact equality plus a one-unit excess.
+   Keep Draft until this is fixed. Then integrate the existing funds API through
+   Gateway admission, dispatch, terminal settlement and recovery; facade methods
+   alone are not an implementation of that lifecycle.
+2. **Upgrade safety (#376/#255):** auto-merge is paused. Review found that mutable
+   image tags and environment overrides cannot guarantee rollback, and backup
+   permissions/readiness need verification. Fix the existing PR with meaningful
+   failure-path tests; do not open another documentation-only replacement.
+3. **Historical audit (#380/#383/#316):** PostgreSQL 17.11 proved
+   `numeric(20,8)` accepts NaN and rejects infinities. #383 now asserts this in
+   read-only SQL and the existing real-schema audit regression (one test passed).
+   Preserve the signed exact audit and all production-evidence limitations.
+   #380 corrects “unknown” versus “no repair required”; parents stay open.
+4. **Reuse and queue cleanup:** #385 is closed because #318/#312 already supplied
+   the durable Redis profile and hosted recovery test. #364 is superseded by
+   this PR, which includes its full checkpoint changes. Close duplicate work
+   with linked evidence instead of counting it as new implementation.
+5. **Remaining verification:** #377 covers peer-error retry timing; #382 adds
+   daily-quota concurrency to the live harness. #371/#384 still need actual
+   Prometheus and receiver-delivery evidence. #375/#379 are proposed protocol
+   and revenue-policy records, not completed runtime integration.
 
-The bounded slices retain their parents: #366 covers tunnel response-relay
-admission (#205/#214), #367 the gateway environment reference (#225), #368
-the #300/#206 lifecycle boundary, #369 PostgreSQL backup/restore (#223), and
-#371 isolated metrics scrape
-and alert delivery (#307/#217). PR #372 redacts sensitive admin video fields
-(#211), but its targeted build is blocked by an unrelated existing refund
-notification compile error. PR #373 records #220 supply-chain residuals and
-PR #374 adds the #247 refund-notification slice; both await protected checks.
-Draft #362 still needs independent review and required
-CI before funds-hold integration with gateway admission/dispatch/terminal,
-cancellation/partial output, retry and crash recovery. Parent issues remain
-open until residual acceptance has evidence.
+Project #1 covers all 45 open issues. Parent cards #253/#316 remain Inbox with
+Decision Planned; review/merge of a child document does not complete its parent.
+Closed duplicate PR cards #364/#385 are Done with closure reasons on GitHub.
 
-The next transition is current-head review and required checks for #362 and
-#364–#369 and #371–#374; #372 needs the unrelated refund compile break resolved before it can
-be accepted. All transitions remain fork-only and are recorded on each PR, parent
-issue, Project card and this queue.
-
-### Earlier checkpoint after PRs #356, #358 and #361
-
-The fork inventory was re-read from GitHub on 2026-09-13: **45 open issues**
-(22 P1, 23 P2), with 13 labelled `status:in-progress`, 21 `status:triage`,
-and 11 `status:blocked`. Counts include parent and child issues and are not a
-count of independent implementation packages.
-
-PR #361 merged as `1831852e9abecfdc267ddbf783d2203cd2d39e14`. PR #356 merged as
-`86bc4d8b88311ac3ddd400d9e72a2d68bdc4c9f6`; Issue #308 is closed and its
-Project card is **Done**. PR #358 merged as
-`1bcff1a5271aebefa96253417f4707574a7a2994` from reviewed head
-`7de0188d44118f7e1c1fc2930bc6aacadfa01070`; its protected checks, including
-the Gateway test, passed.
-
-Draft PR #362 remains open at head `27682e86ff50a18a69ec78f22ecb8c216df0305d`;
-its required CI and independent review are pending. #362 is the
-funds-reservation slice for both #300 and #206, but it does not close either
-parent. Remaining #300/#206 acceptance is gateway admission/dispatch/terminal
-lifecycle integration, cancellation and partial-output handling, retry and
-crash recovery, plus the documented recharge/retention follow-up.
-
-PR #363 (Refs #205) remains open with squash auto-merge enabled at head
-`7095bcca993aa541eca07fa4fe3f59c630aca745`; it is behind current main
-(`1bcff1a5271aebefa96253417f4707574a7a2994`) and its required checks are still
-running. Its root-service-identity guard is a bounded residual; signing-key
-rotation/recovery, nightly artifacts and remaining upgrade evidence stay open
-in #205. Keep all parent issues open until their residual acceptance has tests,
-review and protected-check evidence.
-
-The next transition is to finish current-head review and required checks for
-#362 and #363, then integrate #362's funds hold with gateway lifecycle behavior.
-All transitions remain fork-only and are recorded on the PRs, parent issues,
-Project cards and this queue.
-
-## 2026-09-13 status refresh after PR #353
-
-Current intake: 47 open issues (24 P1, 23 P2), with 13 in progress, 23 triage
-and 11 blocked after #214 entered implementation. PR #353 merged as
-`b2d2b0fca0bb96916880f8061e5d03d2c79fa501` and its Project card is Done.
-PR #355's two remaining usage fixtures now preserve both planner observations;
-all 14 local usage tests passed and the corrected branch awaits complete CI.
-PR #356 passed main review, all four required checks and its hosted 12-phase
-drill (run 34717153949); it is Ready with auto-merge enabled, pending checks
-after main synchronization. #354 and #357 also retain protected auto-merge.
-
-Draft PR #358 implements #214's automatic per-process target capacity and
-corrects stale audit findings. Local target/parser/admission tests passed;
-independent review and protected CI remain. The parent retains permit-lifetime,
-Redis fault-contract and SQL live-timeout acceptance. This snapshot supersedes
-the historical checkpoints below; live GitHub state governs later transitions.
-
-### Earlier checkpoint after PR #349
-
-Latest verified intake: 47 open issues (24 P1, 23 P2), with 12 in progress,
-24 in triage and 11 blocked after #220 entered implementation and #348 closed.
-PR #349 merged as `b044b1292694c1850a6efb7eccc9da63451be7bd`; its four required
-checks passed and its real Redis artifacts were downloaded and verified.
-PR #352 merged as
-`6c2ba493131c6fcf59dcda32779b1fce219912ce`; #343 is closed and its issue/PR
-cards are Done. #247 and #254 retain their separate residual acceptance.
-#225's generated tunnel configuration reference is ready in PR #354, and
-#268's candidate identity correction is ready in PR #355. Both are reviewed
-with automatic merge enabled under the protected checks. #308's complete
-readiness contract is in draft PR #356 for final review and CI. #357's reviewed
-Dependabot coverage is also awaiting protected checks with automatic merge
-enabled. Decisions are recorded in the individual PRs and issue documents.
-
-PR #350's new CI exposed a fallback-recovery test race: persistence completed
-before the lifecycle worker decremented its pending count. The test now waits
-at most two seconds for lifecycle accounting, retaining all capacity and
-persistence assertions. Independent review and six pinned Rust 1.95.0 runs
-passed; #350 then passed CI and merged as
-`f11d9ff3bc27aee42e54982cbe24343c1627ab5e`. #307 and #217 remain open for
-production producer fault injection, scraping and actual alert delivery evidence.
-
-### Earlier status after PR #351
-
-Live GitHub verification: 49 open issues (26 P1, 23 P2), with 11 in progress,
-27 in triage and 11 blocked. Counts include parent and child issues and must
-not be interpreted as 49 independent implementation packages. Removed the
-duplicate triage label from #348. PR #351 merged as
-`5c620e7681cba50451847c3d163076614ddf8e83`, closing #229; its Project #1 card is
-Done. Removed its stale in-progress label; the repository has no status:done
-label, so the closed issue state and Project Done are the completion record.
-Updated PRs #349, #350 and #352 against the new main using their expected head
-SHAs. All three retain squash auto-merge and require fresh checks before merge.
-
-This top checkpoint and the intake table below describe the latest verified
-state. Timestamped checkpoints after the intake table are historical records.
+A subagent mistakenly opened upstream PR fawney19/Aether#816. It was closed
+without merging, recreated in the fork as #385, then rejected as redundant.
+The mistake and correction are recorded in #218/#385; upstream received no code
+merge. All further GitHub mutations must name `JinPengGeng/aeris-token` explicitly.
 
 ## Operating rules
 
@@ -189,38 +94,36 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | Issue | Priority | Decision | Next action |
 | --- | --- | --- | --- |
 | #276 | P1 | Keep blocked | resolve the real upstream sync conflict with a reviewed merge commit |
-| #268 | P1 | In progress | reviewed PR #355 preserves terminal facts with request-wide candidate identities, including heartbeat propagation; await protected checks and merge |
 | #256 | P2 | Split, active | PR #331 merged the no-fork-release policy and first-release migration gate; retain parent for first fork release evidence |
-| #255 | P1 | Split, active | PR #329 persists audit after client disconnect; retain parent for broader mutation coverage and retry/reconciliation evidence |
+| #255 | P1 | Split, active | PR #376 auto-merge paused after review found rollback image selection, backup permissions and readiness gaps. Fix and validate these before resuming protected merge; retain mutation coverage/reconciliation. |
 | #254 | P1 | Split | PR #335 merged the chat/images and Claude compatibility fixtures; retain parent for remaining endpoint coverage |
-| #253 | P1 | Keep | approve signup-credit, overdraft and abuse-control policy before code |
+| #253 | P1 | Keep | PR #379 records current defaults and policy risks. Apply recorded project decisions when implementing future safeguards; document review alone does not put the whole parent In review or require renewed user authorization. |
 | #247 | P1 | Split, active | PR #334 merged idempotent refund terminal notifications; PR #374 adds user refund-completion notification and awaits protected checks; retain parent for balance and transition coverage |
 | #241 | P2 | Split | #305 merged removal of the silent `with_redis_url` no-op builder; parent remains open for broader architecture consistency |
 | #235 | P2 | Planned | create ADR index and ownership/rollback records |
 | #226 | P2 | Planned | measure dependency tree and pair allowlist work with #229 |
-| #225 | P1 | Split, active | PR #354 generated the base reference; PR #367 adds drift checking and awaits protected checks; retain parent for backup/restore and remaining operations acceptance |
+| #225 | P1 | Split, active | #367 completes the gateway environment reference; #378 updates the tunnel audit baseline. Retain remaining operational and ADR consistency acceptance. |
 | #224 | P1 | In progress | #302 and PR #370 (`c860eec66`) provide multi-node preflight/baseline; retain parent for capacity and Redis failure evidence |
 | #223 | P1 | Split, active | PR #333 merged Redis redrive idempotency/retention coverage; PR #369 adds the PostgreSQL backup/restore drill and awaits protected checks |
 | #222 | P2 | Planned | measure one provider/repository extension slice before generic rewrite |
 | #221 | P2 | Planned | produce call/dependency graph and extract one tested boundary |
 | #220 | P1 | Split, active | installer checksum/signature and Cargo/npm advisory gates are merged; PR #373 records residual supply-chain controls and awaits protected checks, while container permissions and hosted updater evidence remain |
-| #218 | P2 | Split | JWT/TLS/Redis-profile slices are merged; document remaining environment settings and mandatory production encryption-key policy |
-| #217 | P1 | In progress | #306 RED is closed; PR #371 adds isolated scrape/alert delivery evidence for #307, while external deployment and producer fault injection remain |
-| #308 | P1 | Closed | PR #356 merged as `86bc4d8b88311ac3ddd400d9e72a2d68bdc4c9f6`; Issue and Project card are Done |
-| #307 | P1 | In progress | #323 and #350 merged counters and Prometheus contract verification; PR #371 adds isolated scrape/alert delivery and awaits protected checks; retain production producer fault injection and deployment evidence |
-| #216 | P1 | Split, active | PR #332 adds the dev profile build-performance gate; #339 adds an isolated Postgres harness and three selected live tests; retain parent for VSCodex required-check evidence, integration baseline execution and remaining ignored-test coverage |
+| #218 | P2 | Split | PR #385 was closed as redundant: #318/#312 already delivered `docker-compose.redis-durable.yml` and the hosted crash/redrive drill. Remaining configuration work should extend existing assets. |
+| #217 | P1 | In progress | Readiness/RED slices are merged. Retain #307's real producer fault injection, Prometheus scrape/rule evaluation and receiver firing/resolved evidence. |
+| #307 | P1 | In progress | #371 adds isolated metrics validation; #384 extends external HTTP targets. API 2xx and synthetic fixture output do not prove real Prometheus evaluation or receiver delivery. |
+| #216 | P1 | Split, active | PR #382 adds the existing entitlement-concurrency test to the required live PostgreSQL harness. Retain broader ignored-test coverage and the parent CI acceptance. |
 | #215 | P2 | Planned | measure synchronous logging/SSE filtering/lock contention before changes |
-| #214 | P1 | Split, active | PR #358 merged as `1bcff1a5271aebefa96253417f4707574a7a2994`; PR #366 holds admission through response relay and awaits protected checks; retain the parent for stream/sync/tunnel and shutdown/error acceptance |
+| #214 | P1 | Split, active | PR #366 merged tunnel response-relay permit lifetime as `8fb31ea6`; PR #377 adds peer-error timing coverage. Retain remaining sync/stream admission and Redis fault-contract acceptance. |
 | #213 | P2 | Planned | split giant handler and standardize error payload boundaries |
 | #212 | P2 | Planned | consolidate cross-cutting capacity and dependency tests |
-| #211 | P1 | Split, active | PR #328 merged bounded terminal registry retention; PR #372 redacts sensitive admin video fields but is blocked by an unrelated refund-notification compile error; verify remaining sensitive-field paths |
+| #211 | P1 | Split, active | PR #372 adds admin video-field redaction; complete its current-head Gateway checks and retain persistence, lease and secret-path acceptance. |
 | #210 | P2 | Planned | verify cryptographic/OAuth contracts with current dependency evidence |
-| #208 | P2 | Planned | reproduce NUMERIC/f64 paths and add adapter regression coverage |
+| #208 | P2 | Planned | The NUMERIC adapter fix and historical audit #325 are merged. #383 now tests that numeric(20,8) accepts NaN but rejects infinities; production historical aggregates remain missing. |
 | #207 | P2 | Planned | bound internal errors and Windsurf buffering; add graceful shutdown slice |
-| #206 | P1 | Split | Keep parent open; Draft PR #362 (head `a39bd31a`) supplies the funds hold needed by #300 and PR #368 records the gateway lifecycle boundary; admission/dispatch/terminal, cancellation/partial output, retry and crash recovery remain |
-| #300 | P1 | Keep | Draft PR #362 (head `a39bd31a`) adds reservation and wallet-hold contracts; PR #368 records the integration boundary; finish CI/review and gateway admission/dispatch/terminal, cancellation/partial output, retry and crash recovery before closing |
-| #205 | P1 | Split, active | PR #363 merged the non-root service-identity guard as `e9ca10ab`; Draft PR #365 defines signing-key rotation overlap; retain the parent for recovery, nightly artifacts and remaining upgrade evidence |
-| #316 | P2 | Split | PR #325 merged the read-only audit tool; obtain real redacted historical aggregates before deciding whether backfill is needed |
+| #206 | P1 | Split | PR #362 adds data funding holds, with a checked-unit debit boundary correction in progress. #300 carries Gateway integration; recharge/retention and historical reconciliation remain explicit acceptance. |
+| #300 | P1 | Keep | PR #362 remains Draft for the exact-hold refund/adjustment arithmetic fix. The four-method Gateway facade is unintegrated; admission/dispatch/terminal, retry, cancellation and recovery must be implemented. |
+| #205 | P1 | Split, active | PR #366 merged response-relay lifetime; #365 contains the rotation contract and #375 a proposed follow-up. Runtime registration/persistence and rotation recovery remain incomplete. |
+| #316 | P2 | Split | #380 records unknown historical impact; #383 validates special values using PostgreSQL 17 and the real migration/audit test. Toolkit completion cannot prove that no production repair is needed. |
 | #303 | P1 | Split, active | reviewed RSA Marvin exception is time-bounded and fail-closed; retain parent for dependency release/removal evidence |
 | #179 | P2 | Deferred | retain as roadmap; move actionable slices into child issues |
 | #158 | P2 | Deferred | upstream provider-scoped allowlist evaluation only |
@@ -236,7 +139,11 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #44 | P2 | Blocked | emergency-chain behavior remains deferred and expiring |
 | #1 | P2 | Blocked | umbrella only; do not duplicate child implementation |
 
+
 ## Historical checkpoints
+
+The records below describe earlier observations only. They do not override the
+current snapshot, per-issue queue, live GitHub checks or recorded review findings.
 
 The records below retain the observations and decisions made at their stated
 times. They do not override the latest checkpoint and current intake above.
@@ -609,3 +516,148 @@ connect admission, retry, sync/stream terminal finalization, unknown-dispatch
 hold retention, and recharge recovery/crash evidence. Keep #300 and #206 open
 until those paths are integrated and exercised against real PostgreSQL and
 failure/recovery scenarios.
+
+### Earlier pre-consolidation records
+
+## 2026-09-13 historical refresh (after PR #363 and new delivery slices)
+
+The fork inventory was re-read from GitHub on 2026-09-13: **45 open issues**
+(22 P1, 23 P2), with 15 labelled `status:in-progress`, 19 `status:triage`,
+and 11 `status:blocked`. Counts include parent and child issues and are not a
+count of independent implementation packages.
+
+Labels were synchronized after review: #217 and #224 moved from `status:triage`
+to `status:in-progress`; closed #345 has no stale lifecycle label and its
+Project card is Done.
+
+PR #361 merged as `1831852e9abecfdc267ddbf783d2203cd2d39e14`; #356 merged as
+`86bc4d8b88311ac3ddd400d9e72a2d68bdc4c9f6` and closed #308 (Project **Done**).
+PR #358 merged as `1bcff1a5271aebefa96253417f4707574a7a2994` from reviewed head
+`7de0188d44118f7e1c1fc2930bc6aacadfa01070`. PR #363 (Refs #205) merged as
+`e9ca10ab2d28a78cb4f265cace17260679b048bc`; #205 remains open for key rotation,
+recovery, nightly artifacts and remaining upgrade evidence.
+PR #370 merged as `c860eec66d9edfb39f7536111bd7e8f6d1b2ca66`; its three-node
+deployment slice is accepted and its Project card is Done.
+
+There are **11 open PRs**: Draft #362 (head
+`2d5abae6143eeb931ebf96906aa5ba0681f22e17`), plus nine non-draft PRs with
+squash auto-merge enabled: #364 (`897b1ee9affc5c9ac45b5ccb98b03e00c99352a2`),
+#365 (`b2b99ed7b6273220b8666204b322ed0e2e2e8ed2`), #366
+(`472484b325e5d85ba7841d71df9f2307bf8a3c29`), #367
+(`0b452aebce4f0d4f49b115b1e534439016a057ad`), #368
+(`03a12764a2f488c7c45fcf28bfdf5d492a7a7d76`), #369
+(`cc0fb5ddabe95924206022f687b840d97e95a362`) and #371
+(`f9921213c07ce814643c58814f5c4e7413b04551`), plus #373
+(`c185a15570af455b849844c1245acc659496b20d`) and #374
+(`4474ae0b77070328483c1335c200f6c162912f5d`). #372 is also open (head
+`5db5675c63211136d6159ffbd385d52f037a72cf`) without auto-merge; all eleven
+currently report `BLOCKED` while protected checks run. Auto-merge remains
+enabled on #364–#369, #371, #373 and #374.
+
+The bounded slices retain their parents: #366 covers tunnel response-relay
+admission (#205/#214), #367 the gateway environment reference (#225), #368
+the #300/#206 lifecycle boundary, #369 PostgreSQL backup/restore (#223), and
+#371 isolated metrics scrape
+and alert delivery (#307/#217). PR #372 redacts sensitive admin video fields
+(#211), but its targeted build is blocked by an unrelated existing refund
+notification compile error. PR #373 records #220 supply-chain residuals and
+PR #374 adds the #247 refund-notification slice; both await protected checks.
+Draft #362 still needs independent review and required
+CI before funds-hold integration with gateway admission/dispatch/terminal,
+cancellation/partial output, retry and crash recovery. Parent issues remain
+open until residual acceptance has evidence.
+
+The next transition is current-head review and required checks for #362 and
+#364–#369 and #371–#374; #372 needs the unrelated refund compile break resolved before it can
+be accepted. All transitions remain fork-only and are recorded on each PR, parent
+issue, Project card and this queue.
+
+### Earlier checkpoint after PRs #356, #358 and #361
+
+The fork inventory was re-read from GitHub on 2026-09-13: **45 open issues**
+(22 P1, 23 P2), with 13 labelled `status:in-progress`, 21 `status:triage`,
+and 11 `status:blocked`. Counts include parent and child issues and are not a
+count of independent implementation packages.
+
+PR #361 merged as `1831852e9abecfdc267ddbf783d2203cd2d39e14`. PR #356 merged as
+`86bc4d8b88311ac3ddd400d9e72a2d68bdc4c9f6`; Issue #308 is closed and its
+Project card is **Done**. PR #358 merged as
+`1bcff1a5271aebefa96253417f4707574a7a2994` from reviewed head
+`7de0188d44118f7e1c1fc2930bc6aacadfa01070`; its protected checks, including
+the Gateway test, passed.
+
+Draft PR #362 remains open at head `27682e86ff50a18a69ec78f22ecb8c216df0305d`;
+its required CI and independent review are pending. #362 is the
+funds-reservation slice for both #300 and #206, but it does not close either
+parent. Remaining #300/#206 acceptance is gateway admission/dispatch/terminal
+lifecycle integration, cancellation and partial-output handling, retry and
+crash recovery, plus the documented recharge/retention follow-up.
+
+PR #363 (Refs #205) remains open with squash auto-merge enabled at head
+`7095bcca993aa541eca07fa4fe3f59c630aca745`; it is behind current main
+(`1bcff1a5271aebefa96253417f4707574a7a2994`) and its required checks are still
+running. Its root-service-identity guard is a bounded residual; signing-key
+rotation/recovery, nightly artifacts and remaining upgrade evidence stay open
+in #205. Keep all parent issues open until their residual acceptance has tests,
+review and protected-check evidence.
+
+The next transition is to finish current-head review and required checks for
+#362 and #363, then integrate #362's funds hold with gateway lifecycle behavior.
+All transitions remain fork-only and are recorded on the PRs, parent issues,
+Project cards and this queue.
+
+## 2026-09-13 historical status after PR #353
+
+Current intake: 47 open issues (24 P1, 23 P2), with 13 in progress, 23 triage
+and 11 blocked after #214 entered implementation. PR #353 merged as
+`b2d2b0fca0bb96916880f8061e5d03d2c79fa501` and its Project card is Done.
+PR #355's two remaining usage fixtures now preserve both planner observations;
+all 14 local usage tests passed and the corrected branch awaits complete CI.
+PR #356 passed main review, all four required checks and its hosted 12-phase
+drill (run 34717153949); it is Ready with auto-merge enabled, pending checks
+after main synchronization. #354 and #357 also retain protected auto-merge.
+
+Draft PR #358 implements #214's automatic per-process target capacity and
+corrects stale audit findings. Local target/parser/admission tests passed;
+independent review and protected CI remain. The parent retains permit-lifetime,
+Redis fault-contract and SQL live-timeout acceptance. This snapshot supersedes
+the historical checkpoints below; live GitHub state governs later transitions.
+
+### Earlier checkpoint after PR #349
+
+Latest verified intake: 47 open issues (24 P1, 23 P2), with 12 in progress,
+24 in triage and 11 blocked after #220 entered implementation and #348 closed.
+PR #349 merged as `b044b1292694c1850a6efb7eccc9da63451be7bd`; its four required
+checks passed and its real Redis artifacts were downloaded and verified.
+PR #352 merged as
+`6c2ba493131c6fcf59dcda32779b1fce219912ce`; #343 is closed and its issue/PR
+cards are Done. #247 and #254 retain their separate residual acceptance.
+#225's generated tunnel configuration reference is ready in PR #354, and
+#268's candidate identity correction is ready in PR #355. Both are reviewed
+with automatic merge enabled under the protected checks. #308's complete
+readiness contract is in draft PR #356 for final review and CI. #357's reviewed
+Dependabot coverage is also awaiting protected checks with automatic merge
+enabled. Decisions are recorded in the individual PRs and issue documents.
+
+PR #350's new CI exposed a fallback-recovery test race: persistence completed
+before the lifecycle worker decremented its pending count. The test now waits
+at most two seconds for lifecycle accounting, retaining all capacity and
+persistence assertions. Independent review and six pinned Rust 1.95.0 runs
+passed; #350 then passed CI and merged as
+`f11d9ff3bc27aee42e54982cbe24343c1627ab5e`. #307 and #217 remain open for
+production producer fault injection, scraping and actual alert delivery evidence.
+
+### Earlier status after PR #351
+
+Live GitHub verification: 49 open issues (26 P1, 23 P2), with 11 in progress,
+27 in triage and 11 blocked. Counts include parent and child issues and must
+not be interpreted as 49 independent implementation packages. Removed the
+duplicate triage label from #348. PR #351 merged as
+`5c620e7681cba50451847c3d163076614ddf8e83`, closing #229; its Project #1 card is
+Done. Removed its stale in-progress label; the repository has no status:done
+label, so the closed issue state and Project Done are the completion record.
+Updated PRs #349, #350 and #352 against the new main using their expected head
+SHAs. All three retain squash auto-merge and require fresh checks before merge.
+
+This top checkpoint and the intake table below describe the latest verified
+state. Timestamped checkpoints after the intake table are historical records.
