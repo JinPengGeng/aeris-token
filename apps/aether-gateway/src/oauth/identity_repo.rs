@@ -3,6 +3,7 @@ use crate::handlers::shared::{
     system_config_bool as system_config_bool_with_default,
 };
 use crate::{AppState, GatewayError};
+use aether_admin::system::DEFAULT_USER_INITIAL_GIFT_USD;
 use aether_data::repository::oauth_providers::{
     validate_oauth_frontend_callback_url, validate_oauth_provider_endpoint_config,
     validate_oauth_redirect_uri, StoredOAuthProviderConfig,
@@ -243,8 +244,8 @@ pub(crate) async fn resolve_identity_oauth_login_user(
         .await
         .map_err(|err| IdentityOAuthAccountError::Storage(format!("{err:?}")))?
         .as_ref()
-        .map(|value| system_config_f64(value, 10.0))
-        .unwrap_or(10.0);
+        .map(|value| system_config_f64(value, DEFAULT_USER_INITIAL_GIFT_USD))
+        .unwrap_or(DEFAULT_USER_INITIAL_GIFT_USD);
 
     let username = unique_oauth_username(state, claims).await?;
     let email_verified = email.is_some() && claims.email_verified;

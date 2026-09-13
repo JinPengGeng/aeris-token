@@ -2233,11 +2233,14 @@ pub fn is_sensitive_admin_system_config_key(key: &str) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(key))
 }
 
+/// New accounts receive credit only when the operator explicitly configures it.
+pub const DEFAULT_USER_INITIAL_GIFT_USD: f64 = 0.0;
+
 pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value> {
     match key {
         "site_name" => Some(json!("Aether")),
         "site_subtitle" => Some(json!("AI Gateway")),
-        "default_user_initial_gift_usd" => Some(json!(10.0)),
+        "default_user_initial_gift_usd" => Some(json!(DEFAULT_USER_INITIAL_GIFT_USD)),
         "daily_usage_limit_usd" => Some(json!(0.0)),
         "password_policy_level" => Some(json!("weak")),
         REQUEST_RECORD_LEVEL_KEY => Some(json!("basic")),
