@@ -3,7 +3,25 @@
 Scope: fork `JinPengGeng/aeris-token`. Runtime changes go through reviewed PRs;
 no upstream writes are part of this delivery workflow.
 
-## Current delivery snapshot — 2026-09-13
+## 当前交付检查点 — 2026-09-14
+
+跨电脑恢复从 [GitHub 交接入口](github-handoff.md) 开始；它列出主干 SHA、在制范围、
+恢复命令及 07:00 后收尾要求。北京时间 02:29 读回主干为
+`d071e55068fed700f45fa91cedccf809226e010c`（#397），开放 47 个 Issue
+（23 P1 / 24 P2），开放 PR #400/#401/#402/#404。父子需求重叠，库存数量不代表独立开发包数量。
+
+#396 的审计可观测性和 #397 的请求取证/敏感读取审计均已合并，不再作为下一项待实施范围。
+#255 保留完整 mutation 清单、历史授权证据、可靠持久化/对账及部署验收。
+当前独立在制项为 #398 服务配置迁移安全（Draft #402）、#399 Redis lease 服务器时间
+（#401，独立评审通过、等待 hosted 门禁）和 #403 nightly tunnel 制品（Draft #404）。
+三项代码、决策与验证均已推送到 fork；未验收草稿不算已完成。#399 不依赖 #52 的 HalfOpen 新功能。
+
+Project 分页审计的错误已更正：46 个开放 Issue 原本均已上板；68 个无依据字段修改
+已经恢复并完整读回，未改变原有精细分诊。风险、复杂度和决定以后按任务证据定向更新。
+
+以下保留 #395 及更早历史检查点，时间较新的 GitHub 事件和本节覆盖其中过时的“当前/下一步”状态。
+
+## Historical delivery snapshot after #395 — 2026-09-13
 
 Verified main: `544feec1737b65305b99de901013cb8671c3ea93` (#395 merged).
 The live intake has **44 open issues**: 21 P1 / 23 P2, with 17 in progress,

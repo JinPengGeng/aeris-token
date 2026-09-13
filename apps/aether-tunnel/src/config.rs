@@ -84,7 +84,7 @@ const TUNNEL_DRAIN_DEADLINE_MS_ENV: &str = "AETHER_TUNNEL_DRAIN_DEADLINE_MS";
 // server entries. Refuse an unexpectedly large local file before TOML parsing
 // so a replaced or corrupted config cannot force an unbounded allocation at
 // service startup.
-const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TunnelPoolSizing {
