@@ -41,6 +41,27 @@ the SQL output alone cannot establish driver decoding behavior. Converting to
 `f64` is an API compatibility fix and does not preserve every decimal digit
 of large amounts, which is why the audit keeps all comparisons in NUMERIC.
 
+`fixtures/referral-numeric-special-values.sql` checks PostgreSQL's special
+values in a read-only transaction. Unconstrained `numeric` accepts `Infinity`,
+`-Infinity`, and `NaN`; `numeric(20,8)` rejects infinities but still accepts
+`NaN`. The fixture raises an error if these expectations change. Query 4 of
+the historical audit therefore explicitly counts NaN in all three reward
+amount fields; the precision/scale declaration does not provide that guard.
+Run the fixture with `psql --no-psqlrc --set ON_ERROR_STOP=1 --file` against an
+isolated PostgreSQL instance. It does not write application tables or prove
+that production contains any nonfinite amounts.
+
+The special-value fixture supports the deployed PostgreSQL 15 baseline. It
+uses real casts and catches only `numeric_value_out_of_range` for rejected
+money values; other database errors fail the check. The initial PR used
+`pg_input_is_valid()`, introduced in PostgreSQL 16, which would fail on the
+project's PostgreSQL 15 deployment. Independent review identified that gap;
+the corrected fixture retains the read-only transaction and NaN assertion.
+Validation on 2026-09-13 reproduced the missing-function error on PostgreSQL
+15.19, then passed the standalone fixture there and the full migration/audit
+regression on both 15.19 and 17.11 (one test passed, zero ignored per version,
+with local PostgreSQL required). Rust 1.95 formatting and diff checks passed.
+
 ## Decision record
 
 Until an operator runs the aggregate queries against a production snapshot,

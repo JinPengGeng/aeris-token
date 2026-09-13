@@ -32,5 +32,11 @@ run_test aether-data-postgres settlement::tests::live_usage_policy_window_aggreg
 run_test aether-data-postgres settlement::tests::live_daily_quota_serializes_each_entitlement_without_locking_shared_plan
 run_test aether-data-postgres usage::tests::live_stale_terminal_event_is_a_full_transaction_noop
 run_test aether-data-postgres pool::tests::live_session_deadlines_rollback_transactions_and_isolate_migration_overrides
+run_test aether-data-postgres settlement::funding::tests::live_request_funds_reserve_settle_release_protect_shared_wallet_and_rollback
+run_test aether-data-postgres settlement::funding::tests::live_request_funds_recovery_collects_only_unreserved_funds_once
+run_test aether-data-postgres settlement::funding::tests::live_request_funds_freeze_entitlement_day_and_recover_legacy_partial_debit
+run_test aether-data-postgres settlement::funding::tests::live_request_funds_admission_time_controls_grant_eligibility_and_frozen_day
+run_test aether-data-postgres settlement::funding::tests::live_request_funds_preserve_decimal_holds_across_ordinary_settlement_and_postpaid
+run_test aether-data-postgres settlement::funding::tests::live_request_funds_sum_entitlement_decimals_without_phantom_debt
 
 printf 'PASS: selected isolated PostgreSQL live-DB tests\n'
