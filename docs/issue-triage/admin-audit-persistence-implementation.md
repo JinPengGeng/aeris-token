@@ -52,6 +52,14 @@ toolchain is available.
 
 ## Follow-up
 
-This is at-least-once persistence with a bounded failure window, not a strict
-same-transaction compliance guarantee. Operations that mutate multiple stores
-need a transaction/outbox design before being advertised as strictly durable.
+Successful inserts are durable and replaying the same event ID is idempotent.
+On write failure or the two-second timeout, the current code only warns and
+preserves the already-applied business response; it has no retry queue, outbox
+or reconciliation worker. This is bounded best-effort delivery on failure,
+not an at-least-once delivery guarantee. A timeout also leaves the commit
+result uncertain; it does not establish that no row was inserted.
+
+The HTTP acceptance slice is described in
+[the readback decision](issue-255-audit-readback.md). Operations that mutate
+multiple stores still need a transaction/outbox design before being advertised
+as strictly durable. Parent #255 remains open for those separate requirements.

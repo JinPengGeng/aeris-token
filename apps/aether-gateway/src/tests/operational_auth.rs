@@ -30,7 +30,7 @@ async fn issue_operational_session_access_token(
         .0
 }
 
-async fn issue_operational_session_access_token_and_user(
+pub(super) async fn issue_operational_session_access_token_and_user(
     state: &AppState,
     client_device_id: &str,
     role: &str,
