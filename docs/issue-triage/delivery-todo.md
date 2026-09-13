@@ -581,9 +581,10 @@ for marker retention/capacity, PostgreSQL restore and end-to-end billing recover
 The fork was re-read with `gh` on 2026-09-13. The repository has **45 open
 issues**: 22 P1 and 23 P2, with 15 `status:in-progress`, 19 `status:triage`,
 and 11 `status:blocked`. This supersedes earlier 47/49/50-item counts while
-keeping them above as history. The delivery queue tracks **15 open
-implementation/documentation PRs** (#362 and #365-#379); prior checkpoint PR
-#364 and this refresh PR are excluded from that queue count.
+keeping them above as history. The delivery queue tracks **18 active open
+implementation/documentation PRs**: #362, #365-#369, #371-#380, and #382-#383.
+PR #364 is the prior checkpoint, #370 is merged, and #381 is this refresh PR;
+those records are excluded from the active queue count.
 
 ### Focused issue and PR mapping
 

@@ -153,9 +153,10 @@ corrected and the failed run is retained as evidence; it is not marked Done.
 
 Remote revalidation found **45 open issues** in Project #1: 22 P1 and 23 P2;
 15 In progress, 19 Triage and 11 Blocked by lifecycle labels. No open issue is
-marked Done. The 15-item delivery queue is #362 and #365-#379; historical
-checkpoint PR #364 and this refresh PR are excluded from that queue count. These
-counts supersede earlier 47/49/50-item observations without rewriting history.
+marked Done. The 18-item active delivery queue is #362, #365-#369, #371-#380,
+and #382-#383. Historical checkpoint PR #364, merged PR #370 and this refresh
+PR #381 are excluded from that queue count. These counts supersede earlier
+47/49/50-item observations without rewriting history.
 
 Focused cards remain linked to live state: #253 -> draft #379 (revenue-risk
 audit), #255 -> #376 (Docker safety and durable-audit residuals), #225 -> #378
