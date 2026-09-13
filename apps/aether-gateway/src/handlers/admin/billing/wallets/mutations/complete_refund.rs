@@ -343,6 +343,12 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
         .await?
     {
         crate::AdminWalletMutationOutcome::Applied(refund) => {
+            if refund_status_notification_should_send(
+                Some(refund_before_complete.status.as_str()),
+                &refund.status,
+            ) {
+                notify_user_refund_status(state, &refund).await;
+            }
             if let Some(order_id) = refund.payment_order_id.as_deref() {
                 if let Err(err) = state
                     .app()
@@ -395,11 +401,25 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::shared::refund_status_notification_should_send;
     use super::{
         gateway_refund_mode_allowed, is_safe_gateway_refund_id, merge_gateway_refund_proof,
     };
     use crate::handlers::shared::DirectGatewayRefundResult;
     use serde_json::json;
+
+    #[test]
+    fn completion_notification_only_fires_on_non_terminal_transition() {
+        assert!(refund_status_notification_should_send(
+            Some("processing"),
+            "succeeded"
+        ));
+        assert!(!refund_status_notification_should_send(
+            Some("succeeded"),
+            "succeeded"
+        ));
+        assert!(!refund_status_notification_should_send(None, "processing"));
+    }
 
     #[test]
     fn gateway_refund_merge_replaces_legacy_raw_payload() {
