@@ -140,6 +140,7 @@ struct DirectReqwestClientCacheKey {
     proxy_digest: Option<String>,
     follow_redirects: bool,
     http1_only: bool,
+    disable_retries: bool,
     transport_profile: Option<DirectReqwestTransportProfileCacheKey>,
 }
 
@@ -1195,6 +1196,7 @@ pub(crate) struct DirectSyncExecutionRuntime;
 pub(crate) struct ExecutionTransportControls {
     follow_redirects: Option<bool>,
     http1_only: bool,
+    disable_retries: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1858,7 +1860,11 @@ async fn send_request_inner(
 
     let prepare_started_at = Instant::now();
     let method = plan.method.parse::<reqwest::Method>()?;
-    let transport_controls = resolve_execution_transport_controls(&plan.headers);
+    let mut transport_controls = resolve_execution_transport_controls(&plan.headers);
+    // A funded operation owns exactly one dispatch. Even HTTP protocol-level
+    // resends must not silently reuse that operation's reservation.
+    transport_controls.disable_retries =
+        crate::execution_runtime::funded_image::current_attempt().is_some();
     let headers = build_request_headers(
         &plan.headers,
         plan.content_encoding.as_deref(),
@@ -4040,6 +4046,7 @@ fn direct_reqwest_client_cache_key(
         proxy_digest: proxy_url.map(|proxy_url| direct_reqwest_proxy_digest(&proxy_url)),
         follow_redirects: transport_controls.follow_redirects == Some(true),
         http1_only: transport_controls.http1_only,
+        disable_retries: transport_controls.disable_retries,
         transport_profile: transport_profile.map(direct_reqwest_transport_profile_cache_key),
     }
 }
@@ -4245,6 +4252,9 @@ fn build_direct_reqwest_client_from_cache_key(
         validate_execution_proxy_url(proxy_url)?;
     }
     let mut builder = reqwest::Client::builder().no_proxy();
+    if cache_key.disable_retries {
+        builder = builder.retry(reqwest::retry::never());
+    }
     if proxy_url.is_none() {
         builder = builder.dns_resolver(Arc::new(ExecutionSafeDnsResolver));
     }
@@ -5096,6 +5106,7 @@ fn resolve_execution_transport_controls(
         http1_only: execution_transport_header_value(headers, EXECUTION_REQUEST_HTTP1_ONLY_HEADER)
             .and_then(|value| parse_execution_transport_bool(value))
             .unwrap_or(false),
+        disable_retries: false,
     }
 }
 

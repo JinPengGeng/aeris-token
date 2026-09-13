@@ -127,49 +127,54 @@ where
         candidate_count,
     );
 
-    async move {
-        tracing::debug!(
-            event_name = "candidate_loop_started",
-            log_type = "event",
-            trace_id = %trace_id,
-            plan_kind,
-            candidate_count,
-            first_provider = first_provider.as_str(),
-            "candidate loop started"
-        );
+    crate::execution_runtime::funded_image::request_scope(
+        state,
+        async move {
+            tracing::debug!(
+                event_name = "candidate_loop_started",
+                log_type = "event",
+                trace_id = %trace_id,
+                plan_kind,
+                candidate_count,
+                first_provider = first_provider.as_str(),
+                "candidate loop started"
+            );
 
-        let port = SyncAttemptLoopPort {
-            state,
-            parts,
-            trace_id,
-            decision,
-            plan_kind,
-            transfer_tracker,
-        };
-        let loop_result = run_ai_attempt_loop(&port, plan_and_reports).await;
-        if loop_result.is_err() {
-            release_active_plan_usage_policy_cost_best_effort(
+            let port = SyncAttemptLoopPort {
                 state,
+                parts,
+                trace_id,
                 decision,
+                plan_kind,
                 transfer_tracker,
-                "candidate_loop_error",
-            )
-            .await;
-        }
-        match loop_result? {
-            AiAttemptLoopOutcome::Responded(response) => {
-                Ok(LocalExecutionRequestOutcome::responded(response))
+            };
+            let loop_result = run_ai_attempt_loop(&port, plan_and_reports).await;
+            if loop_result.is_err() {
+                release_active_plan_usage_policy_cost_best_effort(
+                    state,
+                    decision,
+                    transfer_tracker,
+                    "candidate_loop_error",
+                )
+                .await;
             }
-            AiAttemptLoopOutcome::Deferred(response) => Ok(
-                LocalExecutionRequestOutcome::responded(mark_deferred_upstream_response(response)),
-            ),
-            AiAttemptLoopOutcome::Exhausted(exhaustion) => {
-                Ok(LocalExecutionRequestOutcome::Exhausted(exhaustion))
+            match loop_result? {
+                AiAttemptLoopOutcome::Responded(response) => {
+                    Ok(LocalExecutionRequestOutcome::responded(response))
+                }
+                AiAttemptLoopOutcome::Deferred(response) => {
+                    Ok(LocalExecutionRequestOutcome::responded(
+                        mark_deferred_upstream_response(response),
+                    ))
+                }
+                AiAttemptLoopOutcome::Exhausted(exhaustion) => {
+                    Ok(LocalExecutionRequestOutcome::Exhausted(exhaustion))
+                }
+                AiAttemptLoopOutcome::NoPath => Ok(LocalExecutionRequestOutcome::NoPath),
             }
-            AiAttemptLoopOutcome::NoPath => Ok(LocalExecutionRequestOutcome::NoPath),
         }
-    }
-    .instrument(span)
+        .instrument(span),
+    )
     .await
 }
 
@@ -213,45 +218,48 @@ where
 {
     let span = tracing::debug_span!("candidates", trace_id = %trace_id, plan_kind);
 
-    async move {
-        tracing::debug!(
-            event_name = "candidate_loop_started",
-            log_type = "event",
-            trace_id = %trace_id,
-            plan_kind,
-            "dynamic candidate loop started"
-        );
+    crate::execution_runtime::funded_image::request_scope(
+        state,
+        async move {
+            tracing::debug!(
+                event_name = "candidate_loop_started",
+                log_type = "event",
+                trace_id = %trace_id,
+                plan_kind,
+                "dynamic candidate loop started"
+            );
 
-        let port = SyncAttemptLoopPort {
-            state,
-            parts,
-            trace_id,
-            decision,
-            plan_kind,
-            transfer_tracker,
-        };
-        let loop_result = run_dynamic_attempt_loop(
-            &port,
-            &mut source,
-            trace_id,
-            plan_kind,
-            state
-                .frontdoor_runtime_guards
-                .local_execution_planning_timeout,
-        )
-        .await;
-        if loop_result.is_err() {
-            release_active_plan_usage_policy_cost_best_effort(
+            let port = SyncAttemptLoopPort {
                 state,
+                parts,
+                trace_id,
                 decision,
+                plan_kind,
                 transfer_tracker,
-                "dynamic_candidate_loop_error",
+            };
+            let loop_result = run_dynamic_attempt_loop(
+                &port,
+                &mut source,
+                trace_id,
+                plan_kind,
+                state
+                    .frontdoor_runtime_guards
+                    .local_execution_planning_timeout,
             )
             .await;
+            if loop_result.is_err() {
+                release_active_plan_usage_policy_cost_best_effort(
+                    state,
+                    decision,
+                    transfer_tracker,
+                    "dynamic_candidate_loop_error",
+                )
+                .await;
+            }
+            loop_result
         }
-        loop_result
-    }
-    .instrument(span)
+        .instrument(span),
+    )
     .await
 }
 

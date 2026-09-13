@@ -333,7 +333,7 @@ async fn gateway_converts_openai_image_sync_to_gemini_image_provider_impl() {
                 provider_catalog_repository,
                 Arc::new(InMemoryRequestCandidateRepository::default()),
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            ).with_explicit_free_image_pricing_for_tests(&sample_candidate_row()),
         );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -670,7 +670,7 @@ async fn gateway_converts_gemini_image_sync_to_openai_image_provider_impl() {
                 provider_catalog_repository,
                 Arc::new(InMemoryRequestCandidateRepository::default()),
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            ).with_explicit_free_image_pricing_for_tests(&sample_candidate_row()),
         );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -1042,7 +1042,7 @@ async fn gateway_executes_codex_image_sync_via_local_decision_gate_after_oauth_r
                 provider_catalog_repository.clone(),
                 Arc::new(InMemoryRequestCandidateRepository::default()),
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            ).with_explicit_free_image_pricing_for_tests(&sample_candidate_row()),
         )
         .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
     let gateway = build_router_with_state(gateway_state);
@@ -1443,7 +1443,7 @@ async fn gateway_plans_chatgpt_web_image_sync_with_internal_web_executor_url_imp
                 provider_catalog_repository,
                 Arc::new(InMemoryRequestCandidateRepository::default()),
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            ).with_explicit_free_image_pricing_for_tests(&sample_candidate_row()),
         );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;

@@ -227,6 +227,15 @@ impl UsageSettlementWriter for GatewayDataState {
         GatewayDataState::has_settlement_writer(self)
     }
 
+    async fn write_request_attempt_funds_event(
+        &self,
+        event: &aether_usage_runtime::UsageAttemptFundsEvent,
+        finalized_at_unix_secs: u64,
+    ) -> Result<(), DataLayerError> {
+        self.apply_request_attempt_funds_event(event, finalized_at_unix_secs)
+            .await
+    }
+
     async fn reconcile_usage_policy_cost(
         &self,
         input: ReconcileUsagePolicyCostInput,

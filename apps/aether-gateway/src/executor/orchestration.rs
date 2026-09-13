@@ -1086,7 +1086,7 @@ fn standard_text_sync_heartbeat_error_kind(status_code: u16) -> LocalCoreSyncErr
     }
 }
 
-fn build_openai_image_sync_heartbeat_shell_response(
+pub(crate) fn build_openai_image_sync_heartbeat_shell_response(
     state: AppState,
     request_path: String,
     trace_id: String,
@@ -1106,7 +1106,7 @@ fn build_openai_image_sync_heartbeat_shell_response(
     let request_diagnostics = current_request_diagnostics();
     let cancel_on_disconnect = crate::request_lifecycle::cancel_on_client_disconnect();
 
-    tokio::spawn(async move {
+    crate::execution_runtime::funded_image::spawn_request_scope(&state.clone(), async move {
         scope_request_diagnostics_with(request_diagnostics, async move {
             let execution = execute_openai_image_sync_heartbeat_attempts(
                 state,
@@ -1120,13 +1120,17 @@ fn build_openai_image_sync_heartbeat_shell_response(
             );
             let outcome = tokio::select! {
                 biased;
-                _ = tx.closed(), if cancel_on_disconnect => return,
+                _ = tx.closed(), if cancel_on_disconnect => {
+                    crate::execution_runtime::funded_image::mark_request_cancelled();
+                    return Ok(());
+                },
                 result = execution => result,
             };
             let bytes = openai_image_sync_heartbeat_final_bytes(outcome).await;
             let _ = tx.send(Ok(Bytes::from(bytes))).await;
+            Ok(())
         })
-        .await;
+        .await
     });
 
     let headers = BTreeMap::from([(

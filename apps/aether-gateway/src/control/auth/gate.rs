@@ -126,6 +126,19 @@ async fn execution_plan_balance_capacity_rejection_inner(
     if auth_context.local_rejection.is_some() {
         return Ok(None);
     }
+    if crate::execution_runtime::funded_image::authorize_image_plan(
+        state,
+        plan,
+        decision,
+        report_context,
+    )
+    .await?
+    {
+        // Paid images carry a frozen server quote into an atomic attempt
+        // reservation; free images have explicit zero-cost pricing. Account
+        // shortcuts must never admit an unproven image operation.
+        return Ok(None);
+    }
     if auth_context.api_key_is_standalone {
         validate_execution_plan_pricing_configuration_for_plan(state, plan, report_context).await?;
         return Ok(None);
@@ -2008,15 +2021,15 @@ mod tests {
             &plan,
             Some(&billing_report_context()),
         )
-        .await
-        .expect("image capacity check should resolve");
+        .await;
 
-        assert_eq!(
+        assert!(matches!(
             rejection,
-            Some(GatewayLocalAuthRejection::BalanceDenied {
-                remaining: Some(10.0),
+            Err(crate::GatewayError::Client {
+                status: http::StatusCode::UNPROCESSABLE_ENTITY,
+                ..
             })
-        );
+        ));
     }
 
     #[tokio::test]

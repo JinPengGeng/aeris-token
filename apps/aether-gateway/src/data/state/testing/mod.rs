@@ -32,6 +32,37 @@ mod announcements;
 mod video_tasks;
 
 impl GatewayDataState {
+    /// Transport/conversion fixtures must explicitly declare free image pricing;
+    /// absent billing configuration must retain production fail-closed behavior.
+    #[cfg(test)]
+    pub(crate) fn with_explicit_free_image_pricing_for_tests(
+        mut self,
+        row: &aether_data_contracts::repository::candidate_selection::StoredMinimalCandidateSelectionRow,
+    ) -> Self {
+        use aether_data::repository::billing::InMemoryBillingReadRepository;
+        use aether_data_contracts::repository::billing::StoredBillingModelContext;
+        self.billing_reader = Some(Arc::new(InMemoryBillingReadRepository::seed([
+            StoredBillingModelContext {
+                provider_id: row.provider_id.clone(),
+                provider_billing_type: Some("free_tier".into()),
+                provider_api_key_id: Some(row.key_id.clone()),
+                provider_api_key_rate_multipliers: None,
+                provider_api_key_cache_ttl_minutes: None,
+                global_model_id: row.global_model_id.clone(),
+                global_model_name: row.global_model_name.clone(),
+                global_model_config: None,
+                default_price_per_request: Some(0.0),
+                default_tiered_pricing: None,
+                model_id: Some(row.model_id.clone()),
+                model_provider_model_name: Some(row.model_provider_model_name.clone()),
+                model_config: None,
+                model_price_per_request: None,
+                model_tiered_pricing: None,
+            },
+        ])));
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn with_user_preferences_for_tests(
         mut self,
