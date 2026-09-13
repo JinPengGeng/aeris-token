@@ -1,6 +1,23 @@
 # Issue 核验、排序与交付清单
 
-更新：2026-09-12。基线为 fork `main@12a1d265c090f2666e35ddbe7f13f5b842cf5ff5`。只修改 [JinPengGeng/aeris-token](https://github.com/JinPengGeng/aeris-token)，上游只读。用户已授权自主选择方案、补齐环境和社区协作配置，并要求全过程留档。
+当前交付入口：[完整动态 TODO](issue-triage/delivery-todo.md)。2026-09-13 已核验
+fork main `da215569313bd39a105ef5098e60921140af6e3d`：44 个开放 Issue
+（21 P1 / 23 P2；15 进行中 / 19 待分诊 / 10 依赖阻塞），16 个开放 PR
+（15 个启用受保护自动合并，#379 为 Draft）。父子任务不能重复计数。
+所有 44 个开放 Issue 的 Project 卡均有 Status、Priority、Area、Risk、Size、Decision。
+
+#276 已随 #386 的 merge commit 完成，重新 fetch 后验证指定上游 SHA 的祖先关系。
+#362 资金边界与 #376 升级安全的评审问题均已修复并通过对应实测；#383 修复
+独立评审发现的 PostgreSQL 15 兼容性回归，15.19/17.11 真实迁移审计测试各通过
+1 项且 0 ignored。#375 经范围复核关闭：release 公钥轮换不需要新增 Gateway
+握手协议；#205 保留实际公钥集合、轮换/退役和恢复验收。当前状态、验证链接、
+剩余验收和排序以动态 TODO 与 GitHub 为准。
+
+以下保留 2026-09-12 原始分诊证据及历史阶段记录，不代表当前未完成数量或状态。
+原始基线为 fork `main@12a1d265c090f2666e35ddbe7f13f5b842cf5ff5`。用户已授权
+自主选择方案、补齐环境和社区协作配置，并要求全过程留档。只修改
+[JinPengGeng/aeris-token](https://github.com/JinPengGeng/aeris-token)；误开的上游
+#816 已关闭且没有代码合并，详细纠正记录见动态 TODO，不将历史误操作描述为从未发生。
 
 ## 统计与依据
 
