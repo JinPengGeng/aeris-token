@@ -8,12 +8,13 @@
 
 ## 当前检查点
 
-核验时间：北京时间 2026-09-14 02:04。计划持续开发至当日 07:00，之后停止启动新实现，
+核验时间：北京时间 2026-09-14 02:29。计划持续开发至当日 07:00，之后停止启动新实现，
 整理、验证和同步现场；本检查点不是 07:00 的最终收尾结果。
 
 - 已核验主干：`d071e55068fed700f45fa91cedccf809226e010c`，最近合并 PR #397。
-- 开放需求库存：46 个 Issue，23 P1 / 23 P2；父子范围重叠，不能当作 46 个独立开发包。
-- 本文档 PR 创建前开放 PR 为 0；后续状态以 GitHub 当前事件为准。
+- 开放需求库存：47 个 Issue，23 P1 / 24 P2；父子范围重叠，不能当作 47 个独立开发包。
+- 开放 PR 为 #400、#401、#402、#404；#401 已启用受保护 squash auto-merge，#402/#404 保持 Draft。
+- 本文档通过 [PR #400](https://github.com/JinPengGeng/aeris-token/pull/400) 交付；后续状态以 GitHub 当前事件为准。
 - #396 审计落盘失败指标和告警已合并为 `01caaf5ce6606c4955b8c1ee4816bce8265b1d7b`。
 - #397 请求取证读取与敏感读取审计已合并为上述主干 SHA。#255 仍开放，当前授权状态不等于历史认证证据。
 - 单维护者模式已接受；不要求第二维护者，继续执行四项 required checks、独立评审和受保护 squash merge。
@@ -42,15 +43,23 @@ gh issue list --repo JinPengGeng/aeris-token --state open --limit 100
 
 ## 当前在制范围与决策
 
-| 任务 | 优先级 | 当前结论 | 恢复时下一步 |
+| 任务 | 优先级 | GitHub 现场 | 恢复时下一步 |
 | --- | --- | --- | --- |
-| [#398](https://github.com/JinPengGeng/aeris-token/issues/398) 配置迁移路径安全 | P1 | 草稿独立评审未通过：祖先路径竞态、共享父目录权限修改、真实迁移测试缺口 | 先修正并验证安全边界；通过独立复审后才进入受保护合并 |
-| [#399](https://github.com/JinPengGeng/aeris-token/issues/399) Redis lease 时间源 | P1 | 独立实施 acquire/renew/live-count 在 Lua 内使用 Redis TIME | 真实 Redis 并发/过期/续租/ACL 故障验证；不依赖 #52 HalfOpen 新功能 |
-| [#205](https://github.com/JinPengGeng/aeris-token/issues/205) nightly tunnel 制品残项 | P2 | 工作流草稿尚未验收；签名文件命名、信任输入和发布边界需要修正 | 签名/验签与负路径实测，记录未配置和未发布状态后提交独立 PR |
+| [#398](https://github.com/JinPengGeng/aeris-token/issues/398) 配置迁移路径安全 | P1 | [Draft #402](https://github.com/JinPengGeng/aeris-token/pull/402)，`fix/issue-398-service-config-safe` | 修订稿 13 个真实文件系统测试及 Rust 1.95 Clippy/fmt 通过；需新 head 独立复审、Linux/root 运行边界确认及 hosted 检查 |
+| [#399](https://github.com/JinPengGeng/aeris-token/issues/399) Redis lease 时间源 | P1 | [PR #401](https://github.com/JinPengGeng/aeris-token/pull/401)，`fix/issue-399-redis-server-time` | 本地实现/独立评审已完成，严格 harness 129 passed；Redis 7.4.11/8.10.1 新增 6 项各通过，等待 hosted 四项门禁 |
+| [#403](https://github.com/JinPengGeng/aeris-token/issues/403) nightly tunnel 制品 | P2 | [Draft #404](https://github.com/JinPengGeng/aeris-token/pull/404)，`feat/nightly-signed-tunnel-artifacts` | 当前草稿会使缺签名配置的 nightly 失败，禁止合并；先实现全未配置时保留 gateway nightly 的条件分支，再补真实签名/构建/独立评审 |
 
-上述在制草稿在本检查点尚未推送，不能声称已可跨电脑恢复。其实现、验证和审查结论须在收尾前
-保存到本 fork 分支/Draft PR；后续更新本表为实际 PR、head SHA 和可执行下一步。
-不要将未完成草稿混入 `main`。
+上述三项实现、决策和验证命令均已推送到 fork，可以直接从对应 PR 恢复。核验的 head SHA：
+
+```text
+#401 49b3f35e7603f698a3437bba2a574e7a89fc8fdd
+#402 ce7d747be584e82f3b503406c82ab96460c24bbd
+#404 f539d2da65ab87469dae7873f253ae69c1667abd
+```
+
+#398 第一版独立评审拒绝后已修正祖先 FD walk、共享目录权限策略、FIFO 和真实迁移覆盖，
+不能把第一版的拒绝或本机测试通过当作修订稿已完成独立验收。#399 不依赖 #52 的 HalfOpen 新功能。
+未完成草稿不混入 `main`；原主工作树的用户既有改动和历史 worktree 全量清点仍留待收尾。
 
 签名配置只读核验：仓库及受保护 `release` Environment 均未列出 tunnel signing secret，
 仓库未列出 public trust variables。缺配置不会被当作签名发布验收通过；真实发布仍服从
@@ -59,8 +68,8 @@ gh issue list --repo JinPengGeng/aeris-token --state open --limit 100
 ## 看板核验更正
 
 Project 分页误读曾导致无依据的批量字段覆盖。按更新前快照恢复 68 个字段后，
-已完整读取 389 张卡，核验原有 Status/Priority/Area/Risk/Size/Decision 全部一致。
-46 个开放 Issue 在更改前已经各有卡，不能计作“本轮补齐缺失卡”。后续仅根据具体任务事实
+02:04 已完整读取当时的 389 张卡，核验原有 Status/Priority/Area/Risk/Size/Decision 全部一致。
+当时 46 个开放 Issue 在更改前已经各有卡，不能计作“本轮补齐缺失卡”。后续仅根据具体任务事实
 定向更新字段，不从状态机械推导 Risk、Size 或 Decision。
 
 ## 07:00 后收尾标准
