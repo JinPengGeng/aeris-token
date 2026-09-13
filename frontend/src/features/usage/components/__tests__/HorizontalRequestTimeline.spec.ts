@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
 
 import type { CandidateRecord, RequestTrace } from '@/api/requestTrace'
 import HorizontalRequestTimeline from '../HorizontalRequestTimeline.vue'
@@ -197,6 +197,61 @@ afterEach(() => {
 })
 
 describe('HorizontalRequestTimeline', () => {
+  it('cancels a previous candidate scope and ignores its late result', async () => {
+    let resolveFirst!: (trace: RequestTrace) => void
+    requestTraceApiMock.getRequestTrace
+      .mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve }))
+      .mockResolvedValue(buildTrace([buildCandidate({ provider_name: 'All candidates result', status: 'unused' })]))
+    const attemptedOnly = ref(true)
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(defineComponent({ setup: () => () => h(HorizontalRequestTimeline, {
+      requestId: 'req-1', attemptedOnly: attemptedOnly.value,
+    }) }))
+    app.mount(root)
+    mountedApps.push({ app, root })
+    const firstSignal = requestTraceApiMock.getRequestTrace.mock.calls[0][1].signal as AbortSignal
+    attemptedOnly.value = false
+    await flushPendingUpdates()
+    expect(firstSignal.aborted).toBe(true)
+    expect(requestTraceApiMock.getRequestTrace).toHaveBeenLastCalledWith('req-1', expect.objectContaining({ attemptedOnly: false }))
+    expect(root.textContent).toContain('All candidates result')
+    resolveFirst(buildTrace([buildCandidate({ provider_name: 'Stale result' })]))
+    await flushPendingUpdates()
+    expect(root.textContent).not.toContain('Stale result')
+    expect(root.textContent).toContain('All candidates result')
+  })
+
+  it('starts the new request while a previous request is still pending and cancels on unmount', async () => {
+    requestTraceApiMock.getRequestTrace.mockImplementation(() => new Promise(() => undefined))
+    const requestId = ref('req-first')
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(defineComponent({ setup: () => () => h(HorizontalRequestTimeline, { requestId: requestId.value }) }))
+    app.mount(root)
+    const firstSignal = requestTraceApiMock.getRequestTrace.mock.calls[0][1].signal as AbortSignal
+    requestId.value = 'req-second'
+    await flushPendingUpdates()
+    expect(firstSignal.aborted).toBe(true)
+    expect(requestTraceApiMock.getRequestTrace).toHaveBeenLastCalledWith('req-second', expect.objectContaining({ attemptedOnly: true }))
+    const secondSignal = requestTraceApiMock.getRequestTrace.mock.calls[1][1].signal as AbortSignal
+    app.unmount()
+    root.remove()
+    expect(secondSignal.aborted).toBe(true)
+  })
+
+  it.each([403, 404, undefined])('handles an unavailable all-candidates read (%s)', async status => {
+    requestTraceApiMock.getRequestTrace.mockRejectedValue({
+      isAxiosError: true, message: 'forensic read unavailable',
+      ...(status ? { response: { status, data: { detail: 'forensic read unavailable' } } } : {}),
+    })
+    const { root } = mountTimelineFromApi('req-missing', { attemptedOnly: false })
+    await flushPendingUpdates()
+    const expected = status === 404 ? '暂无追踪数据' : status === 403 ? 'forensic read unavailable' : '无法连接到服务器，请检查网络连接'
+    expect(root.textContent).toContain(expected)
+    expect(requestTraceApiMock.getRequestTrace).toHaveBeenCalledOnce()
+  })
+
   it('exports a skipped conversion failure with context only after clicking copy', async () => {
     diagnosticCopyMock.prepare.mockImplementation(async bundle => ({ ...bundle, reproduction: { status: 'sanitized_context' } }))
     diagnosticCopyMock.copy.mockResolvedValue(true)

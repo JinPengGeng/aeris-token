@@ -19,11 +19,14 @@ use crate::hooks::{get_request_audit_bundle, get_request_usage_audit};
 use crate::router::metrics;
 use crate::state::AppState;
 
+mod audit;
+
 #[derive(Clone, Copy)]
 struct OperationalPermission {
     required_permissions: &'static [&'static str],
     write: bool,
     requires_full_admin_role: bool,
+    audit_action: Option<&'static str>,
 }
 
 pub(crate) fn mount_operational_routes(
@@ -81,6 +84,26 @@ async fn authorize_operational_request(
     request: Request,
     next: Next,
 ) -> Response<Body> {
+    if matches!(*request.method(), http::Method::GET | http::Method::HEAD)
+        && request.uri().path().starts_with("/_gateway/audit/")
+    {
+        return crate::request_lifecycle::run_request_with_usage(
+            state.usage_runtime.clone(),
+            Box::pin(
+                async move { Ok(authorize_operational_request_inner(state, request, next).await) },
+            ),
+        )
+        .await
+        .unwrap_or_else(IntoResponse::into_response);
+    }
+    authorize_operational_request_inner(state, request, next).await
+}
+
+async fn authorize_operational_request_inner(
+    state: AppState,
+    request: Request,
+    next: Next,
+) -> Response<Body> {
     let Some(permission) = operational_permission(request.method(), request.uri().path()) else {
         return operational_error_response(
             StatusCode::FORBIDDEN,
@@ -105,19 +128,33 @@ async fn authorize_operational_request(
         return operational_auth_required_response();
     }
 
-    match crate::control::resolve_local_admin_session_principal(&state, &headers, &uri).await {
+    let client_ip = crate::headers::effective_client_ip(&headers, &remote_addr);
+    let audit = match crate::control::resolve_local_admin_session_principal(&state, &headers, &uri)
+        .await
+    {
         Ok(Some(principal)) => {
+            let audit = audit::Context::new(&permission, &principal, &request, client_ip);
             if permission.requires_full_admin_role
                 && !crate::roles::is_full_admin_role(&principal.user_role)
             {
-                return operational_permission_denied_response(permission.required_permissions[0]);
+                return audit::finish(
+                    &state,
+                    audit,
+                    operational_permission_denied_response(permission.required_permissions[0]),
+                )
+                .await;
             }
             if permission.write && !crate::roles::can_write_admin_console(&principal.user_role) {
-                return operational_permission_denied_response(permission.required_permissions[0]);
+                return audit::finish(
+                    &state,
+                    audit,
+                    operational_permission_denied_response(permission.required_permissions[0]),
+                )
+                .await;
             }
+            audit
         }
         Ok(None) => {
-            let client_ip = crate::headers::effective_client_ip(&headers, &remote_addr);
             let authenticated = match crate::management_token_auth::authenticate_management_token(
                 &state, &headers, client_ip,
             )
@@ -137,14 +174,33 @@ async fn authorize_operational_request(
                 }
             };
 
+            let principal = crate::control::GatewayAdminPrincipalContext {
+                user_id: authenticated.user.id.clone(),
+                user_role: authenticated.user.role.clone(),
+                session_id: None,
+                management_token_id: Some(authenticated.token.id.clone()),
+                management_token_permissions: Some(authenticated.permissions.clone()),
+            };
+            let audit = audit::Context::new(&permission, &principal, &request, client_ip);
+
             if permission.requires_full_admin_role
                 && !crate::roles::is_full_admin_role(&authenticated.user.role)
             {
-                return operational_permission_denied_response(permission.required_permissions[0]);
+                return audit::finish(
+                    &state,
+                    audit,
+                    operational_permission_denied_response(permission.required_permissions[0]),
+                )
+                .await;
             }
             if permission.write && !crate::roles::can_write_admin_console(&authenticated.user.role)
             {
-                return operational_permission_denied_response(permission.required_permissions[0]);
+                return audit::finish(
+                    &state,
+                    audit,
+                    operational_permission_denied_response(permission.required_permissions[0]),
+                )
+                .await;
             }
             let missing_permission =
                 permission
@@ -158,9 +214,13 @@ async fn authorize_operational_request(
                         )
                     });
             if let Some(required_permission) = missing_permission {
-                return operational_permission_denied_response(required_permission);
+                return audit::finish(
+                    &state,
+                    audit,
+                    operational_permission_denied_response(required_permission),
+                )
+                .await;
             }
-
             let client_ip = client_ip.to_string();
             if let Err(err) = state
                 .record_management_token_usage(&authenticated.token.id, Some(client_ip.as_str()))
@@ -172,6 +232,7 @@ async fn authorize_operational_request(
                     "gateway failed to record operational management token usage"
                 );
             }
+            audit
         }
         Err(err) => {
             warn!(error = %crate::error::redact_error_debug(&err), "operational admin session authentication failed");
@@ -181,14 +242,10 @@ async fn authorize_operational_request(
                 None,
             );
         }
-    }
+    };
 
-    let mut response = next.run(request).await;
-    response.headers_mut().insert(
-        http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    response
+    let response = next.run(request).await;
+    audit::finish(&state, audit, response).await
 }
 
 fn operational_permission(method: &http::Method, path: &str) -> Option<OperationalPermission> {
@@ -197,6 +254,7 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             required_permissions: &["admin:monitoring:read"],
             write: false,
             requires_full_admin_role: false,
+            audit_action: None,
         });
     }
     if path.starts_with("/_gateway/async-tasks/video-tasks") {
@@ -209,6 +267,7 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             },
             write,
             requires_full_admin_role: false,
+            audit_action: None,
         });
     }
     if path.starts_with("/_gateway/audit/auth/users/") {
@@ -216,6 +275,7 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             required_permissions: &["admin:api_keys:read"],
             write: false,
             requires_full_admin_role: false,
+            audit_action: Some("read_current_auth_policy"),
         });
     }
     if path.starts_with("/_gateway/audit/request-audit/") {
@@ -227,6 +287,7 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             ],
             write: false,
             requires_full_admin_role: true,
+            audit_action: Some("read_request_audit_bundle"),
         });
     }
     if path.starts_with("/_gateway/audit/request-candidates/")
@@ -236,6 +297,11 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             required_permissions: &["admin:monitoring:admin"],
             write: false,
             requires_full_admin_role: true,
+            audit_action: Some(if path.starts_with("/_gateway/audit/request-candidates/") {
+                "read_request_candidates"
+            } else {
+                "read_request_decision_trace"
+            }),
         });
     }
     if path.starts_with("/_gateway/audit/") {
@@ -243,6 +309,7 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             required_permissions: &["admin:usage:read"],
             write: false,
             requires_full_admin_role: false,
+            audit_action: Some("read_request_usage"),
         });
     }
     None

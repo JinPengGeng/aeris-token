@@ -14,6 +14,17 @@ beforeEach(() => {
 })
 
 describe('dashboard body loading', () => {
+  it('passes the selected candidate scope and cancellation signal to monitoring', async () => {
+    const controller = new AbortController()
+    await requestTraceApi.getRequestTrace('trace-1', { attemptedOnly: false, signal: controller.signal })
+    expect(getMock).toHaveBeenLastCalledWith('/api/admin/monitoring/trace/trace-1', {
+      params: { attempted_only: false }, signal: controller.signal,
+    })
+    await requestTraceApi.getRequestTrace('trace-1', { attemptedOnly: true })
+    expect(getMock).toHaveBeenLastCalledWith('/api/admin/monitoring/trace/trace-1', {
+      params: { attempted_only: true },
+    })
+  })
   it('reports download progress so diagnostic exports can abort oversized bodies', async () => {
     const onProgress = vi.fn()
     getMock.mockResolvedValue({ data: new ArrayBuffer(0), headers: { 'x-aether-body-encoding': 'json', 'x-aether-usage-id': 'usage-1', 'x-aether-body-field': 'response_body' } })

@@ -7,6 +7,7 @@ import RequestDetailDrawer from '../RequestDetailDrawer.vue'
 const apiMocks = vi.hoisted(() => ({
   getRequestDetail: vi.fn(),
 }))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ isAdmin: false }) }))
 
 vi.mock('@/api/dashboard', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/dashboard')>()

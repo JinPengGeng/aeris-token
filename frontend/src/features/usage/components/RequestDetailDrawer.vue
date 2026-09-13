@@ -594,10 +594,39 @@
 
               <!-- 请求链路追踪卡片 -->
               <div>
+                <div
+                  v-if="authStore.isAdmin && traceTimelineRequestId"
+                  class="mb-2 space-y-2"
+                  data-forensic-candidate-mode
+                >
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-sm font-medium">候选范围</span>
+                    <Button
+                      size="sm"
+                      :variant="showAllCandidates ? 'outline' : 'secondary'"
+                      :aria-pressed="!showAllCandidates"
+                      @click="showAllCandidates = false"
+                    >
+                      已尝试候选
+                    </Button>
+                    <Button
+                      size="sm"
+                      :variant="showAllCandidates ? 'secondary' : 'outline'"
+                      :aria-pressed="showAllCandidates"
+                      @click="showAllCandidates = true"
+                    >
+                      全部候选
+                    </Button>
+                  </div>
+                  <p class="text-xs text-muted-foreground">
+                    {{ showAllCandidates ? '包含已记录但未执行、未使用或被跳过的候选；不代表所有候选都向上游发起了请求。' : '仅查看实际开始尝试的候选。' }}
+                  </p>
+                </div>
                 <HorizontalRequestTimeline
                   v-if="showTimeline && traceTimelineRequestId"
                   ref="timelineRef"
                   :request-id="traceTimelineRequestId"
+                  :attempted-only="!authStore.isAdmin || !showAllCandidates"
                   :override-status-code="detail.status_code"
                   :request-status="detail.status"
                   :request-api-format="detail.api_format || null"
@@ -605,6 +634,14 @@
                   @trace-state="handleTraceState"
                 />
               </div>
+
+              <CurrentAuthorizationPanel
+                v-if="authStore.isAdmin"
+                :is-open="isOpen"
+                :request-id="requestId"
+                :user-id="detailForCurrentRequest?.user?.id"
+                :api-key-id="detailForCurrentRequest?.api_key?.id"
+              />
 
               <!-- Tabs 区域 -->
               <Card>
@@ -907,6 +944,7 @@ import Button from '@/components/ui/button.vue'
 import { useEscapeKey } from '@/composables/useEscapeKey'
 import { useClipboard } from '@/composables/useClipboard'
 import { useDarkMode } from '@/composables/useDarkMode'
+import { useAuthStore } from '@/stores/auth'
 import Card from '@/components/ui/card.vue'
 import Badge from '@/components/ui/badge.vue'
 import Separator from '@/components/ui/separator.vue'
@@ -962,6 +1000,7 @@ import { BodyDocument } from '../utils/body-document'
 import { BodyDocumentError, MAX_BODY_BYTES } from '../utils/body-document-protocol'
 import { useToast } from '@/composables/useToast'
 import HorizontalRequestTimeline from './HorizontalRequestTimeline.vue'
+import CurrentAuthorizationPanel from './CurrentAuthorizationPanel.vue'
 import ReplayDialog from './ReplayDialog.vue'
 import ServiceTierFacts from './ServiceTierFacts.vue'
 import UsageModelDisplay from './UsageModelDisplay.vue'
@@ -1021,6 +1060,12 @@ const emit = defineEmits<{
     updatedAt?: string | null
   }]
 }>()
+
+const authStore = useAuthStore()
+const showAllCandidates = ref(false)
+watch([() => props.isOpen, () => props.requestId, () => authStore.isAdmin], () => {
+  showAllCandidates.value = false
+}, { flush: 'sync' })
 
 const REQUEST_STATE_STATUSES = new Set<RequestStateStatus>([
   'pending',

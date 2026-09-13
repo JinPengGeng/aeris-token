@@ -6,6 +6,7 @@ import { BodyDocumentError } from '../../utils/body-document-protocol'
 import RequestDetailDrawer from '../RequestDetailDrawer.vue'
 
 const mocks = vi.hoisted(() => ({ getRequestDetail: vi.fn(), getRequestBody: vi.fn(), load: vi.fn(), copyToClipboard: vi.fn() }))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ isAdmin: false }) }))
 vi.mock('@/composables/useClipboard', () => ({ useClipboard: () => ({ copyToClipboard: mocks.copyToClipboard }) }))
 vi.mock('@/api/dashboard', async importOriginal => {
   const actual = await importOriginal<typeof import('@/api/dashboard')>()
