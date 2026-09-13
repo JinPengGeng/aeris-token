@@ -8,14 +8,14 @@
 
 ## 当前检查点
 
-### 最新现场 — 北京时间 2026-09-14 06:29
+### 最新现场 — 北京时间 2026-09-14 06:38
 
 以下内容覆盖并取代本文件下方的 02:29 历史快照，恢复时以本节和 GitHub 实时状态为准。
 
-- `origin/main`：`30b09bd476a5a4337b31f560a28c1c7e77651644`，已包含 #415（公开缺凭据 401）、#416（RPM reset 查询）、#418（标准流观测借用 chunk）。#416/#418 的四项 required checks 均已成功，父 #214/#215 保持开放。
-- 当前开放 PR 只有 [#420](https://github.com/JinPengGeng/aeris-token/pull/420)，head `e0b00f51a33b920900fdcc688bf5bd5c3203bb86`，已启用受保护 squash auto-merge，等待四项 required checks；不要沿用本地候选 binary 或旧 run 代替最终 head 验收。
+- `origin/main`：`551d9a8922622d6a72d9e865cc7efb95ae83509b`，已包含 #415（公开缺凭据 401）、#416（RPM reset 查询）、#418（标准流观测借用 chunk）及本次交接文档刷新 PR #421。#416/#418/#421 的四项 required checks 均已成功，父 #214/#215 保持开放。
+- 当前开放 PR 只有 [#420](https://github.com/JinPengGeng/aeris-token/pull/420)，已同步主干后的 head `016b567fa9d423e53a3aeb23797666e388e1fbcc`，已启用受保护 squash auto-merge，等待四项 required checks；不要沿用本地候选 binary 或旧 run 代替最终 head 验收。
 - #420 对应 [#419](https://github.com/JinPengGeng/aeris-token/issues/419)，P1/Core/High/M/Accepted，Project 为 In review；父 #214 仍开放。新增 `AETHER_GATEWAY_CONTROL_CONTEXT_TIMEOUT_MS`（默认 30000ms，正值 clamp 1..=120000）只覆盖 `ai_public` 控制上下文解析。
-- #419 候选真实演练已经证明：PostgreSQL 暂停时三个 fresh key 为 502（约 1.004–1.006 秒），恢复后三个 fresh key 为 401，暂停期间 local permits 为 8/0/8、liveness 为 200；旧行为 binary 同一脚本触及 curl 2 秒期限并得到 000。候选证据不等于最终 head CI，生产部署仍未验收。
+- #419 候选真实演练已经证明：PostgreSQL 暂停时三个 fresh key 为 502（约 1.004–1.006 秒），恢复后三个 fresh key 为 401，暂停期间 local permits 为 8/0/8、liveness 为 200；旧行为 binary 同一脚本触及 curl 2 秒期限并得到 000。候选证据不等于最终 head CI，生产部署仍未验收。PR #420 已通过主干变更同步，需针对 `016b567f` 的 checks 重新确认。
 - 实时开放 Issue 清点：45 个已标优先级的 Issue（22 个 P1、23 个 P2），父子需求重叠，数量不等于独立开发包。#254、#300、#303、#307、#214、#215、#220、#223、#224、#225、#235、#255 等父项仍需各自剩余验收。
 - 本轮没有写 upstream。主工作树 `/Users/fengying/workspace/aeris-token` 的 3 个已跟踪修改和多个未追踪文档/fixture 是用户现场，必须保留；#419 工作树另有作者追加的测试 fixture 已提交为 `e0b00f51a`，恢复以 PR #420 head 为准。
 
