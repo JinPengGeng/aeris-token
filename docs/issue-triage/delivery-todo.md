@@ -4,7 +4,24 @@ Snapshot: 2026-09-13, fork `JinPengGeng/aeris-token`. This queue is based on
 the current fork tree and GitHub issue state; it does not modify upstream
 `fawney19/Aether`.
 
-## 2026-09-13 status refresh after PR #349
+## 2026-09-13 status refresh after PR #353
+
+Current intake: 47 open issues (24 P1, 23 P2), with 13 in progress, 23 triage
+and 11 blocked after #214 entered implementation. PR #353 merged as
+`b2d2b0fca0bb96916880f8061e5d03d2c79fa501` and its Project card is Done.
+PR #355's two remaining usage fixtures now preserve both planner observations;
+all 14 local usage tests passed and the corrected branch awaits complete CI.
+PR #356 passed main review, all four required checks and its hosted 12-phase
+drill (run 34717153949); it is Ready with auto-merge enabled, pending checks
+after main synchronization. #354 and #357 also retain protected auto-merge.
+
+Draft PR #358 implements #214's automatic per-process target capacity and
+corrects stale audit findings. Local target/parser/admission tests passed;
+independent review and protected CI remain. The parent retains permit-lifetime,
+Redis fault-contract and SQL live-timeout acceptance. This snapshot supersedes
+the historical checkpoints below; live GitHub state governs later transitions.
+
+### Earlier checkpoint after PR #349
 
 Latest verified intake: 47 open issues (24 P1, 23 P2), with 12 in progress,
 24 in triage and 11 blocked after #220 entered implementation and #348 closed.
@@ -106,7 +123,7 @@ open; “split” means the parent stays open while child issues/PRs carry deliv
 | #307 | P1 | In progress | #323 and #350 merged counters and Prometheus contract/alert verification; retain production producer fault injection, scraping and actual alert delivery evidence |
 | #216 | P1 | Split, active | PR #332 adds the dev profile build-performance gate; #339 adds an isolated Postgres harness and three selected live tests; retain parent for VSCodex required-check evidence, integration baseline execution and remaining ignored-test coverage |
 | #215 | P2 | Planned | measure synchronous logging/SSE filtering/lock contention before changes |
-| #214 | P1 | Planned | add probe, graceful shutdown and accept-error acceptance tests |
+| #214 | P1 | Split, active | PR #358 binds automatic per-target capacity to the per-process request cap; #356 covers readiness; retain stream/sync/tunnel permit lifetime, Redis fault-contract and SQL live-timeout acceptance |
 | #213 | P2 | Planned | split giant handler and standardize error payload boundaries |
 | #212 | P2 | Planned | consolidate cross-cutting capacity and dependency tests |
 | #211 | P1 | Split, active | PR #328 merged bounded terminal registry retention; verify lease failure semantics and remaining sensitive-field paths |

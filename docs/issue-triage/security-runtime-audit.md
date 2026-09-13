@@ -141,15 +141,15 @@
 
 | 子项 | 判定/优先级 | 证据/测试 | 建议 |
 | --- | --- | --- | --- |
-| `/readyz` 静态常绿 | 当前成立，P1 | `apps/aether-gateway/src/api/core.rs:90-99` 固定返回 `status=ready`、`gate_readiness=false`，不检查 DB/Redis/关键 worker。 |
-| `/health` 只反映进程快照 | 当前成立，P1/P2 | `core.rs:29-88` 仅并发快照；Docker healthcheck `main.rs:2042-2058` 调 `/health`，故依赖故障仍可能常绿。 |
+| `/readyz` 静态常绿 | 已部分修复，#308 收口中 | 主干已有 DB/Redis 探测；PR #356 增加共享总 deadline、缓存、启动/关闭和关键 worker gate，并已有真实依赖演练证据。 | 待 #356 合并后完成 #308 验收。 |
+| `/health` 与依赖检查职责 | 明确区分 liveness/readiness | `/health` 的进程存活契约不应因依赖故障失败；`/_gateway/health` 是遥测快照。PR #356 修复 `/health` 经代理 IP 检查间接访问 Redis 的路径。 | 负载均衡摘流使用 `/readyz`。 |
 | SIGTERM/drain | 已修 | `main.rs:1890-1936,1954-1959,2597-2634` 支持 cancellation、drain deadline 与 force close；`shutdown_tests.rs` 覆盖。 |
 | accept error retry/backoff | 已修 | `crates/aether-gateway/frontdoor/src/connection.rs:113-146` 对资源错误 1 秒 backoff，连接错误立即重试；有 connection_tests。 |
-| 分布式限流与 RPM 故障策略矛盾 | 已修/策略一致 | distributed semaphore backend unavailable 仍 fail-closed；RPM `main.rs:1283-1286` 默认也已改 false，仅显式 opt-in 才放行。 | rate limit 与 distributed admission 测试。 |
-| per-upstream bulkhead 默认值 | 当前成立，P1/P2 | `state/app.rs:56-57,263-275` global 与 per-target auto floor 都为 10,000，虽 fd divisor 不同，中小机器仍可能同值；`upstream_admission.rs:87-126` 机制完善。 | auto profile/admission 测试。 |
+| 分布式限流与 RPM 故障策略矛盾 | 原默认策略结论已过时 | RPM 默认 `fail_open=false`；多节点禁止 local fallback，单节点可使用本地限流回退；显式 `fail_open=true` 才完全放行。 | 剩余是 Redis 故障错误契约、恢复与注入证据。 |
+| per-upstream bulkhead 默认值 | 当前成立，P1，容量切片实施中 | 全局请求容量已受 CPU/FD 限制；四 CPU/65536 FD 时 global=4096、target auto=10000，且降低显式 global 不联动 target。 | [自动容量决策](issue-214-target-capacity.md)；流式/同步 permit 生命周期仍单独验收。 |
 | stream idle timeout | 已修 | `execution_runtime/stream_read_timeout.rs:8-30` 默认 300s，可显式 0 禁用；`:78-100` 测试。 |
-| DB 故障客户端契约 | 当前成立，P2 | `GatewayError::ControlUnavailable` 在 `error.rs:150-153,225-240` 定义了 trace_id/502，但当前生产构造点仍未见，许多 data error 汇入 Internal。 | error response 测试。 |
-| statement_timeout | 当前成立，P2 | `adapters/postgres/src/pool.rs:62` 默认 `SET statement_timeout = 0`。 |
+| DB 故障客户端契约 | #340 已完成 | PR #344 已合并，将列举的控制面依赖错误映射为 502、trace_id、Retry-After 与稳定 code。 | 保留独立 Redis admission 错误契约验收。 |
+| statement_timeout | 普通连接默认已实现 | `adapters/postgres/src/pool.rs` 普通连接为 statement 30 秒/lock 3 秒；timeout=0 仅属于用后销毁的迁移连接。 | 将已有真实 SQL timeout/迁移隔离测试纳入常规 CI；服务器超时不等于客户端 TCP 黑洞有界。 |
 | pool key 分布式 lease/owner forward timeout | 待确认，P2 | 属 issue 的架构疑问，当前没有足够生产故障证据；跨节点路径已有独立 Redis in-flight/客户端 timeout。 | 建议另做多节点故障注入，而非直接修改。 |
 
 ## #215 性能
