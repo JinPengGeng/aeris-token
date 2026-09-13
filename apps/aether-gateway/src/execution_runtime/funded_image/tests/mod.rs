@@ -19,7 +19,7 @@ use crate::control::GatewayControlAuthContext;
 use crate::data::GatewayDataState;
 use crate::execution_runtime::sync::execute_execution_runtime_sync_with_retry_scope;
 
-#[path = "funded_image_public_tests.rs"]
+#[path = "public.rs"]
 mod public_tests;
 
 struct Fixture {

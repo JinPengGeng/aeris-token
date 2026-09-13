@@ -1003,5 +1003,5 @@ fn image_output_evidence(body: Option<&Value>) -> UsageAttemptChargeEvidence {
 }
 
 #[cfg(test)]
-#[path = "funded_image_tests.rs"]
+#[path = "funded_image/tests/mod.rs"]
 mod tests;

@@ -2,6 +2,18 @@
 
 状态：主线程统一执行后，固定规格同步图片公共入口及相关资金专项 **15 项通过、0 失败、0 ignored**，其中包括原 8 项真实 PostgreSQL/HTTP 场景和新增 3 项公共 router HTTP 场景。另有 125 项定向回归及最终全特性/全目标 Clippy 通过。新 Gateway 代码的 Hosted 检查仍须在推送后确认；不能将此前数据层的 Hosted checks 当作这些新代码的验收。数据层已有 25 项 PostgreSQL runner 通过。Draft #391 和父 #300 保持开放，每日硬额度及前门每日计数尚未完成。
 
+## Hosted CI 测试目录修正
+
+推送 `e0cf5c242` 后，Rust run `34752956043` 的 Shell security fixtures
+在环境参考完整投影检查失败。复现确认唯一差异是测试专用的
+`AETHER_TEST_DATABASE_URL`：新测试平铺在生产模块旁，未命中现有生成器的
+`tests` 目录排除规则。测试现移动到 `funded_image/tests/`，保持 Rust 模块名和
+CI exact targets 不变；未改生产环境参考或扩大生成器排除逻辑。
+
+移动后，环境参考的五项 Python 测试、生成内容漂移检查、`git diff --check`
+以及 `cargo check -p aether-gateway --tests` 均通过。原 140 项行为测试未因
+纯目录移动重复执行；新 HEAD 的 Hosted checks 仍须单独核验。
+
 ## 公共入口接线修订
 
 ### 主线程实测修正
