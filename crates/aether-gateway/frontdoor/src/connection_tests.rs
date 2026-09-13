@@ -409,3 +409,22 @@ async fn http_connection_accept_retries_peer_errors_and_backs_off_resource_error
     assert_eq!(budget.snapshot().in_flight, 0);
     assert_eq!(budget.snapshot().rejected_total, 0);
 }
+
+#[tokio::test(start_paused = true)]
+async fn http_connection_accept_peer_errors_retry_without_backoff() {
+    let budget = HttpConnectionBudget::new(1);
+    let mut attempts = VecDeque::from([
+        Err(io::Error::from(io::ErrorKind::ConnectionRefused)),
+        Err(io::Error::from(io::ErrorKind::ConnectionAborted)),
+        Err(io::Error::from(io::ErrorKind::ConnectionReset)),
+        Ok(7),
+    ]);
+    let started = tokio::time::Instant::now();
+    let accepted = budget
+        .accept_with(|| std::future::ready(attempts.pop_front().unwrap()))
+        .await;
+
+    assert_eq!(accepted, 7);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(budget.snapshot().accept_errors_total, 3);
+}
