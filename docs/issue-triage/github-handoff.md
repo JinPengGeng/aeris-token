@@ -8,18 +8,17 @@
 
 ## 当前检查点
 
-### 最新现场 — 北京时间 2026-09-14 06:38
+### 最终现场 — 北京时间 2026-09-14 07:02
 
 以下内容覆盖并取代本文件下方的 02:29 历史快照，恢复时以本节和 GitHub 实时状态为准。
 
-- `origin/main`：`551d9a8922622d6a72d9e865cc7efb95ae83509b`，已包含 #415（公开缺凭据 401）、#416（RPM reset 查询）、#418（标准流观测借用 chunk）及本次交接文档刷新 PR #421。#416/#418/#421 的四项 required checks 均已成功，父 #214/#215 保持开放。
-- 当前开放 PR 只有 [#420](https://github.com/JinPengGeng/aeris-token/pull/420)，已同步主干后的 head `016b567fa9d423e53a3aeb23797666e388e1fbcc`，已启用受保护 squash auto-merge，等待四项 required checks；不要沿用本地候选 binary 或旧 run 代替最终 head 验收。
-- #420 对应 [#419](https://github.com/JinPengGeng/aeris-token/issues/419)，P1/Core/High/M/Accepted，Project 为 In review；父 #214 仍开放。新增 `AETHER_GATEWAY_CONTROL_CONTEXT_TIMEOUT_MS`（默认 30000ms，正值 clamp 1..=120000）只覆盖 `ai_public` 控制上下文解析。
-- #419 候选真实演练已经证明：PostgreSQL 暂停时三个 fresh key 为 502（约 1.004–1.006 秒），恢复后三个 fresh key 为 401，暂停期间 local permits 为 8/0/8、liveness 为 200；旧行为 binary 同一脚本触及 curl 2 秒期限并得到 000。候选证据不等于最终 head CI，生产部署仍未验收。PR #420 已通过主干变更同步，需针对 `016b567f` 的 checks 重新确认。
-- 实时开放 Issue 清点：45 个已标优先级的 Issue（22 个 P1、23 个 P2），父子需求重叠，数量不等于独立开发包。#254、#300、#303、#307、#214、#215、#220、#223、#224、#225、#235、#255 等父项仍需各自剩余验收。
-- 本轮没有写 upstream。主工作树 `/Users/fengying/workspace/aeris-token` 的 3 个已跟踪修改和多个未追踪文档/fixture 是用户现场，必须保留；#419 工作树另有作者追加的测试 fixture 已提交为 `e0b00f51a`，恢复以 PR #420 head 为准。
+- `origin/main`：`aaaefda2a733de790ce5d5525e9e0a3724ffa6c5`，已包含 #415、#416、#418、#420 及交接刷新 #421/#422。上述 PR 的四项 required checks 均已成功；#420 于北京时间 06:58:36 以 squash 合并，#419 已自动关闭为 COMPLETED，父 #214/#215 保持开放。
+- 当前开放 PR：无。#420 最终 head `c0f530aa72610bb23c19bc97f500996cfb14a9e0`，合并提交 `aaaefda2a733de790ce5d5525e9e0a3724ffa6c5`；Rust、Frontend、Automation Policy、Dependency Audit 四项 required checks 全部 SUCCESS。
+- #419 已完成 P1/Core/High/M/Accepted 切片：`AETHER_GATEWAY_CONTROL_CONTEXT_TIMEOUT_MS`（默认 30000ms，正值 clamp 1..=120000）只覆盖 `ai_public` 控制上下文解析；真实 PostgreSQL 暂停 3 次 fresh key 502（约 1.004–1.006 秒），恢复 3 次 401，暂停期间 local permits 8/0/8、liveness 200。候选与最终 hosted 结果已写入 PR #420、Issue #419 及主干 `docs/issue-triage/issue-419-*`。
+- 实时开放 Issue 清点：44 个已标优先级的 Issue（21 个 P1、23 个 P2），父子需求重叠，数量不等于独立开发包。#254、#300、#303、#307、#214、#215、#220、#223、#224、#225、#235、#255 等父项仍需各自剩余验收。
+- 本轮没有写 upstream。主工作树 `/Users/fengying/workspace/aeris-token` 的 3 个已跟踪修改和多个未追踪文档/fixture 是用户现场，必须保留；#419 已完整上传 fork，恢复以 `origin/main` 和对应 Issue/PR 记录为准。
 
-恢复顺序：先刷新 `origin/main`、开放 PR/Issue 和 Project #1；检查 #420 的最终 head 与四项 required checks，满足门禁后自动 squash 合并。若 07:00 前未完成，保留 PR #420 和本节记录，不强行合并；随后从该 PR 继续独立评审、最终 hosted/真实演练和父项更新。
+恢复顺序：先刷新 `origin/main`、开放 PR/Issue 和 Project #1；当前没有待合并 PR，继续工作时从父项和剩余 P1 队列选择下一项，重新建立独立 Issue/PR/评审/门禁证据链。#419 的实现、验证和边界已归档，不要重复开发。
 
 核验时间：北京时间 2026-09-14 02:29。计划持续开发至当日 07:00，之后停止启动新实现，
 整理、验证和同步现场；本检查点不是 07:00 的最终收尾结果。
