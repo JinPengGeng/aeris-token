@@ -642,8 +642,10 @@ interface UsageData {
   }
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   requestId?: string | null
+  /** 默认只加载已尝试候选；完整管理员可按需查看全部持久候选。 */
+  attemptedOnly?: boolean
   /** 外部传入的状态码，用于覆盖 trace.final_status 的判断 */
   overrideStatusCode?: number
   /** 外部传入的请求状态，用于识别已失败/取消的终态请求 */
@@ -656,7 +658,16 @@ const props = defineProps<{
   requestMetadata?: Record<string, unknown> | null
   /** 已获取的追踪数据；传入时不再内部拉取 */
   traceData?: RequestTrace | null
-}>()
+}>(), {
+  attemptedOnly: true,
+  requestId: undefined,
+  overrideStatusCode: undefined,
+  requestStatus: undefined,
+  requestApiFormat: undefined,
+  usageData: undefined,
+  requestMetadata: undefined,
+  traceData: undefined,
+})
 
 const emit = defineEmits<{
   selectAttempt: [attempt: CandidateRecord | null]
@@ -717,6 +728,8 @@ const hoveredGroupIndex = ref<number | null>(null)
 const traceLoadStarted = ref(false)
 let tracePollTimer: ReturnType<typeof setTimeout> | null = null
 let traceLoadInFlight: Promise<void> | null = null
+let traceController: AbortController | null = null
+let traceDisposed = false
 const TRACE_POLL_INTERVAL_MS = 1000
 
 // 格式化延迟（自动调整单位）
@@ -2202,6 +2215,9 @@ const loadTrace = async (silent = false) => {
   if (!requestId || props.traceData) return
   if (traceLoadInFlight) return traceLoadInFlight
 
+  const controller = new AbortController()
+  traceController = controller
+
   traceLoadInFlight = (async () => {
     isSilentRefresh.value = silent
     traceLoadStarted.value = true
@@ -2212,8 +2228,14 @@ const loadTrace = async (silent = false) => {
     error.value = null
 
     try {
-      internalTrace.value = await requestTraceApi.getRequestTrace(requestId, { attemptedOnly: true })
+      const result = await requestTraceApi.getRequestTrace(requestId, {
+        attemptedOnly: props.attemptedOnly !== false,
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted || traceController !== controller) return
+      internalTrace.value = result
     } catch (err: unknown) {
+      if (controller.signal.aborted || traceController !== controller) return
       if (isAxiosError(err) && err.response?.status === 404) {
         internalTrace.value = null
         error.value = null
@@ -2224,10 +2246,11 @@ const loadTrace = async (silent = false) => {
       }
       log.error('加载请求追踪失败:', err)
     } finally {
-      if (!silent) {
-        loading.value = false
+      if (traceController === controller) {
+        if (!silent) loading.value = false
+        traceLoadInFlight = null
+        traceController = null
       }
-      traceLoadInFlight = null
     }
   })()
 
@@ -2263,7 +2286,7 @@ const stopTracePolling = () => {
 
 const scheduleTracePolling = () => {
   stopTracePolling()
-  if (!shouldPollTrace.value) return
+  if (traceDisposed || !shouldPollTrace.value) return
 
   tracePollTimer = setTimeout(async () => {
     await loadTrace(true)
@@ -2293,8 +2316,13 @@ watch(groupedTimeline, (newGroups) => {
 
 // 监听 requestId / 外部 trace 变化
 watch(
-  [() => props.requestId, () => props.traceData],
+  [() => props.requestId, () => props.traceData, () => props.attemptedOnly],
   () => {
+    stopTracePolling()
+    traceController?.abort()
+    traceController = null
+    traceLoadInFlight = null
+    internalTrace.value = null
     selectedGroupIndex.value = 0
     selectedAttemptIndex.value = 0
     selectionPinnedByUser.value = false
@@ -2324,6 +2352,9 @@ watch(shouldPollTrace, () => {
 }, { immediate: true })
 
 onBeforeUnmount(() => {
+  traceDisposed = true
+  traceController?.abort()
+  traceController = null
   stopTracePolling()
 })
 

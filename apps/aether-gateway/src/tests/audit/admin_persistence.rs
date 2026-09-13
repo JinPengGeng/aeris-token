@@ -173,7 +173,7 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
             "user",
         )
         .await;
-    let (audit_admin_token, _) =
+    let (audit_admin_token, audit_admin_user) =
         crate::tests::operational_auth::issue_operational_session_access_token_and_user(
             &state,
             OPERATIONAL_ADMIN_DEVICE_ID,
@@ -271,6 +271,20 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     assert_eq!(restricted.status(), StatusCode::FORBIDDEN);
     let restricted: Value = restricted.json().await.unwrap();
     assert_eq!(restricted["required_permission"], "admin:monitoring:admin");
+    let denied_reads: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_logs WHERE event_type='admin_sensitive_read'
+         AND user_id=$1 AND status_code=403
+         AND event_metadata->>'action'='read_request_audit_bundle'",
+    )
+    .bind(&audit_admin_user.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        denied_reads, 1,
+        "authenticated forensic denials are audited"
+    );
+    assert_audit_metrics(&client, &gateway, 3, 0, 0).await;
 
     // Invalid input still has an identified administrator and an audited final status.
     let invalid = client
@@ -297,7 +311,7 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
         .unwrap();
     assert_eq!(failed["user_id"], rows[0]["user_id"]);
     assert_eq!(failed["event_metadata"]["status"], "failed");
-    assert_audit_metrics(&client, &gateway, 3, 0, 0).await;
+    assert_audit_metrics(&client, &gateway, 4, 0, 0).await;
 
     let record: CreateAdminAuditLog = serde_json::from_value(rows[0].clone()).unwrap();
     let repository = PostgresAuditLogReadRepository::new(pool.clone());
@@ -316,10 +330,10 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     );
     assert_eq!(audit_rows(&pool).await, failed_rows);
     // Repository-only replay above is outside the observed persistence boundary.
-    assert_audit_metrics(&client, &gateway, 3, 0, 0).await;
+    assert_audit_metrics(&client, &gateway, 4, 0, 0).await;
     crate::audit::persist_admin_audit(&state.data, &state.admin_audit_metrics, record).await;
     assert_eq!(audit_rows(&pool).await, failed_rows);
-    assert_audit_metrics(&client, &gateway, 4, 0, 0).await;
+    assert_audit_metrics(&client, &gateway, 5, 0, 0).await;
 
     // A real database error must not turn an applied mutation into a retryable 5xx.
     sqlx::raw_sql(
@@ -353,7 +367,7 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     );
     assert_eq!(audit_rows(&pool).await, failed_rows);
     // A configured writer remains available as a capability even when INSERT fails.
-    assert_audit_metrics(&client, &gateway, 5, 1, 0).await;
+    assert_audit_metrics(&client, &gateway, 6, 1, 0).await;
 
     // Hold the writer in a real PostgreSQL BEFORE INSERT trigger until after
     // the HTTP response. This proves the production timeout, without a mock
@@ -425,7 +439,7 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     );
     // Absence is provable only while this BEFORE INSERT lock is held.
     assert_eq!(audit_rows(&pool).await, failed_rows);
-    assert_audit_metrics(&client, &gateway, 6, 2, 1).await;
+    assert_audit_metrics(&client, &gateway, 7, 2, 1).await;
     lock.rollback().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -457,7 +471,21 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
         assert_eq!(late["event_metadata"]["status"], "completed");
     }
     // A possible late commit does not erase the timeout, and scrapes add no attempts.
-    assert_audit_metrics(&client, &gateway, 6, 2, 1).await;
+    assert_audit_metrics(&client, &gateway, 7, 2, 1).await;
+
+    sqlx::query("DROP TRIGGER wait_audit_fixture ON audit_logs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    super::operational_reads::verify_live_reads(
+        &pool,
+        &state,
+        &gateway,
+        &admin_user,
+        &token,
+        &audit_admin_token,
+    )
+    .await;
 
     server.abort();
     let _ = server.await;

@@ -28,6 +28,7 @@ use super::{
 };
 
 mod admin_persistence;
+mod operational_reads;
 
 fn hash_api_key(value: &str) -> String {
     let mut hasher = Sha256::new();

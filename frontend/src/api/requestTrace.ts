@@ -150,11 +150,12 @@ export const requestTraceApi = {
    */
   async getRequestTrace(
     requestId: string,
-    options: { attemptedOnly?: boolean } = {},
+    options: { attemptedOnly?: boolean, signal?: AbortSignal } = {},
   ): Promise<RequestTrace> {
     const attemptedOnly = options.attemptedOnly ?? false
     const response = await apiClient.get<RequestTrace>(`/api/admin/monitoring/trace/${requestId}`, {
       params: { attempted_only: attemptedOnly },
+      ...(options.signal ? { signal: options.signal } : {}),
     })
     return { ...response.data, gateway_version: response.headers?.['x-aether-build-version'] ?? response.data.gateway_version ?? null }
   },
