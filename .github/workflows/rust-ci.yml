@@ -629,6 +629,44 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
         run: cargo test -p aether-integration-tests --bins --tests
 
+      - name: Run single-instance baseline
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          RUST_MIN_STACK: "16777216"
+        run: |
+          mkdir -p artifacts/single-instance-baseline
+          cargo run -p aether-integration-tests --bin single_instance_baseline -- \
+            --output artifacts/single-instance-baseline/report.json
+          jq -e '
+            .suite == "single_instance_baseline" and
+            (.scenarios | type) == "array" and
+            [.scenarios[].name] == [
+              "gateway_proxy_sync",
+              "gateway_proxy_stream",
+              "execution_runtime_sync",
+              "execution_runtime_stream"
+            ] and
+            all(.scenarios[];
+              ((.name | endswith("_stream")) | not) or .result.require_sse_done == true
+            ) and
+            all(.scenarios[];
+              .result.failed_requests == 0 and
+              .result.completed_requests == .result.total_requests and
+              (.result.status_counts | length) == 1 and
+              .result.status_counts["200"] == .result.total_requests
+            )
+          ' artifacts/single-instance-baseline/report.json
+
+      - name: Upload single-instance baseline evidence
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: single-instance-baseline
+          path: artifacts/single-instance-baseline/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Show sccache stats
         if: always()
         env:
