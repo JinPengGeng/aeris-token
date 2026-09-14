@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix="aether-compose-databases-") as director
         assert app["user"] == "10001:10001"
         assert app["read_only"] is True
         assert app["cap_drop"] == ["ALL"]
-        assert set(app["cap_add"]) == {"DAC_OVERRIDE", "FOWNER"}
+        assert "cap_add" not in app
         assert app["security_opt"] == ["no-new-privileges:true"]
         assert not app.get("privileged", False)
         app_env = app["environment"]
