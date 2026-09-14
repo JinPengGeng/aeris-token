@@ -53,10 +53,79 @@ pub(crate) const TASK_KEY_PROVIDER_OAUTH_ACCOUNT_REFRESH: &str = "provider.oauth
 pub(crate) const TASK_KEY_PROVIDER_BALANCE_REFRESH: &str = "provider.ops.balance.refresh";
 const PROVIDER_DELETE_LOCK_TTL_SECS: u64 = 60 * 60 * 6;
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProviderDeleteAuditOrigin {
+    pub(crate) user_id: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) management_token_id: Option<String>,
+    pub(crate) trace_id: Option<String>,
+    pub(crate) client_ip: Option<String>,
+}
+
 const RETRY_ONCE: RetryPolicy = RetryPolicy { max_attempts: 1 };
 const RETRY_THREE: RetryPolicy = RetryPolicy { max_attempts: 3 };
 const BACKGROUND_TASK_RUN_ID_MAX_BYTES: usize = 64;
 const WORKER_BOOT_RUN_ID_HASH_HEX_BYTES: usize = 20;
+
+fn build_provider_delete_terminal_audit(
+    run_id: &str,
+    provider_id: &str,
+    status: &str,
+    task_state: Option<&crate::LocalProviderDeleteTaskState>,
+    origin: &ProviderDeleteAuditOrigin,
+) -> aether_data_contracts::repository::audit::CreateAdminAuditLog {
+    let event_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("provider-delete:{run_id}:{status}").as_bytes(),
+    )
+    .to_string();
+    let stage = task_state.map(|task| task.stage.as_str()).unwrap_or(status);
+    let metadata = serde_json::json!({
+        "schema_version": 1,
+        "event_name": "admin_provider_delete_task_terminal",
+        "action": "provider_delete_task",
+        "target_type": "provider",
+        "target_id": provider_id,
+        "task_id": run_id,
+        "task_status": status,
+        "origin_trace_id": origin.trace_id.as_deref(),
+        "session_id": origin.session_id.as_deref(),
+        "management_token_id": origin.management_token_id.as_deref(),
+        "stage": stage,
+        "deleted_keys": task_state.map_or(0, |task| task.deleted_keys),
+        "total_keys": task_state.map_or(0, |task| task.total_keys),
+        "deleted_endpoints": task_state.map_or(0, |task| task.deleted_endpoints),
+        "total_endpoints": task_state.map_or(0, |task| task.total_endpoints),
+    });
+    aether_data_contracts::repository::audit::CreateAdminAuditLog {
+        id: event_id,
+        event_type: "admin_mutation".to_string(),
+        user_id: origin.user_id.clone(),
+        api_key_id: None,
+        description: "provider delete task reached terminal state".to_string(),
+        ip_address: origin.client_ip.clone(),
+        user_agent: None,
+        request_id: origin.trace_id.clone(),
+        event_metadata: Some(metadata),
+        status_code: None,
+        error_message: (status == "failed").then(|| "provider_delete_failed".to_string()),
+        created_at: chrono::Utc::now(),
+    }
+}
+
+async fn persist_provider_delete_terminal_audit(
+    app: &AppState,
+    run_id: &str,
+    provider_id: &str,
+    status: &str,
+    task_state: Option<&crate::LocalProviderDeleteTaskState>,
+    origin: &ProviderDeleteAuditOrigin,
+) {
+    let record =
+        build_provider_delete_terminal_audit(run_id, provider_id, status, task_state, origin);
+    crate::audit::persist_admin_audit(&app.data, &app.admin_audit_metrics, record).await;
+}
+
 fn build_worker_boot_run_id(task_key: &str) -> String {
     let full_run_id = format!("boot:{task_key}");
     if full_run_id.len() <= BACKGROUND_TASK_RUN_ID_MAX_BYTES {
@@ -592,6 +661,7 @@ pub(crate) async fn submit_provider_delete_task(
     state: &crate::admin_api::AdminAppState<'_>,
     provider_id: &str,
     created_by: Option<&str>,
+    audit_origin: ProviderDeleteAuditOrigin,
 ) -> Result<Option<String>, GatewayError> {
     let Some(provider) = state
         .read_provider_catalog_providers_by_ids(&[provider_id.to_string()])
@@ -624,6 +694,7 @@ pub(crate) async fn submit_provider_delete_task(
     let app = state.cloned_app();
     let provider_id = provider.id.clone();
     let run_id = task_id.clone();
+    let audit_origin = audit_origin.clone();
     let created_at = now_unix_secs();
     let max_attempts = task_definition(TASK_KEY_PROVIDER_DELETE)
         .map(|item| item.retry_policy.max_attempts)
@@ -674,7 +745,7 @@ pub(crate) async fn submit_provider_delete_task(
             app.put_provider_delete_task(crate::LocalProviderDeleteTaskState {
                 task_id: run_id.clone(),
                 provider_id: provider_id.clone(),
-                status: "failed".to_string(),
+                status: "skipped".to_string(),
                 stage: "skipped".to_string(),
                 total_keys: 0,
                 deleted_keys: 0,
@@ -700,6 +771,15 @@ pub(crate) async fn submit_provider_delete_task(
                 "skipped",
                 "provider delete skipped by singleton lock",
                 None,
+            )
+            .await;
+            persist_provider_delete_terminal_audit(
+                &app,
+                &run_id,
+                &provider_id,
+                "skipped",
+                None,
+                &audit_origin,
             )
             .await;
             return;
@@ -733,10 +813,16 @@ pub(crate) async fn submit_provider_delete_task(
             .await;
         match result {
             Ok(task_state) => {
+                let is_completed = task_state.status == "completed";
+                let terminal_status = if is_completed {
+                    BackgroundTaskStatus::Succeeded
+                } else {
+                    BackgroundTaskStatus::Failed
+                };
                 let _ = update_run_status(
                     &app,
                     &run_id,
-                    BackgroundTaskStatus::Succeeded,
+                    terminal_status,
                     Some(100),
                     Some(task_state.message.clone()),
                     Some(serde_json::json!({
@@ -749,7 +835,7 @@ pub(crate) async fn submit_provider_delete_task(
                         "total_endpoints": task_state.total_endpoints,
                         "message": task_state.message,
                     })),
-                    None,
+                    (!is_completed).then(|| "provider_delete_failed".to_string()),
                     None,
                     Some(now_unix_secs()),
                 )
@@ -757,9 +843,22 @@ pub(crate) async fn submit_provider_delete_task(
                 append_event_with_logging(
                     &app,
                     &run_id,
-                    "succeeded",
-                    "provider delete task completed",
+                    if is_completed { "succeeded" } else { "failed" },
+                    if is_completed {
+                        "provider delete task completed"
+                    } else {
+                        "provider delete task failed"
+                    },
                     None,
+                )
+                .await;
+                persist_provider_delete_terminal_audit(
+                    &app,
+                    &run_id,
+                    &provider_id,
+                    if is_completed { "completed" } else { "failed" },
+                    Some(&task_state),
+                    &audit_origin,
                 )
                 .await;
             }
@@ -802,6 +901,15 @@ pub(crate) async fn submit_provider_delete_task(
                     })),
                 )
                 .await;
+                persist_provider_delete_terminal_audit(
+                    &app,
+                    &run_id,
+                    &provider_id,
+                    "failed",
+                    None,
+                    &audit_origin,
+                )
+                .await;
             }
         }
 
@@ -811,6 +919,82 @@ pub(crate) async fn submit_provider_delete_task(
     });
 
     Ok(Some(task_id))
+}
+
+#[cfg(test)]
+mod provider_delete_terminal_audit_tests {
+    use super::{build_provider_delete_terminal_audit, ProviderDeleteAuditOrigin};
+
+    #[test]
+    fn terminal_audit_id_is_deterministic_and_status_scoped() {
+        let origin = ProviderDeleteAuditOrigin {
+            user_id: Some("user-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            management_token_id: None,
+            trace_id: Some("trace-1".to_string()),
+            client_ip: Some("127.0.0.1".to_string()),
+        };
+        let first = build_provider_delete_terminal_audit(
+            "task-1",
+            "provider-1",
+            "completed",
+            None,
+            &origin,
+        );
+        let replay = build_provider_delete_terminal_audit(
+            "task-1",
+            "provider-1",
+            "completed",
+            None,
+            &origin,
+        );
+        let failed =
+            build_provider_delete_terminal_audit("task-1", "provider-1", "failed", None, &origin);
+
+        assert_eq!(first.id, replay.id);
+        assert_ne!(first.id, failed.id);
+        assert_eq!(first.event_type, "admin_mutation");
+        assert_eq!(first.request_id.as_deref(), Some("trace-1"));
+        assert_eq!(first.user_id.as_deref(), Some("user-1"));
+        assert_eq!(first.error_message, None);
+        assert_eq!(
+            failed.error_message.as_deref(),
+            Some("provider_delete_failed")
+        );
+        assert_eq!(
+            first
+                .event_metadata
+                .as_ref()
+                .and_then(|value| value.get("task_status"))
+                .and_then(|value| value.as_str()),
+            Some("completed")
+        );
+    }
+
+    #[test]
+    fn skipped_terminal_audit_uses_safe_fixed_shape() {
+        let record = build_provider_delete_terminal_audit(
+            "task-2",
+            "provider-2",
+            "skipped",
+            None,
+            &ProviderDeleteAuditOrigin::default(),
+        );
+        assert_eq!(
+            record.description,
+            "provider delete task reached terminal state"
+        );
+        assert_eq!(record.user_id, None);
+        assert_eq!(record.ip_address, None);
+        assert_eq!(
+            record
+                .event_metadata
+                .as_ref()
+                .and_then(|value| value.get("stage"))
+                .and_then(|value| value.as_str()),
+            Some("skipped")
+        );
+    }
 }
 
 #[cfg(test)]
