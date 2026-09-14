@@ -181,7 +181,7 @@ pub(crate) fn billing_metric_samples() -> Vec<MetricSample> {
         ]),
         MetricSample::new(
             "billing_insufficient_quota_total",
-            "Completed usage settlements finalized without a wallet debit because credit was insufficient.",
+            "Completed usage settlements recorded without a wallet debit because credit was insufficient.",
             MetricKind::Counter,
             BILLING_INSUFFICIENT_QUOTA_TOTAL.load(Ordering::Relaxed),
         )
