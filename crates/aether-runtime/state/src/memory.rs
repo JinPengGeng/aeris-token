@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     DataLayerError, RuntimeQueueEntry, RuntimeQueueReclaimConfig, RuntimeQueueReclaimPage,
-    RuntimeQueueStats, RuntimeQueueTransferOutcome,
+    RuntimeQueueStats, RuntimeQueueTransferOutcome, RUNTIME_QUEUE_REDRIVE_MARKER_TTL_SECONDS,
 };
 use crate::{ScoreWindowU64Stats, UsageLimitCheck, SCORE_WINDOW_AGGREGATION_MEMBER_LIMIT};
 
@@ -59,7 +59,7 @@ pub(crate) struct MemoryRuntimeBackend {
     sets: Mutex<HashMap<String, MemorySetEntry>>,
     scores: Mutex<HashMap<String, MemoryScoreEntry>>,
     queues: Mutex<HashMap<String, MemoryQueueStream>>,
-    queue_redrive_markers: Mutex<BTreeMap<String, String>>,
+    queue_redrive_markers: Mutex<BTreeMap<String, MemoryRedriveMarker>>,
     queue_seq: AtomicU64,
     locks: Mutex<HashMap<String, MemoryLockEntry>>,
     lock_fencing_seq: AtomicU64,
@@ -71,6 +71,12 @@ struct MemoryUsageLimitWindow {
     window_ms: u64,
     expires_at_unix_ms: u64,
     events: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryRedriveMarker {
+    destination_id: String,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -1268,8 +1274,12 @@ impl MemoryRuntimeBackend {
         let marker = format!("{source}\n{entry_id}");
         let destination_fields = destination_fields.clone();
         let mut markers = self.queue_redrive_markers.lock().await;
-        if let Some(destination_id) = markers.get(&marker).cloned() {
-            return Ok(crate::RuntimeQueueRedriveOutcome::AlreadyRedriven { destination_id });
+        let now = Instant::now();
+        markers.retain(|_, value| value.expires_at > now);
+        if let Some(existing) = markers.get(&marker) {
+            return Ok(crate::RuntimeQueueRedriveOutcome::AlreadyRedriven {
+                destination_id: existing.destination_id.clone(),
+            });
         }
         let mut queues = self.queues.lock().await;
         prune_memory_key(&mut queues, source, Instant::now());
@@ -1306,7 +1316,13 @@ impl MemoryRuntimeBackend {
             .entries
             .retain(|entry| entry.entry.id != entry_id);
         remove_pending_from_all_groups(source_state, entry_id);
-        markers.insert(marker, destination_id.clone());
+        markers.insert(
+            marker,
+            MemoryRedriveMarker {
+                destination_id: destination_id.clone(),
+                expires_at: now + Duration::from_secs(RUNTIME_QUEUE_REDRIVE_MARKER_TTL_SECONDS),
+            },
+        );
         Ok(crate::RuntimeQueueRedriveOutcome::Redriven { destination_id })
     }
 

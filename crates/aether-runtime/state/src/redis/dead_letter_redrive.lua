@@ -1,7 +1,7 @@
 -- Atomically redrive one DLQ entry and make retries idempotent.
 -- KEYS: source DLQ, destination stream, idempotency marker key
--- ARGV: source entry ID, destination MAXLEN (0 = unbounded), field pairs
-if #KEYS ~= 3 or #ARGV < 4 or (#ARGV - 2) % 2 ~= 0 then
+-- ARGV: source entry ID, destination MAXLEN (0 = unbounded), marker TTL seconds, field pairs
+if #KEYS ~= 3 or #ARGV < 5 or (#ARGV - 3) % 2 ~= 0 then
     return redis.error_reply('ERR invalid dead-letter redrive arguments')
 end
 if KEYS[1] == KEYS[2] then
@@ -14,6 +14,10 @@ local entry_id = ARGV[1]
 local maxlen = tonumber(ARGV[2])
 if maxlen == nil or maxlen < 0 or maxlen ~= math.floor(maxlen) then
     return redis.error_reply('ERR dead-letter redrive maxlen must be a non-negative integer')
+end
+local marker_ttl = tonumber(ARGV[3])
+if marker_ttl == nil or marker_ttl <= 0 or marker_ttl ~= math.floor(marker_ttl) then
+    return redis.error_reply('ERR dead-letter redrive marker TTL must be a positive integer')
 end
 if not redis.acl_check_cmd('GET', KEYS[3]) then
     return redis.error_reply('NOPERM dead-letter redrive requires GET permission')
@@ -38,7 +42,7 @@ if maxlen > 0 then
     append = {'XADD', KEYS[2], 'MAXLEN', '~', ARGV[2]}
 end
 append[#append + 1] = '*'
-for index = 3, #ARGV do
+for index = 4, #ARGV do
     append[#append + 1] = ARGV[index]
 end
 if not redis.acl_check_cmd(unpack(append)) then
@@ -51,6 +55,6 @@ if not redis.acl_check_cmd('XDEL', KEYS[1], entry_id) then
     return redis.error_reply('NOPERM dead-letter redrive requires XDEL permission')
 end
 local destination_id = redis.call(unpack(append))
-redis.call('SET', KEYS[3], destination_id)
+redis.call('SET', KEYS[3], destination_id, 'EX', marker_ttl)
 redis.call('XDEL', KEYS[1], entry_id)
 return {1, destination_id}

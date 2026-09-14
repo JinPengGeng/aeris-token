@@ -11,7 +11,7 @@ use crate::redis::{
 };
 use crate::{
     validate_runtime_queue_transfer, DataLayerError, RuntimeQueueRedriveOutcome, RuntimeQueueStats,
-    RuntimeQueueTransferOutcome,
+    RuntimeQueueTransferOutcome, RUNTIME_QUEUE_REDRIVE_MARKER_TTL_SECONDS,
 };
 
 const DEAD_LETTER_TRANSFER_SCRIPT: &str = include_str!("dead_letter_transfer.lua");
@@ -333,7 +333,8 @@ impl RedisStreamRunner {
                     .arg(&destination.0)
                     .arg(marker)
                     .arg(entry_id)
-                    .arg(destination_maxlen.unwrap_or(0));
+                    .arg(destination_maxlen.unwrap_or(0))
+                    .arg(RUNTIME_QUEUE_REDRIVE_MARKER_TTL_SECONDS);
                 for (field, value) in destination_fields {
                     command.arg(field).arg(value);
                 }
