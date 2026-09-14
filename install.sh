@@ -2205,6 +2205,7 @@ install_compose_mode() {
     install_project_file "docker-compose.redis-durable.yml" "${COMPOSE_DIR}/docker-compose.redis-durable.yml" "0644"
     install_project_file ".env.example" "${COMPOSE_DIR}/.env.example" "0644"
     install_project_file "update.sh" "${COMPOSE_DIR}/update.sh" "0755"
+    install_project_file "tools/operations/migrate_container_volume_ownership.sh" "${COMPOSE_DIR}/migrate_container_volume_ownership.sh" "0755"
     install_generate_keys_script "${COMPOSE_DIR}/generate_keys.sh"
 
     validate_managed_regular_file "${COMPOSE_DIR}/.env" false
@@ -2229,6 +2230,7 @@ Docker Compose files are ready:
   ${COMPOSE_DIR}/.env.example
   ${COMPOSE_DIR}/update.sh
   ${COMPOSE_DIR}/generate_keys.sh
+  ${COMPOSE_DIR}/migrate_container_volume_ownership.sh
   ${COMPOSE_DIR}/logs
 
 To enable Redis persistence explicitly after reviewing the recovery runbook:
@@ -2255,6 +2257,7 @@ install_compose_single_node_mode() {
     install_project_file "docker-compose.redis-durable.yml" "${COMPOSE_DIR}/docker-compose.redis-durable.yml" "0644"
     install_project_file ".env.example" "${COMPOSE_DIR}/.env.example" "0644"
     install_project_file "update.sh" "${COMPOSE_DIR}/update.sh" "0755"
+    install_project_file "tools/operations/migrate_container_volume_ownership.sh" "${COMPOSE_DIR}/migrate_container_volume_ownership.sh" "0755"
     install_generate_keys_script "${COMPOSE_DIR}/generate_keys.sh"
 
     validate_managed_regular_file "${COMPOSE_DIR}/.env" false
@@ -2280,6 +2283,7 @@ Docker Compose single-node files are ready:
   ${COMPOSE_DIR}/.env.example
   ${COMPOSE_DIR}/update.sh
   ${COMPOSE_DIR}/generate_keys.sh
+  ${COMPOSE_DIR}/migrate_container_volume_ownership.sh
   ${COMPOSE_DIR}/logs
 
 To enable Redis persistence explicitly after reviewing the recovery runbook:

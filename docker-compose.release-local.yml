@@ -56,6 +56,7 @@ services:
         AETHER_BUILD_TYPE: release
     image: ${LOCAL_RELEASE_APP_IMAGE:-aether-app:release-local}
     container_name: aether-release-local-app
+    user: "10001:10001"
     env_file:
       - ${AETHER_ENV_FILE:-.env}
     environment:

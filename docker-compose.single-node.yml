@@ -58,13 +58,10 @@ services:
   app:
     image: ${APP_IMAGE:-ghcr.io/jinpenggeng/aeris-token:latest}
     container_name: aether-app
-    user: "0:0"
+    user: "10001:10001"
     read_only: true
     cap_drop:
       - ALL
-    cap_add:
-      - DAC_OVERRIDE
-      - FOWNER
     security_opt:
       - no-new-privileges:true
     tmpfs:
