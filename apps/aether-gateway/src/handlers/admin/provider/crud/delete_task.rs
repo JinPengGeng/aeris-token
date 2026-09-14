@@ -4,6 +4,7 @@ use crate::handlers::admin::provider::shared::paths::{
 use crate::handlers::admin::provider::shared::support::build_admin_provider_delete_task_payload;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
+use crate::task_runtime::ProviderDeleteAuditOrigin;
 use crate::GatewayError;
 use axum::{
     body::Body,
@@ -57,9 +58,24 @@ pub(crate) async fn maybe_build_local_admin_provider_delete_task_response(
                 "Provider 不存在",
             )));
         };
-        let Some(task_id) =
-            crate::task_runtime::submit_provider_delete_task(state, &provider_id, Some("admin"))
-                .await?
+        let audit_origin = request_context
+            .decision()
+            .and_then(|decision| decision.admin_principal.as_ref())
+            .map(|principal| ProviderDeleteAuditOrigin {
+                user_id: Some(principal.user_id.clone()),
+                session_id: principal.session_id.clone(),
+                management_token_id: principal.management_token_id.clone(),
+                trace_id: Some(request_context.trace_id().to_string()),
+                client_ip: request_context.public().client_ip.clone(),
+            })
+            .unwrap_or_default();
+        let Some(task_id) = crate::task_runtime::submit_provider_delete_task(
+            state,
+            &provider_id,
+            Some("admin"),
+            audit_origin,
+        )
+        .await?
         else {
             return Ok(Some(build_admin_provider_not_found_response(
                 "提供商不存在",

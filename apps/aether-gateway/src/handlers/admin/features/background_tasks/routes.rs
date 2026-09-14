@@ -4,7 +4,8 @@ use crate::handlers::admin::shared::{
     unix_secs_to_rfc3339,
 };
 use crate::task_runtime::{
-    self, set_cancel_signal, TASK_KEY_PROVIDER_DELETE, TASK_KEY_PROVIDER_OAUTH_BATCH_IMPORT,
+    self, set_cancel_signal, ProviderDeleteAuditOrigin, TASK_KEY_PROVIDER_DELETE,
+    TASK_KEY_PROVIDER_OAUTH_BATCH_IMPORT,
 };
 use crate::GatewayError;
 use aether_data_contracts::repository::background_tasks::{
@@ -296,9 +297,24 @@ pub(super) async fn maybe_build_local_admin_background_tasks_response(
                             "admin task trigger provider delete requires provider_id".to_string(),
                         )
                     })?;
-                let Some(run_id) =
-                    task_runtime::submit_provider_delete_task(state, provider_id, Some("admin"))
-                        .await?
+                let audit_origin = request_context
+                    .decision()
+                    .and_then(|decision| decision.admin_principal.as_ref())
+                    .map(|principal| ProviderDeleteAuditOrigin {
+                        user_id: Some(principal.user_id.clone()),
+                        session_id: principal.session_id.clone(),
+                        management_token_id: principal.management_token_id.clone(),
+                        trace_id: Some(request_context.trace_id().to_string()),
+                        client_ip: request_context.public().client_ip.clone(),
+                    })
+                    .unwrap_or_default();
+                let Some(run_id) = task_runtime::submit_provider_delete_task(
+                    state,
+                    provider_id,
+                    Some("admin"),
+                    audit_origin,
+                )
+                .await?
                 else {
                     return Ok(Some(
                         (
