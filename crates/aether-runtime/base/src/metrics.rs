@@ -12,6 +12,7 @@ static METRICS_NAMESPACE: std::sync::OnceLock<&'static str> = std::sync::OnceLoc
 // an untrusted request cannot create a new time series.
 static BILLING_ENRICHMENT_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static BILLING_SETTLEMENT_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BILLING_INSUFFICIENT_QUOTA_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VIDEO_TASK_SETTLEMENT_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static BILLING_FAIL_OPEN_DAILY_QUOTA_TOTAL: AtomicU64 = AtomicU64::new(0);
 static BILLING_FAIL_OPEN_RPM_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -140,6 +141,10 @@ pub fn record_billing_settlement_failure() {
     BILLING_SETTLEMENT_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn record_billing_insufficient_quota() {
+    BILLING_INSUFFICIENT_QUOTA_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn record_video_task_settlement_failure() {
     VIDEO_TASK_SETTLEMENT_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
@@ -173,6 +178,16 @@ pub(crate) fn billing_metric_samples() -> Vec<MetricSample> {
         .with_labels(vec![
             MetricLabel::new("component", "usage"),
             MetricLabel::new("operation", "settlement"),
+        ]),
+        MetricSample::new(
+            "billing_insufficient_quota_total",
+            "Completed usage settlements finalized without a wallet debit because credit was insufficient.",
+            MetricKind::Counter,
+            BILLING_INSUFFICIENT_QUOTA_TOTAL.load(Ordering::Relaxed),
+        )
+        .with_labels(vec![
+            MetricLabel::new("component", "billing"),
+            MetricLabel::new("operation", "insufficient_quota"),
         ]),
         MetricSample::new(
             "billing_video_task_settlement_failures_total",
@@ -226,8 +241,9 @@ mod tests {
     use super::{
         billing_metric_samples, prometheus_response, record_billing_enrichment_failure,
         record_billing_fail_open_daily_quota, record_billing_fail_open_rpm,
-        record_billing_settlement_failure, record_video_task_settlement_failure,
-        render_prometheus_text, service_up_sample, MetricKind, MetricLabel, MetricSample,
+        record_billing_insufficient_quota, record_billing_settlement_failure,
+        record_video_task_settlement_failure, render_prometheus_text, service_up_sample,
+        MetricKind, MetricLabel, MetricSample,
     };
     use axum::body::to_bytes;
 
@@ -299,11 +315,12 @@ mod tests {
     fn billing_metrics_use_fixed_low_cardinality_labels() {
         record_billing_enrichment_failure();
         record_billing_settlement_failure();
+        record_billing_insufficient_quota();
         record_video_task_settlement_failure();
         record_billing_fail_open_daily_quota();
         record_billing_fail_open_rpm();
         let samples = billing_metric_samples();
-        assert_eq!(samples.len(), 5);
+        assert_eq!(samples.len(), 6);
         assert!(samples
             .iter()
             .all(|sample| sample.kind == MetricKind::Counter));

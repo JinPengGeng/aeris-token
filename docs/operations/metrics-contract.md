@@ -10,6 +10,7 @@ below are the stable suffixes used by alert rules.
 | --- | --- | --- | --- |
 | `billing_enrichment_failures_total` | counter | `component=usage`, `operation=enrichment` | A terminal usage event could not be enriched before persistence. `aether-usage-runtime` owns the event points. |
 | `billing_settlement_failures_total` | counter | `component=usage`, `operation=settlement` | A terminal usage settlement failed after the usage record was written. `aether-usage-runtime` owns the event points. |
+| `billing_insufficient_quota_total` | counter | `component=billing`, `operation=insufficient_quota` | A completed usage settlement persisted as `insufficient_quota`. It is a visibility signal only: it does not debit, retry, release a hold, or establish an amount receivable. The shared usage-settlement wrapper owns the event point. |
 | `billing_video_task_settlement_failures_total` | counter | `component=video_task`, `operation=settlement` | A video task finalizer could not settle its terminal usage event. Gateway video-task finalizer owns the event point. |
 | `billing_fail_open_total` | counter | `component=gateway`, `operation=daily_quota` or `operation=rpm` | A billing or abuse guard allowed a request after its runtime dependency failed. Gateway frontdoor owns the event points. |
 

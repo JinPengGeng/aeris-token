@@ -208,7 +208,12 @@ pub(crate) async fn settle_usage_with_reconciled_cost(
         actual_total_cost_usd: finite_cost(usage.actual_total_cost_usd)?,
         finalized_at_unix_secs,
     };
-    let _ = writer.settle_usage(input).await?;
+    let settlement = writer.settle_usage(input).await?;
+    if usage.status == "completed"
+        && settlement.is_some_and(|settlement| settlement.billing_status == "insufficient_quota")
+    {
+        aether_runtime::record_billing_insufficient_quota();
+    }
     Ok(())
 }
 
@@ -299,7 +304,7 @@ mod tests {
         reconcile_usage_policy_cost_for_event, settle_usage_if_needed, UsageSettlementWriter,
     };
     use aether_data_contracts::repository::settlement::{
-        ReconcileUsagePolicyCostInput, StoredUsagePolicyCostReservation,
+        ReconcileUsagePolicyCostInput, StoredUsagePolicyCostReservation, StoredUsageSettlement,
         UsagePolicyCostReservationState, UsageSettlementInput,
     };
     use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
@@ -313,6 +318,7 @@ mod tests {
         has_writer: bool,
         inputs: Mutex<Vec<UsageSettlementInput>>,
         reconciliations: Mutex<Vec<ReconcileUsagePolicyCostInput>>,
+        settlement: Mutex<Option<StoredUsageSettlement>>,
     }
 
     #[derive(Default)]
@@ -351,7 +357,11 @@ mod tests {
                 .lock()
                 .expect("settlement inputs lock")
                 .push(input);
-            Ok(None)
+            Ok(self
+                .settlement
+                .lock()
+                .expect("settlement result lock")
+                .clone())
         }
     }
 
@@ -459,6 +469,43 @@ mod tests {
             reconciliations[0].terminal_state,
             UsagePolicyCostReservationState::Finalized
         );
+    }
+
+    #[tokio::test]
+    async fn records_completed_insufficient_quota_settlement() {
+        let before = aether_runtime::logging_metric_samples()
+            .into_iter()
+            .find(|sample| sample.name == "billing_insufficient_quota_total")
+            .expect("insufficient quota metric should be exported")
+            .value;
+        let writer = TestSettlementWriter {
+            has_writer: true,
+            settlement: Mutex::new(Some(StoredUsageSettlement {
+                request_id: "req-1".to_string(),
+                wallet_id: Some("wallet-1".to_string()),
+                billing_status: "insufficient_quota".to_string(),
+                wallet_balance_before: Some(0.0),
+                wallet_balance_after: Some(0.0),
+                wallet_recharge_balance_before: Some(0.0),
+                wallet_recharge_balance_after: Some(0.0),
+                wallet_gift_balance_before: Some(0.0),
+                wallet_gift_balance_after: Some(0.0),
+                provider_monthly_used_usd: None,
+                finalized_at_unix_secs: Some(200),
+            })),
+            ..Default::default()
+        };
+
+        settle_usage_if_needed(&writer, &sample_usage())
+            .await
+            .expect("settlement should succeed");
+
+        let after = aether_runtime::logging_metric_samples()
+            .into_iter()
+            .find(|sample| sample.name == "billing_insufficient_quota_total")
+            .expect("insufficient quota metric should be exported")
+            .value;
+        assert_eq!(after, before + 1);
     }
 
     #[tokio::test]
