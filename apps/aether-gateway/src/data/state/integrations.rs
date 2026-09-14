@@ -1,10 +1,10 @@
-use aether_billing::BillingModelContextLookup;
 use aether_billing::enrich_usage_event_with_billing;
-use aether_data::DataLayerError;
+use aether_billing::BillingModelContextLookup;
 use aether_data::repository::audit::RequestAuditReader;
 use aether_data::repository::auth::{
     AuthApiKeyLookupKey, ResolvedAuthApiKeySnapshotReader, StoredAuthApiKeySnapshot,
 };
+use aether_data::DataLayerError;
 use aether_data_contracts::repository::billing::StoredBillingModelContext;
 use aether_data_contracts::repository::candidate_selection::StoredMinimalCandidateSelectionRow;
 use aether_data_contracts::repository::candidates::DecisionTrace;
@@ -430,7 +430,7 @@ impl UsageRecordWriter for GatewayDataState {
 mod tests {
     use aether_billing::enrich_usage_event_with_billing;
     use aether_usage_runtime::UsageRuntimeAccess;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     use super::GatewayDataState;
     use crate::usage::{UsageEvent, UsageEventData, UsageEventType, UsageRequestRecordLevel};

@@ -4,16 +4,16 @@ use std::sync::{Arc, Mutex, RwLock};
 use async_trait::async_trait;
 
 use super::{
-    ReconcileUsagePolicyCostInput, ReleaseUsagePolicyRequestAdmissionInput,
-    ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
-    ReserveUsagePolicyRequestOutcome, SETTLEMENT_EPSILON_USD, SettlementWriteRepository,
-    StoredUsagePolicyCostReservation, StoredUsagePolicyRequestAdmission, StoredUsageSettlement,
-    UsagePolicyCostReservationState, UsagePolicyRequestAdmissionState, UsageSettlementInput,
     settlement_billable_cost_usd, settlement_billing_status_for_usage_status,
-    validate_wallet_settlement_values,
+    validate_wallet_settlement_values, ReconcileUsagePolicyCostInput,
+    ReleaseUsagePolicyRequestAdmissionInput, ReserveUsagePolicyCostInput,
+    ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
+    ReserveUsagePolicyRequestOutcome, SettlementWriteRepository, StoredUsagePolicyCostReservation,
+    StoredUsagePolicyRequestAdmission, StoredUsageSettlement, UsagePolicyCostReservationState,
+    UsagePolicyRequestAdmissionState, UsageSettlementInput, SETTLEMENT_EPSILON_USD,
 };
-use crate::DataLayerError;
 use crate::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
+use crate::DataLayerError;
 
 mod attempt_funding;
 mod funding;
@@ -780,13 +780,11 @@ mod usage_policy_request_admission_tests {
                 used_requests: 1,
             }
         );
-        assert!(
-            !repository
-                .request_admissions
-                .read()
-                .expect("admission lock")
-                .contains_key("event-2")
-        );
+        assert!(!repository
+            .request_admissions
+            .read()
+            .expect("admission lock")
+            .contains_key("event-2"));
     }
 
     #[tokio::test]
@@ -1601,11 +1599,9 @@ mod tests {
                 .count(),
             1
         );
-        assert!(
-            observed
-                .windows(2)
-                .all(|pair| pair[0].settlement == pair[1].settlement)
-        );
+        assert!(observed
+            .windows(2)
+            .all(|pair| pair[0].settlement == pair[1].settlement));
         assert_eq!(
             observed[0]
                 .settlement
@@ -1645,20 +1641,16 @@ mod tests {
                 })
                 .await;
             assert!(result.is_err());
-            assert!(
-                repository
-                    .settlements
-                    .read()
-                    .expect("settlement snapshot lock")
-                    .is_empty()
-            );
-            assert!(
-                repository
-                    .provider_monthly_used
-                    .read()
-                    .expect("provider quota lock")
-                    .is_empty()
-            );
+            assert!(repository
+                .settlements
+                .read()
+                .expect("settlement snapshot lock")
+                .is_empty());
+            assert!(repository
+                .provider_monthly_used
+                .read()
+                .expect("provider quota lock")
+                .is_empty());
         }
     }
 

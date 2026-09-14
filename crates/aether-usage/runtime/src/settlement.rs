@@ -7,7 +7,7 @@ use aether_data_contracts::repository::settlement::{
 };
 use aether_data_contracts::repository::usage::PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY;
 use aether_data_contracts::repository::usage::{
-    StoredRequestUsageAudit, cancelled_request_fee_is_billable,
+    cancelled_request_fee_is_billable, StoredRequestUsageAudit,
 };
 use aether_data_contracts::{DataLayerError, DataLayerError::InvalidInput};
 use async_trait::async_trait;
@@ -309,12 +309,12 @@ mod tests {
         include!("settlement_reuse_tests.rs");
     }
 
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use super::{
-        UsageSettlementWriter, reconcile_usage_policy_cost_for_event, settle_usage_if_needed,
+        reconcile_usage_policy_cost_for_event, settle_usage_if_needed, UsageSettlementWriter,
     };
     use aether_data_contracts::repository::settlement::{
         ReconcileUsagePolicyCostInput, StoredUsagePolicyCostReservation, StoredUsageSettlement,
@@ -690,13 +690,11 @@ mod tests {
             .await
             .expect("blank token should be treated as legacy usage");
 
-        assert!(
-            writer
-                .reconciliations
-                .lock()
-                .expect("reconciliation lock")
-                .is_empty()
-        );
+        assert!(writer
+            .reconciliations
+            .lock()
+            .expect("reconciliation lock")
+            .is_empty());
         assert_eq!(
             writer.inputs.lock().expect("settlement inputs lock").len(),
             1
@@ -726,13 +724,11 @@ mod tests {
             reconcile_usage_policy_cost_for_event(&writer, &event).await,
             Err(aether_data_contracts::DataLayerError::InvalidInput(_))
         ));
-        assert!(
-            writer
-                .reconciliations
-                .lock()
-                .expect("reconciliations lock")
-                .is_empty()
-        );
+        assert!(writer
+            .reconciliations
+            .lock()
+            .expect("reconciliations lock")
+            .is_empty());
 
         event.data.actual_total_cost_usd = Some(1.25);
         reconcile_usage_policy_cost_for_event(&writer, &event)
@@ -770,13 +766,11 @@ mod tests {
             .await
             .expect("deferred reconciliation should not require unknown actual cost");
 
-        assert!(
-            writer
-                .reconciliations
-                .lock()
-                .expect("reconciliations lock")
-                .is_empty()
-        );
+        assert!(writer
+            .reconciliations
+            .lock()
+            .expect("reconciliations lock")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -795,13 +789,11 @@ mod tests {
             .await
             .expect("wallet settlement should continue");
 
-        assert!(
-            writer
-                .reconciliations
-                .lock()
-                .expect("reconciliations lock")
-                .is_empty()
-        );
+        assert!(writer
+            .reconciliations
+            .lock()
+            .expect("reconciliations lock")
+            .is_empty());
         assert_eq!(
             writer.inputs.lock().expect("settlement inputs lock").len(),
             1

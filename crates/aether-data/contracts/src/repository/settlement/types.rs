@@ -619,9 +619,10 @@ pub fn settlement_billable_cost_usd(input: &UsageSettlementInput) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ReconcileUsagePolicyCostInput, ReserveUsagePolicyCostInput, ReserveUsagePolicyRequestInput,
+        validate_wallet_settlement_values, ReconcileUsagePolicyCostInput,
+        ReserveUsagePolicyCostInput, ReserveUsagePolicyRequestInput,
         UsagePolicyCostReservationState, UsagePolicyCostWindow, UsagePolicyRequestWindow,
-        UsageSettlementInput, validate_wallet_settlement_values,
+        UsageSettlementInput,
     };
 
     #[test]

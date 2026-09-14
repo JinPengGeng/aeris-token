@@ -1,19 +1,19 @@
 use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
-use aether_data_contracts::DataLayerError;
 use aether_data_contracts::repository::settlement::{
-    ReconcileUsagePolicyCostInput, ReleaseUsagePolicyRequestAdmissionInput,
-    ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
-    ReserveUsagePolicyRequestOutcome, SETTLEMENT_EPSILON_USD, SettlementWriteRepository,
-    StoredUsagePolicyCostReservation, StoredUsagePolicyRequestAdmission, StoredUsageSettlement,
-    UsagePolicyCostReservationState, UsagePolicyRequestAdmissionState, UsageSettlementInput,
     settlement_billable_cost_usd, settlement_billing_status_for_usage_status,
-    validate_wallet_settlement_values,
+    validate_wallet_settlement_values, ReconcileUsagePolicyCostInput,
+    ReleaseUsagePolicyRequestAdmissionInput, ReserveUsagePolicyCostInput,
+    ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
+    ReserveUsagePolicyRequestOutcome, SettlementWriteRepository, StoredUsagePolicyCostReservation,
+    StoredUsagePolicyRequestAdmission, StoredUsageSettlement, UsagePolicyCostReservationState,
+    UsagePolicyRequestAdmissionState, UsageSettlementInput, SETTLEMENT_EPSILON_USD,
 };
+use aether_data_contracts::DataLayerError;
 
-use crate::PostgresTransactionRunner;
 use crate::error::SqlxResultExt;
+use crate::PostgresTransactionRunner;
 
 pub(crate) mod funding;
 
@@ -1964,15 +1964,11 @@ mod tests {
 
     #[test]
     fn settlement_sql_dual_writes_usage_settlement_snapshots() {
-        assert!(
-            super::UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL
-                .contains("INSERT INTO usage_settlement_snapshots")
-        );
+        assert!(super::UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL
+            .contains("INSERT INTO usage_settlement_snapshots"));
         assert!(super::UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL.contains("provider_monthly_used_usd"));
-        assert!(
-            super::UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL
-                .contains("TO_TIMESTAMP($11::double precision)")
-        );
+        assert!(super::UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL
+            .contains("TO_TIMESTAMP($11::double precision)"));
     }
 
     #[test]
