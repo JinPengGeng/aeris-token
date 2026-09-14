@@ -3,11 +3,11 @@ use std::sync::{Arc, OnceLock};
 use aether_data_contracts::repository::billing::nonnegative_usd_to_usage_policy_cost_units;
 use aether_data_contracts::repository::settlement::{
     ReconcileUsagePolicyCostInput, StoredUsagePolicyCostReservation, StoredUsageSettlement,
-    UsagePolicyCostReservationState, UsageSettlementInput,
+    UsagePolicyCostReservationState, UsageSettlementInput, UsageSettlementWriteOutcome,
 };
 use aether_data_contracts::repository::usage::PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY;
 use aether_data_contracts::repository::usage::{
-    cancelled_request_fee_is_billable, StoredRequestUsageAudit,
+    StoredRequestUsageAudit, cancelled_request_fee_is_billable,
 };
 use aether_data_contracts::{DataLayerError, DataLayerError::InvalidInput};
 use async_trait::async_trait;
@@ -42,6 +42,16 @@ pub trait UsageSettlementWriter: Send + Sync {
         &self,
         input: UsageSettlementInput,
     ) -> Result<Option<StoredUsageSettlement>, DataLayerError>;
+
+    async fn settle_usage_observed(
+        &self,
+        input: UsageSettlementInput,
+    ) -> Result<UsageSettlementWriteOutcome, DataLayerError> {
+        Ok(UsageSettlementWriteOutcome {
+            settlement: self.settle_usage(input).await?,
+            newly_finalized: false,
+        })
+    }
 }
 
 pub async fn reconcile_usage_policy_cost_for_event(
@@ -208,9 +218,12 @@ pub(crate) async fn settle_usage_with_reconciled_cost(
         actual_total_cost_usd: finite_cost(usage.actual_total_cost_usd)?,
         finalized_at_unix_secs,
     };
-    let settlement = writer.settle_usage(input).await?;
-    if usage.status == "completed"
-        && settlement.is_some_and(|settlement| settlement.billing_status == "insufficient_quota")
+    let outcome = writer.settle_usage_observed(input).await?;
+    if outcome.newly_finalized
+        && usage.status == "completed"
+        && outcome
+            .settlement
+            .is_some_and(|settlement| settlement.billing_status == "insufficient_quota")
     {
         aether_runtime::record_billing_insufficient_quota();
     }
@@ -296,16 +309,16 @@ mod tests {
         include!("settlement_reuse_tests.rs");
     }
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::{
-        reconcile_usage_policy_cost_for_event, settle_usage_if_needed, UsageSettlementWriter,
+        UsageSettlementWriter, reconcile_usage_policy_cost_for_event, settle_usage_if_needed,
     };
     use aether_data_contracts::repository::settlement::{
         ReconcileUsagePolicyCostInput, StoredUsagePolicyCostReservation, StoredUsageSettlement,
-        UsagePolicyCostReservationState, UsageSettlementInput,
+        UsagePolicyCostReservationState, UsageSettlementInput, UsageSettlementWriteOutcome,
     };
     use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
     use async_trait::async_trait;
@@ -319,6 +332,7 @@ mod tests {
         inputs: Mutex<Vec<UsageSettlementInput>>,
         reconciliations: Mutex<Vec<ReconcileUsagePolicyCostInput>>,
         settlement: Mutex<Option<StoredUsageSettlement>>,
+        newly_finalized: AtomicBool,
     }
 
     #[derive(Default)]
@@ -362,6 +376,16 @@ mod tests {
                 .lock()
                 .expect("settlement result lock")
                 .clone())
+        }
+
+        async fn settle_usage_observed(
+            &self,
+            input: UsageSettlementInput,
+        ) -> Result<UsageSettlementWriteOutcome, aether_data_contracts::DataLayerError> {
+            Ok(UsageSettlementWriteOutcome {
+                settlement: self.settle_usage(input).await?,
+                newly_finalized: self.newly_finalized.swap(false, Ordering::AcqRel),
+            })
         }
     }
 
@@ -493,19 +517,23 @@ mod tests {
                 provider_monthly_used_usd: None,
                 finalized_at_unix_secs: Some(200),
             })),
+            newly_finalized: AtomicBool::new(true),
             ..Default::default()
         };
 
         settle_usage_if_needed(&writer, &sample_usage())
             .await
             .expect("settlement should succeed");
+        settle_usage_if_needed(&writer, &sample_usage())
+            .await
+            .expect("idempotent replay should succeed");
 
         let after = aether_runtime::logging_metric_samples()
             .into_iter()
             .find(|sample| sample.name == "billing_insufficient_quota_total")
             .expect("insufficient quota metric should be exported")
             .value;
-        assert_eq!(after, before + 1);
+        assert_eq!(after, before + 1, "replay must not increment the metric");
     }
 
     #[tokio::test]
@@ -662,11 +690,13 @@ mod tests {
             .await
             .expect("blank token should be treated as legacy usage");
 
-        assert!(writer
-            .reconciliations
-            .lock()
-            .expect("reconciliation lock")
-            .is_empty());
+        assert!(
+            writer
+                .reconciliations
+                .lock()
+                .expect("reconciliation lock")
+                .is_empty()
+        );
         assert_eq!(
             writer.inputs.lock().expect("settlement inputs lock").len(),
             1
@@ -696,11 +726,13 @@ mod tests {
             reconcile_usage_policy_cost_for_event(&writer, &event).await,
             Err(aether_data_contracts::DataLayerError::InvalidInput(_))
         ));
-        assert!(writer
-            .reconciliations
-            .lock()
-            .expect("reconciliations lock")
-            .is_empty());
+        assert!(
+            writer
+                .reconciliations
+                .lock()
+                .expect("reconciliations lock")
+                .is_empty()
+        );
 
         event.data.actual_total_cost_usd = Some(1.25);
         reconcile_usage_policy_cost_for_event(&writer, &event)
@@ -738,11 +770,13 @@ mod tests {
             .await
             .expect("deferred reconciliation should not require unknown actual cost");
 
-        assert!(writer
-            .reconciliations
-            .lock()
-            .expect("reconciliations lock")
-            .is_empty());
+        assert!(
+            writer
+                .reconciliations
+                .lock()
+                .expect("reconciliations lock")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -761,11 +795,13 @@ mod tests {
             .await
             .expect("wallet settlement should continue");
 
-        assert!(writer
-            .reconciliations
-            .lock()
-            .expect("reconciliations lock")
-            .is_empty());
+        assert!(
+            writer
+                .reconciliations
+                .lock()
+                .expect("reconciliations lock")
+                .is_empty()
+        );
         assert_eq!(
             writer.inputs.lock().expect("settlement inputs lock").len(),
             1

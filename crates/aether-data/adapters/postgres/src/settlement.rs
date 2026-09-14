@@ -1,19 +1,19 @@
 use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
-use aether_data_contracts::repository::settlement::{
-    settlement_billable_cost_usd, settlement_billing_status_for_usage_status,
-    validate_wallet_settlement_values, ReconcileUsagePolicyCostInput,
-    ReleaseUsagePolicyRequestAdmissionInput, ReserveUsagePolicyCostInput,
-    ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
-    ReserveUsagePolicyRequestOutcome, SettlementWriteRepository, StoredUsagePolicyCostReservation,
-    StoredUsagePolicyRequestAdmission, StoredUsageSettlement, UsagePolicyCostReservationState,
-    UsagePolicyRequestAdmissionState, UsageSettlementInput, SETTLEMENT_EPSILON_USD,
-};
 use aether_data_contracts::DataLayerError;
+use aether_data_contracts::repository::settlement::{
+    ReconcileUsagePolicyCostInput, ReleaseUsagePolicyRequestAdmissionInput,
+    ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
+    ReserveUsagePolicyRequestOutcome, SETTLEMENT_EPSILON_USD, SettlementWriteRepository,
+    StoredUsagePolicyCostReservation, StoredUsagePolicyRequestAdmission, StoredUsageSettlement,
+    UsagePolicyCostReservationState, UsagePolicyRequestAdmissionState, UsageSettlementInput,
+    settlement_billable_cost_usd, settlement_billing_status_for_usage_status,
+    validate_wallet_settlement_values,
+};
 
-use crate::error::SqlxResultExt;
 use crate::PostgresTransactionRunner;
+use crate::error::SqlxResultExt;
 
 pub(crate) mod funding;
 
@@ -357,7 +357,10 @@ async fn usage_policy_cost_window_totals(
     input: &ReserveUsagePolicyCostInput,
 ) -> Result<sqlx::postgres::PgRow, DataLayerError> {
     let (mut query, earliest, latest) = usage_policy_window_aggregate_query(
-        input.windows.iter().map(|window| (window.starts_at_unix_secs, window.ends_at_unix_secs)),
+        input
+            .windows
+            .iter()
+            .map(|window| (window.starts_at_unix_secs, window.ends_at_unix_secs)),
         "SUM(CASE WHEN state = 'finalized' THEN COALESCE(actual_cost_units, 0) ELSE reserved_cost_units END)",
     )?;
     query.push(" FROM usage_cost_reservations WHERE subject_id = ")
@@ -1290,6 +1293,16 @@ WHERE retain_until <= TO_TIMESTAMP($1::double precision)
         &self,
         input: UsageSettlementInput,
     ) -> Result<Option<StoredUsageSettlement>, DataLayerError> {
+        Ok(self.settle_usage_observed(input).await?.settlement)
+    }
+
+    async fn settle_usage_observed(
+        &self,
+        input: UsageSettlementInput,
+    ) -> Result<
+        aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome,
+        DataLayerError,
+    > {
         input.validate()?;
         self.tx_runner
             .run_read_write(|tx| {
@@ -1301,7 +1314,10 @@ WHERE retain_until <= TO_TIMESTAMP($1::double precision)
                         .map_postgres_err()?;
 
                     let Some(usage_row) = row else {
-                        return Ok(None);
+                        return Ok(aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome {
+                            settlement: None,
+                            newly_finalized: false,
+                        });
                     };
                     if usage_row.try_get::<String, _>("billing_mode").map_postgres_err()? == "attempt_funds" {
                         return Err(DataLayerError::InvalidInput("attempt funds usage requires v2 financial settlement".to_string()));
@@ -1313,7 +1329,12 @@ WHERE retain_until <= TO_TIMESTAMP($1::double precision)
                         current_billing_status.as_str(),
                         "settled" | "void" | "insufficient_quota"
                     ) {
-                        return settlement_from_row(&usage_row).map(Some);
+                        return settlement_from_row(&usage_row).map(|settlement| {
+                            aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome {
+                                settlement: Some(settlement),
+                                newly_finalized: false,
+                            }
+                        });
                     }
                     let held_request: bool = sqlx::query_scalar(
                         "SELECT EXISTS (SELECT 1 FROM request_fund_reservations WHERE request_id = $1 AND state IN ('prepared', 'dispatched', 'reconciliation_pending'))",
@@ -1518,7 +1539,10 @@ LIMIT 1
                                 .execute(&mut **tx)
                                 .await
                                 .map_postgres_err()?;
-                            return Ok(Some(settlement));
+                            return Ok(aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome {
+                                settlement: Some(settlement),
+                                newly_finalized: true,
+                            });
                         }
 
                         if wallet_debit_cost_usd > SETTLEMENT_EPSILON_USD {
@@ -1550,7 +1574,10 @@ LIMIT 1
                                         sqlx::query(FINALIZE_USAGE_BILLING_SQL).bind(&input.request_id)
                                             .bind(&final_billing_status).bind(finalized_at)
                                             .execute(&mut **tx).await.map_postgres_err()?;
-                                        return Ok(Some(settlement));
+                                        return Ok(aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome {
+                                            settlement: Some(settlement),
+                                            newly_finalized: true,
+                                        });
                                     }
                                     let recharge_debit = required.min(available_recharge);
                                     let gift_debit = required - recharge_debit;
@@ -1617,7 +1644,10 @@ WHERE id = $1
                                 .execute(&mut **tx)
                                 .await
                                 .map_postgres_err()?;
-                            return Ok(Some(settlement));
+                            return Ok(aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome {
+                                settlement: Some(settlement),
+                                newly_finalized: true,
+                            });
                         }
 
                         if let Some(provider_id) = input
@@ -1644,7 +1674,10 @@ WHERE id = $1
                         .await
                         .map_postgres_err()?;
 
-                    Ok(Some(settlement))
+                    Ok(aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome {
+                        settlement: Some(settlement),
+                        newly_finalized: true,
+                    })
                 })
             })
             .await
@@ -1931,11 +1964,15 @@ mod tests {
 
     #[test]
     fn settlement_sql_dual_writes_usage_settlement_snapshots() {
-        assert!(super::UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL
-            .contains("INSERT INTO usage_settlement_snapshots"));
+        assert!(
+            super::UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL
+                .contains("INSERT INTO usage_settlement_snapshots")
+        );
         assert!(super::UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL.contains("provider_monthly_used_usd"));
-        assert!(super::UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL
-            .contains("TO_TIMESTAMP($11::double precision)"));
+        assert!(
+            super::UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL
+                .contains("TO_TIMESTAMP($11::double precision)")
+        );
     }
 
     #[test]

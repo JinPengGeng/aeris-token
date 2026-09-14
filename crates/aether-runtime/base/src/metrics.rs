@@ -1,7 +1,7 @@
 use crate::config::ServiceRuntimeConfig;
 use axum::body::Body;
-use axum::http::header::{HeaderValue, CONTENT_TYPE};
 use axum::http::Response;
+use axum::http::header::{CONTENT_TYPE, HeaderValue};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -239,11 +239,11 @@ fn escape_prometheus_label(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        billing_metric_samples, prometheus_response, record_billing_enrichment_failure,
-        record_billing_fail_open_daily_quota, record_billing_fail_open_rpm,
-        record_billing_insufficient_quota, record_billing_settlement_failure,
-        record_video_task_settlement_failure, render_prometheus_text, service_up_sample,
-        MetricKind, MetricLabel, MetricSample,
+        MetricKind, MetricLabel, MetricSample, billing_metric_samples, prometheus_response,
+        record_billing_enrichment_failure, record_billing_fail_open_daily_quota,
+        record_billing_fail_open_rpm, record_billing_insufficient_quota,
+        record_billing_settlement_failure, record_video_task_settlement_failure,
+        render_prometheus_text, service_up_sample,
     };
     use axum::body::to_bytes;
 
@@ -321,13 +321,17 @@ mod tests {
         record_billing_fail_open_rpm();
         let samples = billing_metric_samples();
         assert_eq!(samples.len(), 6);
-        assert!(samples
-            .iter()
-            .all(|sample| sample.kind == MetricKind::Counter));
-        assert!(samples.iter().all(|sample| sample
-            .labels
-            .iter()
-            .all(|label| matches!(label.key, "component" | "operation"))));
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.kind == MetricKind::Counter)
+        );
+        assert!(samples.iter().all(|sample| {
+            sample
+                .labels
+                .iter()
+                .all(|label| matches!(label.key, "component" | "operation"))
+        }));
         assert!(samples.iter().all(|sample| sample.value >= 1));
     }
 }

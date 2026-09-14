@@ -1289,6 +1289,24 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn settle_usage_observed(
+        &self,
+        input: UsageSettlementInput,
+    ) -> Result<
+        aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome,
+        DataLayerError,
+    > {
+        match &self.settlement_writer {
+            Some(repository) => repository.settle_usage_observed(input).await,
+            None => Ok(
+                aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome {
+                    settlement: None,
+                    newly_finalized: false,
+                },
+            ),
+        }
+    }
+
     pub(crate) async fn reserve_usage_policy_cost(
         &self,
         input: ReserveUsagePolicyCostInput,
