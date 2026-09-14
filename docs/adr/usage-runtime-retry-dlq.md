@@ -57,10 +57,12 @@ Redis `MAXLEN ~` 近似裁剪最旧条目。有限保留保护内存，但会丢
 [Redis redrive Lua](../../crates/aether-runtime/state/src/redis/dead_letter_redrive.lua)
 先校验 ACL/类型，再追加目标、记录幂等 marker、删除源条目；要求 Redis 7 的 ACL 预检。
 
-当前 Redis marker 使用无 TTL 的 SET，Memory 的
-[marker map](../../crates/aether-runtime/state/src/memory.rs) 也没有到期策略。
-幂等返回依赖 marker 保留和后端状态存活，不能把 DLQ MAXLEN 当作 marker 容量上限。
-marker 的寿命/清理与容量政策仍待设计；未经对账不得直接删 marker 或 DLQ。
+当前 Redis marker 使用带 TTL 的 `SET ... EX`，由 redrive 调用方提供正整数 TTL；
+演练与真实 Redis 测试应验证 marker 在写入后仍有正值且不超过配置上限。Memory 的
+[marker map](../../crates/aether-runtime/state/src/memory.rs) 使用固定七天恢复窗口，
+在每次 redrive 时惰性清理已过期 marker；不能把 DLQ MAXLEN 当作 marker 容量上限。
+Redis marker 的寿命/清理由调用方 TTL 政策约束，Memory 与 Redis 均不支持主动清理
+接口；未经对账不得直接删 marker 或 DLQ。
 
 ## 兼容、回滚与未完成范围
 
@@ -76,7 +78,7 @@ Memory、本地 retry 缓冲及无持久化 Redis 都不能承诺进程/主机�
 [停机测试](../../crates/aether-usage/runtime/src/runtime_shutdown_tests.rs)，不将 drain 超时
 解释为业务全部成功。
 
-本 ADR 不完成 core 的生产接线、所有任务类别的 retry 政策、marker 容量/TTL、批量
+本 ADR 不完成 core 的生产接线、所有任务类别的 retry 政策、marker 容量治理、批量
 redrive、生产容量与完整账务灾备验收，也不描述未合并 PR #391 的 attempt 资金生命周期。
 runtime 与数据仓储评审角色负责消息/写入合同，管理员入口评审角色负责权限与审计，
 部署责任人负责留存容量、告警和业务对账。

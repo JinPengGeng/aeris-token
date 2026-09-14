@@ -48,22 +48,27 @@ test "$recovered" = 1
 
 lua="$(<"$lua_file")"
 marker="usage:redrive:drill:$source_id"
-first=( $(redis --raw EVAL "$lua" 3 usage:events:dlq usage:events "$marker" "$source_id" 0 payload fixture) )
+marker_ttl_seconds=60
+first=( $(redis --raw EVAL "$lua" 3 usage:events:dlq usage:events "$marker" "$source_id" 0 "$marker_ttl_seconds" payload fixture) )
 echo "first redrive result: ${first[*]}"
 test "${first[0]}" = 1
 destination_id="${first[1]}"
-second=( $(redis --raw EVAL "$lua" 3 usage:events:dlq usage:events "$marker" "$source_id" 0 payload fixture) )
+second=( $(redis --raw EVAL "$lua" 3 usage:events:dlq usage:events "$marker" "$source_id" 0 "$marker_ttl_seconds" payload fixture) )
 echo "second redrive result: ${second[*]}"
 test "${second[0]}" = 2
 test "${second[1]}" = "$destination_id"
 target_after="$(redis XLEN usage:events)"
 source_after="$(redis XLEN usage:events:dlq)"
 marker_value="$(redis GET "$marker")"
+marker_ttl="$(redis TTL "$marker")"
 echo "target length after redrive: $target_after"
 echo "DLQ entry count after redrive: $source_after"
 echo "redrive marker: $marker_value"
+echo "redrive marker TTL: $marker_ttl"
 test "$target_after" = 1
 test "$source_after" = 0
 test "$marker_value" = "$destination_id"
+test "$marker_ttl" -gt 0
+test "$marker_ttl" -le "$marker_ttl_seconds"
 
 echo "PASS: Redis durable kill/recovery and idempotent DLQ redrive ($source_id -> $destination_id)"
