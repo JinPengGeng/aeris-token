@@ -48,7 +48,7 @@ with tempfile.TemporaryDirectory(prefix="aether-compose-databases-") as director
         assert set(config["services"]) == {"app", "postgres", "redis"}
         assert set(config["volumes"]) == {"postgres_data"}
         app = config["services"]["app"]
-        assert app["user"] == "0:0"
+        assert app["user"] == "10001:10001"
         assert app["read_only"] is True
         assert app["cap_drop"] == ["ALL"]
         assert set(app["cap_add"]) == {"DAC_OVERRIDE", "FOWNER"}
@@ -118,7 +118,7 @@ with tempfile.TemporaryDirectory(prefix="aether-compose-databases-") as director
             result = compose_config(files)
             assert result.returncode == 0, result.stderr
             app = json.loads(result.stdout)["services"]["app"]
-            assert app["user"] == "0:0", files
+            assert app["user"] == "10001:10001", files
             assert app["environment"]["AETHER_LOG_DESTINATION"] == "stdout", files
             assert all(
                 volume["target"] not in ("/app/logs", "/opt/aether/logs")
