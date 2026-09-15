@@ -2564,7 +2564,7 @@ async fn proxy_request_inner(
             build_local_http_error_response_with_request_path_and_code(
                 &trace_id,
                 control_decision,
-                Some(&parts.uri.path().to_string()),
+                Some(parts.uri.path()),
                 http::StatusCode::NOT_FOUND,
                 local_execution_runtime_miss_client_message(
                     local_execution_runtime_miss_detail.as_str(),
