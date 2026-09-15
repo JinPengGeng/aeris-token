@@ -17,8 +17,9 @@ pub use aether_loadtools::{
     fetch_prometheus_samples, find_metric_value_u64, parse_prometheus_samples, PrometheusSample,
 };
 pub use aether_loadtools::{
-    json_body, run_http_load_probe, run_multi_url_http_load_probe, test_http_client,
-    test_http_client_config, HttpLoadProbeConfig, HttpLoadProbeResponseMode, HttpLoadProbeResult,
+    json_body, run_http_load_probe, run_http_load_probe_with_options,
+    run_multi_url_http_load_probe, test_http_client, test_http_client_config, HttpLoadProbeConfig,
+    HttpLoadProbeOptions, HttpLoadProbeResponseMode, HttpLoadProbeResult,
     MultiUrlHttpLoadProbeResult,
 };
 pub use aether_loadtools::{BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot};

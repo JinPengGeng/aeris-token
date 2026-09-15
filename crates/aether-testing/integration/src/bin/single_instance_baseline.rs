@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
 use aether_testkit::{
-    init_test_runtime_for, run_http_load_probe, ExecutionRuntimeHarness,
-    ExecutionRuntimeHarnessConfig, GatewayHarness, GatewayHarnessConfig, HttpLoadProbeConfig,
-    HttpLoadProbeResponseMode, HttpLoadProbeResult, SpawnedServer, GATEWAY_HARNESS_API_KEY,
+    init_test_runtime_for, run_http_load_probe, run_http_load_probe_with_options,
+    ExecutionRuntimeHarness, ExecutionRuntimeHarnessConfig, GatewayHarness, GatewayHarnessConfig,
+    HttpLoadProbeConfig, HttpLoadProbeOptions, HttpLoadProbeResponseMode, HttpLoadProbeResult,
+    SpawnedServer, GATEWAY_HARNESS_API_KEY,
 };
 use axum::body::{to_bytes, Body, Bytes};
 use axum::http::StatusCode;
@@ -85,10 +86,14 @@ async fn run_suite(
     let gateway_sync = run_http_load_probe(&gateway_sync_probe_config(gateway.base_url(), config))
         .await
         .map_err(std::io::Error::other)?;
-    let gateway_stream =
-        run_http_load_probe(&gateway_stream_probe_config(gateway.base_url(), config))
-            .await
-            .map_err(std::io::Error::other)?;
+    let gateway_stream = run_http_load_probe_with_options(
+        &gateway_stream_probe_config(gateway.base_url(), config),
+        HttpLoadProbeOptions {
+            require_sse_done: true,
+        },
+    )
+    .await
+    .map_err(std::io::Error::other)?;
     let execution_runtime_sync = run_http_load_probe(&execution_runtime_sync_probe_config(
         runtime.base_url(),
         upstream.base_url(),
