@@ -6944,7 +6944,9 @@ mod tests {
         StoredRequestUsageAudit, UpsertUsageRecord, UsageBodyCaptureState,
     };
     use aether_data_contracts::DataLayerError;
-    use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeQueueStore, RuntimeState};
+    use aether_runtime_state::{
+        MemoryRuntimeStateConfig, RuntimeQueueRedriveOutcome, RuntimeQueueStore, RuntimeState,
+    };
     use async_trait::async_trait;
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -7086,6 +7088,100 @@ mod tests {
             assert_eq!(metadata["provider_cache_ttl_minutes"], 30);
             assert_eq!(budget.retained_bytes(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn dlq_redrive_replays_exact_payload_once_and_keeps_poison_entries() {
+        let queue: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let store = QueueConfiguredUsageStore {
+            inner: NoRedisUsageStore::default(),
+            queue: Arc::clone(&queue),
+        };
+        let runtime = UsageRuntime::new(UsageRuntimeConfig::default()).expect("usage runtime");
+        let original_fields = BTreeMap::from([
+            ("event_type".to_string(), "completed".to_string()),
+            ("payload".to_string(), "original-event".to_string()),
+            ("request_id".to_string(), "request-223-contract".to_string()),
+        ]);
+        let dead_letter_payload = json!({
+            "entry_id": "7-0",
+            "fields": original_fields.clone(),
+            "error": "permanent provider failure"
+        });
+        let source_id = queue
+            .append_fields_with_maxlen(
+                "usage:events:dlq",
+                &BTreeMap::from([
+                    ("payload".to_string(), dead_letter_payload.to_string()),
+                    ("error_class".to_string(), "poison".to_string()),
+                ]),
+                None,
+            )
+            .await
+            .expect("seed valid DLQ payload");
+
+        let first = runtime
+            .redrive_dead_letter(&store, &source_id)
+            .await
+            .expect("valid payload should redrive");
+        let destination_id = match first {
+            RuntimeQueueRedriveOutcome::Redriven { destination_id } => destination_id,
+            other => panic!("unexpected first redrive outcome: {other:?}"),
+        };
+        let destination_page = queue
+            .read_stream_page("usage:events", "0-0", 10)
+            .await
+            .expect("read replayed event");
+        assert_eq!(destination_page.entries.len(), 1);
+        assert_eq!(destination_page.entries[0].fields, original_fields);
+
+        let retry = runtime
+            .redrive_dead_letter(&store, &source_id)
+            .await
+            .expect("duplicate redrive should be idempotent");
+        assert_eq!(
+            retry,
+            RuntimeQueueRedriveOutcome::AlreadyRedriven { destination_id }
+        );
+        assert_eq!(
+            queue
+                .read_stream_page("usage:events", "0-0", 10)
+                .await
+                .expect("read destination after retry")
+                .entries
+                .len(),
+            1,
+            "a duplicate redrive must not append a second usage event"
+        );
+
+        let poison_payload = json!({
+            "entry_id": "8-0",
+            "fields": {},
+            "error": "malformed poison"
+        });
+        let poison_id = queue
+            .append_fields_with_maxlen(
+                "usage:events:dlq",
+                &BTreeMap::from([("payload".to_string(), poison_payload.to_string())]),
+                None,
+            )
+            .await
+            .expect("seed poison payload");
+        let poison_result = runtime.redrive_dead_letter(&store, &poison_id).await;
+        assert!(matches!(
+            poison_result,
+            Err(DataLayerError::InvalidInput(message))
+                if message.contains("payload fields cannot be empty")
+        ));
+        assert!(
+            queue
+                .read_stream_entry("usage:events:dlq", &poison_id)
+                .await
+                .expect("inspect poison entry")
+                .is_some(),
+            "poison entries must remain available for operator inspection"
+        );
     }
 
     #[tokio::test]
