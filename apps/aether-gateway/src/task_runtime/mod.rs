@@ -735,12 +735,65 @@ pub(crate) async fn submit_provider_delete_task(
     spawn_named("task-runtime-provider-delete", async move {
         let lock_key = format!("task_runtime:lock:{TASK_KEY_PROVIDER_DELETE}:{provider_id}");
         let lock_ttl = std::time::Duration::from_secs(PROVIDER_DELETE_LOCK_TTL_SECS);
-        let lock = app
+        let lock = match app
             .runtime_state
             .lock_try_acquire(&lock_key, app.tunnel.local_instance_id(), lock_ttl)
             .await
-            .ok()
-            .flatten();
+        {
+            Ok(lock) => lock,
+            Err(err) => {
+                warn!(
+                    provider_id = %provider_id,
+                    error = %crate::error::redact_error_debug(&err),
+                    error_category = "provider_delete_lock_unavailable",
+                    "provider delete task could not acquire singleton lock"
+                );
+                let message = "provider delete blocked: singleton lock unavailable".to_string();
+                app.put_provider_delete_task(crate::LocalProviderDeleteTaskState {
+                    task_id: run_id.clone(),
+                    provider_id: provider_id.clone(),
+                    status: "failed".to_string(),
+                    stage: "lock_unavailable".to_string(),
+                    total_keys: 0,
+                    deleted_keys: 0,
+                    total_endpoints: 0,
+                    deleted_endpoints: 0,
+                    message: message.clone(),
+                });
+                let _ = update_run_status(
+                    &app,
+                    &run_id,
+                    BackgroundTaskStatus::Failed,
+                    Some(0),
+                    Some(message.clone()),
+                    None,
+                    Some("provider_delete_lock_unavailable".to_string()),
+                    None,
+                    Some(now_unix_secs()),
+                )
+                .await;
+                append_event_with_logging(
+                    &app,
+                    &run_id,
+                    "failed",
+                    &message,
+                    Some(serde_json::json!({
+                        "error_code": "provider_delete_lock_unavailable"
+                    })),
+                )
+                .await;
+                persist_provider_delete_terminal_audit(
+                    &app,
+                    &run_id,
+                    &provider_id,
+                    "failed",
+                    None,
+                    &audit_origin,
+                )
+                .await;
+                return;
+            }
+        };
         if lock.is_none() {
             app.put_provider_delete_task(crate::LocalProviderDeleteTaskState {
                 task_id: run_id.clone(),
