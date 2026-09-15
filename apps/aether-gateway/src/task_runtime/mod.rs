@@ -838,6 +838,29 @@ pub(crate) async fn submit_provider_delete_task(
             return;
         }
 
+        let lease_renewal = lock.as_ref().map(|lease| {
+            let runtime_state = app.runtime_state.clone();
+            let lease = lease.clone();
+            tokio::spawn(async move {
+                let interval = std::time::Duration::from_secs(PROVIDER_DELETE_LOCK_TTL_SECS / 3);
+                loop {
+                    tokio::time::sleep(interval).await;
+                    match runtime_state.lock_renew(&lease, lock_ttl).await {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(err) => {
+                            warn!(
+                                error = %crate::error::redact_error_debug(&err),
+                                error_category = "provider_delete_lock_renewal_failed",
+                                "provider delete singleton lock renewal failed"
+                            );
+                            break;
+                        }
+                    }
+                }
+            })
+        });
+
         let started_at = now_unix_secs();
         let _ = update_run_status(
             &app,
@@ -966,6 +989,9 @@ pub(crate) async fn submit_provider_delete_task(
             }
         }
 
+        if let Some(renewal) = lease_renewal {
+            renewal.abort();
+        }
         if let Some(lock) = lock {
             let _ = app.runtime_state.lock_release(&lock).await;
         }
