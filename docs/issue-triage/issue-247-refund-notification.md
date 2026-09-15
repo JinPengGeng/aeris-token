@@ -14,8 +14,9 @@ view to learn the result. This slice wires only the two terminal transitions:
 Each transition uses the existing user-email notification dispatcher and the
 new `user_refund_status` item. The item is enabled by default, scoped to email,
 and requires the existing `user_email_enabled` item setting plus the recipient's
-`email_notifications` and `usage_alerts` preferences. Missing preferences
-retain the historical enabled default; preference-store failures fail closed.
+`email_notifications` preference. `usage_alerts` remains scoped to low-balance
+alerts. Missing preferences retain the historical enabled default;
+preference-store failures fail closed.
 No email is sent for API-key or orphaned wallets, users without an address,
 disabled items, opted-out recipients, or missing SMTP configuration.
 
@@ -40,7 +41,8 @@ dispatcher errors in logs.
 - Default item exists in both the runtime fallback and admin system defaults.
 - Unit test bounds unknown status values to `updated` and covers whitespace and
   case normalization.
-- Unit tests cover the two recipient preference gates and their opt-out matrix.
+- An async notification-path test verifies that `email_notifications` is the
+  only recipient preference gate.
 - `cargo fmt --all -- --check`, `git diff --check`, and the focused gateway
   test suite are required before merge.
 
