@@ -219,10 +219,6 @@ async fn gateway_skips_video_get_control_sync_without_opt_in_header() {
 
     let response = reqwest::Client::new()
         .get(format!("{gateway_url}/v1/videos/task-123"))
-        .header(
-            http::header::AUTHORIZATION,
-            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
-        )
         .send()
         .await
         .expect("request should succeed");
