@@ -4,9 +4,9 @@ name: aether-multi-node
 # Put an L7 load balancer in front of frontdoor-1/2; background is not public.
 x-gateway: &gateway
   image: ${APP_IMAGE:-ghcr.io/jinpenggeng/aeris-token:latest}
+  user: "10001:10001"
   read_only: true
   cap_drop: [ALL]
-  cap_add: [DAC_OVERRIDE, FOWNER]
   security_opt: [no-new-privileges:true]
   tmpfs: [/tmp:rw,nosuid,nodev,noexec,mode=1777]
   expose: ["8084"]
