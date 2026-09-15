@@ -434,13 +434,13 @@ mod tests {
 
         let mut preferences = StoredUserPreferenceRecord::default_for_user("user-1");
         preferences.usage_alerts = false;
-        app.write_user_preferences(&preferences)
+        app.write_user_preferences(crate::GatewayUserPreferenceView::from(preferences.clone()))
             .await
             .expect("preferences should update");
         assert!(notify_user_refund_status(&state, &refund).await);
 
         preferences.email_notifications = false;
-        app.write_user_preferences(&preferences)
+        app.write_user_preferences(crate::GatewayUserPreferenceView::from(preferences.clone()))
             .await
             .expect("preferences should update");
         assert!(!notify_user_refund_status(&state, &refund).await);
