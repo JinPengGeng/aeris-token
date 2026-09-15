@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_data_contracts::repository::background_tasks::{
@@ -6,11 +7,13 @@ use aether_data_contracts::repository::background_tasks::{
     UpsertBackgroundTaskRun,
 };
 use aether_runtime::task::spawn_named;
+use aether_runtime_state::{RuntimeLockLease, RuntimeState};
 use aether_task_runtime::{RetryPolicy, TaskDefinition, TaskKind};
 pub(crate) use aether_task_runtime::{TaskSupervisor, TaskSupervisorMetrics};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -60,6 +63,65 @@ pub(crate) struct ProviderDeleteAuditOrigin {
     pub(crate) management_token_id: Option<String>,
     pub(crate) trace_id: Option<String>,
     pub(crate) client_ip: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ProviderDeleteRaceOutcome<T> {
+    TaskCompleted(T),
+    LeaseLost,
+}
+
+async fn wait_for_provider_delete_lease_loss(
+    runtime_state: Arc<RuntimeState>,
+    lease: RuntimeLockLease,
+    lock_ttl: std::time::Duration,
+) {
+    let interval = std::time::Duration::from_secs(PROVIDER_DELETE_LOCK_TTL_SECS / 3);
+    let mut heartbeat = tokio::time::interval(interval);
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    heartbeat.tick().await;
+    loop {
+        heartbeat.tick().await;
+        match runtime_state.lock_renew(&lease, lock_ttl).await {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    lock_key = %lease.key,
+                    fencing_token = lease.fencing_token,
+                    error_category = "provider_delete_lock_lost",
+                    "provider delete singleton lock is no longer owned; cancelling the task"
+                );
+                return;
+            }
+            Err(err) => {
+                warn!(
+                    lock_key = %lease.key,
+                    fencing_token = lease.fencing_token,
+                    error = %crate::error::redact_error_debug(&err),
+                    error_category = "provider_delete_lock_renewal_failed",
+                    "provider delete singleton lock renewal failed; cancelling the task"
+                );
+                return;
+            }
+        }
+    }
+}
+
+async fn race_provider_delete_with_lease_loss<F, L, T>(
+    task: F,
+    lease_loss: L,
+) -> ProviderDeleteRaceOutcome<T>
+where
+    F: Future<Output = T>,
+    L: Future<Output = ()>,
+{
+    tokio::pin!(task);
+    tokio::pin!(lease_loss);
+    tokio::select! {
+        biased;
+        _ = &mut lease_loss => ProviderDeleteRaceOutcome::LeaseLost,
+        result = &mut task => ProviderDeleteRaceOutcome::TaskCompleted(result),
+    }
 }
 
 const RETRY_ONCE: RetryPolicy = RetryPolicy { max_attempts: 1 };
@@ -838,29 +900,6 @@ pub(crate) async fn submit_provider_delete_task(
             return;
         }
 
-        let lease_renewal = lock.as_ref().map(|lease| {
-            let runtime_state = app.runtime_state.clone();
-            let lease = lease.clone();
-            tokio::spawn(async move {
-                let interval = std::time::Duration::from_secs(PROVIDER_DELETE_LOCK_TTL_SECS / 3);
-                loop {
-                    tokio::time::sleep(interval).await;
-                    match runtime_state.lock_renew(&lease, lock_ttl).await {
-                        Ok(true) => {}
-                        Ok(false) => break,
-                        Err(err) => {
-                            warn!(
-                                error = %crate::error::redact_error_debug(&err),
-                                error_category = "provider_delete_lock_renewal_failed",
-                                "provider delete singleton lock renewal failed"
-                            );
-                            break;
-                        }
-                    }
-                }
-            })
-        });
-
         let started_at = now_unix_secs();
         let _ = update_run_status(
             &app,
@@ -884,11 +923,15 @@ pub(crate) async fn submit_provider_delete_task(
         .await;
 
         let admin_state = crate::admin_api::AdminAppState::new(&app);
-        let result = admin_state
-            .run_admin_provider_delete_task(&provider_id, &run_id)
-            .await;
-        match result {
-            Ok(task_state) => {
+        let lease = lock
+            .as_ref()
+            .expect("provider delete lock ownership checked above")
+            .clone();
+        let lease_loss =
+            wait_for_provider_delete_lease_loss(app.runtime_state.clone(), lease, lock_ttl);
+        let task = admin_state.run_admin_provider_delete_task(&provider_id, &run_id);
+        match race_provider_delete_with_lease_loss(task, lease_loss).await {
+            ProviderDeleteRaceOutcome::TaskCompleted(Ok(task_state)) => {
                 let is_completed = task_state.status == "completed";
                 let terminal_status = if is_completed {
                     BackgroundTaskStatus::Succeeded
@@ -938,9 +981,11 @@ pub(crate) async fn submit_provider_delete_task(
                 )
                 .await;
             }
-            Err(_) => {
+            ProviderDeleteRaceOutcome::TaskCompleted(Err(err)) => {
+                let error = crate::error::redact_error_debug(&err);
                 warn!(
                     provider_id = %provider_id,
+                    error = %error,
                     error_category = "provider_delete_failed",
                     "gateway admin provider delete task failed"
                 );
@@ -987,13 +1032,75 @@ pub(crate) async fn submit_provider_delete_task(
                 )
                 .await;
             }
+            ProviderDeleteRaceOutcome::LeaseLost => {
+                let message =
+                    "provider delete stopped: singleton lock ownership was lost".to_string();
+                let mut task_state = app.get_provider_delete_task(&run_id).unwrap_or(
+                    crate::LocalProviderDeleteTaskState {
+                        task_id: run_id.clone(),
+                        provider_id: provider_id.clone(),
+                        status: "running".to_string(),
+                        stage: "unknown".to_string(),
+                        total_keys: 0,
+                        deleted_keys: 0,
+                        total_endpoints: 0,
+                        deleted_endpoints: 0,
+                        message: String::new(),
+                    },
+                );
+                task_state.status = "failed".to_string();
+                task_state.stage = "lock_lost".to_string();
+                task_state.message = message.clone();
+                app.put_provider_delete_task(task_state.clone());
+                let _ = update_run_status(
+                    &app,
+                    &run_id,
+                    BackgroundTaskStatus::Failed,
+                    None,
+                    Some(message.clone()),
+                    None,
+                    Some("provider_delete_failed".to_string()),
+                    None,
+                    Some(now_unix_secs()),
+                )
+                .await;
+                append_event_with_logging(
+                    &app,
+                    &run_id,
+                    "failed",
+                    &message,
+                    Some(serde_json::json!({
+                        "error_code": "provider_delete_lock_lost"
+                    })),
+                )
+                .await;
+                persist_provider_delete_terminal_audit(
+                    &app,
+                    &run_id,
+                    &provider_id,
+                    "failed",
+                    Some(&task_state),
+                    &audit_origin,
+                )
+                .await;
+            }
         }
 
-        if let Some(renewal) = lease_renewal {
-            renewal.abort();
-        }
         if let Some(lock) = lock {
-            let _ = app.runtime_state.lock_release(&lock).await;
+            match app.runtime_state.lock_release(&lock).await {
+                Ok(true) => {}
+                Ok(false) => warn!(
+                    lock_key = %lock.key,
+                    fencing_token = lock.fencing_token,
+                    "provider delete singleton lock was no longer owned during release"
+                ),
+                Err(err) => warn!(
+                    lock_key = %lock.key,
+                    fencing_token = lock.fencing_token,
+                    error = %crate::error::redact_error_debug(&err),
+                    "provider delete singleton lock release failed"
+                ),
+            }
         }
     });
 
@@ -1002,7 +1109,44 @@ pub(crate) async fn submit_provider_delete_task(
 
 #[cfg(test)]
 mod provider_delete_terminal_audit_tests {
-    use super::{build_provider_delete_terminal_audit, ProviderDeleteAuditOrigin};
+    use super::{
+        build_provider_delete_terminal_audit, race_provider_delete_with_lease_loss,
+        ProviderDeleteAuditOrigin, ProviderDeleteRaceOutcome,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_delete_is_cancelled_when_lease_is_lost() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let operation_dropped = dropped.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = async move {
+            let _drop_signal = DropSignal(operation_dropped);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        };
+        let lease_loss = async move {
+            started_rx
+                .await
+                .expect("delete task should start before lease loss");
+        };
+
+        let outcome = race_provider_delete_with_lease_loss(task, lease_loss).await;
+
+        assert_eq!(outcome, ProviderDeleteRaceOutcome::LeaseLost);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn terminal_audit_id_is_deterministic_and_status_scoped() {
