@@ -66,6 +66,10 @@ for compose_file in "${COMPOSE_FILES[@]}"; do
 done
 
 assert_line "${REPO_ROOT}/docker-compose.release-local.yml" '    user: "10001:10001"'
+assert_line "${REPO_ROOT}/deploy/multi-node/docker-compose.yml" '  user: "10001:10001"'
+if grep -Fq '  cap_add:' "${REPO_ROOT}/deploy/multi-node/docker-compose.yml"; then
+    fail_test "multi-node Compose grants capabilities to the non-root gateway"
+fi
 grep -Fq 'migrate_container_volume_ownership.sh' "${REPO_ROOT}/install.sh" \
     || fail_test "installer does not distribute the volume ownership migration helper"
 
