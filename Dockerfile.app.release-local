@@ -133,7 +133,7 @@ RUN set -eux; \
     fi; \
     if [ -f /etc/nsswitch.conf ]; then \
         cp /etc/nsswitch.conf /runtime-root/etc/nsswitch.conf; \
-    fi; \
+    fi
 COPY --from=frontend-builder --chown=10001:10001 /app/frontend/dist /runtime-root/opt/aether/releases/image/frontend
 RUN chown -R 10001:10001 /runtime-root/app /runtime-root/opt/aether \
     && chown -h 10001:10001 /runtime-root/opt/aether/current
