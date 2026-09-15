@@ -31,6 +31,23 @@ Benefit: routine version updates cover every committed npm project and Docker
 build directory. Complexity: S; risk: low, limited to update proposal scheduling.
 The existing Cargo/npm vulnerability checks remain independent merge gates.
 
+## Repository contract and verification
+
+The repository keeps a no-credential coverage contract in
+`.github/automation/test/dependabot-coverage.test.mjs`. The test derives
+tracked `package.json`/`package-lock.json` pairs and Dockerfile directories
+from Git, then requires exactly one matching Dependabot updater for each. It
+also rejects accidental coverage of the root orphan `package-lock.json`,
+duplicate directory targets, mutable cadence limits, and updater entries that
+silently drift beyond the five-open-PR bound. The contract runs with the
+existing `Frontend CI / automation` suite and does not call GitHub APIs or
+require Dependabot credentials.
+
+The contract proves repository configuration coverage only. It cannot prove
+that GitHub's hosted Dependabot service can resolve every remote image or
+publish an update proposal; the first hosted run remains an operational
+acceptance item and must be linked here after it completes.
+
 ## Verification and completion boundary
 
 YAML parsing and a comparison with the tracked manifest/lockfile pairs and Dockerfile inventory
