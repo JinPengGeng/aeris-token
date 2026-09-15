@@ -343,9 +343,8 @@ mod tests {
         notify_user_refund_status, refund_status_notification_label,
         refund_status_notification_should_send,
     };
-    use crate::data::state::StoredUserPreferenceRecord;
     use crate::data::GatewayDataState;
-    use crate::{AdminWalletRefundRecord, AppState};
+    use crate::{AdminWalletRefundRecord, AppState, GatewayUserPreferenceView};
     use aether_data::repository::users::StoredUserAuthRecord;
 
     #[test]
@@ -382,9 +381,7 @@ mod tests {
         let app = AppState::new()
             .expect("gateway should build")
             .with_data_state_for_tests(
-                GatewayDataState::disabled().with_user_preferences_for_tests(std::iter::empty::<
-                    StoredUserPreferenceRecord,
-                >()),
+                GatewayDataState::disabled().with_user_preferences_for_tests(std::iter::empty()),
             )
             .with_auth_users_for_tests([StoredUserAuthRecord::new(
                 "user-1".to_string(),
@@ -432,15 +429,15 @@ mod tests {
 
         assert!(notify_user_refund_status(&state, &refund).await);
 
-        let mut preferences = StoredUserPreferenceRecord::default_for_user("user-1");
+        let mut preferences = GatewayUserPreferenceView::default_for_user("user-1");
         preferences.usage_alerts = false;
-        app.write_user_preferences(crate::GatewayUserPreferenceView::from(preferences.clone()))
+        app.write_user_preferences(preferences.clone())
             .await
             .expect("preferences should update");
         assert!(notify_user_refund_status(&state, &refund).await);
 
         preferences.email_notifications = false;
-        app.write_user_preferences(crate::GatewayUserPreferenceView::from(preferences.clone()))
+        app.write_user_preferences(preferences.clone())
             .await
             .expect("preferences should update");
         assert!(!notify_user_refund_status(&state, &refund).await);
