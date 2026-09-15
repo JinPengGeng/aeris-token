@@ -12,6 +12,8 @@ tests:
         values: '0+1x10'
       - series: 'aether_gateway_billing_video_task_settlement_failures_total{component="video_task",operation="settlement"}'
         values: '0+1x10'
+      - series: 'aether_gateway_billing_insufficient_quota_total{component="billing",operation="insufficient_quota"}'
+        values: '0+1x10'
     promql_expr_test:
       - expr: 'ALERTS{alertstate="firing"}'
         eval_time: 5m
@@ -24,6 +26,8 @@ tests:
           - labels: 'ALERTS{alertname="AetherBillingSettlementFailures",alertstate="firing",component="usage",operation="settlement",severity="warning"}'
             value: 1
           - labels: 'ALERTS{alertname="AetherBillingSettlementFailures",alertstate="firing",component="video_task",operation="settlement",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="AetherBillingInsufficientQuota",alertstate="firing",component="billing",operation="insufficient_quota",severity="warning"}'
             value: 1
 
   - name: fail open distinguishes daily quota and RPM through counter reset and recovery
@@ -98,6 +102,8 @@ tests:
       - series: 'aether_gateway_billing_settlement_failures_total{component="usage",operation="settlement"}'
         values: '3+0x30'
       - series: 'aether_gateway_billing_video_task_settlement_failures_total{component="video_task",operation="settlement"}'
+        values: '3+0x30'
+      - series: 'aether_gateway_billing_insufficient_quota_total{component="billing",operation="insufficient_quota"}'
         values: '3+0x30'
       - series: 'aether_gateway_billing_fail_open_total{component="gateway",operation="rpm"}'
         values: '3+0x30'

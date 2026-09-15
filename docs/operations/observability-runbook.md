@@ -32,6 +32,21 @@ event is queued or in the usage DLQ. Do not retry a settlement by hand unless
 the adapter's idempotency key is present. Roll back the release only when the
 failure began with that release and the dependency is healthy.
 
+## Insufficient quota
+
+```promql
+sum by (component, operation) (
+  increase(aether_gateway_billing_insufficient_quota_total[10m])
+)
+```
+
+This counter means a completed usage settlement was persisted as
+`insufficient_quota`. It is not an invoice, a provider-cost measurement, or
+authorization to retry, debit a wallet, release a hold, or change historical
+records. Inspect the approved account policy and the persisted settlement
+record before escalating; recovery or collection requires its separately
+approved product and finance policy.
+
 ## Usage DLQ
 
 ```promql

@@ -13,5 +13,6 @@ pub use types::{
     ReserveUsagePolicyRequestOutcome, SettlementRepository, SettlementWriteRepository,
     StoredUsagePolicyCostReservation, StoredUsagePolicyRequestAdmission, StoredUsageSettlement,
     UsagePolicyCostReservationState, UsagePolicyCostWindow, UsagePolicyRequestAdmissionState,
-    UsagePolicyRequestWindow, UsageSettlementInput, WalletDebitPlan, SETTLEMENT_EPSILON_USD,
+    UsagePolicyRequestWindow, UsageSettlementInput, UsageSettlementWriteOutcome, WalletDebitPlan,
+    SETTLEMENT_EPSILON_USD,
 };

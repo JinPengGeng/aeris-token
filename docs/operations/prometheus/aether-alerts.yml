@@ -25,6 +25,18 @@ groups:
           deduplication: Group by alertname, component and operation; inhibit repeats for the same failed settlement path.
           rollback: Preserve usage and DLQ records; restore the dependency or roll back a release-correlated regression before idempotent replay.
 
+      - alert: AetherBillingInsufficientQuota
+        expr: sum by (component, operation) (increase(aether_gateway_billing_insufficient_quota_total[10m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Completed usage was finalized with insufficient quota
+          description: A completed usage settlement was persisted without a wallet debit in the last 10 minutes; inspect the approved account policy and records before any manual action.
+          runbook: docs/operations/observability-runbook.md#insufficient-quota
+          deduplication: Group by alertname, component and operation; treat this as a visibility signal, not authorization to retry or charge.
+          rollback: Counters are additive and safe to remove; do not change wallet or settlement state while rolling back telemetry.
+
       - alert: AetherUsageDeadLetterBacklog
         expr: max(aether_gateway_usage_queue_dlq_length) > 0
         for: 10m

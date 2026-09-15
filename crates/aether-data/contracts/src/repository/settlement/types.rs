@@ -385,6 +385,13 @@ pub struct StoredUsageSettlement {
     pub finalized_at_unix_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UsageSettlementWriteOutcome {
+    pub settlement: Option<StoredUsageSettlement>,
+    /// True only for the transaction that changed a pending usage row to a terminal billing state.
+    pub newly_finalized: bool,
+}
+
 #[async_trait]
 pub trait SettlementWriteRepository: Send + Sync {
     async fn reserve_request_attempt_funds(
@@ -514,6 +521,16 @@ pub trait SettlementWriteRepository: Send + Sync {
         &self,
         input: UsageSettlementInput,
     ) -> Result<Option<StoredUsageSettlement>, crate::DataLayerError>;
+
+    async fn settle_usage_observed(
+        &self,
+        input: UsageSettlementInput,
+    ) -> Result<UsageSettlementWriteOutcome, crate::DataLayerError> {
+        Ok(UsageSettlementWriteOutcome {
+            settlement: self.settle_usage(input).await?,
+            newly_finalized: false,
+        })
+    }
 }
 
 pub trait SettlementRepository: SettlementWriteRepository + Send + Sync {}

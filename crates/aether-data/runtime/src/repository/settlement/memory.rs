@@ -470,6 +470,16 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
         &self,
         input: UsageSettlementInput,
     ) -> Result<Option<StoredUsageSettlement>, DataLayerError> {
+        Ok(self.settle_usage_observed(input).await?.settlement)
+    }
+
+    async fn settle_usage_observed(
+        &self,
+        input: UsageSettlementInput,
+    ) -> Result<
+        aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome,
+        DataLayerError,
+    > {
         input.validate()?;
         // Mirror the SQL backends' row-lock transaction: a repeated or concurrent pending
         // finalization for one request must observe the first committed snapshot instead of
@@ -494,22 +504,32 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
             .get(&input.request_id)
             .cloned()
         {
-            return Ok(Some(existing));
+            return Ok(
+                aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome {
+                    settlement: Some(existing),
+                    newly_finalized: false,
+                },
+            );
         }
         if input.billing_status != "pending" {
-            return Ok(Some(StoredUsageSettlement {
-                request_id: input.request_id,
-                wallet_id: None,
-                billing_status: input.billing_status,
-                wallet_balance_before: None,
-                wallet_balance_after: None,
-                wallet_recharge_balance_before: None,
-                wallet_recharge_balance_after: None,
-                wallet_gift_balance_before: None,
-                wallet_gift_balance_after: None,
-                provider_monthly_used_usd: None,
-                finalized_at_unix_secs: input.finalized_at_unix_secs,
-            }));
+            return Ok(
+                aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome {
+                    settlement: Some(StoredUsageSettlement {
+                        request_id: input.request_id,
+                        wallet_id: None,
+                        billing_status: input.billing_status,
+                        wallet_balance_before: None,
+                        wallet_balance_after: None,
+                        wallet_recharge_balance_before: None,
+                        wallet_recharge_balance_after: None,
+                        wallet_gift_balance_before: None,
+                        wallet_gift_balance_after: None,
+                        provider_monthly_used_usd: None,
+                        finalized_at_unix_secs: input.finalized_at_unix_secs,
+                    }),
+                    newly_finalized: false,
+                },
+            );
         }
 
         let mut final_billing_status =
@@ -694,7 +714,12 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
                 .insert(input.request_id.clone(), input);
         }
 
-        Ok(Some(settlement))
+        Ok(
+            aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome {
+                settlement: Some(settlement),
+                newly_finalized: true,
+            },
+        )
     }
 }
 
@@ -1524,15 +1549,15 @@ mod tests {
         };
 
         let first = repository
-            .settle_usage(input.clone())
+            .settle_usage_observed(input.clone())
             .await
-            .unwrap()
             .unwrap();
-        let replay = repository.settle_usage(input).await.unwrap().unwrap();
+        let replay = repository.settle_usage_observed(input).await.unwrap();
 
-        assert_eq!(replay, first);
-        assert_eq!(replay.wallet_balance_after, Some(6.0));
-        assert_eq!(replay.provider_monthly_used_usd, Some(6.0));
+        assert!(first.newly_finalized);
+        assert!(!replay.newly_finalized);
+        assert_eq!(replay.settlement, first.settlement);
+        assert_eq!(replay.settlement.unwrap().wallet_balance_after, Some(6.0));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1558,7 +1583,7 @@ mod tests {
             let input = input.clone();
             tasks.push(tokio::spawn(async move {
                 barrier.wait().await;
-                repository.settle_usage(input).await.unwrap().unwrap()
+                repository.settle_usage_observed(input).await.unwrap()
             }));
         }
         barrier.wait().await;
@@ -1567,9 +1592,32 @@ mod tests {
         for task in tasks {
             observed.push(task.await.unwrap());
         }
-        assert!(observed.windows(2).all(|pair| pair[0] == pair[1]));
-        assert_eq!(observed[0].wallet_balance_after, Some(6.0));
-        assert_eq!(observed[0].provider_monthly_used_usd, Some(6.0));
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|outcome| outcome.newly_finalized)
+                .count(),
+            1
+        );
+        assert!(observed
+            .windows(2)
+            .all(|pair| pair[0].settlement == pair[1].settlement));
+        assert_eq!(
+            observed[0]
+                .settlement
+                .as_ref()
+                .unwrap()
+                .wallet_balance_after,
+            Some(6.0)
+        );
+        assert_eq!(
+            observed[0]
+                .settlement
+                .as_ref()
+                .unwrap()
+                .provider_monthly_used_usd,
+            Some(6.0)
+        );
     }
 
     #[tokio::test]

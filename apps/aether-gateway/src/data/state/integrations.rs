@@ -248,6 +248,16 @@ impl UsageSettlementWriter for GatewayDataState {
     ) -> Result<Option<StoredUsageSettlement>, DataLayerError> {
         GatewayDataState::settle_usage(self, input).await
     }
+
+    async fn settle_usage_observed(
+        &self,
+        input: UsageSettlementInput,
+    ) -> Result<
+        aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome,
+        DataLayerError,
+    > {
+        GatewayDataState::settle_usage_observed(self, input).await
+    }
 }
 
 #[async_trait]
