@@ -22,7 +22,8 @@ COPY dist/frontend/ /opt/aether/releases/image/frontend/
 # Keep the immutable release root-owned while guaranteeing that the runtime
 # identity can traverse and read every packaged asset.
 RUN chmod -R u=rwX,go=rX /opt/aether/releases/image \
-    && chmod 0755 /opt/aether/releases/image/bin/aether-gateway
+    && chmod 0755 /opt/aether/releases/image/bin/aether-gateway \
+    && chown -R 10001:10001 /opt/aether/logs
 
 RUN ln -s /opt/aether/releases/image /opt/aether/current
 
@@ -44,5 +45,5 @@ EXPOSE 8084
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD ["/opt/aether/current/bin/aether-gateway", "--healthcheck"]
 
-USER 0:0
+USER 10001:10001
 ENTRYPOINT ["/opt/aether/current/bin/aether-gateway"]

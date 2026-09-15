@@ -46,24 +46,39 @@ assert_line "${REPO_ROOT}/docker-compose.redis-durable.yml" "      - --appendfsy
 assert_line "${REPO_ROOT}/docker-compose.redis-durable.yml" "      - everysec"
 assert_line "${REPO_ROOT}/docker-compose.redis-durable.yml" "      - redis_data:/data"
 
-assert_line "${APP_DOCKERFILE}" "USER 0:0"
-assert_line "${REPO_ROOT}/Dockerfile.app.local" "USER 0:0"
-assert_line "${REPO_ROOT}/Dockerfile.app.release-local" "USER 0:0"
+assert_line "${APP_DOCKERFILE}" "USER 10001:10001"
+assert_line "${REPO_ROOT}/Dockerfile.app.local" "USER 10001:10001"
+assert_line "${REPO_ROOT}/Dockerfile.app.release-local" "USER 10001:10001"
+grep -Fq 'COPY --from=frontend-builder --chown=10001:10001' "${REPO_ROOT}/Dockerfile.app.release-local" \
+    || fail_test "release-local frontend assets are not owned by the runtime identity"
+grep -Fq 'chown -h 10001:10001 /runtime-root/opt/aether/current' "${REPO_ROOT}/Dockerfile.app.release-local" \
+    || fail_test "release-local current symlink is not owned by the runtime identity"
 assert_line "${APP_DOCKERFILE}" "    HOME=/tmp/aether-home \\"
 
 for compose_file in "${COMPOSE_FILES[@]}"; do
-    assert_line "${compose_file}" '    user: "0:0"'
+    assert_line "${compose_file}" '    user: "10001:10001"'
     assert_line "${compose_file}" "    read_only: true"
     assert_line "${compose_file}" "    cap_drop:"
     assert_line "${compose_file}" "      - ALL"
-    assert_line "${compose_file}" "    cap_add:"
-    assert_line "${compose_file}" "      - DAC_OVERRIDE"
-    assert_line "${compose_file}" "      - FOWNER"
+    if grep -Fq "    cap_add:" "${compose_file}"; then
+        fail_test "${compose_file} grants capabilities to the non-root app"
+    fi
     assert_line "${compose_file}" "    security_opt:"
     assert_line "${compose_file}" "      - no-new-privileges:true"
     assert_line "${compose_file}" "    tmpfs:"
     assert_line "${compose_file}" "      - /tmp:rw,nosuid,nodev,noexec,mode=1777"
 done
+
+assert_line "${REPO_ROOT}/docker-compose.release-local.yml" '    user: "10001:10001"'
+assert_line "${REPO_ROOT}/deploy/multi-node/docker-compose.yml" '  user: "10001:10001"'
+if grep -Fq '  cap_add:' "${REPO_ROOT}/deploy/multi-node/docker-compose.yml"; then
+    fail_test "multi-node Compose grants capabilities to the non-root gateway"
+fi
+grep -Fq 'migrate_container_volume_ownership.sh' "${REPO_ROOT}/install.sh" \
+    || fail_test "installer does not distribute the volume ownership migration helper"
+grep -Fq 'busybox:1.37.0-musl@sha256:fc6dddc4c44b1bfe37f41cae8e67d1693828e8f42a91862816d7953e2c9d3f23' \
+    "${REPO_ROOT}/tools/operations/migrate_container_volume_ownership.sh" \
+    || fail_test "volume ownership helper uses an unpinned image"
 
 assert_line "${REPO_ROOT}/.env.example" "DB_PASSWORD="
 assert_line "${REPO_ROOT}/.env.example" "REDIS_PASSWORD="
