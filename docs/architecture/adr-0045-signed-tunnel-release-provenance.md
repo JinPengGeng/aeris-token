@@ -1,6 +1,6 @@
 # ADR-0045: Signed provenance for tunnel release upgrades
 
-- Status: accepted for implementation
+- Status: Accepted (core verifier implemented; fleet rollout deferred)
 - Date: 2026-09-12
 - Scope: `aether-tunnel` release assets and self-upgrade verification
 - Related: #205, #315

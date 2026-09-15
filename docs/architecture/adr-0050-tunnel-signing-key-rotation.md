@@ -1,5 +1,10 @@
 # ADR-0050: Tunnel signing key rotation overlap
 
+Status: Accepted (partial implementation)
+
+Scope: in-memory tunnel signing-key validity and overlap contract. Persistence
+and authenticated wire integration remain deferred as stated below.
+
 ## Decision
 
 Tunnel handshake signing keys have an explicit `key_id`, `not_before`, and

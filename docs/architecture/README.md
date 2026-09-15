@@ -8,7 +8,7 @@ ADR 的状态只描述已经落地的范围；延期的接线、部署或生产�
 | 文档 | 状态 | 已落地范围 | 仍延期的范围 |
 | --- | --- | --- | --- |
 | [ADR-0044：Emergency chain domain boundary](adr-0044-emergency-chain-domain.md) | Accepted（仅领域 scaffold） | grant 的类型、作用域、目标顺序、TTL 与撤销约束 | Gateway wiring、持久化、审计和生产调度接线 |
-| [ADR-0045：Signed provenance for tunnel release upgrades](adr-0045-signed-tunnel-release-provenance.md) | Accepted for implementation | 发布清单签名与离线验证决策 | 完整发布矩阵和生产轮换演练 |
+| [ADR-0045：Signed provenance for tunnel release upgrades](adr-0045-signed-tunnel-release-provenance.md) | Accepted（核心验签已实现） | 发布清单签名与离线验证、手工/heartbeat 升级门禁 | 完整发布矩阵和生产轮换演练 |
 | [ADR-0046：Bounded gateway readiness and health contract](adr-0046-readiness-health-contract.md) | Accepted | `/health`、`/ready` 的边界、依赖探测与超时合同 | 生产部署容量与告警验收 |
 | [ADR-0050：Tunnel signing key rotation overlap](adr-0050-tunnel-signing-key-rotation.md) | Accepted（部分实现） | key ID、有效期、重叠窗口和撤销语义 | 持久化与 wire integration |
 
