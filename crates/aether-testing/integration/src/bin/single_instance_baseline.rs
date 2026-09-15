@@ -101,9 +101,11 @@ async fn run_suite(
     ))
     .await
     .map_err(std::io::Error::other)?;
-    let execution_runtime_stream = run_http_load_probe(
-        &execution_runtime_stream_probe_config(runtime.base_url(), upstream.base_url(), config),
-    )
+    let execution_runtime_stream = run_http_load_probe(&execution_runtime_stream_probe_config(
+        runtime.base_url(),
+        upstream.base_url(),
+        config,
+    ))
     .await
     .map_err(std::io::Error::other)?;
 
