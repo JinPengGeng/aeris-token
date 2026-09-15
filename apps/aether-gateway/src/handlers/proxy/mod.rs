@@ -2337,6 +2337,7 @@ async fn proxy_request_inner(
         // control-execute path, which has no model-directory classification.
         let pre_fallback_diagnostic = match classify_unknown_public_model(
             &state,
+            control_decision,
             state.take_local_execution_runtime_miss_diagnostic(&trace_id),
         )
         .await
@@ -2418,8 +2419,12 @@ async fn proxy_request_inner(
         }
         let local_execution_runtime_miss_diagnostic = pre_fallback_diagnostic
             .or_else(|| state.take_local_execution_runtime_miss_diagnostic(&trace_id));
-        let local_execution_runtime_miss_diagnostic =
-            classify_unknown_public_model(&state, local_execution_runtime_miss_diagnostic).await;
+        let local_execution_runtime_miss_diagnostic = classify_unknown_public_model(
+            &state,
+            control_decision,
+            local_execution_runtime_miss_diagnostic,
+        )
+        .await;
         let local_execution_runtime_miss_context =
             build_local_execution_runtime_miss_context(&state, &trace_id, control_decision).await;
         let auth_api_key_concurrency_limited = diagnostic_is_auth_api_key_concurrency_limited(
@@ -2944,6 +2949,7 @@ fn local_execution_runtime_miss_status(
 
 async fn classify_unknown_public_model(
     state: &AppState,
+    control_decision: Option<&GatewayControlDecision>,
     diagnostic: Option<LocalExecutionRuntimeMissDiagnostic>,
 ) -> Option<LocalExecutionRuntimeMissDiagnostic> {
     let diagnostic = diagnostic?;
@@ -2961,12 +2967,71 @@ async fn classify_unknown_public_model(
     };
     match state.get_public_global_model_by_name(model_name).await {
         Ok(Some(_)) | Err(_) => Some(diagnostic),
+        Ok(None)
+            if requested_model_is_declared_by_scheduler(state, control_decision, model_name)
+                .await =>
+        {
+            Some(diagnostic)
+        }
         Ok(None) => {
             let mut classified = diagnostic;
             classified.reason = "model_not_found".to_string();
             Some(classified)
         }
     }
+}
+
+async fn requested_model_is_declared_by_scheduler(
+    state: &AppState,
+    control_decision: Option<&GatewayControlDecision>,
+    requested_model: &str,
+) -> bool {
+    let Some(control_decision) = control_decision else {
+        return true;
+    };
+    let Some(client_api_format) = control_decision
+        .auth_endpoint_signature
+        .as_deref()
+        .map(crate::ai_serving::normalize_api_format_alias)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+    let request_operation = control_decision.api_operation.map(|value| value.as_str());
+    for api_format in crate::ai_serving::request_candidate_api_formats(&client_api_format, false) {
+        let Ok(rows) = state
+            .list_minimal_candidate_selection_rows_for_api_format(api_format)
+            .await
+        else {
+            return true;
+        };
+        if requested_model_is_declared_by_rows(
+            &rows,
+            requested_model,
+            api_format,
+            request_operation,
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+fn requested_model_is_declared_by_rows(
+    rows: &[aether_data_contracts::repository::candidate_selection::StoredMinimalCandidateSelectionRow],
+    requested_model: &str,
+    api_format: &str,
+    request_operation: Option<&str>,
+) -> bool {
+    rows.iter().any(|row| {
+        aether_scheduler_core::row_declares_requested_model_with_model_directives_and_request_operation(
+            row,
+            requested_model,
+            api_format,
+            false,
+            request_operation,
+        )
+    })
 }
 
 fn local_execution_runtime_miss_route_detail(
@@ -3013,6 +3078,9 @@ mod tests {
         restore_redacted_stream_execution_response, restore_redacted_sync_execution_response,
         routing_overlay_allows_affinity_target, GatewayControlDecision,
         LocalExecutionRuntimeMissDiagnostic, RequestBodyBufferError, RequestBodyBufferPolicy,
+    };
+    use aether_data_contracts::repository::candidate_selection::{
+        StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
     };
     use axum::body::{to_bytes, Body, Bytes};
     use axum::http::{header, HeaderMap, HeaderValue, Method, Response, StatusCode};
@@ -3641,6 +3709,70 @@ mod tests {
                 "没有可用提供商支持模型 gpt-5.4 的流式请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
             )
         );
+    }
+
+    fn declared_model_row() -> StoredMinimalCandidateSelectionRow {
+        StoredMinimalCandidateSelectionRow {
+            provider_id: "provider-1".to_string(),
+            provider_name: "provider".to_string(),
+            provider_type: "custom".to_string(),
+            provider_priority: 0,
+            provider_is_active: false,
+            endpoint_id: "endpoint-1".to_string(),
+            endpoint_api_format: "openai:chat".to_string(),
+            endpoint_api_family: Some("openai".to_string()),
+            endpoint_kind: Some("chat".to_string()),
+            endpoint_is_active: false,
+            key_id: "key-1".to_string(),
+            key_name: "key".to_string(),
+            key_auth_type: "api_key".to_string(),
+            key_is_active: false,
+            key_api_formats: Some(vec!["openai:chat".to_string()]),
+            key_allowed_models: None,
+            key_capabilities: None,
+            key_internal_priority: 0,
+            key_global_priority_by_format: None,
+            model_id: "model-1".to_string(),
+            global_model_id: "global-1".to_string(),
+            global_model_name: "gpt-canonical".to_string(),
+            global_model_mappings: Some(vec!["gpt-alias-.*".to_string()]),
+            global_model_supports_streaming: Some(true),
+            model_provider_model_name: "provider-default".to_string(),
+            model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
+                name: "provider-alias".to_string(),
+                priority: 0,
+                api_formats: Some(vec!["openai:chat".to_string()]),
+                endpoint_ids: None,
+                operations: None,
+            }]),
+            model_supports_streaming: Some(true),
+            model_is_active: false,
+            model_is_available: false,
+        }
+    }
+
+    #[test]
+    fn configured_aliases_remain_known_when_no_candidate_is_selectable() {
+        let row = declared_model_row();
+        for requested_model in [
+            "gpt-canonical",
+            "provider-default",
+            "provider-alias",
+            "gpt-alias-preview",
+        ] {
+            assert!(requested_model_is_declared_by_rows(
+                std::slice::from_ref(&row),
+                requested_model,
+                "openai:chat",
+                None,
+            ));
+        }
+        assert!(!requested_model_is_declared_by_rows(
+            &[row],
+            "gpt-unknown",
+            "openai:chat",
+            None,
+        ));
     }
 
     #[test]

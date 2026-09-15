@@ -124,6 +124,42 @@ pub fn row_supports_requested_model_with_model_directives_and_request_operation(
     )
 }
 
+/// Returns whether a configured row declares the requested model name without
+/// considering whether that row is currently selectable.
+///
+/// This is intentionally narrower than scheduling: callers can distinguish an
+/// unknown model from a known alias whose providers are temporarily unavailable.
+pub fn row_declares_requested_model_with_model_directives_and_request_operation(
+    row: &StoredMinimalCandidateSelectionRow,
+    requested_model_name: &str,
+    api_format: &str,
+    enable_model_directives: bool,
+    request_operation: Option<&str>,
+) -> bool {
+    requested_model_name_candidates(requested_model_name, enable_model_directives).any(
+        |requested_model_name| {
+            let requested_model_name = requested_model_name.as_ref();
+            row.global_model_name == requested_model_name
+                || (row_default_provider_model_name_available(row, api_format, request_operation)
+                    && row.model_provider_model_name == requested_model_name)
+                || row.global_model_mappings.as_ref().is_some_and(|patterns| {
+                    patterns
+                        .iter()
+                        .any(|pattern| matches_model_mapping(pattern, requested_model_name))
+                })
+                || row
+                    .model_provider_model_mappings
+                    .as_ref()
+                    .is_some_and(|mappings| {
+                        mappings.iter().any(|mapping| {
+                            mapping_scope_matches(mapping, row, api_format, request_operation)
+                                && mapping.name == requested_model_name
+                        })
+                    })
+        },
+    )
+}
+
 fn row_supports_requested_model_exact(
     row: &StoredMinimalCandidateSelectionRow,
     requested_model_name: &str,
