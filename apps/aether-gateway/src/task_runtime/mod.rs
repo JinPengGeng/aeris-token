@@ -124,6 +124,30 @@ where
     }
 }
 
+fn provider_delete_failed_task_state(
+    current: Option<crate::LocalProviderDeleteTaskState>,
+    task_id: &str,
+    provider_id: &str,
+    stage: &str,
+    message: &str,
+) -> crate::LocalProviderDeleteTaskState {
+    let mut task = current.unwrap_or(crate::LocalProviderDeleteTaskState {
+        task_id: task_id.to_string(),
+        provider_id: provider_id.to_string(),
+        status: "running".to_string(),
+        stage: "unknown".to_string(),
+        total_keys: 0,
+        deleted_keys: 0,
+        total_endpoints: 0,
+        deleted_endpoints: 0,
+        message: String::new(),
+    });
+    task.status = "failed".to_string();
+    task.stage = stage.to_string();
+    task.message = message.to_string();
+    task
+}
+
 const RETRY_ONCE: RetryPolicy = RetryPolicy { max_attempts: 1 };
 const RETRY_THREE: RetryPolicy = RetryPolicy { max_attempts: 3 };
 const BACKGROUND_TASK_RUN_ID_MAX_BYTES: usize = 64;
@@ -989,17 +1013,14 @@ pub(crate) async fn submit_provider_delete_task(
                     error_category = "provider_delete_failed",
                     "gateway admin provider delete task failed"
                 );
-                app.put_provider_delete_task(crate::LocalProviderDeleteTaskState {
-                    task_id: run_id.clone(),
-                    provider_id: provider_id.clone(),
-                    status: "failed".to_string(),
-                    stage: "failed".to_string(),
-                    total_keys: 0,
-                    deleted_keys: 0,
-                    total_endpoints: 0,
-                    deleted_endpoints: 0,
-                    message: "provider delete failed".to_string(),
-                });
+                let task_state = provider_delete_failed_task_state(
+                    app.get_provider_delete_task(&run_id),
+                    &run_id,
+                    &provider_id,
+                    "failed",
+                    "provider delete failed",
+                );
+                app.put_provider_delete_task(task_state.clone());
                 let _ = update_run_status(
                     &app,
                     &run_id,
@@ -1027,7 +1048,7 @@ pub(crate) async fn submit_provider_delete_task(
                     &run_id,
                     &provider_id,
                     "failed",
-                    None,
+                    Some(&task_state),
                     &audit_origin,
                 )
                 .await;
@@ -1035,22 +1056,13 @@ pub(crate) async fn submit_provider_delete_task(
             ProviderDeleteRaceOutcome::LeaseLost => {
                 let message =
                     "provider delete stopped: singleton lock ownership was lost".to_string();
-                let mut task_state = app.get_provider_delete_task(&run_id).unwrap_or(
-                    crate::LocalProviderDeleteTaskState {
-                        task_id: run_id.clone(),
-                        provider_id: provider_id.clone(),
-                        status: "running".to_string(),
-                        stage: "unknown".to_string(),
-                        total_keys: 0,
-                        deleted_keys: 0,
-                        total_endpoints: 0,
-                        deleted_endpoints: 0,
-                        message: String::new(),
-                    },
+                let task_state = provider_delete_failed_task_state(
+                    app.get_provider_delete_task(&run_id),
+                    &run_id,
+                    &provider_id,
+                    "lock_lost",
+                    &message,
                 );
-                task_state.status = "failed".to_string();
-                task_state.stage = "lock_lost".to_string();
-                task_state.message = message.clone();
                 app.put_provider_delete_task(task_state.clone());
                 let _ = update_run_status(
                     &app,
@@ -1110,8 +1122,8 @@ pub(crate) async fn submit_provider_delete_task(
 #[cfg(test)]
 mod provider_delete_terminal_audit_tests {
     use super::{
-        build_provider_delete_terminal_audit, race_provider_delete_with_lease_loss,
-        ProviderDeleteAuditOrigin, ProviderDeleteRaceOutcome,
+        build_provider_delete_terminal_audit, provider_delete_failed_task_state,
+        race_provider_delete_with_lease_loss, ProviderDeleteAuditOrigin, ProviderDeleteRaceOutcome,
     };
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -1146,6 +1158,47 @@ mod provider_delete_terminal_audit_tests {
 
         assert_eq!(outcome, ProviderDeleteRaceOutcome::LeaseLost);
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn provider_delete_failure_preserves_partial_progress() {
+        let task = provider_delete_failed_task_state(
+            Some(crate::LocalProviderDeleteTaskState {
+                task_id: "task-partial".to_string(),
+                provider_id: "provider-1".to_string(),
+                status: "running".to_string(),
+                stage: "deleting_endpoints".to_string(),
+                total_keys: 3,
+                deleted_keys: 2,
+                total_endpoints: 4,
+                deleted_endpoints: 1,
+                message: "deleted 1 / 4 endpoints".to_string(),
+            }),
+            "task-partial",
+            "provider-1",
+            "failed",
+            "provider delete failed",
+        );
+
+        assert_eq!(task.status, "failed");
+        assert_eq!(task.stage, "failed");
+        assert_eq!(task.total_keys, 3);
+        assert_eq!(task.deleted_keys, 2);
+        assert_eq!(task.total_endpoints, 4);
+        assert_eq!(task.deleted_endpoints, 1);
+
+        let audit = build_provider_delete_terminal_audit(
+            "task-partial",
+            "provider-1",
+            "failed",
+            Some(&task),
+            &ProviderDeleteAuditOrigin::default(),
+        );
+        let metadata = audit.event_metadata.expect("audit metadata should exist");
+        assert_eq!(metadata["deleted_keys"].as_u64(), Some(2));
+        assert_eq!(metadata["total_keys"].as_u64(), Some(3));
+        assert_eq!(metadata["deleted_endpoints"].as_u64(), Some(1));
+        assert_eq!(metadata["total_endpoints"].as_u64(), Some(4));
     }
 
     #[test]
