@@ -1278,7 +1278,7 @@ impl GatewayUsageArgs {
 
 #[derive(ClapArgs, Debug, Clone)]
 struct GatewayFrontdoorArgs {
-    #[arg(long, env = "ENVIRONMENT", default_value = "development")]
+    #[arg(long, env = "ENVIRONMENT", default_value = "production")]
     environment: String,
 
     #[arg(long, env = "CORS_ORIGINS")]
@@ -3764,7 +3764,7 @@ mod tests {
                 enqueue_retry_max_backoff_ms: 10_000,
             },
             frontdoor: GatewayFrontdoorArgs {
-                environment: "development".to_string(),
+                environment: "production".to_string(),
                 cors_origins: None,
                 cors_allow_credentials: true,
             },

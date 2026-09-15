@@ -106,7 +106,7 @@ are not a general way to enable boolean options.
 | `APP_PORT` | gateway root/server; not inherited by subcommands | `8084` | `u16` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `CORS_ALLOW_CREDENTIALS` | gateway root/server; not inherited by subcommands | `true` | `bool` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `CORS_ORIGINS` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
-| `ENVIRONMENT` | gateway root/server; not inherited by subcommands | `"development"` | `String` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `ENVIRONMENT` | gateway root/server; not inherited by subcommands | `"production"` | `String` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `RATE_LIMIT_FAIL_OPEN` | gateway root/server; not inherited by subcommands | `false` | `bool` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `RPM_BUCKET_SECONDS` | gateway root/server; not inherited by subcommands | `60` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `RPM_KEY_TTL_SECONDS` | gateway root/server; not inherited by subcommands | `120` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
@@ -200,7 +200,7 @@ They contain names and source defaults, not current environment values.
 - `APP_PORT`: `long, env = "APP_PORT", default_value_t = 8084`
 - `CORS_ALLOW_CREDENTIALS`: `long, env = "CORS_ALLOW_CREDENTIALS", default_value_t = true`
 - `CORS_ORIGINS`: `long, env = "CORS_ORIGINS"`
-- `ENVIRONMENT`: `long, env = "ENVIRONMENT", default_value = "development"`
+- `ENVIRONMENT`: `long, env = "ENVIRONMENT", default_value = "production"`
 - `RATE_LIMIT_FAIL_OPEN`: `long, env = "RATE_LIMIT_FAIL_OPEN", default_value_t = false`
 - `RPM_BUCKET_SECONDS`: `long, env = "RPM_BUCKET_SECONDS", default_value_t = 60`
 - `RPM_KEY_TTL_SECONDS`: `long, env = "RPM_KEY_TTL_SECONDS", default_value_t = 120`
