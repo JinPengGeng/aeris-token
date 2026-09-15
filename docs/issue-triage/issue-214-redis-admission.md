@@ -13,7 +13,7 @@
 - fixture 开启 distributed request limit=2，lease TTL=2000ms、renew=500ms、command timeout=250ms；本地 request gate 仍为 8。
 - 向实际 `/v1/chat/completions` 发携带固定无效 API Key 的请求：Redis 正常时通过准入后得到 401；Redis 停止或暂停时，在鉴权之前有界得到 503。该 key 是 fixture 常量，不是真实凭据。
 - 两种 Redis 故障各发送十次请求，超过本地 gate 容量；恢复后须重新连续得到 401。初始及两次恢复后还须读取既有 `/_gateway/health`，有界断言本地 limit=8、in_flight=0、available_permits=8，证明全部本地许可归还。
-- 检查 OpenAI error type、trace header、无 Retry-After 和无内部 gate/连接信息；记录每次 HTTP 状态及耗时。
+- 检查 OpenAI error type、trace header、`Retry-After: 1` 和无内部 gate/连接信息；记录每次 HTTP 状态及耗时。
 - 恢复允许短暂 503 收敛：超时的 Redis acquire 命令可能在服务恢复后才执行，形成短期 orphan lease；必须等 lease 过期后恢复可用。readiness 成功不等于 shared capacity 已恢复。
 - 保留原有 PostgreSQL/Redis 故障、两依赖同时无响应、独立 liveness 和 SIGTERM 摘流/退出全部阶段。沿用 owned fixture 清理，不访问外部数据库、Redis 或提供商。
 
@@ -44,5 +44,20 @@ GitHub hosted 的 [Rust CI run 34779505761](https://github.com/JinPengGeng/aeris
 ## 剩余边界与回滚
 
 这不是 authenticated upstream、付费请求、在途流 lease 丢失、RPM 降级或生产多节点容量验收；也不证明默认 30 秒 lease 参数下的恢复时间。本次 401 探针避免配置/调用真实提供商，只证明全局 admission 与原鉴权路径恢复。
+
+## Admission retry hint follow-up
+
+The public overload response is shared by local saturation and distributed
+Redis admission failure. Both are transient capacity outcomes, so the gateway
+now emits `Retry-After: 1` alongside the existing `503` envelope. This is a
+client-facing hint only: it does not change the distributed gate's fail-closed
+policy, lease TTL, or recovery behavior. Clients should still apply bounded
+backoff and honor repeated failures rather than retrying without a limit.
+
+The response contract test in `apps/aether-gateway/src/api/response.rs` covers
+the header for the shared builder; the live Redis stop/pause evidence above
+continues to validate the admission status and recovery path. The existing
+fixture must be refreshed on the next hosted drill so the artifact records the
+header from the final binary.
 
 父 #214 保留各自残余。无运行时行为或数据迁移，回滚为 revert 测试与文档。

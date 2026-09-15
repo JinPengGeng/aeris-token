@@ -575,7 +575,13 @@ pub(crate) fn build_local_overloaded_response(
     );
     let body =
         serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
-    let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
+    // Admission overload is a transient capacity signal. Give clients a
+    // bounded retry hint for both local saturation and distributed Redis
+    // unavailability; the body remains intentionally format-specific.
+    let headers = BTreeMap::from([
+        ("content-type".to_string(), "application/json".to_string()),
+        ("retry-after".to_string(), "1".to_string()),
+    ]);
     build_client_response_from_parts(
         StatusCode::SERVICE_UNAVAILABLE.as_u16(),
         &headers,
@@ -929,6 +935,8 @@ mod tests {
             10,
         )
         .expect("overload response should build");
+        assert_eq!(overloaded.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(overloaded.headers()["retry-after"], "1");
         let overloaded = response_json(overloaded).await;
         assert_eq!(overloaded["type"], "error");
         assert_eq!(overloaded["error"]["type"], "overloaded_error");

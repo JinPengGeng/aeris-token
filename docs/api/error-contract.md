@@ -32,7 +32,7 @@ gateway's generic mapping is:
 | 413 | `context_length_exceeded` | Reduce request size. |
 | 429 | `rate_limit_error` | Retry only when the response identifies a transient rate/quota window. |
 | 429 | `insufficient_quota` | Restore account credit; do not retry unchanged. |
-| 503/529 | `server_error` | For transient unavailability, use bounded backoff and honor `Retry-After` when present. Empty candidate lists can also reflect configuration problems; see below. |
+| 503/529 | `server_error` | For transient unavailability, use bounded backoff and honor `Retry-After`. Admission overload responses always include `Retry-After: 1`; empty candidate lists can also reflect configuration problems; see below. |
 
 ## Missing or invalid credentials
 
@@ -46,7 +46,8 @@ does not become valid through backoff.
 
 Request admission runs before authentication. If the configured distributed
 request gate cannot acquire a Redis lease, its existing `503/server_error`
-response can therefore take precedence even for a request without credentials.
+response includes `Retry-After: 1` and can therefore take precedence even for a
+request without credentials.
 This does not reclassify missing internal execution/authentication context as
 a client error, or change deferred cookie/Google Bearer resolution.
 

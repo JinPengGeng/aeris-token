@@ -62,7 +62,7 @@
       "envelope": "openai",
       "error_type": "server_error",
       "error_code": null,
-      "retry_after": null,
+      "retry_after": "1",
       "retryable": true,
       "kind": "overloaded"
     },
@@ -140,7 +140,7 @@
       "envelope": "claude",
       "error_type": "overloaded_error",
       "error_code": null,
-      "retry_after": null,
+      "retry_after": "1",
       "retryable": true,
       "kind": "overloaded"
     },
