@@ -437,6 +437,7 @@ mod tests {
         let seed = GeminiVideoTaskSeed {
             local_short_id: "gemini-sensitive".to_string(),
             upstream_operation_name: "operations/upstream-sensitive".to_string(),
+            created_at_unix_secs: 1_712_345_678,
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
             model: "veo-3".to_string(),

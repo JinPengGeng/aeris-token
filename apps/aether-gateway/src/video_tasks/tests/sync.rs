@@ -289,6 +289,7 @@ fn rust_authoritative_service_applies_cancel_and_delete_mutations() {
     service.record_snapshot(LocalVideoTaskSnapshot::Gemini(GeminiVideoTaskSeed {
         local_short_id: "short12345678".to_string(),
         upstream_operation_name: "operations/ext-video-task-123".to_string(),
+        created_at_unix_secs: 1_712_345_678,
         user_id: Some("user-123".to_string()),
         api_key_id: Some("key-123".to_string()),
         model: "veo-3".to_string(),

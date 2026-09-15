@@ -208,6 +208,7 @@ fn rust_authoritative_service_projects_gemini_status_into_local_read_response() 
     service.record_snapshot(LocalVideoTaskSnapshot::Gemini(GeminiVideoTaskSeed {
         local_short_id: "localshort123".to_string(),
         upstream_operation_name: "operations/ext-video-123".to_string(),
+        created_at_unix_secs: 1_712_345_678,
         user_id: Some("user-123".to_string()),
         api_key_id: Some("key-123".to_string()),
         model: "veo-3".to_string(),

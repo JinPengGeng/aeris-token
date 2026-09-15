@@ -274,6 +274,10 @@ impl std::fmt::Debug for OpenAiVideoTaskSeed {
 pub struct GeminiVideoTaskSeed {
     pub local_short_id: String,
     pub upstream_operation_name: String,
+    /// Unix seconds when the local task was created. Older persisted snapshots
+    /// omit this field and are treated as having unknown age by retention.
+    #[serde(default)]
+    pub created_at_unix_secs: u64,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
     pub model: String,

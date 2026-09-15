@@ -10,10 +10,12 @@ use crate::{
 };
 
 impl LocalVideoTaskSnapshot {
-    pub(crate) fn created_at_unix_ms(&self) -> u64 {
+    pub(crate) fn created_at_unix_secs(&self) -> u64 {
         match self {
+            // The legacy field name is retained for the persisted/API contract;
+            // video-task records store this value in Unix seconds.
             Self::OpenAi(seed) => seed.created_at_unix_ms,
-            Self::Gemini(_) => 0,
+            Self::Gemini(seed) => seed.created_at_unix_secs,
         }
     }
 
@@ -105,6 +107,7 @@ impl LocalVideoTaskSnapshot {
                 Some(Self::Gemini(GeminiVideoTaskSeed {
                     local_short_id,
                     upstream_operation_name,
+                    created_at_unix_secs: task.created_at_unix_ms,
                     user_id: task.user_id.clone(),
                     api_key_id: task.api_key_id.clone(),
                     model,

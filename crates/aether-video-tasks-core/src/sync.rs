@@ -95,6 +95,8 @@ impl LocalVideoTaskSeed {
                     local_short_id: context_text(report_context, "local_short_id")
                         .unwrap_or_else(generate_local_short_id),
                     upstream_operation_name: operation_name.to_string(),
+                    created_at_unix_secs: context_u64(report_context, "local_created_at")
+                        .unwrap_or_else(current_unix_timestamp_secs),
                     user_id: context_text(report_context, "user_id"),
                     api_key_id: context_text(report_context, "api_key_id"),
                     model: context_text(report_context, "model")
