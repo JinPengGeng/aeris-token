@@ -49,6 +49,10 @@ assert_line "${REPO_ROOT}/docker-compose.redis-durable.yml" "      - redis_data:
 assert_line "${APP_DOCKERFILE}" "USER 10001:10001"
 assert_line "${REPO_ROOT}/Dockerfile.app.local" "USER 10001:10001"
 assert_line "${REPO_ROOT}/Dockerfile.app.release-local" "USER 10001:10001"
+grep -Fq 'COPY --from=frontend-builder --chown=10001:10001' "${REPO_ROOT}/Dockerfile.app.release-local" \
+    || fail_test "release-local frontend assets are not owned by the runtime identity"
+grep -Fq 'chown -h 10001:10001 /runtime-root/opt/aether/current' "${REPO_ROOT}/Dockerfile.app.release-local" \
+    || fail_test "release-local current symlink is not owned by the runtime identity"
 assert_line "${APP_DOCKERFILE}" "    HOME=/tmp/aether-home \\"
 
 for compose_file in "${COMPOSE_FILES[@]}"; do
@@ -72,6 +76,9 @@ if grep -Fq '  cap_add:' "${REPO_ROOT}/deploy/multi-node/docker-compose.yml"; th
 fi
 grep -Fq 'migrate_container_volume_ownership.sh' "${REPO_ROOT}/install.sh" \
     || fail_test "installer does not distribute the volume ownership migration helper"
+grep -Fq 'busybox:1.37.0-musl@sha256:fc6dddc4c44b1bfe37f41cae8e67d1693828e8f42a91862816d7953e2c9d3f23' \
+    "${REPO_ROOT}/tools/operations/migrate_container_volume_ownership.sh" \
+    || fail_test "volume ownership helper uses an unpinned image"
 
 assert_line "${REPO_ROOT}/.env.example" "DB_PASSWORD="
 assert_line "${REPO_ROOT}/.env.example" "REDIS_PASSWORD="
