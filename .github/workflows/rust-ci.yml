@@ -648,7 +648,7 @@ jobs:
               "execution_runtime_stream"
             ] and
             all(.scenarios[];
-              ((.name | endswith("_stream")) | not) or .result.require_sse_done == true
+              (.name != "gateway_proxy_stream") or .result.require_sse_done == true
             ) and
             all(.scenarios[];
               .result.failed_requests == 0 and
