@@ -12,18 +12,18 @@ use tracing::warn;
 pub(in super::super) async fn notify_user_refund_status(
     state: &crate::handlers::admin::request::AdminAppState<'_>,
     refund: &crate::AdminWalletRefundRecord,
-) {
+) -> bool {
     let Some(user_id) = refund
         .user_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return;
+        return false;
     };
     let user = match state.find_user_auth_by_id(user_id).await {
         Ok(Some(user)) => user,
-        Ok(None) => return,
+        Ok(None) => return false,
         Err(err) => {
             warn!(
                 error = %crate::error::redact_error_debug(&err),
@@ -31,7 +31,7 @@ pub(in super::super) async fn notify_user_refund_status(
                 refund_id = %refund.id,
                 "failed to load refund notification recipient"
             );
-            return;
+            return false;
         }
     };
     let Some(email) = user
@@ -40,8 +40,26 @@ pub(in super::super) async fn notify_user_refund_status(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return;
+        return false;
     };
+
+    // User preferences are the final consent gate for billing-related mail.
+    // Missing preferences retain the historical default (enabled), while a
+    // read failure fails closed so an unavailable preference store cannot
+    // unexpectedly send a message.
+    match state.app().read_user_preferences(user_id).await {
+        Ok(Some(preferences)) if !preferences.email_notifications => return false,
+        Ok(Some(_)) | Ok(None) => {}
+        Err(err) => {
+            warn!(
+                error = %crate::error::redact_error_debug(&err),
+                user_id = %user_id,
+                refund_id = %refund.id,
+                "failed to load refund notification preferences"
+            );
+            return false;
+        }
+    }
 
     let status = refund_status_notification_label(&refund.status);
     let failure_reason = refund
@@ -73,19 +91,23 @@ pub(in super::super) async fn notify_user_refund_status(
         ],
     )
     .await;
-    match report {
+    match &report {
         Ok(report) if report.success => {}
         Ok(report) => warn!(
             refund_id = %refund.id,
             channel_count = report.channels.len(),
             "refund status notification did not reach a channel"
         ),
-        Err(err) => warn!(
-            error = %crate::error::redact_error_debug(&err),
-            refund_id = %refund.id,
-            "refund status notification failed"
-        ),
+        Err(err) => {
+            warn!(
+                error = %crate::error::redact_error_debug(&err),
+                refund_id = %refund.id,
+                "refund status notification failed"
+            );
+            return false;
+        }
     }
+    true
 }
 
 pub(in super::super) fn refund_status_notification_should_send(
@@ -317,7 +339,14 @@ pub(in super::super) fn admin_wallet_build_order_no(now: chrono::DateTime<chrono
 
 #[cfg(test)]
 mod tests {
-    use super::{refund_status_notification_label, refund_status_notification_should_send};
+    use super::{
+        notify_user_refund_status, refund_status_notification_label,
+        refund_status_notification_should_send,
+    };
+    use crate::data::state::StoredUserPreferenceRecord;
+    use crate::data::GatewayDataState;
+    use crate::{AdminWalletRefundRecord, AppState};
+    use aether_data::repository::users::StoredUserAuthRecord;
 
     #[test]
     fn refund_notification_status_is_bounded_to_known_terminal_values() {
@@ -346,5 +375,74 @@ mod tests {
             Some("processing"),
             "processing"
         ));
+    }
+
+    #[tokio::test]
+    async fn refund_notification_honors_email_preference_on_the_async_path() {
+        let app = AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled().with_user_preferences_for_tests(std::iter::empty::<
+                    StoredUserPreferenceRecord,
+                >()),
+            )
+            .with_auth_users_for_tests([StoredUserAuthRecord::new(
+                "user-1".to_string(),
+                Some("alice@example.com".to_string()),
+                true,
+                "alice".to_string(),
+                None,
+                "user".to_string(),
+                "local".to_string(),
+                None,
+                None,
+                None,
+                true,
+                false,
+                None,
+                None,
+            )
+            .expect("auth user should build")]);
+        let state = crate::admin_api::AdminAppState::new(&app);
+        let refund = AdminWalletRefundRecord {
+            id: "refund-1".to_string(),
+            refund_no: "rf-refund-1".to_string(),
+            wallet_id: "wallet-1".to_string(),
+            user_id: Some("user-1".to_string()),
+            payment_order_id: None,
+            source_type: "manual".to_string(),
+            source_id: None,
+            refund_mode: "manual".to_string(),
+            amount_usd: 10.0,
+            status: "succeeded".to_string(),
+            reason: None,
+            failure_reason: None,
+            gateway_refund_id: None,
+            payout_method: None,
+            payout_reference: None,
+            payout_proof: None,
+            requested_by: Some("user-1".to_string()),
+            approved_by: None,
+            processed_by: None,
+            created_at_unix_ms: 1_710_000_000,
+            updated_at_unix_secs: 1_710_000_000,
+            processed_at_unix_secs: Some(1_710_000_000),
+            completed_at_unix_secs: Some(1_710_000_000),
+        };
+
+        assert!(notify_user_refund_status(&state, &refund).await);
+
+        let mut preferences = StoredUserPreferenceRecord::default_for_user("user-1");
+        preferences.usage_alerts = false;
+        app.write_user_preferences(crate::GatewayUserPreferenceView::from(preferences.clone()))
+            .await
+            .expect("preferences should update");
+        assert!(notify_user_refund_status(&state, &refund).await);
+
+        preferences.email_notifications = false;
+        app.write_user_preferences(crate::GatewayUserPreferenceView::from(preferences.clone()))
+            .await
+            .expect("preferences should update");
+        assert!(!notify_user_refund_status(&state, &refund).await);
     }
 }
