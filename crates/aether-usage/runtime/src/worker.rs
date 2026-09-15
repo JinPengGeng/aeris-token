@@ -919,6 +919,7 @@ mod tests {
     }
 
     enum TestEnrichmentOutcome {
+        Failed,
         TimedOut,
         Unpriced,
         Priced { listed: f64, actual: f64 },
@@ -1368,6 +1369,11 @@ mod tests {
                 .expect("enrich outcomes lock")
                 .pop_front()
             {
+                Some(TestEnrichmentOutcome::Failed) => {
+                    return Err(DataLayerError::UnexpectedValue(
+                        "test pricing failure".to_string(),
+                    ));
+                }
                 Some(TestEnrichmentOutcome::TimedOut) => {
                     return Err(DataLayerError::TimedOut("test pricing lookup".to_string()));
                 }
@@ -1611,6 +1617,39 @@ mod tests {
         let records = store.records.lock().expect("records lock");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].total_cost_usd, Some(0.456));
+    }
+
+    #[tokio::test]
+    async fn data_event_recorder_enrichment_failure_increments_billing_metric() {
+        let before = aether_runtime::logging_metric_samples()
+            .into_iter()
+            .find(|sample| sample.name == "billing_enrichment_failures_total")
+            .expect("billing enrichment metric should be exported")
+            .value;
+        let store = Arc::new(TestUsageStore::default());
+        store
+            .enrich_outcomes
+            .lock()
+            .expect("enrich outcomes lock")
+            .push_back(TestEnrichmentOutcome::Failed);
+        let recorder = super::UsageDataEventRecorder::new(Arc::clone(&store));
+
+        let error = recorder
+            .record_usage_event(&sample_event())
+            .await
+            .expect_err("enrichment failure should reject the event");
+        assert!(matches!(error, DataLayerError::UnexpectedValue(_)));
+        assert!(store.records.lock().expect("records lock").is_empty());
+
+        let after = aether_runtime::logging_metric_samples()
+            .into_iter()
+            .find(|sample| sample.name == "billing_enrichment_failures_total")
+            .expect("billing enrichment metric should remain exported")
+            .value;
+        assert!(
+            after > before,
+            "the production enrichment failure path must increment its counter: before={before}, after={after}"
+        );
     }
 
     #[tokio::test]

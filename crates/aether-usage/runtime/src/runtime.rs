@@ -5358,7 +5358,6 @@ impl UsageRuntime {
         };
 
         let write_succeeded = if let Err(err) = enrich_terminal_event(data, event).await {
-            aether_runtime::record_billing_enrichment_failure();
             warn!(
                 event_name = "usage_terminal_direct_fallback_enrichment_failed",
                 log_type = "event",
@@ -9175,6 +9174,11 @@ mod tests {
                 ..UsageEventData::default()
             },
         );
+        let before = aether_runtime::logging_metric_samples()
+            .into_iter()
+            .find(|sample| sample.name == "billing_enrichment_failures_total")
+            .expect("billing enrichment metric should be exported")
+            .value;
         assert!(
             !runtime
                 .try_write_terminal_direct_fallback(&store, &mut event, "test_retry")
@@ -9185,6 +9189,28 @@ mod tests {
         assert_eq!(snapshot.terminal_direct_fallback_failed_total, 1);
         assert_eq!(snapshot.terminal_direct_fallback_succeeded_total, 0);
         assert_eq!(snapshot.terminal_direct_fallback_in_flight, 0);
+        assert_eq!(store.enrichment_calls.load(Ordering::Acquire), 1);
+        let after = aether_runtime::logging_metric_samples()
+            .into_iter()
+            .find(|sample| sample.name == "billing_enrichment_failures_total")
+            .expect("billing enrichment metric should remain exported")
+            .value;
+        assert!(
+            after > before,
+            "direct fallback enrichment failure must be visible in the shared billing counter"
+        );
+        let rendered = aether_runtime::metrics::render_prometheus_text(
+            &aether_runtime::logging_metric_samples(),
+        );
+        let metric_name = aether_runtime::metrics::metrics_namespace()
+            .map(|namespace| format!("{namespace}_billing_enrichment_failures_total"))
+            .unwrap_or_else(|| "billing_enrichment_failures_total".to_string());
+        let help_line = format!("# HELP {metric_name} ");
+        assert_eq!(
+            rendered.matches(&help_line).count(),
+            1,
+            "the counter must render as one Prometheus metric family"
+        );
 
         assert!(
             runtime
