@@ -31,8 +31,19 @@ const MAX_FERNET_TOKEN_BYTES: usize =
     1 + 8 + IV_SIZE + MAX_FERNET_PLAINTEXT_BYTES + AES_BLOCK_SIZE + HMAC_SIZE;
 const AES_BLOCK_SIZE: usize = 16;
 
+/// Stable seed used to derive the compatibility PBKDF2 salt.
+///
+/// Changing this value changes keys derived from passphrases and makes
+/// existing ciphertexts undecipherable without a migration.
 pub const APP_SALT_SEED: &[u8] = b"aether-v1";
+/// Lowercase hexadecimal representation of the 16-byte application salt.
+///
+/// The salt is the first 16 bytes of SHA-256 over [`APP_SALT_SEED`]. This
+/// exported value is useful for compatibility diagnostics and test vectors.
 pub const APP_SALT_HEX: &str = "8797080a7a4b45b4810e934d1af36261";
+/// Development-only passphrase used by local fixtures.
+///
+/// Deployments must provide a unique secret instead of using this value.
 pub const DEVELOPMENT_ENCRYPTION_KEY: &str = "dev-encryption-key-do-not-use-in-production";
 
 static RAW_FERNET_KEY_CACHE: LazyLock<RwLock<RawFernetKeyCache>> =
@@ -93,28 +104,45 @@ impl RawFernetKeyCache {
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Failure while decoding, authenticating, or producing a Python-compatible
+/// Fernet value.
 pub enum PythonFernetError {
+    /// The outer (second) URL-safe Base64 layer is malformed.
     #[error("invalid Python Fernet outer base64 payload")]
     InvalidOuterBase64,
+    /// The inner Fernet token's URL-safe Base64 layer is malformed.
     #[error("invalid Python Fernet inner base64 payload")]
     InvalidInnerBase64,
+    /// The decoded token is too short or has an invalid field layout.
     #[error("invalid Python Fernet token structure")]
     InvalidTokenStructure,
+    /// The token does not use the supported Fernet version byte (`0x80`).
     #[error("unsupported Python Fernet token version: {0:#x}")]
     UnsupportedTokenVersion(u8),
+    /// The token HMAC does not verify with the supplied key.
     #[error("invalid Python Fernet token signature")]
     InvalidTokenSignature,
+    /// The AES-CBC ciphertext has invalid PKCS#7 padding.
     #[error("invalid Python Fernet token padding")]
     InvalidPadding,
+    /// The decrypted bytes are not valid UTF-8.
     #[error("invalid Python Fernet plaintext utf-8")]
     InvalidUtf8(#[from] std::string::FromUtf8Error),
+    /// The plaintext exceeds the 16 MiB compatibility limit.
     #[error("Python Fernet plaintext exceeds {limit_bytes} bytes")]
     PlaintextTooLarge { limit_bytes: usize },
+    /// The encoded or decoded ciphertext exceeds the compatibility size limit.
     #[error("Python Fernet ciphertext exceeds the supported size")]
     CiphertextTooLarge,
 }
 
 #[derive(Clone)]
+/// Python-compatible Fernet encryption and decryption using one derived key.
+///
+/// Construct an instance with [`PythonFernetCompat::from_secret`]. The secret
+/// is interpreted as a padded 32-byte Base64 Fernet key when possible;
+/// otherwise it is derived with the crate's fixed-salt PBKDF2 compatibility
+/// rule. This type never performs key fallback or rotation.
 pub struct PythonFernetCompat {
     signing_key: [u8; SIGNING_KEY_SIZE],
     encryption_key: [u8; ENCRYPTION_KEY_SIZE],
@@ -131,11 +159,22 @@ impl std::fmt::Debug for PythonFernetCompat {
 }
 
 impl PythonFernetCompat {
+    /// Builds a helper from one secret.
+    ///
+    /// A padded URL-safe or standard Base64 secret that decodes to exactly 32
+    /// bytes is used as the Fernet key directly. Every other secret is treated
+    /// as a passphrase and expanded with PBKDF2-HMAC-SHA256 using the fixed
+    /// application salt and 100,000 iterations. This constructor never loads
+    /// fallback keys or performs rotation.
     pub fn from_secret(secret: &str) -> Self {
         let raw_key = raw_fernet_key(secret);
         Self::from_raw_key(raw_key)
     }
 
+    /// Decrypts a double-Base64 Python Fernet ciphertext to UTF-8 text.
+    ///
+    /// The outer URL-safe Base64 layer is decoded first, followed by the inner
+    /// Fernet token. The token is authenticated before AES-CBC decryption.
     pub fn decrypt_ciphertext(&self, ciphertext: &str) -> Result<String, PythonFernetError> {
         if ciphertext.is_empty() {
             return Err(PythonFernetError::InvalidTokenStructure);
@@ -146,6 +185,11 @@ impl PythonFernetCompat {
         String::from_utf8(plaintext).map_err(PythonFernetError::InvalidUtf8)
     }
 
+    /// Encrypts UTF-8 text as a double-Base64 Python Fernet ciphertext.
+    ///
+    /// The generated token contains the current Unix timestamp and a random
+    /// IV. Plaintext is limited to 16 MiB; oversized input returns
+    /// [`PythonFernetError::PlaintextTooLarge`].
     pub fn encrypt_plaintext(&self, plaintext: &str) -> Result<String, PythonFernetError> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -247,10 +291,21 @@ impl PythonFernetCompat {
     }
 }
 
+/// Derives the 32-byte Fernet key and returns padded URL-safe Base64.
+///
+/// A padded URL-safe or standard Base64 `secret` decoding to exactly 32 bytes
+/// is passed through as the direct key. Other secrets use PBKDF2-HMAC-SHA256
+/// with the fixed application salt and 100,000 iterations. An unpadded direct
+/// key is intentionally treated as a passphrase for Python compatibility.
 pub fn derive_python_fernet_key(secret: &str) -> String {
     URL_SAFE.encode(raw_fernet_key(secret))
 }
 
+/// Decrypts a double-Base64 Python Fernet ciphertext using one `secret`.
+///
+/// This convenience function performs no fallback or key rotation. Callers
+/// supporting multiple configured keys must select and retry at their own
+/// layer.
 pub fn decrypt_python_fernet_ciphertext(
     secret: &str,
     ciphertext: &str,
@@ -258,6 +313,11 @@ pub fn decrypt_python_fernet_ciphertext(
     PythonFernetCompat::from_secret(secret).decrypt_ciphertext(ciphertext)
 }
 
+/// Performs a bounded shape check for a double-Base64 Python Fernet value.
+///
+/// This function only checks the encoding, version byte, and size bounds. It
+/// does not authenticate or decrypt the value, so `true` does not prove that a
+/// supplied key can decrypt it.
 pub fn looks_like_python_fernet_ciphertext(ciphertext: &str) -> bool {
     let ciphertext = ciphertext.trim();
     if ciphertext.is_empty() {
@@ -288,6 +348,8 @@ pub fn looks_like_python_fernet_ciphertext(ciphertext: &str) -> bool {
     inner.len() >= MIN_TOKEN_SIZE && inner.first().copied() == Some(FERNET_VERSION)
 }
 
+/// Encrypts UTF-8 text as a double-Base64 Python Fernet ciphertext using one
+/// `secret`. The input is subject to the 16 MiB plaintext limit.
 pub fn encrypt_python_fernet_plaintext(
     secret: &str,
     plaintext: &str,
@@ -295,6 +357,10 @@ pub fn encrypt_python_fernet_plaintext(
     PythonFernetCompat::from_secret(secret).encrypt_plaintext(plaintext)
 }
 
+/// Warms the bounded derived-key cache for `secret`.
+///
+/// This only prepares the one key represented by `secret`; it does not load
+/// keys from a keyring or establish fallback and rotation behavior.
 pub fn warm_python_fernet_secret(secret: &str) {
     let _ = raw_fernet_key(secret);
 }

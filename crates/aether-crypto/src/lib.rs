@@ -1,3 +1,16 @@
+//! Cryptographic compatibility helpers shared by Aether services.
+//!
+//! The Fernet API in this crate is intentionally compatible with the existing
+//! Python implementation. It accepts a padded 32-byte Fernet key or derives a
+//! key from a passphrase with the fixed application salt and PBKDF2 settings.
+//! The compatibility ciphertext format applies URL-safe Base64 twice. The RSA
+//! helpers use AWS-LC for PKCS#1 v1.5 signatures with SHA-256.
+//!
+//! This crate only handles the key supplied by its caller. Key lookup,
+//! fallback ordering, rotation, and storage policy are responsibilities of the
+//! calling service.
+#![warn(missing_docs)]
+
 mod python_fernet;
 mod rsa_pkcs1_sha256;
 
