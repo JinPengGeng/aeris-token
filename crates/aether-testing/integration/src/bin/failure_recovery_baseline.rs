@@ -11,9 +11,9 @@ use aether_data::driver::postgres::{
 use aether_data::{DataLayerError, PostgresBackend};
 use aether_runtime_state::{RedisClientConfig, RedisLockRunner, RedisLockRunnerConfig};
 use aether_testkit::{
-    init_test_runtime_for, insert_tunnel_harness_auth_headers, reserve_local_port,
-    BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot, ManagedPostgresServer, ManagedRedisServer,
-    TunnelHarness, TunnelHarnessConfig, TUNNEL_HARNESS_NODE_ID,
+    init_test_runtime_for, insert_tunnel_harness_auth_headers, BenchmarkRuntimeSampler,
+    BenchmarkRuntimeSnapshot, ManagedPostgresServer, ManagedRedisServer, TunnelHarness,
+    TunnelHarnessConfig, TUNNEL_HARNESS_NODE_ID,
 };
 use futures_util::{FutureExt, StreamExt};
 use serde::Serialize;
@@ -464,9 +464,11 @@ async fn benchmark_tunnel_restart_recovery(
     config: &FailureRecoveryBaselineConfig,
 ) -> Result<RecoverySummary, Box<dyn std::error::Error>> {
     let mut runtime_sampler = BenchmarkRuntimeSampler::new();
-    let port = reserve_local_port()?;
     let tunnel_config = TunnelHarnessConfig::default();
-    let initial_tunnel = TunnelHarness::start_on_port(tunnel_config.clone(), port).await?;
+    // Let the in-process harness bind its listener atomically, then keep the
+    // observed port for the intentional fixed-port restart exercise.
+    let initial_tunnel = TunnelHarness::start(tunnel_config.clone()).await?;
+    let port = initial_tunnel.port();
     let ws_url = format!("ws://127.0.0.1:{port}{PROXY_TUNNEL_PATH}");
     let collector = Arc::new(RecoveryCollector::default());
     let next_attempt = Arc::new(AtomicUsize::new(0));
