@@ -161,7 +161,7 @@ impl LocalVideoTaskSnapshot {
             let mut seed = seed.clone();
             if path.starts_with("/openai/v1/videos/") {
                 seed.persistence.client_api_format = "openai:video".to_string();
-            } else if path.starts_with("/v1/videos/") && seed.uses_xai_provider() {
+            } else if path.starts_with("/v1/videos/") && seed.is_xai_native() {
                 seed.persistence.client_api_format = "xai:video".to_string();
             }
             return Self::OpenAi(seed).read_response();
