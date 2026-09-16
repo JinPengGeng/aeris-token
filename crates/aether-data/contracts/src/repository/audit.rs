@@ -9,6 +9,68 @@ pub const SUSPICIOUS_EVENT_TYPES: &[&str] = &[
     "request_rate_limited",
 ];
 
+/// Metadata is intentionally a flat, small object.  The gateway owns the
+/// allowlisted keys and sanitizes values before constructing an audit record;
+/// this contract validation prevents another caller from persisting arbitrary
+/// request or credential payloads through the generic `Value` field.
+pub const ADMIN_AUDIT_METADATA_MAX_BYTES: usize = 4096;
+pub const ADMIN_AUDIT_METADATA_MAX_STRING_BYTES: usize = 512;
+pub const ADMIN_AUDIT_METADATA_MAX_TARGET_BYTES: usize = 256;
+
+const ADMIN_AUDIT_METADATA_KEYS: &[&str] = &[
+    "schema_version",
+    "event_name",
+    "status",
+    "admin_role",
+    "session_id",
+    "management_token_id",
+    "route_family",
+    "route_kind",
+    "method",
+    "path",
+    "action",
+    "target_type",
+    "target_id",
+    "target_truncated",
+    // Provider-delete terminal events are emitted by the task runtime rather
+    // than the HTTP audit producer, so their lifecycle fields are included in
+    // the same bounded contract.
+    "task_id",
+    "task_status",
+    "origin_trace_id",
+    "stage",
+    "deleted_keys",
+    "total_keys",
+    "deleted_endpoints",
+    "total_endpoints",
+];
+
+const ADMIN_AUDIT_METADATA_STRING_KEYS: &[&str] = &[
+    "event_name",
+    "status",
+    "admin_role",
+    "session_id",
+    "management_token_id",
+    "route_family",
+    "route_kind",
+    "method",
+    "path",
+    "action",
+    "target_type",
+    "target_id",
+    "task_id",
+    "task_status",
+    "origin_trace_id",
+    "stage",
+];
+
+const ADMIN_AUDIT_METADATA_COUNT_KEYS: &[&str] = &[
+    "deleted_keys",
+    "total_keys",
+    "deleted_endpoints",
+    "total_endpoints",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditLogListQuery {
     pub cutoff_unix_secs: u64,
@@ -76,6 +138,113 @@ impl CreateAdminAuditLog {
         {
             return Err(crate::DataLayerError::InvalidInput(
                 "audit log bounded text field exceeds its database limit".to_string(),
+            ));
+        }
+        self.validate_event_metadata()?;
+        Ok(())
+    }
+
+    /// Validate the flat, versioned metadata contract at the data boundary.
+    ///
+    /// `event_metadata` remains an `Option<Value>` for compatibility with
+    /// historical rows and callers, but new values may only contain the
+    /// explicitly documented scalar fields.  In particular, nested objects,
+    /// arrays, unknown keys, negative counters, and oversized strings are
+    /// rejected before reaching PostgreSQL.
+    pub fn validate_event_metadata(&self) -> Result<(), crate::DataLayerError> {
+        let Some(metadata) = self.event_metadata.as_ref() else {
+            return Ok(());
+        };
+        let serde_json::Value::Object(fields) = metadata else {
+            return Err(crate::DataLayerError::InvalidInput(
+                "audit log metadata must be a JSON object".to_string(),
+            ));
+        };
+        let schema_version = fields
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                crate::DataLayerError::InvalidInput(
+                    "audit log metadata schema_version must be 1".to_string(),
+                )
+            })?;
+        if schema_version != 1 {
+            return Err(crate::DataLayerError::InvalidInput(
+                "audit log metadata schema_version must be 1".to_string(),
+            ));
+        }
+        let event_name = fields
+            .get("event_name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                crate::DataLayerError::InvalidInput(
+                    "audit log metadata event_name must be a non-empty string".to_string(),
+                )
+            })?;
+        if event_name.len() > ADMIN_AUDIT_METADATA_MAX_STRING_BYTES {
+            return Err(crate::DataLayerError::InvalidInput(
+                "audit log metadata string value exceeds its limit".to_string(),
+            ));
+        }
+
+        for (key, value) in fields {
+            if !ADMIN_AUDIT_METADATA_KEYS.contains(&key.as_str()) {
+                return Err(crate::DataLayerError::InvalidInput(format!(
+                    "audit log metadata key is not allowlisted: {key}"
+                )));
+            }
+            if value.is_null() {
+                continue;
+            }
+            if ADMIN_AUDIT_METADATA_STRING_KEYS.contains(&key.as_str()) {
+                let Some(text) = value.as_str() else {
+                    return Err(crate::DataLayerError::InvalidInput(format!(
+                        "audit log metadata field {key} must be a string or null"
+                    )));
+                };
+                if text.trim().is_empty()
+                    || text.len() > ADMIN_AUDIT_METADATA_MAX_STRING_BYTES
+                    || (key == "target_id" && text.len() > ADMIN_AUDIT_METADATA_MAX_TARGET_BYTES)
+                {
+                    return Err(crate::DataLayerError::InvalidInput(format!(
+                        "audit log metadata field {key} exceeds its limit"
+                    )));
+                }
+                continue;
+            }
+            if ADMIN_AUDIT_METADATA_COUNT_KEYS.contains(&key.as_str()) {
+                if value.as_u64().is_none() {
+                    return Err(crate::DataLayerError::InvalidInput(format!(
+                        "audit log metadata field {key} must be a non-negative integer"
+                    )));
+                }
+                continue;
+            }
+            if key == "schema_version" {
+                if value.as_u64() != Some(1) {
+                    return Err(crate::DataLayerError::InvalidInput(
+                        "audit log metadata schema_version must be 1".to_string(),
+                    ));
+                }
+                continue;
+            }
+            if key == "target_truncated" {
+                if !value.is_boolean() {
+                    return Err(crate::DataLayerError::InvalidInput(
+                        "audit log metadata target_truncated must be a boolean or null".to_string(),
+                    ));
+                }
+                continue;
+            }
+            unreachable!("every allowlisted metadata key has a type category");
+        }
+        if serde_json::to_vec(metadata)
+            .map(|encoded| encoded.len() > ADMIN_AUDIT_METADATA_MAX_BYTES)
+            .unwrap_or(true)
+        {
+            return Err(crate::DataLayerError::InvalidInput(
+                "audit log metadata exceeds its size limit".to_string(),
             ));
         }
         Ok(())
@@ -211,4 +380,97 @@ pub fn optional_json_from_text(
             })
         })
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use serde_json::json;
+
+    use super::CreateAdminAuditLog;
+
+    fn record(metadata: serde_json::Value) -> CreateAdminAuditLog {
+        CreateAdminAuditLog {
+            id: "audit-1".to_string(),
+            event_type: "admin_mutation".to_string(),
+            user_id: None,
+            api_key_id: None,
+            description: "admin action: update".to_string(),
+            ip_address: None,
+            user_agent: None,
+            request_id: None,
+            event_metadata: Some(metadata),
+            status_code: Some(200),
+            error_message: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn validates_generic_metadata_shape_and_nullable_fields() {
+        let value = json!({
+            "schema_version": 1,
+            "event_name": "admin_mutation_completed",
+            "status": "completed",
+            "session_id": null,
+            "management_token_id": null,
+            "path": "/api/admin/system/configs/example",
+            "target_id": "/api/admin/system/configs/example",
+            "target_truncated": false,
+        });
+        assert!(record(value).validate().is_ok());
+    }
+
+    #[test]
+    fn validates_provider_delete_counters_and_rejects_negative_values() {
+        let valid = json!({
+            "schema_version": 1,
+            "event_name": "admin_provider_delete_task_terminal",
+            "action": "provider_delete_task",
+            "target_type": "provider",
+            "target_id": "provider-1",
+            "task_id": "task-1",
+            "task_status": "completed",
+            "deleted_keys": 2,
+            "total_keys": 3,
+            "deleted_endpoints": 1,
+            "total_endpoints": 1,
+        });
+        assert!(record(valid).validate().is_ok());
+
+        let negative = json!({
+            "schema_version": 1,
+            "event_name": "admin_provider_delete_task_terminal",
+            "deleted_keys": -1,
+        });
+        assert!(record(negative).validate().is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_nested_and_sensitive_metadata_fields() {
+        for metadata in [
+            json!({"schema_version": 1, "event_name": "x", "authorization": "secret"}),
+            json!({"schema_version": 1, "event_name": "x", "details": {"token": "secret"}}),
+            json!({"schema_version": 1, "event_name": "x", "payload": ["body"]}),
+        ] {
+            assert!(record(metadata).validate().is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_schema_version_and_oversized_values() {
+        assert!(record(json!({"schema_version": 2, "event_name": "x"}))
+            .validate()
+            .is_err());
+        assert!(record(json!({"schema_version": 1, "event_name": ""}))
+            .validate()
+            .is_err());
+        assert!(record(json!({
+            "schema_version": 1,
+            "event_name": "x",
+            "target_id": "x".repeat(257),
+        }))
+        .validate()
+        .is_err());
+    }
 }

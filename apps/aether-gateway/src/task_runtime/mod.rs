@@ -969,6 +969,37 @@ mod provider_delete_terminal_audit_tests {
                 .and_then(|value| value.as_str()),
             Some("completed")
         );
+        let metadata_keys = first
+            .event_metadata
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .expect("provider-delete terminal metadata is an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            metadata_keys,
+            [
+                "action",
+                "deleted_endpoints",
+                "deleted_keys",
+                "event_name",
+                "management_token_id",
+                "origin_trace_id",
+                "schema_version",
+                "session_id",
+                "stage",
+                "target_id",
+                "target_type",
+                "task_id",
+                "task_status",
+                "total_endpoints",
+                "total_keys",
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert!(first.validate().is_ok());
     }
 
     #[test]
