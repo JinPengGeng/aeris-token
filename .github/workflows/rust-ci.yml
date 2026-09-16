@@ -25,6 +25,7 @@ on:
       - "docs/operations/referral-rebate-numeric-audit.sql"
       - "docs/operations/fixtures/**"
       - ".github/change-filters.yml"
+      - ".github/CODEOWNERS"
       - "install.sh"
       - "deploy.sh"
       - "update.sh"
@@ -98,6 +99,7 @@ jobs:
         run: |
           python3 tests/compose_database_config_test.py
           python3 tests/gateway_env_reference_test.py
+          python3 tests/readme_governance_reference_test.py
           PYTHONUTF8=1 python3 docs/api/generate_format_field_coverage.py --check
           bash tests/deploy_state_safety_test.sh
           bash tests/install_archive_safety_test.sh

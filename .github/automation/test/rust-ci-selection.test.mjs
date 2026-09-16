@@ -115,6 +115,15 @@ test('every Rust and database job consumes changes, while all aggregate gates an
     /PYTHONUTF8=1 python3 docs\/api\/generate_format_field_coverage\.py --check/u,
     'shell fixtures must enforce the format-field matrix drift check',
   );
+  assert.match(
+    shellFixtureStep.run,
+    /python3 tests\/readme_governance_reference_test\.py/u,
+    'shell fixtures must enforce README and CODEOWNERS reference checks',
+  );
+  assert.ok(
+    workflow.on.push.paths.includes('.github/CODEOWNERS'),
+    'CODEOWNERS-only default-branch pushes must run the reference check',
+  );
   for (const jobId of leaves) {
     assert.equal(workflow.jobs[jobId].needs, 'changes', jobId);
   }
