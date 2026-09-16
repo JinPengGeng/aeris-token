@@ -108,6 +108,13 @@ test('every Rust and database job consumes changes, while all aggregate gates an
   assert.equal(workflow.jobs.prometheus_contracts.needs, undefined);
   assert.equal(workflow.jobs.check.name, 'Rust CI / check');
   assert.equal(workflow.jobs.publish_dispatch_status.needs, 'check');
+  const shellFixtureStep = workflow.jobs.shell_security.steps.find((step) => typeof step.run === 'string');
+  assert.ok(shellFixtureStep, 'shell fixture run step must exist');
+  assert.match(
+    shellFixtureStep.run,
+    /PYTHONUTF8=1 python3 docs\/api\/generate_format_field_coverage\.py --check/u,
+    'shell fixtures must enforce the format-field matrix drift check',
+  );
   for (const jobId of leaves) {
     assert.equal(workflow.jobs[jobId].needs, 'changes', jobId);
   }
