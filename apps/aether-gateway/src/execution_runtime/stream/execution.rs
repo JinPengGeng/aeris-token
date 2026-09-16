@@ -4,7 +4,7 @@ use std::io::Error as IoError;
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    Arc,
+    Arc, LazyLock,
 };
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -394,12 +394,15 @@ enum DirectPassthroughMode {
     Legacy,
 }
 
-fn direct_passthrough_mode() -> DirectPassthroughMode {
+static DIRECT_PASSTHROUGH_MODE: LazyLock<DirectPassthroughMode> = LazyLock::new(|| {
     std::env::var(DIRECT_PASSTHROUGH_MODE_ENV)
         .ok()
-        .as_deref()
-        .map(parse_direct_passthrough_mode)
+        .map(|value| parse_direct_passthrough_mode(&value))
         .unwrap_or(DirectPassthroughMode::Inline)
+});
+
+fn direct_passthrough_mode() -> DirectPassthroughMode {
+    *DIRECT_PASSTHROUGH_MODE
 }
 
 fn stream_body_buffer_limit_for_record_level(record_level: UsageRequestRecordLevel) -> usize {
@@ -14229,23 +14232,22 @@ mod tests {
     }
 
     #[test]
-    fn direct_passthrough_mode_defaults_inline_and_accepts_legacy() {
-        assert_eq!(
-            parse_direct_passthrough_mode(""),
-            DirectPassthroughMode::Inline
-        );
-        assert_eq!(
-            parse_direct_passthrough_mode("inline"),
-            DirectPassthroughMode::Inline
-        );
-        assert_eq!(
-            parse_direct_passthrough_mode("legacy"),
-            DirectPassthroughMode::Legacy
-        );
-        assert_eq!(
-            parse_direct_passthrough_mode("mpsc"),
-            DirectPassthroughMode::Legacy
-        );
+    fn direct_passthrough_mode_parser_is_case_insensitive_and_defaults_inline() {
+        for value in ["", "inline", " INLINE ", "unknown", " legacy-mode "] {
+            assert_eq!(
+                parse_direct_passthrough_mode(value),
+                DirectPassthroughMode::Inline,
+                "unexpected mode for {value:?}"
+            );
+        }
+
+        for value in ["legacy", " LEGACY ", "pump", " PuMp\t", "mpsc", " MPSC\n"] {
+            assert_eq!(
+                parse_direct_passthrough_mode(value),
+                DirectPassthroughMode::Legacy,
+                "unexpected mode for {value:?}"
+            );
+        }
     }
 
     #[test]
