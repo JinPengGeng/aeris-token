@@ -14,6 +14,7 @@ postgres = ["dep:aether-data", "dep:sqlx"]
 [dependencies]
 aether-contracts.workspace = true
 aether-loadtools.workspace = true
+aether-test-support.workspace = true
 aether-data = { workspace = true, optional = true }
 aether-gateway = { workspace = true, features = ["testkit"], optional = true }
 aether-runtime.workspace = true
