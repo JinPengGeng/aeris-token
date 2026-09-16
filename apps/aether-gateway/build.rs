@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -6,7 +7,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=AETHER_BUILD_TYPE");
     println!("cargo:rerun-if-env-changed=AETHER_VERSION");
     println!("cargo:rerun-if-env-changed=GITHUB_REF_NAME");
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
+    if let Some(git_head) = git_head_path() {
+        println!("cargo:rerun-if-changed={}", git_head.display());
+    }
 
     let package_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
     let version = env::var("AETHER_BUILD_VERSION")
@@ -33,6 +36,26 @@ fn main() {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "source".to_string());
     println!("cargo:rustc-env=AETHER_BUILD_TYPE={build_type}");
+}
+
+fn git_head_path() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR")?);
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-path", "HEAD"])
+        .current_dir(&manifest_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw_path = String::from_utf8(output.stdout).ok()?;
+    let path = PathBuf::from(raw_path.trim());
+    let path = if path.is_absolute() {
+        path
+    } else {
+        manifest_dir.join(path)
+    };
+    path.canonicalize().ok()
 }
 
 fn git_describe_version() -> Option<String> {

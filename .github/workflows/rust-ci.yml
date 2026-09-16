@@ -113,6 +113,7 @@ jobs:
           bash tests/tunnel_installer_config_security_test.sh
           bash tests/cargo_audit_gate_test.sh
           bash tests/admin_audit_inventory_test.sh
+          bash tests/aether_gateway_build_script_invalidation_test.sh
 
       - name: Redis durable crash drill
         shell: bash

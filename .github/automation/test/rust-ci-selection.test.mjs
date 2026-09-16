@@ -120,6 +120,11 @@ test('every Rust and database job consumes changes, while all aggregate gates an
     /python3 tests\/readme_governance_reference_test\.py/u,
     'shell fixtures must enforce README and CODEOWNERS reference checks',
   );
+  assert.match(
+    shellFixtureStep.run,
+    /bash tests\/aether_gateway_build_script_invalidation_test\.sh/u,
+    'shell fixtures must enforce linked-worktree build-script freshness',
+  );
   assert.ok(
     workflow.on.push.paths.includes('.github/CODEOWNERS'),
     'CODEOWNERS-only default-branch pushes must run the reference check',
