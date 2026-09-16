@@ -23,14 +23,22 @@ repository and a linked worktree, then verifies:
 
 * the second unchanged Cargo build is `Fresh` and does not rerun
   `build-script-build`;
-* a linked-worktree commit changes HEAD and reruns the build script;
+* an empty commit followed by `checkout --detach HEAD` changes the watched
+  HEAD file, reruns the build script, and reports the new Git version; unchanged
+  builds before and after that operation stay `Fresh`;
 * explicit build-version, `AETHER_VERSION`, GitHub ref, and tunnel-tag
   fallback precedence remains intact;
-* ordinary and linked checkouts report the same tagged version.
+* ordinary and linked checkouts report the same tagged version;
+* paths containing spaces work and a source archive without Git metadata
+  falls back to the package version without emitting a nonexistent watcher.
 
 The fixture runs in the Rust CI shell-security job and is asserted by the
-Rust-CI automation contract. It uses a temporary target directory and removes
-the repository and build artifacts on exit.
+Rust-CI automation contract. The job explicitly installs Rust 1.95.0; this
+fixture requires real Cargo and Git, uses one build job, and disables the Rust
+compiler wrapper. All baseline and HEAD-change Cargo calls use identical
+explicit build-version and build-type variables, so an environment change
+cannot satisfy the HEAD-invalidation assertion. It uses a temporary target
+directory and removes the repository and build artifacts on exit.
 
 ## Remaining boundary
 
