@@ -250,7 +250,9 @@ fn normalize_unix_timestamp_secs(value: u64) -> u64 {
     // A small number of pre-retention stores used the legacy field name
     // literally and persisted milliseconds. Accept both encodings so those
     // records receive the same expiry policy instead of becoming immortal.
-    if value >= 1_000_000_000_000 {
+    // Unix seconds remain below this bound until year 2286, while practical
+    // millisecond timestamps have exceeded it since April 1970.
+    if value >= 10_000_000_000 {
         value / 1_000
     } else {
         value

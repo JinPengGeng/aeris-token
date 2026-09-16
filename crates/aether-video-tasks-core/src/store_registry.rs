@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn terminal_age_pruning_normalizes_legacy_openai_millisecond_timestamps() {
-        let now = 2_000_000;
+        let now = 1_000_000_000;
         let created_at_secs = now - VIDEO_TASK_TERMINAL_RETENTION_SECS - 1;
         let mut registry = VideoTaskRegistry::default();
         registry.insert(LocalVideoTaskSnapshot::OpenAi(OpenAiVideoTaskSeed {
