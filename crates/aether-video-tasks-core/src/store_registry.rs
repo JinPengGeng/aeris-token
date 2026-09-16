@@ -322,6 +322,9 @@ mod tests {
         let created_at_secs = now - VIDEO_TASK_TERMINAL_RETENTION_SECS - 1;
         let mut registry = VideoTaskRegistry::default();
         registry.insert(LocalVideoTaskSnapshot::OpenAi(OpenAiVideoTaskSeed {
+            local_short_id: None,
+            native_response: None,
+            xai_provider: false,
             local_task_id: "openai-legacy-ms".to_string(),
             upstream_task_id: "upstream-legacy-ms".to_string(),
             created_at_unix_ms: created_at_secs * 1_000,
