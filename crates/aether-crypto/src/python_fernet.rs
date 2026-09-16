@@ -130,7 +130,10 @@ pub enum PythonFernetError {
     InvalidUtf8(#[from] std::string::FromUtf8Error),
     /// The plaintext exceeds the 16 MiB compatibility limit.
     #[error("Python Fernet plaintext exceeds {limit_bytes} bytes")]
-    PlaintextTooLarge { limit_bytes: usize },
+    PlaintextTooLarge {
+        /// Maximum plaintext size accepted by the Fernet compatibility layer.
+        limit_bytes: usize,
+    },
     /// The encoded or decoded ciphertext exceeds the compatibility size limit.
     #[error("Python Fernet ciphertext exceeds the supported size")]
     CiphertextTooLarge,
