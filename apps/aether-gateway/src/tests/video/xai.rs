@@ -396,8 +396,15 @@ where
             .json()
             .await
             .unwrap();
-        assert_eq!(native_view["status"], "done");
-        assert_eq!(native_view["video"]["respect_moderation"], true);
+        assert_eq!(
+            native_view["status"],
+            if native { "done" } else { "completed" }
+        );
+        if native {
+            assert_eq!(native_view["video"]["respect_moderation"], true);
+        } else {
+            assert_eq!(native_view["video_url"], expected_video_url);
+        }
         for prefix in ["/v1/videos", "/openai/v1/videos"] {
             let content = client
                 .get(format!("{restart_url}{prefix}/{id}/content"))
