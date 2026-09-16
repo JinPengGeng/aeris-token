@@ -302,6 +302,7 @@ pub(crate) fn build_local_user_rpm_limited_response(
         None,
         message,
         LocalCoreSyncErrorKind::RateLimit,
+        None,
         fallback_payload,
     );
     let body =
@@ -413,6 +414,7 @@ pub(crate) fn build_local_plan_usage_limited_response(
         None,
         message,
         LocalCoreSyncErrorKind::RateLimit,
+        None,
         fallback_payload,
     );
     let body =
@@ -463,17 +465,39 @@ pub(crate) fn build_local_http_error_response_with_request_path(
     status_code: StatusCode,
     message: &str,
 ) -> Result<Response<Body>, GatewayError> {
-    let fallback_payload = json!({
+    build_local_http_error_response_with_request_path_and_code(
+        trace_id,
+        control_decision,
+        request_path,
+        status_code,
+        message,
+        None,
+    )
+}
+
+pub(crate) fn build_local_http_error_response_with_request_path_and_code(
+    trace_id: &str,
+    control_decision: Option<&GatewayControlDecision>,
+    request_path: Option<&str>,
+    status_code: StatusCode,
+    message: &str,
+    error_code: Option<&str>,
+) -> Result<Response<Body>, GatewayError> {
+    let mut fallback_payload = json!({
         "error": {
             "type": "http_error",
             "message": message,
         }
     });
+    if let Some(error_code) = error_code {
+        fallback_payload["error"]["code"] = json!(error_code);
+    }
     let payload = build_local_error_payload(
         control_decision,
         request_path,
         message,
         local_error_kind_for_status(status_code),
+        error_code,
         fallback_payload,
     );
     let body =
@@ -571,6 +595,7 @@ pub(crate) fn build_local_overloaded_response(
         request_path,
         message,
         LocalCoreSyncErrorKind::Overloaded,
+        None,
         fallback_payload,
     );
     let body =
@@ -590,17 +615,18 @@ fn build_local_error_payload(
     request_path: Option<&str>,
     message: &str,
     kind: LocalCoreSyncErrorKind,
+    error_code: Option<&str>,
     fallback_payload: serde_json::Value,
 ) -> serde_json::Value {
     if local_error_uses_openai_format(control_decision, request_path) {
-        return build_core_error_body_for_client_format("openai:chat", message, None, kind)
+        return build_core_error_body_for_client_format("openai:chat", message, error_code, kind)
             .unwrap_or(fallback_payload);
     }
     if !local_error_uses_claude_format(control_decision, request_path) {
         return fallback_payload;
     }
 
-    build_core_error_body_for_client_format("claude:messages", message, None, kind)
+    build_core_error_body_for_client_format("claude:messages", message, error_code, kind)
         .unwrap_or(fallback_payload)
 }
 

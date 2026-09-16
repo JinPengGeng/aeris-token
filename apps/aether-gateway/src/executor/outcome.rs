@@ -348,7 +348,10 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
         upstream_error_type,
     } = exhaustion;
 
-    let status_code = http::StatusCode::SERVICE_UNAVAILABLE.as_u16();
+    let status_code = diagnostic
+        .filter(|value| value.reason == "model_not_found")
+        .map(|_| http::StatusCode::NOT_FOUND.as_u16())
+        .unwrap_or(http::StatusCode::SERVICE_UNAVAILABLE.as_u16());
     let candidate_status_code = upstream_status_code.unwrap_or(status_code);
     data.status_code = Some(status_code);
     data.error_message = Some(local_execution_runtime_miss_detail.to_string());
@@ -385,6 +388,10 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
     data.client_response_body = Some(runtime_miss_client_error_body(
         data.api_format.as_deref(),
         &client_message,
+        diagnostic
+            .filter(|value| value.reason == "model_not_found")
+            .map(|_| "model_not_found"),
+        status_code,
     ));
 
     let mut request_metadata = match data.request_metadata.take() {
@@ -455,10 +462,20 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
         .and_then(|value| value.selected_provider_model_name.clone())
         .filter(|value| !value.eq_ignore_ascii_case(model.as_str()));
 
-    let status_code = http::StatusCode::SERVICE_UNAVAILABLE.as_u16();
+    let status_code = diagnostic
+        .filter(|value| value.reason == "model_not_found")
+        .map(|_| http::StatusCode::NOT_FOUND.as_u16())
+        .unwrap_or(http::StatusCode::SERVICE_UNAVAILABLE.as_u16());
     let client_message =
         beautify_local_execution_client_error_message(local_execution_runtime_miss_detail);
-    let client_body = runtime_miss_client_error_body(api_format.as_deref(), &client_message);
+    let client_body = runtime_miss_client_error_body(
+        api_format.as_deref(),
+        &client_message,
+        diagnostic
+            .filter(|value| value.reason == "model_not_found")
+            .map(|_| "model_not_found"),
+        status_code,
+    );
     let mut client_headers = Map::from_iter([(
         "content-type".to_string(),
         Value::String("application/json".to_string()),
@@ -735,7 +752,12 @@ fn json_header_map() -> Value {
     )]))
 }
 
-fn runtime_miss_client_error_body(api_format: Option<&str>, message: &str) -> Value {
+fn runtime_miss_client_error_body(
+    api_format: Option<&str>,
+    message: &str,
+    error_code: Option<&str>,
+    status_code: u16,
+) -> Value {
     let fallback = json!({
         "error": {
             "type": "http_error",
@@ -746,17 +768,29 @@ fn runtime_miss_client_error_body(api_format: Option<&str>, message: &str) -> Va
         crate::ai_serving::normalize_api_format_alias(format)
             .eq_ignore_ascii_case("claude:messages")
     });
-    if !is_claude {
+    let is_openai_model_not_found = error_code == Some("model_not_found")
+        && status_code == http::StatusCode::NOT_FOUND.as_u16()
+        && api_format.is_some_and(|format| {
+            crate::ai_serving::normalize_api_format_alias(format)
+                .to_ascii_lowercase()
+                .starts_with("openai:")
+        });
+    if !is_claude && !is_openai_model_not_found {
         return fallback;
     }
 
-    build_core_error_body_for_client_format(
-        "claude:messages",
-        message,
-        None,
-        LocalCoreSyncErrorKind::Overloaded,
-    )
-    .unwrap_or(fallback)
+    let kind = if status_code == http::StatusCode::NOT_FOUND.as_u16() {
+        LocalCoreSyncErrorKind::NotFound
+    } else {
+        LocalCoreSyncErrorKind::Overloaded
+    };
+    let client_format = if is_claude {
+        "claude:messages"
+    } else {
+        "openai:chat"
+    };
+    build_core_error_body_for_client_format(client_format, message, error_code, kind)
+        .unwrap_or(fallback)
 }
 
 fn runtime_miss_original_headers_json(headers: &HeaderMap) -> Value {
@@ -1258,13 +1292,36 @@ mod tests {
 
     #[test]
     fn runtime_miss_usage_body_matches_claude_client_envelope() {
-        let claude = runtime_miss_client_error_body(Some("claude:messages"), "busy");
+        let claude = runtime_miss_client_error_body(
+            Some("claude:messages"),
+            "busy",
+            None,
+            http::StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+        );
         assert_eq!(claude["type"], "error");
         assert_eq!(claude["error"]["type"], "overloaded_error");
 
-        let openai = runtime_miss_client_error_body(Some("openai:chat"), "busy");
+        let openai = runtime_miss_client_error_body(
+            Some("openai:chat"),
+            "busy",
+            None,
+            http::StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+        );
         assert_eq!(openai["error"]["type"], "http_error");
         assert!(openai.get("type").is_none());
+    }
+
+    #[test]
+    fn runtime_miss_usage_body_matches_openai_model_not_found_envelope() {
+        let body = runtime_miss_client_error_body(
+            Some("openai:image"),
+            "The model 'missing-image-model' does not exist",
+            Some("model_not_found"),
+            http::StatusCode::NOT_FOUND.as_u16(),
+        );
+        assert_eq!(body["error"]["type"], "not_found_error");
+        assert_eq!(body["error"]["code"], "model_not_found");
+        assert!(body.get("type").is_none());
     }
 
     #[test]
