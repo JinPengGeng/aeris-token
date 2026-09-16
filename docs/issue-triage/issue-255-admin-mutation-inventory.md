@@ -12,15 +12,18 @@ handlers from silently becoming unaudited at the HTTP-result level.
 
 Handlers that need a business outcome, asynchronous task state, or a sensitive
 read attach a bounded `admin_*` event through
-`handlers/shared/admin_proxy.rs`. The canonical event list is kept in
-`issue-255-admin-mutation-inventory.txt` and checked by
+`handlers/shared/admin_proxy.rs`. The local admin proxy permission-denial path
+and the operational audit read path attach through the audit module directly;
+the inventory scanner includes both explicit boundaries. The canonical event
+list is kept in `issue-255-admin-mutation-inventory.txt` and checked by
 `tests/admin_audit_inventory_test.sh`. The check fails when an explicit event is
 added or removed without updating the inventory, so the list remains reviewable
 and does not depend on a stale issue comment.
 
-The inventory currently contains 116 explicit event names across the admin
-handler tree. The generic fallback is intentionally not duplicated in the list;
-its two stable names are asserted directly against the finalizer source.
+The inventory currently contains 118 explicit event names across the admin
+handler tree and the two shared admin response boundaries. The generic fallback
+is intentionally not duplicated in the list; its two stable names are asserted
+directly against the finalizer source.
 
 ## Coverage classes
 

@@ -38,6 +38,7 @@ on:
       - "docker-compose.local.yml"
       - "docker-compose.release-local.yml"
       - "docs/operations/prometheus/**"
+      - "docs/issue-triage/issue-255-admin-mutation-inventory.txt"
       - "tests/**"
       - "tools/ci/**"
       - ".github/workflows/build-tunnel.yml"

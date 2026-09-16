@@ -5,6 +5,8 @@
 # do not attach a domain event are covered by the finalizer's generic
 # admin_mutation_completed/admin_mutation_failed fallback and are intentionally
 # not duplicated here.
+# The scanner covers handlers/admin plus the shared proxy and operational-audit
+# response boundaries that attach events directly through the audit module.
 
 admin_billing_preset_applied
 admin_default_user_group_set
@@ -28,6 +30,7 @@ admin_oauth_frontend_callback_permission_denied
 admin_oauth_provider_config_viewed
 admin_oauth_provider_configs_viewed
 admin_oauth_provider_tested
+admin_operational_read
 admin_payment_order_credited
 admin_payment_order_expired
 admin_payment_order_failed
@@ -50,6 +53,7 @@ admin_provider_ops_status_viewed
 admin_provider_pool_cooldown_cleared
 admin_provider_pool_cost_reset
 admin_provider_updated
+admin_route_permission_denied
 admin_redeem_code_batch_created
 admin_redeem_code_batch_deleted
 admin_redeem_code_batch_disabled
