@@ -2934,10 +2934,9 @@ mod tests {
         diagnostic_is_auth_api_key_concurrency_limited,
         diagnostic_is_provider_key_capacity_limited, local_execution_runtime_miss_detail,
         local_execution_runtime_miss_status, owner_forward_request_is_stream,
-        requested_model_is_declared_by_rows, restore_redacted_stream_execution_response,
-        restore_redacted_sync_execution_response, routing_overlay_allows_affinity_target,
-        GatewayControlDecision, LocalExecutionRuntimeMissDiagnostic, RequestBodyBufferError,
-        RequestBodyBufferPolicy,
+        restore_redacted_stream_execution_response, restore_redacted_sync_execution_response,
+        routing_overlay_allows_affinity_target, GatewayControlDecision,
+        LocalExecutionRuntimeMissDiagnostic, RequestBodyBufferError, RequestBodyBufferPolicy,
     };
     use axum::body::{to_bytes, Body, Bytes};
     use axum::http::{header, HeaderMap, HeaderValue, Method, Response, StatusCode};

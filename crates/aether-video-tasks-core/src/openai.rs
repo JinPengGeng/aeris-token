@@ -899,6 +899,9 @@ mod tests {
 
     fn sample_seed(status: LocalVideoTaskStatus) -> OpenAiVideoTaskSeed {
         OpenAiVideoTaskSeed {
+            local_short_id: None,
+            native_response: None,
+            xai_provider: false,
             local_task_id: "task-openai-poll".to_string(),
             upstream_task_id: "upstream-openai-poll".to_string(),
             created_at_unix_ms: 1_712_345_678,
