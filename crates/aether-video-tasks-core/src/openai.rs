@@ -182,9 +182,7 @@ impl OpenAiVideoTaskSeed {
             self.status = match raw_status.to_ascii_lowercase().as_str() {
                 "queued" | "pending" => LocalVideoTaskStatus::Queued,
                 "processing" | "in_progress" | "running" => LocalVideoTaskStatus::Processing,
-                "completed" | "done" | "succeeded" | "success" => {
-                    LocalVideoTaskStatus::Completed
-                }
+                "completed" | "done" | "succeeded" | "success" => LocalVideoTaskStatus::Completed,
                 "failed" | "error" => LocalVideoTaskStatus::Failed,
                 "cancelled" | "canceled" => LocalVideoTaskStatus::Cancelled,
                 "expired" => LocalVideoTaskStatus::Expired,
@@ -225,12 +223,20 @@ impl OpenAiVideoTaskSeed {
                 .get("video_url")
                 .or_else(|| provider_body.get("url"))
                 .or_else(|| provider_body.get("result_url"))
-                .or_else(|| provider_body.get("video").and_then(|video| video.get("url")))
+                .or_else(|| {
+                    provider_body
+                        .get("video")
+                        .and_then(|video| video.get("url"))
+                })
                 .and_then(Value::as_str)
                 .map(str::to_string);
             if let Some(seconds) = provider_body
                 .get("seconds")
-                .or_else(|| provider_body.get("video").and_then(|video| video.get("duration")))
+                .or_else(|| {
+                    provider_body
+                        .get("video")
+                        .and_then(|video| video.get("duration"))
+                })
                 .filter(|value| value.is_string() || value.is_number())
             {
                 self.seconds = Some(
