@@ -661,6 +661,7 @@ dependencies = [
  "aether-loadtools",
  "aether-runtime",
  "aether-runtime-state",
+ "aether-test-support",
  "axum",
  "http",
  "sqlx",
