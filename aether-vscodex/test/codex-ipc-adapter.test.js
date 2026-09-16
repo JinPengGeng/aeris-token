@@ -1218,8 +1218,7 @@ test("IPC adapter waits for the revision returned by complete-history loading", 
       this.calls.push({ method: "loadCompleteHistory" });
       // The owner can acknowledge the request before the stream broadcast.
       // An unrelated owner's revision must not release our waiter.
-      setTimeout(() => this.emitState(initial, 2, "snapshot", THREAD_ID, "other-owner"), 0);
-      setTimeout(() => this.emitState(complete, 2, "snapshot", THREAD_ID, "owner"), 10);
+      this.emitState(initial, 2, "snapshot", THREAD_ID, "other-owner");
       return { revision: 2 };
     }
   }
@@ -1229,6 +1228,7 @@ test("IPC adapter waits for the revision returned by complete-history loading", 
   await new Promise((resolve) => setTimeout(resolve, 5));
   // The unrelated owner event at t=0 must not overwrite the attached stream.
   assert.equal((await adapter.snapshot()).metadata.historyComplete, false);
+  client.emitState(complete, 2, "snapshot", THREAD_ID, "owner");
   await new Promise((resolve) => setTimeout(resolve, 20));
   const snapshot = await adapter.snapshot();
   assert.equal(snapshot.metadata.historyComplete, true);
