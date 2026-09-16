@@ -17,12 +17,13 @@ SCAN_PATHS=(
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/aether-admin-audit-inventory.XXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
-# Restrict extraction to explicit attach calls at the admin handler boundary
-# and the two shared admin response boundaries. Require a literal bounded
-# event name; generic finalizer fallback names are checked separately below.
+# Extract literals passed through any audit-response wrapper, plus named event
+# constants used by dynamic taxonomies. The constant prefix is the contract for
+# dynamic producers; scanning every `admin_*` string would incorrectly include
+# actions, target types, metrics, and test fixtures.
 find "${SCAN_PATHS[@]}" -type f -name '*.rs' -print0 \
   | LC_ALL=C xargs -0 perl -0777 -ne \
-      'while (/(?:attach_admin_audit_response|attach_admin_audit_event)\((?:(?!\);).){0,2000}?"(admin_[A-Za-z0-9_]+)"/sg) { print "$1\n" }' \
+      'while (/(?:attach_[A-Za-z0-9_]*audit_response|attach_admin_audit_event)\((?:(?!\);).){0,2000}?"(admin_[A-Za-z0-9_]+)"/sg) { print "$1\n" } while (/\bconst\s+ADMIN_AUDIT_EVENT_[A-Z0-9_]+\s*:\s*&str\s*=\s*"(admin_[A-Za-z0-9_]+)"/sg) { print "$1\n" }' \
   | sort -u > "${tmp_dir}/actual"
 
 sed -E 's/[[:space:]]+#.*$//' "${INVENTORY}" \

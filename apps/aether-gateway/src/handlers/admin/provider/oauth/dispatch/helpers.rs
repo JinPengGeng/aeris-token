@@ -6,6 +6,11 @@ use axum::{
 use serde_json::{Map, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const ADMIN_AUDIT_EVENT_AGENT_IDENTITY_CREATED: &str =
+    "admin_provider_oauth_agent_identity_created";
+const ADMIN_AUDIT_EVENT_REFRESH_TOKEN_IMPORTED: &str =
+    "admin_provider_oauth_refresh_token_imported";
+
 pub(super) fn admin_provider_oauth_single_import_audit_taxonomy(
     request_body: Option<&axum::body::Bytes>,
 ) -> (&'static str, &'static str) {
@@ -20,12 +25,12 @@ pub(super) fn admin_provider_oauth_single_import_audit_taxonomy(
         });
     if creates_agent_identity {
         (
-            "admin_provider_oauth_agent_identity_created",
+            ADMIN_AUDIT_EVENT_AGENT_IDENTITY_CREATED,
             "create_provider_agent_identity",
         )
     } else {
         (
-            "admin_provider_oauth_refresh_token_imported",
+            ADMIN_AUDIT_EVENT_REFRESH_TOKEN_IMPORTED,
             "import_provider_oauth_refresh_token",
         )
     }
