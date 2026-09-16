@@ -379,6 +379,13 @@ fn maybe_trigger_upgrade(version: Option<String>, enabled: bool) {
     let Some(target_version) = version else {
         return;
     };
+    if !crate::setup::provenance::release_verification_configured() {
+        warn!(
+            target_version = %target_version,
+            "remote upgrade skipped: no valid embedded release trust root"
+        );
+        return;
+    }
     if !crate::setup::service::is_root() {
         if NON_ROOT_UPGRADE_WARNED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -539,6 +546,15 @@ mod tests {
         UPGRADE_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
         maybe_trigger_upgrade(Some("999.0.0".to_string()), false);
         assert!(!UPGRADE_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn remote_upgrade_admission_rejects_missing_embedded_trust_root() {
+        UPGRADE_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+        if !crate::setup::provenance::release_verification_configured() {
+            maybe_trigger_upgrade(Some("999.0.0".to_string()), true);
+            assert!(!UPGRADE_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
+        }
     }
 
     #[tokio::test]

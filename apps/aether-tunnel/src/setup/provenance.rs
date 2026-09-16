@@ -22,6 +22,16 @@ pub(crate) fn verify_release_manifest(manifest: &[u8], envelope: &[u8]) -> anyho
     verify_release_manifest_with_keys(manifest, envelope, &keys)
 }
 
+/// Return whether this binary has a valid embedded release trust root.
+///
+/// Heartbeat-triggered upgrades must make this admission check before they
+/// start a download. A source build with missing or malformed public inputs may
+/// still run, but it must never turn a local opt-in into an unsigned automatic
+/// upgrade attempt.
+pub(crate) fn release_verification_configured() -> bool {
+    embedded_trust_keys().is_ok()
+}
+
 pub(crate) fn verify_release_manifest_with_keys(
     manifest: &[u8],
     envelope: &[u8],
