@@ -219,6 +219,7 @@ mod admin_shared;
 mod admin_system;
 mod admin_users;
 mod ai_serving;
+mod issue_222;
 mod runtime_and_security;
 mod sql_and_data;
 mod usage;

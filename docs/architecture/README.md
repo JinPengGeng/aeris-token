@@ -11,6 +11,7 @@ ADR 的状态只描述已经落地的范围；延期的接线、部署或生产�
 | [ADR-0045：Signed provenance for tunnel release upgrades](adr-0045-signed-tunnel-release-provenance.md) | Accepted（核心验签已实现） | 发布清单签名与离线验证、手工/heartbeat 升级门禁 | 完整发布矩阵和生产轮换演练 |
 | [ADR-0046：Bounded gateway readiness and health contract](adr-0046-readiness-health-contract.md) | Accepted | `/health`、`/ready` 的边界、依赖探测与超时合同 | 生产部署容量与告警验收 |
 | [ADR-0050：Tunnel signing key rotation overlap](adr-0050-tunnel-signing-key-rotation.md) | Accepted（部分实现） | key ID、有效期、重叠窗口和撤销语义 | 持久化与 wire integration |
+| [ADR-0051：Provider and data-layer extension surfaces](adr-0051-extension-surfaces.md) | Accepted（Issue #222 bounded contract） | PostgreSQL-only data boundary、provider registration points、measured change baseline | Cross-capability provider registry、trait splitting、migration convergence |
 
 编号沿用仓库已有记录，不补造缺失的历史 ADR-0001 至 ADR-0043。新增记录应使用下一个
 可追溯编号，并在标题、状态、相关 Issue 和延期范围中说明来源；描述性 ADR（见
