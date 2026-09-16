@@ -41,6 +41,7 @@ automation:
   - '.github/ai-executors.json'
   - '.github/automation-policy.yml'
   - '.github/change-filters.yml'
+  - '.github/dependabot.yml'
   - '.github/automation/**'
   - '.github/upstream-sync-policy.yml'
   - '.github/workflows/**'

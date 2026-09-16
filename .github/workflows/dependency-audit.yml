@@ -16,6 +16,7 @@ on:
       - "frontend/**"
       - "aether-vscodex/**"
       - ".github/automation/**"
+      - ".github/dependabot.yml"
       - ".github/workflows/dependency-audit.yml"
   pull_request:
   schedule:

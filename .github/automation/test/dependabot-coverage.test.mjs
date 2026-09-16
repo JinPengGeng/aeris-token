@@ -119,3 +119,13 @@ test('npm and Docker updater entries use bounded review cadence', () => {
     }
   }
 });
+
+test('Dependabot configuration changes trigger audit and automation workflows', () => {
+  for (const workflow of ['.github/workflows/frontend-ci.yml', '.github/workflows/dependency-audit.yml']) {
+    assert.match(
+      read(workflow),
+      /^      - "\.github\/dependabot\.yml"$/m,
+      `${workflow} must run when Dependabot configuration changes`,
+    );
+  }
+});
