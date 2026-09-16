@@ -13,9 +13,9 @@ impl LocalVideoTaskSnapshot {
     pub(crate) fn created_at_unix_secs(&self) -> u64 {
         match self {
             // The legacy field name is retained for the persisted/API contract;
-            // video-task records store this value in Unix seconds.
-            Self::OpenAi(seed) => seed.created_at_unix_ms,
-            Self::Gemini(seed) => seed.created_at_unix_secs,
+            // current video-task records store this value in Unix seconds.
+            Self::OpenAi(seed) => normalize_unix_timestamp_secs(seed.created_at_unix_ms),
+            Self::Gemini(seed) => normalize_unix_timestamp_secs(seed.created_at_unix_secs),
         }
     }
 
@@ -243,6 +243,17 @@ impl LocalVideoTaskSnapshot {
             Self::OpenAi(seed) => seed.transport.provider_name.as_deref(),
             Self::Gemini(seed) => seed.transport.provider_name.as_deref(),
         }
+    }
+}
+
+fn normalize_unix_timestamp_secs(value: u64) -> u64 {
+    // A small number of pre-retention stores used the legacy field name
+    // literally and persisted milliseconds. Accept both encodings so those
+    // records receive the same expiry policy instead of becoming immortal.
+    if value >= 1_000_000_000_000 {
+        value / 1_000
+    } else {
+        value
     }
 }
 

@@ -10,7 +10,8 @@ capacity bound was added to `VideoTaskRegistry`.
 - Snapshots from older versions without a creation timestamp are retained until
   the capacity bound removes them. This avoids treating unknown age as expired.
 - The legacy OpenAI `created_at_unix_ms` field is interpreted as Unix seconds,
-  matching the video-task database projection and existing poll scheduling.
+  matching the video-task database projection and existing poll scheduling;
+  historical millisecond values are normalized before age comparison.
 - Cleanup is persisted through the existing encrypted atomic rewrite. No
   plaintext store, credential, API response, or upstream repository is changed.
 

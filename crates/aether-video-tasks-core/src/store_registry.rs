@@ -315,4 +315,55 @@ mod tests {
         assert!(registry.prune_terminal_at(now));
         assert!(registry.read_openai("openai-expired").is_none());
     }
+
+    #[test]
+    fn terminal_age_pruning_normalizes_legacy_openai_millisecond_timestamps() {
+        let now = 2_000_000;
+        let created_at_secs = now - VIDEO_TASK_TERMINAL_RETENTION_SECS - 1;
+        let mut registry = VideoTaskRegistry::default();
+        registry.insert(LocalVideoTaskSnapshot::OpenAi(OpenAiVideoTaskSeed {
+            local_task_id: "openai-legacy-ms".to_string(),
+            upstream_task_id: "upstream-legacy-ms".to_string(),
+            created_at_unix_ms: created_at_secs * 1_000,
+            user_id: None,
+            api_key_id: None,
+            model: Some("sora-2".to_string()),
+            prompt: None,
+            size: None,
+            seconds: None,
+            remixed_from_video_id: None,
+            status: LocalVideoTaskStatus::Completed,
+            progress_percent: 100,
+            completed_at_unix_secs: Some(created_at_secs),
+            expires_at_unix_secs: None,
+            error_code: None,
+            error_message: None,
+            video_url: None,
+            persistence: LocalVideoTaskPersistence {
+                request_id: "request-openai-legacy-ms".to_string(),
+                username: None,
+                api_key_name: None,
+                client_api_format: "openai:video".to_string(),
+                provider_api_format: "openai:video".to_string(),
+                original_request_body: json!({}),
+                format_converted: false,
+            },
+            transport: LocalVideoTaskTransport {
+                upstream_base_url: "https://api.openai.example".to_string(),
+                provider_name: Some("openai".to_string()),
+                provider_id: "provider-1".to_string(),
+                endpoint_id: "endpoint-1".to_string(),
+                key_id: "key-1".to_string(),
+                headers: Default::default(),
+                content_type: Some("application/json".to_string()),
+                model_name: Some("sora-2".to_string()),
+                proxy: None,
+                transport_profile: None,
+                timeouts: None,
+            },
+        }));
+
+        assert!(registry.prune_terminal_at(now));
+        assert!(registry.read_openai("openai-legacy-ms").is_none());
+    }
 }
