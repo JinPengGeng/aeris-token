@@ -38,17 +38,35 @@ fi
 # Every explicit event must be attached through the shared helper. A literal
 # event name elsewhere is either a generic fallback or needs an explicit
 # review before it can become a durable audit event.
+scan_files="${tmp_dir}/scan-files"
+if ! find "${SCAN_PATHS[@]}" -type f -name '*.rs' -print0 > "${scan_files}"; then
+  printf 'failed to enumerate audit producer files\n' >&2
+  exit 1
+fi
+scan_paths=()
+while IFS= read -r -d '' scan_path; do
+  scan_paths+=("${scan_path}")
+done < "${scan_files}"
+
 while IFS= read -r event; do
-  count="$(rg -l --fixed-strings "\"${event}\"" "${SCAN_PATHS[@]}" --glob '*.rs' \
-    | wc -l | tr -d ' ')"
+  if matches="$(grep -lF -- "\"${event}\"" "${scan_paths[@]}")"; then
+    count="$(printf '%s\n' "${matches}" | wc -l | tr -d ' ')"
+  else
+    grep_status=$?
+    (( grep_status == 1 )) || {
+      printf 'failed to scan audit producers for event: %s\n' "${event}" >&2
+      exit "${grep_status}"
+    }
+    count=0
+  fi
   (( count > 0 )) || {
     printf 'inventory event is not present in an admin handler: %s\n' "${event}" >&2
     exit 1
   }
 done < "${tmp_dir}/declared"
 
-rg -q 'admin_mutation_completed' "${REPO_ROOT}/apps/aether-gateway/src/audit/admin.rs"
-rg -q 'admin_mutation_failed' "${REPO_ROOT}/apps/aether-gateway/src/audit/admin.rs"
+grep -Fq -- 'admin_mutation_completed' "${REPO_ROOT}/apps/aether-gateway/src/audit/admin.rs"
+grep -Fq -- 'admin_mutation_failed' "${REPO_ROOT}/apps/aether-gateway/src/audit/admin.rs"
 
 printf 'admin audit inventory is current (%s explicit events; generic fallback present)\n' \
   "$(wc -l < "${tmp_dir}/declared" | tr -d ' ')"
