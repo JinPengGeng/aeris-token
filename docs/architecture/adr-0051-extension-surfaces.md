@@ -38,7 +38,7 @@ cannot silently bypass the architecture review:
 | `codex` | dedicated pool and OAuth adapters |
 | `chatgpt_web` | dedicated pool adapter; generic OAuth template |
 | `kiro` | dedicated pool and OAuth adapters |
-| `grok` | dedicated pool adapter; generic OAuth behavior where applicable |
+| `grok` | dedicated pool adapter; no OAuth adapter registered |
 | `gemini_cli` | generic/unsupported pool behavior; generic OAuth template |
 | `vertex_ai` | unsupported pool adapter; no OAuth adapter |
 | `antigravity` | unsupported pool adapter; dedicated OAuth adapter |
