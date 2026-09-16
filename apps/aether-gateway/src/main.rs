@@ -3816,6 +3816,23 @@ mod tests {
     }
 
     #[test]
+    fn frontdoor_environment_controls_cors_security_posture() {
+        let production = GatewayFrontdoorArgs {
+            environment: "production".to_string(),
+            cors_origins: None,
+            cors_allow_credentials: true,
+        };
+        assert!(production.cors_config().is_none());
+
+        let development = GatewayFrontdoorArgs {
+            environment: "development".to_string(),
+            cors_origins: None,
+            cors_allow_credentials: true,
+        };
+        assert!(development.cors_config().is_some());
+    }
+
+    #[test]
     fn clamps_gateway_listen_backlog() {
         assert_eq!(
             super::gateway_listen_backlog(MIN_GATEWAY_LISTEN_BACKLOG - 1),

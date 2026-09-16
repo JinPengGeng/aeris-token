@@ -213,11 +213,20 @@ mod public_error_projection_tests {
     }
 }
 
-fn auth_environment() -> Option<String> {
+const DEFAULT_AUTH_ENVIRONMENT: &str = "production";
+
+/// Resolve the environment used by request-time authentication helpers.
+///
+/// `GatewayFrontdoorArgs` defaults `ENVIRONMENT` to production at clap parse
+/// time.  Keep the request-time fallback identical so direct launches do not
+/// silently use a development cookie policy when the environment variable is
+/// absent.
+fn auth_environment() -> String {
     std::env::var("ENVIRONMENT")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_AUTH_ENVIRONMENT.to_string())
 }
 
 pub(super) fn auth_jwt_secret() -> Result<String, String> {
@@ -257,9 +266,10 @@ pub(crate) fn auth_refresh_cookie_name() -> String {
 }
 
 pub(crate) fn auth_refresh_cookie_secure() -> bool {
+    let environment = auth_environment();
     auth_refresh_cookie_secure_from_values(
         std::env::var("AUTH_REFRESH_COOKIE_SECURE").ok().as_deref(),
-        auth_environment().as_deref(),
+        Some(environment.as_str()),
     )
 }
 
@@ -281,13 +291,26 @@ fn auth_refresh_cookie_secure_from_values(
 }
 
 fn auth_refresh_cookie_samesite() -> &'static str {
-    match std::env::var("AUTH_REFRESH_COOKIE_SAMESITE") {
-        Ok(value) if value.trim().eq_ignore_ascii_case("strict") => "Strict",
-        Ok(value) if value.trim().eq_ignore_ascii_case("none") => "None",
-        Ok(value) if value.trim().eq_ignore_ascii_case("lax") => "Lax",
-        _ if auth_environment()
-            .as_deref()
-            .is_some_and(|value| value.eq_ignore_ascii_case("production")) =>
+    let environment = auth_environment();
+    auth_refresh_cookie_samesite_from_values(
+        std::env::var("AUTH_REFRESH_COOKIE_SAMESITE")
+            .ok()
+            .as_deref(),
+        Some(environment.as_str()),
+    )
+}
+
+fn auth_refresh_cookie_samesite_from_values(
+    explicit_samesite: Option<&str>,
+    environment: Option<&str>,
+) -> &'static str {
+    match explicit_samesite {
+        Some(value) if value.trim().eq_ignore_ascii_case("strict") => "Strict",
+        Some(value) if value.trim().eq_ignore_ascii_case("none") => "None",
+        Some(value) if value.trim().eq_ignore_ascii_case("lax") => "Lax",
+        _ if environment
+            .unwrap_or(DEFAULT_AUTH_ENVIRONMENT)
+            .eq_ignore_ascii_case("production") =>
         {
             "None"
         }
@@ -448,7 +471,8 @@ pub(super) fn validate_auth_login_password(password: &str) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::{
-        auth_refresh_cookie_secure_from_values, extract_bearer_token, extract_cookie_value,
+        auth_refresh_cookie_samesite_from_values, auth_refresh_cookie_secure_from_values,
+        extract_bearer_token, extract_cookie_value,
     };
     use axum::http::{header, HeaderMap, HeaderValue};
 
@@ -529,5 +553,25 @@ mod tests {
             Some("true"),
             Some("development")
         ));
+    }
+
+    #[test]
+    fn refresh_cookie_samesite_matches_the_frontdoor_environment_default() {
+        // Clap defaults the frontdoor environment to production when the
+        // ENVIRONMENT variable is absent.  Authentication must make the same
+        // choice so the default cookie policy is SameSite=None.
+        assert_eq!(auth_refresh_cookie_samesite_from_values(None, None), "None");
+        assert_eq!(
+            auth_refresh_cookie_samesite_from_values(None, Some("production")),
+            "None"
+        );
+        assert_eq!(
+            auth_refresh_cookie_samesite_from_values(None, Some("development")),
+            "Lax"
+        );
+        assert_eq!(
+            auth_refresh_cookie_samesite_from_values(Some("lax"), Some("production")),
+            "Lax"
+        );
     }
 }
