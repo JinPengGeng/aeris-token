@@ -217,10 +217,6 @@ fn sanitize_admin_audit_path(path_and_query: &str) -> String {
     crate::middleware::sanitize_access_log_path(path_and_query)
 }
 
-fn sanitize_admin_audit_target_id(target_id: String) -> String {
-    sanitize_admin_audit_target_id_with_truncation(target_id).0
-}
-
 fn sanitize_admin_audit_target_id_with_truncation(target_id: String) -> (String, bool) {
     let sanitized = if target_id.trim_start().starts_with('/') {
         sanitize_admin_audit_path(&target_id)
@@ -277,7 +273,7 @@ fn is_admin_read_method(method: &http::Method) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_admin_audit_response, sanitize_admin_audit_path, sanitize_admin_audit_target_id,
+        classify_admin_audit_response, sanitize_admin_audit_path,
         sanitize_admin_audit_target_id_with_truncation, AdminAuditLogLevel,
     };
     use axum::http::{Method, StatusCode};
@@ -315,13 +311,14 @@ mod tests {
     #[test]
     fn path_shaped_audit_targets_drop_sensitive_query_values() {
         assert_eq!(
-            sanitize_admin_audit_target_id(
+            sanitize_admin_audit_target_id_with_truncation(
                 "/api/admin/monitoring/trace/request-1?token=secret&limit=25".to_string(),
-            ),
+            )
+            .0,
             "/api/admin/monitoring/trace/request-1?limit=25"
         );
         assert_eq!(
-            sanitize_admin_audit_target_id("resource-id?literal".to_string()),
+            sanitize_admin_audit_target_id_with_truncation("resource-id?literal".to_string()).0,
             "resource-id?literal"
         );
     }
