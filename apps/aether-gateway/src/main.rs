@@ -1289,13 +1289,27 @@ struct GatewayFrontdoorArgs {
 }
 
 impl GatewayFrontdoorArgs {
+    fn effective_environment(&self) -> &str {
+        let environment = self.environment.trim();
+        if environment.is_empty() {
+            "production"
+        } else {
+            environment
+        }
+    }
+
     fn cors_config(&self) -> Option<FrontdoorCorsConfig> {
         FrontdoorCorsConfig::from_environment(
-            self.environment.trim(),
+            self.effective_environment(),
             self.cors_origins.as_deref(),
             self.cors_allow_credentials,
         )
     }
+}
+
+/// Auth helpers read ENVIRONMENT; call this before starting runtime threads.
+fn sync_auth_environment(frontdoor: &GatewayFrontdoorArgs) {
+    std::env::set_var("ENVIRONMENT", frontdoor.effective_environment());
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -2184,6 +2198,8 @@ fn validate_deployment_topology(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    sync_auth_environment(&args.frontdoor);
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| std::io::Error::other("Failed to install rustls CryptoProvider"))?;
@@ -2193,13 +2209,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .thread_stack_size(GATEWAY_TOKIO_WORKER_STACK_SIZE_BYTES)
         .build()?;
-    let result = runtime.block_on(run());
+    let result = runtime.block_on(run(args));
     aether_usage_runtime::shutdown_usage_background_runtime(std::time::Duration::from_secs(5));
     result
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(command) = args.command.as_ref() {
         init_service_runtime(args.runtime_config()?)?;
         // Data export/import can decrypt and persist sensitive credentials;
@@ -3830,6 +3845,19 @@ mod tests {
             cors_allow_credentials: true,
         };
         assert!(development.cors_config().is_some());
+    }
+
+    #[test]
+    fn cli_environment_override_is_retained_for_auth_and_cors_resolution() {
+        let args = Args::try_parse_from(["aether-gateway", "--environment", "development"])
+            .expect("explicit environment should parse");
+        assert_eq!(args.frontdoor.effective_environment(), "development");
+        assert!(args.frontdoor.cors_config().is_some());
+
+        let production = Args::try_parse_from(["aether-gateway", "--environment", "production"])
+            .expect("production environment should parse");
+        assert_eq!(production.frontdoor.effective_environment(), "production");
+        assert!(production.frontdoor.cors_config().is_none());
     }
 
     #[test]
