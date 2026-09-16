@@ -50,7 +50,7 @@ const orphanPackageLockDirectories = trackedFiles
   .filter((directory) => !trackedFileSet.has(path.posix.join(directory, 'package.json')));
 
 const trackedDockerDirectories = trackedFiles
-  .filter((file) => /(^|\/)(Dockerfile[^/]*|[^/]*\.Dockerfile)$/i.test(file))
+  .filter((file) => /dockerfile|containerfile/i.test(path.posix.basename(file)))
   .map((file) => normalizeDirectory(path.posix.dirname(file)));
 
 const assertExactlyOnce = (configuredDirectories, expectedDirectories, label) => {
@@ -105,5 +105,17 @@ test('npm and Docker updater entries use bounded review cadence', () => {
       Number.isInteger(limit) && limit > 0 && limit <= 5,
       `updater PR limit must be a positive integer no greater than five: ${limit}`,
     );
+
+    const groups = Object.values(update.groups ?? {});
+    if (update.directories || update['package-ecosystem'] === 'docker') {
+      assert.ok(groups.length > 0, `grouped updater must define a minor/patch group: ${JSON.stringify(update)}`);
+    }
+    for (const group of groups) {
+      assert.deepEqual(
+        [...(group['update-types'] ?? [])].sort(),
+        ['minor', 'patch'],
+        `updater groups must retain minor/patch coverage: ${JSON.stringify(update)}`,
+      );
+    }
   }
 });

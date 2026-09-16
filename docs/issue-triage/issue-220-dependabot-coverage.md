@@ -53,7 +53,7 @@ acceptance item and must be linked here after it completes.
 YAML parsing and a comparison with the tracked manifest/lockfile pairs and Dockerfile inventory
 passed: all five npm project directories and all three Dockerfile directories have
 exactly one updater. The baseline was missing three npm and three Docker
-directories. All four existing update entries are preserved; every entry uses
+directories. All five existing update entries are preserved; every entry uses
 weekly scheduling and a positive PR limit no greater than five. The patch
 passed `git diff --check`. The actual hosted update job's first successful run remains
 operational evidence to collect after merge; configuration coverage alone does
