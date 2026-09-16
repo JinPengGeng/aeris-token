@@ -183,6 +183,20 @@ AETHER_BACKUP_ENCRYPTION_KEY='原备份密钥' \
 
 默认限制密文为 `512MiB`、解压后 JSON 为 `1GiB`，可通过受限的 `--max-encrypted-mib` / `--max-json-mib` 调整。网关最多扫描同一备份前缀下 10,000 个对象，并且不会自动删除 S3 对象：`backup_s3_retention_count` 只用于报告超出保留数量的清理候选。旧明文备份在创建并验证加密副本后仍会保留，必须通过 bucket lifecycle 或支持版本条件的外部清理工具移除；启用 Versioning 时还需清理 noncurrent versions，Object Lock/retention 可能阻止物理删除。
 
+## Q&A
+
+### 应该选择哪种部署方式？
+
+Docker Compose 适合大多数部署，并会同时运行 PostgreSQL 与 Redis。原生
+Linux systemd 安装适合已经准备好 PostgreSQL 的主机；Tunnel 是可选的独立
+中转组件，安装和升级说明见 [Tunnel 运维入口](docs/operations/tunnel-runbook.md)。
+
+### 如何验证备份恢复？
+
+先使用隔离数据库运行[备份恢复演练](docs/operations/backup-restore-drill.md)，
+再根据部署环境记录 RPO、RTO 和业务对账结果。离线解密输出本身不等于数据库恢复
+成功，也不能替代生产灾备验收。
+
 ---
 
 ## 许可证

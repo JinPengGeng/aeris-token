@@ -661,6 +661,7 @@ dependencies = [
  "aether-loadtools",
  "aether-runtime",
  "aether-runtime-state",
+ "aether-test-support",
  "axum",
  "http",
  "sqlx",
@@ -751,6 +752,7 @@ dependencies = [
  "async-trait",
  "serde",
  "serde_json",
+ "sha2",
  "url",
  "uuid",
 ]

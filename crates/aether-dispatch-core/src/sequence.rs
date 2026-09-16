@@ -82,9 +82,25 @@ impl<Candidate> DispatchSequence<Candidate> {
         &mut self,
         mark: DispatchSequenceMark,
     ) -> Option<&DispatchSequenceItem<Candidate>> {
+        // Sequences can be restored with terminal attempts before the cursor.
+        // Never let a later completion overwrite that durable outcome.
+        while self
+            .items
+            .get(self.cursor)
+            .is_some_and(|item| item.mark != DispatchSequenceMark::Pending)
+        {
+            self.cursor = self.cursor.saturating_add(1);
+        }
         let item = self.items.get_mut(self.cursor)?;
         item.mark = mark;
         self.cursor = self.cursor.saturating_add(1);
+        while self
+            .items
+            .get(self.cursor)
+            .is_some_and(|item| item.mark != DispatchSequenceMark::Pending)
+        {
+            self.cursor = self.cursor.saturating_add(1);
+        }
         self.items.get(self.cursor)
     }
 }
@@ -106,5 +122,80 @@ mod tests {
         assert_eq!(sequence.items()[0].mark, DispatchSequenceMark::Failed);
         assert_eq!(sequence.items()[1].mark, DispatchSequenceMark::Failed);
         assert_eq!(sequence.items()[2].mark, DispatchSequenceMark::Pending);
+    }
+
+    #[test]
+    fn marking_a_restored_sequence_never_overwrites_a_terminal_attempt() {
+        let mut sequence = DispatchSequence::new(vec![
+            super::DispatchSequenceItem {
+                candidate_index: 0,
+                retry_index: 0,
+                candidate: "already-succeeded",
+                mark: DispatchSequenceMark::Succeeded,
+            },
+            super::DispatchSequenceItem {
+                candidate_index: 1,
+                retry_index: 0,
+                candidate: "pending",
+                mark: DispatchSequenceMark::Pending,
+            },
+        ]);
+
+        assert_eq!(sequence.mark_failed(), None);
+        assert_eq!(sequence.cursor(), 2);
+        assert_eq!(sequence.items()[0].mark, DispatchSequenceMark::Succeeded);
+        assert_eq!(sequence.items()[1].mark, DispatchSequenceMark::Failed);
+    }
+
+    #[test]
+    fn marking_an_exhausted_sequence_preserves_all_terminal_attempts() {
+        let mut sequence = DispatchSequence::new(vec![super::DispatchSequenceItem {
+            candidate_index: 0,
+            retry_index: 0,
+            candidate: "already-succeeded",
+            mark: DispatchSequenceMark::Succeeded,
+        }]);
+
+        assert_eq!(sequence.mark_failed(), None);
+        assert_eq!(sequence.cursor(), 1);
+        assert_eq!(sequence.items()[0].mark, DispatchSequenceMark::Succeeded);
+    }
+
+    #[test]
+    fn marking_a_restored_sequence_returns_the_next_pending_attempt() {
+        let mut sequence = DispatchSequence::new(vec![
+            super::DispatchSequenceItem {
+                candidate_index: 0,
+                retry_index: 0,
+                candidate: "already-succeeded",
+                mark: DispatchSequenceMark::Succeeded,
+            },
+            super::DispatchSequenceItem {
+                candidate_index: 1,
+                retry_index: 0,
+                candidate: "pending-a",
+                mark: DispatchSequenceMark::Pending,
+            },
+            super::DispatchSequenceItem {
+                candidate_index: 2,
+                retry_index: 0,
+                candidate: "already-failed",
+                mark: DispatchSequenceMark::Failed,
+            },
+            super::DispatchSequenceItem {
+                candidate_index: 3,
+                retry_index: 0,
+                candidate: "pending-b",
+                mark: DispatchSequenceMark::Pending,
+            },
+        ]);
+
+        assert_eq!(
+            sequence.mark_failed().map(|item| item.candidate),
+            Some("pending-b")
+        );
+        assert_eq!(sequence.cursor(), 3);
+        assert_eq!(sequence.items()[1].mark, DispatchSequenceMark::Failed);
+        assert_eq!(sequence.items()[2].mark, DispatchSequenceMark::Failed);
     }
 }

@@ -10,13 +10,20 @@ const PRIVATE_KEY_PEM_LABELS: &[&str] = &["PRIVATE KEY", "RSA PRIVATE KEY"];
 const PUBLIC_KEY_PEM_LABELS: &[&str] = &["PUBLIC KEY", "RSA PUBLIC KEY"];
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+/// Errors returned while parsing RSA key material or processing a signature.
 pub enum RsaPkcs1Sha256Error {
+    /// The private key is malformed, unsupported, or exceeds the 64 KiB input
+    /// limit.
     #[error("invalid RSA private key")]
     InvalidPrivateKey,
+    /// The public key is malformed, unsupported, or outside the 2048-8192 bit
+    /// modulus range.
     #[error("invalid RSA public key")]
     InvalidPublicKey,
+    /// AWS-LC could not produce a signature for the parsed private key.
     #[error("RSA signing failed")]
     SigningFailed,
+    /// The signature length does not match the public key modulus.
     #[error("invalid RSA signature encoding")]
     InvalidSignature,
 }

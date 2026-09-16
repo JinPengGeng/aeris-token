@@ -108,6 +108,30 @@ test('every Rust and database job consumes changes, while all aggregate gates an
   assert.equal(workflow.jobs.prometheus_contracts.needs, undefined);
   assert.equal(workflow.jobs.check.name, 'Rust CI / check');
   assert.equal(workflow.jobs.publish_dispatch_status.needs, 'check');
+  const shellFixtureStep = workflow.jobs.shell_security.steps.find((step) => typeof step.run === 'string');
+  assert.ok(shellFixtureStep, 'shell fixture run step must exist');
+  assert.match(
+    shellFixtureStep.run,
+    /PYTHONUTF8=1 python3 docs\/api\/generate_format_field_coverage\.py --check/u,
+    'shell fixtures must enforce the format-field matrix drift check',
+  );
+  assert.match(
+    shellFixtureStep.run,
+    /python3 tests\/readme_governance_reference_test\.py/u,
+    'shell fixtures must enforce README and CODEOWNERS reference checks',
+  );
+  assert.match(
+    shellFixtureStep.run,
+    /bash tests\/aether_gateway_build_script_invalidation_test\.sh/u,
+    'shell fixtures must enforce linked-worktree build-script freshness',
+  );
+  assert.ok(workflow.jobs.shell_security.steps.some((step) =>
+    step.uses?.startsWith('dtolnay/rust-toolchain@') && step.with?.toolchain === '1.95.0'),
+  'the real Cargo fixture must have the pinned Rust toolchain');
+  assert.ok(
+    workflow.on.push.paths.includes('.github/CODEOWNERS'),
+    'CODEOWNERS-only default-branch pushes must run the reference check',
+  );
   for (const jobId of leaves) {
     assert.equal(workflow.jobs[jobId].needs, 'changes', jobId);
   }

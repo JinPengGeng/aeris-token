@@ -14,11 +14,10 @@
 # Frontend and protected control plane
 /frontend/ @JinPengGeng
 /.github/ @JinPengGeng
-/CODEOWNERS @JinPengGeng
+/.github/CODEOWNERS @JinPengGeng
 /Cargo.toml @JinPengGeng
 /Cargo.lock @JinPengGeng
 /**/Cargo.toml @JinPengGeng
 /**/Cargo.lock @JinPengGeng
 /frontend/package.json @JinPengGeng
 /frontend/package-lock.json @JinPengGeng
-/release.toml @JinPengGeng

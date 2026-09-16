@@ -216,6 +216,13 @@ impl std::fmt::Debug for LocalVideoTaskPersistence {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiVideoTaskSeed {
+    /// Preserve existing database identity; older snapshots derive it from the local task ID.
+    #[serde(default)]
+    pub local_short_id: Option<String>,
+    #[serde(default)]
+    pub native_response: Option<Value>,
+    #[serde(default)]
+    pub xai_provider: bool,
     pub local_task_id: String,
     pub upstream_task_id: String,
     pub created_at_unix_ms: u64,
@@ -274,6 +281,10 @@ impl std::fmt::Debug for OpenAiVideoTaskSeed {
 pub struct GeminiVideoTaskSeed {
     pub local_short_id: String,
     pub upstream_operation_name: String,
+    /// Unix seconds when the local task was created. Older persisted snapshots
+    /// omit this field and are treated as having unknown age by retention.
+    #[serde(default)]
+    pub created_at_unix_secs: u64,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
     pub model: String,

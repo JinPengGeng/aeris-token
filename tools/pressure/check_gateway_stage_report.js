@@ -261,6 +261,9 @@ function parseArgs(argv) {
   const options = {
     stage: process.env.PRESSURE_STAGE || 'S1',
     reportPath: null,
+    requireMultiNodeContext: ['1', 'true', 'yes', 'on'].includes(
+      String(process.env.PRESSURE_REQUIRE_MULTI_NODE_CONTEXT || '').toLowerCase(),
+    ),
     minRequests: numberEnv('PRESSURE_MIN_REQUESTS'),
     minConcurrency: numberEnv('PRESSURE_MIN_CONCURRENCY'),
     minThroughputRps: numberEnv('PRESSURE_MIN_THROUGHPUT_RPS'),
@@ -314,6 +317,8 @@ function parseArgs(argv) {
     const arg = argv[index]
     if (arg === '--stage') {
       options.stage = nextValue(argv, ++index, arg)
+    } else if (arg === '--require-multi-node-context') {
+      options.requireMultiNodeContext = true
     } else if (arg === '--min-requests') {
       options.minRequests = numberArg(nextValue(argv, ++index, arg), arg)
     } else if (arg === '--min-concurrency') {
@@ -483,6 +488,7 @@ function parseArgs(argv) {
     }),
     stage: options.stage,
     reportPath: options.reportPath || defaults.defaultReport,
+    requireMultiNodeContext: options.requireMultiNodeContext,
   }
 }
 
@@ -576,6 +582,10 @@ function fail(message) {
   failures += 1
 }
 
+if (options.requireMultiNodeContext) {
+  validateMultiNodeContext()
+}
+
 function metric(name, { required = true } = {}) {
   const value = metrics[name]
   if (value == null) {
@@ -593,6 +603,108 @@ function metric(name, { required = true } = {}) {
 function optionalMetric(name) {
   if (metrics[name] == null) return null
   return metric(name)
+}
+
+function validateMultiNodeContext() {
+  const deployment = report.deployment
+  if (!isRecord(deployment)) {
+    fail('missing deployment context for multi-node report')
+    return
+  }
+
+  if (deployment.topology !== 'multi-node') {
+    fail(`deployment.topology=${JSON.stringify(deployment.topology)}, expected multi-node`)
+  }
+
+  const nodeCount = deployment.nodes
+  if (!Number.isSafeInteger(nodeCount) || nodeCount < 3) {
+    fail(`deployment.nodes must be an integer >= 3, got ${JSON.stringify(nodeCount)}`)
+  }
+
+  const roles = deployment.roles
+  if (!isRecord(roles)) {
+    fail('missing deployment.roles')
+  } else {
+    const frontdoor = roles.frontdoor
+    const background = roles.background
+    if (!Number.isSafeInteger(frontdoor) || frontdoor < 2) {
+      fail(`deployment.roles.frontdoor must be an integer >= 2, got ${JSON.stringify(frontdoor)}`)
+    }
+    if (!Number.isSafeInteger(background) || background < 1) {
+      fail(`deployment.roles.background must be an integer >= 1, got ${JSON.stringify(background)}`)
+    }
+    if (Number.isSafeInteger(nodeCount) && frontdoor + background !== nodeCount) {
+      fail(`deployment.roles total=${frontdoor + background}, expected ${nodeCount}`)
+    }
+  }
+
+  const instanceIds = deployment.instance_ids
+  if (!Array.isArray(instanceIds) || instanceIds.length !== nodeCount) {
+    fail(`deployment.instance_ids must contain exactly ${nodeCount} node IDs`)
+  } else {
+    const normalizedIds = instanceIds.filter((id) => typeof id === 'string' && id.trim() !== '')
+    if (normalizedIds.length !== instanceIds.length) {
+      fail('deployment.instance_ids must contain non-empty strings')
+    }
+    if (new Set(normalizedIds).size !== normalizedIds.length) {
+      fail('deployment.instance_ids must be unique')
+    }
+  }
+
+  if (typeof deployment.image_digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(deployment.image_digest)) {
+    fail('deployment.image_digest must be a sha256:<64 lowercase hex> digest')
+  }
+  if (deployment.shared_postgres !== true) {
+    fail('deployment.shared_postgres must be true')
+  }
+  if (deployment.shared_redis !== true) {
+    fail('deployment.shared_redis must be true')
+  }
+  if (deployment.preflight !== 'pass') {
+    fail(`deployment.preflight=${JSON.stringify(deployment.preflight)}, expected pass`)
+  }
+
+  const evidence = report.evidence
+  if (!isRecord(evidence)) {
+    fail('missing evidence context for multi-node report')
+    return
+  }
+  const instanceIdList = Array.isArray(instanceIds) ? instanceIds : []
+  if (!Array.isArray(evidence.sampled_nodes) || evidence.sampled_nodes.length !== nodeCount) {
+    fail(`evidence.sampled_nodes must contain exactly ${nodeCount} node IDs`)
+  } else if (
+    new Set(evidence.sampled_nodes).size !== evidence.sampled_nodes.length
+    || new Set(evidence.sampled_nodes).size !== new Set(instanceIdList).size
+    || !evidence.sampled_nodes.every((id) => instanceIdList.includes(id))
+  ) {
+    fail('evidence.sampled_nodes must match deployment.instance_ids exactly')
+  }
+  if (!isStrictIso8601Timestamp(evidence.collected_at)) {
+    fail('evidence.collected_at must be an ISO-8601 timestamp')
+  }
+}
+
+function isStrictIso8601Timestamp(value) {
+  if (typeof value !== 'string') return false
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-](\d{2}):(\d{2}))$/,
+  )
+  if (!match || !Number.isFinite(Date.parse(value))) return false
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  const offsetHour = match[9] == null ? 0 : Number(match[9])
+  const offsetMinute = match[10] == null ? 0 : Number(match[10])
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false
+  if (offsetHour > 23 || offsetMinute > 59) return false
+
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return day >= 1 && day <= daysInMonth[month - 1]
 }
 
 function isRecord(value) {
@@ -1285,6 +1397,9 @@ if (failures > 0) {
 
 console.log(`${options.stage} PASS`)
 console.log(`report=${options.reportPath}`)
+if (options.requireMultiNodeContext) {
+  console.log('multi_node_context=PASS')
+}
 console.log(`completed=${completedRequests} concurrency=${concurrency} throughput_rps=${load.throughput_rps ?? '-'} p95_ms=${load.p95_ms ?? '-'} p99_ms=${load.p99_ms ?? '-'}`)
 if (load.headers_p95_ms != null || load.first_body_p95_ms != null) {
   console.log(`headers_p95_ms=${load.headers_p95_ms ?? '-'} first_body_p95_ms=${load.first_body_p95_ms ?? '-'}`)
@@ -1493,5 +1608,5 @@ if (usageRuntimeWorkerReclaimFailuresTotal != null) {
 }
 
 function printUsage() {
-  console.error('usage: check_gateway_stage_report.js [--stage S1|S2|S3|S4|S5|realistic-stream|tps] [--min-requests N] [--min-concurrency N] [--min-throughput-rps N] [--max-headers-p95-ms N] [--max-first-body-p95-ms N] [--max-p95-ms N] [--max-p99-ms N] [--max-first-body-hold-ms N] [--expected-response-mode headers|first-body-byte|full] [--db-pool-max-usage-basis-points N] [--max-db-pool-pressure-samples N] [--max-db-pool-pressure-sample-rate-basis-points N] [--max-postgres-observability-unavailable-samples N] [--max-postgres-wal-observability-unavailable-samples N] [--max-postgres-checkpoint-observability-unavailable-samples N] [--max-postgres-statement-observability-unavailable-samples N] [--max-postgres-lock-waiting-connections N] [--max-postgres-idle-in-transaction-connections N] [--max-postgres-oldest-active-query-age-ms N] [--max-postgres-oldest-transaction-age-ms N] [--max-postgres-statement-top-max-exec-time-ms N] [--max-redis-runtime-health-unavailable-samples N] [--max-redis-runtime-memory-usage-basis-points N] [--max-redis-runtime-rejected-connections-total N] [--max-redis-runtime-evicted-keys-total N] [--max-redis-runtime-error-replies-total N] [--max-redis-runtime-lane-command-errors-total N] [--max-redis-runtime-lane-command-timeouts-total N] [--max-redis-runtime-nonblocking-command-latency-ms N] [--max-redis-runtime-nonblocking-over-500ms-rate-basis-points N] [--max-gateway-process-fd-usage-basis-points N] [--max-gateway-process-tcp-close-wait-connections N] [--max-gateway-background-tasks-unexpected-exits-total N] [--max-usage-queue-final-pending N] [--max-usage-queue-final-lag N] [--max-usage-queue-final-dlq-length N] [--max-usage-queue-oldest-pending-idle-ms N] [--max-usage-queue-health-unavailable-samples N] [--max-usage-counter-outbox-final-pending-rows N] [--max-usage-counter-outbox-oldest-pending-age-seconds N] [--max-usage-counter-health-unavailable-samples N] [--max-usage-counter-outbox-flush-failed-batches-total N] [--max-usage-counter-outbox-cleanup-failed-batches-total N] [--max-usage-runtime-worker-dead-lettered-entries-total N] [--max-usage-runtime-worker-process-failures-total N] [--max-usage-runtime-worker-read-failures-total N] [--max-usage-runtime-worker-reclaim-failures-total N] [report.json]')
+  console.error('usage: check_gateway_stage_report.js [--stage S1|S2|S3|S4|S5|realistic-stream|tps] [--require-multi-node-context] [--min-requests N] [--min-concurrency N] [--min-throughput-rps N] [--max-headers-p95-ms N] [--max-first-body-p95-ms N] [--max-p95-ms N] [--max-p99-ms N] [--max-first-body-hold-ms N] [--expected-response-mode headers|first-body-byte|full] [--db-pool-max-usage-basis-points N] [--max-db-pool-pressure-samples N] [--max-db-pool-pressure-sample-rate-basis-points N] [--max-postgres-observability-unavailable-samples N] [--max-postgres-wal-observability-unavailable-samples N] [--max-postgres-checkpoint-observability-unavailable-samples N] [--max-postgres-statement-observability-unavailable-samples N] [--max-postgres-lock-waiting-connections N] [--max-postgres-idle-in-transaction-connections N] [--max-postgres-oldest-active-query-age-ms N] [--max-postgres-oldest-transaction-age-ms N] [--max-postgres-statement-top-max-exec-time-ms N] [--max-redis-runtime-health-unavailable-samples N] [--max-redis-runtime-memory-usage-basis-points N] [--max-redis-runtime-rejected-connections-total N] [--max-redis-runtime-evicted-keys-total N] [--max-redis-runtime-error-replies-total N] [--max-redis-runtime-lane-command-errors-total N] [--max-redis-runtime-lane-command-timeouts-total N] [--max-redis-runtime-nonblocking-command-latency-ms N] [--max-redis-runtime-nonblocking-over-500ms-rate-basis-points N] [--max-gateway-process-fd-usage-basis-points N] [--max-gateway-process-tcp-close-wait-connections N] [--max-gateway-background-tasks-unexpected-exits-total N] [--max-usage-queue-final-pending N] [--max-usage-queue-final-lag N] [--max-usage-queue-final-dlq-length N] [--max-usage-queue-oldest-pending-idle-ms N] [--max-usage-queue-health-unavailable-samples N] [--max-usage-counter-outbox-final-pending-rows N] [--max-usage-counter-outbox-oldest-pending-age-seconds N] [--max-usage-counter-health-unavailable-samples N] [--max-usage-counter-outbox-flush-failed-batches-total N] [--max-usage-counter-cleanup-failed-batches-total N] [--max-usage-runtime-worker-dead-lettered-entries-total N] [--max-usage-runtime-worker-process-failures-total N] [--max-usage-runtime-worker-read-failures-total N] [--max-usage-runtime-worker-reclaim-failures-total N] [report.json]')
 }

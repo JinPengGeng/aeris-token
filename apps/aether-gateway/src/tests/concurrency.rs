@@ -269,6 +269,13 @@ async fn gateway_rejects_second_in_flight_stream_request_with_distributed_overlo
     assert_eq!(
         second_response
             .headers()
+            .get(http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1")
+    );
+    assert_eq!(
+        second_response
+            .headers()
             .get(EXECUTION_PATH_HEADER)
             .and_then(|value| value.to_str().ok()),
         Some(EXECUTION_PATH_DISTRIBUTED_OVERLOADED)
@@ -363,6 +370,13 @@ async fn gateway_rejects_second_in_flight_stream_request_with_local_overload_imp
         .expect("second request should complete");
 
     assert_eq!(second_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        second_response
+            .headers()
+            .get(http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1")
+    );
     assert_eq!(
         second_response
             .headers()

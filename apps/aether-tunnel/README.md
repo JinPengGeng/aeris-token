@@ -74,7 +74,7 @@ $env:AETHER_TUNNEL_SECURITY = "off"
 irm https://raw.githubusercontent.com/fawney19/Aether/main/apps/aether-tunnel/install.ps1 | iex
 ```
 
-可选变量：`AETHER_TUNNEL_RELEASE_TAG` 固定安装某个 `tunnel-v*` tag，`AETHER_TUNNEL_CONFIG` 指定配置文件路径，`AETHER_TUNNEL_INSTALL_DIR` 指定二进制安装目录。
+可选变量：`AETHER_TUNNEL_RELEASE_REPO` 覆盖默认的 `fawney19/Aether` 发布仓库（仅在该仓库确实发布 `tunnel-v*` 制品时使用），`AETHER_TUNNEL_RELEASE_TAG` 固定安装某个 `tunnel-v*` tag，`AETHER_TUNNEL_CONFIG` 指定配置文件路径，`AETHER_TUNNEL_INSTALL_DIR` 指定二进制安装目录。发布仓库切换政策见 [运行时安装策略](../../docs/issue-triage/issue-256-runtime-install-policy.md)。
 
 ```bash
 # 1. 注册 root 系统服务前，先把二进制和凭据配置放入 root 管理的路径
@@ -101,7 +101,7 @@ sudo aether-tunnel uninstall
 
 完成向导后，如果启用了 Install Service，将自动注册并启动当前系统支持的服务（`systemd` 或 `OpenRC`）。安装会创建不可登录的 `aether-tunnel` system user/group，并让 tunnel 进程以该身份运行。systemd 还启用 `NoNewPrivileges`、空 capability 集、`ProtectSystem=strict`、`ProtectHome` 和独立临时目录；OpenRC 使用 `supervise-daemon --user aether-tunnel:aether-tunnel`。配置目录保持 root 所有、服务组可读（目录 `0750`，配置 `0640`），日志目录和文件由服务身份写入。
 
-既有 root 安装在重新执行 `setup` 时会迁移上述 owner/mode，只有校验成功后才会生成新的服务定义；失败时安装会中止。卸载不会删除配置、日志或服务账号。二进制仍保持 root 所有且不可由服务身份写入，因此自动远程升级在非 root 服务身份下继续拒绝；请使用 `sudo aether-tunnel upgrade` 完成手工升级。签名发布制品校验由 Issue #315 单独定义。
+既有 root 安装在重新执行 `setup` 时会迁移上述 owner/mode，只有校验成功后才会生成新的服务定义；失败时安装会中止。卸载不会删除配置、日志或服务账号。二进制仍保持 root 所有且不可由服务身份写入，因此自动远程升级在非 root 服务身份下继续拒绝；请使用 `sudo aether-tunnel upgrade` 完成手工升级。手工和 heartbeat 触发的升级都会先验证 `SHA256SUMS.txt.sig` 的签名，再校验归档摘要；密钥轮换与恢复边界见[发布密钥轮换手册](../../docs/operations/issue-205-release-key-rotation.md)。
 
 权限迁移只调整 `/etc/aether-tunnel` 专用配置目录。自定义配置路径的父目录保持原权限，需提前允许服务组遍历；所有祖先必须 root 所有且不可由 group/other 写入（包括 sticky 共享目录）。配置路径不接受 `..`、符号链接或多硬链接文件。管理员应串行执行 `setup` 和配置写入；若错误提示配置已替换但目录权限或持久性确认失败，修复所报问题后重试，不能视为已回滚。
 
@@ -115,9 +115,17 @@ sudo aether-tunnel uninstall
 
 ### 安全更新
 
-Linux/macOS 可运行 `sudo aether-tunnel upgrade [version]`。自更新只接受本仓库的非草稿 `tunnel-v*` / `proxy-v*` SemVer Release，下载当前平台的固定资产和同一 tag 下的 `SHA256SUMS.txt`，校验后在受保护的二进制目录内原子替换，并保留上一版本用于失败回滚。Windows 不执行进程内自更新；请重新运行上面的 PowerShell 安装脚本完成手工替换，避免二段重命名产生二进制缺失窗口。
+Linux/macOS 可运行 `sudo aether-tunnel upgrade [version]`。自更新只接受本仓库的非草稿 `tunnel-v*` / `proxy-v*` SemVer Release，下载当前平台的固定资产、同一 tag 下的 `SHA256SUMS.txt` 和 `SHA256SUMS.txt.sig`，先验证签名再校验摘要，随后在受保护的二进制目录内原子替换，并保留上一版本用于失败回滚。`release-provenance.json` 是发布审计信息，不是运行时信任根。Windows 不执行进程内自更新；请重新运行上面的 PowerShell 安装脚本完成手工替换，避免二段重命名产生二进制缺失窗口。
 
-heartbeat ACK 触发的远程自动升级默认关闭，因为当前客户端只验证与制品同源的 SHA-256，尚未消费发布签名或 provenance。只有在已接受该信任边界、并确认管理面与发布资产受保护时，才显式设置 `AETHER_TUNNEL_REMOTE_UPGRADE_ENABLED=true`（或 `--remote-upgrade-enabled`）；这不会改变手工 `upgrade` 命令的行为。
+heartbeat ACK 触发的远程自动升级默认关闭，因为服务身份通常没有替换 root 所有二进制的权限。只有在已完成发布密钥配置、接受远程控制面边界并确认管理面与发布资产受保护时，才显式设置 `AETHER_TUNNEL_REMOTE_UPGRADE_ENABLED=true`（或 `--remote-upgrade-enabled`）；这不会绕过签名校验，也不会改变手工 `upgrade` 命令的行为。
+
+## 运维与架构参考
+
+- [完整环境变量参考](ENVIRONMENT.md)：由 `Config::command()` 生成并在 Rust CI 中检查；安装器专用变量（包括 `AETHER_TUNNEL_RELEASE_REPO`）单独列出。
+- [Tunnel 运维入口](../../docs/operations/tunnel-runbook.md)：安装源、配置优先级、日志/健康检查、签名升级与回滚边界。
+- [发布密钥轮换手册](../../docs/operations/issue-205-release-key-rotation.md)：信任集合、轮换窗口和签名失败恢复。
+- [多节点部署基线](../../docs/operations/multi-node-deployment.md)、[备份恢复演练](../../docs/operations/backup-restore-drill.md)和[指标合同](../../docs/operations/metrics-contract.md)：Gateway 侧的部署与运营合同；这些文档的演练状态不能由 Tunnel 本地启动替代。
+- [架构与 ADR 索引](../../docs/architecture/README.md)：协议兼容、发布 provenance、readiness 和请求数据流的状态与延期范围。
 
 ## 配置
 

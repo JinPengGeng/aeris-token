@@ -9,6 +9,8 @@ cargo test -p aether-tunnel --bin aether-tunnel config::env_reference::regenerat
 校验命令：`cargo test -p aether-tunnel --bin aether-tunnel config::env_reference`。
 Rust CI 的 `Test (Workspace Rest)` 会运行同一校验；环境变量名、CLI 名、默认值、说明或枚举值变化都会要求重新生成。
 
+安装、升级、日志和回滚边界见 [Tunnel 运维入口](../../docs/operations/tunnel-runbook.md)；Gateway 的部署/恢复/指标演练不由本表代替。
+
 ## 读取规则
 
 - 默认值列只导出 clap 声明的默认值，不导出当前环境变量值或实际凭据。CLI 覆盖环境变量，环境变量覆盖 TOML。
@@ -25,6 +27,7 @@ Rust CI 的 `Test (Workspace Rest)` 会运行同一校验；环境变量名、CL
 | 环境变量 | 默认或省略行为 | 读取方 |
 | --- | --- | --- |
 | `AETHER_TUNNEL_CONFIG` | `aether-tunnel.toml`（路径） | `src/main.rs`；安装脚本也接受配置路径 |
+| `AETHER_TUNNEL_RELEASE_REPO` | `fawney19/Aether` | `install.sh` / `install.ps1` |
 | `AETHER_TUNNEL_RELEASE_TAG` | 自动选择最新 tunnel tag | `install.sh` / `install.ps1` |
 | `AETHER_TUNNEL_INSTALL_DIR` | 按系统选择安装目录 | `install.sh` / `install.ps1` |
 

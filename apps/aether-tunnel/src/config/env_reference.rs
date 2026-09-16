@@ -84,6 +84,7 @@ fn render_reference() -> String {
          ```\n\n\
          校验命令：`cargo test -p aether-tunnel --bin aether-tunnel config::env_reference`。\n\
          Rust CI 的 `Test (Workspace Rest)` 会运行同一校验；环境变量名、CLI 名、默认值、说明或枚举值变化都会要求重新生成。\n\n\
+         安装、升级、日志和回滚边界见 [Tunnel 运维入口](../../docs/operations/tunnel-runbook.md)；Gateway 的部署/恢复/指标演练不由本表代替。\n\n\
          ## 读取规则\n\n\
          - 默认值列只导出 clap 声明的默认值，不导出当前环境变量值或实际凭据。CLI 覆盖环境变量，环境变量覆盖 TOML。\n\
          - `必填` 表示 clap 无默认值；直接运行需提供值，使用 TOML 时由配置加载器提供。多服务器的 URL、Token 和可选节点覆盖放在 `[[servers]]` 中。\n\
@@ -96,6 +97,7 @@ fn render_reference() -> String {
          | 环境变量 | 默认或省略行为 | 读取方 |\n\
          | --- | --- | --- |\n\
          | `AETHER_TUNNEL_CONFIG` | `aether-tunnel.toml`（路径） | `src/main.rs`；安装脚本也接受配置路径 |\n\
+         | `AETHER_TUNNEL_RELEASE_REPO` | `fawney19/Aether` | `install.sh` / `install.ps1` |\n\
          | `AETHER_TUNNEL_RELEASE_TAG` | 自动选择最新 tunnel tag | `install.sh` / `install.ps1` |\n\
          | `AETHER_TUNNEL_INSTALL_DIR` | 按系统选择安装目录 | `install.sh` / `install.ps1` |\n\n\
          ## clap 参数\n\n\
@@ -182,6 +184,7 @@ fn readme_uses_known_tunnel_env_names() {
     // These are intentionally outside clap; keep ownership explicit.
     known.extend([
         "AETHER_TUNNEL_CONFIG",
+        "AETHER_TUNNEL_RELEASE_REPO",
         "AETHER_TUNNEL_RELEASE_TAG",
         "AETHER_TUNNEL_INSTALL_DIR",
     ]);

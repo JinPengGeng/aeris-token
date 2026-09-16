@@ -10,10 +10,12 @@ use crate::{
 };
 
 impl LocalVideoTaskSnapshot {
-    pub(crate) fn created_at_unix_ms(&self) -> u64 {
+    pub(crate) fn created_at_unix_secs(&self) -> u64 {
         match self {
-            Self::OpenAi(seed) => seed.created_at_unix_ms,
-            Self::Gemini(_) => 0,
+            // The legacy field name is retained for the persisted/API contract;
+            // current video-task records store this value in Unix seconds.
+            Self::OpenAi(seed) => normalize_unix_timestamp_secs(seed.created_at_unix_ms),
+            Self::Gemini(seed) => normalize_unix_timestamp_secs(seed.created_at_unix_secs),
         }
     }
 
@@ -36,6 +38,7 @@ impl LocalVideoTaskSnapshot {
         // contain stale identity fields after a task import or repair.
         match &mut snapshot {
             Self::OpenAi(seed) => {
+                seed.local_short_id = task.short_id.clone();
                 seed.user_id = task.user_id.clone();
                 seed.api_key_id = task.api_key_id.clone();
             }
@@ -58,6 +61,9 @@ impl LocalVideoTaskSnapshot {
             "openai:video" => {
                 let upstream_task_id = non_empty_owned(task.external_task_id.as_ref())?;
                 Some(Self::OpenAi(OpenAiVideoTaskSeed {
+                    local_short_id: task.short_id.clone(),
+                    native_response: None,
+                    xai_provider: persistence.client_api_format == "xai:video",
                     local_task_id: task.id.clone(),
                     upstream_task_id,
                     created_at_unix_ms: task.created_at_unix_ms,
@@ -105,6 +111,7 @@ impl LocalVideoTaskSnapshot {
                 Some(Self::Gemini(GeminiVideoTaskSeed {
                     local_short_id,
                     upstream_operation_name,
+                    created_at_unix_secs: task.created_at_unix_ms,
                     user_id: task.user_id.clone(),
                     api_key_id: task.api_key_id.clone(),
                     model,
@@ -147,6 +154,19 @@ impl LocalVideoTaskSnapshot {
                 changed
             }
         }
+    }
+
+    pub fn read_response_for_path(&self, path: &str) -> LocalVideoTaskReadResponse {
+        if let Self::OpenAi(seed) = self {
+            let mut seed = seed.clone();
+            if path.starts_with("/openai/v1/videos/") {
+                seed.persistence.client_api_format = "openai:video".to_string();
+            } else if path.starts_with("/v1/videos/") && seed.is_xai_native() {
+                seed.persistence.client_api_format = "xai:video".to_string();
+            }
+            return Self::OpenAi(seed).read_response();
+        }
+        self.read_response()
     }
 
     pub fn read_response(&self) -> LocalVideoTaskReadResponse {
@@ -223,6 +243,19 @@ impl LocalVideoTaskSnapshot {
             Self::OpenAi(seed) => seed.transport.provider_name.as_deref(),
             Self::Gemini(seed) => seed.transport.provider_name.as_deref(),
         }
+    }
+}
+
+fn normalize_unix_timestamp_secs(value: u64) -> u64 {
+    // A small number of pre-retention stores used the legacy field name
+    // literally and persisted milliseconds. Accept both encodings so those
+    // records receive the same expiry policy instead of becoming immortal.
+    // Unix seconds remain below this bound until year 2286, while practical
+    // millisecond timestamps have exceeded it since April 1970.
+    if value >= 10_000_000_000 {
+        value / 1_000
+    } else {
+        value
     }
 }
 

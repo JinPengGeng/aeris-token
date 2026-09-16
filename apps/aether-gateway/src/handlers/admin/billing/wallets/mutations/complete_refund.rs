@@ -477,6 +477,11 @@ mod tests {
         let applied_branch = source
             .split_once("AdminWalletMutationOutcome::Applied(refund) => {")
             .map(|(_, branch)| branch)
+            .and_then(|branch| {
+                branch
+                    .split_once("let response = Json(json!({")
+                    .map(|(branch, _)| branch)
+            })
             .expect("applied refund branch should exist");
         let notification = applied_branch
             .find("notify_user_refund_status(state, &refund).await;")

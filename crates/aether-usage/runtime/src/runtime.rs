@@ -5358,7 +5358,6 @@ impl UsageRuntime {
         };
 
         let write_succeeded = if let Err(err) = enrich_terminal_event(data, event).await {
-            aether_runtime::record_billing_enrichment_failure();
             warn!(
                 event_name = "usage_terminal_direct_fallback_enrichment_failed",
                 log_type = "event",
@@ -6932,7 +6931,7 @@ mod tests {
     }
 
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -6944,7 +6943,9 @@ mod tests {
         StoredRequestUsageAudit, UpsertUsageRecord, UsageBodyCaptureState,
     };
     use aether_data_contracts::DataLayerError;
-    use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeQueueStore, RuntimeState};
+    use aether_runtime_state::{
+        MemoryRuntimeStateConfig, RuntimeQueueRedriveOutcome, RuntimeQueueStore, RuntimeState,
+    };
     use async_trait::async_trait;
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -7086,6 +7087,100 @@ mod tests {
             assert_eq!(metadata["provider_cache_ttl_minutes"], 30);
             assert_eq!(budget.retained_bytes(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn dlq_redrive_replays_exact_payload_once_and_keeps_poison_entries() {
+        let queue: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let store = QueueConfiguredUsageStore {
+            inner: NoRedisUsageStore::default(),
+            queue: Arc::clone(&queue),
+        };
+        let runtime = UsageRuntime::new(UsageRuntimeConfig::default()).expect("usage runtime");
+        let original_fields = BTreeMap::from([
+            ("event_type".to_string(), "completed".to_string()),
+            ("payload".to_string(), "original-event".to_string()),
+            ("request_id".to_string(), "request-223-contract".to_string()),
+        ]);
+        let dead_letter_payload = json!({
+            "entry_id": "7-0",
+            "fields": original_fields.clone(),
+            "error": "permanent provider failure"
+        });
+        let source_id = queue
+            .append_fields_with_maxlen(
+                "usage:events:dlq",
+                &BTreeMap::from([
+                    ("payload".to_string(), dead_letter_payload.to_string()),
+                    ("error_class".to_string(), "poison".to_string()),
+                ]),
+                None,
+            )
+            .await
+            .expect("seed valid DLQ payload");
+
+        let first = runtime
+            .redrive_dead_letter(&store, &source_id)
+            .await
+            .expect("valid payload should redrive");
+        let destination_id = match first {
+            RuntimeQueueRedriveOutcome::Redriven { destination_id } => destination_id,
+            other => panic!("unexpected first redrive outcome: {other:?}"),
+        };
+        let destination_page = queue
+            .read_stream_page("usage:events", "0-0", 10)
+            .await
+            .expect("read replayed event");
+        assert_eq!(destination_page.entries.len(), 1);
+        assert_eq!(destination_page.entries[0].fields, original_fields);
+
+        let retry = runtime
+            .redrive_dead_letter(&store, &source_id)
+            .await
+            .expect("duplicate redrive should be idempotent");
+        assert_eq!(
+            retry,
+            RuntimeQueueRedriveOutcome::AlreadyRedriven { destination_id }
+        );
+        assert_eq!(
+            queue
+                .read_stream_page("usage:events", "0-0", 10)
+                .await
+                .expect("read destination after retry")
+                .entries
+                .len(),
+            1,
+            "a duplicate redrive must not append a second usage event"
+        );
+
+        let poison_payload = json!({
+            "entry_id": "8-0",
+            "fields": {},
+            "error": "malformed poison"
+        });
+        let poison_id = queue
+            .append_fields_with_maxlen(
+                "usage:events:dlq",
+                &BTreeMap::from([("payload".to_string(), poison_payload.to_string())]),
+                None,
+            )
+            .await
+            .expect("seed poison payload");
+        let poison_result = runtime.redrive_dead_letter(&store, &poison_id).await;
+        assert!(matches!(
+            poison_result,
+            Err(DataLayerError::InvalidInput(message))
+                if message.contains("payload fields cannot be empty")
+        ));
+        assert!(
+            queue
+                .read_stream_entry("usage:events:dlq", &poison_id)
+                .await
+                .expect("inspect poison entry")
+                .is_some(),
+            "poison entries must remain available for operator inspection"
+        );
     }
 
     #[tokio::test]
@@ -7659,7 +7754,25 @@ mod tests {
         queue: Arc<dyn RuntimeQueueStore>,
         policy_started: Arc<tokio::sync::Notify>,
         release_policy: Arc<tokio::sync::Notify>,
+        policy_released: Arc<AtomicBool>,
         policy_reads: Arc<AtomicUsize>,
+    }
+
+    impl BlockingPolicyQueueConfiguredUsageStore {
+        fn new(queue: Arc<dyn RuntimeQueueStore>) -> Self {
+            Self {
+                queue,
+                policy_started: Arc::new(tokio::sync::Notify::new()),
+                release_policy: Arc::new(tokio::sync::Notify::new()),
+                policy_released: Arc::new(AtomicBool::new(false)),
+                policy_reads: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn release_blocked_policy(&self) {
+            self.policy_released.store(true, Ordering::Release);
+            self.release_policy.notify_waiters();
+        }
     }
 
     #[derive(Default)]
@@ -8738,7 +8851,18 @@ mod tests {
         async fn body_capture_policy(&self) -> Result<UsageBodyCapturePolicy, DataLayerError> {
             self.policy_reads.fetch_add(1, Ordering::AcqRel);
             self.policy_started.notify_one();
-            self.release_policy.notified().await;
+            // Latch the gate: Notify is edge-triggered, and later policy reads
+            // (or a waiter that subscribed after a single notify) must not hang.
+            loop {
+                if self.policy_released.load(Ordering::Acquire) {
+                    break;
+                }
+                let notified = self.release_policy.notified();
+                if self.policy_released.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
             Ok(UsageBodyCapturePolicy::default())
         }
     }
@@ -9079,6 +9203,11 @@ mod tests {
                 ..UsageEventData::default()
             },
         );
+        let before = aether_runtime::logging_metric_samples()
+            .into_iter()
+            .find(|sample| sample.name == "billing_enrichment_failures_total")
+            .expect("billing enrichment metric should be exported")
+            .value;
         assert!(
             !runtime
                 .try_write_terminal_direct_fallback(&store, &mut event, "test_retry")
@@ -9089,6 +9218,28 @@ mod tests {
         assert_eq!(snapshot.terminal_direct_fallback_failed_total, 1);
         assert_eq!(snapshot.terminal_direct_fallback_succeeded_total, 0);
         assert_eq!(snapshot.terminal_direct_fallback_in_flight, 0);
+        assert_eq!(store.enrichment_calls.load(Ordering::Acquire), 1);
+        let after = aether_runtime::logging_metric_samples()
+            .into_iter()
+            .find(|sample| sample.name == "billing_enrichment_failures_total")
+            .expect("billing enrichment metric should remain exported")
+            .value;
+        assert!(
+            after > before,
+            "direct fallback enrichment failure must be visible in the shared billing counter"
+        );
+        let rendered = aether_runtime::metrics::render_prometheus_text(
+            &aether_runtime::logging_metric_samples(),
+        );
+        let metric_name = aether_runtime::metrics::metrics_namespace()
+            .map(|namespace| format!("{namespace}_billing_enrichment_failures_total"))
+            .unwrap_or_else(|| "billing_enrichment_failures_total".to_string());
+        let help_line = format!("# HELP {metric_name} ");
+        assert_eq!(
+            rendered.matches(&help_line).count(),
+            1,
+            "the counter must render as one Prometheus metric family"
+        );
 
         assert!(
             runtime
@@ -9462,15 +9613,39 @@ mod tests {
         .await
         .expect("a duplicate first-byte marker must release the terminal barrier");
 
-        let records = store.records.lock().expect("records lock");
-        assert_eq!(
-            records.len(),
-            2,
-            "the duplicate first byte must be coalesced"
-        );
-        assert_eq!(records[0].status, "streaming");
-        assert_eq!(records[1].status, "completed");
-        drop(records);
+        {
+            let records = store.records.lock().expect("records lock");
+            assert_eq!(
+                records.len(),
+                2,
+                "the duplicate first byte must be coalesced"
+            );
+            assert_eq!(records[0].status, "streaming");
+            assert_eq!(records[1].status, "completed");
+        }
+
+        // The terminal persistence notification can arrive before the submission
+        // dispatcher accounts for its completed task and releases admission.
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = runtime.metrics_snapshot();
+                if snapshot.lifecycle_submission_pending == 0
+                    && snapshot.first_byte_persistence_pending == 0
+                    && snapshot.ordered_lifecycle_pending == 0
+                    && runtime
+                        .lifecycle_submission
+                        .state
+                        .admission
+                        .available_permits()
+                        == CAPACITY
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("duplicate first-byte submission accounting should drain");
 
         let snapshot = runtime.metrics_snapshot();
         assert_eq!(snapshot.lifecycle_submission_pending, 0);
@@ -12753,12 +12928,9 @@ mod tests {
     async fn event_capture_budget_bounds_blocked_policy_waiters_and_releases_on_cancel_or_basic() {
         for limit in [0, 64 * 1024] {
             let runtime = UsageRuntime::new(UsageRuntimeConfig::default()).expect("runtime");
-            let store = BlockingPolicyQueueConfiguredUsageStore {
-                queue: Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default())),
-                policy_started: Arc::new(tokio::sync::Notify::new()),
-                release_policy: Arc::new(tokio::sync::Notify::new()),
-                policy_reads: Arc::new(AtomicUsize::new(0)),
-            };
+            let store = BlockingPolicyQueueConfiguredUsageStore::new(Arc::new(
+                RuntimeState::memory(MemoryRuntimeStateConfig::default()),
+            ));
             let budget = Arc::new(crate::event_capture_budget::EventCaptureMemoryBudget::new(
                 limit,
             ));
@@ -12819,7 +12991,7 @@ mod tests {
                 .await
                 .expect("replacement policy read starts");
             assert_eq!(budget.retained_bytes(), retained);
-            store.release_policy.notify_one();
+            store.release_blocked_policy();
             let event = timeout(Duration::from_secs(2), completing)
                 .await
                 .expect("Basic policy completes")
@@ -13841,12 +14013,7 @@ mod tests {
             Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
         let tracked_queue = Arc::new(FlakyAppendQueueStore::new(inner_queue, 0));
         let queue: Arc<dyn RuntimeQueueStore> = tracked_queue.clone();
-        let store = BlockingPolicyQueueConfiguredUsageStore {
-            queue,
-            policy_started: Arc::new(tokio::sync::Notify::new()),
-            release_policy: Arc::new(tokio::sync::Notify::new()),
-            policy_reads: Arc::new(AtomicUsize::new(0)),
-        };
+        let store = BlockingPolicyQueueConfiguredUsageStore::new(queue);
         let runtime = UsageRuntime::new(config).expect("usage runtime should build");
         let request_id = "req-terminal-seed-waits-for-turn";
         let plan = terminal_test_plan(request_id);
@@ -13869,9 +14036,10 @@ mod tests {
         assert!(blocked_snapshot.lifecycle_submission_pending >= 2);
         assert_eq!(store.policy_reads.load(Ordering::Acquire), 1);
 
-        store.release_policy.notify_one();
+        store.release_blocked_policy();
         timeout(Duration::from_secs(2), async {
             loop {
+                store.release_blocked_policy();
                 let snapshot = runtime.metrics_snapshot();
                 if tracked_queue.successful_appends.load(Ordering::Acquire) == 1
                     && snapshot.lifecycle_submission_pending == 0
@@ -13879,7 +14047,7 @@ mod tests {
                 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                sleep(Duration::from_millis(1)).await;
             }
         })
         .await
@@ -13913,12 +14081,7 @@ mod tests {
             Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
         let tracked_queue = Arc::new(FlakyAppendQueueStore::new(inner_queue, 0));
         let queue: Arc<dyn RuntimeQueueStore> = tracked_queue.clone();
-        let store = BlockingPolicyQueueConfiguredUsageStore {
-            queue,
-            policy_started: Arc::new(tokio::sync::Notify::new()),
-            release_policy: Arc::new(tokio::sync::Notify::new()),
-            policy_reads: Arc::new(AtomicUsize::new(0)),
-        };
+        let store = BlockingPolicyQueueConfiguredUsageStore::new(queue);
         let runtime = UsageRuntime::new(config).expect("usage runtime should build");
         let policy_started = store.policy_started.notified();
 
@@ -13966,9 +14129,10 @@ mod tests {
         assert!(blocked_snapshot.lifecycle_submission_pending <= BACKLOG + 1);
         assert_eq!(store.policy_reads.load(Ordering::Acquire), 1);
 
-        store.release_policy.notify_one();
+        store.release_blocked_policy();
         timeout(Duration::from_secs(5), async {
             loop {
+                store.release_blocked_policy();
                 let snapshot = runtime.metrics_snapshot();
                 if tracked_queue.successful_appends.load(Ordering::Acquire) == BACKLOG + 1
                     && snapshot.lifecycle_submission_pending == 0
@@ -13976,7 +14140,7 @@ mod tests {
                 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                sleep(Duration::from_millis(1)).await;
             }
         })
         .await
@@ -14275,12 +14439,7 @@ mod tests {
             Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
         let tracked_queue = Arc::new(FlakyAppendQueueStore::new(inner_queue, 0));
         let queue: Arc<dyn RuntimeQueueStore> = tracked_queue.clone();
-        let store = BlockingPolicyQueueConfiguredUsageStore {
-            queue,
-            policy_started: Arc::new(tokio::sync::Notify::new()),
-            release_policy: Arc::new(tokio::sync::Notify::new()),
-            policy_reads: Arc::new(AtomicUsize::new(0)),
-        };
+        let store = BlockingPolicyQueueConfiguredUsageStore::new(queue);
         let runtime = UsageRuntime::new(config).expect("usage runtime should build");
         let policy_started = store.policy_started.notified();
         runtime
@@ -14339,10 +14498,10 @@ mod tests {
         .expect("terminal submissions should reach the execution backlog");
         let saturated_snapshot = runtime.metrics_snapshot();
 
-        store.release_policy.notify_waiters();
+        store.release_blocked_policy();
         let all_completed = timeout(Duration::from_secs(2), async {
             loop {
-                store.release_policy.notify_waiters();
+                store.release_blocked_policy();
                 if tracked_queue.successful_appends.load(Ordering::Acquire)
                     == EXCESS_SUBMISSIONS + 1
                     && runtime.metrics_snapshot().terminal_submission_in_flight == 0

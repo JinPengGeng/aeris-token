@@ -41,7 +41,9 @@ echo "AOF write status before kill: $aof_status"
 test "$aof_status" = ok
 
 "${compose[@]}" kill -s KILL redis
-"${compose[@]}" up -d --wait redis
+# SIGKILL leaves the old container in an exited state. Force a fresh
+# container so Compose cannot race a restart of the killed instance.
+"${compose[@]}" up -d --force-recreate --wait redis
 recovered="$(redis EXISTS "usage:events:dlq")"
 echo "DLQ exists after restart: $recovered"
 test "$recovered" = 1

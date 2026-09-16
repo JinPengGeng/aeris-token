@@ -109,7 +109,7 @@ impl Readiness {
 
     // Keep the operation alive when its initiating HTTP client disconnects. There is
     // at most one pair of probes, sharing one deadline, even during an outage storm.
-    async fn probe<F, Fut>(&self, probe: F) -> Option<Dependencies>
+    async fn probe<F, Fut>(&self, fallback: Dependencies, probe: F) -> Option<Dependencies>
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = Dependencies> + Send + 'static,
@@ -133,12 +133,27 @@ impl Readiness {
                     let snapshot = std::panic::AssertUnwindSafe(probe())
                         .catch_unwind()
                         .await
-                        .ok();
+                        .unwrap_or_else(|_| {
+                            // A panic is a probe failure even when the normal
+                            // dependency set is empty. Keep this synthetic
+                            // snapshot unconditionally not-ready so it cannot
+                            // turn a failed flight into a green readiness response.
+                            let any_required =
+                                fallback.database.required || fallback.redis.required;
+                            Dependencies {
+                                database: Check::new(
+                                    fallback.database.required || !any_required,
+                                    CheckStatus::Failed,
+                                ),
+                                redis: Check::new(
+                                    fallback.redis.required || !any_required,
+                                    CheckStatus::Failed,
+                                ),
+                            }
+                        });
                     let mut state = probes.lock().unwrap_or_else(|err| err.into_inner());
-                    if let Some(snapshot) = snapshot {
-                        state.cached = Some((Instant::now() + CACHE_TTL, snapshot));
-                        sender.send_replace(Some(snapshot));
-                    }
+                    state.cached = Some((Instant::now() + CACHE_TTL, snapshot));
+                    sender.send_replace(Some(snapshot));
                     state.flight = None;
                 });
                 receiver
@@ -249,13 +264,16 @@ impl AppState {
             let state = self.clone();
             dependencies = self
                 .readiness
-                .probe(move || async move {
-                    let (database, redis) = tokio::join!(
-                        dependency_probe(database, deadline, state.data.ping_database()),
-                        dependency_probe(redis, deadline, state.ping_runtime_state()),
-                    );
-                    Dependencies { database, redis }
-                })
+                .probe(
+                    Dependencies::unchecked(database, redis),
+                    move || async move {
+                        let (database, redis) = tokio::join!(
+                            dependency_probe(database, deadline, state.data.ping_database()),
+                            dependency_probe(redis, deadline, state.ping_runtime_state()),
+                        );
+                        Dependencies { database, redis }
+                    },
+                )
                 .await
                 .unwrap_or(Dependencies {
                     database: Check::new(database, CheckStatus::Timeout),

@@ -1,4 +1,4 @@
-use aether_data::repository::audit::CreateAdminAuditLog;
+use aether_data::repository::audit::{CreateAdminAuditLog, ADMIN_AUDIT_METADATA_MAX_TARGET_BYTES};
 use axum::body::Body;
 use axum::http::{self, Response, StatusCode};
 use chrono::Utc;
@@ -79,7 +79,7 @@ pub(crate) fn emit_admin_audit(
             sanitized_path_and_query.clone(),
         )
     };
-    let target_id = sanitize_admin_audit_target_id(target_id);
+    let (target_id, target_truncated) = sanitize_admin_audit_target_id_with_truncation(target_id);
 
     let (audit_status, log_level) = classify_admin_audit_response(method, response.status());
     if log_level == AdminAuditLogLevel::Info {
@@ -148,6 +148,7 @@ pub(crate) fn emit_admin_audit(
         "action": action,
         "target_type": target_type,
         "target_id": target_id,
+        "target_truncated": target_truncated.then_some(true),
     });
     let record = CreateAdminAuditLog {
         id: uuid::Uuid::now_v7().to_string(),
@@ -216,11 +217,20 @@ fn sanitize_admin_audit_path(path_and_query: &str) -> String {
     crate::middleware::sanitize_access_log_path(path_and_query)
 }
 
-fn sanitize_admin_audit_target_id(target_id: String) -> String {
-    if target_id.trim_start().starts_with('/') {
-        return sanitize_admin_audit_path(&target_id);
+fn sanitize_admin_audit_target_id_with_truncation(target_id: String) -> (String, bool) {
+    let sanitized = if target_id.trim_start().starts_with('/') {
+        sanitize_admin_audit_path(&target_id)
+    } else {
+        target_id
+    };
+    if sanitized.len() <= ADMIN_AUDIT_METADATA_MAX_TARGET_BYTES {
+        return (sanitized, false);
     }
-    target_id
+    let mut end = ADMIN_AUDIT_METADATA_MAX_TARGET_BYTES;
+    while !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    (sanitized[..end].to_string(), true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,8 +273,8 @@ fn is_admin_read_method(method: &http::Method) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_admin_audit_response, sanitize_admin_audit_path, sanitize_admin_audit_target_id,
-        AdminAuditLogLevel,
+        classify_admin_audit_response, sanitize_admin_audit_path,
+        sanitize_admin_audit_target_id_with_truncation, AdminAuditLogLevel,
     };
     use axum::http::{Method, StatusCode};
 
@@ -301,14 +311,25 @@ mod tests {
     #[test]
     fn path_shaped_audit_targets_drop_sensitive_query_values() {
         assert_eq!(
-            sanitize_admin_audit_target_id(
+            sanitize_admin_audit_target_id_with_truncation(
                 "/api/admin/monitoring/trace/request-1?token=secret&limit=25".to_string(),
-            ),
+            )
+            .0,
             "/api/admin/monitoring/trace/request-1?limit=25"
         );
         assert_eq!(
-            sanitize_admin_audit_target_id("resource-id?literal".to_string()),
+            sanitize_admin_audit_target_id_with_truncation("resource-id?literal".to_string()).0,
             "resource-id?literal"
         );
+    }
+
+    #[test]
+    fn oversized_targets_are_utf8_safe_and_marked_truncated() {
+        let (target, truncated) = sanitize_admin_audit_target_id_with_truncation("🙂".repeat(200));
+        assert!(truncated);
+        assert!(
+            target.len() <= aether_data::repository::audit::ADMIN_AUDIT_METADATA_MAX_TARGET_BYTES
+        );
+        assert!(std::str::from_utf8(target.as_bytes()).is_ok());
     }
 }

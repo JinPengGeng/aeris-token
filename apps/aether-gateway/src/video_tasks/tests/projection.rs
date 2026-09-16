@@ -10,6 +10,9 @@ use super::{
 fn rust_authoritative_service_projects_openai_status_into_local_read_response() {
     let service = VideoTaskService::new(VideoTaskTruthSourceMode::RustAuthoritative);
     service.record_snapshot(LocalVideoTaskSnapshot::OpenAi(OpenAiVideoTaskSeed {
+        local_short_id: None,
+        native_response: None,
+        xai_provider: false,
         local_task_id: "task-local-123".to_string(),
         upstream_task_id: "ext-video-task-123".to_string(),
         created_at_unix_ms: 1712345678,
@@ -93,6 +96,9 @@ fn rust_authoritative_service_projects_openai_status_into_local_read_response() 
 fn rust_authoritative_service_builds_openai_content_stream_plan_from_direct_video_url() {
     let service = VideoTaskService::new(VideoTaskTruthSourceMode::RustAuthoritative);
     service.record_snapshot(LocalVideoTaskSnapshot::OpenAi(OpenAiVideoTaskSeed {
+        local_short_id: None,
+        native_response: None,
+        xai_provider: false,
         local_task_id: "task-local-123".to_string(),
         upstream_task_id: "ext-video-task-123".to_string(),
         created_at_unix_ms: 1712345678,
@@ -159,6 +165,9 @@ fn rust_authoritative_service_builds_openai_content_stream_plan_from_direct_vide
 fn rust_authoritative_service_returns_processing_content_response_for_pending_openai_task() {
     let service = VideoTaskService::new(VideoTaskTruthSourceMode::RustAuthoritative);
     service.record_snapshot(LocalVideoTaskSnapshot::OpenAi(OpenAiVideoTaskSeed {
+        local_short_id: None,
+        native_response: None,
+        xai_provider: false,
         local_task_id: "task-local-123".to_string(),
         upstream_task_id: "ext-video-task-123".to_string(),
         created_at_unix_ms: 1712345678,
@@ -208,6 +217,7 @@ fn rust_authoritative_service_projects_gemini_status_into_local_read_response() 
     service.record_snapshot(LocalVideoTaskSnapshot::Gemini(GeminiVideoTaskSeed {
         local_short_id: "localshort123".to_string(),
         upstream_operation_name: "operations/ext-video-123".to_string(),
+        created_at_unix_secs: 1_712_345_678,
         user_id: Some("user-123".to_string()),
         api_key_id: Some("key-123".to_string()),
         model: "veo-3".to_string(),
