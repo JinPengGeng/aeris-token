@@ -18,8 +18,7 @@ use super::{build_router, start_server};
 const INTERNAL_AUTH_CONTEXT_TEST_BEARER: &str = "Bearer sk-context-reader-unavailable";
 
 #[tokio::test]
-async fn gateway_locally_denies_video_control_sync_even_with_opt_in_headers_when_execution_runtime_missing(
-) {
+async fn gateway_hides_video_task_from_unauthenticated_caller_with_opt_in_headers() {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
     let public_hits = Arc::new(Mutex::new(0usize));
@@ -74,13 +73,9 @@ async fn gateway_locally_denies_video_control_sync_even_with_opt_in_headers_when
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "server_error");
-    assert_eq!(
-        payload["error"]["message"],
-        "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径"
-    );
+    assert_eq!(payload, crate::video_tasks::not_found_body());
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
@@ -89,8 +84,7 @@ async fn gateway_locally_denies_video_control_sync_even_with_opt_in_headers_when
 }
 
 #[tokio::test]
-async fn gateway_locally_denies_video_control_sync_without_opt_in_header_when_execution_runtime_missing(
-) {
+async fn gateway_hides_video_task_without_calling_public_or_control_upstream() {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
     let public_hits = Arc::new(Mutex::new(0usize));
@@ -154,13 +148,9 @@ async fn gateway_locally_denies_video_control_sync_without_opt_in_header_when_ex
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "server_error");
-    assert_eq!(
-        payload["error"]["message"],
-        "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径"
-    );
+    assert_eq!(payload, crate::video_tasks::not_found_body());
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(
@@ -177,7 +167,7 @@ async fn gateway_locally_denies_video_control_sync_without_opt_in_header_when_ex
 }
 
 #[tokio::test]
-async fn gateway_skips_video_get_control_sync_without_opt_in_header() {
+async fn gateway_hides_video_task_from_unauthenticated_caller_without_opt_in_headers() {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
     let public_hits = Arc::new(Mutex::new(0usize));
@@ -227,13 +217,9 @@ async fn gateway_skips_video_get_control_sync_without_opt_in_header() {
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "server_error");
-    assert_eq!(
-        payload["error"]["message"],
-        "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径"
-    );
+    assert_eq!(payload, crate::video_tasks::not_found_body());
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 

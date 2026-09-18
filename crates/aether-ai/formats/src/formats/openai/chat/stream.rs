@@ -3,15 +3,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::formats::openai::chat::response::openai_chat_reasoning_texts;
 use crate::formats::openai::namespace::NamespaceToolAliases;
 use crate::formats::openai::responses::{
     encode_gemini_tool_signature_carrier_with_direction, openai_responses_message_item_id,
-    openai_responses_synthetic_reasoning_item_id,
+    openai_responses_reasoning_text_fields, openai_responses_synthetic_reasoning_item_id,
     response::{
         ensure_modern_openai_responses_response_fields, openai_responses_current_timestamp,
     },
     GeminiToolSignatureCarrierDirection,
 };
+use crate::formats::shared::citations::canonical_citations_to_openai_annotations;
 use crate::formats::shared::response::build_generated_tool_call_id;
 use crate::formats::shared::sse::{encode_done_sse, encode_json_sse};
 use crate::formats::shared::stream_core::common::*;
@@ -41,6 +43,7 @@ pub struct OpenAIChatProviderState {
     started: bool,
     finished: bool,
     pending_finish_reason: Option<String>,
+    last_reasoning_index: Option<usize>,
     tool_calls: BTreeMap<usize, OpenAIChatProviderToolState>,
 }
 
@@ -271,24 +274,39 @@ impl OpenAIChatProviderState {
             } else if delta.contains_key("content") {
                 recognized_delta = true;
             }
-            if let Some(reasoning_content) = delta.get("reasoning_content").and_then(Value::as_str)
+            if delta.contains_key("reasoning_content")
+                || delta.contains_key("reasoning_details")
+                || delta.contains_key("reasoning")
             {
                 recognized_delta = true;
-                if !reasoning_content.is_empty() {
+                for (reasoning_index, text) in openai_chat_reasoning_texts(delta) {
                     self.ensure_started(report_context, &mut out);
                     if !self.terminal_only {
                         let (id, model) = self.identity(report_context);
+                        // A change of reasoning block index closes the part that
+                        // is open, so downstream summaries keep the provider's
+                        // own segmentation instead of collapsing into one
+                        // paragraph.
+                        if let Some(reasoning_index) = reasoning_index {
+                            if self
+                                .last_reasoning_index
+                                .is_some_and(|last| last != reasoning_index)
+                            {
+                                out.push(CanonicalStreamFrame {
+                                    id: id.clone(),
+                                    model: model.clone(),
+                                    event: CanonicalStreamEvent::ReasoningSummaryDone,
+                                });
+                            }
+                            self.last_reasoning_index = Some(reasoning_index);
+                        }
                         out.push(CanonicalStreamFrame {
                             id,
                             model,
-                            event: CanonicalStreamEvent::ReasoningDelta(
-                                reasoning_content.to_string(),
-                            ),
+                            event: CanonicalStreamEvent::ReasoningDelta(text),
                         });
                     }
                 }
-            } else if delta.contains_key("reasoning_content") {
-                recognized_delta = true;
             }
 
             if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
@@ -2144,6 +2162,9 @@ pub struct OpenAIResponsesClientEmitter {
     text_item_started: bool,
     text_part_started: bool,
     message_output_index: Option<usize>,
+    /// Citations projected onto the answer text, kept on the finished message
+    /// item so non-incremental clients see them too.
+    annotations: Vec<Value>,
     text: String,
     reasoning: String,
     reasoning_part: String,
@@ -2263,6 +2284,28 @@ impl OpenAIChatClientEmitter {
                         "index": 0,
                         "delta": {
                             "reasoning_content": "\n\n",
+                        },
+                        "finish_reason": Value::Null
+                    }]
+                }))?);
+                Ok(out)
+            }
+            CanonicalStreamEvent::Citations(citations) => {
+                let annotations = canonical_citations_to_openai_annotations(&citations);
+                if annotations.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let mut out = self.ensure_started()?;
+                out.extend(self.encode_chunk(json!({
+                    "id": self.response_id
+                        .as_deref()
+                        .unwrap_or("chatcmpl-local-stream"),
+                    "object": "chat.completion.chunk",
+                    "model": self.model.as_deref().unwrap_or("unknown"),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "annotations": annotations,
                         },
                         "finish_reason": Value::Null
                     }]
@@ -2621,6 +2664,107 @@ impl OpenAIResponsesClientEmitter {
         self.reasoning_summary_parts.len()
     }
 
+    fn reasoning_texts(&self) -> Vec<String> {
+        if self.reasoning_summary_parts.is_empty() {
+            if self.reasoning.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![self.reasoning.clone()]
+            }
+        } else {
+            self.reasoning_summary_parts.clone()
+        }
+    }
+
+    fn reasoning_item_value(&self) -> Value {
+        let (content, summary) = openai_responses_reasoning_text_fields(self.reasoning_texts());
+        json!({
+            "type": "reasoning",
+            "id": self.reasoning_item_id(),
+            "status": "completed",
+            "summary": summary,
+            "content": content,
+        })
+    }
+
+    fn encode_reasoning_text_delta(
+        &mut self,
+        text: &str,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let item_id = self.reasoning_item_id();
+        let output_index = self.reasoning_output_index.unwrap_or(0);
+        let part_index = self.current_reasoning_summary_index();
+        let mut out = self.encode_response_event(
+            "response.reasoning_text.delta",
+            json!({
+                "type": "response.reasoning_text.delta",
+                "response_id": self.response_id(),
+                "item_id": item_id.clone(),
+                "output_index": output_index,
+                "content_index": part_index,
+                "delta": text,
+            }),
+        )?;
+        out.extend(self.encode_response_event(
+            "response.reasoning_summary_text.delta",
+            json!({
+                "type": "response.reasoning_summary_text.delta",
+                "response_id": self.response_id(),
+                "item_id": item_id,
+                "output_index": output_index,
+                "summary_index": part_index,
+                "delta": text,
+            }),
+        )?);
+        Ok(out)
+    }
+
+    fn encode_reasoning_text_done_events(
+        &mut self,
+        item_id: &str,
+        output_index: usize,
+        part_index: usize,
+        part_text: &str,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let mut out = self.encode_response_event(
+            "response.reasoning_text.done",
+            json!({
+                "type": "response.reasoning_text.done",
+                "response_id": self.response_id(),
+                "item_id": item_id,
+                "output_index": output_index,
+                "content_index": part_index,
+                "text": part_text,
+            }),
+        )?;
+        out.extend(self.encode_response_event(
+            "response.reasoning_summary_text.done",
+            json!({
+                "type": "response.reasoning_summary_text.done",
+                "response_id": self.response_id(),
+                "item_id": item_id,
+                "output_index": output_index,
+                "summary_index": part_index,
+                "text": part_text,
+            }),
+        )?);
+        out.extend(self.encode_response_event(
+            "response.reasoning_summary_part.done",
+            json!({
+                "type": "response.reasoning_summary_part.done",
+                "response_id": self.response_id(),
+                "item_id": item_id,
+                "output_index": output_index,
+                "summary_index": part_index,
+                "part": {
+                    "type": "summary_text",
+                    "text": part_text,
+                }
+            }),
+        )?);
+        Ok(out)
+    }
+
     fn ensure_message_output_index(&mut self) -> usize {
         if let Some(output_index) = self.message_output_index {
             return output_index;
@@ -2676,6 +2820,7 @@ impl OpenAIResponsesClientEmitter {
                         "type": "reasoning",
                         "id": item_id.clone(),
                         "summary": [],
+                        "content": [],
                     }
                 }),
             )?);
@@ -2775,7 +2920,7 @@ impl OpenAIResponsesClientEmitter {
                     "part": {
                         "type": "output_text",
                         "text": self.text.as_str(),
-                        "annotations": [],
+                        "annotations": self.annotations.as_slice(),
                     }
                 }),
             )?);
@@ -2794,7 +2939,7 @@ impl OpenAIResponsesClientEmitter {
                     "content": [{
                         "type": "output_text",
                         "text": self.text.as_str(),
-                        "annotations": [],
+                        "annotations": self.annotations.as_slice(),
                     }],
                 }
             }),
@@ -2812,66 +2957,23 @@ impl OpenAIResponsesClientEmitter {
         if self.reasoning_part_started {
             let summary_index = self.current_reasoning_summary_index();
             let part_text = self.reasoning_part.clone();
-            out.extend(self.encode_response_event(
-                "response.reasoning_summary_text.done",
-                json!({
-                    "type": "response.reasoning_summary_text.done",
-                    "response_id": self.response_id(),
-                    "item_id": item_id.clone(),
-                    "output_index": output_index,
-                    "summary_index": summary_index,
-                    "text": part_text.as_str(),
-                }),
-            )?);
-            out.extend(self.encode_response_event(
-                "response.reasoning_summary_part.done",
-                json!({
-                    "type": "response.reasoning_summary_part.done",
-                    "response_id": self.response_id(),
-                    "item_id": item_id.clone(),
-                    "output_index": output_index,
-                    "summary_index": summary_index,
-                    "part": {
-                        "type": "summary_text",
-                        "text": part_text.as_str(),
-                    }
-                }),
+            out.extend(self.encode_reasoning_text_done_events(
+                &item_id,
+                output_index,
+                summary_index,
+                part_text.as_str(),
             )?);
             self.reasoning_summary_parts.push(part_text);
             self.reasoning_part.clear();
             self.reasoning_part_started = false;
         }
-        let summary = if self.reasoning_summary_parts.is_empty() {
-            if self.reasoning.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![json!({
-                    "type": "summary_text",
-                    "text": self.reasoning.as_str(),
-                })]
-            }
-        } else {
-            self.reasoning_summary_parts
-                .iter()
-                .map(|text| {
-                    json!({
-                        "type": "summary_text",
-                        "text": text,
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
         out.extend(self.encode_response_event(
             "response.output_item.done",
             json!({
                 "type": "response.output_item.done",
                 "response_id": self.response_id(),
                 "output_index": output_index,
-                "item": {
-                    "type": "reasoning",
-                    "id": item_id,
-                    "summary": summary,
-                }
+                "item": self.reasoning_item_value(),
             }),
         )?);
         Ok(out)
@@ -3035,35 +3137,10 @@ impl OpenAIResponsesClientEmitter {
         incomplete_reason: Option<&str>,
     ) -> Value {
         let mut ordered_output = Vec::new();
-        let summary = if self.reasoning_summary_parts.is_empty() {
-            if self.reasoning.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![json!({
-                    "type": "summary_text",
-                    "text": self.reasoning.as_str(),
-                })]
-            }
-        } else {
-            self.reasoning_summary_parts
-                .iter()
-                .map(|text| {
-                    json!({
-                        "type": "summary_text",
-                        "text": text,
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        if !summary.is_empty() {
+        if !self.reasoning_texts().is_empty() {
             ordered_output.push((
                 self.reasoning_output_index.unwrap_or(0),
-                json!({
-                    "type": "reasoning",
-                    "id": self.reasoning_item_id(),
-                    "status": "completed",
-                    "summary": summary,
-                }),
+                self.reasoning_item_value(),
             ));
         }
         if self.text_item_started || !self.text.is_empty() {
@@ -3077,7 +3154,7 @@ impl OpenAIResponsesClientEmitter {
                     "content": [{
                         "type": "output_text",
                         "text": self.text.as_str(),
-                        "annotations": [],
+                        "annotations": self.annotations.as_slice(),
                     }],
                 }),
             ));
@@ -3297,17 +3374,36 @@ impl OpenAIResponsesClientEmitter {
                 let mut out = self.ensure_reasoning_item_started()?;
                 self.reasoning.push_str(&text);
                 self.reasoning_part.push_str(&text);
-                out.extend(self.encode_response_event(
-                    "response.reasoning_summary_text.delta",
-                    json!({
-                        "type": "response.reasoning_summary_text.delta",
-                        "response_id": self.response_id(),
-                        "item_id": self.reasoning_item_id(),
-                        "output_index": self.reasoning_output_index.unwrap_or(0),
-                        "summary_index": self.current_reasoning_summary_index(),
-                        "delta": text,
-                    }),
-                )?);
+                out.extend(self.encode_reasoning_text_delta(&text)?);
+                Ok(out)
+            }
+            CanonicalStreamEvent::Citations(citations) => {
+                let annotations = canonical_citations_to_openai_annotations(&citations);
+                if annotations.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // The text item has to exist before an annotation can point at
+                // it, and the annotations are also kept on the item itself so
+                // clients that only read `response.completed` still see them.
+                let mut out = self.ensure_text_item_started()?;
+                let item_id = self.message_item_id();
+                let output_index = self.message_output_index.unwrap_or(0);
+                for annotation in annotations {
+                    let annotation_index = self.annotations.len();
+                    self.annotations.push(annotation.clone());
+                    out.extend(self.encode_response_event(
+                        "response.output_text.annotation.added",
+                        json!({
+                            "type": "response.output_text.annotation.added",
+                            "response_id": self.response_id(),
+                            "output_index": output_index,
+                            "item_id": item_id,
+                            "content_index": 0,
+                            "annotation_index": annotation_index,
+                            "annotation": annotation,
+                        }),
+                    )?);
+                }
                 Ok(out)
             }
             CanonicalStreamEvent::ReasoningSummaryDone => {
@@ -3320,32 +3416,12 @@ impl OpenAIResponsesClientEmitter {
                 let item_id = self.reasoning_item_id();
                 let summary_index = self.current_reasoning_summary_index();
                 let part_text = self.reasoning_part.clone();
-                let mut out = Vec::new();
-                out.extend(self.encode_response_event(
-                    "response.reasoning_summary_text.done",
-                    json!({
-                        "type": "response.reasoning_summary_text.done",
-                        "response_id": self.response_id(),
-                        "item_id": item_id.clone(),
-                        "output_index": output_index,
-                        "summary_index": summary_index,
-                        "text": part_text.as_str(),
-                    }),
-                )?);
-                out.extend(self.encode_response_event(
-                    "response.reasoning_summary_part.done",
-                    json!({
-                        "type": "response.reasoning_summary_part.done",
-                        "response_id": self.response_id(),
-                        "item_id": item_id,
-                        "output_index": output_index,
-                        "summary_index": summary_index,
-                        "part": {
-                            "type": "summary_text",
-                            "text": part_text.as_str(),
-                        }
-                    }),
-                )?);
+                let out = self.encode_reasoning_text_done_events(
+                    &item_id,
+                    output_index,
+                    summary_index,
+                    part_text.as_str(),
+                )?;
                 self.reasoning_summary_parts.push(part_text);
                 self.reasoning_part.clear();
                 self.reasoning_part_started = false;
@@ -4285,6 +4361,175 @@ mod tests {
                     .and_then(|delta| delta.get("future_delta_type"))
                     .is_some()
         )));
+    }
+
+    #[test]
+    fn openai_chat_provider_state_reads_openrouter_reasoning_once() {
+        let mut state = OpenAIChatProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "id": "gen-openrouter-123",
+                    "model": "stealth/ox-alpha",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "content": "",
+                            "role": "assistant",
+                            "reasoning": " me translate the",
+                            "reasoning_details": [{
+                                "type": "reasoning.text",
+                                "text": " me translate the",
+                                "format": "unknown",
+                                "index": 0
+                            }]
+                        },
+                        "finish_reason": Value::Null
+                    }]
+                })),
+            )
+            .expect("openrouter reasoning delta should parse");
+
+        let reasoning = frames
+            .iter()
+            .filter_map(|frame| match frame.event {
+                CanonicalStreamEvent::ReasoningDelta(ref text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // `reasoning` and `reasoning_details` repeat the same text, so only one
+        // of the two may reach the client.
+        assert_eq!(reasoning, vec![" me translate the"]);
+        assert!(!frames
+            .iter()
+            .any(|frame| matches!(frame.event, CanonicalStreamEvent::UnknownEvent(_))));
+    }
+
+    #[test]
+    fn openai_chat_provider_state_still_reads_deepseek_reasoning_content() {
+        let mut state = OpenAIChatProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "id": "chatcmpl-deepseek",
+                    "model": "deepseek-reasoner",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "reasoning_content": "let me work it out"},
+                        "finish_reason": Value::Null
+                    }]
+                })),
+            )
+            .expect("deepseek reasoning delta should parse");
+
+        let reasoning = frames
+            .iter()
+            .filter_map(|frame| match frame.event {
+                CanonicalStreamEvent::ReasoningDelta(ref text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning, vec!["let me work it out"]);
+        // A single reasoning block carries no index, so nothing may close a part.
+        assert!(!frames
+            .iter()
+            .any(|frame| matches!(frame.event, CanonicalStreamEvent::ReasoningSummaryDone)));
+        assert!(!frames
+            .iter()
+            .any(|frame| matches!(frame.event, CanonicalStreamEvent::UnknownEvent(_))));
+    }
+
+    #[test]
+    fn openai_chat_provider_state_splits_reasoning_details_on_block_index() {
+        let mut state = OpenAIChatProviderState::default();
+        let report_context = json!({});
+        let reasoning_chunk = |index: u64, text: &str| {
+            data_line(json!({
+                "id": "gen-openrouter-123",
+                "model": "stealth/ox-alpha",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "content": "",
+                        "role": "assistant",
+                        "reasoning_details": [{
+                            "type": "reasoning.text",
+                            "text": text,
+                            "index": index
+                        }]
+                    },
+                    "finish_reason": Value::Null
+                }]
+            }))
+        };
+        let mut frames = state
+            .push_line(&report_context, reasoning_chunk(0, "first"))
+            .expect("first reasoning block should parse");
+        frames.extend(
+            state
+                .push_line(&report_context, reasoning_chunk(1, "second"))
+                .expect("second reasoning block should parse"),
+        );
+
+        let reasoning = frames
+            .iter()
+            .filter_map(|frame| match frame.event {
+                CanonicalStreamEvent::ReasoningDelta(ref text) => Some(text.as_str()),
+                CanonicalStreamEvent::ReasoningSummaryDone => Some("<part-done>"),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning, vec!["first", "<part-done>", "second"]);
+    }
+
+    #[test]
+    fn openai_chat_reasoning_only_stream_reaches_responses_clients() {
+        // Regression: OpenRouter streams a long reasoning phase as chunks whose
+        // `delta.content` is an empty string and whose text sits under
+        // `reasoning`.  Dropping those chunks left Responses clients with
+        // nothing after `response.in_progress` until they timed the stream out.
+        let mut state = OpenAIChatProviderState::default();
+        let mut emitter = OpenAIResponsesClientEmitter::default();
+        let report_context = json!({});
+        let mut bytes = Vec::new();
+        for piece in ["Let", " me think."] {
+            let frames = state
+                .push_line(
+                    &report_context,
+                    data_line(json!({
+                        "id": "gen-openrouter-123",
+                        "model": "stealth/ox-alpha",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "content": "",
+                                "role": "assistant",
+                                "reasoning": piece,
+                                "reasoning_details": [{
+                                    "type": "reasoning.text",
+                                    "text": piece,
+                                    "format": "unknown",
+                                    "index": 0
+                                }]
+                            },
+                            "finish_reason": Value::Null
+                        }]
+                    })),
+                )
+                .expect("reasoning chunk should parse");
+            for frame in frames {
+                bytes.extend(emitter.emit(frame).expect("frame should encode"));
+            }
+        }
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("event: response.reasoning_summary_text.delta\n"));
+        assert!(sse.contains("\"delta\":\"Let\""));
+        assert!(sse.contains("\"delta\":\" me think.\""));
     }
 
     #[test]
@@ -6352,13 +6597,19 @@ mod tests {
 
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
         assert!(sse.contains("event: response.reasoning_summary_part.added\n"));
+        assert!(sse.contains("event: response.reasoning_text.delta\n"));
         assert!(sse.contains("event: response.reasoning_summary_text.delta\n"));
+        assert!(sse.contains("event: response.reasoning_text.done\n"));
         assert!(sse.contains("event: response.reasoning_summary_text.done\n"));
         assert!(sse.contains("event: response.reasoning_summary_part.done\n"));
+        assert!(sse.contains("\"type\":\"reasoning_text\""));
         let reasoning_item_id = openai_responses_synthetic_reasoning_item_id("resp_456", 0);
         assert!(sse.contains(&format!("\"item_id\":\"{reasoning_item_id}\"")));
         assert!(sse.contains("\"type\":\"reasoning\""));
-        assert_eq!(response_sequence_numbers(&sse), (1..=9).collect::<Vec<_>>());
+        assert_eq!(
+            response_sequence_numbers(&sse),
+            (1..=11).collect::<Vec<_>>()
+        );
     }
 
     #[test]
