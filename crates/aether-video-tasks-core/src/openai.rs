@@ -43,6 +43,27 @@ pub fn map_openai_stored_task_to_read_response(
 }
 
 fn build_openai_stored_task_body(task: StoredVideoTask, status: VideoTaskStatus) -> Value {
+    if task.client_api_format.as_deref() == Some("xai:video") {
+        let mut body = json!({"status":match status {
+            VideoTaskStatus::Completed => "done",
+            VideoTaskStatus::Expired => "expired",
+            VideoTaskStatus::Failed | VideoTaskStatus::Cancelled | VideoTaskStatus::Deleted => "failed",
+            _ => "pending",
+        }});
+        if let Some(model) = task.model {
+            body["model"] = json!(model);
+        }
+        if let Some(url) = task.video_url {
+            body["video"] = json!({"url":url});
+            if let Some(duration) = task.duration_seconds {
+                body["video"]["duration"] = json!(duration);
+            }
+        }
+        if status == VideoTaskStatus::Failed {
+            body["error"] = json!({"code":sanitize_video_task_error_code(task.error_code).unwrap_or_else(|| "unknown".into()),"message":"Video generation failed"});
+        }
+        return body;
+    }
     let mut body = json!({
         "id": task.id,
         "object": "video",
@@ -56,6 +77,9 @@ fn build_openai_stored_task_body(task: StoredVideoTask, status: VideoTaskStatus)
     }
     if let Some(prompt) = task.prompt {
         body["prompt"] = Value::String(prompt);
+    }
+    if let Some(seconds) = task.duration_seconds {
+        body["seconds"] = json!(seconds.to_string());
     }
     if let Some(size) = task.size {
         body["size"] = Value::String(size);
@@ -91,19 +115,96 @@ fn map_openai_stored_task_status(status: VideoTaskStatus) -> &'static str {
 }
 
 impl OpenAiVideoTaskSeed {
+    pub fn uses_xai_provider(&self) -> bool {
+        self.xai_provider || self.is_xai_native()
+    }
+
+    pub fn is_xai_native(&self) -> bool {
+        self.persistence.client_api_format == "xai:video"
+    }
+
+    pub fn native_create_body_json(&self) -> Value {
+        let mut body = self.native_response.clone().unwrap_or_else(|| json!({}));
+        body["request_id"] = json!(self.local_task_id);
+        if body.get("id").is_some() {
+            body["id"] = json!(self.local_task_id);
+        }
+        body
+    }
+
+    fn native_read_body_json(&self) -> Value {
+        if let Some(mut body) = self.native_response.clone().filter(|body| {
+            body.get("status").is_some()
+                || body.get("error").is_some()
+                || body.get("code").is_some()
+        }) {
+            if body.get("request_id").is_some() {
+                body["request_id"] = json!(self.local_task_id);
+            }
+            if body.get("id").is_some() {
+                body["id"] = json!(self.local_task_id);
+            }
+            return body;
+        }
+        let mut body = json!({"status":match self.status {
+            LocalVideoTaskStatus::Completed => "done",
+            LocalVideoTaskStatus::Expired => "expired",
+            LocalVideoTaskStatus::Failed | LocalVideoTaskStatus::Cancelled | LocalVideoTaskStatus::Deleted => "failed",
+            _ => "pending",
+        }});
+        if let Some(model) = &self.model {
+            body["model"] = json!(model);
+        }
+        if let Some(url) = &self.video_url {
+            body["video"] = json!({"url":url});
+            if let Some(duration) = self.seconds.as_deref().and_then(|v| v.parse::<u64>().ok()) {
+                body["video"]["duration"] = json!(duration);
+            }
+        }
+        if self.error_code.is_some() {
+            body["error"] = json!({"code":self.error_code,"message":"Video generation failed"});
+        }
+        body
+    }
+
     pub fn apply_provider_body(&mut self, provider_body: &Map<String, Value>) {
         let provider_status = provider_body
             .get("status")
             .and_then(Value::as_str)
             .and_then(parse_openai_provider_status);
+        let error = provider_body.get("error").filter(|value| !value.is_null());
+        let error_code = provider_body
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                error
+                    .and_then(|value| value.get("code"))
+                    .and_then(Value::as_str)
+            });
+
+        let mut next_status = provider_status;
+        // A provider may report a failed job as a 200 response with code/error
+        // only. xAI also uses that error envelope alongside a lifecycle status.
+        if (self.uses_xai_provider() || provider_status.is_none())
+            && (error.is_some() || error_code.is_some())
+            && !matches!(
+                next_status.unwrap_or(self.status),
+                LocalVideoTaskStatus::Cancelled | LocalVideoTaskStatus::Expired
+            )
+        {
+            next_status = Some(LocalVideoTaskStatus::Failed);
+        }
 
         // Polls can arrive out of order. A late active response must not reopen
-        // an already terminal task, but providers may still evolve one terminal
-        // outcome into another (for example, completed to expired).
-        if is_terminal_status(self.status) && provider_status.is_some_and(is_active_status) {
+        // an already terminal task, but terminal outcomes may still evolve.
+        if is_terminal_status(self.status) && next_status.is_some_and(is_active_status) {
             return;
         }
-        if let Some(status) = provider_status {
+        if self.uses_xai_provider() {
+            self.native_response = Some(Value::Object(provider_body.clone()));
+        }
+        if let Some(status) = next_status {
             self.status = status;
         }
 
@@ -117,8 +218,7 @@ impl OpenAiVideoTaskSeed {
             self.progress_percent = 100;
         }
 
-        // Provider GET responses may omit fields which were present in an earlier
-        // response. Only an explicitly present field, including JSON null, updates it.
+        // A sparse provider response must retain prior values; explicit JSON null clears them.
         if let Some(completed_at) = provider_body.get("completed_at") {
             self.completed_at_unix_secs = completed_at.as_u64();
         }
@@ -128,19 +228,16 @@ impl OpenAiVideoTaskSeed {
 
         match self.status {
             LocalVideoTaskStatus::Failed => {
-                self.error_code = match provider_body.get("error") {
-                    Some(error) => error
-                        .as_object()
-                        .and_then(|value| value.get("code"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .and_then(|code| sanitize_video_task_error_code(Some(code)))
-                        .or_else(|| Some("provider_error".to_string())),
-                    None => self
-                        .error_code
-                        .clone()
-                        .or_else(|| Some("provider_error".to_string())),
-                };
+                self.error_code = error_code
+                    .map(str::to_string)
+                    .and_then(|code| sanitize_video_task_error_code(Some(code)))
+                    .or_else(|| {
+                        provider_body
+                            .contains_key("error")
+                            .then(|| "provider_error".to_string())
+                    })
+                    .or_else(|| self.error_code.clone())
+                    .or_else(|| Some("provider_error".to_string()));
                 self.error_message = None;
                 self.video_url = None;
             }
@@ -163,17 +260,31 @@ impl OpenAiVideoTaskSeed {
             | LocalVideoTaskStatus::Queued
             | LocalVideoTaskStatus::Processing
             | LocalVideoTaskStatus::Deleted => {
-                if let Some(error) = provider_body.get("error") {
-                    self.error_code = error
-                        .as_object()
-                        .and_then(|value| value.get("code"))
-                        .and_then(Value::as_str)
+                if provider_body.contains_key("error") || provider_body.contains_key("code") {
+                    self.error_code = error_code
                         .map(str::to_string)
                         .and_then(|code| sanitize_video_task_error_code(Some(code)));
                     self.error_message = None;
                 }
                 apply_openai_video_url(&mut self.video_url, provider_body);
             }
+        }
+
+        if let Some(seconds) = provider_body
+            .get("seconds")
+            .or_else(|| {
+                provider_body
+                    .get("video")
+                    .and_then(|video| video.get("duration"))
+            })
+            .filter(|value| value.is_string() || value.is_number())
+        {
+            self.seconds = Some(
+                seconds
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| seconds.to_string()),
+            );
         }
     }
 
@@ -283,6 +394,9 @@ impl OpenAiVideoTaskSeed {
     }
 
     pub fn client_body_json(&self) -> Value {
+        if self.is_xai_native() {
+            return self.native_read_body_json();
+        }
         let mut body = json!({
             "id": self.local_task_id,
             "object": "video",
@@ -302,6 +416,9 @@ impl OpenAiVideoTaskSeed {
         }
         if let Some(seconds) = &self.seconds {
             body["seconds"] = Value::String(seconds.clone());
+        }
+        if let Some(video_url) = &self.video_url {
+            body["video_url"] = Value::String(video_url.clone());
         }
         if let Some(remixed_from_video_id) = &self.remixed_from_video_id {
             body["remixed_from_video_id"] = Value::String(remixed_from_video_id.clone());
@@ -401,12 +518,20 @@ impl OpenAiVideoTaskSeed {
     }
 
     pub fn build_get_follow_up_plan(&self, trace_id: &str) -> Option<ExecutionPlan> {
-        if !matches!(
+        let refreshable = matches!(
             self.status,
             LocalVideoTaskStatus::Submitted
                 | LocalVideoTaskStatus::Queued
                 | LocalVideoTaskStatus::Processing
-        ) {
+        ) || (self.uses_xai_provider()
+            && self.native_response.is_none()
+            && matches!(
+                self.status,
+                LocalVideoTaskStatus::Completed
+                    | LocalVideoTaskStatus::Failed
+                    | LocalVideoTaskStatus::Expired
+            ));
+        if !refreshable {
             return None;
         }
 
@@ -617,7 +742,12 @@ impl OpenAiVideoTaskSeed {
         };
         let mut record = UpsertVideoTask {
             id: self.local_task_id.clone(),
-            short_id: None,
+            // The production schema requires a unique, non-null short_id (at most 16 chars).
+            // Derive it deterministically so repeated capture and legacy snapshot reloads agree.
+            short_id: Some(self.local_short_id.clone().unwrap_or_else(|| {
+                use sha2::{Digest, Sha256};
+                format!("{:x}", Sha256::digest(self.local_task_id.as_bytes()))[..16].to_string()
+            })),
             request_id: self.persistence.request_id.clone(),
             user_id: self.user_id.clone(),
             api_key_id: self.api_key_id.clone(),
@@ -633,7 +763,11 @@ impl OpenAiVideoTaskSeed {
             model: self.model.clone().or_else(|| Some(String::new())),
             prompt: self.prompt.clone().or_else(|| Some(String::new())),
             original_request_body: None,
-            duration_seconds: request_body_u32(&self.persistence.original_request_body, "seconds"),
+            duration_seconds: self
+                .seconds
+                .as_deref()
+                .and_then(|value| value.parse().ok())
+                .or_else(|| request_body_u32(&self.persistence.original_request_body, "seconds")),
             resolution: request_body_string(&self.persistence.original_request_body, "resolution"),
             aspect_ratio: request_body_string(
                 &self.persistence.original_request_body,
@@ -663,12 +797,12 @@ impl OpenAiVideoTaskSeed {
 }
 
 fn parse_openai_provider_status(value: &str) -> Option<LocalVideoTaskStatus> {
-    match value.trim() {
-        "queued" => Some(LocalVideoTaskStatus::Queued),
-        "in_progress" | "processing" => Some(LocalVideoTaskStatus::Processing),
-        "completed" => Some(LocalVideoTaskStatus::Completed),
-        "failed" => Some(LocalVideoTaskStatus::Failed),
-        "cancelled" => Some(LocalVideoTaskStatus::Cancelled),
+    match value.trim().to_ascii_lowercase().as_str() {
+        "queued" | "pending" => Some(LocalVideoTaskStatus::Queued),
+        "in_progress" | "processing" | "running" => Some(LocalVideoTaskStatus::Processing),
+        "completed" | "done" | "succeeded" | "success" => Some(LocalVideoTaskStatus::Completed),
+        "failed" | "error" => Some(LocalVideoTaskStatus::Failed),
+        "cancelled" | "canceled" => Some(LocalVideoTaskStatus::Cancelled),
         "expired" => Some(LocalVideoTaskStatus::Expired),
         _ => None,
     }
@@ -701,6 +835,11 @@ fn apply_openai_video_url(video_url: &mut Option<String>, provider_body: &Map<St
             break;
         }
     }
+    if let Some(video) = provider_body.get("video") {
+        if let Some(url) = video.get("url") {
+            *video_url = url.as_str().map(str::to_string);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -719,6 +858,9 @@ mod tests {
 
     fn sample_seed(status: LocalVideoTaskStatus) -> OpenAiVideoTaskSeed {
         OpenAiVideoTaskSeed {
+            local_short_id: None,
+            native_response: None,
+            xai_provider: false,
             local_task_id: "task-openai-poll".to_string(),
             upstream_task_id: "upstream-openai-poll".to_string(),
             created_at_unix_ms: 1_712_345_678,
@@ -855,11 +997,13 @@ mod tests {
             "completed_at": null,
             "expires_at": null,
             "video_url": null,
+            "error": null,
         });
         seed.apply_provider_body(explicit_clear.as_object().expect("object"));
         assert_eq!(seed.completed_at_unix_secs, None);
         assert_eq!(seed.expires_at_unix_secs, None);
         assert_eq!(seed.video_url, None);
+        assert_eq!(seed.error_code, None);
     }
 
     #[test]
@@ -902,8 +1046,29 @@ mod tests {
     }
 
     #[test]
+    fn terminal_xai_task_ignores_stale_active_poll_without_replacing_native_response() {
+        let mut seed = sample_seed(LocalVideoTaskStatus::Completed);
+        seed.xai_provider = true;
+        seed.native_response = Some(json!({"status": "done", "id": "task-openai-poll"}));
+
+        let stale_poll = json!({"status": "pending", "id": "upstream-pending"});
+        seed.apply_provider_body(stale_poll.as_object().expect("object"));
+
+        assert_eq!(seed.status, LocalVideoTaskStatus::Completed);
+        assert_eq!(
+            seed.native_response
+                .as_ref()
+                .and_then(|body| body.get("status")),
+            Some(&json!("done"))
+        );
+    }
+
+    #[test]
     fn builds_minimal_openai_persistence_record_without_sensitive_snapshot() {
         let seed = OpenAiVideoTaskSeed {
+            local_short_id: None,
+            native_response: None,
+            xai_provider: false,
             local_task_id: "task-openai-sensitive".to_string(),
             upstream_task_id: "upstream-openai-sensitive".to_string(),
             created_at_unix_ms: 1_712_345_678,
@@ -954,6 +1119,12 @@ mod tests {
 
         let record = seed.to_upsert_record();
 
+        let short_id = record
+            .short_id
+            .as_deref()
+            .expect("database short_id is required");
+        assert_eq!(short_id.len(), 16);
+        assert_eq!(seed.to_upsert_record().short_id, record.short_id);
         assert_eq!(record.error_code.as_deref(), Some("provider_error"));
         assert!(record.original_request_body.is_none());
         assert!(record.progress_message.is_none());
@@ -966,6 +1137,8 @@ mod tests {
 
         let mut stored = record.into_stored();
         stored.status = VideoTaskStatus::Completed;
+        // Migrated tasks can already have a short ID unrelated to the derived ID.
+        stored.short_id = Some("legacy-short-id".to_string());
         let snapshot =
             LocalVideoTaskSnapshot::from_stored_task_with_transport(&stored, seed.transport)
                 .expect("stored task should reconstruct with current transport");
@@ -973,6 +1146,21 @@ mod tests {
             panic!("expected OpenAI snapshot");
         };
         assert_eq!(restored.prompt, stored.prompt);
+        assert_eq!(restored.to_upsert_record().short_id, stored.short_id);
+        let mut embedded = stored.clone();
+        let mut legacy_snapshot =
+            serde_json::to_value(LocalVideoTaskSnapshot::OpenAi(restored.clone())).unwrap();
+        legacy_snapshot["OpenAi"]
+            .as_object_mut()
+            .unwrap()
+            .remove("local_short_id");
+        embedded.request_metadata = Some(json!({"rust_local_snapshot": legacy_snapshot}));
+        let embedded_snapshot = LocalVideoTaskSnapshot::from_stored_task(&embedded)
+            .expect("legacy embedded snapshot should hydrate");
+        assert_eq!(
+            embedded_snapshot.to_upsert_record().short_id,
+            stored.short_id
+        );
         assert_eq!(restored.to_upsert_record().video_url, stored.video_url);
         let Some(LocalVideoTaskContentAction::StreamPlan(plan)) =
             restored.build_content_stream_action(None, "trace-download")
