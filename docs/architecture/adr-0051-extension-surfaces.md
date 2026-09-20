@@ -25,8 +25,8 @@ an explicit registration point:
 
 | Surface | Registration point | Contract |
 | --- | --- | --- |
-| Fixed transport metadata | `crates/aether-provider/transport/src/provider_types.rs` | `FixedProviderTemplate`, `fixed_provider_template`, and `provider_runtime_policy` are the source of truth for fixed provider defaults. |
-| Pool/quota behavior | `crates/aether-provider/pool/src/service.rs` and `providers/mod.rs` | `ProviderPoolService::with_builtin_adapters` is the pool registry; unknown types use the default adapter. |
+| Fixed transport metadata and quota support | `crates/aether-provider/transport/src/provider_types.rs` | `FixedProviderTemplate` and `provider_runtime_policy` define fixed provider defaults and builtin quota-refresh support. Gateway probes and builtin pool adapters consume that support declaration. |
+| Pool/quota execution | `crates/aether-provider/pool/src/service.rs` and `providers/mod.rs` | `ProviderPoolService::with_builtin_adapters` registers provider-specific quota requests, responses, and pool behavior. Unknown types use the default adapter; explicitly registered custom adapters retain their own capabilities. |
 | OAuth behavior | `crates/aether-oauth/src/provider/service.rs` and `providers/*` | `ProviderOAuthService::with_builtin_adapters` registers dedicated adapters and generic templates. |
 | Repository contract | `crates/aether-data/contracts/src/repository` | Traits remain SQLx-independent; selected adapters implement them. |
 
@@ -40,9 +40,9 @@ cannot silently bypass the architecture review:
 | `chatgpt_web` | dedicated pool adapter; generic OAuth template |
 | `kiro` | dedicated pool and OAuth adapters |
 | `grok` | dedicated pool adapter; no OAuth adapter registered |
-| `gemini_cli` | generic/unsupported pool behavior; generic OAuth template |
+| `gemini_cli` | dedicated quota pool adapter; generic OAuth template |
 | `vertex_ai` | unsupported pool adapter; no OAuth adapter |
-| `antigravity` | unsupported pool adapter; dedicated OAuth adapter |
+| `antigravity` | dedicated quota pool adapter; dedicated OAuth adapter |
 | `windsurf` | dedicated pool and OAuth adapters |
 | `xai` | dedicated pool and OAuth adapters |
 

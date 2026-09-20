@@ -573,6 +573,9 @@ impl fmt::Debug for ResponseMeta {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HelloPayload {
     pub protocol_version: u8,
+    /// Legacy informational metadata. It is not used for capability negotiation:
+    /// protocol_version and SETTINGS determine enabled behavior. Keep accepting it
+    /// during deserialization for compatibility with older peers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1067,6 +1070,23 @@ mod tests {
         let raw = br#"{"method":"GET","url":"https://example.com","headers":{},"timeout":15.0}"#;
         let meta: RequestMeta = serde_json::from_slice(raw).expect("parse request meta");
         assert_eq!(meta.timeout, 15);
+    }
+
+    #[test]
+    fn hello_capabilities_remain_optional_legacy_metadata() {
+        let missing: super::HelloPayload = serde_json::from_str(r#"{"protocol_version":3}"#)
+            .expect("HELLO without legacy capabilities should parse");
+        assert!(missing.capabilities.is_empty());
+        assert!(serde_json::to_value(&missing)
+            .expect("HELLO should serialize")
+            .get("capabilities")
+            .is_none());
+
+        let legacy: super::HelloPayload = serde_json::from_str(
+            r#"{"protocol_version":3,"capabilities":["flow-control","load-report"]}"#,
+        )
+        .expect("HELLO with legacy capabilities should parse");
+        assert_eq!(legacy.capabilities, ["flow-control", "load-report"]);
     }
 
     #[test]

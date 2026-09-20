@@ -6,40 +6,30 @@ use tracing::warn;
 
 pub(crate) const DEFAULT_APP_TIMEZONE: &str = "Asia/Shanghai";
 
-static APP_TIMEZONE: LazyLock<Tz> = LazyLock::new(|| configured_app_timezone());
+static APP_TIMEZONE: LazyLock<Tz> = LazyLock::new(configured_app_timezone);
 
 pub(crate) fn app_timezone() -> Tz {
     *APP_TIMEZONE
 }
 
 pub(crate) fn configured_app_timezone() -> Tz {
-    configured_app_timezone_setting().1
-}
-
-fn configured_app_timezone_setting() -> (String, Tz) {
     resolve_app_timezone(std::env::var("APP_TIMEZONE").ok().as_deref())
 }
 
-fn resolve_app_timezone(configured: Option<&str>) -> (String, Tz) {
+fn resolve_app_timezone(configured: Option<&str>) -> Tz {
     let configured = configured
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| DEFAULT_APP_TIMEZONE.to_string());
+        .unwrap_or(DEFAULT_APP_TIMEZONE);
     match configured.parse() {
-        Ok(timezone) => (configured, timezone),
+        Ok(timezone) => timezone,
         Err(_) => {
             warn!(
                 timezone = %configured,
                 fallback = DEFAULT_APP_TIMEZONE,
                 "gateway APP_TIMEZONE invalid; falling back"
             );
-            (
-                DEFAULT_APP_TIMEZONE.to_string(),
-                DEFAULT_APP_TIMEZONE
-                    .parse()
-                    .expect("default application timezone should parse"),
-            )
+            chrono_tz::Asia::Shanghai
         }
     }
 }
@@ -101,22 +91,15 @@ mod tests {
 
     #[test]
     fn configured_timezone_trims_and_preserves_a_valid_name() {
-        let (name, timezone) = resolve_app_timezone(Some(" America/New_York "));
-        assert_eq!(name, "America/New_York");
+        let timezone = resolve_app_timezone(Some(" America/New_York "));
         assert_eq!(timezone, chrono_tz::America::New_York);
     }
 
     #[test]
     fn missing_or_invalid_timezone_uses_the_application_default() {
         let default: Tz = DEFAULT_APP_TIMEZONE.parse().unwrap();
-        assert_eq!(
-            resolve_app_timezone(None),
-            (DEFAULT_APP_TIMEZONE.to_string(), default)
-        );
-        assert_eq!(
-            resolve_app_timezone(Some("not-a-timezone")),
-            (DEFAULT_APP_TIMEZONE.to_string(), default)
-        );
+        assert_eq!(resolve_app_timezone(None), default);
+        assert_eq!(resolve_app_timezone(Some("not-a-timezone")), default);
     }
 
     #[test]

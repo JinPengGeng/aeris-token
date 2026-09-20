@@ -150,7 +150,7 @@
 | stream idle timeout | 已修 | `execution_runtime/stream_read_timeout.rs:8-30` 默认 300s，可显式 0 禁用；`:78-100` 测试。 |
 | DB 故障客户端契约 | #340 已完成 | PR #344 已合并，将列举的控制面依赖错误映射为 502、trace_id、Retry-After 与稳定 code。 | 保留独立 Redis admission 错误契约验收。 |
 | statement_timeout | 普通连接默认已实现 | `adapters/postgres/src/pool.rs` 普通连接为 statement 30 秒/lock 3 秒；timeout=0 仅属于用后销毁的迁移连接。 | 将已有真实 SQL timeout/迁移隔离测试纳入常规 CI；服务器超时不等于客户端 TCP 黑洞有界。 |
-| pool key 分布式 lease/owner forward timeout | 待确认，P2 | 属 issue 的架构疑问，当前没有足够生产故障证据；跨节点路径已有独立 Redis in-flight/客户端 timeout。 | 建议另做多节点故障注入，而非直接修改。 |
+| pool key 分布式 lease/owner forward timeout | 已澄清，#214 | pool cursor 允许并行选择同一健康 key，发送前由 `scheduler/send_admission.rs` 按 credential concurrent_limit 获取共享 Redis keyed semaphore；owner-forward 已有总期限。候选阶段的旧 lease 字段不承担最终并发准入。 | `pool_key_cursor_allows_parallel_requests_to_use_same_healthy_key`；required Redis gate 的 `redis_two_gateways_key_concurrent_limit_admits_one_then_recovers_after_release` 验证 16 个竞争者、唯一占用及释放恢复，#473 检查通过。 |
 
 ## #215 性能
 

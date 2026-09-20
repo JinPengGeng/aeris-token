@@ -180,7 +180,6 @@ const DB_MAINTENANCE_WEEKLY_INTERVAL: chrono::Duration = chrono::Duration::days(
 const DB_MAINTENANCE_WEEKDAY: Weekday = Weekday::Sun;
 const DB_MAINTENANCE_HOUR: u32 = 5;
 const DB_MAINTENANCE_MINUTE: u32 = 0;
-const MAINTENANCE_DEFAULT_TIMEZONE: &str = "Asia/Shanghai";
 const DB_MAINTENANCE_TABLES: &[&str] = &["usage", "request_candidates", "audit_logs"];
 const MAX_ADMIN_STATS_REBUILD_BUCKETS: usize = 100_000;
 
