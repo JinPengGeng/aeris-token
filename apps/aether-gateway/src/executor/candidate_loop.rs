@@ -78,7 +78,6 @@ fn operation_allows_retry_replay(plan_kind: &str) -> bool {
         // same key or another candidate could duplicate that effect.
         OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND
             | OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND
-            | OPENAI_IMAGE_SYNC_PLAN_KIND
             | OPENAI_IMAGE_STREAM_PLAN_KIND
             | OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND
             | OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND

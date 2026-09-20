@@ -2074,7 +2074,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openai_image_sync_heartbeat_does_not_replay_a_sent_first_candidate() {
+    async fn openai_image_sync_heartbeat_retries_after_a_retryable_first_candidate() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_override = Arc::clone(&call_count);
         let state = AppState::new()
@@ -2112,12 +2112,15 @@ mod tests {
         )
         .await
         .expect("heartbeat attempts should execute");
-        assert!(matches!(outcome, LocalExecutionRequestOutcome::NoPath));
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            outcome,
+            LocalExecutionRequestOutcome::Responded(_)
+        ));
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
-    async fn openai_image_sync_heartbeat_does_not_retry_a_sent_sticky_key() {
+    async fn openai_image_sync_heartbeat_retries_a_sticky_key_before_transfer() {
         let seen_plans = Arc::new(std::sync::Mutex::new(Vec::<(String, Option<String>)>::new()));
         let seen_plans_for_override = Arc::clone(&seen_plans);
         let state = AppState::new()
@@ -2141,8 +2144,8 @@ mod tests {
                     ))
                 }
             });
-        // A retryable read operation would derive two more sticky-key attempts.
-        // Image generation must stop after the initial upstream send instead.
+        // A retryable image operation may use the configured same-key attempts
+        // before transferring to the next candidate.
         let attempts = vec![
             test_openai_image_heartbeat_attempt_with_sticky_key_attempts(
                 0,
@@ -2176,18 +2179,26 @@ mod tests {
                 .iter()
                 .map(|(endpoint_id, _)| endpoint_id.as_str())
                 .collect::<Vec<_>>(),
-            ["endpoint-retry"]
+            [
+                "endpoint-retry",
+                "endpoint-retry",
+                "endpoint-retry",
+                "endpoint-success",
+            ]
         );
         let sticky_candidate_ids = seen_plans
             .iter()
             .map(|(_, candidate_id)| candidate_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(sticky_candidate_ids.len(), 1);
-        assert!(matches!(outcome, LocalExecutionRequestOutcome::NoPath));
+        assert_eq!(sticky_candidate_ids.len(), 4);
+        assert!(matches!(
+            outcome,
+            LocalExecutionRequestOutcome::Responded(_)
+        ));
     }
 
     #[tokio::test]
-    async fn openai_image_sync_heartbeat_does_not_transfer_a_sent_effectful_operation() {
+    async fn openai_image_sync_heartbeat_transfers_after_retryable_effectful_failure() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_override = Arc::clone(&call_count);
         let seen_provider_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2248,14 +2259,17 @@ mod tests {
         )
         .await
         .expect("heartbeat attempts should execute");
-        assert!(matches!(outcome, LocalExecutionRequestOutcome::NoPath));
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            outcome,
+            LocalExecutionRequestOutcome::Responded(_)
+        ));
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
         assert_eq!(
             seen_provider_ids
                 .lock()
                 .expect("mutex should lock")
                 .as_slice(),
-            ["provider-openai"]
+            ["provider-openai", "provider-openai", "provider-fallback",]
         );
     }
 
