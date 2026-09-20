@@ -53,7 +53,7 @@ impl ResponsesWebSocketTurnAdmission {
                 drop(upstream_execution);
                 return Err(GatewayError::Client {
                     status: http::StatusCode::TOO_MANY_REQUESTS,
-                    message: format!("上游账号并发已达上限 ({limit})"),
+                    message: format!("Upstream account concurrency limit reached ({limit})"),
                 });
             }
         };
@@ -108,7 +108,10 @@ fn gateway_send_admission_skip_error(reason: SendAdmissionSkipReason) -> Gateway
     };
     GatewayError::Client {
         status,
-        message: format!("上游账号当前不可用 ({})", reason.as_str()),
+        message: format!(
+            "Upstream account is currently unavailable ({})",
+            reason.as_str()
+        ),
     }
 }
 

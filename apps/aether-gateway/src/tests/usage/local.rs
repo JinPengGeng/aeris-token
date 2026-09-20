@@ -1385,7 +1385,7 @@ async fn gateway_records_failed_usage_for_claude_runtime_miss_without_execution_
     assert_eq!(body_json["error"]["type"], "overloaded_error");
     assert_eq!(
         body_json["error"]["message"],
-        "没有可用提供商支持模型 claude-sonnet-4-5 的同步请求"
+        "No available provider supports model claude-sonnet-4-5 for this synchronous request"
     );
 
     let stored_usage = wait_for_usage_status(
@@ -2081,7 +2081,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
     assert_eq!(body_json["error"]["type"], "overloaded_error");
     assert_eq!(
         body_json["error"]["message"],
-        "没有可用提供商支持模型 gpt-5.4 的同步请求"
+        "No available provider supports model gpt-5.4 for this synchronous request"
     );
 
     let stored_usage = wait_for_usage_status(

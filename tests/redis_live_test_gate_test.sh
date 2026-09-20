@@ -54,6 +54,6 @@ grep -Fq 'scheduler::send_admission::tests::redis_two_gateways_key_concurrent_li
 grep -Fq 'ai_serving::planner::candidate_source::tests::redis_affinity::redis_two_gateways_share_affinity_across_selector_pages_without_duplicates_or_omissions -- --ignored --exact --nocapture --test-threads=1' "$calls"
 grep -Fq 'tests::ai_execute::lifecycle::redis_two_gateways_do_not_replay_a_stream_after_client_commit -- --ignored --exact --nocapture --test-threads=1' "$calls"
 grep -Fq 'tests::ai_execute::lifecycle::redis_two_gateways_keep_attempt_budget_request_local_and_bounded -- --ignored --exact --nocapture --test-threads=1' "$calls"
-[[ "$(wc -l < "$calls" | tr -d ' ')" -eq 10 ]]
+[[ "$(wc -l < "$calls" | tr -d ' ')" -eq 11 ]]
 
 printf 'PASS: Redis live-test gate registers shared Redis selector acceptance\n'

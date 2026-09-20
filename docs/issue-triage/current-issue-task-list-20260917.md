@@ -18,8 +18,10 @@ exclusion, revalidation retaining RPM, explicit WebSocket release, HTTP
 OAuth/Windsurf cross-task budgets, WebSocket logical budgets, error trace IDs,
 and model-404 usage consistency. The old HTTP-under-review state and the
 preceding 108-pass/two-failure fixture result are historical; compatibility
-fixtures are integrated. The three local implementations and final targeted
-Gateway validation are complete, pending publication/integration: 456 passed,
+fixtures are integrated. The three implementations were committed and pushed in PR #447 as
+`4ce1d4c7bfcc276a6d4083857274e56a43075fb3`. Integration with main is conflict-free;
+hosted CI exposed fixture and runner updates now being repaired. The preceding
+local targeted Gateway validation reports 456 passed,
 0 failed, and 2 ignored in
 `/Users/jinpeng/.agents/tmp/aeris-delivery-20260920/final-three-slices-20260920T175230.log`.
 The two ignored Redis targets were not rerun and are not passes. An integration
@@ -30,8 +32,10 @@ Do not add this selection to historical totals. The separate `aether-ai-serving`
 The full-repository format and diff checks also passed.
 
 Issue #443 and individual #51/#53/#254 progress comments were updated and read
-back on GitHub. PR #447 is still DIRTY and #440 is still BEHIND; the local
-changes are uncommitted and unpublished. Upstream `ba7c9f8b` remains an ancestor
+back on GitHub. PR #447 is MERGEABLE and awaiting required CI; #440 will be
+closed as superseded after #447 merges. The #254 public local errors are now
+English, including execution, capacity and IP access-control messages.
+Upstream `ba7c9f8b` remains an ancestor
 of fork main `5534ba54`: zero upstream commits are missing.
 
 ## Execution resumed on 2026-09-20
@@ -46,8 +50,11 @@ independent Luna assignments, then returned to four while the main agent
 reviewed results. The emergency persistence patch required a Terra repair
 after its first draft failed patch validation and code review.
 The main agent owns upstream integration, patch review, and serialized Rust
-validation. Local changes remain uncommitted until an authorized publication
-step. Completion of a local slice does not close its parent issue.
+validation. Publication was already authorized and has been performed;
+Issue closure follows the actual PR merge, not local-only validation.
+The original requirements of #44–#49 and #51–#53 are covered by this batch;
+close them after #447 merges with its required checks, along with #254 once
+the English-message follow-up passes. Deployment work remains separate.
 
 The live upstream check found four commits after `fb25dde4`, ending at
 `ba7c9f8b270cce63b0515299076b30129d7d64b4` (2026-09-19): user-group usage
@@ -55,8 +62,8 @@ views and Responses reasoning-channel correction. PR #452 resolved the test
 import/fixture conflict and merged after hosted CI passed, at 02:15:26 UTC on
 September 20. Fork main is `5534ba54f6dc93c6ce4aae276d556edd2ead49e0`; a fresh
 fetch verifies the upstream tip is its ancestor and both merges have two
-parents. Conflict #451 closed automatically. The same upstream file delta is
-present in the uncommitted development tree; its HEAD remains `26638a4f7`.
+parents. Conflict #451 closed automatically. The development commit `4ce1d4c7` has the prior development head and
+`5534ba54` as parents, preserving the reviewed upstream integration.
 
 Repository: `JinPengGeng/aeris-token`. The September 20 hosted refresh returns
 **45 open issues** and two open PRs: **#447** and **#440**. This is a
@@ -70,11 +77,9 @@ and `.../pr-open.json`.
 
 PR #452 is merged. Fork `main` is `5534ba54f6dc93c6ce4aae276d556edd2ead49e0`,
 and upstream `ba7c9f8b270cce63b0515299076b30129d7d64b4` is its ancestor. PR #447
-and #440 remain open; the 2026-09-20 hosted refresh reports #447 as `DIRTY`
-and #440 as `BEHIND`. The successful hosted checks recorded for their earlier
-heads are historical results, not hosted CI for the current follow-up work.
-The current follow-up work remains uncommitted and is not covered by those
-checks.
+and #440 remain open. #447 is now conflict-free; its required checks must
+pass on the final follow-up head. Successful checks from earlier heads remain
+historical evidence and do not replace that requirement.
 The earlier local checkpoint did not change GitHub labels or Project cards.
 The subsequent user-directed upstream priority change set #446, #448 and
 #449 to `priority:P0` / `status:in-progress` before their closure. Project field updates remain

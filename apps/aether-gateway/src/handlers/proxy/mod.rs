@@ -82,36 +82,36 @@ use std::{collections::BTreeMap, time::Instant};
 use tracing::{debug, info, warn};
 
 const OPENAI_CHAT_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "当前 OpenAI Chat Completions 请求无法在本地执行：没有匹配到可用的执行路径";
+    "The OpenAI Chat Completions request cannot be executed locally: no matching execution path is available";
 const OPENAI_RESPONSES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "当前 OpenAI Responses 请求无法在本地执行：没有匹配到可用的执行路径";
+    "The OpenAI Responses request cannot be executed locally: no matching execution path is available";
 const OPENAI_RESPONSES_COMPACT_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "当前 OpenAI Responses Compact 请求无法在本地执行：没有匹配到可用的执行路径";
+    "The OpenAI Responses Compact request cannot be executed locally: no matching execution path is available";
 const OPENAI_SEARCH_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "当前 OpenAI Search 请求无法在本地执行：没有匹配到可用的执行路径";
+    "The OpenAI Search request cannot be executed locally: no matching execution path is available";
 const OPENAI_VIDEO_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径";
+    "The OpenAI Video request cannot be executed locally: no matching execution path is available";
 const CLAUDE_MESSAGES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "当前 Claude Messages 请求无法在本地执行：没有匹配到可用的执行路径";
+    "The Claude Messages request cannot be executed locally: no matching execution path is available";
 const GEMINI_PUBLIC_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "当前 Gemini Public 请求无法在本地执行：没有匹配到可用的执行路径";
+    "The Gemini Public request cannot be executed locally: no matching execution path is available";
 const GEMINI_FILES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径";
+    "The Gemini Files request cannot be executed locally: no matching execution path is available";
 const LOCAL_ROUTE_NOT_FOUND_DETAIL: &str = "Route not found";
 const LOCAL_PROXY_PASSTHROUGH_REMOVED_DETAIL: &str =
     "Route matched a removed compatibility passthrough; implement it in Rust or retire the route";
 const LOCAL_EXECUTION_LOOP_DETECTED_DETAIL: &str =
     "Gateway detected an execution runtime request loop back into the local frontdoor";
 const AUTH_API_KEY_CONCURRENCY_LIMIT_REACHED_DETAIL: &str =
-    "当前调用方 API Key 并发请求数已达上限，请稍后重试";
+    "The API key has reached its concurrent request limit. Please retry later.";
 const PROVIDER_KEY_CAPACITY_LIMIT_REACHED_DETAIL: &str =
-    "所有可用上游账号当前均已达到并发或 RPM 上限，请稍后重试";
+    "All available upstream accounts have reached their concurrency or RPM limit. Please retry later.";
 const PROVIDER_KEY_CAPACITY_LIMIT_SKIP_REASONS: &[&str] = &[
     "provider_key_concurrency_limit_reached",
     "key_rpm_exhausted",
 ];
 const LOCAL_EXECUTION_PLANNING_TIMEOUT_DETAIL: &str =
-    "当前 AI 请求在本地执行规划阶段超时，请稍后重试";
+    "The AI request timed out during local execution planning. Please retry later.";
 const EXECUTION_PATH_TUNNEL_AFFINITY_FORWARD: &str = "tunnel_affinity_forward";
 const EXECUTION_PATH_CODEX_LIVE_CALL: &str = "codex_live_call";
 const MANAGEMENT_TOKEN_PREFIX: &str = "ae-";
@@ -1375,7 +1375,7 @@ async fn proxy_request_inner(
                 None,
                 Some(parts.uri.path()),
                 http::StatusCode::FORBIDDEN,
-                "当前 IP 已被禁止访问",
+                "Access from this IP address is blocked",
             )?;
             return Ok(finalize_gateway_response(
                 &state,
@@ -1410,7 +1410,7 @@ async fn proxy_request_inner(
                 None,
                 Some(parts.uri.path()),
                 http::StatusCode::SERVICE_UNAVAILABLE,
-                "IP 访问控制暂时不可用",
+                "IP access control is temporarily unavailable",
             )?;
             return Ok(finalize_gateway_response(
                 &state,
@@ -2457,7 +2457,10 @@ async fn proxy_request_inner(
                     stream_request,
                 )
             })
-            .unwrap_or_else(|| "当前 AI 请求无法在本地执行：没有匹配到可用的执行路径".to_string());
+            .unwrap_or_else(|| {
+                "The AI request cannot be executed locally: no matching execution path is available"
+                    .to_string()
+            });
         let local_execution_failure_path = if auth_api_key_concurrency_limited {
             EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED
         } else {
@@ -2678,42 +2681,42 @@ fn local_execution_runtime_miss_diagnostic_detail(
         }
         "missing_auth_context" => {
             return Some(format!(
-                "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（{route_label}，原因代码: missing_auth_context）"
+                "The request has no valid user or API key authentication context, so an upstream provider cannot be selected ({route_label}; reason code: missing_auth_context)"
             ));
         }
         "missing_requested_model" => {
             return Some(format!(
-                "请求缺少 model 字段，无法选择上游提供商（{route_label}，原因代码: missing_requested_model）"
+                "The request is missing the model field, so an upstream provider cannot be selected ({route_label}; reason code: missing_requested_model)"
             ));
         }
         "auth_snapshot_missing" => {
             return Some(format!(
-                "当前 API Key 的本地执行配置不存在或已过期，无法选择上游提供商（{route_label}，原因代码: auth_snapshot_missing）"
+                "The API key local execution configuration is missing or stale, so an upstream provider cannot be selected ({route_label}; reason code: auth_snapshot_missing)"
             ));
         }
         "auth_snapshot_read_failed" => {
             return Some(format!(
-                "读取 API Key 的本地执行配置失败，无法选择上游提供商（{route_label}，原因代码: auth_snapshot_read_failed）"
+                "The API key local execution configuration could not be read, so an upstream provider cannot be selected ({route_label}; reason code: auth_snapshot_read_failed)"
             ));
         }
         "decision_input_unavailable" => {
             return Some(format!(
-                "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商（{route_label}，原因代码: decision_input_unavailable）"
+                "The request lacks the authentication, model, or configuration context required for local execution, so an upstream provider cannot be selected ({route_label}; reason code: decision_input_unavailable)"
             ));
         }
         "execution_runtime_candidates_exhausted" => {
             return Some(format!(
-                "已尝试所有本地执行候选提供商，但没有任何候选成功完成请求（{route_label}，原因代码: execution_runtime_candidates_exhausted）"
+                "All local execution candidate providers were attempted, but none completed the request successfully ({route_label}; reason code: execution_runtime_candidates_exhausted)"
             ));
         }
         "candidate_evaluation_incomplete" => {
             return Some(format!(
-                "本地执行候选评估未完成，暂时无法为本次{request_mode}请求选择上游提供商（{route_label}，原因代码: candidate_evaluation_incomplete）"
+                "Local execution candidate evaluation is incomplete, so an upstream provider cannot currently be selected for this {request_mode} request ({route_label}; reason code: candidate_evaluation_incomplete)"
             ));
         }
         "no_local_sync_plans" | "no_local_stream_plans" => {
             return Some(format!(
-                "找到了候选提供商，但无法为本次{request_mode}请求构建本地执行计划。请检查端点路径、认证方式、Header/Body 规则和格式转换配置（{route_label}，原因代码: {}）",
+                "Candidate providers were found, but a local execution plan could not be built for this {request_mode} request. Check the endpoint path, authentication method, header/body rules, and format conversion configuration ({route_label}; reason code: {})",
                 diagnostic.reason
             ));
         }
@@ -2725,7 +2728,7 @@ fn local_execution_runtime_miss_diagnostic_detail(
         None
     } else {
         Some(format!(
-            "当前请求无法在本地执行：{route_label} 的执行路径未就绪（原因代码: {reason}）"
+            "The request cannot be executed locally: the {route_label} execution path is not ready (reason code: {reason})"
         ))
     }
 }
@@ -2736,12 +2739,12 @@ fn local_execution_runtime_miss_candidate_list_empty_detail(
 ) -> String {
     if let Some(requested_model) = diagnostic_requested_model(diagnostic) {
         return format!(
-            "没有可用提供商支持模型 {requested_model} 的{request_mode}请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
+            "No available provider supports model {requested_model} for this {request_mode} request. Check model mappings, endpoint enablement, and API key permissions (reason code: candidate_list_empty)"
         );
     }
 
     format!(
-        "没有可用提供商支持本次{request_mode}请求。请检查模型字段、模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
+        "No available provider supports this {request_mode} request. Check the model field, model mappings, endpoint enablement, and API key permissions (reason code: candidate_list_empty)"
     )
 }
 
@@ -2759,28 +2762,28 @@ fn local_execution_runtime_miss_all_candidates_skipped_detail(
 
     match (candidate_count, skipped_summary, requested_model) {
         (count, Some(summary), Some(model)) if count > 0 => format!(
-            "找到 {count} 个支持模型 {model} 的候选提供商，但本次{request_mode}请求全部不可用：{summary}（原因代码: all_candidates_skipped）"
+            "Found {count} candidate providers supporting model {model}, but none are available for this {request_mode} request: {summary} (reason code: all_candidates_skipped)"
         ),
         (count, Some(summary), None) if count > 0 => format!(
-            "找到 {count} 个候选提供商，但本次{request_mode}请求全部不可用：{summary}（原因代码: all_candidates_skipped）"
+            "Found {count} candidate providers, but none are available for this {request_mode} request: {summary} (reason code: all_candidates_skipped)"
         ),
         (_, Some(summary), Some(model)) => format!(
-            "支持模型 {model} 的候选提供商全部不可用：{summary}（原因代码: all_candidates_skipped）"
+            "No candidate provider supporting model {model} is available: {summary} (reason code: all_candidates_skipped)"
         ),
         (_, Some(summary), None) => {
-            format!("候选提供商全部不可用：{summary}（原因代码: all_candidates_skipped）")
+            format!("No candidate provider is available: {summary} (reason code: all_candidates_skipped)")
         }
         (count, None, Some(model)) if count > 0 => format!(
-            "找到 {count} 个支持模型 {model} 的候选提供商，但都不满足本次{request_mode}请求要求（原因代码: all_candidates_skipped）"
+            "Found {count} candidate providers supporting model {model}, but none meet the requirements for this {request_mode} request (reason code: all_candidates_skipped)"
         ),
         (count, None, None) if count > 0 => format!(
-            "找到 {count} 个候选提供商，但都不满足本次{request_mode}请求要求（原因代码: all_candidates_skipped）"
+            "Found {count} candidate providers, but none meet the requirements for this {request_mode} request (reason code: all_candidates_skipped)"
         ),
         (_, None, Some(model)) if skipped_count > 0 => format!(
-            "支持模型 {model} 的 {skipped_count} 个候选提供商都不满足本次{request_mode}请求要求（原因代码: all_candidates_skipped）"
+            "None of the {skipped_count} candidate providers supporting model {model} meet the requirements for this {request_mode} request (reason code: all_candidates_skipped)"
         ),
         _ => format!(
-            "候选提供商都不满足本次{request_mode}请求要求（原因代码: all_candidates_skipped）"
+            "No candidate provider meets the requirements for this {request_mode} request (reason code: all_candidates_skipped)"
         ),
     }
 }
@@ -2805,64 +2808,68 @@ fn local_execution_runtime_miss_skip_reasons_summary(
             .iter()
             .map(|(reason, count)| {
                 format!(
-                    "{} {} 次",
+                    "{} ({})",
                     local_execution_runtime_miss_skip_reason_label(reason),
                     count
                 )
             })
             .collect::<Vec<_>>()
-            .join("，"),
+            .join("; "),
     )
 }
 
 fn local_execution_runtime_miss_skip_reason_label(reason: &str) -> &str {
     match reason {
         "auth_api_key_concurrency_limit_reached" | "api_key_concurrency_limit_reached" => {
-            "调用方 API Key 并发已达上限"
+            "API key concurrent request limit reached"
         }
-        "auth_channel_mismatch" => "认证通道不匹配",
-        "auth_snapshot_missing" => "API Key 本地执行配置缺失",
-        "endpoint_api_format_changed" => "端点 API 格式已变更",
-        "endpoint_inactive" => "端点未启用",
-        "format_conversion_disabled" => "格式转换未启用",
-        "key_api_format_disabled" => "API Key 未启用该 API 格式",
-        "key_inactive" => "API Key 未启用",
-        "key_model_disabled" => "API Key 未允许该模型",
-        "mapped_model_missing" => "模型映射缺失",
-        "pool_active_probe_sealed" => "池内账号未进入主动探测热池",
-        "pool_cooldown" => "池内账号处于冷却中",
-        "pool_cost_limit_reached" => "池内账号成本额度已用尽",
-        "pool_group_exhausted" => "池化提供商没有可调度账号",
-        "pool_key_lease_busy" => "池内账号正被其他请求占用",
-        "provider_concurrency_limit_reached" => "上游提供商并发已达上限",
-        "provider_inactive" => "提供商未启用",
-        "provider_key_concurrency_limit_reached" => "上游账号并发已达上限",
-        "provider_request_body_missing" => "无法构建上游请求体",
-        "provider_request_body_build_failed" => "上游请求体转换失败",
-        "transport_api_format_mismatch" => "传输层 API 格式不匹配",
-        "transport_api_format_unsupported" => "传输层不支持该 API 格式",
-        "transport_auth_unavailable" => "上游认证信息不可用",
-        "transport_body_rules_unsupported" => "Body 规则不支持本地执行",
-        "transport_custom_path_unsupported" => "自定义路径不支持本地执行",
-        "transport_header_rules_unsupported" => "Header 规则不支持本地执行",
-        "transport_header_rules_apply_failed" => "Header 规则应用失败",
-        "transport_oauth_resolution_unsupported" => "OAuth 认证解析不支持本地执行",
-        "transport_provider_type_unsupported" => "提供商类型不支持本地执行",
-        "transport_proxy_or_profile_unsupported" => "代理或传输指纹配置不支持本地执行",
-        "transport_proxy_unsupported" => "代理配置不支持本地执行",
-        "transport_snapshot_missing" => "提供商传输配置缺失",
-        "transport_profile_unsupported" => "传输指纹配置不支持本地执行",
-        "transport_unsupported" => "传输配置不支持本地执行",
-        "upstream_url_missing" => "无法构建上游请求地址",
+        "auth_channel_mismatch" => "authentication channel mismatch",
+        "auth_snapshot_missing" => "API key local execution configuration missing",
+        "endpoint_api_format_changed" => "endpoint API format changed",
+        "endpoint_inactive" => "endpoint inactive",
+        "format_conversion_disabled" => "format conversion disabled",
+        "key_api_format_disabled" => "API key does not enable this API format",
+        "key_inactive" => "API key inactive",
+        "key_model_disabled" => "API key does not allow this model",
+        "mapped_model_missing" => "model mapping missing",
+        "pool_active_probe_sealed" => "pool account is not in the active probe set",
+        "pool_cooldown" => "pool account is cooling down",
+        "pool_cost_limit_reached" => "pool account cost limit reached",
+        "pool_group_exhausted" => "pooled provider has no schedulable accounts",
+        "pool_key_lease_busy" => "pool account is in use by another request",
+        "provider_concurrency_limit_reached" => "upstream provider concurrency limit reached",
+        "provider_inactive" => "provider inactive",
+        "provider_key_concurrency_limit_reached" => "upstream account concurrency limit reached",
+        "provider_request_body_missing" => "unable to build upstream request body",
+        "provider_request_body_build_failed" => "upstream request body conversion failed",
+        "transport_api_format_mismatch" => "transport API format mismatch",
+        "transport_api_format_unsupported" => "transport does not support this API format",
+        "transport_auth_unavailable" => "upstream authentication unavailable",
+        "transport_body_rules_unsupported" => "body rules do not support local execution",
+        "transport_custom_path_unsupported" => "custom path does not support local execution",
+        "transport_header_rules_unsupported" => "header rules do not support local execution",
+        "transport_header_rules_apply_failed" => "header rules could not be applied",
+        "transport_oauth_resolution_unsupported" => {
+            "OAuth resolution does not support local execution"
+        }
+        "transport_provider_type_unsupported" => "provider type does not support local execution",
+        "transport_proxy_or_profile_unsupported" => {
+            "proxy or transport profile does not support local execution"
+        }
+        "transport_proxy_unsupported" => "proxy configuration does not support local execution",
+        "transport_snapshot_missing" => "provider transport configuration missing",
+        "transport_profile_unsupported" => "transport profile does not support local execution",
+        "transport_unsupported" => "transport configuration does not support local execution",
+        "upstream_url_missing" => "unable to build upstream request URL",
         other => other,
     }
 }
 
 fn local_execution_runtime_miss_request_mode(stream_request: bool) -> &'static str {
     if stream_request {
-        "流式"
+        "streaming"
     } else {
-        "同步"
+        "synchronous"
     }
 }
 
@@ -2870,7 +2877,7 @@ fn local_execution_runtime_miss_route_label(
     decision: Option<&GatewayControlDecision>,
 ) -> &'static str {
     let Some(decision) = decision else {
-        return "AI 请求";
+        return "AI request";
     };
     match decision.public_path.as_str() {
         "/v1/chat/completions" => "OpenAI Chat Completions",
@@ -2887,7 +2894,7 @@ fn local_execution_runtime_miss_route_label(
         {
             "Gemini Public"
         }
-        _ => "AI 请求",
+        _ => "AI request",
     }
 }
 
@@ -3774,7 +3781,7 @@ mod tests {
         assert_eq!(
             detail.as_deref(),
             Some(
-                "没有可用提供商支持模型 gpt-5.4 的流式请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
+                "No available provider supports model gpt-5.4 for this streaming request. Check model mappings, endpoint enablement, and API key permissions (reason code: candidate_list_empty)"
             )
         );
     }
@@ -3800,7 +3807,7 @@ mod tests {
         assert_eq!(
             detail.as_deref(),
             Some(
-                "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（Claude Messages，原因代码: missing_auth_context）"
+                "The request has no valid user or API key authentication context, so an upstream provider cannot be selected (Claude Messages; reason code: missing_auth_context)"
             )
         );
     }
@@ -3829,7 +3836,7 @@ mod tests {
 
         assert_eq!(
             detail.as_deref(),
-            Some("当前调用方 API Key 并发请求数已达上限，请稍后重试")
+            Some("The API key has reached its concurrent request limit. Please retry later.")
         );
         assert!(diagnostic_is_auth_api_key_concurrency_limited(Some(
             &diagnostic
@@ -3860,7 +3867,7 @@ mod tests {
 
         assert_eq!(
             detail.as_deref(),
-            Some("当前调用方 API Key 并发请求数已达上限，请稍后重试")
+            Some("The API key has reached its concurrent request limit. Please retry later.")
         );
     }
 

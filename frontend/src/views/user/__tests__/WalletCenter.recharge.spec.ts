@@ -281,7 +281,7 @@ describe('WalletCenter recharge recovery', () => {
     expect(rows[0].textContent).toContain('RECHARGE-1')
     expect(rows[0].textContent).toContain('$10.00')
     expect(rows[1].textContent).toContain('充值入账')
-    expect(panel.textContent).toContain('本次追扣后剩余欠费')
+    expect(panel.textContent).toContain('本次充值对应剩余欠费')
     expect(panel.textContent).toContain('本次追扣后可用本金')
     expect(panel.textContent).toContain('下次处理')
     for (const value of ['private-wallet-id', 'private-job-id', 'private-other-order', 'private-database-error']) {

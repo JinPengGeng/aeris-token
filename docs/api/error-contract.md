@@ -35,6 +35,8 @@ gateway's generic mapping is:
 | 429 | `insufficient_quota` | Restore account credit; do not retry unchanged. |
 | 503/529 | `server_error` | For transient unavailability, use bounded backoff and honor `Retry-After`. Admission overload responses always include `Retry-After: 1`; empty candidate lists can also reflect configuration problems; see below. |
 
+Gateway-generated local execution and admission diagnostics use English messages. This does not alter upstream response bodies relayed by the gateway.
+
 ## Missing or invalid credentials
 
 At the public AI authentication boundary, missing credentials or credential

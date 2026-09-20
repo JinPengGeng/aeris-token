@@ -4,6 +4,7 @@ set -Eeuo pipefail
 # This job owns a disposable PostgreSQL service. Keep the URL explicit so a
 # local invocation cannot accidentally point at a developer's default DB.
 : "${AETHER_TEST_DATABASE_URL:?AETHER_TEST_DATABASE_URL must point at a disposable PostgreSQL test database}"
+export RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
 
 if [[ -n "${AETHER_TEST_POSTGRES_URL:-}" && "${AETHER_TEST_POSTGRES_URL}" != "${AETHER_TEST_DATABASE_URL}" ]]; then
   printf 'AETHER_TEST_POSTGRES_URL must match AETHER_TEST_DATABASE_URL in the live-DB harness\n' >&2

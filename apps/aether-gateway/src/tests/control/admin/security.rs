@@ -48,7 +48,10 @@ async fn gateway_blocks_blacklisted_ip_before_routing() {
         .to_bytes();
     let payload: serde_json::Value =
         serde_json::from_slice(&payload).expect("response should be json");
-    assert_eq!(payload["error"]["message"], "当前 IP 已被禁止访问");
+    assert_eq!(
+        payload["error"]["message"],
+        "Access from this IP address is blocked"
+    );
 }
 
 #[tokio::test]
@@ -84,7 +87,7 @@ async fn gateway_shapes_blacklist_rejections_for_claude_routes_before_routing() 
         assert_eq!(payload["type"], "error", "path: {path}");
         assert_eq!(payload["error"]["type"], "permission_error", "path: {path}");
         assert_eq!(
-            payload["error"]["message"], "当前 IP 已被禁止访问",
+            payload["error"]["message"], "Access from this IP address is blocked",
             "path: {path}"
         );
     }
@@ -161,7 +164,10 @@ async fn gateway_fails_closed_when_ip_blacklist_state_is_unavailable() {
         .to_bytes();
     let payload: serde_json::Value =
         serde_json::from_slice(&payload).expect("response should be json");
-    assert_eq!(payload["error"]["message"], "IP 访问控制暂时不可用");
+    assert_eq!(
+        payload["error"]["message"],
+        "IP access control is temporarily unavailable"
+    );
 }
 
 #[tokio::test]

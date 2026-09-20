@@ -983,7 +983,7 @@ mod tests {
         output.extend(matrix.finish(&context).expect("finish"));
         let reasoning = json_data_events(&output)
             .into_iter()
-            .filter(|event| event["type"] == "response.reasoning_summary_text.delta")
+            .filter(|event| event["type"] == "response.reasoning_text.delta")
             .filter_map(|event| event["delta"].as_str().map(str::to_owned))
             .collect::<String>();
         assert_eq!(reasoning, "Let me");

@@ -8,11 +8,18 @@ patches are integrated in the active local batch. This includes precise initial
 WebSocket release, HTTP OAuth/Windsurf cross-task budgets, WebSocket logical
 budgets, top-level local error trace IDs, and consistent model-404 usage. This
 is distinct from the hosted inventory of 45 open parent/issues and two open
-PRs. #447 still has conflicts and #440 is behind main; no new development
-issue has been closed on the strength of unpublished local code.
+PRs. The integrated code was committed and pushed to #447 as
+`4ce1d4c7bfcc276a6d4083857274e56a43075fb3`; conflicts with main are resolved.
+#440 is covered by this implementation and will close after #447 merges.
+No development issue has been closed before the actual merge.
 
 The three local implementations and their final targeted Gateway validation
-are complete; publication/integration remains pending. The final run reports
+are complete; publication is done and hosted CI integration is in progress.
+The subsequent #254 follow-up makes locally generated execution and IP access
+errors English, without translating upstream payloads. CI found stale migration
+and recharge-copy assertions, an integration-test stack setting omitted from one
+runner, and the funded-image memory fixture missing its provider catalog.
+These follow-up fixes await hosted verification on the published head. The preceding local run reports
 456 passed, 0 failed, and 2 ignored:
 `/Users/jinpeng/.agents/tmp/aeris-delivery-20260920/final-three-slices-20260920T175230.log`.
 The two ignored Redis targets were not rerun and are not counted as passes.
@@ -70,8 +77,8 @@ ancestry of main. Conflict #451 closed automatically. Local validation passed fo
 usage-memory 47, admin-stats 8, Gateway stats 44 and reasoning 28 tests; the
 additional authenticated stats selection passed 30 and overlaps the 44.
 Frontend tests 3, type checking, changed-file ESLint, format and diff checks
-passed. The same reviewed upstream diff is applied to the local development
-worktree without publishing its other uncommitted changes.
+passed. The published development commit retains the prior development head
+and the synced main as its two parents.
 
 ## Implemented and locally checked
 

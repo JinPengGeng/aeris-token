@@ -671,7 +671,7 @@ async fn gateway_surfaces_local_execution_runtime_miss_reason_when_all_openai_ch
     assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(
         payload["error"]["message"],
-        "没有可用提供商支持模型 gpt-5 的同步请求"
+        "No available provider supports model gpt-5 for this synchronous request"
     );
 
     let stored_candidates = request_candidate_repository
