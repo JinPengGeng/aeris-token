@@ -1767,6 +1767,7 @@ ORDER BY created_at ASC
         Ok(Vec::new())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn insert_referral_reward(
         &self,
         relationship: &ReferralRelationshipRecord,
