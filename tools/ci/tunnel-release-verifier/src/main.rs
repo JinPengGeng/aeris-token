@@ -5,11 +5,12 @@ mod provenance;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let [command, manifest, envelope] = args.as_slice() {
+    if let [command, manifest, envelope, expected_tag] = args.as_slice() {
         if command == "verify-embedded" {
-            provenance::verify_release_manifest(
+            provenance::verify_release_manifest_for_tag(
                 &std::fs::read(manifest)?,
                 &std::fs::read(envelope)?,
+                expected_tag,
             )?;
             return Ok(());
         }
@@ -37,10 +38,11 @@ fn main() -> anyhow::Result<()> {
     match args.as_slice() {
         [command] if command == "check" => Ok(()),
         [command, flag] if command == "check" && flag == "--allow-unconfigured" => Ok(()),
-        [command, manifest, envelope] if command == "verify" => {
-            let verified = provenance::verify_release_manifest_with_keys(
+        [command, manifest, envelope, expected_tag] if command == "verify" => {
+            let verified = provenance::verify_release_manifest_for_tag_with_keys(
                 &std::fs::read(manifest)?,
                 &std::fs::read(envelope)?,
+                expected_tag,
                 &keys,
             )?;
             if verified != signing_id {
@@ -48,6 +50,6 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        _ => anyhow::bail!("expected check [--allow-unconfigured] or verify <manifest> <envelope>"),
+        _ => anyhow::bail!("expected check [--allow-unconfigured] or verify <manifest> <envelope> <release-tag>"),
     }
 }

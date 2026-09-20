@@ -173,7 +173,9 @@ jobs:
 
       - name: Generate checksums
         working-directory: artifacts
-        run: sha256sum aether-tunnel-* > SHA256SUMS.txt
+        run: |
+          printf '# aether-tunnel-release-tag=%s\n' "${GITHUB_REF_NAME}" > SHA256SUMS.txt
+          sha256sum aether-tunnel-* >> SHA256SUMS.txt
 
       - name: Sign release manifest
         working-directory: artifacts
@@ -228,6 +230,7 @@ jobs:
           AETHER_TUNNEL_RELEASE_KEY_ID: ${{ vars.AETHER_TUNNEL_RELEASE_KEY_ID }}
           AETHER_TUNNEL_RELEASE_PUBLIC_KEY: ${{ vars.AETHER_TUNNEL_RELEASE_PUBLIC_KEY }}
           AETHER_TUNNEL_RELEASE_TRUST_KEYS: ${{ vars.AETHER_TUNNEL_RELEASE_TRUST_KEYS }}
+          AETHER_TUNNEL_RELEASE_TAG: ${{ github.ref_name }}
         shell: bash
         run: |
           "${GITHUB_WORKSPACE}/.github/workflows/scripts/verify-tunnel-release.sh"

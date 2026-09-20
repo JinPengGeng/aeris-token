@@ -425,7 +425,8 @@ async fn download_and_verify(
         download_release_file(client, tag, "SHA256SUMS.txt", MAX_CHECKSUM_DOWNLOAD_BYTES,),
         download_release_file(client, tag, "SHA256SUMS.txt.sig", 16 * 1024,),
     )?;
-    let key_id = super::provenance::verify_release_manifest(&checksum_bytes, &signature_bytes)?;
+    let key_id =
+        super::provenance::verify_release_manifest_for_tag(&checksum_bytes, &signature_bytes, tag)?;
     eprintln!("  Release manifest signature verified with key: {}", key_id);
     let checksum_text = String::from_utf8(checksum_bytes)?;
 
