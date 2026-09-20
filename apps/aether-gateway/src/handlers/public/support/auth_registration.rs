@@ -1118,7 +1118,12 @@ async fn apply_existing_user_email_verification_referral_reward(
     };
     state
         .data
-        .apply_registration_referral_reward(&user_id, amount_usd, "email_verified")
+        .apply_registration_referral_reward(
+            &user_id,
+            amount_usd,
+            "email_verified",
+            config.lifetime_reward_cap_usd,
+        )
         .await
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
     Ok(())
@@ -1165,6 +1170,7 @@ mod tests {
             headcount_enabled: true,
             headcount_amount_usd: 3.5,
             headcount_trigger: "email_verified".to_string(),
+            lifetime_reward_cap_usd: 100.0,
         };
         assert_eq!(
             email_verification_referral_reward_amount(&enabled),

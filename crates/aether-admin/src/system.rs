@@ -2271,6 +2271,7 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "turnstile_site_key" => Some(serde_json::Value::Null),
         "turnstile_secret_key" => Some(serde_json::Value::Null),
         "turnstile_allowed_hostnames" => Some(json!([])),
+        "referral_lifetime_reward_cap_usd" => Some(json!(100.0)),
         "backup_s3_enabled" => Some(json!(false)),
         "backup_s3_scope" => Some(json!("data")),
         "backup_s3_endpoint" => Some(serde_json::Value::Null),

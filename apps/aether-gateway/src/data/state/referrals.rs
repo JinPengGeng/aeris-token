@@ -68,9 +68,15 @@ impl GatewayDataState {
         invitee_user_id: &str,
         amount_usd: f64,
         trigger_point: &str,
+        lifetime_reward_cap_usd: f64,
     ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
         self.referrals()
-            .apply_registration_referral_reward(invitee_user_id, amount_usd, trigger_point)
+            .apply_registration_referral_reward(
+                invitee_user_id,
+                amount_usd,
+                trigger_point,
+                lifetime_reward_cap_usd,
+            )
             .await
     }
 
