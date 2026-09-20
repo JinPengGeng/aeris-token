@@ -160,6 +160,18 @@ fn validate_gateway_data_encryption_key(value: Option<&str>) -> Result<(), &'sta
     Ok(())
 }
 
+fn validate_gateway_data_encryption_key_for_environment(
+    value: Option<&str>,
+    environment: &str,
+) -> Result<(), &'static str> {
+    if value.is_none_or(|value| value.trim().is_empty())
+        && environment.trim().eq_ignore_ascii_case("production")
+    {
+        return Err("gateway data encryption key is required in production");
+    }
+    validate_gateway_data_encryption_key(value)
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum VideoTaskTruthSourceArg {
     PythonSyncReport,
@@ -755,9 +767,12 @@ struct GatewayDataArgs {
 }
 
 impl GatewayDataArgs {
-    fn validate_encryption_key(&self) -> Result<(), std::io::Error> {
-        validate_gateway_data_encryption_key(self.effective_encryption_key().as_deref())
-            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))
+    fn validate_encryption_key(&self, environment: &str) -> Result<(), std::io::Error> {
+        validate_gateway_data_encryption_key_for_environment(
+            self.effective_encryption_key().as_deref(),
+            environment,
+        )
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))
     }
 
     fn effective_database_driver(&self) -> Option<DatabaseDriver> {
@@ -2221,7 +2236,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         // apply the same encryption-key policy as the normal gateway path
         // before touching the selected database.
         if matches!(command, DataCommand::Export(_) | DataCommand::Import(_)) {
-            args.data.validate_encryption_key()?;
+            args.data
+                .validate_encryption_key(args.frontdoor.effective_environment())?;
         }
         return run_data_command(command, &args.data).await;
     }
@@ -2261,7 +2277,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         runtime_redis_url.as_deref(),
         runtime_backend,
     )?;
-    args.data.validate_encryption_key()?;
+    args.data
+        .validate_encryption_key(args.frontdoor.effective_environment())?;
     let data_config = args.data.to_config();
     let isolate_background_database = args.node_role.isolates_background_database();
     let background_database_config = if isolate_background_database {
@@ -3457,7 +3474,8 @@ async fn run_explicit_migrations(args: &Args) -> Result<(), Box<dyn std::error::
         );
     }
 
-    args.data.validate_encryption_key()?;
+    args.data
+        .validate_encryption_key(args.frontdoor.effective_environment())?;
     let state = AppState::new()?.with_data_config(args.data.to_config())?;
     let pending = state
         .pending_database_migrations()
@@ -3494,7 +3512,8 @@ async fn run_explicit_backfills(args: &Args) -> Result<(), Box<dyn std::error::E
             "AETHER_DATABASE_DRIVER/AETHER_DATABASE_URL, AETHER_GATEWAY_DATA_POSTGRES_URL, or DATABASE_URL is required when running --apply-backfills",
         )
     })?;
-    args.data.validate_encryption_key()?;
+    args.data
+        .validate_encryption_key(args.frontdoor.effective_environment())?;
     let state = AppState::new()?.with_data_config(args.data.to_config())?;
     ensure_database_schema_is_current(&state).await?;
 
@@ -4636,6 +4655,17 @@ mod tests {
                 "accepted insecure key: {insecure}"
             );
         }
+    }
+
+    #[test]
+    fn production_requires_gateway_data_encryption_key_but_development_does_not() {
+        assert!(validate_gateway_data_encryption_key_for_environment(None, "production").is_err());
+        assert!(validate_gateway_data_encryption_key_for_environment(None, "development").is_ok());
+        assert!(validate_gateway_data_encryption_key_for_environment(
+            Some("0123456789abcdef0123456789abcdef"),
+            "production",
+        )
+        .is_ok());
     }
 
     #[test]
