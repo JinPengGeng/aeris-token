@@ -743,7 +743,7 @@ verify_release_checksum() {
 
     [[ -f "${checksum_file}" ]] || die "release checksum manifest is missing"
     matches="$(awk -v asset="${asset}" '
-        ($2 == asset || $2 == "*" asset) && $1 ~ /^[0-9A-Fa-f]{64}$/ {
+        NF == 2 && ($2 == asset || $2 == "*" asset) && $1 ~ /^[0-9A-Fa-f]{64}$/ {
             print tolower($1)
         }
     ' "${checksum_file}")"
