@@ -658,15 +658,19 @@ mod tests {
     #[test]
     fn antigravity_responses_conversion_keeps_scoped_previous_response_history() {
         use aether_ai_formats::{
-            api::record_converted_response_history,
+            api::{conversation_history_scope, record_converted_response_history},
             formats::shared::standard_matrix::build_standard_request_body,
         };
         let schema = json!({"type": "object", "properties": {"mode": {"const": "fast"}}});
         let response_id = "resp_antigravity_schema_history_test";
-        let scope = "antigravity-schema-history";
+        let user_id = "antigravity-schema-history-user";
+        let api_key_id = "antigravity-schema-history-key";
+        let scope = conversation_history_scope(user_id, api_key_id).expect("history scope");
+        let other_scope =
+            conversation_history_scope("different-user", api_key_id).expect("history scope");
         record_converted_response_history(&json!({
             "needs_conversion": true, "client_api_format": "openai:responses",
-            "provider_api_format": "openai:chat", "api_key_id": scope,
+            "provider_api_format": "openai:chat", "user_id": user_id, "api_key_id": api_key_id,
             "original_request_body": {"model": "client", "input": "first"}
         }), &json!({"id": response_id, "status": "completed", "output": [{
             "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "remembered"}]
@@ -682,7 +686,7 @@ mod tests {
             "",
             true,
             None,
-            Some(scope),
+            Some(scope.as_str()),
         )
         .expect("expand history");
         assert_eq!(output["contents"][0]["parts"][0]["text"], "first");
@@ -701,7 +705,7 @@ mod tests {
             "",
             true,
             None,
-            Some("different-key")
+            Some(other_scope.as_str())
         )
         .is_none());
     }
