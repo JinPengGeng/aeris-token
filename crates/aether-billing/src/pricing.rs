@@ -454,9 +454,9 @@ impl BillingModelPricingSnapshot {
         mapping
             .get(&normalized)
             .and_then(Value::as_f64)
-            // A malformed multiplier must never turn a billable request into a
-            // free or negative charge. Keep the historical neutral fallback.
-            .filter(|multiplier| multiplier.is_finite() && *multiplier > 0.0)
+            // Zero is an explicit free-cost rate accepted by provider key writes.
+            // Malformed or negative values retain the neutral fallback.
+            .filter(|multiplier| multiplier.is_finite() && *multiplier >= 0.0)
             .unwrap_or(1.0)
     }
 }
@@ -798,7 +798,7 @@ mod tests {
     fn invalid_api_format_multiplier_falls_back_to_neutral_rate() {
         let mut pricing = snapshot(None, None);
         pricing.provider_api_key_rate_multipliers = Some(json!({
-            "openai:chat": 0.0,
+            "openai:chat": -0.5,
             "openai:responses": -2.0,
             "openai:image": "not-a-number",
             "openai:audio": {}
@@ -815,6 +815,24 @@ mod tests {
         assert_eq!(
             pricing.rate_multiplier_for_api_format(Some("openai:valid")),
             1.0
+        );
+    }
+
+    #[test]
+    fn api_format_multiplier_preserves_free_and_discounted_rates() {
+        let mut pricing = snapshot(None, None);
+        pricing.provider_api_key_rate_multipliers = Some(json!({
+            "openai:chat": 0.0,
+            "openai:responses": 0.5
+        }));
+
+        assert_eq!(
+            pricing.rate_multiplier_for_api_format(Some("openai:chat")),
+            0.0
+        );
+        assert_eq!(
+            pricing.rate_multiplier_for_api_format(Some("openai:responses")),
+            0.5
         );
     }
 

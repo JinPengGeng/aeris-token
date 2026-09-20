@@ -2232,10 +2232,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(command) = args.command.as_ref() {
         init_service_runtime(args.runtime_config()?)?;
-        // Data export/import can decrypt and persist sensitive credentials;
-        // apply the same encryption-key policy as the normal gateway path
-        // before touching the selected database.
-        if matches!(command, DataCommand::Export(_) | DataCommand::Import(_)) {
+        // Data export/import can decrypt and persist sensitive credentials, and
+        // db prepare applies migrations/backfills. Validate before any of these
+        // paths can construct a database-backed state.
+        if data_command_requires_encryption_key_validation(command) {
             args.data
                 .validate_encryption_key(args.frontdoor.effective_environment())?;
         }
@@ -2744,6 +2744,17 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         "gateway local persistence drained"
     );
     Ok(())
+}
+
+fn data_command_requires_encryption_key_validation(command: &DataCommand) -> bool {
+    matches!(
+        command,
+        DataCommand::Export(_)
+            | DataCommand::Import(_)
+            | DataCommand::Db(DatabaseCommandArgs {
+                command: DatabaseCommand::Prepare
+            })
+    )
 }
 
 async fn run_data_command(
@@ -4088,6 +4099,30 @@ mod tests {
             prepare.command,
             Some(DataCommand::Db(args))
                 if matches!(args.command, DatabaseCommand::Prepare)
+        ));
+    }
+
+    #[tokio::test]
+    async fn production_db_prepare_requires_an_encryption_key_before_database_access() {
+        let mut prepare = Args::try_parse_from(["aether-gateway", "db", "prepare"])
+            .expect("db prepare should parse");
+        let command = prepare.command.as_ref().expect("db prepare command");
+
+        assert!(super::data_command_requires_encryption_key_validation(
+            command
+        ));
+        prepare.data.encryption_key = Some("short".to_string());
+        let error = super::run(prepare)
+            .await
+            .expect_err("production db prepare must reject a short encryption key");
+        assert!(error
+            .to_string()
+            .contains("gateway data encryption key must contain at least 32 bytes"));
+
+        let status = Args::try_parse_from(["aether-gateway", "db", "status"])
+            .expect("db status should parse");
+        assert!(!super::data_command_requires_encryption_key_validation(
+            status.command.as_ref().expect("db status command")
         ));
     }
 
