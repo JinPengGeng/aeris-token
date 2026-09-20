@@ -150,7 +150,7 @@ test('nightly publishes signed tunnel archives alongside the dated package', () 
     { name: 'linux-musl-arm64', target: 'aarch64-unknown-linux-musl' },
   ]);
   assert.match(tunnelSource(tunnel), /aether-tunnel-\$\{\{ matrix\.name \}\}\.tar\.gz/);
-  assert.match(source, /sha256sum aether-tunnel-linux-musl-amd64\.tar\.gz aether-tunnel-linux-musl-arm64\.tar\.gz > SHA256SUMS\.txt/);
+  assert.match(source, /printf '# aether-tunnel-release-tag=%s\\n' "\$\{RELEASE_TAG\}" > SHA256SUMS\.txt[\s\S]*sha256sum aether-tunnel-linux-musl-amd64\.tar\.gz aether-tunnel-linux-musl-arm64\.tar\.gz >> SHA256SUMS\.txt/);
 
   const signing = findStep(document, 'tunnel-sign', (step) => step.name === 'Sign nightly tunnel manifest');
   const signer = fs.readFileSync(path.join(repoRoot, '.github/workflows/scripts/sign-nightly-tunnel.sh'), 'utf8');
