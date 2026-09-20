@@ -118,6 +118,7 @@ pub struct ReferralRewardConfig {
     pub headcount_enabled: bool,
     pub headcount_amount_usd: f64,
     pub headcount_trigger: String,
+    pub lifetime_reward_cap_usd: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -743,6 +744,7 @@ WHERE ($1::TEXT IS NULL OR inviter_user_id = $1)
         invitee_user_id: &str,
         amount_usd: f64,
         trigger_point: &str,
+        lifetime_reward_cap_usd: f64,
     ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
         if !amount_usd.is_finite() || amount_usd <= 0.0 {
             return Ok(Vec::new());
@@ -761,6 +763,7 @@ WHERE ($1::TEXT IS NULL OR inviter_user_id = $1)
             trigger_point,
             amount_usd,
             &idempotency_key,
+            lifetime_reward_cap_usd,
         )
         .await?;
         self.credit_pending_referral_rewards(&[idempotency_key], None, None)
@@ -840,6 +843,7 @@ WHERE ($1::TEXT IS NULL OR inviter_user_id = $1)
                     "paid_order",
                     amount_usd,
                     &idempotency_key,
+                    config.lifetime_reward_cap_usd,
                 )
                 .await?;
                 idempotency_keys.push(idempotency_key);
@@ -860,6 +864,7 @@ WHERE ($1::TEXT IS NULL OR inviter_user_id = $1)
                 "first_paid_order",
                 config.headcount_amount_usd,
                 &idempotency_key,
+                config.lifetime_reward_cap_usd,
             )
             .await?;
             idempotency_keys.push(idempotency_key);
@@ -1762,6 +1767,7 @@ ORDER BY created_at ASC
         Ok(Vec::new())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn insert_referral_reward(
         &self,
         relationship: &ReferralRelationshipRecord,
@@ -1770,6 +1776,7 @@ ORDER BY created_at ASC
         trigger_point: &str,
         amount_usd: f64,
         idempotency_key: &str,
+        lifetime_reward_cap_usd: f64,
     ) -> Result<bool, DataLayerError> {
         let Some(backends) = self.backends.as_ref() else {
             return Ok(false);
@@ -1777,6 +1784,48 @@ ORDER BY created_at ASC
         let reward_id = uuid::Uuid::new_v4().to_string();
         #[cfg(feature = "postgres")]
         if let Some(backend) = backends.postgres() {
+            let mut tx = backend
+                .pool_clone()
+                .begin()
+                .await
+                .map_err(DataLayerError::postgres)?;
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(hashtextextended('aether:referral:lifetime-cap:' || $1, 0))",
+            )
+                .bind(&relationship.inviter_user_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(DataLayerError::postgres)?;
+            if sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM referral_rewards WHERE idempotency_key=$1)",
+            )
+            .bind(idempotency_key)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(DataLayerError::postgres)?
+            {
+                tx.commit().await.map_err(DataLayerError::postgres)?;
+                return Ok(false);
+            }
+            let reserved: f64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(amount_usd), 0)::DOUBLE PRECISION FROM referral_rewards WHERE inviter_user_id=$1 AND status <> 'voided'",
+            )
+            .bind(&relationship.inviter_user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(DataLayerError::postgres)?;
+            if !lifetime_reward_cap_usd.is_finite() || lifetime_reward_cap_usd < 0.0 {
+                return Err(DataLayerError::InvalidInput("返利终身上限无效".to_string()));
+            }
+            let amount_usd = if lifetime_reward_cap_usd == 0.0 {
+                0.0
+            } else {
+                amount_usd.min((lifetime_reward_cap_usd - reserved).max(0.0))
+            };
+            if !amount_usd.is_finite() || amount_usd <= 0.0 {
+                tx.commit().await.map_err(DataLayerError::postgres)?;
+                return Ok(false);
+            }
             let affected = sqlx::query(
                 r#"
 INSERT INTO referral_rewards (
@@ -1796,10 +1845,11 @@ ON CONFLICT (idempotency_key) DO NOTHING
             .bind(trigger_point)
             .bind(amount_usd)
             .bind(idempotency_key)
-            .execute(&backend.pool_clone())
+            .execute(&mut *tx)
             .await
             .map_err(DataLayerError::postgres)?
             .rows_affected();
+            tx.commit().await.map_err(DataLayerError::postgres)?;
             return Ok(affected > 0);
         }
         Ok(false)

@@ -378,6 +378,27 @@
             </SelectContent>
           </Select>
         </div>
+
+        <div>
+          <Label
+            for="referral-lifetime-reward-cap"
+            class="block text-sm font-medium"
+          >
+            每位邀请人终身返利上限（USD）
+          </Label>
+          <Input
+            id="referral-lifetime-reward-cap"
+            :model-value="referralLifetimeRewardCapUsd"
+            type="number"
+            min="0"
+            step="0.01"
+            class="mt-1"
+            @update:model-value="$emit('update:referralLifetimeRewardCapUsd', Math.max(0, Number($event) || 0))"
+          />
+          <p class="mt-1 text-xs text-muted-foreground">
+            0 表示停止新增返利；退款不会恢复已使用的终身额度
+          </p>
+        </div>
       </div>
 
       <div class="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4 border-t pt-5">
@@ -494,6 +515,7 @@ defineProps<{
   referralRechargePercent: number
   referralHeadcountAmountUsd: number
   referralHeadcountTrigger: string
+  referralLifetimeRewardCapUsd: number
   registrationPrivacyPolicyEnabled: boolean
   registrationPrivacyPolicyFormat: string
   registrationPrivacyPolicyContent: string
@@ -521,6 +543,7 @@ defineEmits<{
   'update:referralRechargePercent': [value: number]
   'update:referralHeadcountAmountUsd': [value: number]
   'update:referralHeadcountTrigger': [value: string]
+  'update:referralLifetimeRewardCapUsd': [value: number]
   'update:registrationPrivacyPolicyEnabled': [value: boolean]
   'update:registrationPrivacyPolicyFormat': [value: string]
   'update:registrationPrivacyPolicyContent': [value: string]
