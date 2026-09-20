@@ -31,6 +31,7 @@ function fixture(t) {
     ...process.env, RUNNER_TEMP: directory, GITHUB_WORKSPACE: root,
     GITHUB_OUTPUT: path.join(directory, 'output'), GITHUB_STEP_SUMMARY: path.join(directory, 'summary'),
     RELEASE_TAG: tag, RELEASE_DATE: '20260914', SOURCE_SHA: sourceSha, SOURCE_SHORT_SHA: sourceSha.slice(0, 7),
+    AETHER_TUNNEL_RELEASE_TAG: tag,
     GITHUB_WORKFLOW_REF: 'fixture/nightly.yml@refs/heads/main',
   };
   for (const name of [...publicNames, secretName]) env[name] = '';

@@ -160,6 +160,18 @@ fn validate_gateway_data_encryption_key(value: Option<&str>) -> Result<(), &'sta
     Ok(())
 }
 
+fn validate_gateway_data_encryption_key_for_environment(
+    value: Option<&str>,
+    environment: &str,
+) -> Result<(), &'static str> {
+    if value.is_none_or(|value| value.trim().is_empty())
+        && environment.trim().eq_ignore_ascii_case("production")
+    {
+        return Err("gateway data encryption key is required in production");
+    }
+    validate_gateway_data_encryption_key(value)
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum VideoTaskTruthSourceArg {
     PythonSyncReport,
@@ -755,9 +767,12 @@ struct GatewayDataArgs {
 }
 
 impl GatewayDataArgs {
-    fn validate_encryption_key(&self) -> Result<(), std::io::Error> {
-        validate_gateway_data_encryption_key(self.effective_encryption_key().as_deref())
-            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))
+    fn validate_encryption_key(&self, environment: &str) -> Result<(), std::io::Error> {
+        validate_gateway_data_encryption_key_for_environment(
+            self.effective_encryption_key().as_deref(),
+            environment,
+        )
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))
     }
 
     fn effective_database_driver(&self) -> Option<DatabaseDriver> {
@@ -2217,11 +2232,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(command) = args.command.as_ref() {
         init_service_runtime(args.runtime_config()?)?;
-        // Data export/import can decrypt and persist sensitive credentials;
-        // apply the same encryption-key policy as the normal gateway path
-        // before touching the selected database.
-        if matches!(command, DataCommand::Export(_) | DataCommand::Import(_)) {
-            args.data.validate_encryption_key()?;
+        // Data export/import can decrypt and persist sensitive credentials, and
+        // db prepare applies migrations/backfills. Validate before any of these
+        // paths can construct a database-backed state.
+        if data_command_requires_encryption_key_validation(command) {
+            args.data
+                .validate_encryption_key(args.frontdoor.effective_environment())?;
         }
         return run_data_command(command, &args.data).await;
     }
@@ -2261,7 +2277,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         runtime_redis_url.as_deref(),
         runtime_backend,
     )?;
-    args.data.validate_encryption_key()?;
+    args.data
+        .validate_encryption_key(args.frontdoor.effective_environment())?;
     let data_config = args.data.to_config();
     let isolate_background_database = args.node_role.isolates_background_database();
     let background_database_config = if isolate_background_database {
@@ -2727,6 +2744,17 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         "gateway local persistence drained"
     );
     Ok(())
+}
+
+fn data_command_requires_encryption_key_validation(command: &DataCommand) -> bool {
+    matches!(
+        command,
+        DataCommand::Export(_)
+            | DataCommand::Import(_)
+            | DataCommand::Db(DatabaseCommandArgs {
+                command: DatabaseCommand::Prepare
+            })
+    )
 }
 
 async fn run_data_command(
@@ -3457,7 +3485,8 @@ async fn run_explicit_migrations(args: &Args) -> Result<(), Box<dyn std::error::
         );
     }
 
-    args.data.validate_encryption_key()?;
+    args.data
+        .validate_encryption_key(args.frontdoor.effective_environment())?;
     let state = AppState::new()?.with_data_config(args.data.to_config())?;
     let pending = state
         .pending_database_migrations()
@@ -3494,7 +3523,8 @@ async fn run_explicit_backfills(args: &Args) -> Result<(), Box<dyn std::error::E
             "AETHER_DATABASE_DRIVER/AETHER_DATABASE_URL, AETHER_GATEWAY_DATA_POSTGRES_URL, or DATABASE_URL is required when running --apply-backfills",
         )
     })?;
-    args.data.validate_encryption_key()?;
+    args.data
+        .validate_encryption_key(args.frontdoor.effective_environment())?;
     let state = AppState::new()?.with_data_config(args.data.to_config())?;
     ensure_database_schema_is_current(&state).await?;
 
@@ -3670,16 +3700,17 @@ mod tests {
         ensure_database_schema_is_current, pending_backfills_error, pending_schema_error,
         read_data_import_input_with_limit, resolve_database_mode, resolve_healthcheck_url,
         usage_database_config_for_role, validate_gateway_data_encryption_key,
-        write_atomic_private_export, Args, DataCommand, DatabaseCommand, DatabaseDriverArg,
-        DatabaseModeArg, DeploymentTopologyArg, GatewayDataArgs, GatewayFrontdoorArgs,
-        GatewayLogDestinationArg, GatewayLogFormatArg, GatewayLogRotationArg, GatewayLoggingArgs,
-        GatewayRateLimitArgs, GatewayUsageArgs, NodeRoleArg, RuntimeBackendArg,
-        VideoTaskTruthSourceArg, DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
-        DEFAULT_GATEWAY_HTTP_HEADER_MAX_BYTES, DEFAULT_GATEWAY_HTTP_HEADER_READ_TIMEOUT_MS,
-        DEFAULT_GATEWAY_HTTP_MAX_HEADERS, DEFAULT_GATEWAY_LISTENER_SHARDS,
-        DEFAULT_GATEWAY_LISTEN_BACKLOG, MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
-        MAX_GATEWAY_LISTENER_SHARDS, MAX_GATEWAY_LISTEN_BACKLOG,
-        MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, MIN_GATEWAY_LISTEN_BACKLOG,
+        validate_gateway_data_encryption_key_for_environment, write_atomic_private_export, Args,
+        DataCommand, DatabaseCommand, DatabaseDriverArg, DatabaseModeArg, DeploymentTopologyArg,
+        GatewayDataArgs, GatewayFrontdoorArgs, GatewayLogDestinationArg, GatewayLogFormatArg,
+        GatewayLogRotationArg, GatewayLoggingArgs, GatewayRateLimitArgs, GatewayUsageArgs,
+        NodeRoleArg, RuntimeBackendArg, VideoTaskTruthSourceArg,
+        DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, DEFAULT_GATEWAY_HTTP_HEADER_MAX_BYTES,
+        DEFAULT_GATEWAY_HTTP_HEADER_READ_TIMEOUT_MS, DEFAULT_GATEWAY_HTTP_MAX_HEADERS,
+        DEFAULT_GATEWAY_LISTENER_SHARDS, DEFAULT_GATEWAY_LISTEN_BACKLOG,
+        MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, MAX_GATEWAY_LISTENER_SHARDS,
+        MAX_GATEWAY_LISTEN_BACKLOG, MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
+        MIN_GATEWAY_LISTEN_BACKLOG,
     };
     use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
     use aether_gateway::AppState;
@@ -4068,6 +4099,30 @@ mod tests {
             prepare.command,
             Some(DataCommand::Db(args))
                 if matches!(args.command, DatabaseCommand::Prepare)
+        ));
+    }
+
+    #[tokio::test]
+    async fn production_db_prepare_requires_an_encryption_key_before_database_access() {
+        let mut prepare = Args::try_parse_from(["aether-gateway", "db", "prepare"])
+            .expect("db prepare should parse");
+        let command = prepare.command.as_ref().expect("db prepare command");
+
+        assert!(super::data_command_requires_encryption_key_validation(
+            command
+        ));
+        prepare.data.encryption_key = Some("short".to_string());
+        let error = super::run(prepare)
+            .await
+            .expect_err("production db prepare must reject a short encryption key");
+        assert!(error
+            .to_string()
+            .contains("gateway data encryption key must contain at least 32 bytes"));
+
+        let status = Args::try_parse_from(["aether-gateway", "db", "status"])
+            .expect("db status should parse");
+        assert!(!super::data_command_requires_encryption_key_validation(
+            status.command.as_ref().expect("db status command")
         ));
     }
 
@@ -4636,6 +4691,17 @@ mod tests {
                 "accepted insecure key: {insecure}"
             );
         }
+    }
+
+    #[test]
+    fn production_requires_gateway_data_encryption_key_but_development_does_not() {
+        assert!(validate_gateway_data_encryption_key_for_environment(None, "production").is_err());
+        assert!(validate_gateway_data_encryption_key_for_environment(None, "development").is_ok());
+        assert!(validate_gateway_data_encryption_key_for_environment(
+            Some("0123456789abcdef0123456789abcdef"),
+            "production",
+        )
+        .is_ok());
     }
 
     #[test]

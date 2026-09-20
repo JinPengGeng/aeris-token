@@ -19,7 +19,12 @@ rust:
   - 'frontend/src/**'
   - 'tools/ci/**'
   - 'tests/**'
-  - 'docs/api/**'
+  # Rust include_str! contracts consume these files; narrative API guides use
+  # the always-run documentation checks without rebuilding the Rust workspace.
+  - 'docs/api/fixtures/**'
+  - 'docs/api/provider-interface-definitions.md'
+  - 'docs/api/format-field-coverage-matrix.md'
+  - 'docs/api/format-conversion-audit.md'
   - 'docs/operations/referral-rebate-numeric-audit.sql'
   - 'docs/operations/fixtures/**'
   - '.github/change-filters.yml'

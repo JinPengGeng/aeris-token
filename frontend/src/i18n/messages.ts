@@ -2228,7 +2228,7 @@ const legacyExactEnglishMessages: Record<string, string> = {
   '优先级已更新': 'Priority updated',
   '倍率已更新': 'Multiplier updated',
   '请输入有效的倍率值': 'Enter a valid multiplier',
-  '倍率必须在 0.01 到 100 之间': 'Multiplier must be between 0.01 and 100',
+  '倍率必须在 0 到 100 之间': 'Multiplier must be between 0 and 100',
   '切换格式转换失败': 'Failed to toggle format conversion',
   '后台刷新配额失败': 'Failed to refresh quota in the background',
   '没有获取到配额信息（请检查账号是否已授权、project_id 是否存在）': 'No quota information was returned. Check whether the account is authorized and project_id exists.',

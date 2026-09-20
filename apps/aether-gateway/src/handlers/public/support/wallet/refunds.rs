@@ -12,6 +12,7 @@ use super::{
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
+use std::fmt::Debug;
 use uuid::Uuid;
 
 use crate::handlers::shared::{
@@ -22,6 +23,19 @@ use aether_data::repository::wallet::{
 };
 
 const WALLET_REFUND_CONFIGURED_PROVIDERS: &[&str] = &["epay", "alipay", "wxpay", "stripe"];
+
+fn wallet_refund_internal_error<E: Debug>(operation: &'static str, error: E) -> Response<Body> {
+    tracing::error!(
+        operation,
+        error = %crate::error::redact_error_debug(&error),
+        "wallet refund operation failed"
+    );
+    build_auth_error_response(
+        http::StatusCode::INTERNAL_SERVER_ERROR,
+        "服务暂不可用，请稍后重试",
+        false,
+    )
+}
 
 #[derive(Debug, Deserialize)]
 struct WalletCreateRefundRequest {
@@ -118,11 +132,7 @@ pub(super) async fn handle_wallet_refund_eligible_providers(
             }
             Ok(_) => {}
             Err(err) => {
-                return build_auth_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("payment gateway lookup failed: {err:?}"),
-                    false,
-                )
+                return wallet_refund_internal_error("eligible_providers.gateway_lookup", &err);
             }
         }
     }
@@ -226,11 +236,7 @@ pub(super) async fn handle_wallet_refunds_list(
     {
         Ok(value) => value,
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("wallet refund lookup failed: {err:?}"),
-                false,
-            )
+            return wallet_refund_internal_error("list.lookup", &err);
         }
     };
     let items = refunds
@@ -438,11 +444,7 @@ pub(super) async fn handle_wallet_create_refund(
             Ok(Some(record)) => payment_gateway_allow_user_refund(&record.channels_json),
             Ok(None) => false,
             Err(err) => {
-                return build_auth_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("payment gateway lookup failed: {err:?}"),
-                    false,
-                )
+                return wallet_refund_internal_error("create.gateway_lookup", &err);
             }
         };
         if !allow_user_refund {
@@ -549,11 +551,7 @@ pub(super) async fn handle_wallet_create_refund(
         Ok(Some(value)) => value,
         Ok(None) => return build_wallet_refund_storage_unavailable_response(),
         Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("wallet refund create failed: {err:?}"),
-                false,
-            )
+            return wallet_refund_internal_error("create.persist", &err);
         }
     };
 
@@ -616,9 +614,28 @@ pub(super) async fn handle_wallet_create_refund(
 
 #[cfg(test)]
 mod tests {
-    use super::wallet_refund_payload_from_record;
+    use super::{wallet_refund_internal_error, wallet_refund_payload_from_record};
     use aether_data::repository::wallet::StoredAdminWalletRefund;
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn internal_refund_errors_return_generic_public_detail() {
+        let response = wallet_refund_internal_error(
+            "lookup",
+            "database connection failed: password=refund-secret",
+        );
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("json body should parse");
+        assert_eq!(payload["detail"], "服务暂不可用，请稍后重试");
+        assert!(!String::from_utf8_lossy(&body).contains("refund-secret"));
+    }
 
     #[test]
     fn public_refund_projection_excludes_payout_proof_and_upstream_payload() {

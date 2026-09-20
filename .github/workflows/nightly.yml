@@ -397,7 +397,11 @@ jobs:
 
       - name: Generate tunnel manifest
         working-directory: tunnel-assets
-        run: sha256sum aether-tunnel-linux-musl-amd64.tar.gz aether-tunnel-linux-musl-arm64.tar.gz > SHA256SUMS.txt
+        env:
+          RELEASE_TAG: ${{ needs.source.outputs.tag }}
+        run: |
+          printf '# aether-tunnel-release-tag=%s\n' "${RELEASE_TAG}" > SHA256SUMS.txt
+          sha256sum aether-tunnel-linux-musl-amd64.tar.gz aether-tunnel-linux-musl-arm64.tar.gz >> SHA256SUMS.txt
 
       - name: Sign nightly tunnel manifest
         working-directory: tunnel-assets
@@ -406,6 +410,7 @@ jobs:
           AETHER_TUNNEL_RELEASE_PUBLIC_KEY: ${{ vars.AETHER_TUNNEL_RELEASE_PUBLIC_KEY }}
           AETHER_TUNNEL_RELEASE_TRUST_KEYS: ${{ vars.AETHER_TUNNEL_RELEASE_TRUST_KEYS }}
           AETHER_TUNNEL_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.AETHER_TUNNEL_RELEASE_PRIVATE_KEY_PEM }}
+          AETHER_TUNNEL_RELEASE_TAG: ${{ needs.source.outputs.tag }}
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/.github/workflows/scripts/sign-nightly-tunnel.sh"
 
@@ -478,7 +483,7 @@ jobs:
 
           if [[ "${TUNNEL_ENABLED}" == true ]]; then
             # Only the gated signing job's bundle is allowed into the release.
-            (cd artifacts/nightly-tunnel-signed && sha256sum --strict -c SHA256SUMS.txt)
+            (cd artifacts/nightly-tunnel-signed && tail -n +2 SHA256SUMS.txt | sha256sum --strict -c -)
             for asset in aether-tunnel-linux-musl-amd64.tar.gz aether-tunnel-linux-musl-arm64.tar.gz SHA256SUMS.txt SHA256SUMS.txt.sig release-provenance.json; do
               install -m 0644 "artifacts/nightly-tunnel-signed/${asset}" release-assets/
             done
@@ -541,7 +546,7 @@ jobs:
         run: |
           set -euo pipefail
           bash "${GITHUB_WORKSPACE}/.github/workflows/scripts/verify-tunnel-release.sh"
-          sha256sum --strict -c SHA256SUMS.txt
+          tail -n +2 SHA256SUMS.txt | sha256sum --strict -c -
 
       - name: Download all artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5

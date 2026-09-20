@@ -113,6 +113,7 @@ jobs:
           bash tests/install_local_bundle_safety_test.sh
           bash tests/install_privileged_write_safety_test.sh
           bash tests/install_source_trust_test.sh
+          bash tests/install_checksum_verification_test.sh
           bash tests/release_supply_chain_test.sh
           bash tests/update_compose_safety_test.sh
           bash tests/tunnel_installer_config_security_test.sh
@@ -545,7 +546,6 @@ jobs:
       matrix:
         feature:
           - postgres
-          - all-drivers
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:

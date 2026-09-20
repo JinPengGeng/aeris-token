@@ -15,11 +15,51 @@ const MAX_KEY_ID_BYTES: usize = 128;
 const ENVELOPE_VERSION: &str = "1";
 const MAX_TRUST_KEYS: usize = 16;
 const MAX_TRUST_SET_BYTES: usize = 16 * 1024;
+const RELEASE_TAG_PREFIX: &str = "# aether-tunnel-release-tag=";
 
-/// Verify a release manifest against the public trust set configured at build time.
-pub(crate) fn verify_release_manifest(manifest: &[u8], envelope: &[u8]) -> anyhow::Result<String> {
+/// Verify a release manifest and bind it to the release tag being downloaded.
+///
+/// The tag marker is covered by the detached signature. Without this check, a
+/// valid old manifest and archive could be copied onto a newer GitHub release;
+/// the updater's tag comparison would then approve an older binary.
+pub(crate) fn verify_release_manifest_for_tag(
+    manifest: &[u8],
+    envelope: &[u8],
+    expected_tag: &str,
+) -> anyhow::Result<String> {
     let keys = embedded_trust_keys()?;
-    verify_release_manifest_with_keys(manifest, envelope, &keys)
+    verify_release_manifest_for_tag_with_keys(manifest, envelope, expected_tag, &keys)
+}
+
+pub(crate) fn verify_release_manifest_for_tag_with_keys(
+    manifest: &[u8],
+    envelope: &[u8],
+    expected_tag: &str,
+    keys: &BTreeMap<String, VerifyingKey>,
+) -> anyhow::Result<String> {
+    let key_id = verify_release_manifest_with_keys(manifest, envelope, keys)?;
+    verify_manifest_release_tag(manifest, expected_tag)?;
+    Ok(key_id)
+}
+
+fn verify_manifest_release_tag(manifest: &[u8], expected_tag: &str) -> anyhow::Result<()> {
+    if expected_tag.is_empty() {
+        anyhow::bail!("signed release tag is empty");
+    }
+    let text = std::str::from_utf8(manifest)
+        .map_err(|_| anyhow::anyhow!("signed release manifest is not UTF-8"))?;
+    let mut tags = text.lines().filter_map(|line| {
+        line.strip_prefix(RELEASE_TAG_PREFIX)
+            .filter(|tag| !tag.is_empty())
+    });
+    match (tags.next(), tags.next()) {
+        (Some(tag), None) if tag == expected_tag => Ok(()),
+        (Some(_), None) => anyhow::bail!("signed release manifest tag does not match release"),
+        (None, _) => anyhow::bail!("signed release manifest is missing its release tag"),
+        (Some(_), Some(_)) => {
+            anyhow::bail!("signed release manifest contains multiple release tags")
+        }
+    }
 }
 
 /// Return whether this binary has a valid embedded release trust root.
@@ -28,6 +68,7 @@ pub(crate) fn verify_release_manifest(manifest: &[u8], envelope: &[u8]) -> anyho
 /// start a download. A source build with missing or malformed public inputs may
 /// still run, but it must never turn a local opt-in into an unsigned automatic
 /// upgrade attempt.
+#[allow(dead_code)]
 pub(crate) fn release_verification_configured() -> bool {
     embedded_trust_keys().is_ok()
 }
@@ -217,6 +258,41 @@ mod tests {
             verify_release_manifest_with_keys(&manifest, &envelope, &keys).unwrap(),
             "test-key"
         );
+    }
+
+    #[test]
+    fn signed_manifest_must_match_requested_release_tag() {
+        let manifest = b"# aether-tunnel-release-tag=tunnel-v0.3.17\nabc123  aether-tunnel-linux-amd64.tar.gz\n";
+        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+        let signature = signing_key.sign(manifest);
+        let envelope = format!(
+            "version=1\nkey_id=test-key\nsignature={}\n",
+            BASE64.encode(signature.to_bytes())
+        );
+        let keys = BTreeMap::from([(String::from("test-key"), signing_key.verifying_key())]);
+
+        assert_eq!(
+            verify_manifest_release_tag(manifest, "tunnel-v0.3.17").unwrap(),
+            ()
+        );
+        assert!(verify_manifest_release_tag(manifest, "tunnel-v0.3.18").is_err());
+        assert_eq!(
+            verify_release_manifest_for_tag_with_keys(
+                manifest,
+                envelope.as_bytes(),
+                "tunnel-v0.3.17",
+                &keys,
+            )
+            .unwrap(),
+            "test-key"
+        );
+        let duplicate = b"# aether-tunnel-release-tag=tunnel-v0.3.17\n# aether-tunnel-release-tag=tunnel-v0.3.17\nabc123  aether-tunnel-linux-amd64.tar.gz\n";
+        assert!(verify_manifest_release_tag(duplicate, "tunnel-v0.3.17").is_err());
+        assert!(verify_manifest_release_tag(
+            b"abc123  aether-tunnel-linux-amd64.tar.gz\n",
+            "tunnel-v0.3.17"
+        )
+        .is_err());
     }
 
     #[test]
