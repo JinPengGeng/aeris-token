@@ -58,8 +58,9 @@ curl --fail --silent http://127.0.0.1:9311/stats
 ## 升级与回滚
 
 Linux/macOS 的 `sudo aether-tunnel upgrade [version]` 和 heartbeat 触发的升级都先
-验证同一 release 的 `SHA256SUMS.txt.sig`，再解析已认证的 `SHA256SUMS.txt` 并校验
-当前平台归档摘要；`release-provenance.json` 只提供发布审计信息，不是运行时信任根。
+验证同一 release 的 `SHA256SUMS.txt.sig`，并要求已签名的 release-tag marker 与
+请求的 GitHub tag 完全一致，再解析已认证的 `SHA256SUMS.txt` 并校验当前平台归档
+摘要；`release-provenance.json` 只提供发布审计信息，不是运行时信任根。
 验证失败会保留当前二进制，不得改用未签名资产或关闭校验重试。
 
 远程升级仍须同时满足本地 `remote_upgrade_enabled`、root 写入权限和受保护的发布
