@@ -7,6 +7,7 @@ use axum::{
 use chrono::Utc;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::fmt::Debug;
 use uuid::Uuid;
 
 use aether_data::repository::management_tokens::{
@@ -34,6 +35,22 @@ const USERS_ME_MANAGEMENT_TOKEN_READ_UNAVAILABLE_DETAIL: &str =
     "用户 Management Token 数据暂不可用";
 const USERS_ME_MANAGEMENT_TOKEN_WRITE_UNAVAILABLE_DETAIL: &str =
     "用户 Management Token 写入暂不可用";
+
+fn users_me_management_token_internal_error<E: Debug>(
+    operation: &'static str,
+    error: E,
+) -> Response<Body> {
+    tracing::error!(
+        operation,
+        error = %crate::error::redact_error_debug(&error),
+        "management token operation failed"
+    );
+    build_auth_error_response(
+        http::StatusCode::INTERNAL_SERVER_ERROR,
+        "服务暂不可用，请稍后重试",
+        false,
+    )
+}
 
 fn users_me_management_token_secret_response(response: Response<Body>) -> Response<Body> {
     mark_sensitive_response_no_store(response)
@@ -336,13 +353,7 @@ fn build_users_me_management_token_user_summary(
         auth.user.username.clone(),
         auth.user.role.clone(),
     )
-    .map_err(|err| {
-        build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("management token user summary build failed: {err:?}"),
-            false,
-        )
-    })
+    .map_err(|err| users_me_management_token_internal_error("user_summary", &err))
 }
 
 async fn list_users_me_management_tokens_for_user(
@@ -363,13 +374,7 @@ async fn list_users_me_management_tokens_for_user(
             limit,
         })
         .await
-        .map_err(|err| {
-            build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("management token list failed: {err:?}"),
-                false,
-            )
-        })
+        .map_err(|err| users_me_management_token_internal_error("list", &err))
 }
 
 async fn resolve_users_me_management_token(
@@ -388,11 +393,7 @@ async fn resolve_users_me_management_token(
             "Management Token 不存在",
             false,
         )),
-        Err(err) => Err(build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("management token lookup failed: {err:?}"),
-            false,
-        )),
+        Err(err) => Err(users_me_management_token_internal_error("lookup", &err)),
     }
 }
 
@@ -423,13 +424,7 @@ pub(super) async fn handle_users_me_management_tokens_list(
         .await
     {
         Ok(value) => value,
-        Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("management token list failed: {err:?}"),
-                false,
-            )
-        }
+        Err(err) => return users_me_management_token_internal_error("list", &err),
     };
 
     Json(json!({
@@ -548,11 +543,7 @@ pub(super) async fn handle_users_me_management_token_create(
             "Management Token 不存在",
             false,
         ),
-        Err(err) => build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("management token create failed: {err:?}"),
-            false,
-        ),
+        Err(err) => users_me_management_token_internal_error("create", &err),
     }
 }
 
@@ -684,11 +675,7 @@ pub(super) async fn handle_users_me_management_token_update(
         Ok(LocalMutationOutcome::Unavailable) => {
             build_users_me_management_token_writer_unavailable_response()
         }
-        Err(err) => build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("management token update failed: {err:?}"),
-            false,
-        ),
+        Err(err) => users_me_management_token_internal_error("update", &err),
     }
 }
 
@@ -730,11 +717,7 @@ pub(super) async fn handle_users_me_management_token_delete(
             "Management Token 不存在",
             false,
         ),
-        Err(err) => build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("management token delete failed: {err:?}"),
-            false,
-        ),
+        Err(err) => users_me_management_token_internal_error("delete", &err),
     }
 }
 
@@ -785,11 +768,7 @@ pub(super) async fn handle_users_me_management_token_toggle(
             "Management Token 不存在",
             false,
         ),
-        Err(err) => build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("management token toggle failed: {err:?}"),
-            false,
-        ),
+        Err(err) => users_me_management_token_internal_error("toggle", &err),
     }
 }
 
@@ -852,17 +831,30 @@ pub(super) async fn handle_users_me_management_token_regenerate(
         Ok(LocalMutationOutcome::Unavailable) => {
             build_users_me_management_token_writer_unavailable_response()
         }
-        Err(err) => build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("management token regenerate failed: {err:?}"),
-            false,
-        ),
+        Err(err) => users_me_management_token_internal_error("regenerate", &err),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn internal_management_token_errors_hide_storage_details() {
+        let response = users_me_management_token_internal_error(
+            "lookup",
+            "database connection failed: password=management-secret",
+        );
+
+        assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("json body should parse");
+        assert_eq!(payload["detail"], "服务暂不可用，请稍后重试");
+        assert!(!String::from_utf8_lossy(&body).contains("management-secret"));
+    }
 
     #[test]
     fn management_token_writes_require_the_current_full_admin_role() {
