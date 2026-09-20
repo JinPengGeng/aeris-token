@@ -246,20 +246,16 @@ pub(crate) fn attach_control_metadata_headers(
 pub(crate) fn build_local_balance_denied_response(
     trace_id: &str,
     control_decision: Option<&GatewayControlDecision>,
-    balance_remaining: Option<f64>,
+    _balance_remaining: Option<f64>,
 ) -> Result<Response<Body>, GatewayError> {
-    let message = match balance_remaining {
-        Some(remaining) => format!("Insufficient balance (remaining: ${remaining:.2})"),
-        None => "Insufficient balance".to_string(),
-    };
+    // Unknown client formats still receive a stable quota error. Never fall
+    // back to echoing the internal wallet snapshot in a public response.
+    let message = "Insufficient quota";
     let fallback_payload = json!({
         "error": {
-            "type": "balance_exceeded",
+            "type": "insufficient_quota",
             "message": message,
-            "details": {
-                "balance_type": "USD",
-                "remaining": balance_remaining,
-            }
+            "code": "credit_balance_exhausted"
         }
     });
     let client_format = if local_error_uses_openai_format(control_decision, None) {
@@ -965,6 +961,22 @@ mod tests {
         assert_eq!(payload["error"]["message"], "Insufficient quota");
         assert!(payload["error"]["details"].is_null());
         assert_eq!(payload["trace_id"], "trace-balance-openai");
+    }
+
+    #[tokio::test]
+    async fn unknown_balance_denial_does_not_expose_wallet_snapshot() {
+        let response =
+            build_local_balance_denied_response("trace-balance-unknown", None, Some(12.34))
+                .expect("balance response should build");
+
+        assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+        let payload = response_json(response).await;
+        assert_eq!(payload["error"]["type"], "insufficient_quota");
+        assert_eq!(payload["error"]["code"], "credit_balance_exhausted");
+        assert_eq!(payload["error"]["message"], "Insufficient quota");
+        assert!(payload["error"].get("details").is_none());
+        assert_eq!(payload["trace_id"], "trace-balance-unknown");
+        assert!(!payload.to_string().contains("12.34"));
     }
 
     #[tokio::test]
