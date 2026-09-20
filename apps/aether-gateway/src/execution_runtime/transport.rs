@@ -1464,6 +1464,15 @@ pub(crate) async fn execute_sync_plan_with_report_context(
         }
     }
 
+    // Keep synchronous executions inside the same per-target bulkhead as
+    // streaming and websocket paths. The permit is owned by this future, so
+    // direct, provider-specific, and local-tunnel branches release it only
+    // after their complete response lifecycle (or on cancellation).
+    let _upstream_target_permit = state
+        .upstream_target_admission
+        .acquire(plan, trace_id.unwrap_or("sync"))
+        .await?;
+
     if resolve_local_tunnel_node_id(state, plan.proxy.as_ref()).is_some() {
         return execute_sync_plan_via_local_tunnel(state, plan, report_context)
             .await
@@ -5482,7 +5491,7 @@ mod tests {
         gateway_frontdoor_self_loop_guard_matches_with_port,
     };
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
-    use crate::AppState;
+    use crate::{AppState, GatewayError};
 
     const LOCAL_HTTP_SUCCESS_TIMEOUT_MS: u64 = 15_000;
     const RELAY_TEST_SECRET: &str = "relay-test-secret-at-least-32-bytes";
@@ -7462,6 +7471,45 @@ mod tests {
             transport_profile: None,
             timeouts: Some(timeouts),
         }
+    }
+
+    #[tokio::test]
+    async fn execute_sync_plan_respects_target_bulkhead_before_transport() {
+        let mut config = crate::state::FrontdoorRuntimeGuardConfig::for_tests(
+            None,
+            std::time::Duration::from_millis(1),
+        );
+        config.upstream_target_gate_limit = Some(1);
+        config.upstream_target_gate_is_auto = false;
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_frontdoor_runtime_guard_config_for_tests(config);
+        let plan = direct_timeout_plan(
+            "https://same-target.example/v1/chat/completions".to_string(),
+            false,
+            ExecutionTimeouts::default(),
+        );
+        let held = state
+            .upstream_target_admission
+            .acquire(&plan, "held")
+            .await
+            .expect("initial target admission should succeed")
+            .expect("target gate should be enabled");
+
+        let result = execute_sync_plan(&state, Some("blocked"), &plan).await;
+        assert!(matches!(
+            result,
+            Err(GatewayError::AdmissionTimeout {
+                gate: "gateway_upstream_target",
+                ..
+            })
+        ));
+        drop(held);
+        assert!(state
+            .upstream_target_admission
+            .try_acquire_for_plan(&plan)
+            .expect("target admission should recover")
+            .is_some());
     }
 
     fn tunnel_proxy_snapshot(base_url: String) -> ProxySnapshot {
