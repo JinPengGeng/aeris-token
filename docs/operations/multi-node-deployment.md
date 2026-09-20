@@ -28,6 +28,19 @@
 每个节点必须提供能从其他节点访问的 `AETHER_TUNNEL_RELAY_BASE_URL`，relay 本身
 应验证签名并限制来源网络。
 
+## Compose 资源上限
+
+单节点 Compose 文件为每个服务设置硬上限：app 为 `2.0` CPU / `2g` 内存 / `512` PID，
+PostgreSQL 为 `2.0` CPU / `3g` 内存 / `512` PID，Redis 为 `1.0` CPU / `512m` 内存 /
+`256` PID。它们是上限，不是资源预留或最低主机配置。升级既有部署前，应根据实际
+负载在 `.env` 设置对应的 `AETHER_APP_*_LIMIT`、`POSTGRES_*_LIMIT` 和
+`REDIS_*_LIMIT`。
+
+配置 `POSTGRES_MEMORY_LIMIT` 时必须同时考虑 `POSTGRES_SHARED_BUFFERS` 和
+`POSTGRES_WORK_MEM`；增大数据库内存调优参数而不提高容器上限可能触发 OOM。大队列
+Redis 需要提高 `REDIS_MEMORY_LIMIT`；此设置不改变 Redis 淘汰或持久化策略。local
+和 durable-Redis overlay 继承基线服务的上限。
+
 ## PostgreSQL 连接池预算
 
 示例按 PostgreSQL `max_connections >= 160` 预留：frontdoor 两节点各 40，background
