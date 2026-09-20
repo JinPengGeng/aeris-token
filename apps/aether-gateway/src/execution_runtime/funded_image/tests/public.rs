@@ -110,6 +110,10 @@ fn candidate() -> StoredMinimalCandidateSelectionRow {
 fn retry_candidate() -> StoredMinimalCandidateSelectionRow {
     let mut row = candidate();
     row.provider_id = "p-b".into();
+    // Keep the primary candidate deterministic for tests that assert the
+    // first attempt's provider; retry coverage still reaches this candidate
+    // after the primary attempt fails.
+    row.provider_priority = 20;
     row.provider_name = "images".into();
     row.endpoint_id = "e-b".into();
     row.key_id = "pk-b".into();
