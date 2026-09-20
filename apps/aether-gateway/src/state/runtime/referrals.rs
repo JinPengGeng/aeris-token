@@ -126,12 +126,16 @@ impl AppState {
             .await?;
         let headcount_trigger =
             config_string(headcount_trigger.as_ref()).unwrap_or_else(|| "registration".to_string());
+        let lifetime_cap = self
+            .read_system_config_json_value("referral_lifetime_reward_cap_usd")
+            .await?;
         Ok(Some(ReferralRewardConfig {
             percent_enabled: matches!(mode.as_str(), "percent" | "both"),
             percent_rate: config_percent(percent.as_ref()),
             headcount_enabled: matches!(mode.as_str(), "headcount" | "both"),
             headcount_amount_usd: config_f64(headcount_amount.as_ref(), 0.0),
             headcount_trigger,
+            lifetime_reward_cap_usd: config_f64(lifetime_cap.as_ref(), 100.0).max(0.0),
         }))
     }
 
@@ -162,6 +166,7 @@ impl AppState {
                     user_id,
                     config.headcount_amount_usd,
                     &config.headcount_trigger,
+                    config.lifetime_reward_cap_usd,
                 )
                 .await
                 .map_err(|err| GatewayError::Internal(err.to_string()))?;
