@@ -2930,7 +2930,6 @@ mod tests {
     #[test]
     fn operation_replay_policy_blocks_sent_effectful_plan_kinds() {
         for plan_kind in [
-            OPENAI_IMAGE_SYNC_PLAN_KIND,
             OPENAI_IMAGE_STREAM_PLAN_KIND,
             OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
             OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
@@ -2946,6 +2945,11 @@ mod tests {
                 "{plan_kind} must not replay a sent upstream operation"
             );
         }
+    }
+
+    #[test]
+    fn operation_replay_policy_allows_retryable_image_sync() {
+        assert!(operation_allows_retry_replay(OPENAI_IMAGE_SYNC_PLAN_KIND));
     }
 
     #[test]
