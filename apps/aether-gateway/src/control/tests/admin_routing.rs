@@ -59,6 +59,41 @@ fn classifies_admin_routing_group_routes_as_admin_proxy_route() {
 }
 
 #[test]
+fn admin_v1_routes_classify_against_the_canonical_admin_path() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/v1/routing/groups?limit=10"
+        .parse()
+        .expect("uri should parse");
+    let decision = classify_control_route(&http::Method::GET, &uri, &headers)
+        .expect("versioned admin route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(
+        decision.route_family.as_deref(),
+        Some("routing_profiles_manage")
+    );
+    assert_eq!(decision.route_kind.as_deref(), Some("list_groups"));
+    assert_eq!(decision.public_path, "/api/admin/routing/groups");
+    assert_eq!(uri.path(), "/api/admin/v1/routing/groups");
+    assert_eq!(uri.query(), Some("limit=10"));
+}
+
+#[test]
+fn admin_v1_prefix_does_not_match_similar_versions() {
+    let headers = headers(&[]);
+    for path in [
+        "/api/admin/v10/routing/groups",
+        "/api/admin/v1x/routing/groups",
+    ] {
+        let uri: Uri = path.parse().expect("uri should parse");
+        assert!(
+            classify_control_route(&http::Method::GET, &uri, &headers).is_none(),
+            "{path} must not be treated as an admin v1 alias"
+        );
+    }
+}
+
+#[test]
 fn admin_routing_write_routes_buffer_request_body() {
     let headers = headers(&[]);
     let routes = [
