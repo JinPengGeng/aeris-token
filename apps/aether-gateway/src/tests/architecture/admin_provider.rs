@@ -141,12 +141,12 @@ fn provider_cleanup_keeps_common_backends_in_sync() {
         let source = read_workspace_file(path);
         for required in [
             "UPDATE user_preferences SET default_provider_id = NULL WHERE default_provider_id =",
-            "UPDATE video_tasks SET provider_id = NULL WHERE provider_id =",
+            "UPDATE video_tasks SET provider_id = NULL, row_revision = row_revision + 1, updated_at = GREATEST(updated_at, NOW()) WHERE provider_id =",
             "DELETE FROM request_candidates WHERE provider_id =",
-            "UPDATE video_tasks SET endpoint_id = NULL WHERE endpoint_id =",
+            "UPDATE video_tasks SET endpoint_id = NULL, row_revision = row_revision + 1, updated_at = GREATEST(updated_at, NOW()) WHERE endpoint_id =",
             "DELETE FROM request_candidates WHERE endpoint_id =",
             "DELETE FROM gemini_file_mappings WHERE key_id =",
-            "UPDATE video_tasks SET key_id = NULL WHERE key_id =",
+            "UPDATE video_tasks SET key_id = NULL, row_revision = row_revision + 1, updated_at = GREATEST(updated_at, NOW()) WHERE key_id =",
         ] {
             assert!(
                 source.contains(required),

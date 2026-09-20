@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use aether_data_contracts::DataLayerError;
 use aether_runtime_state::{
-    RuntimeQueueEntry, RuntimeQueueReclaimConfig, RuntimeQueueReclaimPage, RuntimeQueueStats,
-    RuntimeQueueStore, RuntimeQueueTransferOutcome,
+    RuntimeQueueCapacitySignal, RuntimeQueueEntry, RuntimeQueueReclaimConfig,
+    RuntimeQueueReclaimPage, RuntimeQueueStats, RuntimeQueueStore, RuntimeQueueTransferOutcome,
 };
 
 use super::config::UsageRuntimeConfig;
@@ -330,6 +330,15 @@ impl UsageQueue {
     pub async fn dlq_stats(&self) -> Result<RuntimeQueueStats, DataLayerError> {
         self.runner.stats(&self.dlq_stream, None).await
     }
+
+    /// Returns a bounded capacity signal for operators and health checks.
+    pub async fn dlq_capacity_signal(&self) -> Result<RuntimeQueueCapacitySignal, DataLayerError> {
+        let stats = self.dlq_stats().await?;
+        Ok(RuntimeQueueCapacitySignal::from_stats(
+            stats,
+            self.config.dlq_stream_maxlen,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -588,6 +597,11 @@ mod tests {
                 .expect("dead letter append");
         }
         assert_eq!(queue.dlq_stats().await.unwrap().stream_length, 2);
+        let signal = queue.dlq_capacity_signal().await.unwrap();
+        assert_eq!(signal.stream_length, 2);
+        assert_eq!(signal.max_length, 2);
+        assert_eq!(signal.utilization_per_mille, 1000);
+        assert!(signal.at_retention_boundary);
     }
 
     #[test]

@@ -10,10 +10,12 @@ use crate::{
 };
 
 impl LocalVideoTaskSnapshot {
-    pub(crate) fn created_at_unix_ms(&self) -> u64 {
+    pub(crate) fn created_at_unix_secs(&self) -> u64 {
         match self {
-            Self::OpenAi(seed) => seed.created_at_unix_ms,
-            Self::Gemini(_) => 0,
+            // The legacy field name is retained for the persisted/API contract;
+            // current video-task records store this value in Unix seconds.
+            Self::OpenAi(seed) => normalize_unix_timestamp_secs(seed.created_at_unix_ms),
+            Self::Gemini(seed) => normalize_unix_timestamp_secs(seed.created_at_unix_secs),
         }
     }
 
@@ -25,27 +27,110 @@ impl LocalVideoTaskSnapshot {
     }
 
     pub fn from_stored_task(task: &StoredVideoTask) -> Option<Self> {
-        let mut snapshot = task
+        let snapshot = task
             .request_metadata
             .as_ref()
             .and_then(|metadata| metadata.get("rust_local_snapshot"))
             .cloned()
             .and_then(|value| serde_json::from_value::<LocalVideoTaskSnapshot>(value).ok())?;
+        snapshot.with_stored_task(task)
+    }
 
-        // The row is the ownership source of truth. Older embedded snapshots can
-        // contain stale identity fields after a task import or repair.
-        match &mut snapshot {
-            Self::OpenAi(seed) => {
-                seed.local_short_id = task.short_id.clone();
-                seed.user_id = task.user_id.clone();
-                seed.api_key_id = task.api_key_id.clone();
-            }
-            Self::Gemini(seed) => {
-                seed.user_id = task.user_id.clone();
-                seed.api_key_id = task.api_key_id.clone();
+    /// Preserve transport capability, but take identity and lifecycle exclusively from the row.
+    pub fn with_stored_task(&self, task: &StoredVideoTask) -> Option<Self> {
+        let transport = match self {
+            Self::OpenAi(seed) => seed.transport.clone(),
+            Self::Gemini(seed) => seed.transport.clone(),
+        };
+        let mut task = task.clone();
+        task.provider_api_format = task
+            .provider_api_format
+            .or_else(|| task.client_api_format.clone());
+        let mut snapshot = Self::from_stored_task_with_transport(&task, transport)?;
+        if let (Self::OpenAi(source), Self::OpenAi(target)) = (self, &mut snapshot) {
+            target.xai_provider = source.xai_provider;
+        }
+        Some(snapshot)
+    }
+
+    /// Only use after the source update was accepted, or for a cache observation of
+    /// this exact row revision. These provider fields are deliberately not persisted
+    /// in the database, but remain part of the native in-memory response contract.
+    pub fn with_committed_stored_task(&self, task: &StoredVideoTask) -> Option<Self> {
+        let mut snapshot = self.with_stored_task(task)?;
+        if let (Self::OpenAi(source), Self::OpenAi(target)) = (self, &mut snapshot) {
+            if source.status.as_database_status() == task.status {
+                target.native_response = source.native_response.clone();
+                target.expires_at_unix_secs = source.expires_at_unix_secs;
+                target.remixed_from_video_id = source.remixed_from_video_id.clone();
             }
         }
         Some(snapshot)
+    }
+
+    /// Enrich a terminal native view without changing any authoritative row fields.
+    pub fn with_terminal_presentation(&self, projected: &Self) -> Option<Self> {
+        let (Self::OpenAi(current), Self::OpenAi(projected)) = (self, projected) else {
+            return None;
+        };
+        if !current.uses_xai_provider()
+            || current.native_response.is_some()
+            || !matches!(
+                current.status,
+                LocalVideoTaskStatus::Completed
+                    | LocalVideoTaskStatus::Failed
+                    | LocalVideoTaskStatus::Expired
+            )
+            || current.persistence.row_revision != projected.persistence.row_revision
+            || current.local_task_id != projected.local_task_id
+            || current.status != projected.status
+            || current.video_url != projected.video_url
+            || projected.native_response.is_none()
+        {
+            return None;
+        }
+        let mut enriched = current.clone();
+        enriched.native_response = projected.native_response.clone();
+        enriched.expires_at_unix_secs = projected.expires_at_unix_secs;
+        Some(Self::OpenAi(enriched))
+    }
+
+    pub fn row_revision(&self) -> i64 {
+        match self {
+            Self::OpenAi(seed) => seed.persistence.row_revision,
+            Self::Gemini(seed) => seed.persistence.row_revision,
+        }
+    }
+
+    /// Project a finalize report without changing the shared registry.
+    pub fn apply_finalize_report(&mut self, report_kind: &str) -> bool {
+        let status = match self {
+            Self::OpenAi(seed) => &mut seed.status,
+            Self::Gemini(seed) => &mut seed.status,
+        };
+        let next = match report_kind {
+            "openai_video_delete_sync_finalize"
+                if matches!(
+                    *status,
+                    LocalVideoTaskStatus::Completed | LocalVideoTaskStatus::Failed
+                ) =>
+            {
+                LocalVideoTaskStatus::Deleted
+            }
+            "openai_video_cancel_sync_finalize" | "gemini_video_cancel_sync_finalize"
+                if matches!(
+                    *status,
+                    LocalVideoTaskStatus::Submitted
+                        | LocalVideoTaskStatus::Queued
+                        | LocalVideoTaskStatus::Processing
+                ) =>
+            {
+                LocalVideoTaskStatus::Cancelled
+            }
+            _ => return false,
+        };
+        *status = next;
+        true
     }
 
     pub fn from_stored_task_with_transport(
@@ -109,6 +194,7 @@ impl LocalVideoTaskSnapshot {
                 Some(Self::Gemini(GeminiVideoTaskSeed {
                     local_short_id,
                     upstream_operation_name,
+                    created_at_unix_secs: task.created_at_unix_ms,
                     user_id: task.user_id.clone(),
                     api_key_id: task.api_key_id.clone(),
                     model,
@@ -158,7 +244,7 @@ impl LocalVideoTaskSnapshot {
             let mut seed = seed.clone();
             if path.starts_with("/openai/v1/videos/") {
                 seed.persistence.client_api_format = "openai:video".to_string();
-            } else if path.starts_with("/v1/videos/") && seed.uses_xai_provider() {
+            } else if path.starts_with("/v1/videos/") && seed.is_xai_native() {
                 seed.persistence.client_api_format = "xai:video".to_string();
             }
             return Self::OpenAi(seed).read_response();
@@ -243,6 +329,19 @@ impl LocalVideoTaskSnapshot {
     }
 }
 
+fn normalize_unix_timestamp_secs(value: u64) -> u64 {
+    // A small number of pre-retention stores used the legacy field name
+    // literally and persisted milliseconds. Accept both encodings so those
+    // records receive the same expiry policy instead of becoming immortal.
+    // Unix seconds remain below this bound until year 2286, while practical
+    // millisecond timestamps have exceeded it since April 1970.
+    if value >= 10_000_000_000 {
+        value / 1_000
+    } else {
+        value
+    }
+}
+
 fn sanitized_error_code_for_status(
     status: LocalVideoTaskStatus,
     error_code: Option<String>,
@@ -253,5 +352,59 @@ fn sanitized_error_code_for_status(
         LocalVideoTaskStatus::Expired => Some("expired".to_string()),
         LocalVideoTaskStatus::Cancelled => Some("cancelled".to_string()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod revision_display_tests {
+    use super::*;
+
+    #[test]
+    fn only_committed_sources_preserve_native_display_fields() {
+        let source: LocalVideoTaskSnapshot = serde_json::from_value(json!({
+            "OpenAi": {
+                "local_task_id":"native-task", "upstream_task_id":"upstream-task",
+                "created_at_unix_ms":100, "user_id":"owner", "api_key_id":"key",
+                "model":"grok-imagine-video", "prompt":null, "size":null, "seconds":"6",
+                "remixed_from_video_id":null, "status":"Completed", "progress_percent":100,
+                "completed_at_unix_secs":200, "expires_at_unix_secs":300,
+                "error_code":null, "error_message":null, "video_url":"https://example.test/video.mp4",
+                "native_response":{"status":"done","video":{"url":"https://example.test/video.mp4","respect_moderation":true},"provider_extension":"preserved"},
+                "xai_provider":true,
+                "persistence":{"row_revision":3,"request_id":"request-native","username":null,"api_key_name":null,
+                    "client_api_format":"xai:video","provider_api_format":"openai:video","original_request_body":{},"format_converted":false},
+                "transport":{"upstream_base_url":"https://api.example.test","provider_name":"xai","provider_id":"provider",
+                    "endpoint_id":"endpoint","key_id":"key","headers":{},"content_type":null,"model_name":null,
+                    "proxy":null,"transport_profile":null,"timeouts":null}
+            }
+        })).unwrap();
+        let mut row = source.to_upsert_record().into_stored();
+        row.row_revision = 4;
+        let accepted = source.with_committed_stored_task(&row).unwrap();
+        let LocalVideoTaskSnapshot::OpenAi(accepted) = accepted else {
+            unreachable!()
+        };
+        assert_eq!(accepted.persistence.row_revision, 4);
+        assert_eq!(
+            accepted.native_response.as_ref().unwrap()["provider_extension"],
+            "preserved"
+        );
+        assert_eq!(
+            accepted.native_response.as_ref().unwrap()["video"]["respect_moderation"],
+            true
+        );
+        assert_eq!(accepted.expires_at_unix_secs, Some(300));
+
+        row.status = aether_data_contracts::repository::video_tasks::VideoTaskStatus::Cancelled;
+        row.progress_percent = 73;
+        let recovered = source.with_stored_task(&row).unwrap();
+        let LocalVideoTaskSnapshot::OpenAi(recovered) = recovered else {
+            unreachable!()
+        };
+        assert_eq!(recovered.status, LocalVideoTaskStatus::Cancelled);
+        assert_eq!(recovered.progress_percent, 73);
+        assert_eq!(recovered.persistence.row_revision, 4);
+        assert!(recovered.native_response.is_none());
+        assert!(recovered.expires_at_unix_secs.is_none());
     }
 }

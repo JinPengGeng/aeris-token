@@ -45,6 +45,33 @@ fn admin_monitoring_matches_typical_routes() {
     );
 }
 
+#[tokio::test]
+async fn audit_delivery_list_rejects_invalid_filters_before_repository_access() {
+    let state = AppState::new().expect("state should build");
+    for query in [
+        "limit=0",
+        "limit=101",
+        "state=unknown",
+        "before_created_at=nope&before_event_id=x",
+        "before_created_at=2026-09-17T00%3A00%3A00Z",
+        "before_event_id=x",
+    ] {
+        let context = request_context(
+            http::Method::GET,
+            &format!("/api/admin/monitoring/audit-deliveries?{query}"),
+        );
+        let response = local_monitoring_response(&state, &context)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            http::StatusCode::BAD_REQUEST,
+            "query={query}"
+        );
+    }
+}
+
 #[test]
 fn admin_monitoring_matches_cache_delete_shapes_and_trailing_slashes() {
     assert_eq!(

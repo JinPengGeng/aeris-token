@@ -3,6 +3,8 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 use std::collections::BTreeSet;
 
+use aether_data_contracts::repository::emergency_chain::EmergencyChainTarget;
+
 pub(crate) fn parse_admin_provider_query_body(
     request_body: Option<&Bytes>,
 ) -> Result<serde_json::Value, Response<axum::body::Body>> {
@@ -124,6 +126,57 @@ pub(crate) fn provider_query_extract_request_id(payload: &serde_json::Value) -> 
         .map(ToOwned::to_owned)
 }
 
+pub(crate) fn provider_query_extract_emergency_targets(
+    payload: &serde_json::Value,
+    provider_id: &str,
+) -> Option<Vec<EmergencyChainTarget>> {
+    if !provider_query_emergency_identity_is_valid(provider_id) {
+        return None;
+    }
+    let items = payload.get("targets")?.as_array()?;
+    if items.is_empty() || items.len() > 32 {
+        return None;
+    }
+
+    let mut identities = BTreeSet::new();
+    let mut targets = Vec::with_capacity(items.len());
+    for item in items {
+        let endpoint_id = item
+            .get("endpoint_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let key_id = item
+            .get("key_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        if !provider_query_emergency_identity_is_valid(endpoint_id)
+            || !provider_query_emergency_identity_is_valid(key_id)
+        {
+            return None;
+        }
+        if !identities.insert((endpoint_id.to_string(), key_id.to_string())) {
+            return None;
+        }
+        targets.push(EmergencyChainTarget {
+            provider_id: provider_id.to_string(),
+            endpoint_id: endpoint_id.to_string(),
+            key_id: key_id.to_string(),
+        });
+    }
+    Some(targets)
+}
+
+fn provider_query_emergency_identity_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_whitespace)
+        && !value.chars().any(char::is_control)
+        && !value.contains("://")
+}
+
 pub(crate) fn provider_query_payload_keys(payload: &serde_json::Value) -> Vec<String> {
     let Some(object) = payload.as_object() else {
         return Vec::new();
@@ -131,4 +184,36 @@ pub(crate) fn provider_query_payload_keys(payload: &serde_json::Value) -> Vec<St
     let mut keys = object.keys().cloned().collect::<Vec<_>>();
     keys.sort();
     keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_query_extract_emergency_targets;
+    use serde_json::json;
+
+    #[test]
+    fn emergency_targets_keep_request_order_and_reject_duplicates() {
+        let targets = provider_query_extract_emergency_targets(
+            &json!({
+                "targets": [
+                    { "endpoint_id": "endpoint-b", "key_id": "key-b" },
+                    { "endpoint_id": "endpoint-a", "key_id": "key-a" }
+                ]
+            }),
+            "provider-a",
+        )
+        .expect("ordered targets should parse");
+        assert_eq!(targets[0].endpoint_id, "endpoint-b");
+        assert_eq!(targets[1].endpoint_id, "endpoint-a");
+        assert!(provider_query_extract_emergency_targets(
+            &json!({
+                "targets": [
+                    { "endpoint_id": "endpoint-a", "key_id": "key-a" },
+                    { "endpoint_id": "endpoint-a", "key_id": "key-a" }
+                ]
+            }),
+            "provider-a",
+        )
+        .is_none());
+    }
 }

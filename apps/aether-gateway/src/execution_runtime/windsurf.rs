@@ -4,7 +4,7 @@ use std::io::{self, Error as IoError, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_contracts::{
@@ -37,7 +37,8 @@ use uuid::Uuid;
 
 use super::ndjson::encode_stream_frame_ndjson;
 use super::transport::{
-    with_non_stream_total_timeout, ExecutionRuntimeTransportError, UpstreamResponseBodyPhase,
+    with_non_stream_total_timeout, ExecutionRuntimeTransportError, LocalSendAdmissionError,
+    UpstreamResponseBodyPhase,
 };
 use crate::AppState;
 
@@ -229,6 +230,69 @@ struct PreparedCascade {
     model: String,
     cascade_id: String,
     ls: LsHandle,
+    retry_admission: Option<WindsurfRetryAdmission>,
+}
+
+#[derive(Clone)]
+struct WindsurfRetryAdmission {
+    state: AppState,
+    guard: Arc<crate::scheduler::send_admission::GatewaySendAdmissionGuard>,
+    budget: crate::executor::InternalAttemptBudgetHandle,
+}
+
+impl WindsurfRetryAdmission {
+    fn capture(
+        state: &AppState,
+        guard: Option<Arc<crate::scheduler::send_admission::GatewaySendAdmissionGuard>>,
+    ) -> Option<Self> {
+        Some(Self {
+            state: state.clone(),
+            guard: guard?,
+            budget: crate::executor::current_internal_attempt_budget_handle()?,
+        })
+    }
+
+    async fn admit(
+        &self,
+        plan: &ExecutionPlan,
+    ) -> Result<crate::execution_runtime::InternalRetrySendAdmission, ExecutionRuntimeTransportError>
+    {
+        crate::execution_runtime::admit_internal_retry_send(
+            &self.state,
+            plan,
+            self.guard.as_ref(),
+            Some(&self.budget),
+        )
+        .await
+        .map_err(|_| {
+            ExecutionRuntimeTransportError::LocalAdmission(LocalSendAdmissionError::Stopped)
+        })
+    }
+}
+
+async fn require_windsurf_retry_admission(
+    retry_admission: Option<&WindsurfRetryAdmission>,
+    plan: &ExecutionPlan,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    let admission = retry_admission
+        .ok_or_else(|| {
+            ExecutionRuntimeTransportError::LocalAdmission(
+                LocalSendAdmissionError::ContextUnavailable,
+            )
+        })?
+        .admit(plan)
+        .await?;
+    match admission {
+        crate::execution_runtime::InternalRetrySendAdmission::Admit => Ok(()),
+        crate::execution_runtime::InternalRetrySendAdmission::Skip => Err(
+            ExecutionRuntimeTransportError::LocalAdmission(LocalSendAdmissionError::Skipped),
+        ),
+        crate::execution_runtime::InternalRetrySendAdmission::BudgetExhausted(reason) => {
+            Err(ExecutionRuntimeTransportError::LocalAdmission(
+                LocalSendAdmissionError::BudgetExhausted(reason),
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,12 +308,16 @@ pub(crate) async fn maybe_execute_windsurf_stream(
     state: &AppState,
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
+    send_admission_guard: Option<Arc<crate::scheduler::send_admission::GatewaySendAdmissionGuard>>,
 ) -> Result<Option<WindsurfNativeStream>, ExecutionRuntimeTransportError> {
     let Some(input) = detect_windsurf_request(plan, report_context) else {
         return Ok(None);
     };
     let key_upstream_metadata = read_windsurf_key_upstream_metadata(state, plan).await;
-    let prepared = prepare_windsurf_cascade(plan, input, key_upstream_metadata).await?;
+    let retry_admission = WindsurfRetryAdmission::capture(state, send_admission_guard);
+    let prepared =
+        prepare_windsurf_cascade(plan, input, key_upstream_metadata, retry_admission, false)
+            .await?;
     let report_context = native_report_context(report_context, &prepared);
     let frame_stream = build_windsurf_stream_frame_stream(prepared).boxed();
 
@@ -263,13 +331,17 @@ pub(crate) async fn maybe_execute_windsurf_sync(
     state: &AppState,
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
+    send_admission_guard: Option<Arc<crate::scheduler::send_admission::GatewaySendAdmissionGuard>>,
 ) -> Result<Option<ExecutionResult>, ExecutionRuntimeTransportError> {
     let Some(input) = detect_windsurf_request(plan, report_context) else {
         return Ok(None);
     };
     with_non_stream_total_timeout(plan, async move {
         let key_upstream_metadata = read_windsurf_key_upstream_metadata(state, plan).await;
-        let prepared = prepare_windsurf_cascade(plan, input, key_upstream_metadata).await?;
+        let retry_admission = WindsurfRetryAdmission::capture(state, send_admission_guard);
+        let prepared =
+            prepare_windsurf_cascade(plan, input, key_upstream_metadata, retry_admission, false)
+                .await?;
         let started_at = Instant::now();
         let mut content = String::new();
         let buffered_body_limit = crate::headers::max_internal_buffered_body_bytes();
@@ -338,6 +410,8 @@ async fn prepare_windsurf_cascade(
     plan: &ExecutionPlan,
     input: WindsurfRequestInput,
     key_upstream_metadata: Option<Value>,
+    retry_admission: Option<WindsurfRetryAdmission>,
+    retry_initial_send: bool,
 ) -> Result<PreparedCascade, ExecutionRuntimeTransportError> {
     let model = resolve_windsurf_execution_model(&input.model, key_upstream_metadata.as_ref())
         .ok_or_else(|| {
@@ -416,6 +490,9 @@ async fn prepare_windsurf_cascade(
                 "failed to build Windsurf cascade message".to_string(),
             )
         })?;
+        if retry_initial_send || send_retry > 0 {
+            require_windsurf_retry_admission(retry_admission.as_ref(), plan).await?;
+        }
         match windsurf_grpc_unary(
             ls.port,
             &ls.csrf_token,
@@ -460,6 +537,7 @@ async fn prepare_windsurf_cascade(
         model: model.canonical_name,
         cascade_id,
         ls,
+        retry_admission,
     })
 }
 
@@ -768,6 +846,17 @@ fn windsurf_execution_error_from_transport_error(
 ) -> ExecutionError {
     let lower = err.to_string().to_ascii_lowercase();
     let message = windsurf_public_error_message(err, &lower);
+    if let ExecutionRuntimeTransportError::LocalAdmission(reason) = err {
+        return ExecutionError {
+            kind: ExecutionErrorKind::Internal,
+            phase,
+            message,
+            upstream_status: matches!(reason, LocalSendAdmissionError::BudgetExhausted(_))
+                .then_some(429),
+            retryable: false,
+            failover_recommended: false,
+        };
+    }
     if lower.contains("stream cancelled by downstream client") {
         return ExecutionError {
             kind: ExecutionErrorKind::Cancelled,
@@ -828,6 +917,18 @@ fn windsurf_execution_error_from_transport_error(
 }
 
 fn windsurf_public_error_message(err: &ExecutionRuntimeTransportError, normalized: &str) -> String {
+    if let ExecutionRuntimeTransportError::LocalAdmission(reason) = err {
+        return match reason {
+            LocalSendAdmissionError::BudgetExhausted(reason) => {
+                format!("request_attempt_budget_exhausted: {}", reason.as_str())
+            }
+            LocalSendAdmissionError::ContextUnavailable
+            | LocalSendAdmissionError::Skipped
+            | LocalSendAdmissionError::Stopped => {
+                "Windsurf internal retry was not admitted".to_string()
+            }
+        };
+    }
     if normalized.contains("stream cancelled by downstream client") {
         return "Windsurf request was cancelled".to_string();
     }
@@ -989,6 +1090,8 @@ where
         &prepared.plan,
         prepared.input.clone(),
         prepared.key_upstream_metadata.clone(),
+        prepared.retry_admission.clone(),
+        true,
     )
     .await?;
     poll_windsurf_cascade(&recovered, on_event).await

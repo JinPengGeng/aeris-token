@@ -81,7 +81,9 @@ impl AppState {
         self.auth_wallet_snapshot_cache
             .get_or_load(cache_key, ttl, || async move {
                 let _permit = self.acquire_auth_snapshot_load_gate().await?;
-                self.find_wallet(lookup).await
+                let wallet = self.find_wallet(lookup).await?;
+                schedule_low_balance_notification(self, wallet.as_ref());
+                Ok(wallet)
             })
             .await
     }
@@ -119,7 +121,9 @@ impl AppState {
         };
 
         let _permit = self.acquire_auth_snapshot_load_gate().await?;
-        self.find_wallet(lookup).await
+        let wallet = self.find_wallet(lookup).await?;
+        schedule_low_balance_notification(self, wallet.as_ref());
+        Ok(wallet)
     }
 
     pub(crate) async fn list_wallet_snapshots_by_user_ids(
@@ -259,6 +263,29 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
+}
+
+fn schedule_low_balance_notification(
+    state: &AppState,
+    wallet: Option<&aether_data::repository::wallet::StoredWalletSnapshot>,
+) {
+    let Some(wallet) = wallet else {
+        return;
+    };
+    let state = state.clone();
+    let wallet = wallet.clone();
+    tokio::spawn(async move {
+        if let Err(err) =
+            crate::important_notification::maybe_send_user_low_balance_notification(&state, &wallet)
+                .await
+        {
+            tracing::warn!(
+                error = %crate::error::redact_error_debug(&err),
+                wallet_id = %wallet.id,
+                "failed to evaluate low balance notification"
+            );
+        }
+    });
 }
 
 #[cfg(test)]

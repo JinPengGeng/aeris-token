@@ -4594,6 +4594,7 @@ fn coalesce_openai_responses_text_content(content: Vec<Value>) -> Vec<Value> {
     }
     let mut text = String::new();
     let mut annotations = Vec::new();
+    let mut text_offset = 0_i64;
     for part in &content {
         let Some(part_object) = part.as_object() else {
             return content;
@@ -4610,8 +4611,13 @@ fn coalesce_openai_responses_text_content(content: Vec<Value>) -> Vec<Value> {
         };
         text.push_str(part_text);
         if let Some(part_annotations) = part_object.get("annotations").and_then(Value::as_array) {
-            annotations.extend(part_annotations.iter().cloned());
+            annotations.extend(
+                part_annotations
+                    .iter()
+                    .map(|annotation| offset_openai_annotation_indices(annotation, text_offset)),
+            );
         }
+        text_offset += part_text.chars().count() as i64;
     }
     vec![json!({
         "type": "output_text",

@@ -340,6 +340,24 @@ impl AppState {
         Ok(members)
     }
 
+    pub(crate) async fn replace_user_group_members_with_audit(
+        &self,
+        group_id: &str,
+        user_ids: &[String],
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<Vec<aether_data::repository::users::StoredUserGroupMember>>, GatewayError>
+    {
+        let members = self
+            .data
+            .replace_user_group_members_with_audit(group_id, user_ids, audit)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if members.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(members)
+    }
+
     pub(crate) async fn list_user_groups_for_user(
         &self,
         user_id: &str,

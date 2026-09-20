@@ -54,6 +54,10 @@ const TEST_EMAIL_VERIFICATION_TOKEN: &str =
 mod auth_cookie;
 #[path = "public_support/dashboard.rs"]
 mod dashboard;
+#[path = "public_support/email_verification_referral.rs"]
+mod email_verification_referral;
+#[path = "public_support/recharge_recovery.rs"]
+mod recharge_recovery;
 #[path = "public_support/vscodex.rs"]
 mod vscodex;
 

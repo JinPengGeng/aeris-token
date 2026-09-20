@@ -22,6 +22,33 @@ fn classifies_admin_monitoring_audit_logs_as_admin_proxy_route() {
 }
 
 #[test]
+fn classifies_admin_audit_delivery_operator_routes() {
+    let headers = headers(&[]);
+    for (method, path, kind) in [
+        (
+            http::Method::GET,
+            "/api/admin/monitoring/audit-deliveries",
+            "audit_deliveries",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/monitoring/audit-deliveries/event-1/redrive",
+            "audit_delivery_redrive",
+        ),
+    ] {
+        let uri: Uri = path.parse().unwrap();
+        let decision =
+            classify_control_route(&method, &uri, &headers).expect("route should classify");
+        assert_eq!(decision.route_family.as_deref(), Some("monitoring"));
+        assert_eq!(decision.route_kind.as_deref(), Some(kind));
+        assert_eq!(
+            decision.auth_endpoint_signature.as_deref(),
+            Some("admin:monitoring")
+        );
+    }
+}
+
+#[test]
 fn classifies_admin_monitoring_trace_request_as_admin_proxy_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/admin/monitoring/trace/request-1"

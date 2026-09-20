@@ -1,4 +1,6 @@
-use aether_scheduler_core::{ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate};
+use aether_scheduler_core::{
+    ClientSessionAffinity, SchedulerAffinityTarget, SchedulerMinimalCandidateSelectionCandidate,
+};
 use std::time::Duration;
 
 use super::{GatewayAuthApiKeySnapshot, PlannerAppState};
@@ -145,6 +147,7 @@ impl<'a> PlannerAppState<'a> {
         now_unix_secs: u64,
         ranking_seed: u64,
         ordering_config: SchedulerOrderingConfig,
+        affinity_target: Option<&Option<SchedulerAffinityTarget>>,
     ) -> Result<
         (
             Vec<SchedulerMinimalCandidateSelectionCandidate>,
@@ -163,6 +166,7 @@ impl<'a> PlannerAppState<'a> {
             now_unix_secs,
             ranking_seed,
             ordering_config,
+            affinity_target,
         )
         .await
     }

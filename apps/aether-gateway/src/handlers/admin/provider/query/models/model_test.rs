@@ -5,7 +5,8 @@ use super::super::payload::{
 };
 use super::super::response::{
     build_admin_provider_query_bad_request_response, build_admin_provider_query_not_found_response,
-    ADMIN_PROVIDER_QUERY_API_KEY_NOT_FOUND_DETAIL, ADMIN_PROVIDER_QUERY_MODEL_REQUIRED_DETAIL,
+    ADMIN_PROVIDER_QUERY_API_KEY_NOT_FOUND_DETAIL,
+    ADMIN_PROVIDER_QUERY_EMERGENCY_UNAVAILABLE_DETAIL, ADMIN_PROVIDER_QUERY_MODEL_REQUIRED_DETAIL,
     ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL, ADMIN_PROVIDER_QUERY_NO_LOCAL_MODELS_DETAIL,
     ADMIN_PROVIDER_QUERY_PROVIDER_ID_REQUIRED_DETAIL,
     ADMIN_PROVIDER_QUERY_PROVIDER_NOT_FOUND_DETAIL,
@@ -16,7 +17,7 @@ use crate::ai_serving::{
     ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME, GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND,
     OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND, OPENAI_IMAGE_SYNC_FINALIZE_REPORT_KIND,
 };
-use crate::clock::current_unix_ms;
+use crate::clock::{current_unix_ms, current_unix_secs};
 use crate::execution_runtime;
 use crate::handlers::admin::provider::write::provider::reconcile_admin_fixed_provider_template_endpoints;
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
@@ -41,6 +42,9 @@ use crate::provider_transport::kiro::{
     build_kiro_provider_request_body, supports_local_kiro_request_transport_with_network,
     KiroProviderHeadersInput, KIRO_ENVELOPE_NAME,
 };
+use crate::scheduler::send_admission::{
+    request_gateway_send_admission, GatewaySendAdmissionDecision,
+};
 use crate::usage::GatewaySyncReportRequest;
 use crate::{AppState, GatewayError};
 use aether_admin::provider::pool as admin_provider_pool_pure;
@@ -49,11 +53,17 @@ use aether_ai_serving::{
     AiPoolRuntimeState, AiPoolSchedulingConfig, AiPoolSchedulingPreset,
 };
 use aether_contracts::{ExecutionPlan, RequestBody};
+use aether_data_contracts::repository::audit::CreateAdminAuditLog;
 use aether_data_contracts::repository::candidate_selection::{
     StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
 };
 use aether_data_contracts::repository::candidates::{
     RequestCandidateStatus, UpsertRequestCandidateRecord,
+};
+use aether_data_contracts::repository::emergency_chain::{
+    emergency_chain_target_hash, ConsumeEmergencyChainGrant, ConsumeEmergencyChainGrantOutcome,
+    EmergencyChainTarget, IssueEmergencyChainGrant, IssueEmergencyChainGrantOutcome,
+    RevokeEmergencyChainGrant, RevokeEmergencyChainGrantOutcome, StoredEmergencyChainGrant,
 };
 use aether_data_contracts::repository::global_models::{
     AdminProviderModelListQuery, StoredAdminProviderModel,
@@ -75,6 +85,7 @@ use axum::{
     Json,
 };
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tracing::{debug, warn};
@@ -2959,11 +2970,21 @@ async fn provider_query_execute_standard_test_candidate(
     payload: &Value,
     route_path: &str,
     trace_id: &str,
+    transport_override: Option<AdminGatewayProviderTransportSnapshot>,
 ) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
-    let Some(mut transport) = state
-        .read_provider_transport_snapshot(&provider.id, &candidate.endpoint.id, &candidate.key.id)
-        .await?
-    else {
+    let emergency_execution = transport_override.is_some();
+    let Some(mut transport) = (match transport_override {
+        Some(transport) => Some(transport),
+        None => {
+            state
+                .read_provider_transport_snapshot(
+                    &provider.id,
+                    &candidate.endpoint.id,
+                    &candidate.key.id,
+                )
+                .await?
+        }
+    }) else {
         return Ok(provider_query_skipped_execution_outcome(
             Value::Null,
             "Provider transport snapshot is unavailable",
@@ -3017,11 +3038,12 @@ async fn provider_query_execute_standard_test_candidate(
     let request_model =
         provider_query_request_body_model(&request_body, &candidate.effective_model);
 
-    let upstream_is_stream = provider_query_resolve_standard_test_upstream_is_stream(
-        transport.endpoint.config.as_ref(),
-        transport.provider.provider_type.as_str(),
-        provider_api_format,
-    );
+    let upstream_is_stream = !emergency_execution
+        && provider_query_resolve_standard_test_upstream_is_stream(
+            transport.endpoint.config.as_ref(),
+            transport.provider.provider_type.as_str(),
+            provider_api_format,
+        );
     let require_body_stream_field = provider_query_request_requires_body_stream_field(
         &request_body,
         transport.endpoint.config.as_ref(),
@@ -3528,6 +3550,18 @@ async fn provider_query_execute_standard_test_candidate(
         }
     }
 
+    if emergency_execution {
+        if let Some(object) = provider_request_body.as_object_mut() {
+            object.insert("stream".to_string(), Value::Bool(false));
+        }
+        if emergency_chain_request_contains_tools(&provider_request_body) {
+            return Ok(provider_query_skipped_execution_outcome(
+                provider_request_body,
+                "Emergency model tests do not permit tools",
+            ));
+        }
+    }
+
     let plan = ExecutionPlan {
         request_id: trace_id.to_string(),
         candidate_id: Some(format!("provider-query-{}", candidate.key.id)),
@@ -3550,6 +3584,42 @@ async fn provider_query_execute_standard_test_candidate(
             .await,
         transport_profile: state.resolve_transport_profile(&transport),
         timeouts: state.resolve_transport_execution_timeouts(&transport),
+    };
+
+    let _emergency_send_admission = if emergency_execution {
+        let guard = match request_gateway_send_admission(state.app(), &plan).await {
+            GatewaySendAdmissionDecision::Admit(guard) => guard,
+            GatewaySendAdmissionDecision::Skip(skip) => {
+                return Ok(provider_query_skipped_execution_outcome(
+                    provider_request_body,
+                    format!(
+                        "Emergency send admission skipped target: {}",
+                        skip.reason().as_str()
+                    ),
+                ));
+            }
+            GatewaySendAdmissionDecision::Stop(stop) => {
+                return Ok(provider_query_skipped_execution_outcome(
+                    provider_request_body,
+                    format!(
+                        "Emergency send admission stopped target: {}",
+                        stop.reason().as_str()
+                    ),
+                ));
+            }
+        };
+        if let Err(reason) = guard.ensure_alive() {
+            return Ok(provider_query_skipped_execution_outcome(
+                provider_request_body,
+                format!(
+                    "Emergency send admission lease was lost: {}",
+                    reason.as_str()
+                ),
+            ));
+        }
+        Some(guard)
+    } else {
+        None
     };
 
     let result = state
@@ -3905,7 +3975,7 @@ async fn build_admin_provider_query_kiro_failover_response(
                 }
                 Some(ProviderQueryTestAdapter::Standard) => {
                     provider_query_execute_standard_test_candidate(
-                        state, &provider, candidate, payload, route_path, &trace_id,
+                        state, &provider, candidate, payload, route_path, &trace_id, None,
                     )
                     .await
                 }
@@ -4063,6 +4133,423 @@ pub(crate) async fn build_admin_provider_query_test_model_local_response(
             .unwrap_or_else(|| provider_query_candidate_summary_payload(0, 0, &[])),
     }))
     .into_response())
+}
+
+const EMERGENCY_CHAIN_V1_TTL_SECS: u64 = 300;
+const EMERGENCY_CHAIN_EXECUTE_PATH: &str = "/api/admin/provider-query/emergency-chain/execute";
+
+fn emergency_chain_json_response(status: http::StatusCode, body: Value) -> Response<Body> {
+    (status, Json(body)).into_response()
+}
+
+fn emergency_chain_internal_response(
+    stage: &'static str,
+    error: impl std::fmt::Debug,
+) -> Response<Body> {
+    warn!(
+        event_name = "admin_emergency_chain_internal_failure",
+        log_type = "error",
+        stage,
+        error = ?error,
+        "administrator emergency chain failed internally"
+    );
+    emergency_chain_json_response(
+        http::StatusCode::INTERNAL_SERVER_ERROR,
+        json!({ "detail": "Emergency chain target validation failed" }),
+    )
+}
+
+fn emergency_chain_request_fingerprint(
+    provider_id: &str,
+    model: &str,
+    targets: &[EmergencyChainTarget],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"aether-admin-emergency-model-test-v1\0");
+    for value in std::iter::once(provider_id)
+        .chain(std::iter::once(model))
+        .chain(targets.iter().flat_map(|target| {
+            [
+                target.provider_id.as_str(),
+                target.endpoint_id.as_str(),
+                target.key_id.as_str(),
+            ]
+        }))
+    {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn emergency_chain_audit(
+    principal: &str,
+    request_id: &str,
+    action: &'static str,
+    grant_id: &str,
+) -> CreateAdminAuditLog {
+    CreateAdminAuditLog {
+        id: Uuid::now_v7().to_string(),
+        event_type: "admin_mutation".to_string(),
+        user_id: Some(principal.to_string()),
+        api_key_id: None,
+        description: format!("admin action: {action}"),
+        ip_address: None,
+        user_agent: None,
+        request_id: Some(request_id.to_string()),
+        event_metadata: Some(json!({
+            "schema_version": 1,
+            "event_name": action,
+            "action": action,
+            "target_type": "emergency_chain_grant",
+            "target_id": grant_id,
+        })),
+        status_code: Some(200),
+        error_message: None,
+        created_at: chrono::Utc::now(),
+    }
+}
+
+fn emergency_chain_format_is_sync_model_test(api_format: &str) -> bool {
+    matches!(
+        provider_query_normalize_api_format_alias(api_format).as_str(),
+        "openai:chat"
+            | "openai:responses"
+            | "openai:responses:compact"
+            | "claude:messages"
+            | "gemini:generate_content"
+    )
+}
+
+fn emergency_chain_request_contains_tools(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "tools" | "tool_choice" | "functions" | "function_call"
+            ) || emergency_chain_request_contains_tools(value)
+        }),
+        Value::Array(items) => items.iter().any(emergency_chain_request_contains_tools),
+        _ => false,
+    }
+}
+
+async fn emergency_chain_materialize_candidate(
+    state: &AdminAppState<'_>,
+    provider_id: &str,
+    model: &str,
+    target: &EmergencyChainTarget,
+) -> Result<
+    (
+        StoredProviderCatalogProvider,
+        ProviderQueryTestCandidate,
+        AdminGatewayProviderTransportSnapshot,
+    ),
+    Response<Body>,
+> {
+    let providers = state
+        .app()
+        .read_provider_catalog_providers_by_ids_strong(&[provider_id.to_string()])
+        .await
+        .map_err(|error| emergency_chain_internal_response("provider_read", error))?;
+    let provider = providers
+        .into_iter()
+        .find(|provider| provider.id == provider_id && provider.is_active)
+        .ok_or_else(|| {
+            emergency_chain_json_response(
+                http::StatusCode::CONFLICT,
+                json!({ "detail": "Emergency target provider is unavailable" }),
+            )
+        })?;
+
+    let endpoints = state
+        .app()
+        .read_provider_catalog_endpoints_by_ids_strong(std::slice::from_ref(&target.endpoint_id))
+        .await
+        .map_err(|error| emergency_chain_internal_response("endpoint_read", error))?;
+    let endpoint = endpoints
+        .into_iter()
+        .find(|endpoint| {
+            endpoint.id == target.endpoint_id
+                && endpoint.provider_id == provider_id
+                && endpoint.is_active
+                && emergency_chain_format_is_sync_model_test(&endpoint.api_format)
+                && matches!(
+                    provider_query_test_adapter_for_provider_api_format(
+                        &provider.provider_type,
+                        &endpoint.api_format,
+                    ),
+                    Some(ProviderQueryTestAdapter::Standard)
+                )
+        })
+        .ok_or_else(|| {
+            emergency_chain_json_response(
+                http::StatusCode::CONFLICT,
+                json!({ "detail": "Emergency target endpoint is unavailable or unsupported" }),
+            )
+        })?;
+
+    let keys = state
+        .app()
+        .list_provider_catalog_keys_by_ids_strong(std::slice::from_ref(&target.key_id))
+        .await
+        .map_err(|error| emergency_chain_internal_response("key_read", error))?;
+    let key = keys
+        .into_iter()
+        .find(|key| {
+            key.id == target.key_id
+                && key.provider_id == provider_id
+                && key.is_active
+                && key
+                    .expires_at_unix_secs
+                    .is_none_or(|expires_at| current_unix_secs() < expires_at)
+                && provider_query_key_supports_endpoint(
+                    key,
+                    &provider.provider_type,
+                    &endpoint.api_format,
+                )
+                && provider_query_key_allows_effective_test_model(key, model, model)
+        })
+        .ok_or_else(|| {
+            emergency_chain_json_response(
+                http::StatusCode::CONFLICT,
+                json!({ "detail": "Emergency target key is unavailable" }),
+            )
+        })?;
+
+    let transport = state
+        .read_provider_transport_snapshot_uncached(provider_id, &endpoint.id, &key.id)
+        .await
+        .map_err(|error| emergency_chain_internal_response("transport_read", error))?
+        .ok_or_else(|| {
+            emergency_chain_json_response(
+                http::StatusCode::CONFLICT,
+                json!({ "detail": "Emergency target transport is unavailable" }),
+            )
+        })?;
+    if crate::provider_transport::is_windsurf_provider_transport(&transport) {
+        return Err(emergency_chain_json_response(
+            http::StatusCode::CONFLICT,
+            json!({ "detail": "Emergency v1 does not support specialized provider transports" }),
+        ));
+    }
+
+    Ok((
+        provider,
+        ProviderQueryTestCandidate {
+            endpoint,
+            key,
+            effective_model: model.to_string(),
+            scheduler_skip_reason: None,
+        },
+        transport,
+    ))
+}
+
+fn emergency_chain_failure_is_retryable(execution: &ProviderQueryExecutionOutcome) -> bool {
+    execution.status == "failed" && matches!(execution.status_code, Some(408 | 429 | 500..=599))
+}
+
+pub(crate) async fn build_admin_provider_query_emergency_chain_execute_response(
+    state: &AdminAppState<'_>,
+    principal: &str,
+    provider_id: String,
+    model: String,
+    targets: Vec<EmergencyChainTarget>,
+) -> Result<Response<Body>, GatewayError> {
+    let Some(repository) = state.app().data.emergency_chain_grant_repository() else {
+        return Ok(emergency_chain_json_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            json!({ "detail": ADMIN_PROVIDER_QUERY_EMERGENCY_UNAVAILABLE_DETAIL }),
+        ));
+    };
+
+    // Validate every exact identity before granting. The same strong reads are
+    // repeated immediately before each send because catalog state can change.
+    for target in &targets {
+        if let Err(response) =
+            emergency_chain_materialize_candidate(state, &provider_id, &model, target).await
+        {
+            return Ok(response);
+        }
+    }
+
+    let issued_at = current_unix_secs();
+    let grant_id = Uuid::now_v7().to_string();
+    let request_id = Uuid::now_v7().to_string();
+    let session_nonce = Uuid::new_v4().to_string();
+    let chain_hash = emergency_chain_target_hash(&targets);
+    let grant = StoredEmergencyChainGrant {
+        grant_id: grant_id.clone(),
+        principal: principal.to_string(),
+        operations: vec!["admin.provider_query.model_test".to_string()],
+        request_id: request_id.clone(),
+        request_fingerprint: emergency_chain_request_fingerprint(&provider_id, &model, &targets),
+        session_nonce,
+        chain_hash: chain_hash.clone(),
+        targets: targets.clone(),
+        issued_at_unix_secs: issued_at,
+        expires_at_unix_secs: issued_at.saturating_add(EMERGENCY_CHAIN_V1_TTL_SECS),
+        revoked_at_unix_secs: None,
+        consumed_at_unix_secs: None,
+    };
+    let issue = repository
+        .issue_emergency_chain_grant(IssueEmergencyChainGrant {
+            audit: emergency_chain_audit(
+                principal,
+                &request_id,
+                "issue_emergency_chain_grant",
+                &grant_id,
+            ),
+            grant,
+        })
+        .await
+        .map_err(|error| GatewayError::Internal(error.to_string()))?;
+    if issue != IssueEmergencyChainGrantOutcome::Issued {
+        return Ok(emergency_chain_json_response(
+            http::StatusCode::CONFLICT,
+            json!({ "detail": "Emergency chain grant already exists" }),
+        ));
+    }
+
+    let consumed_at = current_unix_secs();
+    let consume = repository
+        .consume_emergency_chain_grant(ConsumeEmergencyChainGrant {
+            grant_id: grant_id.clone(),
+            principal: principal.to_string(),
+            consumed_at_unix_secs: consumed_at,
+        })
+        .await
+        .map_err(|error| GatewayError::Internal(error.to_string()))?;
+    if consume != ConsumeEmergencyChainGrantOutcome::Consumed {
+        return Ok(emergency_chain_json_response(
+            http::StatusCode::CONFLICT,
+            json!({
+                "detail": "Emergency chain grant could not be consumed",
+                "grant_id": grant_id,
+                "consume_outcome": format!("{consume:?}"),
+            }),
+        ));
+    }
+
+    let execution_payload = json!({ "model": model });
+    let mut attempts = Vec::new();
+    let mut success_body = None;
+    for (candidate_index, target) in targets.iter().enumerate() {
+        let (provider, candidate, transport) = match emergency_chain_materialize_candidate(
+            state,
+            &provider_id,
+            &model,
+            target,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(response) => return Ok(response),
+        };
+        let Some(current_grant) = repository
+            .read_emergency_chain_grant(&grant_id)
+            .await
+            .map_err(|error| GatewayError::Internal(error.to_string()))?
+        else {
+            break;
+        };
+        let now = current_unix_secs();
+        if current_grant.principal != principal
+            || current_grant.chain_hash != chain_hash
+            || current_grant.consumed_at_unix_secs != Some(consumed_at)
+            || now < current_grant.issued_at_unix_secs
+            || now >= current_grant.expires_at_unix_secs
+            || current_grant
+                .revoked_at_unix_secs
+                .is_some_and(|revoked_at| revoked_at <= now)
+        {
+            break;
+        }
+        let execution = provider_query_execute_standard_test_candidate(
+            state,
+            &provider,
+            &candidate,
+            &execution_payload,
+            EMERGENCY_CHAIN_EXECUTE_PATH,
+            &request_id,
+            Some(transport),
+        )
+        .await?;
+        let success = execution.status == "success";
+        let retryable = emergency_chain_failure_is_retryable(&execution);
+        if success {
+            success_body = provider_query_success_response_body(&execution);
+        }
+        attempts.push(provider_query_test_attempt_payload(
+            candidate_index,
+            &candidate,
+            &execution,
+        ));
+        if success || !retryable {
+            break;
+        }
+    }
+
+    let success = success_body.is_some();
+    Ok(emergency_chain_json_response(
+        http::StatusCode::OK,
+        json!({
+            "success": success,
+            "grant_id": grant_id,
+            "request_id": request_id,
+            "chain_hash": chain_hash,
+            "provider_id": provider_id,
+            "model": model,
+            "targets": targets,
+            "attempts": attempts,
+            "data": success_body,
+            "error": if success { Value::Null } else { json!("Emergency chain exhausted or stopped") },
+        }),
+    ))
+}
+
+pub(crate) async fn build_admin_provider_query_emergency_chain_revoke_response(
+    state: &AdminAppState<'_>,
+    principal: &str,
+    grant_id: &str,
+) -> Result<Response<Body>, GatewayError> {
+    let Some(repository) = state.app().data.emergency_chain_grant_repository() else {
+        return Ok(emergency_chain_json_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            json!({ "detail": ADMIN_PROVIDER_QUERY_EMERGENCY_UNAVAILABLE_DETAIL }),
+        ));
+    };
+    let revoked_at = current_unix_secs();
+    let request_id = Uuid::now_v7().to_string();
+    let outcome = repository
+        .revoke_emergency_chain_grant(RevokeEmergencyChainGrant {
+            grant_id: grant_id.to_string(),
+            principal: principal.to_string(),
+            revoked_at_unix_secs: revoked_at,
+            audit: emergency_chain_audit(
+                principal,
+                &request_id,
+                "revoke_emergency_chain_grant",
+                grant_id,
+            ),
+        })
+        .await
+        .map_err(|error| GatewayError::Internal(error.to_string()))?;
+    let status = match outcome {
+        RevokeEmergencyChainGrantOutcome::Revoked { .. }
+        | RevokeEmergencyChainGrantOutcome::AlreadyRevoked { .. } => http::StatusCode::OK,
+        RevokeEmergencyChainGrantOutcome::NotFound => http::StatusCode::NOT_FOUND,
+        RevokeEmergencyChainGrantOutcome::PrincipalDenied => http::StatusCode::FORBIDDEN,
+    };
+    Ok(emergency_chain_json_response(
+        status,
+        json!({
+            "success": status.is_success(),
+            "grant_id": grant_id,
+            "outcome": format!("{outcome:?}"),
+        }),
+    ))
 }
 
 pub(crate) async fn build_admin_provider_query_test_model_failover_local_response(

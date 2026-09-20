@@ -191,6 +191,14 @@ impl SchedulerRuntimeState for CountingState {
         Ok(None)
     }
 
+    async fn read_provider_quota_snapshot_uncached(
+        &self,
+        _provider_id: &str,
+    ) -> Result<Option<StoredProviderQuotaSnapshot>, GatewayError> {
+        self.quota_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+
     async fn read_provider_catalog_providers_by_ids(
         &self,
         provider_ids: &[String],

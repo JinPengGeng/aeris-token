@@ -370,4 +370,45 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
+
+    pub(crate) async fn admin_revoke_user_session_with_audit(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<
+        Option<aether_data::repository::users::AdminUserSessionRevocationOutcome>,
+        GatewayError,
+    > {
+        #[cfg(test)]
+        if self.auth_session_store.is_some() {
+            return Ok(None);
+        }
+        self.data
+            .admin_revoke_user_session_with_audit(user_id, session_id, revoked_at, reason, audit)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn admin_revoke_all_user_sessions_with_audit(
+        &self,
+        user_id: &str,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<
+        Option<aether_data::repository::users::AdminUserSessionsRevocationOutcome>,
+        GatewayError,
+    > {
+        #[cfg(test)]
+        if self.auth_session_store.is_some() {
+            return Ok(None);
+        }
+        self.data
+            .admin_revoke_all_user_sessions_with_audit(user_id, revoked_at, reason, audit)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
 }

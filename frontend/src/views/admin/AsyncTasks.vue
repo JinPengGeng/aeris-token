@@ -860,6 +860,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { asyncTasksApi, type AsyncTaskItem, type AsyncTaskDetail, type AsyncTaskStatsResponse, type AsyncTaskStatus } from '@/api/async-tasks'
+import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
 import { getI18nLocale, useI18n } from '@/i18n'
@@ -905,6 +906,7 @@ import { log } from '@/utils/logger'
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.canAccessAdmin)
 const { toast } = useToast()
+const { confirmWarning } = useConfirm()
 const { legacyT } = useI18n()
 const { copyToClipboard } = useClipboard()
 
@@ -1117,7 +1119,8 @@ async function openUsageRecord(task: AsyncTaskItem) {
 
 // 取消任务
 async function cancelTask(task: AsyncTaskItem | AsyncTaskDetail) {
-  if (!confirm(legacyT('确定要取消这个任务吗？'))) return
+  const confirmed = await confirmWarning(legacyT('确定要取消这个任务吗？'), legacyT('取消任务'))
+  if (!confirmed) return
   try {
     await asyncTasksApi.cancel(task.id)
     toast({

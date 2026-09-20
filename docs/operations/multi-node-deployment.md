@@ -6,17 +6,21 @@
 
 ## 启动
 
-1. 复制 `deploy/multi-node/.env.node-*`，替换镜像 digest、数据库/Redis 凭据和
-   relay 域名。不要把真实凭据提交到仓库。
+1. 复制 `deploy/multi-node/.env.node-*`，替换镜像 digest、数据库/Redis 凭据、
+   `JWT_SECRET_KEY`、`ENCRYPTION_KEY` 和 relay 域名。两个密钥都必须使用稳定的
+   随机值（至少 32 字节）；三节点共享同一组密钥。不要把真实凭据提交到仓库。
 2. 在每台主机只保留对应节点的 env 文件，然后运行：
 
    ```sh
    tools/operations/check_multi_node_preflight.sh .env.node-frontdoor-1
-   docker compose -f deploy/multi-node/docker-compose.yml up -d frontdoor-1
+   docker compose --env-file deploy/multi-node/.env.node-frontdoor-1 \
+     -f deploy/multi-node/docker-compose.yml up -d frontdoor-1
    ```
 
-   三个服务也可由同一编排器启动：`docker compose -f deploy/multi-node/docker-compose.yml up -d`。
-3. 入口负载均衡器只把 HTTPS 流量转发到 `frontdoor-1/2:8084`，健康检查 `/health`，
+   三个服务也可由同一编排器启动（用任一节点 env 提供镜像插值变量）：
+   `docker compose --env-file deploy/multi-node/.env.node-frontdoor-1 -f deploy/multi-node/docker-compose.yml up -d`。
+3. 入口负载均衡器只把 HTTPS 流量转发到 `frontdoor-1/2:8084`，就绪检查 `/readyz`，
+   存活检查可使用 `/health`，
    并将其固定在 `AETHER_GATEWAY_TRUSTED_INGRESS_CIDRS`。该 CIDR 必须只包含实际
    反向代理网段；不要把公网网段加入信任列表。background 不应暴露公网端口。
 
@@ -62,4 +66,3 @@ fail-open/recovery 语义处理，不得当作财务账本。
 错误、usage queue pending/lag/DLQ 与 outbox pending。仓库无法在 CI 中证明真实三
 节点、真实负载均衡或故障恢复；`verify_multi_node_assets.sh` 只验证 env 契约和
 compose 解析，不能替代上述隔离环境证据。
-

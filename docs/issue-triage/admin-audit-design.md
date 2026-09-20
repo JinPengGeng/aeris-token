@@ -77,6 +77,14 @@
 `session_id`、`management_token_id`、`route_family`、`route_kind`、`method`、
 `path`、`action`、`target_type`、`target_id`、`target_truncated`。其中：
 
+当前数据契约在 `CreateAdminAuditLog::validate_event_metadata` 中执行同一白名单，并额外
+覆盖异步 provider-delete 终态事件的 `task_id`、`task_status`、`origin_trace_id`、`stage`、
+`deleted_keys`、`total_keys`、`deleted_endpoints`、`total_endpoints`。metadata 必须是扁平
+对象，固定 `schema_version = 1` 且包含非空 `event_name`；字符串最多 512 字节，`target_id`
+最多 256 字节，四个计数字段只能是非负整数，`target_truncated` 只能是布尔值，整个 JSON
+最多 4096 字节。未知键、嵌套对象/数组、负数或超限值在写入 PostgreSQL 前拒绝。`null`
+只用于已知的可选字段，不会放宽必需的版本和事件名校验。
+
 - `path` 必须继续经过 `sanitize_admin_audit_path`，去除 token、API key 等 query 值；
 - path 形态的 `target_id` 继续复用 `sanitize_admin_audit_target_id`；所有 target 均设长度
   上限，超限时截断并附 `target_truncated = true`，不要把请求/响应 payload 写入 metadata；

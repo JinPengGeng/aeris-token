@@ -863,6 +863,18 @@ impl IntoResponse for ExecutionRuntimeAppError {
                 ExecutionRuntimeTransportError::UpstreamHttpStatus { status_code, .. },
             ) => StatusCode::from_u16(*status_code).unwrap_or(StatusCode::BAD_GATEWAY),
             ExecutionRuntimeServerError::Transport(
+                ExecutionRuntimeTransportError::LocalAdmission(reason),
+            ) => {
+                if matches!(
+                    reason,
+                    super::transport::LocalSendAdmissionError::BudgetExhausted(_)
+                ) {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            }
+            ExecutionRuntimeServerError::Transport(
                 ExecutionRuntimeTransportError::ClientBuild(_)
                 | ExecutionRuntimeTransportError::BrowserClientBuild(_)
                 | ExecutionRuntimeTransportError::BrowserBody(_)
@@ -894,6 +906,9 @@ impl IntoResponse for ExecutionRuntimeAppError {
             ExecutionRuntimeServerError::Transport(
                 ExecutionRuntimeTransportError::UpstreamHttpStatus { status_code, .. },
             ) => format!("Upstream request returned HTTP {status_code}"),
+            ExecutionRuntimeServerError::Transport(
+                ExecutionRuntimeTransportError::LocalAdmission(reason),
+            ) => format!("Local execution admission failed: {reason}"),
             ExecutionRuntimeServerError::Transport(
                 ExecutionRuntimeTransportError::ClientBuild(_)
                 | ExecutionRuntimeTransportError::BrowserClientBuild(_)

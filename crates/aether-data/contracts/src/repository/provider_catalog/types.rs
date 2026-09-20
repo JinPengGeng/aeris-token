@@ -1409,10 +1409,24 @@ pub trait ProviderCatalogReadRepository: Send + Sync {
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogProvider>, crate::DataLayerError>;
 
+    async fn list_providers_by_ids_strong(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogProvider>, crate::DataLayerError> {
+        self.list_providers_by_ids(provider_ids).await
+    }
+
     async fn list_endpoints_by_ids(
         &self,
         endpoint_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogEndpoint>, crate::DataLayerError>;
+
+    async fn list_endpoints_by_ids_strong(
+        &self,
+        endpoint_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogEndpoint>, crate::DataLayerError> {
+        self.list_endpoints_by_ids(endpoint_ids).await
+    }
 
     async fn list_endpoints_by_provider_ids(
         &self,

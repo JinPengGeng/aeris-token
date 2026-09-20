@@ -58,6 +58,18 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn upsert_system_config_entry_with_audit(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+        description: Option<&str>,
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<crate::data::state::StoredSystemConfigEntry>, GatewayError> {
+        self.app
+            .upsert_system_config_entry_with_audit(key, value, description, audit)
+            .await
+    }
+
     pub(crate) async fn delete_system_config_value(&self, key: &str) -> Result<bool, GatewayError> {
         self.app.delete_system_config_value(key).await
     }

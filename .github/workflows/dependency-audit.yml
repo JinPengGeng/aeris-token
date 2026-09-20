@@ -16,6 +16,7 @@ on:
       - "frontend/**"
       - "aether-vscodex/**"
       - ".github/automation/**"
+      - ".github/dependabot.yml"
       - ".github/workflows/dependency-audit.yml"
   pull_request:
   schedule:
@@ -132,7 +133,7 @@ jobs:
           test -f package-lock.json
           mkdir -p audit-artifacts/npm
           set +e
-          npm audit --package-lock-only --audit-level=high \
+          npm audit --json --package-lock-only --audit-level=high \
             --registry="$NPM_CONFIG_REGISTRY" \
             > audit-artifacts/npm/audit.json \
             2> audit-artifacts/npm/audit.stderr

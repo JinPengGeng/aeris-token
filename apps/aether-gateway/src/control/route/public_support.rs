@@ -335,6 +335,7 @@ pub(super) fn classify_public_support_route(
             normalized_path,
             "/api/wallet/balance"
                 | "/api/wallet/transactions"
+                | "/api/wallet/recharge-recoveries"
                 | "/api/wallet/flow"
                 | "/api/wallet/today-cost"
                 | "/api/wallet/recharge"
@@ -346,6 +347,7 @@ pub(super) fn classify_public_support_route(
         let route_kind = match normalized_path {
             "/api/wallet/balance" => "balance",
             "/api/wallet/transactions" => "transactions",
+            "/api/wallet/recharge-recoveries" => "recharge_recoveries",
             "/api/wallet/flow" => "flow",
             "/api/wallet/today-cost" => "today_cost",
             "/api/wallet/recharge" => "list_recharge_orders",

@@ -115,9 +115,11 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 
 ## API 文档
 
-配置好 API Key 和允许访问的模型后，可从 [Chat 快速调用示例](docs/api/chat-completions.md#quick-start) 或 [图片生成示例](docs/api/images.md#generate) 开始。
+配置好 API Key 和允许访问的模型后，可从 [Responses 快速调用示例](docs/api/responses.md#quick-start)、[Chat 快速调用示例](docs/api/chat-completions.md#quick-start) 或 [图片生成示例](docs/api/images.md#generate) 开始。
 
+- Responses: [OpenAI compatible `POST /v1/responses`](docs/api/responses.md)
 - Chat Completions: [OpenAI compatible `POST /v1/chat/completions`](docs/api/chat-completions.md)
+- Models: [list and inspect `GET /v1/models`](docs/api/models.md)
 - Images: [OpenAI compatible generations / edits](docs/api/images.md)
 - 错误与重试：[公共 API 错误契约](docs/api/error-contract.md) · [兼容性验证范围](docs/api/compatibility-fixtures.md)
 - Embeddings: [OpenAI compatible `POST /v1/embeddings`](docs/api/embeddings.md)
@@ -182,6 +184,20 @@ AETHER_BACKUP_ENCRYPTION_KEY='原备份密钥' \
 工具默认拒绝覆盖，输出采用原子写并在 Unix 上设置为 `0600`；Unix 可用 `--overwrite` 原子替换，Windows 为避免非原子删除窗口会要求选择新输出路径。密钥不能作为命令行参数。可使用 `AETHER_BACKUP_ENCRYPTION_KEY`、兼容用 `AETHER_GATEWAY_DATA_ENCRYPTION_KEY` / `ENCRYPTION_KEY`、受保护的 `--key-file`，或 `AETHER_BACKUP_KEYRING_FILE`。Keyring JSON 格式为 `{"version":1,"keys":["当前或历史 v2 secret"],"legacy_v1":["旧 v1 secret"]}`；条目也可写成 `{"secret":"..."}`（兼容字段名 `key`）。也可由 `AETHER_BACKUP_HISTORICAL_KEYS_JSON` 提供同一结构。密钥文件必须是非符号链接的普通文件，Unix 下权限需为 `0600` 或更严格。
 
 默认限制密文为 `512MiB`、解压后 JSON 为 `1GiB`，可通过受限的 `--max-encrypted-mib` / `--max-json-mib` 调整。网关最多扫描同一备份前缀下 10,000 个对象，并且不会自动删除 S3 对象：`backup_s3_retention_count` 只用于报告超出保留数量的清理候选。旧明文备份在创建并验证加密副本后仍会保留，必须通过 bucket lifecycle 或支持版本条件的外部清理工具移除；启用 Versioning 时还需清理 noncurrent versions，Object Lock/retention 可能阻止物理删除。
+
+## Q&A
+
+### 应该选择哪种部署方式？
+
+Docker Compose 适合大多数部署，并会同时运行 PostgreSQL 与 Redis。原生
+Linux systemd 安装适合已经准备好 PostgreSQL 的主机；Tunnel 是可选的独立
+中转组件，安装和升级说明见 [Tunnel 运维入口](docs/operations/tunnel-runbook.md)。
+
+### 如何验证备份恢复？
+
+先使用隔离数据库运行[备份恢复演练](docs/operations/backup-restore-drill.md)，
+再根据部署环境记录 RPO、RTO 和业务对账结果。离线解密输出本身不等于数据库恢复
+成功，也不能替代生产灾备验收。
 
 ---
 

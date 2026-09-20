@@ -63,6 +63,20 @@
             </div>
           </div>
 
+          <div class="max-w-xs">
+            <Label for="notification-low-balance-threshold" class="block text-sm font-medium">
+              低余额提醒阈值（美元）
+            </Label>
+            <Input
+              id="notification-low-balance-threshold"
+              v-model.number="config.low_balance_threshold"
+              type="number"
+              min="0"
+              step="0.01"
+              class="mt-1"
+            />
+          </div>
+
           <div class="grid gap-6 border-t border-border/60 pt-5 lg:grid-cols-3">
             <section class="space-y-4">
               <div class="flex items-center justify-between gap-3">
@@ -195,7 +209,10 @@
                   >
                     内置
                   </Badge>
-                  <Badge :variant="isItemReady(item) ? 'success' : 'outline'">
+                  <Badge v-if="isUnsupportedItem(item)" variant="outline">
+                    未接入
+                  </Badge>
+                  <Badge v-else :variant="isItemReady(item) ? 'success' : 'outline'">
                     {{ isItemReady(item) ? '可投递' : '未就绪' }}
                   </Badge>
                 </div>
@@ -204,7 +221,7 @@
                 </p>
               </div>
               <div class="flex items-center gap-2">
-                <Switch v-model="item.enabled" />
+                <Switch v-model="item.enabled" :disabled="isUnsupportedItem(item)" />
                 <Button
                   v-if="!item.system"
                   size="icon"
@@ -242,7 +259,7 @@
                 <Label class="block text-xs font-medium">
                   推送服务
                 </Label>
-                <Select v-model="item.channel">
+                <Select v-model="item.channel" :disabled="isUnsupportedItem(item)">
                   <SelectTrigger class="mt-1">
                     <SelectValue />
                   </SelectTrigger>
@@ -276,7 +293,7 @@
                 </div>
                 <Switch
                   v-model="item.user_email_enabled"
-                  :disabled="!smtpConfigured"
+                  :disabled="!smtpConfigured || isUnsupportedItem(item)"
                 />
               </div>
             </div>
@@ -332,7 +349,7 @@
             </SelectTrigger>
             <SelectContent>
               <SelectItem
-                v-for="item in config.items"
+                v-for="item in testableItems"
                 :key="item.local_id"
                 :value="item.key"
               >
@@ -436,6 +453,7 @@ interface NotificationConfig {
   email_enabled: boolean
   email_recipients: string
   default_channel: Exclude<DeliveryChannel, 'global'>
+  low_balance_threshold: number
   items: NotificationItem[]
 }
 
@@ -444,6 +462,7 @@ const CONFIG_KEYS = {
   email_enabled: 'module.important_notification.email_enabled',
   email_recipients: 'module.important_notification.email_recipients',
   default_channel: 'module.important_notification.default_channel',
+  low_balance_threshold: 'module.important_notification.user_balance_low_threshold',
   items: 'module.important_notification.items',
   server_chan_send_key: 'module.server_chan_push.send_key',
   bark_device_key: 'module.bark_push.device_key',
@@ -459,18 +478,6 @@ const DEFAULT_ITEMS: NotificationItem[] = [
     title_template: '',
     markdown_template: '',
     text_template: '',
-    user_email_enabled: false,
-    system: true,
-  },
-  {
-    local_id: 'provider_pool_abnormal',
-    key: 'provider_pool_abnormal',
-    name: '号池异常',
-    enabled: true,
-    channel: 'global',
-    title_template: '号池异常：{provider_name}',
-    markdown_template: '号池 `{provider_name}` 出现异常，请检查服务状态。',
-    text_template: '号池 {provider_name} 出现异常，请检查服务状态。',
     user_email_enabled: false,
     system: true,
   },
@@ -506,6 +513,7 @@ const config = ref<NotificationConfig>({
   email_enabled: false,
   email_recipients: '',
   default_channel: 'all',
+  low_balance_threshold: 10,
   items: cloneDefaultItems(),
 })
 
@@ -526,6 +534,8 @@ const canEnableService = computed(() => {
   return config.value.items.some(item => item.enabled && isItemReady(item))
 })
 
+const testableItems = computed(() => config.value.items.filter(item => !isUnsupportedItem(item)))
+
 onMounted(() => {
   loadConfig()
 })
@@ -543,6 +553,7 @@ async function loadConfig() {
     const emailEnabled = configsByKey.get(CONFIG_KEYS.email_enabled)
     const recipients = configsByKey.get(CONFIG_KEYS.email_recipients)
     const defaultChannel = configsByKey.get(CONFIG_KEYS.default_channel)
+    const lowBalanceThreshold = configsByKey.get(CONFIG_KEYS.low_balance_threshold)
     const items = configsByKey.get(CONFIG_KEYS.items)
     const serverChanKey = configsByKey.get(CONFIG_KEYS.server_chan_send_key)
     const barkDeviceKey = configsByKey.get(CONFIG_KEYS.bark_device_key)
@@ -553,14 +564,15 @@ async function loadConfig() {
     config.value.email_enabled = emailEnabled?.value === true
     config.value.email_recipients = normalizeRecipients(recipients?.value)
     config.value.default_channel = normalizeDefaultChannel(defaultChannel?.value)
+    config.value.low_balance_threshold = normalizeNonnegativeNumber(lowBalanceThreshold?.value, 10)
     config.value.items = normalizeItems(items?.value)
     serverChanStatus.value = serverChanModuleStatus
     serverChanKeyIsSet.value = serverChanKey?.is_set === true
     barkStatus.value = barkModuleStatus
     barkKeyIsSet.value = barkDeviceKey?.is_set === true
     smtpConfigured.value = isNonEmptyString(smtpHost?.value) && isNonEmptyString(smtpFromEmail?.value)
-    if (!config.value.items.some(item => item.key === testItemKey.value)) {
-      testItemKey.value = config.value.items[0]?.key || ''
+    if (!testableItems.value.some(item => item.key === testItemKey.value)) {
+      testItemKey.value = testableItems.value[0]?.key || ''
     }
   } catch (err) {
     error(parseApiError(err, '加载通知服务配置失败'))
@@ -578,6 +590,7 @@ async function saveConfig() {
       adminApi.updateSystemConfig(CONFIG_KEYS.email_enabled, config.value.email_enabled, '通知服务邮件推送开关'),
       adminApi.updateSystemConfig(CONFIG_KEYS.email_recipients, config.value.email_recipients, '通知服务管理员收件人'),
       adminApi.updateSystemConfig(CONFIG_KEYS.default_channel, config.value.default_channel, '通知服务全局推送服务'),
+      adminApi.updateSystemConfig(CONFIG_KEYS.low_balance_threshold, normalizeNonnegativeNumber(config.value.low_balance_threshold, 10), '用户低余额提醒阈值（美元）'),
       adminApi.updateSystemConfig(CONFIG_KEYS.items, serializeItems(), '通知服务通知项和模板'),
     ])
     await adminApi.updateSystemConfig(CONFIG_KEYS.enabled, config.value.enabled, '通知服务总开关')
@@ -632,13 +645,17 @@ function addItem() {
 function removeItem(index: number) {
   const [removed] = config.value.items.splice(index, 1)
   if (removed?.key === testItemKey.value) {
-    testItemKey.value = config.value.items[0]?.key || ''
+    testItemKey.value = testableItems.value[0]?.key || ''
   }
 }
 
 function isItemReady(item: NotificationItem): boolean {
-  if (!item.enabled) return false
+  if (!item.enabled || isUnsupportedItem(item)) return false
   return deliveryReady(resolveItemChannel(item))
+}
+
+function isUnsupportedItem(item: NotificationItem): boolean {
+  return item.key === 'provider_pool_abnormal'
 }
 
 function deliveryReady(channel: Exclude<DeliveryChannel, 'global'>): boolean {
@@ -684,7 +701,7 @@ function normalizeItem(value: unknown, index: number): NotificationItem | null {
     local_id: `${key}_${index}`,
     key,
     name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : key,
-    enabled: raw.enabled !== false,
+    enabled: key === 'provider_pool_abnormal' ? false : raw.enabled !== false,
     channel: normalizeItemChannel(raw.channel),
     title_template: typeof raw.title_template === 'string' ? raw.title_template : '',
     markdown_template: typeof raw.markdown_template === 'string' ? raw.markdown_template : '',
@@ -725,6 +742,11 @@ function normalizeRecipients(value: unknown): string {
       .join('\n')
   }
   return typeof value === 'string' ? value : ''
+}
+
+function normalizeNonnegativeNumber(value: unknown, fallback: number): number {
+  const parsed = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
 }
 
 function formatChannel(channel: string): string {

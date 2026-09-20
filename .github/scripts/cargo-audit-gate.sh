@@ -63,7 +63,7 @@ fi
 # backends (including sqlx-mysql) and make this guard reject its own review.
 # Optional packages remain visible to cargo-audit through Cargo.lock below.
 resolved="$(cargo tree --locked --workspace --target all --format '{p}' --prefix none)"
-if rg -q '^(rsa|sqlx-mysql) v' <<<"$resolved"; then
+if grep -Eq '^(rsa|sqlx-mysql) v' <<<"$resolved"; then
   echo "rsa/sqlx-mysql is active in the resolved graph; review the exception" >&2
   exit 1
 fi

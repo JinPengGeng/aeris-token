@@ -192,6 +192,7 @@ async fn gateway_executes_gemini_video_cancel_via_data_backed_local_follow_up_wi
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: "task-gemini-cancel-local-123".to_string(),
             short_id: Some("localshort123".to_string()),
             request_id: "request-gemini-video-cancel-local-123".to_string(),
@@ -498,6 +499,7 @@ async fn gateway_executes_gemini_video_cancel_via_reconstructed_data_backed_loca
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: "task-gemini-cancel-op-123".to_string(),
             short_id: Some("opshort123".to_string()),
             request_id: "request-gemini-video-cancel-op-123".to_string(),

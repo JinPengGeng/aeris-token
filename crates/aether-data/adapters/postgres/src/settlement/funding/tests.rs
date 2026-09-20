@@ -11,7 +11,7 @@ use aether_data_contracts::repository::wallet::{
     WalletWriteRepository,
 };
 
-pub(super) async fn fixture() -> (PgPool, PgPool, PgPool, String) {
+pub(crate) async fn fixture() -> (PgPool, PgPool, PgPool, String) {
     let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
         .expect("AETHER_TEST_DATABASE_URL must name a disposable PostgreSQL database");
     let admin = PgPoolOptions::new()
@@ -58,6 +58,7 @@ pub(super) async fn fixture() -> (PgPool, PgPool, PgPool, String) {
         "request_fund_collection_receipts",
         "wallet_transactions",
         "refund_requests",
+        "refund_status_notifications",
     ] {
         sqlx::query(&format!(
             "CREATE TABLE \"{table}\" (LIKE public.\"{table}\" INCLUDING ALL)"
@@ -85,7 +86,7 @@ pub(super) async fn fixture() -> (PgPool, PgPool, PgPool, String) {
     (admin, first, second, schema)
 }
 
-fn quote(request: &str, key: &str, units: u64) -> ReserveRequestFundsInput {
+pub(crate) fn quote(request: &str, key: &str, units: u64) -> ReserveRequestFundsInput {
     ReserveRequestFundsInput {
         identity: RequestFundsIdentity {
             reservation_token: format!("token-{request}"),
@@ -100,7 +101,7 @@ fn quote(request: &str, key: &str, units: u64) -> ReserveRequestFundsInput {
     }
 }
 
-async fn persist_usage(
+pub(crate) async fn persist_usage(
     pool: &PgPool,
     identity: &RequestFundsIdentity,
     cost: f64,

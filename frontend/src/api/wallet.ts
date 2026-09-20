@@ -139,6 +139,27 @@ export interface WalletRechargeOrdersResponse extends WalletBalanceResponse {
   offset: number
 }
 
+export interface WalletRechargeRecovery {
+  id: string
+  payment_order_id: string
+  wallet_id: string
+  state: string
+  principal_cost_units: number
+  collected_cost_units: number
+  outstanding_cost_units: number
+  available_recharge_cost_units: number
+  retry_count: number
+  next_attempt_at_unix_secs: number | null
+  error_code: string | null
+  created_at_unix_secs: number
+  updated_at_unix_secs: number
+}
+
+export interface WalletRechargeRecoveriesResponse {
+  items: WalletRechargeRecovery[]
+  limit: number
+}
+
 export interface RefundRequest {
   id: string
   refund_no: string
@@ -249,6 +270,13 @@ export const walletApi = {
 
   async getRechargeOrder(orderId: string): Promise<{ order: PaymentOrder }> {
     const response = await apiClient.get<{ order: PaymentOrder }>(`/api/wallet/recharge/${orderId}`)
+    return response.data
+  },
+
+  async listRechargeRecoveries(): Promise<WalletRechargeRecoveriesResponse> {
+    const response = await apiClient.get<WalletRechargeRecoveriesResponse>(
+      '/api/wallet/recharge-recoveries', { params: { limit: 50 } },
+    )
     return response.data
   },
 

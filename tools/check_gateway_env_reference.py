@@ -22,6 +22,54 @@ READ = re.compile(
 )
 CONSTANT = re.compile(r'const\s+\w*_ENV\w*\s*:\s*&str\s*=\s*"(' + NAME + r')"')
 
+# These compatibility groups use control flow and are intentionally kept as
+# reviewed source facts rather than inferred from variable names.
+RUNTIME_NOTES = (
+    (
+        "SQL data URL",
+        "`AETHER_DATABASE_URL` (or `--database-url`) wins; otherwise the legacy "
+        "`AETHER_GATEWAY_DATA_POSTGRES_URL` is used, then `DATABASE_URL`. Empty "
+        "values are ignored.",
+        "main.rs",
+    ),
+    (
+        "Data Redis URL",
+        "`AETHER_GATEWAY_DATA_REDIS_URL` (or `--data-redis-url`) wins over the "
+        "compatibility fallback `REDIS_URL`. Empty values are ignored.",
+        "main.rs",
+    ),
+    (
+        "Data encryption key",
+        "`AETHER_GATEWAY_DATA_ENCRYPTION_KEY` (or `--data-encryption-key`) wins "
+        "over the compatibility fallback `ENCRYPTION_KEY`. If both non-empty "
+        "values differ, startup logs a warning and prefers the gateway-specific "
+        "value.",
+        "main.rs",
+    ),
+    (
+        "JWT signing key",
+        "`JWT_SECRET_KEY` has no production default and is validated before the "
+        "network service starts. It must be UTF-8, at least 32 bytes, and must "
+        "not equal the documented development or placeholder values.",
+        "local_auth_token.rs",
+    ),
+    (
+        "Gateway instance identity",
+        "`AETHER_GATEWAY_INSTANCE_ID` wins over `HOSTNAME`. With neither set, "
+        "gateway logs use `local`; tunnel ownership uses a process-specific "
+        "`gateway-<pid>` value. Set an explicit value for multi-node tunnel "
+        "routing.",
+        "main.rs, tunnel/mod.rs",
+    ),
+    (
+        "Windsurf native tool bridge",
+        "`WINDSURFAPI_NATIVE_TOOL_BRIDGE` and `AETHER_WINDSURF_NATIVE_TOOL_BRIDGE` "
+        "are equivalent enable switches; the corresponding `_OFF` switches are "
+        "also equivalent. All four default to disabled when unset.",
+        "execution_runtime/windsurf.rs",
+    ),
+)
+
 
 def attribute_values(attribute: str) -> dict[str, str]:
     """Split supported attribute syntax, preserving nested default expressions."""
@@ -52,7 +100,8 @@ def attribute_values(attribute: str) -> dict[str, str]:
 
 def source_files(source: Path) -> list[Path]:
     return sorted(path for path in source.rglob("*.rs")
-                  if "tests" not in path.relative_to(source).parts)
+                  if "tests" not in path.relative_to(source).parts
+                  and not path.name.endswith("_tests.rs"))
 
 
 def field_after_attribute(text: str, cursor: int):
@@ -151,6 +200,14 @@ are not a general way to enable boolean options.
               "| Variable | Reader source |", "| --- | --- |"]
     for name, paths in sorted(runtime.items()):
         lines.append(f"| `{name}` | {', '.join(source_link(path) for path in sorted(set(paths)))} |")
+    lines += ["", "## Operational precedence and compatibility", "",
+              "The following runtime groups have explicit compatibility behavior that "
+              "cannot be derived from a variable name. They list source-confirmed "
+              "defaults and precedence only; they never expose configured values.", "",
+              "| Setting | Behavior | Source |", "| --- | --- | --- |"]
+    for setting, behavior, sources in RUNTIME_NOTES:
+        links = ", ".join(source_link(source) for source in sources.split(", "))
+        lines.append(f"| {setting} | {behavior} | {links} |")
     return "\n".join(lines) + "\n"
 
 

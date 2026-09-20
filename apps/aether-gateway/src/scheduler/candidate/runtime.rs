@@ -4,11 +4,16 @@ use std::future::Future;
 use aether_admin::provider::{
     pool as admin_provider_pool_pure, status as admin_provider_status_pure,
 };
-use aether_data_contracts::repository::candidates::StoredRequestCandidate;
-use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
+use aether_data_contracts::repository::candidates::{
+    RequestCandidateStatus, StoredRequestCandidate,
+};
+use aether_data_contracts::repository::provider_catalog::{
+    StoredProviderCatalogKey, StoredProviderCatalogProvider,
+};
 use aether_scheduler_core::{
     auth_api_key_concurrency_limit_reached, build_provider_concurrent_limit_map,
     candidate_is_selectable_with_runtime_state, candidate_runtime_skip_reason_with_state,
+    count_recent_active_requests_for_provider, count_recent_active_requests_for_provider_key,
     effective_provider_key_rpm_limit, CandidateRuntimeSelectabilityInput,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,7 +26,8 @@ use super::{SchedulerMinimalCandidateSelectionCandidate, SchedulerRuntimeState};
 
 pub(super) use aether_scheduler_core::should_skip_provider_quota;
 
-pub(super) struct CandidateRuntimeSelectionSnapshot {
+#[derive(Clone)]
+pub(crate) struct CandidateRuntimeSelectionSnapshot {
     pub(super) recent_candidates: Vec<StoredRequestCandidate>,
     pub(super) provider_concurrent_limits: BTreeMap<String, usize>,
     pub(super) provider_key_rpm_states: BTreeMap<String, StoredProviderCatalogKey>,
@@ -32,7 +38,7 @@ pub(super) struct CandidateRuntimeSelectionSnapshot {
     provider_key_rpm_reset_ats: BTreeMap<String, Option<u64>>,
 }
 
-pub(super) async fn read_candidate_runtime_selection_snapshot(
+pub(crate) async fn read_candidate_runtime_selection_snapshot(
     state: &(impl SchedulerRuntimeState + ?Sized),
     candidates: &[SchedulerMinimalCandidateSelectionCandidate],
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
@@ -68,6 +74,66 @@ pub(super) async fn read_candidate_runtime_selection_snapshot(
         read_key_oauth_invalid_map(candidates, &provider_key_rpm_states, now_unix_secs);
     let provider_quota_blocks_requests =
         read_provider_quota_block_map(state, candidates, now_unix_secs).await?;
+    let provider_key_rpm_reset_ats =
+        read_provider_key_rpm_reset_at_map(state, candidates, now_unix_secs);
+
+    Ok(CandidateRuntimeSelectionSnapshot {
+        recent_candidates,
+        provider_concurrent_limits,
+        provider_key_rpm_states,
+        pool_provider_ids,
+        provider_quota_blocks_requests,
+        key_account_quota_exhausted,
+        key_oauth_invalid,
+        provider_key_rpm_reset_ats,
+    })
+}
+
+/// Builds the send-time runtime snapshot from catalog rows that were just read
+/// from the authority. This keeps a selected plan from being admitted against
+/// the ordinary catalog cache after its provider or key has changed.
+pub(crate) async fn read_candidate_runtime_selection_snapshot_with_fresh_catalog(
+    state: &(impl SchedulerRuntimeState + ?Sized),
+    candidates: &[SchedulerMinimalCandidateSelectionCandidate],
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    now_unix_secs: u64,
+    fresh_providers: &[StoredProviderCatalogProvider],
+    fresh_keys: &[StoredProviderCatalogKey],
+) -> Result<CandidateRuntimeSelectionSnapshot, GatewayError> {
+    let provider_concurrent_limits = build_provider_concurrent_limit_map(fresh_providers.to_vec());
+    let provider_pool_state = provider_pool_state_map(fresh_providers);
+    let provider_skip_exhausted_accounts = provider_pool_state
+        .iter()
+        .map(|(provider_id, state)| (provider_id.clone(), state.skip_exhausted_accounts))
+        .collect::<BTreeMap<_, _>>();
+    let pool_provider_ids = provider_pool_state
+        .iter()
+        .filter_map(|(provider_id, state)| state.pool_enabled.then_some(provider_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let provider_key_rpm_states = fresh_keys
+        .iter()
+        .cloned()
+        .map(|key| (key.id.clone(), key))
+        .collect::<BTreeMap<_, _>>();
+    let recent_candidates = if runtime_snapshot_requires_recent_candidates(
+        auth_snapshot,
+        &provider_concurrent_limits,
+        &provider_key_rpm_states,
+        now_unix_secs,
+    ) {
+        state.read_recent_request_candidates(128).await?
+    } else {
+        Vec::new()
+    };
+    let key_account_quota_exhausted = read_key_account_quota_exhaustion_map(
+        candidates,
+        &provider_key_rpm_states,
+        &provider_skip_exhausted_accounts,
+    );
+    let key_oauth_invalid =
+        read_key_oauth_invalid_map(candidates, &provider_key_rpm_states, now_unix_secs);
+    let provider_quota_blocks_requests =
+        read_provider_quota_block_map_uncached(state, candidates, now_unix_secs).await?;
     let provider_key_rpm_reset_ats =
         read_provider_key_rpm_reset_at_map(state, candidates, now_unix_secs);
 
@@ -243,7 +309,7 @@ pub(super) fn is_candidate_selectable(
     })
 }
 
-pub(super) fn current_candidate_runtime_skip_reason(
+pub(crate) fn current_candidate_runtime_skip_reason(
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
     snapshot: &CandidateRuntimeSelectionSnapshot,
     now_unix_secs: u64,
@@ -288,6 +354,96 @@ pub(super) fn current_candidate_runtime_skip_reason(
         enforce_key_circuit_breaker: !pool_group,
         rpm_reset_at,
     })
+}
+
+/// The candidate loop records the selected candidate as pending before its
+/// first physical send. That exact placeholder is neither another in-flight
+/// request nor RPM consumption yet.
+pub(crate) fn current_candidate_runtime_skip_reason_excluding_pending_candidate(
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    snapshot: &CandidateRuntimeSelectionSnapshot,
+    now_unix_secs: u64,
+    current_request_id: &str,
+    pending_candidate_id: &str,
+) -> Option<&'static str> {
+    let mut without_pending_candidate = snapshot.clone();
+    without_pending_candidate.recent_candidates.retain(|row| {
+        !(row.id == pending_candidate_id
+            && row.request_id == current_request_id
+            && row.status == RequestCandidateStatus::Pending
+            && row.finished_at_unix_ms.is_none())
+    });
+    current_candidate_runtime_skip_reason(candidate, &without_pending_candidate, now_unix_secs)
+}
+
+/// A retry already owns its permit. Exclude only that candidate from concurrent
+/// occupancy; use the complete history for RPM, health and circuit checks.
+pub(crate) fn current_candidate_runtime_skip_reason_for_revalidation(
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    snapshot: &CandidateRuntimeSelectionSnapshot,
+    now_unix_secs: u64,
+    current_request_id: &str,
+    current_candidate_id: Option<&str>,
+) -> Option<&'static str> {
+    let reason = current_candidate_runtime_skip_reason(candidate, snapshot, now_unix_secs)?;
+    if !matches!(
+        reason,
+        "provider_concurrency_limit_reached" | "provider_key_concurrency_limit_reached"
+    ) {
+        return Some(reason);
+    }
+
+    let other_requests = snapshot
+        .recent_candidates
+        .iter()
+        .filter(|row| {
+            current_candidate_id.is_none_or(|candidate_id| {
+                row.request_id != current_request_id || row.id != candidate_id
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if snapshot
+        .provider_concurrent_limits
+        .get(candidate.provider_id.as_str())
+        .is_some_and(|limit| {
+            count_recent_active_requests_for_provider(
+                &other_requests,
+                candidate.provider_id.as_str(),
+                now_unix_secs,
+            ) >= *limit
+        })
+    {
+        return Some("provider_concurrency_limit_reached");
+    }
+    if snapshot
+        .provider_key_rpm_states
+        .get(candidate.key_id.as_str())
+        .and_then(|key| key.concurrent_limit)
+        .filter(|limit| *limit > 0)
+        .and_then(|limit| usize::try_from(limit).ok())
+        .is_some_and(|limit| {
+            count_recent_active_requests_for_provider_key(
+                &other_requests,
+                candidate.key_id.as_str(),
+                now_unix_secs,
+            ) >= limit
+        })
+    {
+        return Some("provider_key_concurrency_limit_reached");
+    }
+
+    let mut without_concurrency_limits = snapshot.clone();
+    without_concurrency_limits
+        .provider_concurrent_limits
+        .clear();
+    if let Some(key) = without_concurrency_limits
+        .provider_key_rpm_states
+        .get_mut(candidate.key_id.as_str())
+    {
+        key.concurrent_limit = None;
+    }
+    current_candidate_runtime_skip_reason(candidate, &without_concurrency_limits, now_unix_secs)
 }
 
 pub(super) async fn read_provider_concurrent_limits(
@@ -356,6 +512,31 @@ async fn read_provider_quota_block_map(
     Ok(quota_blocks)
 }
 
+async fn read_provider_quota_block_map_uncached(
+    state: &(impl SchedulerRuntimeState + ?Sized),
+    candidates: &[SchedulerMinimalCandidateSelectionCandidate],
+    now_unix_secs: u64,
+) -> Result<BTreeMap<String, bool>, GatewayError> {
+    let provider_ids = candidates
+        .iter()
+        .map(|candidate| candidate.provider_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut quota_blocks = BTreeMap::new();
+
+    for provider_id in provider_ids {
+        let blocks_requests = state
+            .read_provider_quota_snapshot_uncached(&provider_id)
+            .await?
+            .as_ref()
+            .is_some_and(|quota| should_skip_provider_quota(quota, now_unix_secs));
+        quota_blocks.insert(provider_id, blocks_requests);
+    }
+
+    Ok(quota_blocks)
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct ProviderPoolState {
     pool_enabled: bool,
@@ -379,8 +560,14 @@ async fn read_provider_pool_state_map(
     let providers = state
         .read_provider_catalog_providers_by_ids(&provider_ids)
         .await?;
-    Ok(providers
-        .into_iter()
+    Ok(provider_pool_state_map(&providers))
+}
+
+fn provider_pool_state_map(
+    providers: &[StoredProviderCatalogProvider],
+) -> BTreeMap<String, ProviderPoolState> {
+    providers
+        .iter()
         .map(|provider| {
             let pool_advanced = provider
                 .config
@@ -392,14 +579,14 @@ async fn read_provider_pool_state_map(
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             (
-                provider.id,
+                provider.id.clone(),
                 ProviderPoolState {
                     pool_enabled: pool_advanced.is_some(),
                     skip_exhausted_accounts,
                 },
             )
         })
-        .collect())
+        .collect()
 }
 
 fn read_key_account_quota_exhaustion_map(

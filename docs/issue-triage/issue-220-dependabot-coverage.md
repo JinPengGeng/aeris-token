@@ -31,19 +31,45 @@ Benefit: routine version updates cover every committed npm project and Docker
 build directory. Complexity: S; risk: low, limited to update proposal scheduling.
 The existing Cargo/npm vulnerability checks remain independent merge gates.
 
+## Repository contract and verification
+
+The repository keeps a no-credential coverage contract in
+`.github/automation/test/dependabot-coverage.test.mjs`. The test derives
+tracked `package.json`/`package-lock.json` pairs and Dockerfile directories
+from Git, then requires exactly one matching Dependabot updater for each. It
+also rejects accidental coverage of the root orphan `package-lock.json`,
+duplicate directory targets, mutable cadence limits, and updater entries that
+silently drift beyond the five-open-PR bound. The contract runs with the
+existing `Frontend CI / automation` suite and does not call GitHub APIs or
+require Dependabot credentials.
+
+The contract proves repository configuration coverage only. It cannot prove
+that GitHub's hosted Dependabot service can resolve every remote image or
+publish an update proposal; the first hosted run remains an operational
+acceptance item and must be linked here after it completes.
+
 ## Verification and completion boundary
 
 YAML parsing and a comparison with the tracked manifest/lockfile pairs and Dockerfile inventory
 passed: all five npm project directories and all three Dockerfile directories have
 exactly one updater. The baseline was missing three npm and three Docker
-directories. All four existing update entries are preserved; every entry uses
+directories. All five existing update entries are preserved; every entry uses
 weekly scheduling and a positive PR limit no greater than five. The patch
 passed `git diff --check`. The actual hosted update job's first successful run remains
 operational evidence to collect after merge; configuration coverage alone does
 not prove every image reference is resolvable by the hosted service.
 
-This does not pin local build-image digests, change container UID or volume
-permissions, resolve the tracked RSA exception, or produce vulnerability-scan
-artifacts. Those #220/#303 acceptance items retain their separate scope.
+## VSCodex base-image digest
+
+On 2026-09-17, `docker buildx imagetools inspect node:22-alpine` resolved the
+official multi-platform index to
+`sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32`.
+The VSCodex Dockerfile now pins that digest while retaining the `22-alpine` tag
+for maintainability. The release supply-chain contract checks the exact pin and
+rejects a VSCodex `FROM` line without `@sha256`.
+
+This does not change container UID or volume permissions, resolve the tracked
+RSA exception, or produce vulnerability-scan artifacts. Those #220/#303
+acceptance items retain their separate scope.
 Keep #220 open after this slice. Rollback is a revert of the new updater entries;
 already-open Dependabot proposals remain reviewable through normal PR history.

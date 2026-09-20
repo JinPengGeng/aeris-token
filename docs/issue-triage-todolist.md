@@ -1,5 +1,10 @@
 # Issue 核验、排序与交付清单
 
+2026-09-20 恢复开发后的当前状态见
+[当前任务列表](issue-triage/current-issue-task-list-20260917.md)和
+[本轮交付记录](issue-triage/resumed-development-20260920.md)。下文日期更早的
+实时统计与任务状态仅为历史记录。
+
 当前交付入口：[完整动态 TODO](issue-triage/delivery-todo.md)。2026-09-13 已核验
 fork main `7b415fd6689d230c45a6f44da5e81bb98855b160`：当前实时为 44 个开放
 Issue（21 P1 / 23 P2），13 个开放 PR，均启用受保护自动合并、没有 Draft。
@@ -112,14 +117,14 @@ owner 为维护者 JinPengGeng；主线程协调独立实现与评审。沿用 M
 | --- | --- | --- | --- |
 | #220 | checksum/digest已修，扫描门禁缺口；root为运维权衡 | Planned/P1/M | 与#216共用扫描；降权须volume/升级测试，独立规划 |
 | #221 | 依赖集中真实，一次搬迁缺收益证据 | Deferred/P2/XL | 当前依赖图与一个admin adapter垂直切片，endpoint tests不变 |
-| #222 | 旧多库前提已变，扩展成本需真实样本 | Deferred/P2/XL | 一次provider/repository变更面测量后决定registry/dialect |
+| #222 | ProviderCost与emergency grant实测均为单PostgreSQL adapter；5张新表已补logical/generated及required-table guard | Locally verified/P2/S | schema check及8项测试通过；不建通用dialect/provider registry |
 | #223 | restore binary/apply已有；DLQ无操作出口，重试/保留策略 | Planned/P1/L | DLQ闭环；隔离Postgres恢复演练，不操作生产恢复 |
 | #224 | multi-node启动约束已有，参考部署/演练不足 | Planned/P1/M | 三实例共享Redis、identity与outage/cache窗口说明 |
 | #225 | 旧七env大部已修，仅TCP_KEEPALIVE文档名残余；手册不足 | Develop/P1/M | env更正先交付；metrics/restore/multi-node手册独立验收 |
-| #226 | RC依赖仍在，旧rustls结论未证；公式边界真实 | Develop formula/P2/M | 公式边界矩阵；cargo tree和clean build证据后决定transport升级 |
+| #226 | 公式有限值与函数契约已修；RC依赖仍在，aws-lc仍是有效闭包的一部分 | Develop dependency strategy/P2/M | [审计](issue-triage/issue-226-dependency-transport-audit.md)；先补clean build/WS兼容矩阵，再决定transport升级 |
 | #229 | 白名单重复、分级反馈/导航DX缺口 | Develop docs/P2/S | CONTRIBUTING真实命令；formula allowlist后续单一来源跨模块测试 |
 | #235 | 财务/协议决策记录不足 | Planned/P2/M | ADR index、restore atomicity、tunnel version、usage retry/DLQ逐条代码证据 |
-| #241 | with_redis_url静默no-op真实，不代表runtime仅内存 | Planned/P2/M | 删除或显式弃用builder、迁移调用；一致性/资金预留ADR |
+| #241 | PR #305已删除with_redis_url no-op；Postgres真相源、Redis多节点协调和memory开发边界已有文档 | Deferred decisions/P2/M | 资金预留、Redis故障、缓存失效、管理API演进、tunnel capability保持独立议题，不并入#222重构 |
 | #247 | balance429/code歧义；通知基础设施已有 | Planned/P1/M | OpenAI/Claude兼容测试后决定契约；实际转换事件幂等/偏好测试 |
 | #253 | gift/Turnstile属默认策略，不是已证实免单漏洞 | Planned policy/P1/L | 注册威胁模型、并发admit/settle仿真与告警；不追扣历史款或静默改存量收费 |
 | #254 | formatter/model_not_found已修；API examples/错误矩阵不足 | Planned/P1/M | 与#247共用契约；chat/images quickstart对应实际fixture |
@@ -140,7 +145,7 @@ owner 为维护者 JinPengGeng；主线程协调独立实现与评审。沿用 M
 | #52 | 通用fencing已有，无专用HalfOpen lease | 多节点高/XL/P2 | 集群目标/Redis时间及失败策略，CAS/fencing/单探测测试 |
 | #48 | history加密和API-key scope已有，无adapter capability | 中高/XL/P2 | 核实tenant隔离，native/hydrate/translate/unsupported声明与跨key测试 |
 | #45 | candidate trace已有，缺budget/classifier/generation事件 | 中/L/P2 | #49/#51/#53语义稳定，可重建选择且不泄敏感payload |
-| #44 | 应急domain gate已有，无ledger/授权/持久化/发送 | 场景相关/XL/P2 | 实际应急需求和审计/撤销/TTL验收；默认fail-closed |
+| #44 | operations-only v1已覆盖request scope、授权、审计、5分钟expiry、revoke/单次consume rollback及非默认scheduler边界 | Verify/close candidate | 等真实HTTP/PG 429->200且不触发第三目标的验收；opaque permit/ledger/CAS仅为public/tenant扩展的deferred设计 |
 | #47 | 存档验收依赖全部生产能力 | 高/L/P2 | 依赖实现后最后验证，不能只测桩件声称完成 |
 
 ## 同步、观察与历史关闭

@@ -249,8 +249,8 @@ pub(crate) fn build_local_balance_denied_response(
     balance_remaining: Option<f64>,
 ) -> Result<Response<Body>, GatewayError> {
     let message = match balance_remaining {
-        Some(remaining) => format!("余额不足（剩余: ${remaining:.2}）"),
-        None => "余额不足".to_string(),
+        Some(remaining) => format!("Insufficient balance (remaining: ${remaining:.2})"),
+        None => "Insufficient balance".to_string(),
     };
     let fallback_payload = json!({
         "error": {
@@ -273,8 +273,7 @@ pub(crate) fn build_local_balance_denied_response(
     let payload = client_format
         .and_then(|format| build_core_error_body_for_client_format(format, &message, None, kind))
         .unwrap_or(fallback_payload);
-    let body =
-        serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let body = serialize_local_error_payload(payload, trace_id)?;
     let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
     build_client_response_from_parts(
         kind.http_status_code(client_format.unwrap_or_default()),
@@ -290,7 +289,7 @@ pub(crate) fn build_local_user_rpm_limited_response(
     control_decision: Option<&GatewayControlDecision>,
     rejection: &FrontdoorUserRpmRejection,
 ) -> Result<Response<Body>, GatewayError> {
-    let message = "请求过于频繁，请稍后重试";
+    let message = "Too many requests. Please retry later.";
     let fallback_payload = json!({
         "error": {
             "type": "rate_limit_exceeded",
@@ -304,8 +303,7 @@ pub(crate) fn build_local_user_rpm_limited_response(
         LocalCoreSyncErrorKind::RateLimit,
         fallback_payload,
     );
-    let body =
-        serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let body = serialize_local_error_payload(payload, trace_id)?;
     let headers = BTreeMap::from([
         ("content-type".to_string(), "application/json".to_string()),
         ("Retry-After".to_string(), rejection.retry_after.to_string()),
@@ -327,7 +325,7 @@ pub(crate) fn build_local_daily_usage_limited_response(
     control_decision: Option<&GatewayControlDecision>,
     rejection: &FrontdoorDailyUsageRejection,
 ) -> Result<Response<Body>, GatewayError> {
-    let message = "已达到每日使用上限，请在额度重置后重试";
+    let message = "Daily usage limit reached. Please retry after the quota resets.";
     let fallback_payload = json!({
         "error": {
             "type": "daily_usage_limit_exceeded",
@@ -353,8 +351,7 @@ pub(crate) fn build_local_daily_usage_limited_response(
     } else {
         fallback_payload
     };
-    let body =
-        serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let body = serialize_local_error_payload(payload, trace_id)?;
     let headers = BTreeMap::from([
         ("content-type".to_string(), "application/json".to_string()),
         ("Retry-After".to_string(), rejection.retry_after.to_string()),
@@ -395,7 +392,7 @@ pub(crate) fn build_local_plan_usage_limited_response(
     control_decision: Option<&GatewayControlDecision>,
     rejection: &PlanUsagePolicyRejection,
 ) -> Result<Response<Body>, GatewayError> {
-    let message = "套餐使用限制已达到上限，请稍后重试";
+    let message = "Plan usage limit reached. Please retry later.";
     let fallback_payload = json!({
         "error": {
             "type": "plan_usage_limit_exceeded",
@@ -415,8 +412,7 @@ pub(crate) fn build_local_plan_usage_limited_response(
         LocalCoreSyncErrorKind::RateLimit,
         fallback_payload,
     );
-    let body =
-        serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let body = serialize_local_error_payload(payload, trace_id)?;
     let headers = BTreeMap::from([
         ("content-type".to_string(), "application/json".to_string()),
         ("Retry-After".to_string(), rejection.retry_after.to_string()),
@@ -476,8 +472,7 @@ pub(crate) fn build_local_http_error_response_with_request_path(
         local_error_kind_for_status(status_code),
         fallback_payload,
     );
-    let body =
-        serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let body = serialize_local_error_payload(payload, trace_id)?;
     let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
     build_client_response_from_parts(
         status_code.as_u16(),
@@ -493,26 +488,27 @@ pub(crate) fn build_local_auth_rejection_response(
     control_decision: Option<&GatewayControlDecision>,
     rejection: &GatewayLocalAuthRejection,
 ) -> Result<Response<Body>, GatewayError> {
-    const ACCESS_POLICY_SUBJECT: &str = "当前用户、用户组或密钥的访问控制策略";
+    const ACCESS_POLICY_SUBJECT: &str =
+        "The access policy for the current user, user group, or API key";
 
     match rejection {
         GatewayLocalAuthRejection::InvalidApiKey => build_local_http_error_response(
             trace_id,
             control_decision,
             StatusCode::UNAUTHORIZED,
-            "无效的API密钥",
+            "Invalid API key",
         ),
         GatewayLocalAuthRejection::LockedApiKey => build_local_http_error_response(
             trace_id,
             control_decision,
             StatusCode::FORBIDDEN,
-            "该密钥已被管理员锁定，请联系管理员",
+            "This API key has been locked by an administrator. Contact an administrator.",
         ),
         GatewayLocalAuthRejection::WalletUnavailable => build_local_http_error_response(
             trace_id,
             control_decision,
             StatusCode::FORBIDDEN,
-            "钱包不可用",
+            "Wallet unavailable",
         ),
         GatewayLocalAuthRejection::BalanceDenied { remaining } => {
             build_local_balance_denied_response(trace_id, control_decision, *remaining)
@@ -522,7 +518,7 @@ pub(crate) fn build_local_auth_rejection_response(
                 trace_id,
                 control_decision,
                 StatusCode::FORBIDDEN,
-                &format!("{ACCESS_POLICY_SUBJECT}不允许访问 {provider} 提供商"),
+                &format!("{ACCESS_POLICY_SUBJECT} does not allow access to provider {provider}"),
             )
         }
         GatewayLocalAuthRejection::ApiFormatNotAllowed { api_format } => {
@@ -530,20 +526,22 @@ pub(crate) fn build_local_auth_rejection_response(
                 trace_id,
                 control_decision,
                 StatusCode::FORBIDDEN,
-                &format!("{ACCESS_POLICY_SUBJECT}不允许访问 {api_format} 格式"),
+                &format!(
+                    "{ACCESS_POLICY_SUBJECT} does not allow access to API format {api_format}"
+                ),
             )
         }
         GatewayLocalAuthRejection::ModelNotAllowed { model } => build_local_http_error_response(
             trace_id,
             control_decision,
             StatusCode::FORBIDDEN,
-            &format!("{ACCESS_POLICY_SUBJECT}不允许访问模型 {model}"),
+            &format!("{ACCESS_POLICY_SUBJECT} does not allow access to model {model}"),
         ),
         GatewayLocalAuthRejection::IpNotAllowed { remote_ip } => build_local_http_error_response(
             trace_id,
             control_decision,
             StatusCode::UNAUTHORIZED,
-            &format!("API Key 不允许从当前 IP 访问: {remote_ip}"),
+            &format!("The API key does not permit access from IP address {remote_ip}"),
         ),
     }
 }
@@ -555,7 +553,7 @@ pub(crate) fn build_local_overloaded_response(
     gate: &str,
     limit: usize,
 ) -> Result<Response<Body>, GatewayError> {
-    let message = "服务繁忙，请稍后重试";
+    let message = "Service is busy. Please retry later.";
     let fallback_payload = json!({
         "error": {
             "type": "overloaded",
@@ -573,9 +571,14 @@ pub(crate) fn build_local_overloaded_response(
         LocalCoreSyncErrorKind::Overloaded,
         fallback_payload,
     );
-    let body =
-        serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
-    let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
+    let body = serialize_local_error_payload(payload, trace_id)?;
+    // Admission overload is a transient capacity signal. Give clients a
+    // bounded retry hint for both local saturation and distributed Redis
+    // unavailability; the body remains intentionally format-specific.
+    let headers = BTreeMap::from([
+        ("content-type".to_string(), "application/json".to_string()),
+        ("retry-after".to_string(), "1".to_string()),
+    ]);
     build_client_response_from_parts(
         StatusCode::SERVICE_UNAVAILABLE.as_u16(),
         &headers,
@@ -602,6 +605,16 @@ fn build_local_error_payload(
 
     build_core_error_body_for_client_format("claude:messages", message, None, kind)
         .unwrap_or(fallback_payload)
+}
+
+fn serialize_local_error_payload(
+    mut payload: serde_json::Value,
+    trace_id: &str,
+) -> Result<Vec<u8>, GatewayError> {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("trace_id".to_string(), json!(trace_id));
+    }
+    serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))
 }
 
 fn local_error_uses_claude_format(
@@ -906,6 +919,8 @@ mod tests {
         let invalid_key = response_json(invalid_key).await;
         assert_eq!(invalid_key["type"], "error");
         assert_eq!(invalid_key["error"]["type"], "authentication_error");
+        assert_eq!(invalid_key["error"]["message"], "Invalid API key");
+        assert_eq!(invalid_key["trace_id"], "trace-auth");
 
         let rpm = build_local_user_rpm_limited_response(
             "trace-rpm",
@@ -929,6 +944,8 @@ mod tests {
             10,
         )
         .expect("overload response should build");
+        assert_eq!(overloaded.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(overloaded.headers()["retry-after"], "1");
         let overloaded = response_json(overloaded).await;
         assert_eq!(overloaded["type"], "error");
         assert_eq!(overloaded["error"]["type"], "overloaded_error");
@@ -947,6 +964,7 @@ mod tests {
         assert_eq!(payload["error"]["code"], "credit_balance_exhausted");
         assert_eq!(payload["error"]["message"], "Insufficient quota");
         assert!(payload["error"]["details"].is_null());
+        assert_eq!(payload["trace_id"], "trace-balance-openai");
     }
 
     #[tokio::test]
@@ -980,6 +998,11 @@ mod tests {
         let payload = response_json(response).await;
         assert_eq!(payload["error"]["type"], "daily_usage_limit_exceeded");
         assert_eq!(payload["error"]["details"]["timezone"], "Asia/Shanghai");
+        assert_eq!(
+            payload["error"]["message"],
+            "Daily usage limit reached. Please retry after the quota resets."
+        );
+        assert_eq!(payload["trace_id"], "trace-daily-limit");
     }
 
     #[tokio::test]

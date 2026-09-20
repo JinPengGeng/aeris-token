@@ -23,6 +23,8 @@ mod flow;
 mod reads;
 #[path = "wallet/recharge.rs"]
 mod recharge;
+#[path = "wallet/recharge_recoveries.rs"]
+mod recharge_recoveries;
 #[path = "wallet/redeem.rs"]
 mod redeem;
 #[path = "wallet/refunds.rs"]
@@ -49,6 +51,7 @@ use self::recharge::{
     handle_wallet_create_recharge, handle_wallet_recharge_detail, handle_wallet_recharge_list,
     handle_wallet_recharge_options, wallet_recharge_detail_path_matches,
 };
+use self::recharge_recoveries::handle_wallet_recharge_recoveries;
 use self::redeem::handle_wallet_redeem;
 use self::refunds::{
     handle_wallet_create_refund, handle_wallet_refund_detail,
@@ -150,6 +153,12 @@ pub(super) async fn maybe_build_local_wallet_response(
         && request_context.request_path == "/api/wallet/transactions"
     {
         return Some(handle_wallet_transactions(state, request_context, headers).await);
+    }
+
+    if decision.route_kind.as_deref() == Some("recharge_recoveries")
+        && request_context.request_path == "/api/wallet/recharge-recoveries"
+    {
+        return Some(handle_wallet_recharge_recoveries(state, request_context, headers).await);
     }
 
     if decision.route_kind.as_deref() == Some("flow")

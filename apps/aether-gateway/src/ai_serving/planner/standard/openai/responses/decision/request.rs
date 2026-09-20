@@ -426,14 +426,35 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts_with_
                 return Ok(None);
             }
         };
-    crate::ai_serving::hydrate_openai_response_history(
+    let history_skip_reason = crate::ai_serving::hydrate_openai_response_history(
         state,
         body_json,
         spec_metadata.api_format,
         provider_api_format,
+        input.auth_context.user_id.as_str(),
         input.auth_context.api_key_id.as_str(),
+        candidate.provider_id.as_str(),
+        candidate.endpoint_id.as_str(),
+        candidate.key_id.as_str(),
     )
     .await?;
+    if let Some(skip_reason) = history_skip_reason {
+        mark_skipped_local_openai_responses_candidate(
+            state,
+            input,
+            trace_id,
+            candidate,
+            candidate_index,
+            candidate_id,
+            skip_reason,
+        )
+        .await;
+        return Ok(None);
+    }
+    let history_scope = crate::ai_serving::conversation_history_scope(
+        input.auth_context.user_id.as_str(),
+        input.auth_context.api_key_id.as_str(),
+    );
     let reasoning_replay_policy = openai_responses_reasoning_replay_policy(
         transport.provider.provider_type.as_str(),
         transport.endpoint.base_url.as_str(),
@@ -502,7 +523,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts_with_
                 transport.endpoint.body_rules.as_ref()
             },
             effective_headers,
-            Some(input.auth_context.api_key_id.as_str()),
+            history_scope.as_deref(),
             codex_model_capabilities.as_ref(),
             false,
         )

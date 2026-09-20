@@ -410,6 +410,92 @@
         </Card>
       </div>
 
+      <Card
+        class="overflow-hidden"
+        data-recharge-recoveries
+      >
+        <div class="flex items-center justify-between gap-3 p-5">
+          <div>
+            <h3 class="text-base font-semibold">
+              充值追扣记录
+            </h3>
+            <p class="mt-1 text-xs text-muted-foreground">
+              最近 50 笔充值的欠费处理记录。剩余金额为本次处理时的快照，当前余额请查看上方钱包余额。
+            </p>
+          </div>
+          <RefreshButton
+            :loading="loadingRecoveries"
+            @click="loadRecoveries()"
+          />
+        </div>
+        <p
+          v-if="recoveryLoadFailed"
+          role="status"
+          class="px-5 pb-4 text-sm text-muted-foreground"
+        >
+          追扣记录暂时无法刷新，请稍后重试。
+        </p>
+        <div class="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>充值记录</TableHead>
+                <TableHead>处理状态</TableHead>
+                <TableHead>充值本金</TableHead>
+                <TableHead>已追扣</TableHead>
+                <TableHead>本次充值对应剩余欠费</TableHead>
+                <TableHead>本次追扣后可用本金</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <TableRow
+                v-for="job in recoveryJobs"
+                :key="job.id"
+                data-recovery-row
+              >
+                <TableCell class="text-xs">
+                  <div>{{ recoveryOrderLabel(job) }}</div>
+                  <div class="text-muted-foreground">
+                    {{ formatDateTime(new Date(job.created_at_unix_secs * 1000).toISOString()) }}
+                  </div>
+                </TableCell>
+                <TableCell class="text-xs">
+                  <Badge variant="outline">
+                    {{ rechargeRecoveryStateLabel(job.state) }}
+                  </Badge>
+                  <div
+                    v-if="job.next_attempt_at_unix_secs !== null"
+                    class="mt-1 text-muted-foreground"
+                  >
+                    下次处理：{{ formatDateTime(new Date(job.next_attempt_at_unix_secs * 1000).toISOString()) }}
+                  </div>
+                </TableCell>
+                <TableCell class="tabular-nums">
+                  {{ formatWalletCostUnits(job.principal_cost_units) }}
+                </TableCell>
+                <TableCell class="tabular-nums">
+                  {{ formatWalletCostUnits(job.collected_cost_units) }}
+                </TableCell>
+                <TableCell class="tabular-nums">
+                  {{ !['completed', 'waiting_next_recharge'].includes(job.state) ? '待核对' : formatWalletCostUnits(job.outstanding_cost_units) }}
+                </TableCell>
+                <TableCell class="tabular-nums">
+                  {{ !['completed', 'waiting_next_recharge'].includes(job.state) ? '待核对' : formatWalletCostUnits(job.available_recharge_cost_units) }}
+                </TableCell>
+              </TableRow>
+              <TableRow v-if="!loadingRecoveries && !recoveryLoadFailed && recoveryJobs.length === 0">
+                <TableCell
+                  colspan="6"
+                  class="py-6 text-center text-sm text-muted-foreground"
+                >
+                  暂无充值追扣记录
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </div>
+      </Card>
+
       <Card class="overflow-hidden">
         <div class="px-5 pt-5 pb-2">
           <Tabs v-model="activeTab">
@@ -435,7 +521,7 @@
                 </div>
                 <RefreshButton
                   :loading="loadingTransactions"
-                  @click="loadTransactions"
+                  @click="loadTransactions()"
                 />
               </div>
               <div class="overflow-x-auto">
@@ -770,6 +856,7 @@ import {
   type WalletBalanceResponse,
   type WalletRedeemResponse,
   type WalletRechargeOption,
+  type WalletRechargeRecovery,
 } from '@/api/wallet'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
@@ -784,6 +871,8 @@ import {
   dailyUsageCategoryLabel,
   formatTokenCount,
   formatWalletCurrency as formatCurrency,
+  formatWalletCostUnits,
+  rechargeRecoveryStateLabel,
   paymentMethodLabel,
   paymentStatusBadge,
   paymentStatusLabel,
@@ -806,6 +895,9 @@ const loadingTransactions = ref(false)
 const loadingOrders = ref(false)
 const loadingRefunds = ref(false)
 const loadingRefundEligibility = ref(false)
+const loadingRecoveries = ref(false)
+const recoveryLoadFailed = ref(false)
+const recoveryJobs = ref<WalletRechargeRecovery[]>([])
 const submittingRedeem = ref(false)
 const submittingRecharge = ref(false)
 const submittingRefund = ref(false)
@@ -843,6 +935,11 @@ let refundEligibilityLoaded = false
 let todayCostPollTimer: ReturnType<typeof setInterval> | null = null
 let orderPollTimer: ReturnType<typeof setTimeout> | null = null
 let orderLoadVersion = 0
+let balanceLoadVersion = 0
+let flowLoadVersion = 0
+let recoveryPollTimer: ReturnType<typeof setTimeout> | null = null
+let recoveryLoadVersion = 0
+let recoverySnapshot: string | null = null
 let unmounted = false
 const pendingOrders = new Map<string, PaymentOrder>()
 
@@ -1010,6 +1107,8 @@ onMounted(async () => {
     ])
     if (unmounted) return
     await loadOrders()
+    if (unmounted) return
+    await loadRecoveries()
     syncTodayCostPolling()
   } finally {
     loadingInitial.value = false
@@ -1019,8 +1118,12 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   unmounted = true
   orderLoadVersion += 1
+  balanceLoadVersion += 1
+  flowLoadVersion += 1
+  recoveryLoadVersion += 1
   stopTodayCostPolling()
   stopOrderPolling()
+  stopRecoveryPolling()
   document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 
@@ -1035,11 +1138,14 @@ watch(refundableOrders, () => {
 
 async function refreshWallet() {
   await loadOrders()
+  await loadRecoveries()
   await Promise.all([loadBalance(), loadTransactions(), loadEntitlements()])
 }
 
 async function loadBalance() {
-  walletBalance.value = await walletApi.getBalance()
+  const version = ++balanceLoadVersion
+  const balance = await walletApi.getBalance()
+  if (!unmounted && version === balanceLoadVersion) walletBalance.value = balance
 }
 
 function scrollToRedeemCard() {
@@ -1108,20 +1214,25 @@ async function loadRechargeOptions() {
   }
 }
 
-async function loadTransactions() {
+async function loadTransactions(silent = false) {
+  const version = ++flowLoadVersion
   loadingTransactions.value = true
   try {
     const offset = (txPage.value - 1) * txPageSize.value
     const resp = await walletApi.getFlow({ limit: txPageSize.value, offset })
+    if (unmounted || version !== flowLoadVersion) return false
     flowItems.value = resp.items
     txTotal.value = resp.total
     todayUsage.value = resp.today_entry
     loadedTabs.add('transactions')
+    return true
   } catch (error) {
+    if (unmounted || version !== flowLoadVersion) return false
     log.error('加载钱包流水失败:', error)
-    showError(parseApiError(error, '加载钱包流水失败'))
+    if (!silent) showError(parseApiError(error, '加载钱包流水失败'))
+    return false
   } finally {
-    loadingTransactions.value = false
+    if (!unmounted && version === flowLoadVersion) loadingTransactions.value = false
   }
 }
 
@@ -1158,8 +1269,69 @@ function handleVisibilityChange() {
   syncTodayCostPolling()
   if (document.hidden) {
     stopOrderPolling()
+    stopRecoveryPolling()
   } else if (!loadingInitial.value) {
     void reloadOrders(true)
+    void loadRecoveries(true)
+  }
+}
+
+function recoveryOrderLabel(job: WalletRechargeRecovery): string {
+  return rechargeOrders.value.find(order => order.id === job.payment_order_id)?.order_no || '充值入账'
+}
+
+function stopRecoveryPolling() {
+  if (recoveryPollTimer === null) return
+  clearTimeout(recoveryPollTimer)
+  recoveryPollTimer = null
+}
+
+function scheduleRecoveryPolling() {
+  stopRecoveryPolling()
+  if (unmounted || document.hidden) return
+  const active = recoveryJobs.value.filter(job => job.state === 'pending' || job.state === 'retry')
+  if (active.length === 0 && !recoveryLoadFailed.value) return
+  const distantRetry = !recoveryLoadFailed.value && active.every(job =>
+    job.state === 'retry' && job.next_attempt_at_unix_secs !== null
+      && job.next_attempt_at_unix_secs * 1000 > Date.now() + 30_000,
+  )
+  recoveryPollTimer = setTimeout(() => {
+    recoveryPollTimer = null
+    void loadRecoveries(true)
+  }, distantRetry ? 30_000 : 5_000)
+}
+
+async function loadRecoveries(silent = false) {
+  if (unmounted) return
+  stopRecoveryPolling()
+  const version = ++recoveryLoadVersion
+  loadingRecoveries.value = !silent
+  try {
+    const response = await walletApi.listRechargeRecoveries()
+    if (unmounted || version !== recoveryLoadVersion) return
+    const snapshot = JSON.stringify(response.items.map(job => [
+      job.id, job.state, job.collected_cost_units, job.outstanding_cost_units,
+      job.available_recharge_cost_units, job.updated_at_unix_secs,
+    ]))
+    const changed = recoverySnapshot !== null && snapshot !== recoverySnapshot
+    recoveryJobs.value = response.items
+    recoveryLoadFailed.value = false
+    if (changed) {
+      // Read after the job transition so a pre-recovery balance/flow cannot win.
+      const [, flowLoaded] = await Promise.all([loadBalance(), loadTransactions(true)])
+      if (!flowLoaded) throw new Error('Recovery flow refresh did not finish')
+      if (unmounted || version !== recoveryLoadVersion) return
+    }
+    recoverySnapshot = snapshot
+  } catch (error) {
+    if (unmounted || version !== recoveryLoadVersion) return
+    recoveryLoadFailed.value = true
+    log.error('加载充值追扣记录失败:', error)
+  } finally {
+    if (!unmounted && version === recoveryLoadVersion) {
+      loadingRecoveries.value = false
+      scheduleRecoveryPolling()
+    }
   }
 }
 
@@ -1192,6 +1364,7 @@ async function reloadOrders(silent: boolean) {
   if (unmounted) return
   stopOrderPolling()
   const version = ++orderLoadVersion
+  const balanceVersionAtStart = balanceLoadVersion
   loadingOrders.value = !silent
   try {
     const offset = (orderPage.value - 1) * orderPageSize.value
@@ -1221,11 +1394,13 @@ async function reloadOrders(silent: boolean) {
     const { items: _items, total: _total, limit: _limit, offset: _offset, ...balance } = resp
     const currentPackageBalance = packageBalance.value
     const currentWalletBalance = Number(balance.wallet?.balance ?? balance.balance ?? 0)
-    walletBalance.value = {
-      ...walletBalance.value,
-      ...balance,
-      wallet_balance: Math.max(0, currentWalletBalance),
-      total_available_balance: balance.unlimited ? null : Math.max(0, currentWalletBalance + currentPackageBalance),
+    if (balanceVersionAtStart === balanceLoadVersion) {
+      walletBalance.value = {
+        ...walletBalance.value,
+        ...balance,
+        wallet_balance: Math.max(0, currentWalletBalance),
+        total_available_balance: balance.unlimited ? null : Math.max(0, currentWalletBalance + currentPackageBalance),
+      }
     }
     rechargeOrders.value = resp.items
     orderTotal.value = resp.total
@@ -1233,7 +1408,7 @@ async function reloadOrders(silent: boolean) {
     syncRefundOrderSelection()
     if (newlyCredited.length > 0) {
       // Read after the credited status so a pre-credit list snapshot cannot win.
-      await Promise.all([loadBalance(), loadTransactions()])
+      await Promise.all([loadBalance(), loadTransactions(), loadRecoveries(true)])
       for (const order of newlyCredited) pendingOrders.delete(order.id)
       if (!unmounted && version === orderLoadVersion) success('充值已到账，余额已更新')
     }
@@ -1326,7 +1501,7 @@ async function submitRedeem() {
     })
     redeemForm.code = ''
     success('兑换成功')
-    await Promise.all([loadBalance(), loadOrders(), loadTransactions(), loadTodayCost()])
+    await Promise.all([loadBalance(), loadOrders(), loadTransactions(), loadTodayCost(), loadRecoveries()])
     activeTab.value = 'orders'
   } catch (error) {
     log.error('兑换码充值失败:', error)

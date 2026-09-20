@@ -52,11 +52,30 @@ approved product and finance policy.
 ```promql
 aether_gateway_usage_queue_dlq_length
 aether_gateway_usage_queue_group_pending
+aether_gateway_usage_queue_dlq_max_length
+aether_gateway_usage_queue_dlq_utilization_per_mille
+aether_gateway_usage_queue_dlq_at_retention_boundary
 ```
 
 Preserve the DLQ. Resolve the dependency or schema issue, run the documented
 bounded/idempotent redrive, and verify the length decreases without duplicate
 settlements. If poison messages recur, stop redrive and leave the alert active.
+
+The capacity warning fires after five minutes at 80 percent of the configured
+DLQ retention threshold. The boundary alert fires on the first scrape at or
+above that threshold. Keep job, instance, stream and deployment labels when
+routing these alerts; inhibit the warning while the boundary alert fires for
+the same series. These are example thresholds to validate against the local
+inflow rate and operator response time.
+
+Redis uses approximate MAXLEN trimming, so the raw length may exceed the
+threshold while utilization is capped at 1000 per mille. Neither metric counts
+lost events. Export the available evidence, restore consumers and use the
+bounded redrive procedure; do not delete records merely to clear an alert.
+Capacity metrics are absent for disabled/unconfigured queues or failed health
+reads. Check `usage_queue_health_unavailable` and scrape health; missing data
+must not be treated as an empty or healthy DLQ. These rules do not prove a
+production Alertmanager notification was delivered.
 
 ## Fail-open
 
@@ -108,6 +127,26 @@ uploads the rendered metrics, tool version and results on every PR.
 These checks prove parser and rule behavior. They do not substitute for
 deployment scraping, delivery to an external Alertmanager, or fault injection
 at every production event point; record those separately when accepting #307.
+
+The required Prometheus CI also runs the real delivery harness with
+`python3 tests/metrics_acceptance_harness.py --scenario dlq --evidence-dir
+<new-evidence-directory>`. It requires Prometheus 3.14.0, its matching promtool,
+and Alertmanager 0.34.0 on PATH (or the harness's explicit binary arguments).
+It loads the unchanged checked-in rules, serves synthetic capacity samples on
+an authenticated loopback endpoint, and verifies a healthy scrape followed by
+the retention-boundary firing and resolved webhooks. Both notifications must
+retain `alertname`, `severity`, `job`, `instance` and `stream`. Missing or wrong
+scrape credentials are also rejected. It uses only owned loopback listeners;
+no production receiver is contacted.
+
+The CI artifact includes the exact rule file and its SHA-256, tool versions,
+target status, webhook bodies and the result. Temporary service state is
+removed after both processes stop; failure logs remain in the evidence
+directory. On 2026-09-17 the DLQ scenario passed locally with those binaries.
+This proves local rule-to-webhook delivery. Gateway metric production is
+covered separately by the authenticated HTTP queue-health test, and deployment
+scraping and delivery to the operator's actual notification destination still
+require deployment evidence.
 
 ## Silence and recovery
 

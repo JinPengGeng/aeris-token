@@ -1035,6 +1035,28 @@ impl GatewayDataState {
         })
     }
 
+    pub(crate) async fn upsert_system_config_entry_with_audit(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+        description: Option<&str>,
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<StoredSystemConfigEntry>, DataLayerError> {
+        if self.system_config_values.is_some() {
+            return Ok(None);
+        }
+        let Some(backends) = self.backends.as_ref() else {
+            return Ok(None);
+        };
+        let result = backends
+            .upsert_system_config_entry_with_audit(key, value, description, audit)
+            .await?;
+        if result.is_some() {
+            self.clear_cached_system_config_value(key);
+        }
+        Ok(result)
+    }
+
     pub(crate) async fn delete_system_config_value(
         &self,
         key: &str,

@@ -1,4 +1,4 @@
-use aether_data::repository::audit::CreateAdminAuditLog;
+use aether_data::repository::audit::{CreateAdminAuditLog, ADMIN_AUDIT_METADATA_MAX_TARGET_BYTES};
 use axum::body::Body;
 use axum::http::{self, Response, StatusCode};
 use chrono::Utc;
@@ -6,6 +6,14 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::control::GatewayControlDecision;
+
+mod wallet_balances;
+pub(crate) use wallet_balances::build_admin_wallet_balance_audit;
+
+mod group_members;
+mod sessions;
+pub(crate) use group_members::build_user_group_members_update_audit;
+pub(crate) use sessions::build_admin_session_revocation_audit;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AdminAuditEvent {
@@ -21,6 +29,53 @@ pub(crate) struct AdminAuditEvent {
 /// before Hyper receives the response.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingAdminAudit(pub(crate) CreateAdminAuditLog);
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DurableAdminAuditEnqueued;
+
+pub(crate) fn build_system_config_update_audit(
+    decision: &GatewayControlDecision,
+    target_id: &str,
+    client_ip: Option<&str>,
+) -> Option<CreateAdminAuditLog> {
+    let principal = decision.admin_principal.as_ref()?;
+    let (target_id, target_truncated) =
+        sanitize_admin_audit_target_id_with_truncation(target_id.to_string());
+    let id = uuid::Uuid::now_v7().to_string();
+    Some(CreateAdminAuditLog {
+        id: id.clone(),
+        event_type: "admin_mutation".to_string(),
+        user_id: Some(principal.user_id.clone()),
+        api_key_id: None,
+        description: "admin action: update_system_config".to_string(),
+        ip_address: client_ip
+            .and_then(|value| value.parse::<std::net::IpAddr>().ok())
+            .map(|value| value.to_string()),
+        user_agent: None,
+        // Client trace headers are not length bounded. Keep the durable request
+        // correlation server-controlled while structured logs retain trace_id.
+        request_id: Some(id),
+        event_metadata: Some(json!({
+            "schema_version": 1,
+            "event_name": "admin_system_config_updated",
+            "status": "completed",
+            "admin_role": principal.user_role.as_str(),
+            "session_id": principal.session_id.as_deref(),
+            "management_token_id": principal.management_token_id.as_deref(),
+            "route_family": "system_manage",
+            "route_kind": "config_set",
+            "method": "PUT",
+            "path": "/api/admin/system/configs/[key]",
+            "action": "update_system_config",
+            "target_type": "system_config",
+            "target_id": target_id,
+            "target_truncated": target_truncated.then_some(true),
+        })),
+        status_code: Some(200),
+        error_message: None,
+        created_at: Utc::now(),
+    })
+}
 
 pub(crate) fn attach_admin_audit_event(
     response: &mut Response<Body>,
@@ -45,6 +100,10 @@ pub(crate) fn emit_admin_audit(
     control_decision: Option<&GatewayControlDecision>,
     client_ip: std::net::IpAddr,
 ) {
+    let durable_enqueued = response
+        .extensions()
+        .get::<DurableAdminAuditEnqueued>()
+        .is_some();
     let sanitized_path_and_query = sanitize_admin_audit_path(path_and_query);
     let Some(decision) = control_decision else {
         return;
@@ -79,7 +138,7 @@ pub(crate) fn emit_admin_audit(
             sanitized_path_and_query.clone(),
         )
     };
-    let target_id = sanitize_admin_audit_target_id(target_id);
+    let (target_id, target_truncated) = sanitize_admin_audit_target_id_with_truncation(target_id);
 
     let (audit_status, log_level) = classify_admin_audit_response(method, response.status());
     if log_level == AdminAuditLogLevel::Info {
@@ -148,6 +207,7 @@ pub(crate) fn emit_admin_audit(
         "action": action,
         "target_type": target_type,
         "target_id": target_id,
+        "target_truncated": target_truncated.then_some(true),
     });
     let record = CreateAdminAuditLog {
         id: uuid::Uuid::now_v7().to_string(),
@@ -163,7 +223,9 @@ pub(crate) fn emit_admin_audit(
         error_message: None,
         created_at: Utc::now(),
     };
-    response.extensions_mut().insert(PendingAdminAudit(record));
+    if !durable_enqueued {
+        response.extensions_mut().insert(PendingAdminAudit(record));
+    }
 }
 
 pub(crate) async fn persist_admin_audit(
@@ -216,11 +278,20 @@ fn sanitize_admin_audit_path(path_and_query: &str) -> String {
     crate::middleware::sanitize_access_log_path(path_and_query)
 }
 
-fn sanitize_admin_audit_target_id(target_id: String) -> String {
-    if target_id.trim_start().starts_with('/') {
-        return sanitize_admin_audit_path(&target_id);
+fn sanitize_admin_audit_target_id_with_truncation(target_id: String) -> (String, bool) {
+    let sanitized = if target_id.trim_start().starts_with('/') {
+        sanitize_admin_audit_path(&target_id)
+    } else {
+        target_id
+    };
+    if sanitized.len() <= ADMIN_AUDIT_METADATA_MAX_TARGET_BYTES {
+        return (sanitized, false);
     }
-    target_id
+    let mut end = ADMIN_AUDIT_METADATA_MAX_TARGET_BYTES;
+    while !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    (sanitized[..end].to_string(), true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,8 +334,8 @@ fn is_admin_read_method(method: &http::Method) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_admin_audit_response, sanitize_admin_audit_path, sanitize_admin_audit_target_id,
-        AdminAuditLogLevel,
+        classify_admin_audit_response, sanitize_admin_audit_path,
+        sanitize_admin_audit_target_id_with_truncation, AdminAuditLogLevel,
     };
     use axum::http::{Method, StatusCode};
 
@@ -301,14 +372,25 @@ mod tests {
     #[test]
     fn path_shaped_audit_targets_drop_sensitive_query_values() {
         assert_eq!(
-            sanitize_admin_audit_target_id(
+            sanitize_admin_audit_target_id_with_truncation(
                 "/api/admin/monitoring/trace/request-1?token=secret&limit=25".to_string(),
-            ),
+            )
+            .0,
             "/api/admin/monitoring/trace/request-1?limit=25"
         );
         assert_eq!(
-            sanitize_admin_audit_target_id("resource-id?literal".to_string()),
+            sanitize_admin_audit_target_id_with_truncation("resource-id?literal".to_string()).0,
             "resource-id?literal"
         );
+    }
+
+    #[test]
+    fn oversized_targets_are_utf8_safe_and_marked_truncated() {
+        let (target, truncated) = sanitize_admin_audit_target_id_with_truncation("🙂".repeat(200));
+        assert!(truncated);
+        assert!(
+            target.len() <= aether_data::repository::audit::ADMIN_AUDIT_METADATA_MAX_TARGET_BYTES
+        );
+        assert!(std::str::from_utf8(target.as_bytes()).is_ok());
     }
 }

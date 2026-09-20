@@ -363,7 +363,7 @@ async fn gateway_locally_denies_gemini_files_upload_control_sync_with_opt_in_hea
     assert_eq!(payload["error"]["type"], "http_error");
     assert_eq!(
         payload["error"]["message"],
-        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径"
+        "The Gemini Files request cannot be executed locally: no matching execution path is available"
     );
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -437,7 +437,7 @@ async fn gateway_locally_denies_gemini_files_upload_control_sync_without_opt_in_
     assert_eq!(payload["error"]["type"], "http_error");
     assert_eq!(
         payload["error"]["message"],
-        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径"
+        "The Gemini Files request cannot be executed locally: no matching execution path is available"
     );
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);

@@ -4177,6 +4177,37 @@ mod tests {
     }
 
     #[test]
+    fn aggregates_reasoning_alias_fallbacks_without_losing_space_deltas() {
+        let deltas = [
+            json!({"reasoning_content": "", "reasoning": "Let"}),
+            json!({"reasoning_details": [{"text": null, "summary": " "}]}),
+            json!({"reasoning_details": [{"text": "", "summary": "me"}]}),
+            json!({"reasoning_content": null, "reasoning": " think"}),
+        ];
+        let mut body = String::new();
+        for delta in deltas {
+            body.push_str(&format!(
+                "data: {}\n\n",
+                json!({"id": "reasoning-fallback", "choices": [{
+                    "index": 0, "delta": delta
+                }]})
+            ));
+        }
+        body.push_str(&format!(
+            "data: {}\n\n",
+            json!({"id": "reasoning-fallback", "choices": [{
+                "index": 0, "delta": {"content": "Done."}, "finish_reason": "stop"
+            }]})
+        ));
+        let result =
+            aggregate_openai_chat_stream_sync_response(body.as_bytes()).expect("sync body");
+        assert_eq!(
+            result["choices"][0]["message"]["reasoning_content"],
+            "Let me think"
+        );
+        assert_eq!(result["choices"][0]["message"]["content"], "Done.");
+    }
+    #[test]
     fn aggregates_openai_chat_stream_reasoning_into_sync_body() {
         // The aggregator used to keep only `content` and `tool_calls`, so a
         // stream downgraded to a sync response lost the reasoning entirely —

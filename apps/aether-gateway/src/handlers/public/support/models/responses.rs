@@ -9,12 +9,13 @@ use serde_json::json;
 
 const PUBLIC_MODELS_OWNER: &str = "aether";
 
-pub(crate) fn build_models_auth_error_response(api_format: &str) -> Response<Body> {
+pub(crate) fn build_models_auth_error_response(trace_id: &str, api_format: &str) -> Response<Body> {
     match api_format {
         "claude:messages" => (
             http::StatusCode::UNAUTHORIZED,
             Json(json!({
                 "type": "error",
+                "trace_id": trace_id,
                 "error": {
                     "type": "authentication_error",
                     "message": "Invalid API key provided",
@@ -25,6 +26,7 @@ pub(crate) fn build_models_auth_error_response(api_format: &str) -> Response<Bod
         "gemini:generate_content" => (
             http::StatusCode::UNAUTHORIZED,
             Json(json!({
+                "trace_id": trace_id,
                 "error": {
                     "code": 401,
                     "message": "API key not valid. Please pass a valid API key.",
@@ -36,6 +38,7 @@ pub(crate) fn build_models_auth_error_response(api_format: &str) -> Response<Bod
         _ => (
             http::StatusCode::UNAUTHORIZED,
             Json(json!({
+                "trace_id": trace_id,
                 "error": {
                     "message": "Incorrect API key provided. You can find your API key at https://platform.openai.com/account/api-keys.",
                     "type": "invalid_request_error",
@@ -48,12 +51,17 @@ pub(crate) fn build_models_auth_error_response(api_format: &str) -> Response<Bod
     }
 }
 
-pub(super) fn build_models_not_found_response(model_id: &str, api_format: &str) -> Response<Body> {
+pub(super) fn build_models_not_found_response(
+    trace_id: &str,
+    model_id: &str,
+    api_format: &str,
+) -> Response<Body> {
     match api_format {
         "claude:messages" => (
             http::StatusCode::NOT_FOUND,
             Json(json!({
                 "type": "error",
+                "trace_id": trace_id,
                 "error": {
                     "type": "not_found_error",
                     "message": format!("Model '{model_id}' not found"),
@@ -64,6 +72,7 @@ pub(super) fn build_models_not_found_response(model_id: &str, api_format: &str) 
         "gemini:generate_content" => (
             http::StatusCode::NOT_FOUND,
             Json(json!({
+                "trace_id": trace_id,
                 "error": {
                     "code": 404,
                     "message": format!("models/{model_id} is not found"),
@@ -75,6 +84,7 @@ pub(super) fn build_models_not_found_response(model_id: &str, api_format: &str) 
         _ => (
             http::StatusCode::NOT_FOUND,
             Json(json!({
+                "trace_id": trace_id,
                 "error": {
                     "message": format!("The model '{model_id}' does not exist"),
                     "type": "invalid_request_error",

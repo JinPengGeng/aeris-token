@@ -269,6 +269,7 @@ fn rust_authoritative_service_builds_gemini_cancel_follow_up_plan() {
     service.record_snapshot(LocalVideoTaskSnapshot::Gemini(GeminiVideoTaskSeed {
         local_short_id: "localshort123".to_string(),
         upstream_operation_name: "operations/ext-video-123".to_string(),
+        created_at_unix_secs: 1_712_345_678,
         user_id: Some("user-123".to_string()),
         api_key_id: Some("key-123".to_string()),
         model: "veo-3".to_string(),
@@ -387,6 +388,7 @@ fn rust_authoritative_service_builds_gemini_read_refresh_plan() {
     service.record_snapshot(LocalVideoTaskSnapshot::Gemini(GeminiVideoTaskSeed {
         local_short_id: "localshort123".to_string(),
         upstream_operation_name: "operations/ext-video-123".to_string(),
+        created_at_unix_secs: 1_712_345_678,
         user_id: Some("user-123".to_string()),
         api_key_id: Some("key-123".to_string()),
         model: "veo-3".to_string(),

@@ -593,6 +593,7 @@ mod tests {
     ) {
         repository
             .upsert(UpsertVideoTask {
+                row_revision: 0,
                 id: id.to_string(),
                 short_id: short_id.map(ToOwned::to_owned),
                 request_id: request_id.to_string(),

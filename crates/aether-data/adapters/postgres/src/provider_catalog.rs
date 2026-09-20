@@ -753,7 +753,7 @@ impl SqlxProviderCatalogReadRepository {
                     )
                     .build()
                     .fetch(&self.pool),
-                    map_endpoint_row,
+                    map_endpoint_row_legacy,
                 )
                 .await?
             }
@@ -792,7 +792,7 @@ impl SqlxProviderCatalogReadRepository {
                     )
                     .build()
                     .fetch(&self.pool),
-                    map_endpoint_row,
+                    map_endpoint_row_legacy,
                 )
                 .await?
             }
@@ -1568,7 +1568,7 @@ WHERE id = $1
             .execute(&mut *tx)
             .await
             .map_postgres_err()?;
-            sqlx::query("UPDATE video_tasks SET provider_id = NULL WHERE provider_id = $1")
+            sqlx::query("UPDATE video_tasks SET provider_id = NULL, row_revision = row_revision + 1, updated_at = GREATEST(updated_at, NOW()) WHERE provider_id = $1")
                 .bind(provider_id)
                 .execute(&mut *tx)
                 .await
@@ -1581,7 +1581,7 @@ WHERE id = $1
         }
 
         for endpoint_id in endpoint_ids {
-            sqlx::query("UPDATE video_tasks SET endpoint_id = NULL WHERE endpoint_id = $1")
+            sqlx::query("UPDATE video_tasks SET endpoint_id = NULL, row_revision = row_revision + 1, updated_at = GREATEST(updated_at, NOW()) WHERE endpoint_id = $1")
                 .bind(endpoint_id)
                 .execute(&mut *tx)
                 .await
@@ -1599,7 +1599,7 @@ WHERE id = $1
                 .execute(&mut *tx)
                 .await
                 .map_postgres_err()?;
-            sqlx::query("UPDATE video_tasks SET key_id = NULL WHERE key_id = $1")
+            sqlx::query("UPDATE video_tasks SET key_id = NULL, row_revision = row_revision + 1, updated_at = GREATEST(updated_at, NOW()) WHERE key_id = $1")
                 .bind(key_id)
                 .execute(&mut *tx)
                 .await
@@ -3424,6 +3424,17 @@ fn map_provider_row(row: &PgRow) -> Result<StoredProviderCatalogProvider, DataLa
 }
 
 fn map_endpoint_row(row: &PgRow) -> Result<StoredProviderCatalogEndpoint, DataLayerError> {
+    map_endpoint_row_with_health_score(row, true)
+}
+
+fn map_endpoint_row_legacy(row: &PgRow) -> Result<StoredProviderCatalogEndpoint, DataLayerError> {
+    map_endpoint_row_with_health_score(row, false)
+}
+
+fn map_endpoint_row_with_health_score(
+    row: &PgRow,
+    has_health_score: bool,
+) -> Result<StoredProviderCatalogEndpoint, DataLayerError> {
     let created_at_unix_ms = row_get::<Option<i64>>(row, "created_at_unix_ms")?
         .map(|value| {
             u64::try_from(value).map_err(|_| {
@@ -3442,6 +3453,11 @@ fn map_endpoint_row(row: &PgRow) -> Result<StoredProviderCatalogEndpoint, DataLa
             })
         })
         .transpose()?;
+    let health_score = if has_health_score {
+        row_get::<Option<f64>>(row, "health_score")?.unwrap_or(1.0)
+    } else {
+        1.0
+    };
     StoredProviderCatalogEndpoint::new(
         row_get(row, "id")?,
         row_get(row, "provider_id")?,
@@ -3451,12 +3467,7 @@ fn map_endpoint_row(row: &PgRow) -> Result<StoredProviderCatalogEndpoint, DataLa
         row_get(row, "is_active")?,
     )?
     .with_timestamps(created_at_unix_ms, updated_at_unix_secs)
-    .with_health_score(
-        row.try_get::<Option<f64>, _>("health_score")
-            .ok()
-            .flatten()
-            .unwrap_or(1.0),
-    )
+    .with_health_score(health_score)
     .with_transport_fields(
         row_get(row, "base_url")?,
         row_get(row, "header_rules")?,
@@ -3701,7 +3712,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
         row_get(row, "proxy")?,
         row_get(row, "fingerprint")?,
     )
-    .map(|key| {
+    .and_then(|key| {
         let mut key = key
             .with_rate_limit_fields(
                 rpm_limit,
@@ -3709,42 +3720,43 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
                 learned_rpm_limit,
                 concurrent_429_count,
                 rpm_429_count,
-                row.try_get::<Option<i64>, _>("last_429_at_unix_secs")
-                    .ok()
-                    .flatten()
-                    .and_then(|value| u64::try_from(value).ok()),
-                row.try_get("adjustment_history").ok(),
+                optional_u64(
+                    row_get::<Option<i64>>(row, "last_429_at_unix_secs")?,
+                    "provider_api_keys.last_429_at",
+                )?,
+                row_get(row, "adjustment_history")?,
                 request_count,
                 success_count,
             )
             .with_usage_fields(error_count, total_response_time_ms)
             .with_usage_totals(total_tokens, total_cost_usd)
             .with_health_fields(
-                row.try_get("health_by_format").ok(),
-                row.try_get("circuit_breaker_by_format").ok(),
+                row_get(row, "health_by_format")?,
+                row_get(row, "circuit_breaker_by_format")?,
             );
-        key.note = row.try_get("note").ok();
-        key.internal_priority = row.try_get("internal_priority").unwrap_or(50);
-        key.cache_ttl_minutes = row.try_get("cache_ttl_minutes").unwrap_or(5);
-        key.max_probe_interval_minutes = row.try_get("max_probe_interval_minutes").unwrap_or(32);
-        key.last_429_type = row.try_get("last_429_type").ok();
-        key.utilization_samples = row.try_get("utilization_samples").ok();
+        key.note = row_get(row, "note")?;
+        key.internal_priority = row_get::<Option<i32>>(row, "internal_priority")?.unwrap_or(50);
+        key.cache_ttl_minutes = row_get::<Option<i32>>(row, "cache_ttl_minutes")?.unwrap_or(5);
+        key.max_probe_interval_minutes =
+            row_get::<Option<i32>>(row, "max_probe_interval_minutes")?.unwrap_or(32);
+        key.last_429_type = row_get(row, "last_429_type")?;
+        key.utilization_samples = row_get(row, "utilization_samples")?;
         key.last_probe_increase_at_unix_secs = last_probe_increase_at_unix_secs;
         key.last_rpm_peak = last_rpm_peak;
         key.last_used_at_unix_secs = last_used_at_unix_secs;
-        key.auto_fetch_models = row.try_get("auto_fetch_models").unwrap_or(false);
+        key.auto_fetch_models = row_get::<Option<bool>>(row, "auto_fetch_models")?.unwrap_or(false);
         key.last_models_fetch_at_unix_secs = last_models_fetch_at_unix_secs;
-        key.last_models_fetch_error = row.try_get("last_models_fetch_error").ok();
-        key.locked_models = row.try_get("locked_models").ok();
-        key.model_include_patterns = row.try_get("model_include_patterns").ok();
-        key.model_exclude_patterns = row.try_get("model_exclude_patterns").ok();
-        key.upstream_metadata = row.try_get("upstream_metadata").ok();
+        key.last_models_fetch_error = row_get(row, "last_models_fetch_error")?;
+        key.locked_models = row_get(row, "locked_models")?;
+        key.model_include_patterns = row_get(row, "model_include_patterns")?;
+        key.model_exclude_patterns = row_get(row, "model_exclude_patterns")?;
+        key.upstream_metadata = row_get(row, "upstream_metadata")?;
         key.oauth_invalid_at_unix_secs = oauth_invalid_at_unix_secs;
-        key.oauth_invalid_reason = row.try_get("oauth_invalid_reason").ok();
-        key.status_snapshot = row.try_get("status_snapshot").ok();
+        key.oauth_invalid_reason = row_get(row, "oauth_invalid_reason")?;
+        key.status_snapshot = row_get(row, "status_snapshot")?;
         key.created_at_unix_ms = created_at_unix_ms;
         key.updated_at_unix_secs = updated_at_unix_secs;
-        key
+        Ok(key)
     })
     .and_then(|key| {
         key.with_auth_channel_policy_fields(
@@ -3759,7 +3771,9 @@ mod tests {
     use aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyRuntimeMetadataUpdate;
     use serde_json::json;
 
-    use super::{optional_u64, SqlxProviderCatalogReadRepository};
+    use super::{
+        map_endpoint_row, map_endpoint_row_legacy, optional_u64, SqlxProviderCatalogReadRepository,
+    };
     use crate::{PostgresPoolConfig, PostgresPoolFactory};
 
     #[tokio::test]
@@ -3781,6 +3795,76 @@ mod tests {
         let _ = repository.pool();
     }
 
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and a PostgreSQL server"]
+    async fn live_endpoint_health_score_mapping_preserves_null_legacy_and_decode_failures() {
+        async fn endpoint_row(
+            pool: &sqlx::PgPool,
+            health_score_select: Option<&str>,
+        ) -> sqlx::postgres::PgRow {
+            let health_score = health_score_select
+                .map(|value| format!("{value} AS health_score,"))
+                .unwrap_or_default();
+            let query = format!(
+                r#"
+SELECT
+  'endpoint-test'::text AS id,
+  'provider-test'::text AS provider_id,
+  'openai'::text AS api_format,
+  NULL::text AS api_family,
+  NULL::text AS endpoint_kind,
+  true AS is_active,
+  {health_score}
+  'https://example.invalid'::text AS base_url,
+  NULL::json AS header_rules,
+  NULL::json AS body_rules,
+  NULL::integer AS max_retries,
+  NULL::text AS custom_path,
+  NULL::json AS config,
+  NULL::json AS format_acceptance_config,
+  NULL::jsonb AS proxy,
+  NULL::bigint AS created_at_unix_ms,
+  NULL::bigint AS updated_at_unix_secs
+"#,
+            );
+            sqlx::query(&query)
+                .fetch_one(pool)
+                .await
+                .expect("endpoint mapping fixture should select")
+        }
+
+        let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+            .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("test database should connect");
+
+        assert_eq!(
+            map_endpoint_row(&endpoint_row(&pool, Some("0.25::double precision")).await)
+                .expect("projected double precision health score should decode")
+                .health_score,
+            0.25
+        );
+        assert_eq!(
+            map_endpoint_row(&endpoint_row(&pool, Some("NULL::double precision")).await)
+                .expect("projected NULL health score should retain the default")
+                .health_score,
+            1.0
+        );
+        assert!(
+            map_endpoint_row(&endpoint_row(&pool, Some("'invalid'::text")).await).is_err(),
+            "a projected health score with an incompatible type must be rejected"
+        );
+        assert_eq!(
+            map_endpoint_row_legacy(&endpoint_row(&pool, None).await)
+                .expect("the legacy projection without health_score should retain the default")
+                .health_score,
+            1.0
+        );
+    }
+
     #[test]
     fn provider_catalog_negative_security_timestamps_fail_closed() {
         assert!(optional_u64(Some(-1), "provider_api_keys.expires_at").is_err());
@@ -3788,6 +3872,25 @@ mod tests {
             optional_u64(None, "provider_api_keys.expires_at")
                 .expect("SQL NULL should remain optional"),
             None
+        );
+    }
+
+    #[test]
+    fn provider_catalog_key_row_mapping_propagates_decode_errors() {
+        let source = include_str!("provider_catalog.rs");
+        let mapping = source
+            .split_once("fn map_key_row(")
+            .and_then(|(_, remainder)| remainder.split_once("#[cfg(test)]"))
+            .map(|(mapping, _)| mapping)
+            .expect("map_key_row source should be present");
+
+        assert!(
+            !mapping.contains("row.try_get"),
+            "provider key row mapping must use row_get so sqlx decode errors are preserved"
+        );
+        assert!(
+            !mapping.contains(".ok()"),
+            "provider key row mapping must not silently discard sqlx decode errors"
         );
     }
 

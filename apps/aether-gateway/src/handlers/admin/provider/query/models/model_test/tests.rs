@@ -1286,3 +1286,83 @@ fn provider_query_dall_e_3_image_test_keeps_single_generation_boundary() {
         "Provider request body could not be normalized for openai:image: selected provider supports n=1..1 for generation"
     );
 }
+
+#[test]
+fn emergency_chain_audit_uses_the_existing_flat_metadata_contract() {
+    let audit = emergency_chain_audit(
+        "admin-user",
+        "request-id",
+        "issue_emergency_chain_grant",
+        "grant-id",
+    );
+    audit
+        .validate()
+        .expect("emergency audit should satisfy the shared audit contract");
+    let metadata = audit.event_metadata.expect("audit metadata should exist");
+    assert_eq!(metadata["target_id"], "grant-id");
+    assert_eq!(metadata["event_name"], "issue_emergency_chain_grant");
+}
+
+#[test]
+fn emergency_chain_fingerprint_and_hash_preserve_declared_target_order() {
+    let targets = vec![
+        EmergencyChainTarget {
+            provider_id: "provider-a".to_string(),
+            endpoint_id: "endpoint-a".to_string(),
+            key_id: "key-a".to_string(),
+        },
+        EmergencyChainTarget {
+            provider_id: "provider-a".to_string(),
+            endpoint_id: "endpoint-b".to_string(),
+            key_id: "key-b".to_string(),
+        },
+    ];
+    let mut reversed = targets.clone();
+    reversed.reverse();
+
+    assert_ne!(
+        emergency_chain_request_fingerprint("provider-a", "gpt-5", &targets),
+        emergency_chain_request_fingerprint("provider-a", "gpt-5", &reversed),
+    );
+    assert_ne!(
+        emergency_chain_target_hash(&targets),
+        emergency_chain_target_hash(&reversed),
+    );
+}
+
+#[test]
+fn emergency_chain_retries_only_explicit_transient_http_failures() {
+    let outcome = |status_code| ProviderQueryExecutionOutcome {
+        status: "failed",
+        skip_reason: None,
+        error_message: Some("projected".to_string()),
+        status_code,
+        latency_ms: None,
+        request_url: String::new(),
+        request_headers: BTreeMap::new(),
+        request_body: Value::Null,
+        response_headers: BTreeMap::new(),
+        response_body: None,
+    };
+
+    assert!(emergency_chain_failure_is_retryable(&outcome(Some(408))));
+    assert!(emergency_chain_failure_is_retryable(&outcome(Some(429))));
+    assert!(emergency_chain_failure_is_retryable(&outcome(Some(503))));
+    assert!(!emergency_chain_failure_is_retryable(&outcome(Some(400))));
+    assert!(!emergency_chain_failure_is_retryable(&outcome(Some(401))));
+    assert!(!emergency_chain_failure_is_retryable(&outcome(None)));
+}
+
+#[test]
+fn emergency_chain_rejects_tool_fields_at_any_request_depth() {
+    assert!(emergency_chain_request_contains_tools(&json!({
+        "request": {
+            "tools": [{ "type": "function" }]
+        }
+    })));
+    assert!(!emergency_chain_request_contains_tools(&json!({
+        "model": "gpt-5",
+        "messages": [{ "role": "user", "content": "hello" }],
+        "stream": false
+    })));
+}

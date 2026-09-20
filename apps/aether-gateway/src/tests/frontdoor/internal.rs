@@ -140,6 +140,7 @@ async fn internal_video_followup_planner_state(
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: task_id.to_string(),
             short_id: short_id.map(ToOwned::to_owned),
             request_id: format!("request-{task_id}"),

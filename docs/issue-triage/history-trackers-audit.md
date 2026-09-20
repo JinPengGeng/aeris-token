@@ -1,5 +1,26 @@
 # Historical closures and tracker audit
 
+## Upstream evaluation refresh — 2026-09-20
+
+GitHub was read again for the eight PRs tracked by #157/#158. The table below
+supersedes their September 12 evaluation status only; historical counts and
+closure evidence in the remainder of this document retain their original date.
+
+| Upstream PR | Live state | Fork evidence and decision |
+| --- | --- | --- |
+| #750 | Closed without merge; updated September 9 | Do not transplant the closed combined billing/UI proposal. Evaluate any future replacement against the existing fork billing contracts. |
+| #732 | Merged September 5 | Merge `882bb43125745dcb8b88281776b0fc017eed795e` is already an ancestor of fork main. No duplicate port is needed. |
+| #727 | Open; updated August 15 | The fork's replacement was delivered by PR #278 for #174. Retain that implementation and monitor upstream. |
+| #714 | Open; updated August 6 | User/API-key daily usage limit contracts and Gateway enforcement already exist. Do not repeat the core implementation. |
+| #634 | Open; updated June 7 | API-key billing multiplier is already carried by the fork's auth and billing contracts. No duplicate port. |
+| #607 | Open; updated May 29 | The fork consumes `billing_source.mode` (`auto`, `wallet`, `package`) in normalization and wallet access. Keep the implemented path; compare any future merged revision before adopting it. |
+| #638 | Open; updated June 10 | `/api/admin/usage/attribution` has a registered route, handler and tests. This does not replace #431 supplier-cost pricing and receipts. |
+| #736 | Open; updated August 18 | Head `92865487df2d015753f7686d3fb181b2e8d18300`; `allowed_provider_key_ids` was not found in the reviewed fork contracts/Gateway. Defer this unmerged feature rather than report it as implemented. |
+
+These are evaluation records, not eight new development assignments. The
+original #157/#158 intake scope does not authorize importing entire unmerged
+PRs. Ordinary merged upstream changes continue through the daily sync workflow.
+
 Audited 2026-09-12 against `origin/main` at `12a1d265c090f2666e35ddbe7f13f5b842cf5ff5`. This is a read-only GitHub and ancestry audit of the fork `JinPengGeng/aeris-token`; it does not make a claim about the current upstream tip.
 
 ## Scope and method

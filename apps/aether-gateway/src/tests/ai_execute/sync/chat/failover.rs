@@ -358,7 +358,7 @@ async fn gateway_skips_unsupported_local_openai_chat_sync_candidate_before_tryin
             "Bearer sk-client-openai-skip-local",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-skip-local-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -646,7 +646,7 @@ async fn gateway_surfaces_local_execution_runtime_miss_reason_when_all_openai_ch
             "Bearer sk-client-openai-local-miss",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-local-miss-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -671,7 +671,7 @@ async fn gateway_surfaces_local_execution_runtime_miss_reason_when_all_openai_ch
     assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(
         payload["error"]["message"],
-        "没有可用提供商支持模型 gpt-5 的同步请求"
+        "No available provider supports model gpt-5 for this synchronous request"
     );
 
     let stored_candidates = request_candidate_repository
@@ -938,23 +938,29 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
                 let raw_body = to_bytes(body, usize::MAX).await.expect("body should read");
                 let payload: serde_json::Value = serde_json::from_slice(&raw_body)
                     .expect("execution runtime payload should parse");
+                let trace_id = parts
+                    .headers
+                    .get(TRACE_ID_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let authorization = payload
+                    .get("headers")
+                    .and_then(|value| value.get("authorization"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let mut hits = execution_runtime_hits_inner
                     .lock()
                     .expect("mutex should lock");
                 *hits += 1;
-                let attempt = *hits;
                 drop(hits);
 
                 seen_execution_runtime_inner
                     .lock()
                     .expect("mutex should lock")
                     .push(SeenExecutionRuntimeSyncRequest {
-                        trace_id: parts
-                            .headers
-                            .get(TRACE_ID_HEADER)
-                            .and_then(|value| value.to_str().ok())
-                            .unwrap_or_default()
-                            .to_string(),
+                        trace_id: trace_id.clone(),
                         url: payload
                             .get("url")
                             .and_then(|value| value.as_str())
@@ -967,27 +973,27 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()
                             .to_string(),
-                        authorization: payload
-                            .get("headers")
-                            .and_then(|value| value.get("authorization"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
+                        authorization: authorization.clone(),
                     });
 
-                // The primary key gets two attempts under the default
-                // sticky_key_attempts; both must fail to reach the backup.
-                if attempt <= 2 {
+                if authorization == "Bearer sk-upstream-openai-primary" {
+                    let (status_code, message, error_type) =
+                        if trace_id == "trace-openai-chat-local-client-error-422" {
+                            (422, "request validation failed", "invalid_request_error")
+                        } else {
+                            (401, "invalid auth token", "authentication_error")
+                        };
                     return Json(json!({
-                        "request_id": "trace-openai-chat-local-failover-123",
-                        "status_code": 401,
+                        "request_id": trace_id,
+                        "status_code": status_code,
                         "headers": {
                             "content-type": "application/json"
                         },
                         "body": {
                             "json_body": {
                                 "error": {
-                                    "message": "invalid auth token"
+                                    "message": message,
+                                    "type": error_type
                                 }
                             }
                         },
@@ -998,7 +1004,7 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
                 }
 
                 Json(json!({
-                    "request_id": "trace-openai-chat-local-failover-123",
+                    "request_id": trace_id,
                     "status_code": 200,
                     "headers": {
                         "content-type": "application/json"
@@ -1104,6 +1110,89 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
+    let client_error_response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-client-openai-local-failover",
+        )
+        .header(TRACE_ID_HEADER, "trace-openai-chat-local-client-error-422")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
+        .send()
+        .await
+        .expect("422 request should complete");
+    assert_eq!(
+        client_error_response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        client_error_response
+            .headers()
+            .get(EXECUTION_PATH_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some(EXECUTION_PATH_EXECUTION_RUNTIME_SYNC)
+    );
+    assert_eq!(
+        client_error_response
+            .json::<serde_json::Value>()
+            .await
+            .expect("422 response should parse"),
+        json!({
+            "error": {
+                "message": "request validation failed",
+                "type": "invalid_request_error"
+            }
+        })
+    );
+    let client_error_requests = seen_execution_runtime
+        .lock()
+        .expect("mutex should lock")
+        .iter()
+        .filter(|request| request.trace_id == "trace-openai-chat-local-client-error-422")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(client_error_requests.len(), 1);
+    assert_eq!(
+        client_error_requests[0].authorization,
+        "Bearer sk-upstream-openai-primary"
+    );
+    assert_eq!(
+        client_error_requests
+            .iter()
+            .filter(|request| request.authorization == "Bearer sk-upstream-openai-backup")
+            .count(),
+        0
+    );
+    let client_error_candidates = request_candidate_repository
+        .list_by_request_id("trace-openai-chat-local-client-error-422")
+        .await
+        .expect("422 request candidate trace should read");
+    assert_eq!(client_error_candidates.len(), 1);
+    assert_eq!(
+        client_error_candidates[0].status,
+        RequestCandidateStatus::Failed
+    );
+    assert_eq!(client_error_candidates[0].status_code, Some(422));
+    let client_error_flow = client_error_candidates[0]
+        .extra_data
+        .as_ref()
+        .and_then(|value| value.get("error_flow"))
+        .expect("422 candidate should persist its error flow");
+    assert_eq!(client_error_flow["failure_origin"], "upstream_provider");
+    assert_eq!(
+        client_error_flow["classifier_disposition"]["retry_action"],
+        "stop"
+    );
+    assert_eq!(
+        client_error_flow["classifier_disposition"]["failure_scope"],
+        "none"
+    );
+    assert_eq!(
+        client_error_flow["classifier_disposition"]["token_action"],
+        "none"
+    );
+
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/chat/completions"))
         .header(http::header::CONTENT_TYPE, "application/json")
@@ -1112,7 +1201,7 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
             "Bearer sk-client-openai-local-failover",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-local-failover-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -1131,65 +1220,82 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
     let seen_execution_runtime_requests = seen_execution_runtime
         .lock()
         .expect("mutex should lock")
-        .clone();
-    // Default sticky_key_attempts is 2: the primary key is retried once on
-    // the same key, then failover moves to the backup with a single attempt.
-    assert_eq!(seen_execution_runtime_requests.len(), 3);
-    for primary_request in &seen_execution_runtime_requests[..2] {
-        assert_eq!(
-            primary_request.trace_id,
-            "trace-openai-chat-local-failover-123"
-        );
-        assert_eq!(
-            primary_request.url,
-            "https://api.openai.primary.example/chat/completions"
-        );
-        assert_eq!(
-            primary_request.authorization,
-            "Bearer sk-upstream-openai-primary"
-        );
-    }
+        .iter()
+        .filter(|request| request.trace_id == "trace-openai-chat-local-failover-123")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(seen_execution_runtime_requests.len(), 2);
+    let primary_request = &seen_execution_runtime_requests[0];
     assert_eq!(
-        seen_execution_runtime_requests[2].url,
+        primary_request.trace_id,
+        "trace-openai-chat-local-failover-123"
+    );
+    assert_eq!(
+        primary_request.url,
+        "https://api.openai.primary.example/chat/completions"
+    );
+    assert_eq!(
+        primary_request.authorization,
+        "Bearer sk-upstream-openai-primary"
+    );
+    assert_eq!(
+        seen_execution_runtime_requests[1].url,
         "https://api.openai.backup.example/chat/completions"
     );
     assert_eq!(
-        seen_execution_runtime_requests[2].model,
+        seen_execution_runtime_requests[1].model,
         "gpt-5-upstream-backup"
     );
     assert_eq!(
-        seen_execution_runtime_requests[2].authorization,
+        seen_execution_runtime_requests[1].authorization,
         "Bearer sk-upstream-openai-backup"
     );
     let stored_candidates = request_candidate_repository
         .list_by_request_id("trace-openai-chat-local-failover-123")
         .await
         .expect("request candidate trace should read");
-    assert_eq!(stored_candidates.len(), 3);
-    for (retry_index, failed_candidate) in stored_candidates[..2].iter().enumerate() {
-        assert_eq!(failed_candidate.candidate_index, 0);
-        assert_eq!(failed_candidate.retry_index, retry_index as u32);
-        assert_eq!(failed_candidate.status, RequestCandidateStatus::Failed);
-        assert_eq!(failed_candidate.status_code, Some(401));
-        assert!(failed_candidate.error_message.is_some());
-        let failed_upstream_response = failed_candidate
-            .extra_data
-            .as_ref()
-            .and_then(|value| value.get("upstream_response"))
-            .expect("failed candidate should keep its upstream response");
-        assert_eq!(failed_upstream_response["status_code"], json!(401));
-        assert_eq!(
-            failed_upstream_response["headers"]["content-type"],
-            "application/json"
-        );
-        assert_eq!(
-            failed_upstream_response["body"]["error"]["message"],
-            "invalid auth token"
-        );
-    }
-    assert_eq!(stored_candidates[2].candidate_index, 1);
-    assert_eq!(stored_candidates[2].status, RequestCandidateStatus::Success);
-    assert_eq!(stored_candidates[2].status_code, Some(200));
+    assert_eq!(stored_candidates.len(), 2);
+    let failed_candidate = &stored_candidates[0];
+    assert_eq!(failed_candidate.candidate_index, 0);
+    assert_eq!(failed_candidate.retry_index, 0);
+    assert_eq!(failed_candidate.status, RequestCandidateStatus::Failed);
+    assert_eq!(failed_candidate.status_code, Some(401));
+    assert!(failed_candidate.error_message.is_some());
+    let failed_upstream_response = failed_candidate
+        .extra_data
+        .as_ref()
+        .and_then(|value| value.get("upstream_response"))
+        .expect("failed candidate should keep its upstream response");
+    assert_eq!(failed_upstream_response["status_code"], json!(401));
+    assert_eq!(
+        failed_upstream_response["headers"]["content-type"],
+        "application/json"
+    );
+    assert_eq!(
+        failed_upstream_response["body"]["error"]["message"],
+        "invalid auth token"
+    );
+    let failed_error_flow = failed_candidate
+        .extra_data
+        .as_ref()
+        .and_then(|value| value.get("error_flow"))
+        .expect("401 candidate should persist its error flow");
+    assert_eq!(failed_error_flow["failure_origin"], "upstream_credential");
+    assert_eq!(
+        failed_error_flow["classifier_disposition"]["retry_action"],
+        "next_credential"
+    );
+    assert_eq!(
+        failed_error_flow["classifier_disposition"]["failure_scope"],
+        "credential"
+    );
+    assert_eq!(
+        failed_error_flow["classifier_disposition"]["token_action"],
+        "force_refresh"
+    );
+    assert_eq!(stored_candidates[1].candidate_index, 1);
+    assert_eq!(stored_candidates[1].status, RequestCandidateStatus::Success);
+    assert_eq!(stored_candidates[1].status_code, Some(200));
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(

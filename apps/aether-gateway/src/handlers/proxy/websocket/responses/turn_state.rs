@@ -6,11 +6,15 @@
 //! 一个枚举：合法组合由类型保证，转换只能走受控 API。
 
 use aether_provider_transport::CodexFingerprintConvergenceContext;
+use aether_scheduler_core::AttemptBudget;
 use serde_json::Value;
 
 use super::control::ResponsesWebSocketTurnControl;
 use super::lifecycle::ActiveProviderAttempt;
 use super::request::response_create_has_previous_response_id;
+use crate::executor::attempt_lifecycle::{
+    AttemptLifecycle, AttemptLifecycleTerminalGuard, RequestCommitBarrier,
+};
 use crate::plan_usage_policy::PlanUsagePolicySnapshot;
 
 /// 客户端一次 `response.create` 对应的 logical turn。
@@ -32,8 +36,20 @@ pub(super) struct LogicalTurn {
     /// this logical turn. A transparent re-plan must never mint a new turn.
     pub(super) codex_fingerprint_context: Option<CodexFingerprintConvergenceContext>,
     pub(super) turn_attempt: u32,
+    /// The scheduler budget belongs to the client-visible response.create,
+    /// rather than to a physical provider connection. A transparent quota
+    /// rebind consumes from this same instance; the next logical turn gets a
+    /// new instance in `LogicalTurn::new`.
+    attempt_budget: AttemptBudget,
     pub(super) retry_attempted: bool,
+    /// A parsed terminal upstream quota event passed the origin/disposition
+    /// gate. It remains valid until this logical turn is finalized or retried.
+    pub(super) quota_retry_admitted: bool,
     pub(super) retry_unsafe_reason: Option<&'static str>,
+    /// Shared by every provider attempt for this client request. A committed
+    /// attempt makes its replacement unsafe even after the old attempt has
+    /// been detached for transparent retry.
+    request_commit_barrier: RequestCommitBarrier,
     /// Exact live control decision and strong auth snapshot used to authorize
     /// this logical turn. Quota retries reuse it instead of falling back to the
     /// connection's Upgrade-time authorization snapshot.
@@ -57,8 +73,11 @@ impl LogicalTurn {
             logical_turn_id,
             codex_fingerprint_context: None,
             turn_attempt: 1,
+            attempt_budget: AttemptBudget::new(std::time::Instant::now()),
             retry_attempted: false,
+            quota_retry_admitted: false,
             retry_unsafe_reason: None,
+            request_commit_barrier: RequestCommitBarrier::default(),
             turn_control: None,
             plan_usage_permit: None,
             plan_usage_policy_snapshot: None,
@@ -102,6 +121,8 @@ impl LogicalTurn {
     pub(super) fn quota_retry_block_reason(&self) -> Option<&'static str> {
         if self.retry_attempted {
             Some("quota_retry_already_attempted")
+        } else if self.request_commit_barrier.is_client_committed() {
+            Some("client_committed")
         } else if let Some(reason) = self.retry_unsafe_reason {
             Some(reason)
         } else if response_create_has_previous_response_id(&self.client_event) {
@@ -109,6 +130,22 @@ impl LogicalTurn {
         } else {
             None
         }
+    }
+
+    pub(super) const fn quota_retry_admitted(&self) -> bool {
+        self.quota_retry_admitted
+    }
+
+    pub(super) fn admit_quota_retry(&mut self) {
+        self.quota_retry_admitted = true;
+    }
+
+    pub(super) fn begin_attempt_lifecycle(&self) -> AttemptLifecycle {
+        AttemptLifecycle::new(self.request_commit_barrier.clone())
+    }
+
+    pub(super) fn attempt_budget_mut(&mut self) -> &mut AttemptBudget {
+        &mut self.attempt_budget
     }
 
     pub(super) fn mark_retry_unsafe(&mut self, reason: &'static str) {
@@ -125,7 +162,11 @@ pub(super) enum ResponsesTurnState<A = ActiveProviderAttempt> {
     /// 没有进行中的 logical turn。上游可能仍绑定，也可能已被 detach。
     Idle,
     /// 一个 logical turn 正在等待 provider 终态：logical 与当前 attempt 同时存在。
-    Responding { logical: LogicalTurn, attempt: A },
+    Responding {
+        logical: LogicalTurn,
+        attempt: A,
+        lifecycle: AttemptLifecycleTerminalGuard,
+    },
     /// logical turn 仍在，但当前 attempt 已被取走去结算或重绑，新 attempt 未就位。
     /// 配额透明重试期间就处于这个状态。
     Replanning { logical: LogicalTurn },
@@ -178,18 +219,32 @@ impl<A> ResponsesTurnState<A> {
     ///
     /// 与原来的 `active_turn = Some(..)` 语义一致：若此刻竟持有旧 attempt，
     /// 它会被丢弃并由自身的 drop guard 兜底结算，而不是静默泄漏。
-    pub(super) fn begin(&mut self, logical: LogicalTurn, attempt: A) {
+    pub(super) fn begin_with_lifecycle(
+        &mut self,
+        logical: LogicalTurn,
+        attempt: A,
+        lifecycle: AttemptLifecycleTerminalGuard,
+    ) {
         debug_assert!(
             self.accepts_new_response_create(),
             "a new logical turn must only begin on an idle connection"
         );
-        *self = Self::Responding { logical, attempt };
+        *self = Self::Responding {
+            logical,
+            attempt,
+            lifecycle,
+        };
     }
 
     /// `Responding` → `Replanning`：把当前 attempt 交给调用方结算，保留 logical turn。
     pub(super) fn detach_attempt(&mut self) -> Option<A> {
         match std::mem::replace(self, Self::Idle) {
-            Self::Responding { logical, attempt } => {
+            Self::Responding {
+                logical,
+                attempt,
+                lifecycle,
+            } => {
+                lifecycle.mark_terminal();
                 *self = Self::Replanning { logical };
                 Some(attempt)
             }
@@ -204,10 +259,18 @@ impl<A> ResponsesTurnState<A> {
     ///
     /// 状态不符时把 attempt 交还调用方，避免静默丢弃一条已经写了 pending usage
     /// 行、占着 candidate 和 pool key lease 的 attempt。
-    pub(super) fn resume(&mut self, attempt: A) -> Result<(), A> {
+    pub(super) fn resume_with_lifecycle(
+        &mut self,
+        attempt: A,
+        lifecycle: AttemptLifecycleTerminalGuard,
+    ) -> Result<(), A> {
         match std::mem::replace(self, Self::Idle) {
             Self::Replanning { logical } => {
-                *self = Self::Responding { logical, attempt };
+                *self = Self::Responding {
+                    logical,
+                    attempt,
+                    lifecycle,
+                };
                 Ok(())
             }
             state => {
@@ -217,14 +280,49 @@ impl<A> ResponsesTurnState<A> {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn begin(&mut self, logical: LogicalTurn, attempt: A) {
+        let lifecycle = logical.begin_attempt_lifecycle().into_terminal_guard();
+        lifecycle.mark_sent();
+        self.begin_with_lifecycle(logical, attempt, lifecycle);
+    }
+
+    #[cfg(test)]
+    pub(super) fn resume(&mut self, attempt: A) -> Result<(), A> {
+        let Some(logical) = self.logical() else {
+            return Err(attempt);
+        };
+        let lifecycle = logical.begin_attempt_lifecycle().into_terminal_guard();
+        lifecycle.mark_sent();
+        self.resume_with_lifecycle(attempt, lifecycle)
+    }
+
     /// `Responding`/`Replanning` → `Idle`：logical turn 结束，交出待结算的 attempt。
     ///
     /// 取代原来「`active_turn.take()` + 在每个出口手写 `active_response_create = None`」
     /// 的组合：清理只有这一个出口，漏清不再可能。
     pub(super) fn end(&mut self) -> Option<A> {
         match std::mem::replace(self, Self::Idle) {
-            Self::Responding { attempt, .. } => Some(attempt),
+            Self::Responding {
+                attempt, lifecycle, ..
+            } => {
+                lifecycle.mark_terminal();
+                Some(attempt)
+            }
             Self::Idle | Self::Replanning { .. } => None,
+        }
+    }
+}
+
+impl<A> ResponsesTurnState<A> {
+    /// Records the actual public client handoff for the active provider
+    /// attempt. Control frames and internal observations never call this.
+    pub(super) fn mark_client_committed(&mut self) {
+        if let Some(lifecycle) = match self {
+            Self::Responding { lifecycle, .. } => Some(lifecycle),
+            Self::Idle | Self::Replanning { .. } => None,
+        } {
+            lifecycle.mark_client_committed();
         }
     }
 }
@@ -247,6 +345,7 @@ mod tests {
     use serde_json::json;
 
     use super::{LogicalTurn, ResponsesTurnState};
+    use crate::executor::attempt_lifecycle::AttemptLifecyclePhase;
 
     /// attempt 的测试替身：只需要能被 move，不需要 AppState 或真实 socket。
     #[derive(Debug, PartialEq, Eq)]
@@ -303,6 +402,13 @@ mod tests {
         assert!(!state.accepts_new_response_create());
         assert_eq!(state.logical().map(|logical| logical.turn_index), Some(7));
         assert_eq!(state.attempt(), Some(&FakeAttempt(1)));
+        assert!(matches!(
+            &state,
+            ResponsesTurnState::Responding {
+                lifecycle,
+                ..
+            } if lifecycle.phase() == AttemptLifecyclePhase::SentButUncommitted
+        ));
     }
 
     #[test]
@@ -399,5 +505,54 @@ mod tests {
                 .and_then(LogicalTurn::quota_retry_block_reason),
             Some("standard_response_event")
         );
+    }
+
+    #[test]
+    fn client_commit_blocks_quota_retry_across_attempt_rebinding() {
+        let mut state = ResponsesTurnState::Idle;
+        state.begin(logical(), FakeAttempt(1));
+
+        state
+            .logical_mut()
+            .expect("logical turn")
+            .admit_quota_retry();
+        state.mark_client_committed();
+        assert!(matches!(
+            &state,
+            ResponsesTurnState::Responding {
+                lifecycle,
+                ..
+            } if lifecycle.phase() == AttemptLifecyclePhase::ClientCommitted
+        ));
+        assert_eq!(
+            state
+                .logical()
+                .and_then(LogicalTurn::quota_retry_block_reason),
+            Some("client_committed")
+        );
+
+        // The commit belongs to the logical turn, so detaching the old
+        // provider attempt cannot make the already visible response replayable.
+        let _ = state.detach_attempt();
+        assert_eq!(state.resume(FakeAttempt(2)), Ok(()));
+        assert_eq!(
+            state
+                .logical()
+                .and_then(LogicalTurn::quota_retry_block_reason),
+            Some("client_committed")
+        );
+    }
+
+    #[test]
+    fn each_logical_turn_starts_with_an_independent_attempt_budget() {
+        let mut first = logical();
+        first
+            .attempt_budget_mut()
+            .reserve("provider", "key", None, std::time::Instant::now())
+            .expect("first physical send is admitted");
+        assert_eq!(first.attempt_budget_mut().attempts(), 1);
+
+        let second = logical();
+        assert_eq!(second.attempt_budget.attempts(), 0);
     }
 }

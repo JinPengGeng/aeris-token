@@ -89,6 +89,7 @@ async fn gateway_reads_openai_video_task_via_data_read_side_without_hitting_publ
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: "task-db-123".to_string(),
             short_id: Some("short-task-db-123".to_string()),
             request_id: "request-db-123".to_string(),
@@ -204,6 +205,7 @@ async fn gateway_reads_gemini_video_task_via_data_read_side_without_hitting_publ
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: "task-db-456".to_string(),
             short_id: Some("localshort123".to_string()),
             request_id: "request-db-456".to_string(),
@@ -336,6 +338,7 @@ async fn gateway_hides_data_backed_video_task_from_non_owner() {
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: "task-owned-123".to_string(),
             short_id: None,
             request_id: "request-owned-123".to_string(),

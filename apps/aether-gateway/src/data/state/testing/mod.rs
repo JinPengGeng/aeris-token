@@ -817,6 +817,26 @@ impl GatewayDataState {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_provider_catalog_request_candidate_and_usage_repository_for_tests<T, U, V>(
+        provider_catalog_repository: Arc<T>,
+        request_candidate_repository: Arc<U>,
+        usage_repository: Arc<V>,
+    ) -> Self
+    where
+        T: ProviderCatalogReadRepository + ProviderCatalogWriteRepository + 'static,
+        U: RequestCandidateRepository + 'static,
+        V: UsageRepository + 'static,
+    {
+        let mut state = Self::with_request_candidate_and_usage_repository_for_tests(
+            request_candidate_repository,
+            usage_repository,
+        );
+        state.provider_catalog_reader = Some(provider_catalog_repository.clone());
+        state.provider_catalog_writer = Some(provider_catalog_repository);
+        state
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_request_candidate_and_gemini_file_mapping_repository_for_tests<T, U>(
         request_candidate_repository: Arc<T>,
         gemini_file_mapping_repository: Arc<U>,

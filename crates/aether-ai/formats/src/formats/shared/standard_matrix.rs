@@ -133,6 +133,39 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
     enable_model_directives: bool,
     reasoning_replay_policy: crate::formats::openai::responses::OpenAiResponsesReasoningReplayPolicy,
 ) -> Option<Value> {
+    build_standard_request_body_with_model_directives_and_request_headers_and_history_scope(
+        body_json,
+        client_api_format,
+        mapped_model,
+        provider_type,
+        provider_api_format,
+        request_path,
+        upstream_is_stream,
+        body_rules,
+        user_api_key_id,
+        user_api_key_id,
+        request_headers,
+        enable_model_directives,
+        reasoning_replay_policy,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_standard_request_body_with_model_directives_and_request_headers_and_history_scope(
+    body_json: &Value,
+    client_api_format: &str,
+    mapped_model: &str,
+    provider_type: &str,
+    provider_api_format: &str,
+    request_path: &str,
+    upstream_is_stream: bool,
+    body_rules: Option<&Value>,
+    user_api_key_id: Option<&str>,
+    history_scope: Option<&str>,
+    request_headers: Option<&http::HeaderMap>,
+    enable_model_directives: bool,
+    reasoning_replay_policy: crate::formats::openai::responses::OpenAiResponsesReasoningReplayPolicy,
+) -> Option<Value> {
     let reasoning_replay_policy = if provider_type.trim().eq_ignore_ascii_case("xai") {
         crate::formats::openai::responses::OpenAiResponsesReasoningReplayPolicy::XaiEncrypted
     } else {
@@ -144,7 +177,7 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
         .with_upstream_stream(upstream_is_stream);
     format_context.preserve_gemini_tool_schemas =
         preserves_gemini_tool_schemas(provider_type, provider_api_format);
-    if let Some(history_scope) = user_api_key_id {
+    if let Some(history_scope) = history_scope {
         format_context = format_context.with_history_scope(history_scope);
     }
     let source_api_format = compatible_source_format_for_standard_request(
@@ -456,7 +489,9 @@ fn normalize_standard_request_to_openai_chat_request_cow<'a>(
 
 #[cfg(test)]
 mod tests {
-    use crate::formats::openai::responses::history::record_converted_response_history;
+    use crate::formats::openai::responses::history::{
+        conversation_history_scope, record_converted_response_history,
+    };
 
     use super::{
         build_standard_request_body, build_standard_request_body_from_canonical,
@@ -716,12 +751,13 @@ mod tests {
     }
 
     #[test]
-    fn standard_request_body_scopes_previous_response_history_by_api_key() {
+    fn standard_request_body_scopes_previous_response_history_by_tenant_and_api_key() {
         record_converted_response_history(
             &json!({
                 "needs_conversion": true,
                 "client_api_format": "openai:responses",
                 "provider_api_format": "openai:chat",
+                "user_id": "standard-history-user-a",
                 "api_key_id": "standard-history-key-a",
                 "original_request_body": {
                     "model": "source-model",
@@ -749,6 +785,12 @@ mod tests {
                 "output": "inspection-complete"
             }]
         });
+        let owner_scope =
+            conversation_history_scope("standard-history-user-a", "standard-history-key-a")
+                .expect("test identities should produce a scope");
+        let other_scope =
+            conversation_history_scope("standard-history-user-b", "standard-history-key-a")
+                .expect("test identities should produce a scope");
 
         let owner = build_standard_request_body(
             &continuation,
@@ -759,9 +801,9 @@ mod tests {
             "/v1/responses",
             false,
             None,
-            Some("standard-history-key-a"),
+            Some(owner_scope.as_str()),
         )
-        .expect("the owning API key should restore response history");
+        .expect("the owning tenant and API key should restore response history");
         assert_eq!(
             owner["messages"][1]["tool_calls"][0]["id"],
             "call_standard_history_scope_1"
@@ -780,7 +822,7 @@ mod tests {
             "/v1/responses",
             false,
             None,
-            Some("standard-history-key-b"),
+            Some(other_scope.as_str()),
         )
         .is_none());
     }

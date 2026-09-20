@@ -11,6 +11,8 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 mod daily_cost;
 #[path = "quota_tests.rs"]
 mod quota;
+#[path = "stale_cleanup_tests.rs"]
+mod stale_cleanup;
 
 async fn fixture() -> (PgPool, PgPool, PgPool, String) {
     let (admin, first, second, schema) = super::super::tests::fixture().await;

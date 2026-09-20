@@ -806,6 +806,28 @@ fn build_terminal_usage_event_from_seed_impl(
         }
     }
 
+    // Presence is independent of whether the normalized values won above.
+    // Normalized usage alone cannot distinguish missing fields from zero.
+    if data
+        .response_body
+        .as_ref()
+        .is_some_and(response_has_input_and_output_token_counts)
+        && standardized_usage.as_ref().is_none_or(|usage| {
+            [
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_tokens,
+                usage.cache_creation_ephemeral_5m_tokens,
+                usage.cache_creation_ephemeral_1h_tokens,
+                usage.cache_read_tokens,
+            ]
+            .into_iter()
+            .all(|tokens| tokens >= 0)
+        })
+    {
+        mark_authoritative_usage_available(&mut data);
+    }
+
     if matches!(event_type, UsageEventType::Completed) {
         apply_completed_image_usage_estimate(&mut data);
     }
@@ -2675,6 +2697,43 @@ fn apply_standardized_usage_seed(usage: &StandardizedUsage, data: &mut UsageEven
     apply_standardized_usage_dimensions_seed(usage, data);
 }
 
+fn response_has_input_and_output_token_counts(value: &Value) -> bool {
+    let has_u64 = |usage: &Map<String, Value>, names: &[&str]| {
+        names
+            .iter()
+            .any(|name| usage.get(*name).and_then(Value::as_u64).is_some())
+    };
+    if let Some(usage) = value.get("usage").and_then(Value::as_object) {
+        return has_u64(usage, &["input_tokens", "prompt_tokens"])
+            && has_u64(usage, &["output_tokens", "completion_tokens"]);
+    }
+    if let Some(usage) = value.get("usageMetadata").and_then(Value::as_object) {
+        return has_u64(usage, &["promptTokenCount"]) && has_u64(usage, &["candidatesTokenCount"]);
+    }
+    value
+        .get("chunks")
+        .and_then(Value::as_array)
+        .is_some_and(|chunks| {
+            chunks
+                .iter()
+                .any(response_has_input_and_output_token_counts)
+        })
+        || value
+            .get("response")
+            .is_some_and(response_has_input_and_output_token_counts)
+}
+
+fn mark_authoritative_usage_available(data: &mut UsageEventData) {
+    let mut metadata = match data.request_metadata.take() {
+        Some(Value::Object(metadata)) => metadata,
+        _ => Map::new(),
+    };
+    metadata
+        .entry(USAGE_AVAILABLE_METADATA_KEY.to_string())
+        .or_insert(Value::Bool(true));
+    data.request_metadata = Some(Value::Object(metadata));
+}
+
 fn apply_standardized_usage_dimensions_seed(usage: &StandardizedUsage, data: &mut UsageEventData) {
     if usage.dimensions.is_empty() && usage.request_count <= 0 {
         return;
@@ -3534,6 +3593,167 @@ mod tests {
     use base64::Engine as _;
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
+
+    fn terminal_seed_for_usage_availability(
+        standardized_usage: Option<StandardizedUsage>,
+        provider_response: Option<Value>,
+        request_metadata: Option<Value>,
+    ) -> TerminalUsageSeed {
+        TerminalUsageSeed {
+            terminal_state: UsageTerminalState::Completed,
+            client_contract: "openai:chat".to_string(),
+            provider_contract: "openai:chat".to_string(),
+            request_id: "usage-availability-request".to_string(),
+            user_id: Some("user-1".to_string()),
+            api_key_id: Some("key-1".to_string()),
+            username: None,
+            api_key_name: None,
+            api_key_billing_multiplier: None,
+            provider_name: "provider".to_string(),
+            model: "model".to_string(),
+            target_model: None,
+            model_id: None,
+            global_model_id: None,
+            provider_id: Some("provider-1".to_string()),
+            provider_endpoint_id: None,
+            provider_api_key_id: None,
+            request_type: "chat".to_string(),
+            has_format_conversion: false,
+            is_stream: false,
+            status_code: 200,
+            terminal_error_message: None,
+            terminal_failure_category: None,
+            response_time_ms: None,
+            first_byte_time_ms: None,
+            request_headers: None,
+            request_body: None,
+            provider_request_headers: None,
+            provider_request: None,
+            body_refs: UsageBodyRefsSeed::default(),
+            body_states: UsageBodyStatesSeed::default(),
+            provider_response_headers: None,
+            provider_response,
+            client_response_headers: None,
+            client_response: None,
+            routing: UsageRoutingSeed::default(),
+            request_metadata,
+            audit_payload: None,
+            standardized_usage,
+        }
+    }
+
+    fn usage_available(event: &UsageEvent) -> Option<bool> {
+        event
+            .data
+            .request_metadata
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|metadata| metadata.get("usage_available"))
+            .and_then(Value::as_bool)
+    }
+
+    #[test]
+    fn synthesized_empty_standardized_usage_is_not_marked_available() {
+        let event = build_terminal_usage_event_from_seed(terminal_seed_for_usage_availability(
+            Some(StandardizedUsage::new()),
+            None,
+            None,
+        ))
+        .expect("terminal usage should build");
+        assert_eq!(event.data.input_tokens, None);
+        assert_eq!(event.data.output_tokens, None);
+        assert_eq!(event.data.total_tokens, None);
+        assert_eq!(usage_available(&event), None);
+    }
+
+    #[test]
+    fn terminal_usage_requires_raw_input_and_output_presence_to_mark_usage_available() {
+        let event = build_terminal_usage_event_from_seed(terminal_seed_for_usage_availability(
+            None,
+            Some(json!({"usage": {"input_tokens": 8}})),
+            None,
+        ))
+        .expect("terminal usage should build");
+
+        assert_eq!(event.data.input_tokens, Some(8));
+        assert_eq!(event.data.output_tokens, None);
+        assert_eq!(usage_available(&event), None);
+    }
+
+    #[test]
+    fn terminal_usage_marks_explicit_raw_zero_tokens_available() {
+        let event = build_terminal_usage_event_from_seed(terminal_seed_for_usage_availability(
+            None,
+            Some(json!({"usage": {"input_tokens": 0, "output_tokens": 0}})),
+            None,
+        ))
+        .expect("terminal usage should build");
+
+        assert_eq!(event.data.total_tokens, Some(0));
+        assert_eq!(usage_available(&event), Some(true));
+    }
+
+    #[test]
+    fn terminal_usage_marks_complete_raw_usage_even_when_normalization_has_tokens() {
+        let event = build_terminal_usage_event_from_seed(terminal_seed_for_usage_availability(
+            None,
+            Some(json!({"usage": {"prompt_tokens": 8, "completion_tokens": 3}})),
+            None,
+        ))
+        .expect("terminal usage should build");
+        assert_eq!(event.data.input_tokens, Some(8));
+        assert_eq!(event.data.output_tokens, Some(3));
+        assert_eq!(usage_available(&event), Some(true));
+    }
+
+    #[test]
+    fn terminal_usage_never_promotes_standardized_usage_without_presence_evidence() {
+        let mut standardized = StandardizedUsage::new();
+        standardized.input_tokens = 8;
+        let event = build_terminal_usage_event_from_seed(terminal_seed_for_usage_availability(
+            Some(standardized),
+            None,
+            None,
+        ))
+        .expect("terminal usage should build");
+
+        assert_eq!(event.data.input_tokens, Some(8));
+        assert_eq!(event.data.output_tokens, None);
+        assert_eq!(usage_available(&event), None);
+    }
+
+    #[test]
+    fn terminal_usage_preserves_explicit_false_and_standardized_priority() {
+        let mut standardized = StandardizedUsage::new();
+        standardized.input_tokens = 7;
+        standardized.output_tokens = 9;
+        let event = build_terminal_usage_event_from_seed(terminal_seed_for_usage_availability(
+            Some(standardized),
+            Some(json!({"usage": {"input_tokens": 70, "output_tokens": 90}})),
+            Some(json!({"usage_available": false})),
+        ))
+        .expect("terminal usage should build");
+
+        assert_eq!(event.data.input_tokens, Some(7));
+        assert_eq!(event.data.output_tokens, Some(9));
+        assert_eq!(usage_available(&event), Some(false));
+    }
+
+    #[test]
+    fn terminal_usage_does_not_promote_negative_standardized_values() {
+        let mut standardized = StandardizedUsage::new();
+        standardized.input_tokens = -1;
+        standardized.output_tokens = 3;
+        let event = build_terminal_usage_event_from_seed(terminal_seed_for_usage_availability(
+            Some(standardized),
+            None,
+            None,
+        ))
+        .expect("terminal usage should build");
+
+        assert_eq!(event.data.output_tokens, Some(3));
+        assert_eq!(usage_available(&event), None);
+    }
 
     #[test]
     fn extracts_openai_usage_tokens() {

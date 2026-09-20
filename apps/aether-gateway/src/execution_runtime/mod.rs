@@ -37,10 +37,11 @@ pub(crate) use self::constants::{
     MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES,
 };
 pub(crate) use self::fallback::{
-    analyze_local_candidate_failover_sync, local_failover_response_text,
-    resolve_core_stream_direct_finalize_report_kind,
+    analyze_local_candidate_failover_sync, analyze_local_candidate_failover_sync_with_origin,
+    local_failover_response_text, resolve_core_stream_direct_finalize_report_kind,
     resolve_core_stream_error_finalize_report_kind, resolve_core_sync_error_finalize_report_kind,
     resolve_local_candidate_failover_analysis_stream,
+    resolve_local_candidate_failover_analysis_stream_with_origin,
     resolve_local_candidate_failover_decision_stream, should_fallback_to_control_stream,
     should_fallback_to_control_sync, should_finalize_sync_response,
     should_retry_next_local_candidate_stream, should_retry_next_local_candidate_sync,
@@ -54,6 +55,45 @@ pub(crate) use crate::orchestration::{
 };
 pub(crate) use aether_ai_serving::AdaptationMode;
 pub(crate) use aether_ai_serving::{ConversionMode, ExecutionStrategy};
+
+/// Admits an additional physical send inside an already-admitted candidate.
+/// The budget reservation is new; the send admission guard is reused so a
+/// provider-key concurrency limit of one cannot self-saturate on retry.
+pub(crate) enum InternalRetrySendAdmission {
+    Admit,
+    Skip,
+    BudgetExhausted(aether_scheduler_core::AttemptBudgetError),
+}
+
+pub(crate) async fn admit_internal_retry_send(
+    state: &crate::AppState,
+    plan: &aether_contracts::ExecutionPlan,
+    guard: &crate::scheduler::send_admission::GatewaySendAdmissionGuard,
+    budget_handle: Option<&crate::executor::InternalAttemptBudgetHandle>,
+) -> Result<InternalRetrySendAdmission, crate::GatewayError> {
+    match crate::scheduler::send_admission::revalidate_gateway_send_admission(state, plan, guard)
+        .await
+    {
+        crate::scheduler::send_admission::GatewaySendAdmissionDecision::Admit(()) => {}
+        crate::scheduler::send_admission::GatewaySendAdmissionDecision::Skip(_) => {
+            return Ok(InternalRetrySendAdmission::Skip);
+        }
+        crate::scheduler::send_admission::GatewaySendAdmissionDecision::Stop(stop) => {
+            return Err(crate::GatewayError::Internal(format!(
+                "send admission stopped before internal upstream retry: {}",
+                stop.reason().as_str()
+            )));
+        }
+    }
+    let budget_reservation = match budget_handle {
+        Some(handle) => handle.reserve(plan).await,
+        None => crate::executor::reserve_internal_request_attempt(plan).await,
+    };
+    if let Err(reason) = budget_reservation {
+        return Ok(InternalRetrySendAdmission::BudgetExhausted(reason));
+    }
+    Ok(InternalRetrySendAdmission::Admit)
+}
 
 pub(crate) fn ai_attempt_retry_scope_from_failure_disposition(
     disposition: crate::orchestration::FailureDisposition,

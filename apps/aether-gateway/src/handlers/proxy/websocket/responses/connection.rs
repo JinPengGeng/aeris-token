@@ -19,8 +19,9 @@ use super::lifecycle::{
 };
 use super::plan_admission::terminate_responses_websocket_for_plan_permit_loss;
 use super::quota::{
-    detach_exhausted_upstream, is_usage_limit_error_event, mark_active_response_retry_unsafe,
-    observe_active_response_rebind_safety, retry_active_turn_after_quota_exhaustion,
+    active_turn_allows_quota_retry, detach_exhausted_upstream, is_usage_limit_error_event,
+    mark_active_response_retry_unsafe, observe_active_response_rebind_safety,
+    retry_active_turn_after_quota_exhaustion, terminal_upstream_quota_retry_is_admitted,
 };
 use super::relay_policy::{
     classify_quota_relay, fatal_relay_policy, FatalRelaySignal, QuotaRelayAction, QuotaRelayFacts,
@@ -354,6 +355,16 @@ pub(super) async fn relay_bound_connection(
                         }
                     }
                 }
+                if parsed_upstream_frame.as_ref().is_some_and(|frame| {
+                    terminal_upstream_quota_retry_is_admitted(
+                        bound.decision_template.provider_api_format.as_deref(),
+                        frame,
+                    )
+                }) {
+                    if let Some(active) = bound.turn_state.logical_mut() {
+                        active.admit_quota_retry();
+                    }
+                }
                 let observation = match &upstream_message {
                     WreqWsMessage::Text(text) => {
                         let adapter = bound.adapter;
@@ -465,13 +476,12 @@ pub(super) async fn relay_bound_connection(
                 );
                 let quota_facts = QuotaRelayFacts {
                     drain_ready: drain_for_adapter,
-                    retry_current_turn: bound
-                        .pending_adapter_drain
-                        .is_some_and(|directive| directive.retry_current_turn)
-                        && bound
-                            .turn_state
-                            .logical()
-                            .is_some_and(|turn| turn.quota_retry_block_reason().is_none()),
+                    retry_current_turn: active_turn_allows_quota_retry(
+                        bound
+                            .pending_adapter_drain
+                            .is_some_and(|directive| directive.retry_current_turn),
+                        bound.turn_state.logical(),
+                    ),
                     transparent_retry_failed: false,
                     usage_limit_error: parsed_upstream_event.is_some_and(is_usage_limit_error_event),
                     upstream_closed: is_close,
@@ -603,6 +613,7 @@ pub(super) async fn relay_bound_connection(
                                     ) {
                                         turn.capture_client_frame(frame.event());
                                     }
+                                    mark_client_response_frame_committed(bound, parsed_upstream_frame.as_ref());
                                 }
                                 Err(error) => relay_send_error = Some(error),
                             }
@@ -637,6 +648,7 @@ pub(super) async fn relay_bound_connection(
                                     if let Some(turn) = bound.turn_state.attempt_mut() {
                                         turn.capture_client_frame(event);
                                     }
+                                    mark_client_response_event_committed(bound, event);
                                 }
                                 Err(error) => {
                                     relay_send_error = Some(error);
@@ -759,6 +771,35 @@ pub(super) async fn relay_bound_connection(
             }
         }
     }
+}
+
+fn mark_client_response_frame_committed(
+    bound: &mut BoundResponsesConnection,
+    frame: Option<&ParsedResponsesWebSocketFrame<'_>>,
+) {
+    let Some(frame) = frame else {
+        return;
+    };
+    if frame
+        .protocol_events()
+        .into_iter()
+        .any(client_visible_response_event)
+    {
+        bound.turn_state.mark_client_committed();
+    }
+}
+
+fn mark_client_response_event_committed(bound: &mut BoundResponsesConnection, event: &Value) {
+    if client_visible_response_event(event) {
+        bound.turn_state.mark_client_committed();
+    }
+}
+
+fn client_visible_response_event(event: &Value) -> bool {
+    event
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|event_type| event_type.starts_with("response.") || event_type == "error")
 }
 
 fn retain_disconnected_turn(bound: &mut BoundResponsesConnection) -> bool {
@@ -1062,5 +1103,25 @@ mod tests {
             evicted_default_lane_continuation_response_id(Some(&continuation), &completed),
             None
         );
+    }
+
+    #[test]
+    fn client_commit_gate_includes_response_and_error_events_only() {
+        assert!(super::client_visible_response_event(
+            &json!({"type": "response.created"})
+        ));
+        assert!(super::client_visible_response_event(
+            &json!({"type": "response.output_text.delta"})
+        ));
+        assert!(!super::client_visible_response_event(
+            &json!({"type": "codex.rate_limits"})
+        ));
+        assert!(super::client_visible_response_event(&json!({
+            "type": "error",
+            "error": {"type": "usage_limit_reached"}
+        })));
+        assert!(!super::client_visible_response_event(
+            &json!({"type": "ping"})
+        ));
     }
 }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
-import type { PaymentOrder, WalletBalanceResponse } from '@/api/wallet'
+import type { PaymentOrder, WalletBalanceResponse, WalletRechargeRecovery } from '@/api/wallet'
 import WalletCenter from '../WalletCenter.vue'
 
 const walletApiMock = vi.hoisted(() => ({
@@ -11,6 +11,7 @@ const walletApiMock = vi.hoisted(() => ({
   listRechargeOrders: vi.fn(),
   getRechargeOrder: vi.fn(),
   createRechargeOrder: vi.fn(),
+  listRechargeRecoveries: vi.fn(),
 }))
 const toastMock = vi.hoisted(() => ({ success: vi.fn(), info: vi.fn(), error: vi.fn() }))
 const billingApiMock = vi.hoisted(() => ({ listEntitlements: vi.fn() }))
@@ -90,6 +91,18 @@ function orderResponse(items: PaymentOrder[], amount = 2, offset = 0) {
   return { ...balance, items, total: items.length, limit: 20, offset }
 }
 
+function recovery(overrides: Partial<WalletRechargeRecovery> = {}): WalletRechargeRecovery {
+  return {
+    id: 'private-job-id', payment_order_id: 'order-1', wallet_id: 'private-wallet-id',
+    state: 'pending', principal_cost_units: 1_000_000_000,
+    collected_cost_units: 0, outstanding_cost_units: 700_000_000,
+    available_recharge_cost_units: 1_000_000_000,
+    retry_count: 0, next_attempt_at_unix_secs: 1_800_000_000,
+    error_code: null, created_at_unix_secs: 1_799_999_000,
+    updated_at_unix_secs: 1_799_999_000, ...overrides,
+  }
+}
+
 async function flushPromises() {
   for (let i = 0; i < 10; i += 1) await Promise.resolve()
   await nextTick()
@@ -120,6 +133,7 @@ beforeEach(() => {
   walletApiMock.getTodayCost.mockResolvedValue(null)
   walletApiMock.listRechargeOptions.mockResolvedValue({ items: [] })
   walletApiMock.listRechargeOrders.mockResolvedValue(orderResponse([paymentOrder()]))
+  walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [], limit: 50 })
   billingApiMock.listEntitlements.mockResolvedValue({ items: [] })
 })
 
@@ -244,5 +258,184 @@ describe('WalletCenter recharge synchronization', () => {
     resolve(orderResponse([paymentOrder()]))
     await flushPromises()
     expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('WalletCenter recharge recovery', () => {
+  beforeEach(() => {
+    walletApiMock.listRechargeOrders.mockResolvedValue(orderResponse([paymentOrder('credited')]))
+  })
+
+  it('shows separate recharge snapshots without adding debts or exposing internal fields', async () => {
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [
+      recovery({ collected_cost_units: 300_000_000, outstanding_cost_units: 400_000_000,
+        available_recharge_cost_units: 700_000_000, error_code: 'private-database-error', retry_count: 99 }),
+      recovery({ id: 'private-job-two', payment_order_id: 'private-other-order',
+        principal_cost_units: 500_000_000, collected_cost_units: 100_000_000,
+        outstanding_cost_units: 300_000_000, available_recharge_cost_units: 400_000_000 }),
+    ], limit: 50 })
+    const { root } = await mountWallet()
+    const panel = root.querySelector<HTMLElement>('[data-recharge-recoveries]')!
+    const rows = panel.querySelectorAll('[data-recovery-row]')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].textContent).toContain('RECHARGE-1')
+    expect(rows[0].textContent).toContain('$10.00')
+    expect(rows[1].textContent).toContain('充值入账')
+    expect(panel.textContent).toContain('本次充值对应剩余欠费')
+    expect(panel.textContent).toContain('本次追扣后可用本金')
+    expect(panel.textContent).toContain('下次处理')
+    for (const value of ['private-wallet-id', 'private-job-id', 'private-other-order', 'private-database-error']) {
+      expect(root.textContent).not.toContain(value)
+    }
+    // The snapshot's $7 principal must not replace the real $2 wallet balance.
+    expect(root.textContent).toContain('钱包余额: $2.00')
+  })
+
+  it.each(['pending', 'retry', 'manual_review', 'source_unavailable'] as const)('marks unverified %s snapshot balances as pending review', async (state) => {
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery({
+      state, collected_cost_units: 300_000_000, outstanding_cost_units: 0,
+      available_recharge_cost_units: 0, next_attempt_at_unix_secs: null,
+    })], limit: 50 })
+    const { root } = await mountWallet()
+    const row = root.querySelector<HTMLElement>('[data-recovery-row]')!
+    expect(row.textContent).toContain('$10.00')
+    expect(row.textContent).toContain('$3.00')
+    expect(row.textContent?.match(/待核对/g)).toHaveLength(2)
+    expect(row.textContent).not.toContain('$0.00')
+    expect(root.textContent).toContain('钱包余额: $2.00')
+  })
+
+  it('keeps polling after credit and refreshes balance and recovery history after collection', async () => {
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery()], limit: 50 })
+    const { root } = await mountWallet()
+    const initialFlowCalls = walletApiMock.getFlow.mock.calls.length
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery({
+      state: 'completed', collected_cost_units: 700_000_000, outstanding_cost_units: 0,
+      available_recharge_cost_units: 300_000_000, next_attempt_at_unix_secs: null,
+      updated_at_unix_secs: 1_800_000_001,
+    })], limit: 50 })
+    walletApiMock.getBalance.mockResolvedValue(walletBalance(5))
+    walletApiMock.getFlow.mockResolvedValue({ items: [{ type: 'transaction', data: {
+      id: 'recovery-ledger-entry', category: 'adjustment', reason_code: 'historical_debt_recovery',
+      amount: -7, balance_before: 12, balance_after: 5,
+      recharge_balance_before: 12, recharge_balance_after: 5,
+      gift_balance_before: 0, gift_balance_after: 0,
+      description: '充值后追扣历史欠费', created_at: '2026-09-17T01:00:00Z',
+    } }], total: 1, today_entry: null })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(walletApiMock.getFlow).toHaveBeenCalledTimes(initialFlowCalls + 1)
+    expect(root.textContent).toContain('钱包余额: $5.00')
+    expect(root.textContent).toContain('充值后追扣历史欠费')
+    expect(root.textContent).toContain('历史欠费追扣')
+    expect(root.textContent).toContain('-7.0000')
+    const calls = walletApiMock.listRechargeRecoveries.mock.calls.length
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(walletApiMock.listRechargeRecoveries).toHaveBeenCalledTimes(calls)
+    expect(walletApiMock.listRechargeOrders).toHaveBeenCalledTimes(1)
+  })
+
+  it('retains the last snapshot through a retry without claiming the debt is cleared', async () => {
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery()], limit: 50 })
+    const { root } = await mountWallet()
+    walletApiMock.listRechargeRecoveries.mockRejectedValueOnce(new Error('temporary outage'))
+    await vi.advanceTimersByTimeAsync(5_000)
+    const panel = root.querySelector<HTMLElement>('[data-recharge-recoveries]')!
+    expect(panel.textContent).toContain('暂时无法刷新')
+    expect(panel.textContent).toContain('RECHARGE-1')
+    expect(panel.textContent).toContain('$10.00')
+    expect(panel.textContent?.match(/待核对/g)).toHaveLength(2)
+    expect(toastMock.error).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(panel.textContent).not.toContain('暂时无法刷新')
+    expect(walletApiMock.listRechargeRecoveries).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not let an older order response overwrite the balance read after recovery', async () => {
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery()], limit: 50 })
+    const { root } = await mountWallet()
+    let resolveOrders!: (value: ReturnType<typeof orderResponse>) => void
+    walletApiMock.listRechargeOrders.mockReturnValueOnce(new Promise(resolve => { resolveOrders = resolve }))
+    root.querySelector<HTMLButtonElement>('[value="orders"] [data-refresh]')!.click()
+    await flushPromises()
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery({
+      state: 'completed', collected_cost_units: 700_000_000,
+      outstanding_cost_units: 0, next_attempt_at_unix_secs: null,
+    })], limit: 50 })
+    walletApiMock.getBalance.mockResolvedValue(walletBalance(5))
+    await vi.advanceTimersByTimeAsync(5_000)
+    resolveOrders(orderResponse([paymentOrder('credited')], 12))
+    await flushPromises()
+    expect(root.textContent).toContain('钱包余额: $5.00')
+    expect(root.textContent).not.toContain('钱包余额: $12.00')
+  })
+
+  it('retries a failed history refresh even when the recovery job has completed', async () => {
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery()], limit: 50 })
+    const { root } = await mountWallet()
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery({
+      state: 'completed', collected_cost_units: 700_000_000,
+      outstanding_cost_units: 0, next_attempt_at_unix_secs: null,
+    })], limit: 50 })
+    walletApiMock.getFlow.mockRejectedValueOnce(new Error('history temporarily unavailable'))
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(root.querySelector('[data-recharge-recoveries]')!.textContent).toContain('暂时无法刷新')
+    expect(toastMock.error).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(walletApiMock.getFlow).toHaveBeenCalledTimes(3)
+    expect(root.querySelector('[data-recharge-recoveries]')!.textContent).not.toContain('暂时无法刷新')
+  })
+
+  it('shows partially collected debt awaiting the next recharge without continuing an active-job poll', async () => {
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery({
+      state: 'waiting_next_recharge', collected_cost_units: 300_000_000,
+      outstanding_cost_units: 400_000_000, available_recharge_cost_units: 0,
+      next_attempt_at_unix_secs: null,
+    })], limit: 50 })
+    const { root } = await mountWallet()
+    const panel = root.querySelector('[data-recharge-recoveries]')!
+    expect(panel.textContent).toContain('等待下次充值')
+    expect(panel.textContent).toContain('$4.00')
+    expect(panel.textContent).not.toContain('本次处理完成')
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(walletApiMock.listRechargeRecoveries).toHaveBeenCalledTimes(1)
+  })
+
+  it('throttles long retry waits while keeping a visible status and scheduled processing time', async () => {
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery({
+      state: 'retry', next_attempt_at_unix_secs: Math.floor(Date.now() / 1000) + 86_400,
+    })], limit: 50 })
+    const { root } = await mountWallet()
+    expect(root.querySelector('[data-recharge-recoveries]')!.textContent).toContain('等待重试')
+    await vi.advanceTimersByTimeAsync(29_000)
+    expect(walletApiMock.listRechargeRecoveries).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(walletApiMock.listRechargeRecoveries).toHaveBeenCalledTimes(2)
+  })
+
+  it('pauses while hidden and does not revive polling or apply late results after unmount', async () => {
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery()], limit: 50 })
+    const { app } = await mountWallet()
+    setHidden(true)
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(walletApiMock.listRechargeRecoveries).toHaveBeenCalledTimes(1)
+    let resolve!: (value: { items: WalletRechargeRecovery[]; limit: number }) => void
+    walletApiMock.listRechargeRecoveries.mockReturnValue(new Promise(complete => { resolve = complete }))
+    setHidden(false)
+    await flushPromises()
+    const balanceCalls = walletApiMock.getBalance.mock.calls.length
+    app.unmount()
+    mountedApps.splice(0).forEach(({ root }) => root.remove())
+    resolve({ items: [recovery({ collected_cost_units: 100_000_000 })], limit: 50 })
+    await flushPromises()
+    expect(walletApiMock.getBalance).toHaveBeenCalledTimes(balanceCalls)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps an unknown state visible without presenting it as completed', async () => {
+    walletApiMock.listRechargeRecoveries.mockResolvedValue({ items: [recovery({
+      state: 'future_state', next_attempt_at_unix_secs: null,
+    })], limit: 50 })
+    const { root } = await mountWallet()
+    expect(root.querySelector('[data-recharge-recoveries]')!.textContent).toContain('状态待确认')
   })
 })

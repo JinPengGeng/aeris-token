@@ -18,3 +18,10 @@
 210_request_funds.sql
 220_request_attempt_funds.sql
 230_attempt_usage_policy.sql
+240_recharge_recovery.sql
+250_refund_status_notifications.sql
+260_admin_audit_delivery.sql
+270_admin_audit_delivery_operator_indexes.sql
+280_provider_cost_ledger.sql
+290_provider_cost_snapshot_imports.sql
+300_emergency_chain_grants.sql

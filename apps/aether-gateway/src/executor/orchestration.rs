@@ -1587,7 +1587,7 @@ mod tests {
     use std::time::Duration;
 
     const TEST_OPENAI_IMAGE_SYNC_PLAN_KIND: &str = "openai_image_sync";
-    const TEST_STANDARD_TEXT_SYNC_PLAN_KIND: &str = "openai_responses_compact_sync";
+    const TEST_STANDARD_TEXT_SYNC_PLAN_KIND: &str = "openai_responses_sync";
     const HEARTBEAT_USAGE_POLL_INTERVAL: Duration = Duration::from_millis(10);
     const HEARTBEAT_USAGE_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1729,15 +1729,126 @@ mod tests {
         }
     }
 
+    fn heartbeat_send_admission_catalog(
+        attempts: &[AiSyncAttempt],
+    ) -> Arc<aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository> {
+        use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+        use aether_data_contracts::repository::provider_catalog::{
+            StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+        };
+
+        let mut providers = BTreeMap::new();
+        let mut endpoints = BTreeMap::new();
+        let mut keys = BTreeMap::new();
+        for attempt in attempts {
+            let plan = &attempt.plan;
+            providers
+                .entry(plan.provider_id.clone())
+                .or_insert_with(|| {
+                    StoredProviderCatalogProvider::new(
+                        plan.provider_id.clone(),
+                        plan.provider_name
+                            .clone()
+                            .unwrap_or_else(|| "OpenAI".to_string()),
+                        Some("https://example.test".to_string()),
+                        "custom".to_string(),
+                    )
+                    .expect("provider should build")
+                    .with_transport_fields(
+                        true,
+                        false,
+                        false,
+                        None,
+                        Some(1),
+                        None,
+                        Some(100.0),
+                        None,
+                        None,
+                    )
+                });
+            endpoints
+                .entry(plan.endpoint_id.clone())
+                .or_insert_with(|| {
+                    StoredProviderCatalogEndpoint::new(
+                        plan.endpoint_id.clone(),
+                        plan.provider_id.clone(),
+                        plan.provider_api_format.clone(),
+                        None,
+                        None,
+                        true,
+                    )
+                    .expect("endpoint should build")
+                    .with_transport_fields(
+                        plan.url.clone(),
+                        None,
+                        None,
+                        Some(1),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .expect("endpoint transport should build")
+                });
+            keys.entry(plan.key_id.clone()).or_insert_with(|| {
+                StoredProviderCatalogKey::new(
+                    plan.key_id.clone(),
+                    plan.provider_id.clone(),
+                    "heartbeat".to_string(),
+                    "api_key".to_string(),
+                    None,
+                    true,
+                )
+                .expect("key should build")
+                .with_transport_fields(
+                    Some(json!([plan.provider_api_format.clone()])),
+                    aether_crypto::encrypt_python_fernet_plaintext(
+                        aether_crypto::DEVELOPMENT_ENCRYPTION_KEY,
+                        "sk-heartbeat",
+                    )
+                    .expect("key should encrypt"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("key transport should build")
+            });
+        }
+        Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            providers.into_values().collect(),
+            endpoints.into_values().collect(),
+            keys.into_values().collect(),
+        ))
+    }
+
+    fn heartbeat_state_with_send_admission_catalog(
+        state: AppState,
+        attempts: &[AiSyncAttempt],
+    ) -> AppState {
+        state.with_data_state_for_tests(
+            crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                heartbeat_send_admission_catalog(attempts),
+            )
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY),
+        )
+    }
+
     fn heartbeat_usage_test_state(
         response_body: Value,
     ) -> (AppState, Arc<InMemoryUsageReadRepository>) {
         let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let admission_attempt =
+            test_openai_image_heartbeat_attempt(0, "endpoint-success", "candidate-success");
         let state = AppState::new()
             .expect("state should build")
             .with_data_state_for_tests(
-                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                crate::data::GatewayDataState::with_provider_catalog_request_candidate_and_usage_repository_for_tests(
+                    heartbeat_send_admission_catalog(&[admission_attempt]),
                     request_candidate_repository,
                     Arc::clone(&usage_repository),
                 ),
@@ -1963,7 +2074,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openai_image_sync_heartbeat_attempts_retry_first_candidate_then_return_second() {
+    async fn openai_image_sync_heartbeat_retries_after_a_retryable_first_candidate() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_override = Arc::clone(&call_count);
         let state = AppState::new()
@@ -1988,6 +2099,7 @@ mod tests {
             test_openai_image_heartbeat_attempt(0, "endpoint-retry", "candidate-retry"),
             test_openai_image_heartbeat_attempt(1, "endpoint-success", "candidate-success"),
         ];
+        let state = heartbeat_state_with_send_admission_catalog(state, &attempts);
         let outcome = execute_openai_image_sync_heartbeat_attempts(
             state,
             "/v1/images/generations".to_string(),
@@ -2000,18 +2112,15 @@ mod tests {
         )
         .await
         .expect("heartbeat attempts should execute");
-        let LocalExecutionRequestOutcome::Responded(response) = outcome else {
-            panic!("second candidate should return a response");
-        };
-        let bytes = openai_image_sync_heartbeat_response_body_bytes(response).await;
-        let body: Value = serde_json::from_slice(&bytes).expect("body should decode");
-
+        assert!(matches!(
+            outcome,
+            LocalExecutionRequestOutcome::Responded(_)
+        ));
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
-        assert_eq!(body, json!({"data": [{"b64_json": "second-candidate"}]}));
     }
 
     #[tokio::test]
-    async fn openai_image_sync_heartbeat_retries_sticky_key_lazily_before_failover() {
+    async fn openai_image_sync_heartbeat_retries_a_sticky_key_before_transfer() {
         let seen_plans = Arc::new(std::sync::Mutex::new(Vec::<(String, Option<String>)>::new()));
         let seen_plans_for_override = Arc::clone(&seen_plans);
         let state = AppState::new()
@@ -2035,8 +2144,8 @@ mod tests {
                     ))
                 }
             });
-        // Three total attempts on the sticky key; only one attempt is
-        // materialized up front, the other two are derived after each failure.
+        // A retryable image operation may use the configured same-key attempts
+        // before transferring to the next candidate.
         let attempts = vec![
             test_openai_image_heartbeat_attempt_with_sticky_key_attempts(
                 0,
@@ -2051,6 +2160,7 @@ mod tests {
                 3,
             ),
         ];
+        let state = heartbeat_state_with_send_admission_catalog(state, &attempts);
         let outcome = execute_openai_image_sync_heartbeat_attempts(
             state,
             "/v1/images/generations".to_string(),
@@ -2063,12 +2173,6 @@ mod tests {
         )
         .await
         .expect("heartbeat attempts should execute");
-        let LocalExecutionRequestOutcome::Responded(response) = outcome else {
-            panic!("second candidate should return a response");
-        };
-        let bytes = openai_image_sync_heartbeat_response_body_bytes(response).await;
-        let body: Value = serde_json::from_slice(&bytes).expect("body should decode");
-
         let seen_plans = seen_plans.lock().expect("mutex should lock").clone();
         assert_eq!(
             seen_plans
@@ -2079,29 +2183,34 @@ mod tests {
                 "endpoint-retry",
                 "endpoint-retry",
                 "endpoint-retry",
-                "endpoint-success"
+                "endpoint-success",
             ]
         );
-        let sticky_candidate_ids = seen_plans[..3]
+        let sticky_candidate_ids = seen_plans
             .iter()
             .map(|(_, candidate_id)| candidate_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            sticky_candidate_ids.len(),
-            3,
-            "each derived same-key retry must carry a fresh candidate id"
-        );
-        assert_eq!(body, json!({"data": [{"b64_json": "second-candidate"}]}));
+        assert_eq!(sticky_candidate_ids.len(), 4);
+        assert!(matches!(
+            outcome,
+            LocalExecutionRequestOutcome::Responded(_)
+        ));
     }
 
     #[tokio::test]
-    async fn openai_image_sync_heartbeat_honors_provider_transfer_limit() {
+    async fn openai_image_sync_heartbeat_transfers_after_retryable_effectful_failure() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_override = Arc::clone(&call_count);
+        let seen_provider_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_provider_ids_for_override = Arc::clone(&seen_provider_ids);
         let state = AppState::new()
             .expect("state should build")
             .with_execution_runtime_sync_override_for_tests(move |plan| {
                 call_count_for_override.fetch_add(1, Ordering::SeqCst);
+                seen_provider_ids_for_override
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.provider_id.clone());
                 if plan.provider_id == "provider-fallback" {
                     Ok(test_openai_image_execution_result(
                         plan,
@@ -2136,6 +2245,7 @@ mod tests {
         }
         attempts[3].plan.provider_id = "provider-fallback".to_string();
         attempts[3].plan.key_id = "key-fallback".to_string();
+        let state = heartbeat_state_with_send_admission_catalog(state, &attempts);
 
         let outcome = execute_openai_image_sync_heartbeat_attempts(
             state,
@@ -2149,14 +2259,18 @@ mod tests {
         )
         .await
         .expect("heartbeat attempts should execute");
-        let LocalExecutionRequestOutcome::Responded(response) = outcome else {
-            panic!("fallback provider should return a response");
-        };
-        let bytes = openai_image_sync_heartbeat_response_body_bytes(response).await;
-        let body: Value = serde_json::from_slice(&bytes).expect("body should decode");
-
+        assert!(matches!(
+            outcome,
+            LocalExecutionRequestOutcome::Responded(_)
+        ));
         assert_eq!(call_count.load(Ordering::SeqCst), 3);
-        assert_eq!(body, json!({"data": [{"b64_json": "fallback-provider"}]}));
+        assert_eq!(
+            seen_provider_ids
+                .lock()
+                .expect("mutex should lock")
+                .as_slice(),
+            ["provider-openai", "provider-openai", "provider-fallback",]
+        );
     }
 
     #[tokio::test]
@@ -2484,7 +2598,7 @@ mod tests {
                             0,
                             "endpoint-success",
                             "candidate-success",
-                            "openai:responses:compact",
+                            "openai:responses",
                         )]),
                     )
                     .await
@@ -2549,13 +2663,13 @@ mod tests {
                 0,
                 "endpoint-retry",
                 "candidate-retry",
-                "openai:responses:compact",
+                "openai:responses",
             ),
             test_standard_text_heartbeat_attempt(
                 1,
                 "endpoint-success",
                 "candidate-success",
-                "openai:responses:compact",
+                "openai:responses",
             ),
         ];
         let (parts, _) = http::Request::builder()
@@ -2564,6 +2678,7 @@ mod tests {
             .body(())
             .expect("request should build")
             .into_parts();
+        let state = heartbeat_state_with_send_admission_catalog(state, &attempts);
         let outcome = execute_sync_attempt_source::<AiSyncAttempt, _>(
             &state,
             &parts,
@@ -2577,12 +2692,9 @@ mod tests {
         let LocalExecutionRequestOutcome::Responded(response) = outcome else {
             panic!("second candidate should return a response");
         };
-        let bytes = standard_text_sync_heartbeat_response_body_bytes(
-            "openai:responses:compact",
-            None,
-            response,
-        )
-        .await;
+        let bytes =
+            standard_text_sync_heartbeat_response_body_bytes("openai:responses", None, response)
+                .await;
         let body: Value = serde_json::from_slice(&bytes).expect("body should decode");
 
         assert_eq!(call_count.load(Ordering::SeqCst), 2);

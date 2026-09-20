@@ -17,6 +17,12 @@ pub(crate) const ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL: &str =
     "No active API Key found for this provider";
 pub(crate) const ADMIN_PROVIDER_QUERY_NO_LOCAL_MODELS_DETAIL: &str =
     "No models available from local provider catalog";
+pub(crate) const ADMIN_PROVIDER_QUERY_EMERGENCY_TARGETS_REQUIRED_DETAIL: &str =
+    "targets must contain 1 to 32 ordered endpoint_id/key_id pairs";
+pub(crate) const ADMIN_PROVIDER_QUERY_EMERGENCY_GRANT_ID_REQUIRED_DETAIL: &str =
+    "emergency grant_id is required";
+pub(crate) const ADMIN_PROVIDER_QUERY_EMERGENCY_UNAVAILABLE_DETAIL: &str =
+    "Emergency chain persistence is unavailable";
 
 pub(crate) fn build_admin_provider_query_bad_request_response(
     detail: &'static str,

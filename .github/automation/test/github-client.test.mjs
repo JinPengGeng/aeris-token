@@ -94,7 +94,7 @@ test('listPullTimelineEvents rejects invalid pull numbers before calling GitHub'
   assert.equal(calls, 0);
 });
 
-test('Writer governance API methods use fixed repository and writer Environment endpoints', async () => {
+test('Governance API methods use fixed repository endpoints', async () => {
   const calls = [];
   const api = client(async (url) => {
     calls.push(url);
@@ -103,10 +103,6 @@ test('Writer governance API methods use fixed repository and writer Environment 
     if (url.endsWith('/rulesets/101')) return response({ id: 101 });
     if (url.endsWith('/actions/permissions/workflow')) return response({ default_workflow_permissions: 'read' });
     if (url.endsWith('/actions/permissions')) return response({ enabled: true });
-    if (url.endsWith('/environments/writer')) return response({ name: 'writer' });
-    if (url.includes('/deployment-branch-policies?')) {
-      return response({ total_count: 1, branch_policies: [{ id: 1, name: 'main', type: 'branch' }] });
-    }
     return response(null, 404);
   });
 
@@ -115,20 +111,14 @@ test('Writer governance API methods use fixed repository and writer Environment 
   assert.deepEqual(await api.getRepositoryRuleset(101), { id: 101 });
   assert.deepEqual(await api.getActionsPermissions(), { enabled: true });
   assert.deepEqual(await api.getDefaultWorkflowPermissions(), { default_workflow_permissions: 'read' });
-  assert.deepEqual(await api.getWriterEnvironment(), { name: 'writer' });
-  assert.deepEqual(await api.listWriterDeploymentBranchPolicies(), {
-    items: [{ id: 1, name: 'main', type: 'branch' }], truncated: false,
-  });
 
   assert.ok(calls.some((url) => /collaborators\?affiliation=direct&per_page=100&page=1$/.test(url)));
   assert.ok(calls.some((url) => /rulesets\?includes_parents=true&per_page=100&page=1$/.test(url)));
   assert.ok(calls.some((url) => /rulesets\/101$/.test(url)));
   assert.ok(calls.some((url) => /actions\/permissions\/workflow$/.test(url)));
-  assert.ok(calls.some((url) => /environments\/writer$/.test(url)));
-  assert.ok(calls.some((url) => /environments\/writer\/deployment-branch-policies\?per_page=100&page=1$/.test(url)));
 });
 
-test('Writer governance list methods expose bounded pagination truncation', async () => {
+test('Governance list methods expose bounded pagination truncation', async () => {
   const fullPage = Array.from({ length: 100 }, (_, index) => ({ id: index + 1 }));
   const api = client(async () => response(fullPage));
   assert.deepEqual(await api.listDirectCollaborators(), {
@@ -139,41 +129,6 @@ test('Writer governance list methods expose bounded pagination truncation', asyn
     items: Array.from({ length: 1_000 }, (_, index) => ({ id: (index % 100) + 1 })),
     truncated: true,
   });
-});
-
-test('Writer deployment branch policy pagination is complete, bounded, and total-stable', async () => {
-  const first = Array.from({ length: 100 }, (_, index) => ({ id: index + 1 }));
-  let calls = 0;
-  const api = client(async () => {
-    calls += 1;
-    return calls === 1
-      ? response({ total_count: 101, branch_policies: first })
-      : response({ total_count: 101, branch_policies: [{ id: 101 }] });
-  });
-  const complete = await api.listWriterDeploymentBranchPolicies();
-  assert.equal(complete.items.length, 101);
-  assert.equal(complete.truncated, false);
-
-  calls = 0;
-  const drifting = client(async () => {
-    calls += 1;
-    return response({ total_count: calls === 1 ? 101 : 102, branch_policies: calls === 1 ? first : [] });
-  });
-  await assert.rejects(
-    () => drifting.listWriterDeploymentBranchPolicies(),
-    (error) => error instanceof GitHubApiError && /total drifted/.test(error.message),
-  );
-
-  const full = client(async () => response({ total_count: 1_000, branch_policies: first }));
-  assert.equal((await full.listWriterDeploymentBranchPolicies()).truncated, true);
-});
-
-test('unsupported Writer governance REST endpoints fail closed', async () => {
-  const api = client(async () => response({ message: 'Not Found' }, 404));
-  await assert.rejects(
-    () => api.getWriterEnvironment(),
-    (error) => error instanceof GitHubApiError && error.status === 404,
-  );
 });
 
 test('managed comment writes use only the Issue Comments API', async () => {

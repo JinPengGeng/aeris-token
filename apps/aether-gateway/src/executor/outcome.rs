@@ -214,7 +214,7 @@ impl LocalExecutionRuntimeMissContext {
             return None;
         }
 
-        Some("上游请求体转换失败（原因代码: provider_request_body_build_failed）".to_string())
+        Some("Upstream request body conversion failed (reason code: provider_request_body_build_failed)".to_string())
     }
 }
 
@@ -348,7 +348,10 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
         upstream_error_type,
     } = exhaustion;
 
-    let status_code = http::StatusCode::SERVICE_UNAVAILABLE.as_u16();
+    let status_code = diagnostic
+        .filter(|value| value.reason == "model_not_found")
+        .map(|_| http::StatusCode::NOT_FOUND.as_u16())
+        .unwrap_or(http::StatusCode::SERVICE_UNAVAILABLE.as_u16());
     let candidate_status_code = upstream_status_code.unwrap_or(status_code);
     data.status_code = Some(status_code);
     data.error_message = Some(local_execution_runtime_miss_detail.to_string());
@@ -385,6 +388,10 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
     data.client_response_body = Some(runtime_miss_client_error_body(
         data.api_format.as_deref(),
         &client_message,
+        diagnostic
+            .filter(|value| value.reason == "model_not_found")
+            .map(|_| "model_not_found"),
+        status_code,
     ));
 
     let mut request_metadata = match data.request_metadata.take() {
@@ -455,10 +462,20 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
         .and_then(|value| value.selected_provider_model_name.clone())
         .filter(|value| !value.eq_ignore_ascii_case(model.as_str()));
 
-    let status_code = http::StatusCode::SERVICE_UNAVAILABLE.as_u16();
+    let status_code = diagnostic
+        .filter(|value| value.reason == "model_not_found")
+        .map(|_| http::StatusCode::NOT_FOUND.as_u16())
+        .unwrap_or(http::StatusCode::SERVICE_UNAVAILABLE.as_u16());
     let client_message =
         beautify_local_execution_client_error_message(local_execution_runtime_miss_detail);
-    let client_body = runtime_miss_client_error_body(api_format.as_deref(), &client_message);
+    let client_body = runtime_miss_client_error_body(
+        api_format.as_deref(),
+        &client_message,
+        diagnostic
+            .filter(|value| value.reason == "model_not_found")
+            .map(|_| "model_not_found"),
+        status_code,
+    );
     let mut client_headers = Map::from_iter([(
         "content-type".to_string(),
         Value::String("application/json".to_string()),
@@ -563,20 +580,7 @@ pub(crate) fn beautify_local_execution_client_error_message(message: &str) -> St
     {
         return unavailable_message;
     }
-    for marker in [
-        "。请检查",
-        "。请确认",
-        ". 请检查",
-        ". 请确认",
-        "! 请检查",
-        "! 请确认",
-        "? 请检查",
-        "? 请确认",
-        "。Reason",
-        ". Reason",
-        "。Code",
-        ". Code",
-    ] {
+    for marker in [". Check ", ". Confirm ", ". Reason ", ". Code "] {
         if let Some(index) = simplified.find(marker) {
             simplified.truncate(index);
             break;
@@ -586,8 +590,9 @@ pub(crate) fn beautify_local_execution_client_error_message(message: &str) -> St
 }
 
 fn simplify_all_candidates_skipped_client_error_message(message: &str) -> Option<String> {
-    if !message.contains("候选提供商")
-        || !(message.contains("全部不可用") || message.contains("都不满足本次"))
+    if !message.contains("candidate provider")
+        || !(message.contains("none are available for this")
+            || message.contains("none meet the requirements for this"))
     {
         return None;
     }
@@ -595,27 +600,35 @@ fn simplify_all_candidates_skipped_client_error_message(message: &str) -> Option
     let request_mode = extract_local_execution_request_mode(message)?;
     if let Some(model) = extract_candidate_supported_model(message) {
         return Some(format!(
-            "没有可用提供商支持模型 {model} 的{request_mode}请求"
+            "No available provider supports model {model} for this {request_mode} request"
         ));
     }
 
-    Some(format!("没有可用提供商支持本次{request_mode}请求"))
+    Some(format!(
+        "No available provider supports this {request_mode} request"
+    ))
 }
 
 fn extract_local_execution_request_mode(message: &str) -> Option<&str> {
-    let rest = message.get(message.find("本次")? + "本次".len()..)?;
-    let mode = rest.get(..rest.find("请求")?)?.trim();
+    let rest = message.get(message.find("for this ")? + "for this ".len()..)?;
+    let mode = rest.get(..rest.find(" request")?)?.trim();
     (!mode.is_empty()).then_some(mode)
 }
 
 fn extract_candidate_supported_model(message: &str) -> Option<&str> {
-    let rest = message.get(message.find("支持模型 ")? + "支持模型 ".len()..)?;
-    let model = rest.get(..rest.find(" 的")?)?.trim();
+    let marker = if message.contains("supports model ") {
+        "supports model "
+    } else {
+        "supporting model "
+    };
+    let rest = message.get(message.find(marker)? + marker.len()..)?;
+    let model_end = rest.find(", but ").or_else(|| rest.find(" for this"))?;
+    let model = rest.get(..model_end)?.trim();
     (!model.is_empty()).then_some(model)
 }
 
 fn strip_parenthesized_reason_code(message: &str) -> String {
-    let Some(reason_index) = message.find("原因代码") else {
+    let Some(reason_index) = message.find("reason code") else {
         return message.to_string();
     };
     let Some((start, open)) = message[..reason_index]
@@ -735,7 +748,12 @@ fn json_header_map() -> Value {
     )]))
 }
 
-fn runtime_miss_client_error_body(api_format: Option<&str>, message: &str) -> Value {
+fn runtime_miss_client_error_body(
+    api_format: Option<&str>,
+    message: &str,
+    error_code: Option<&str>,
+    status_code: u16,
+) -> Value {
     let fallback = json!({
         "error": {
             "type": "http_error",
@@ -746,17 +764,29 @@ fn runtime_miss_client_error_body(api_format: Option<&str>, message: &str) -> Va
         crate::ai_serving::normalize_api_format_alias(format)
             .eq_ignore_ascii_case("claude:messages")
     });
-    if !is_claude {
+    let is_openai_model_not_found = error_code == Some("model_not_found")
+        && status_code == http::StatusCode::NOT_FOUND.as_u16()
+        && api_format.is_some_and(|format| {
+            crate::ai_serving::normalize_api_format_alias(format)
+                .to_ascii_lowercase()
+                .starts_with("openai:")
+        });
+    if !is_claude && !is_openai_model_not_found {
         return fallback;
     }
 
-    build_core_error_body_for_client_format(
-        "claude:messages",
-        message,
-        None,
-        LocalCoreSyncErrorKind::Overloaded,
-    )
-    .unwrap_or(fallback)
+    let kind = if status_code == http::StatusCode::NOT_FOUND.as_u16() {
+        LocalCoreSyncErrorKind::NotFound
+    } else {
+        LocalCoreSyncErrorKind::Overloaded
+    };
+    let client_format = if is_claude {
+        "claude:messages"
+    } else {
+        "openai:chat"
+    };
+    build_core_error_body_for_client_format(client_format, message, error_code, kind)
+        .unwrap_or(fallback)
 }
 
 fn runtime_miss_original_headers_json(headers: &HeaderMap) -> Value {
@@ -1214,21 +1244,21 @@ mod tests {
     fn local_execution_client_error_message_is_client_friendly() {
         assert_eq!(
             beautify_local_execution_client_error_message(
-                "没有可用提供商支持模型 gpt-5.4 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）",
+                "No available provider supports model gpt-5.4 for this synchronous request. Check model mappings, endpoint enablement, and API key permissions (reason code: candidate_list_empty)",
             ),
-            "没有可用提供商支持模型 gpt-5.4 的同步请求"
+            "No available provider supports model gpt-5.4 for this synchronous request"
         );
         assert_eq!(
             beautify_local_execution_client_error_message(
-                "请求缺少 model 字段，无法选择上游提供商（openai/chat，原因代码: missing_requested_model）",
+                "The request is missing the model field, so an upstream provider cannot be selected (OpenAI Chat Completions; reason code: missing_requested_model)",
             ),
-            "请求缺少 model 字段，无法选择上游提供商"
+            "The request is missing the model field, so an upstream provider cannot be selected"
         );
         assert_eq!(
             beautify_local_execution_client_error_message(
-                "找到 1 个支持模型 gpt-5.4 的候选提供商，但本次流式请求全部不可用：provider_quota_blocked 2 次（原因代码: all_candidates_skipped）",
+                "Found 1 candidate provider supporting model gpt-5.4, but none are available for this streaming request: provider_quota_blocked (2) (reason code: all_candidates_skipped)",
             ),
-            "没有可用提供商支持模型 gpt-5.4 的流式请求"
+            "No available provider supports model gpt-5.4 for this streaming request"
         );
     }
 
@@ -1258,13 +1288,36 @@ mod tests {
 
     #[test]
     fn runtime_miss_usage_body_matches_claude_client_envelope() {
-        let claude = runtime_miss_client_error_body(Some("claude:messages"), "busy");
+        let claude = runtime_miss_client_error_body(
+            Some("claude:messages"),
+            "busy",
+            None,
+            http::StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+        );
         assert_eq!(claude["type"], "error");
         assert_eq!(claude["error"]["type"], "overloaded_error");
 
-        let openai = runtime_miss_client_error_body(Some("openai:chat"), "busy");
+        let openai = runtime_miss_client_error_body(
+            Some("openai:chat"),
+            "busy",
+            None,
+            http::StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+        );
         assert_eq!(openai["error"]["type"], "http_error");
         assert!(openai.get("type").is_none());
+    }
+
+    #[test]
+    fn runtime_miss_usage_body_matches_openai_model_not_found_envelope() {
+        let body = runtime_miss_client_error_body(
+            Some("openai:image"),
+            "The model 'missing-image-model' does not exist",
+            Some("model_not_found"),
+            http::StatusCode::NOT_FOUND.as_u16(),
+        );
+        assert_eq!(body["error"]["type"], "not_found_error");
+        assert_eq!(body["error"]["code"], "model_not_found");
+        assert!(body.get("type").is_none());
     }
 
     #[test]

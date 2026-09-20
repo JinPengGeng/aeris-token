@@ -19,6 +19,11 @@ impl LocalVideoTaskSeed {
     ) -> Option<Self> {
         let transport = LocalVideoTaskTransport::from_plan(plan)?;
         let persistence = LocalVideoTaskPersistence::from_report_context(report_context, plan);
+        let xai_provider = report_context
+            .get("video_provider_xai")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || is_xai_video_url(&plan.url);
         let mut seed = match report_kind {
             "openai_video_create_sync_finalize" => {
                 let upstream_id = openai_video_provider_task_id(provider_body)?;
@@ -26,10 +31,7 @@ impl LocalVideoTaskSeed {
                 Some(Self::OpenAiCreate(OpenAiVideoTaskSeed {
                     local_short_id: None,
                     native_response: None,
-                    xai_provider: report_context
-                        .get("video_provider_xai")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
+                    xai_provider,
                     local_task_id: context_text(report_context, "local_task_id")
                         .unwrap_or_else(|| Uuid::new_v4().to_string()),
                     upstream_task_id: upstream_id.to_string(),
@@ -64,10 +66,7 @@ impl LocalVideoTaskSeed {
                 Some(Self::OpenAiRemix(OpenAiVideoTaskSeed {
                     local_short_id: None,
                     native_response: None,
-                    xai_provider: report_context
-                        .get("video_provider_xai")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
+                    xai_provider,
                     local_task_id: context_text(report_context, "local_task_id")
                         .unwrap_or_else(|| Uuid::new_v4().to_string()),
                     upstream_task_id: upstream_id.to_string(),
@@ -109,6 +108,8 @@ impl LocalVideoTaskSeed {
                     local_short_id: context_text(report_context, "local_short_id")
                         .unwrap_or_else(generate_local_short_id),
                     upstream_operation_name: operation_name.to_string(),
+                    created_at_unix_secs: context_u64(report_context, "local_created_at")
+                        .unwrap_or_else(current_unix_timestamp_secs),
                     user_id: context_text(report_context, "user_id"),
                     api_key_id: context_text(report_context, "api_key_id"),
                     model: context_text(report_context, "model")
@@ -172,6 +173,16 @@ impl LocalVideoTaskSeed {
             Self::GeminiCreate(seed) => seed.client_body_json(),
         }
     }
+}
+
+fn is_xai_video_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    matches!(
+        parsed.host_str(),
+        Some("api.x.ai" | "cli-chat-proxy.grok.com")
+    )
 }
 
 fn openai_video_provider_task_id(body: &Map<String, Value>) -> Option<&str> {

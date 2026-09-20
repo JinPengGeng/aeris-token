@@ -8,6 +8,8 @@ use crate::{AppState, GatewayError};
 
 #[path = "runtime/account_self_check.rs"]
 mod account_self_check;
+#[path = "runtime/admin_audit_delivery.rs"]
+mod admin_audit_delivery;
 #[path = "runtime/audit_cleanup.rs"]
 mod audit_cleanup;
 #[path = "runtime/cleanup_runs.rs"]
@@ -36,6 +38,10 @@ mod proxy_node_metrics_cleanup;
 mod proxy_node_staleness;
 #[path = "runtime/proxy_upgrade_rollout.rs"]
 mod proxy_upgrade_rollout;
+#[path = "runtime/recharge_recovery.rs"]
+mod recharge_recovery;
+#[path = "runtime/refund_notifications.rs"]
+mod refund_notifications;
 #[path = "runtime/remote_quota_sync.rs"]
 mod remote_quota_sync;
 #[path = "runtime/request_candidate_cleanup.rs"]
@@ -64,6 +70,7 @@ pub(crate) use account_self_check::{
     select_account_self_check_key_ids, spawn_account_self_check_worker, AccountSelfCheckRunSummary,
     AccountSelfCheckWorkerConfig,
 };
+pub(crate) use admin_audit_delivery::spawn_admin_audit_delivery_worker;
 pub(crate) use aether_data_contracts::repository::usage::{
     UsageCleanupSummary, UsageCleanupWindow,
 };
@@ -112,6 +119,8 @@ pub(crate) use proxy_upgrade_rollout::{
     ProxyUpgradeRolloutSkippedRestoreSummary, ProxyUpgradeRolloutStatus,
     ProxyUpgradeRolloutSummary, ProxyUpgradeRolloutTrackedNodeState,
 };
+pub(crate) use recharge_recovery::spawn_recharge_recovery_worker;
+pub(crate) use refund_notifications::spawn_refund_notification_worker;
 pub(crate) use remote_quota_sync::{
     perform_remote_quota_sync_for_provider, perform_remote_quota_sync_once,
     perform_remote_quota_sync_once_for_provider, remote_quota_sync_worker_interval,

@@ -2,7 +2,8 @@ use aether_contracts::{ExecutionPlan, ExecutionResult};
 use serde_json::Value;
 
 use crate::orchestration::{
-    resolve_local_failover_analysis_for_attempt, LocalFailoverAnalysis,
+    failure_origin_from_upstream_response, resolve_local_failover_analysis_for_attempt,
+    resolve_local_failover_analysis_for_attempt_with_origin, FailureOrigin, LocalFailoverAnalysis,
     LocalFailoverClassification, LocalFailoverDecision,
 };
 use crate::AppState;
@@ -55,6 +56,27 @@ pub(crate) async fn analyze_local_candidate_failover_sync(
     result: &ExecutionResult,
     response_text: Option<&str>,
 ) -> LocalFailoverAnalysis {
+    analyze_local_candidate_failover_sync_with_origin(
+        state,
+        plan,
+        plan_kind,
+        report_context,
+        result,
+        response_text,
+        failure_origin_from_upstream_response(result.status_code, response_text),
+    )
+    .await
+}
+
+pub(crate) async fn analyze_local_candidate_failover_sync_with_origin(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    plan_kind: &str,
+    report_context: Option<&serde_json::Value>,
+    result: &ExecutionResult,
+    response_text: Option<&str>,
+    failure_origin: FailureOrigin,
+) -> LocalFailoverAnalysis {
     if sync_plan_kind_disables_local_candidate_failover(plan_kind) {
         return LocalFailoverAnalysis::use_default();
     }
@@ -72,12 +94,13 @@ pub(crate) async fn analyze_local_candidate_failover_sync(
         }
     }
 
-    resolve_local_failover_analysis_for_attempt(
+    resolve_local_failover_analysis_for_attempt_with_origin(
         state,
         plan,
         report_context,
         result.status_code,
         response_text,
+        failure_origin,
     )
     .await
 }
@@ -262,16 +285,36 @@ pub(crate) async fn resolve_local_candidate_failover_analysis_stream(
     status_code: u16,
     response_text: Option<&str>,
 ) -> LocalFailoverAnalysis {
-    if openai_image_success_disables_local_success_failover(plan, status_code) {
-        return LocalFailoverAnalysis::use_default();
-    }
-
-    resolve_local_failover_analysis_for_attempt(
+    resolve_local_candidate_failover_analysis_stream_with_origin(
         state,
         plan,
         report_context,
         status_code,
         response_text,
+        failure_origin_from_upstream_response(status_code, response_text),
+    )
+    .await
+}
+
+pub(crate) async fn resolve_local_candidate_failover_analysis_stream_with_origin(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    status_code: u16,
+    response_text: Option<&str>,
+    failure_origin: FailureOrigin,
+) -> LocalFailoverAnalysis {
+    if openai_image_success_disables_local_success_failover(plan, status_code) {
+        return LocalFailoverAnalysis::use_default();
+    }
+
+    resolve_local_failover_analysis_for_attempt_with_origin(
+        state,
+        plan,
+        report_context,
+        status_code,
+        response_text,
+        failure_origin,
     )
     .await
 }
@@ -708,7 +751,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_retry_next_candidate_treats_client_error_as_failover_by_default() {
+    async fn sync_retry_next_candidate_treats_trusted_credential_401_as_failover_by_default() {
         let result = ExecutionResult {
             request_id: "req-1".to_string(),
             candidate_id: None,
@@ -932,7 +975,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_retry_next_candidate_treats_client_error_as_failover_by_default() {
+    async fn stream_retry_next_candidate_stops_unproven_client_error_by_default() {
+        let local_report_context = serde_json::json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        let state = build_state_with_provider_config(None);
+        let plan = sample_plan();
+
+        assert!(
+            !should_retry_next_local_candidate_stream(
+                &state,
+                &plan,
+                "openai_chat_stream",
+                Some(&local_report_context),
+                403,
+                Some("{\"error\":{\"message\":\"invalid auth token\"}}"),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_retry_next_candidate_treats_trusted_credential_401_as_failover_by_default() {
         let local_report_context = serde_json::json!({
             "candidate_index": 0,
             "retry_index": 0,
@@ -946,7 +1011,7 @@ mod tests {
                 &plan,
                 "openai_chat_stream",
                 Some(&local_report_context),
-                403,
+                401,
                 Some("{\"error\":{\"message\":\"invalid auth token\"}}"),
             )
             .await
@@ -1049,7 +1114,7 @@ mod tests {
                 success_failover_patterns: Vec::new(),
                 error_stop_patterns: Vec::new(),
                 stop_cyber_policy_errors: true,
-                retry_client_errors_by_default: true,
+                retry_client_errors_by_default: false,
             }
         );
     }

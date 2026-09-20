@@ -3,6 +3,9 @@ use super::activity::{
     build_admin_monitoring_suspicious_activities_response,
     build_admin_monitoring_system_status_response, build_admin_monitoring_user_behavior_response,
 };
+use super::audit_delivery::{
+    build_audit_delivery_list_response, build_audit_delivery_redrive_response,
+};
 use super::cache::{
     build_admin_monitoring_cache_config_response, build_admin_monitoring_cache_metrics_response,
     build_admin_monitoring_cache_stats_response,
@@ -57,6 +60,20 @@ pub(crate) async fn maybe_build_local_admin_monitoring_response(
             "admin_monitoring_audit_logs_viewed",
             "view_admin_audit_logs",
             "audit_log",
+            &admin_monitoring_audit_target_id(request_context),
+        ))),
+        AdminMonitoringRoute::AuditDeliveries => Ok(Some(attach_admin_audit_response(
+            build_audit_delivery_list_response(state, request_context).await?,
+            "admin_audit_deliveries_viewed",
+            "view_admin_audit_deliveries",
+            "audit_delivery",
+            &admin_monitoring_audit_target_id(request_context),
+        ))),
+        AdminMonitoringRoute::AuditDeliveryRedrive => Ok(Some(attach_admin_audit_response(
+            build_audit_delivery_redrive_response(state, request_context).await?,
+            "admin_audit_delivery_redrive_requested",
+            "redrive_admin_audit_delivery",
+            "audit_delivery",
             &admin_monitoring_audit_target_id(request_context),
         ))),
         AdminMonitoringRoute::ResilienceStatus => Ok(Some(

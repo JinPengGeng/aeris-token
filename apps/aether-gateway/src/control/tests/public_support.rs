@@ -332,6 +332,11 @@ fn classifies_wallet_routes_as_public_support_route() {
         (http::Method::GET, "/api/wallet/today-cost", "today_cost"),
         (
             http::Method::GET,
+            "/api/wallet/recharge-recoveries?limit=20",
+            "recharge_recoveries",
+        ),
+        (
+            http::Method::GET,
             "/api/wallet/recharge?limit=20",
             "list_recharge_orders",
         ),

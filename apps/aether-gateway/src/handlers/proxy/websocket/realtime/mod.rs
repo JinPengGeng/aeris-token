@@ -47,7 +47,8 @@ pub(crate) async fn realtime_websocket(
                 {
                     Ok(realtime) => realtime,
                     Err(rejection) => {
-                        return prepared.rejection_response(rejection.status(), rejection.message())
+                        return prepared
+                            .rejection_response(rejection.status(), rejection.message());
                     }
                 };
             Ok(prepared.into_response_with(

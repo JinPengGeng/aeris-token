@@ -860,7 +860,7 @@ async fn gateway_records_openai_sync_usage_and_pricing_with_cache_tokens_impl() 
             "Bearer sk-client-openai-usage-pricing-sync",
         )
         .header(TRACE_ID_HEADER, "trace-openai-usage-pricing-sync-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -952,7 +952,7 @@ async fn gateway_records_openai_stream_usage_and_pricing_with_cache_tokens_impl(
             "Bearer sk-client-openai-usage-pricing-stream",
         )
         .header(TRACE_ID_HEADER, "trace-openai-usage-pricing-stream-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");

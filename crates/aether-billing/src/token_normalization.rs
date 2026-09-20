@@ -48,6 +48,28 @@ pub fn normalize_input_tokens_for_billing(
     }
 }
 
+/// Returns the established input normalization only when the API family has
+/// defined cache semantics. Provider-cost estimates use this to leave unknown
+/// usage unknown instead of treating a fallback as a billing guarantee.
+pub fn normalize_input_tokens_for_billing_with_known_cache_semantics(
+    api_format: Option<&str>,
+    input_tokens: i64,
+    cache_creation_tokens: i64,
+    cache_read_tokens: i64,
+) -> Option<i64> {
+    match parse_api_family(api_format) {
+        ApiFamily::Unknown => None,
+        ApiFamily::OpenAi | ApiFamily::Claude | ApiFamily::Gemini => {
+            Some(normalize_input_tokens_for_billing(
+                api_format,
+                input_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+            ))
+        }
+    }
+}
+
 pub fn normalize_total_input_context_for_cache_hit_rate(
     api_format: Option<&str>,
     input_tokens: i64,
@@ -90,7 +112,9 @@ pub fn normalize_total_input_context_for_cache_hit_rate(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_input_tokens_for_billing, normalize_total_input_context_for_cache_hit_rate,
+        normalize_input_tokens_for_billing,
+        normalize_input_tokens_for_billing_with_known_cache_semantics,
+        normalize_total_input_context_for_cache_hit_rate,
     };
 
     #[test]
@@ -110,6 +134,23 @@ mod tests {
         assert_eq!(
             normalize_input_tokens_for_billing(Some("claude:messages"), 100, 10, 20),
             100
+        );
+    }
+
+    #[test]
+    fn only_reports_cache_normalization_for_known_api_families() {
+        assert_eq!(
+            normalize_input_tokens_for_billing_with_known_cache_semantics(
+                Some("openai:chat"),
+                100,
+                10,
+                20,
+            ),
+            Some(70)
+        );
+        assert_eq!(
+            normalize_input_tokens_for_billing_with_known_cache_semantics(None, 100, 10, 20),
+            None
         );
     }
 

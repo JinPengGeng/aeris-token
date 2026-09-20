@@ -6,8 +6,13 @@ use std::time::Duration;
 use aether_data::driver::postgres::{
     run_migrations, SqlxSettlementRepository, SqlxUsageReadRepository, SqlxWalletRepository,
 };
-use aether_data::repository::billing::InMemoryBillingReadRepository;
+use aether_data::repository::{
+    billing::InMemoryBillingReadRepository, provider_catalog::InMemoryProviderCatalogReadRepository,
+};
 use aether_data_contracts::repository::billing::StoredBillingModelContext;
+use aether_data_contracts::repository::provider_catalog::{
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+};
 use aether_data_contracts::repository::settlement::RequestFundsSummary;
 use aether_data_contracts::repository::usage::UsageWriteRepository;
 use aether_usage_runtime::UsageRuntimeConfig;
@@ -111,6 +116,48 @@ impl Fixture {
             pricing("a"),
             pricing("b"),
         ]));
+        let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            ["a", "b"]
+                .into_iter()
+                .map(|suffix| {
+                    StoredProviderCatalogProvider::new(
+                        format!("p-{suffix}"),
+                        format!("provider-{suffix}"),
+                        None,
+                        "openai".into(),
+                    )
+                    .expect("provider catalog fixture should build")
+                })
+                .collect(),
+            ["a", "b"]
+                .into_iter()
+                .map(|suffix| {
+                    StoredProviderCatalogEndpoint::new(
+                        format!("e-{suffix}"),
+                        format!("p-{suffix}"),
+                        "openai:image".into(),
+                        Some("openai".into()),
+                        Some("image".into()),
+                        true,
+                    )
+                    .expect("endpoint catalog fixture should build")
+                })
+                .collect(),
+            ["a", "b"]
+                .into_iter()
+                .map(|suffix| {
+                    StoredProviderCatalogKey::new(
+                        format!("pk-{suffix}"),
+                        format!("p-{suffix}"),
+                        format!("image-key-{suffix}"),
+                        "api_key".into(),
+                        None,
+                        true,
+                    )
+                    .expect("key catalog fixture should build")
+                })
+                .collect(),
+        ));
         let usage = Arc::new(SqlxUsageReadRepository::new(self.pool.clone()));
         let wallet = Arc::new(SqlxWalletRepository::new(self.pool.clone()));
         let settlement = Arc::new(SqlxSettlementRepository::new(self.pool.clone()));
@@ -118,6 +165,7 @@ impl Fixture {
             .unwrap()
             .with_data_state_for_tests(
                 GatewayDataState::with_usage_billing_and_wallet_for_tests(usage, billing, wallet)
+                    .attach_provider_catalog_repository_for_tests(provider_catalog)
                     .with_settlement_writer_for_tests(settlement),
             )
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
@@ -937,6 +985,42 @@ fn memory_state() -> (
         pricing("a"),
         pricing("b"),
     ]));
+    let provider = StoredProviderCatalogProvider::new(
+        "p-a".into(),
+        "memory-image-provider".into(),
+        None,
+        "openai".into(),
+    )
+    .unwrap();
+    let endpoint = StoredProviderCatalogEndpoint::new(
+        "e-a".into(),
+        "p-a".into(),
+        "openai:image".into(),
+        Some("openai".into()),
+        Some("image".into()),
+        true,
+    )
+    .unwrap()
+    .with_transport_fields(
+        "http://127.0.0.1".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let key = StoredProviderCatalogKey::new(
+        "pk-a".into(),
+        "p-a".into(),
+        "memory-image-key".into(),
+        "api_key".into(),
+        None,
+        true,
+    )
+    .unwrap();
     let state = AppState::new()
         .unwrap()
         .with_data_state_for_tests(
@@ -945,6 +1029,13 @@ fn memory_state() -> (
                 billing,
                 wallets,
             )
+            .attach_provider_catalog_repository_for_tests(Arc::new(
+                InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    vec![endpoint],
+                    vec![key],
+                ),
+            ))
             .with_settlement_writer_for_tests(settlement),
         )
         .with_usage_runtime_for_tests(UsageRuntimeConfig {
@@ -960,7 +1051,20 @@ async fn memory_gateway_image_attempt_uses_shared_parent_usage_repository() {
     use aether_data_contracts::repository::usage::UsageReadRepository;
     let (state, usage) = memory_state();
     let (url, count, server) = upstream(vec![(200, image(6))]).await;
-    execute(&state, "gateway-memory", "a", &url).await.unwrap();
+    let response = match execute(&state, "gateway-memory", "a", &url).await.unwrap() {
+        aether_ai_serving::AiAttemptExecutionOutcome::Responded(response) => response,
+        outcome => panic!("image attempt must return a response, got {outcome:?}"),
+    };
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["data"]
+            .as_array()
+            .map(Vec::len),
+        Some(6)
+    );
     let stored = usage
         .find_by_request_id("gateway-memory")
         .await

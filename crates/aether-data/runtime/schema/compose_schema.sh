@@ -32,6 +32,9 @@ check_logical_generated() {
   local args=()
   local path
   args+=(--require-tables-from "${postgres_migrations_root}/20260403000000_baseline.sql")
+  args+=(--require-tables-from "${bootstrap_schema_root}/280_provider_cost_ledger.sql")
+  args+=(--require-tables-from "${bootstrap_schema_root}/290_provider_cost_snapshot_imports.sql")
+  args+=(--require-tables-from "${bootstrap_schema_root}/300_emergency_chain_grants.sql")
   (cd "${workspace_root}" && cargo run -q -p aether-data-schema --bin aether-schema -- check "${args[@]}")
   printf 'ok generated logical schema\n'
 }

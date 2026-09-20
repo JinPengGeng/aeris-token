@@ -25,6 +25,143 @@ test('realistic-stream report passes full-chain latency and throughput checks', 
   assert.match(result.stdout, /throughput_rps=180/)
 })
 
+test('multi-node pressure report requires deployment and sampled-node context', () => {
+  const report = reportFor({
+    totalRequests: 1000,
+    concurrency: 1000,
+    throughputRps: 40,
+    headersP95Ms: 120,
+    firstBodyP95Ms: 350,
+    p95Ms: 120000,
+    p99Ms: 120100,
+    responseMode: 'FirstBodyByte',
+    firstBodyHoldMs: 120000,
+  })
+  report.deployment = {
+    topology: 'multi-node',
+    nodes: 3,
+    roles: { frontdoor: 2, background: 1 },
+    instance_ids: ['frontdoor-1', 'frontdoor-2', 'background-1'],
+    image_digest: 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    shared_postgres: true,
+    shared_redis: true,
+    preflight: 'pass',
+  }
+  report.evidence = {
+    sampled_nodes: ['frontdoor-1', 'frontdoor-2', 'background-1'],
+    collected_at: '2026-09-15T12:00:00Z',
+  }
+  const result = runChecker('--stage', 'S1', '--require-multi-node-context', writeReport(report))
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /multi_node_context=PASS/)
+})
+
+test('multi-node pressure report rejects missing or unsafe deployment context', () => {
+  const report = reportFor({
+    totalRequests: 1000,
+    concurrency: 1000,
+    throughputRps: 40,
+    headersP95Ms: 120,
+    firstBodyP95Ms: 350,
+    p95Ms: 120000,
+    p99Ms: 120100,
+    responseMode: 'FirstBodyByte',
+    firstBodyHoldMs: 120000,
+  })
+  report.deployment = {
+    topology: 'single-node',
+    nodes: 2,
+    roles: { frontdoor: 1, background: 1 },
+    instance_ids: ['frontdoor-1', 'frontdoor-1'],
+    image_digest: 'latest',
+    shared_postgres: false,
+    shared_redis: true,
+    preflight: 'warn',
+  }
+  report.evidence = {
+    sampled_nodes: ['frontdoor-1'],
+    collected_at: 'September 15, 2026',
+  }
+  const result = runChecker('--stage', 'S1', '--require-multi-node-context', writeReport(report))
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /deployment\.topology=.*expected multi-node/)
+  assert.match(result.stderr, /deployment\.nodes must be an integer >= 3/)
+  assert.match(result.stderr, /deployment\.image_digest must be a sha256/)
+  assert.match(result.stderr, /deployment\.shared_postgres must be true/)
+  assert.match(result.stderr, /deployment\.preflight=.*expected pass/)
+  assert.match(result.stderr, /evidence\.collected_at must be an ISO-8601 timestamp/)
+})
+
+test('multi-node pressure report rejects non-ISO and invalid calendar timestamps', () => {
+  const invalidTimestamps = ['September 15, 2026', '2026-09-15', '0', '2026-02-30T12:00:00Z']
+  for (const collectedAt of invalidTimestamps) {
+    const report = reportFor({
+      totalRequests: 1000,
+      concurrency: 1000,
+      throughputRps: 40,
+      headersP95Ms: 120,
+      firstBodyP95Ms: 350,
+      p95Ms: 120000,
+      p99Ms: 120100,
+      responseMode: 'FirstBodyByte',
+      firstBodyHoldMs: 120000,
+    })
+    report.deployment = {
+      topology: 'multi-node',
+      nodes: 3,
+      roles: { frontdoor: 2, background: 1 },
+      instance_ids: ['frontdoor-1', 'frontdoor-2', 'background-1'],
+      image_digest: 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      shared_postgres: true,
+      shared_redis: true,
+      preflight: 'pass',
+    }
+    report.evidence = {
+      sampled_nodes: ['frontdoor-1', 'frontdoor-2', 'background-1'],
+      collected_at: collectedAt,
+    }
+    const result = runChecker('--stage', 'S1', '--require-multi-node-context', writeReport(report))
+
+    assert.equal(result.status, 1, collectedAt)
+    assert.match(result.stderr, /evidence\.collected_at must be an ISO-8601 timestamp/, collectedAt)
+  }
+})
+
+test('multi-node pressure report rejects non-array instance IDs without crashing', () => {
+  const report = reportFor({
+    totalRequests: 1000,
+    concurrency: 1000,
+    throughputRps: 40,
+    headersP95Ms: 120,
+    firstBodyP95Ms: 350,
+    p95Ms: 120000,
+    p99Ms: 120100,
+    responseMode: 'FirstBodyByte',
+    firstBodyHoldMs: 120000,
+  })
+  report.deployment = {
+    topology: 'multi-node',
+    nodes: 3,
+    roles: { frontdoor: 2, background: 1 },
+    instance_ids: { length: 3 },
+    image_digest: 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    shared_postgres: true,
+    shared_redis: true,
+    preflight: 'pass',
+  }
+  report.evidence = {
+    sampled_nodes: ['frontdoor-1', 'frontdoor-2', 'background-1'],
+    collected_at: '2026-09-15T12:00:00Z',
+  }
+  const result = runChecker('--stage', 'S1', '--require-multi-node-context', writeReport(report))
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /deployment\.instance_ids must contain exactly 3 node IDs/)
+  assert.doesNotMatch(result.stderr, /TypeError|Cannot convert undefined or null to object/)
+})
+
 for (const [stage, totalRequests, concurrency] of [
   ['S1', 1000, 1000],
   ['S2', 3000, 3000],

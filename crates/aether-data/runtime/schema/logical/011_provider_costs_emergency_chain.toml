@@ -1,0 +1,354 @@
+[table.provider_cost_prices]
+domain = "provider_costs"
+order = 10
+primary_key = ["import_id"]
+
+[[table.provider_cost_prices.columns]]
+name = "import_id"
+type = "text_id"
+length = 128
+[[table.provider_cost_prices.columns]]
+name = "supplier"
+type = "text"
+length = 128
+[[table.provider_cost_prices.columns]]
+name = "provider"
+type = "text"
+length = 128
+[[table.provider_cost_prices.columns]]
+name = "model"
+type = "text"
+length = 255
+[[table.provider_cost_prices.columns]]
+name = "dimension"
+type = "text"
+length = 32
+[[table.provider_cost_prices.columns]]
+name = "currency"
+type = "text"
+length = 16
+[[table.provider_cost_prices.columns]]
+name = "unit"
+type = "text"
+length = 32
+[[table.provider_cost_prices.columns]]
+name = "version"
+type = "text"
+length = 128
+[[table.provider_cost_prices.columns]]
+name = "price_units"
+type = "int64"
+[[table.provider_cost_prices.columns]]
+name = "effective_from_unix_secs"
+type = "unix_seconds"
+[[table.provider_cost_prices.columns]]
+name = "effective_to_unix_secs"
+type = "unix_seconds"
+nullable = true
+[[table.provider_cost_prices.columns]]
+name = "source_reference"
+type = "text"
+length = 255
+[[table.provider_cost_prices.columns]]
+name = "imported_by"
+type = "text"
+length = 128
+[[table.provider_cost_prices.columns]]
+name = "imported_at"
+type = "timestamp"
+default = { raw = "now()" }
+
+[[table.provider_cost_prices.uniques]]
+name = "provider_cost_prices_identity_key"
+columns = ["supplier", "provider", "model", "dimension", "currency", "unit", "version"]
+[[table.provider_cost_prices.indexes]]
+name = "provider_cost_prices_effective_idx"
+columns = ["supplier", "provider", "model", "dimension", "currency", "unit", "effective_from_unix_secs"]
+
+[table.provider_cost_snapshots]
+domain = "provider_costs"
+order = 20
+primary_key = ["import_id"]
+[[table.provider_cost_snapshots.columns]]
+name = "import_id"
+type = "text_id"
+length = 128
+[[table.provider_cost_snapshots.columns]]
+name = "request_id"
+type = "text_id"
+length = 128
+[[table.provider_cost_snapshots.columns]]
+name = "provider"
+type = "text"
+length = 128
+[[table.provider_cost_snapshots.columns]]
+name = "model"
+type = "text"
+length = 255
+[[table.provider_cost_snapshots.columns]]
+name = "dimension"
+type = "text"
+length = 32
+[[table.provider_cost_snapshots.columns]]
+name = "sales_amount_units"
+type = "int64"
+[[table.provider_cost_snapshots.columns]]
+name = "sales_currency"
+type = "text"
+length = 16
+[[table.provider_cost_snapshots.columns]]
+name = "provider_cost_amount_units"
+type = "int64"
+nullable = true
+[[table.provider_cost_snapshots.columns]]
+name = "provider_currency"
+type = "text"
+length = 16
+nullable = true
+[[table.provider_cost_snapshots.columns]]
+name = "certainty"
+type = "text"
+length = 16
+[[table.provider_cost_snapshots.columns]]
+name = "source_kind"
+type = "text"
+length = 24
+[[table.provider_cost_snapshots.columns]]
+name = "reconciliation_status"
+type = "text"
+length = 24
+[[table.provider_cost_snapshots.columns]]
+name = "price_import_id"
+type = "text_id"
+length = 128
+nullable = true
+[[table.provider_cost_snapshots.columns]]
+name = "price_version"
+type = "text"
+length = 128
+nullable = true
+[[table.provider_cost_snapshots.columns]]
+name = "source_reference"
+type = "text"
+length = 255
+nullable = true
+[[table.provider_cost_snapshots.columns]]
+name = "price_components"
+type = "json"
+default = { raw = "'[]'::jsonb" }
+[[table.provider_cost_snapshots.columns]]
+name = "occurred_at_unix_secs"
+type = "unix_seconds"
+[[table.provider_cost_snapshots.columns]]
+name = "imported_by"
+type = "text"
+length = 128
+[[table.provider_cost_snapshots.columns]]
+name = "imported_at"
+type = "timestamp"
+default = { raw = "now()" }
+# Value-domain and price-component consistency CHECK constraints remain in
+# migration 20260920000000 and bootstrap/postgres/280_provider_cost_ledger.sql.
+[[table.provider_cost_snapshots.uniques]]
+name = "provider_cost_snapshots_request_provider_model_dimension_key"
+columns = ["request_id", "provider", "model", "dimension"]
+[[table.provider_cost_snapshots.indexes]]
+name = "provider_cost_snapshots_summary_idx"
+columns = ["occurred_at_unix_secs", "sales_currency", "provider_currency", "certainty", "price_version", "reconciliation_status"]
+[[table.provider_cost_snapshots.indexes]]
+name = "provider_cost_snapshots_request_idx"
+columns = ["request_id", "occurred_at_unix_secs"]
+[[table.provider_cost_snapshots.foreign_keys]]
+name = "provider_cost_snapshots_price_import_id_fkey"
+columns = ["price_import_id"]
+references_table = "provider_cost_prices"
+references_columns = ["import_id"]
+
+[table.provider_cost_snapshot_imports]
+domain = "provider_costs"
+order = 30
+primary_key = ["import_id"]
+[[table.provider_cost_snapshot_imports.columns]]
+name = "import_id"
+type = "text_id"
+length = 128
+[[table.provider_cost_snapshot_imports.columns]]
+name = "request_id"
+type = "text_id"
+length = 128
+[[table.provider_cost_snapshot_imports.columns]]
+name = "provider"
+type = "text"
+length = 128
+[[table.provider_cost_snapshot_imports.columns]]
+name = "model"
+type = "text"
+length = 255
+[[table.provider_cost_snapshot_imports.columns]]
+name = "dimension"
+type = "text"
+length = 32
+[[table.provider_cost_snapshot_imports.columns]]
+name = "sales_amount_units"
+type = "int64"
+[[table.provider_cost_snapshot_imports.columns]]
+name = "sales_currency"
+type = "text"
+length = 16
+[[table.provider_cost_snapshot_imports.columns]]
+name = "provider_cost_amount_units"
+type = "int64"
+nullable = true
+[[table.provider_cost_snapshot_imports.columns]]
+name = "provider_currency"
+type = "text"
+length = 16
+nullable = true
+[[table.provider_cost_snapshot_imports.columns]]
+name = "certainty"
+type = "text"
+length = 16
+[[table.provider_cost_snapshot_imports.columns]]
+name = "source_kind"
+type = "text"
+length = 24
+[[table.provider_cost_snapshot_imports.columns]]
+name = "reconciliation_status"
+type = "text"
+length = 24
+[[table.provider_cost_snapshot_imports.columns]]
+name = "price_import_id"
+type = "text_id"
+length = 128
+nullable = true
+[[table.provider_cost_snapshot_imports.columns]]
+name = "price_version"
+type = "text"
+length = 128
+nullable = true
+[[table.provider_cost_snapshot_imports.columns]]
+name = "source_reference"
+type = "text"
+length = 255
+nullable = true
+[[table.provider_cost_snapshot_imports.columns]]
+name = "price_components"
+type = "json"
+default = { raw = "'[]'::jsonb" }
+[[table.provider_cost_snapshot_imports.columns]]
+name = "occurred_at_unix_secs"
+type = "unix_seconds"
+[[table.provider_cost_snapshot_imports.columns]]
+name = "imported_by"
+type = "text"
+length = 128
+[[table.provider_cost_snapshot_imports.columns]]
+name = "imported_at"
+type = "timestamp"
+default = { raw = "now()" }
+# Value-domain and price-component consistency CHECK constraints remain in
+# migration 20260920000000 and bootstrap/postgres/290_provider_cost_snapshot_imports.sql.
+[[table.provider_cost_snapshot_imports.indexes]]
+name = "provider_cost_snapshot_imports_identity_idx"
+columns = ["request_id", "provider", "model", "dimension", "imported_at"]
+[[table.provider_cost_snapshot_imports.foreign_keys]]
+name = "provider_cost_snapshot_imports_price_import_id_fkey"
+columns = ["price_import_id"]
+references_table = "provider_cost_prices"
+references_columns = ["import_id"]
+
+[table.emergency_chain_grants]
+domain = "emergency_chain"
+order = 40
+primary_key = ["grant_id"]
+[[table.emergency_chain_grants.columns]]
+name = "grant_id"
+type = "text_id"
+length = 256
+[[table.emergency_chain_grants.columns]]
+name = "principal"
+type = "text"
+length = 256
+[[table.emergency_chain_grants.columns]]
+name = "operations"
+type = "json"
+[[table.emergency_chain_grants.columns]]
+name = "request_id"
+type = "text_id"
+length = 256
+[[table.emergency_chain_grants.columns]]
+name = "request_fingerprint"
+type = "text"
+length = 64
+driver.postgres.type = "char(64)"
+[[table.emergency_chain_grants.columns]]
+name = "session_nonce"
+type = "text"
+length = 256
+[[table.emergency_chain_grants.columns]]
+name = "chain_hash"
+type = "text"
+length = 64
+driver.postgres.type = "char(64)"
+[[table.emergency_chain_grants.columns]]
+name = "issued_at_unix_secs"
+type = "unix_seconds"
+[[table.emergency_chain_grants.columns]]
+name = "expires_at_unix_secs"
+type = "unix_seconds"
+[[table.emergency_chain_grants.columns]]
+name = "revoked_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+[[table.emergency_chain_grants.columns]]
+name = "consumed_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+[[table.emergency_chain_grants.columns]]
+name = "created_at"
+type = "timestamp"
+default = { raw = "clock_timestamp()" }
+[[table.emergency_chain_grants.columns]]
+name = "updated_at"
+type = "timestamp"
+default = { raw = "clock_timestamp()" }
+# JSON, hash, and temporal CHECK constraints are maintained in migration
+# 20260920010000 and bootstrap/postgres/300_emergency_chain_grants.sql.
+[[table.emergency_chain_grants.indexes]]
+name = "emergency_chain_grants_request_id_idx"
+columns = ["request_id", "expires_at_unix_secs"]
+
+[table.emergency_chain_grant_targets]
+domain = "emergency_chain"
+order = 50
+primary_key = ["grant_id", "chain_position"]
+[[table.emergency_chain_grant_targets.columns]]
+name = "grant_id"
+type = "text_id"
+length = 256
+[[table.emergency_chain_grant_targets.columns]]
+name = "chain_position"
+type = "int32"
+[[table.emergency_chain_grant_targets.columns]]
+name = "provider_id"
+type = "text_id"
+length = 256
+[[table.emergency_chain_grant_targets.columns]]
+name = "endpoint_id"
+type = "text_id"
+length = 256
+[[table.emergency_chain_grant_targets.columns]]
+name = "key_id"
+type = "text_id"
+length = 256
+# chain_position CHECK constraint is maintained in migration 20260920010000 and
+# bootstrap/postgres/300_emergency_chain_grants.sql.
+[[table.emergency_chain_grant_targets.uniques]]
+name = "emergency_chain_grant_targets_identity_key"
+columns = ["grant_id", "provider_id", "endpoint_id", "key_id"]
+[[table.emergency_chain_grant_targets.foreign_keys]]
+name = "emergency_chain_grant_targets_grant_id_fkey"
+columns = ["grant_id"]
+references_table = "emergency_chain_grants"
+references_columns = ["grant_id"]
+on_delete = "restrict"

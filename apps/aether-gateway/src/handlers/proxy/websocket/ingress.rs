@@ -289,7 +289,7 @@ pub(crate) async fn prepare_authenticated_ai_websocket(
                 Some(uri.path()),
                 error,
             )
-            .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected)
+            .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected);
         }
     };
     let websocket_connection_permit = match state.try_acquire_websocket_connection_permit().await {
@@ -301,7 +301,7 @@ pub(crate) async fn prepare_authenticated_ai_websocket(
                 Some(uri.path()),
                 error,
             )
-            .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected)
+            .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected);
         }
     };
 

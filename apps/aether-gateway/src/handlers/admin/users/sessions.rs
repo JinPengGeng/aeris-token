@@ -13,6 +13,18 @@ use axum::{
 };
 use serde_json::json;
 
+fn mark_durable_admin_audit(
+    response: &mut Response<Body>,
+    audit: aether_data::repository::audit::CreateAdminAuditLog,
+) {
+    response
+        .extensions_mut()
+        .insert(crate::audit::DurableAdminAuditEnqueued);
+    response
+        .extensions_mut()
+        .insert(crate::audit::PendingAdminAudit(audit));
+}
+
 fn admin_user_id_from_sessions_path(request_path: &str) -> Option<String> {
     request_path
         .strip_prefix("/api/admin/users/")?
@@ -116,34 +128,69 @@ pub(super) async fn build_admin_delete_user_session_response(
         ));
     }
 
-    if state
-        .find_user_session(&user_id, &session_id)
-        .await?
-        .is_none()
-    {
+    let revoked_at = chrono::Utc::now();
+    let audit = request_context.decision().and_then(|decision| {
+        crate::audit::build_admin_session_revocation_audit(
+            decision,
+            &session_id,
+            false,
+            request_context.public().client_ip.as_deref(),
+        )
+    });
+    let durable = if let Some(audit) = audit.as_ref() {
+        state
+            .admin_revoke_user_session_with_audit(
+                &user_id,
+                &session_id,
+                revoked_at,
+                "admin_session_revoked",
+                audit,
+            )
+            .await?
+    } else {
+        None
+    };
+    if matches!(
+        durable,
+        Some(aether_data::repository::users::AdminUserSessionRevocationOutcome::NotFound)
+    ) {
         return Ok((
             http::StatusCode::NOT_FOUND,
             Json(json!({ "detail": "会话不存在" })),
         )
             .into_response());
     }
+    if durable.is_none() {
+        if state
+            .find_user_session(&user_id, &session_id)
+            .await?
+            .is_none()
+        {
+            return Ok((
+                http::StatusCode::NOT_FOUND,
+                Json(json!({ "detail": "会话不存在" })),
+            )
+                .into_response());
+        }
+        state
+            .revoke_user_session(&user_id, &session_id, revoked_at, "admin_session_revoked")
+            .await?;
+    }
 
-    state
-        .revoke_user_session(
-            &user_id,
-            &session_id,
-            chrono::Utc::now(),
-            "admin_session_revoked",
-        )
-        .await?;
-
-    Ok(attach_admin_audit_response(
+    let mut response = attach_admin_audit_response(
         Json(json!({ "message": "用户设备已强制下线" })).into_response(),
         "admin_user_session_deleted",
         "delete_user_session",
         "user_session",
         &session_id,
-    ))
+    );
+    if durable.is_some() {
+        mark_durable_admin_audit(
+            &mut response,
+            audit.expect("durable audit enqueue requires an audit intent"),
+        );
+    }
+    Ok(response)
 }
 
 pub(super) async fn build_admin_delete_user_sessions_response(
@@ -169,11 +216,46 @@ pub(super) async fn build_admin_delete_user_sessions_response(
         ));
     }
 
-    let revoked_count = state
-        .revoke_all_user_sessions(&user_id, chrono::Utc::now(), "admin_revoke_all_sessions")
-        .await?;
+    let revoked_at = chrono::Utc::now();
+    let audit = request_context.decision().and_then(|decision| {
+        crate::audit::build_admin_session_revocation_audit(
+            decision,
+            &user_id,
+            true,
+            request_context.public().client_ip.as_deref(),
+        )
+    });
+    let durable = if let Some(audit) = audit.as_ref() {
+        state
+            .admin_revoke_all_user_sessions_with_audit(
+                &user_id,
+                revoked_at,
+                "admin_revoke_all_sessions",
+                audit,
+            )
+            .await?
+    } else {
+        None
+    };
+    let revoked_count = match durable {
+        Some(aether_data::repository::users::AdminUserSessionsRevocationOutcome::Revoked(
+            count,
+        )) => count,
+        Some(aether_data::repository::users::AdminUserSessionsRevocationOutcome::NotFound) => {
+            return Ok((
+                http::StatusCode::NOT_FOUND,
+                Json(json!({ "detail": "用户不存在" })),
+            )
+                .into_response());
+        }
+        None => {
+            state
+                .revoke_all_user_sessions(&user_id, revoked_at, "admin_revoke_all_sessions")
+                .await?
+        }
+    };
 
-    Ok(attach_admin_audit_response(
+    let mut response = attach_admin_audit_response(
         Json(json!({
             "message": "已强制下线该用户所有设备",
             "revoked_count": revoked_count,
@@ -183,5 +265,12 @@ pub(super) async fn build_admin_delete_user_sessions_response(
         "delete_user_sessions",
         "user",
         &user_id,
-    ))
+    );
+    if durable.is_some() {
+        mark_durable_admin_audit(
+            &mut response,
+            audit.expect("durable audit enqueue requires an audit intent"),
+        );
+    }
+    Ok(response)
 }

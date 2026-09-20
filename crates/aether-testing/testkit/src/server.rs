@@ -3,6 +3,27 @@ use std::net::SocketAddr;
 
 use axum::Router;
 
+pub struct ReservedListener {
+    listener: tokio::net::TcpListener,
+    addr: SocketAddr,
+}
+
+impl ReservedListener {
+    pub async fn bind() -> Result<Self, std::io::Error> {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let addr = listener.local_addr()?;
+        Ok(Self { listener, addr })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    pub fn base_url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+}
+
 pub struct SpawnedServer {
     base_url: String,
     port: u16,
@@ -17,6 +38,21 @@ impl SpawnedServer {
     pub async fn start_on_port(port: u16, app: Router) -> Result<Self, std::io::Error> {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         let addr = listener.local_addr()?;
+        Self::start_bound(listener, addr, app)
+    }
+
+    pub fn start_with_listener(
+        reservation: ReservedListener,
+        app: Router,
+    ) -> Result<Self, std::io::Error> {
+        Self::start_bound(reservation.listener, reservation.addr, app)
+    }
+
+    fn start_bound(
+        listener: tokio::net::TcpListener,
+        addr: SocketAddr,
+        app: Router,
+    ) -> Result<Self, std::io::Error> {
         let handle = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -60,4 +96,48 @@ pub fn reserve_local_port() -> Result<u16, std::io::Error> {
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::get;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn reserved_listener_stays_owned_until_server_handoff() {
+        let reservation = ReservedListener::bind().await.unwrap();
+        let port = reservation.port();
+        let competing = tokio::net::TcpListener::bind(("127.0.0.1", port)).await;
+        assert_eq!(competing.unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
+
+        let server = SpawnedServer::start_with_listener(
+            reservation,
+            Router::new().route("/probe", get(|| async { "ok" })),
+        )
+        .unwrap();
+        assert_eq!(server.port(), port);
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /probe HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
+    }
+
+    #[tokio::test]
+    async fn dropping_unconsumed_reservation_releases_port() {
+        let reservation = ReservedListener::bind().await.unwrap();
+        let port = reservation.port();
+        drop(reservation);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+    }
 }

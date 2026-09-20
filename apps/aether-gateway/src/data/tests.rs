@@ -182,6 +182,7 @@ async fn data_state_find_uses_configured_read_repository() {
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: "task-1".to_string(),
             short_id: Some("short-task-1".to_string()),
             request_id: "request-1".to_string(),
@@ -903,6 +904,7 @@ async fn maps_openai_video_task_repository_row_into_read_response() {
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: "task-1".to_string(),
             short_id: Some("short-task-1".to_string()),
             request_id: "request-1".to_string(),
@@ -962,6 +964,7 @@ async fn maps_gemini_video_task_repository_row_into_read_response() {
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: "task-1".to_string(),
             short_id: Some("localshort123".to_string()),
             request_id: "request-1".to_string(),

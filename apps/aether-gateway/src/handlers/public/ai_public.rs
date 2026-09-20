@@ -28,6 +28,9 @@ const AI_PUBLIC_METHOD_NOT_ALLOWED_DETAIL: &str = "Method not allowed";
 const AI_PUBLIC_UNAUTHORIZED_DETAIL: &str = "Unauthorized";
 const AI_PUBLIC_INTERNAL_ERROR_DETAIL: &str = "Service temporarily unavailable";
 const AI_PUBLIC_UPSTREAM_ERROR_DETAIL: &str = "Upstream request failed";
+const OPENAI_CHAT_INVALID_JSON_DETAIL: &str = "Chat completion request JSON body is invalid";
+const OPENAI_CHAT_MESSAGES_REQUIRED_DETAIL: &str =
+    "Chat completion request messages must not be empty";
 const OPENAI_IMAGE_PROMPT_DETAIL: &str = "Image generation or edit request requires prompt";
 const OPENAI_IMAGE_EDIT_INPUT_DETAIL: &str = "Image edit request requires at least one input image";
 const OPENAI_IMAGE_PARTIAL_IMAGES_DETAIL: &str =
@@ -186,6 +189,7 @@ async fn maybe_build_local_gemini_files_response(
 
     let Some(user_id) = allowed_ai_public_user_id(decision) else {
         return Some(build_ai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::NOT_FOUND,
             GEMINI_FILE_NOT_FOUND_DETAIL,
         ));
@@ -197,6 +201,7 @@ async fn maybe_build_local_gemini_files_response(
                 build_local_gemini_files_list_response(state, request_context, user_id).await
             }
             _ => build_ai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::METHOD_NOT_ALLOWED,
                 AI_PUBLIC_METHOD_NOT_ALLOWED_DETAIL,
             ),
@@ -208,6 +213,7 @@ async fn maybe_build_local_gemini_files_response(
         http::Method::GET | http::Method::DELETE
     ) {
         return Some(build_ai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::METHOD_NOT_ALLOWED,
             AI_PUBLIC_METHOD_NOT_ALLOWED_DETAIL,
         ));
@@ -226,6 +232,7 @@ async fn maybe_build_local_gemini_files_response(
                 request_context.request_method.clone(),
                 user_id,
                 short_id,
+                request_context.trace_id.as_str(),
             )
             .await,
         );
@@ -233,12 +240,14 @@ async fn maybe_build_local_gemini_files_response(
 
     if !state.has_gemini_file_mapping_data_reader() {
         return Some(build_ai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::SERVICE_UNAVAILABLE,
             GEMINI_FILES_DATA_UNAVAILABLE_DETAIL,
         ));
     }
     let Some(file_name) = file_name else {
         return Some(build_ai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::NOT_FOUND,
             GEMINI_FILE_NOT_FOUND_DETAIL,
         ));
@@ -254,12 +263,14 @@ async fn maybe_build_local_gemini_files_response(
         Ok(Some(mapping)) => mapping,
         Ok(None) => {
             return Some(build_ai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::NOT_FOUND,
                 GEMINI_FILE_NOT_FOUND_DETAIL,
             ));
         }
         Err(_) => {
             return Some(build_ai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::SERVICE_UNAVAILABLE,
                 GEMINI_FILES_DATA_UNAVAILABLE_DETAIL,
             ));
@@ -267,6 +278,7 @@ async fn maybe_build_local_gemini_files_response(
     };
     if mapping.user_id.as_deref().map(str::trim) != Some(user_id) {
         return Some(build_ai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::NOT_FOUND,
             GEMINI_FILE_NOT_FOUND_DETAIL,
         ));
@@ -289,9 +301,11 @@ async fn build_local_gemini_video_file_response(
     method: http::Method,
     user_id: &str,
     short_id: &str,
+    trace_id: &str,
 ) -> Response<Body> {
     if method != http::Method::GET {
         return build_ai_public_error_response(
+            trace_id,
             http::StatusCode::METHOD_NOT_ALLOWED,
             AI_PUBLIC_METHOD_NOT_ALLOWED_DETAIL,
         );
@@ -304,12 +318,14 @@ async fn build_local_gemini_video_file_response(
         Ok(Some(task)) if is_gemini_video_task(&task) => task,
         Ok(_) => {
             return build_ai_public_error_response(
+                trace_id,
                 http::StatusCode::NOT_FOUND,
                 GEMINI_FILE_NOT_FOUND_DETAIL,
             );
         }
         Err(_) => {
             return build_ai_public_internal_error_response(
+                trace_id,
                 "gemini_video_file_lookup",
                 "data_store_unavailable",
             );
@@ -320,12 +336,14 @@ async fn build_local_gemini_video_file_response(
         Ok(Some(source)) => source,
         Ok(None) => {
             return build_ai_public_error_response(
+                trace_id,
                 http::StatusCode::NOT_FOUND,
                 GEMINI_FILE_NOT_FOUND_DETAIL,
             );
         }
         Err(_) => {
             return build_ai_public_internal_error_response(
+                trace_id,
                 "gemini_video_file_source",
                 "video_source_unavailable",
             );
@@ -335,6 +353,7 @@ async fn build_local_gemini_video_file_response(
     match crate::async_task::build_video_task_video_response(state, &task.id, source).await {
         Ok(response) => response,
         Err(_) => build_ai_public_internal_error_response(
+            trace_id,
             "gemini_video_file_delivery",
             "video_delivery_failed",
         ),
@@ -348,6 +367,7 @@ async fn build_local_gemini_files_list_response(
 ) -> Response<Body> {
     if !state.has_gemini_file_mapping_data_reader() {
         return build_ai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::SERVICE_UNAVAILABLE,
             GEMINI_FILES_DATA_UNAVAILABLE_DETAIL,
         );
@@ -376,6 +396,7 @@ async fn build_local_gemini_files_list_response(
         Ok(mappings) => mappings,
         Err(_) => {
             return build_ai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::SERVICE_UNAVAILABLE,
                 GEMINI_FILES_DATA_UNAVAILABLE_DETAIL,
             );
@@ -440,6 +461,20 @@ fn maybe_build_local_openai_request_validation_response(
     if decision.route_kind.as_deref() == Some("chat")
         && request_context.request_path == "/v1/chat/completions"
     {
+        let Some(request_body) = request_body else {
+            return Some(build_openai_public_error_response(
+                request_context.trace_id.as_str(),
+                http::StatusCode::BAD_REQUEST,
+                OPENAI_CHAT_INVALID_JSON_DETAIL,
+            ));
+        };
+        if let Err(detail) = validate_openai_chat_request(request_body) {
+            return Some(build_openai_public_error_response(
+                request_context.trace_id.as_str(),
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
         return None;
     }
 
@@ -448,6 +483,7 @@ fn maybe_build_local_openai_request_validation_response(
     {
         let Some(request_body) = request_body else {
             return Some(build_openai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::BAD_REQUEST,
                 OPENAI_EMBEDDING_INVALID_JSON_DETAIL,
             ));
@@ -457,6 +493,7 @@ fn maybe_build_local_openai_request_validation_response(
             request_body,
         ) {
             return Some(build_openai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::BAD_REQUEST,
                 detail,
             ));
@@ -469,6 +506,7 @@ fn maybe_build_local_openai_request_validation_response(
     {
         let Some(request_body) = request_body else {
             return Some(build_openai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::BAD_REQUEST,
                 OPENAI_RERANK_INVALID_JSON_DETAIL,
             ));
@@ -478,6 +516,7 @@ fn maybe_build_local_openai_request_validation_response(
             request_body,
         ) {
             return Some(build_openai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::BAD_REQUEST,
                 detail,
             ));
@@ -507,6 +546,7 @@ fn maybe_build_local_openai_request_validation_response(
         Ok(validation) => validation,
         Err(detail) => {
             return Some(build_openai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::BAD_REQUEST,
                 detail,
             ));
@@ -518,12 +558,14 @@ fn maybe_build_local_openai_request_validation_response(
             if validation.prompt.is_none() =>
         {
             return Some(build_openai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::BAD_REQUEST,
                 OPENAI_IMAGE_PROMPT_DETAIL,
             ));
         }
         OpenAiImageOperation::Edit if validation.image_count == 0 => {
             return Some(build_openai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::BAD_REQUEST,
                 OPENAI_IMAGE_EDIT_INPUT_DETAIL,
             ));
@@ -533,6 +575,7 @@ fn maybe_build_local_openai_request_validation_response(
 
     if let Some(detail) = validate_openai_image_n(&validation) {
         return Some(build_openai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::BAD_REQUEST,
             detail,
         ));
@@ -542,6 +585,7 @@ fn maybe_build_local_openai_request_validation_response(
         || (validation.partial_images.is_some() && !validation.stream)
     {
         return Some(build_openai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_PARTIAL_IMAGES_DETAIL,
         ));
@@ -549,6 +593,7 @@ fn maybe_build_local_openai_request_validation_response(
 
     if validation.style_present {
         return Some(build_openai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_STYLE_DETAIL,
         ));
@@ -560,6 +605,7 @@ fn maybe_build_local_openai_request_validation_response(
         .is_some_and(|value| !matches!(value, "url" | "b64_json"))
     {
         return Some(build_openai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_RESPONSE_FORMAT_DETAIL,
         ));
@@ -571,6 +617,7 @@ fn maybe_build_local_openai_request_validation_response(
         .is_some_and(|value| !matches!(value, "png" | "jpeg" | "jpg" | "webp"))
     {
         return Some(build_openai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_OUTPUT_FORMAT_DETAIL,
         ));
@@ -582,6 +629,7 @@ fn maybe_build_local_openai_request_validation_response(
         .is_some_and(|value| normalize_openai_image_quality(value).is_none())
     {
         return Some(build_openai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_QUALITY_DETAIL,
         ));
@@ -593,6 +641,7 @@ fn maybe_build_local_openai_request_validation_response(
         .is_some_and(|value| !matches!(value, "auto" | "opaque" | "transparent"))
     {
         return Some(build_openai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_BACKGROUND_DETAIL,
         ));
@@ -604,6 +653,7 @@ fn maybe_build_local_openai_request_validation_response(
         .is_some_and(|value| !matches!(value, "auto" | "low"))
     {
         return Some(build_openai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_MODERATION_DETAIL,
         ));
@@ -615,6 +665,7 @@ fn maybe_build_local_openai_request_validation_response(
         .is_some_and(|value| !matches!(value, "low" | "high"))
     {
         return Some(build_openai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_INPUT_FIDELITY_DETAIL,
         ));
@@ -625,6 +676,7 @@ fn maybe_build_local_openai_request_validation_response(
         .is_some_and(|value| value > 100)
     {
         return Some(build_openai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_OUTPUT_COMPRESSION_DETAIL,
         ));
@@ -647,6 +699,20 @@ fn validate_openai_image_n(validation: &OpenAiImageValidationInput) -> Option<St
         .n
         .is_some_and(|value| value == 0 || value > max_generation_count)
         .then(|| openai_image_n_detail(max_generation_count))
+}
+
+fn validate_openai_chat_request(request_body: &Bytes) -> Result<(), &'static str> {
+    let payload = serde_json::from_slice::<Value>(request_body)
+        .map_err(|_| OPENAI_CHAT_INVALID_JSON_DETAIL)?;
+    let object = payload.as_object().ok_or(OPENAI_CHAT_INVALID_JSON_DETAIL)?;
+    if object
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err(OPENAI_CHAT_MESSAGES_REQUIRED_DETAIL);
+    }
+    Ok(())
 }
 
 fn validate_openai_embedding_request(
@@ -1269,6 +1335,7 @@ fn maybe_build_local_ai_public_route_guard_response(
         && request_context.request_method != http::Method::POST
     {
         return Some(build_ai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::METHOD_NOT_ALLOWED,
             AI_PUBLIC_METHOD_NOT_ALLOWED_DETAIL,
         ));
@@ -1291,7 +1358,9 @@ fn maybe_build_local_claude_count_tokens_validation_response(
     }
 
     let validation = validate_claude_count_tokens_request(request_body);
-    validation.err().map(build_claude_invalid_request_response)
+    validation.err().map(|detail| {
+        build_claude_invalid_request_response(request_context.trace_id.as_str(), detail)
+    })
 }
 
 fn validate_claude_count_tokens_request(request_body: Option<&Bytes>) -> Result<(), &'static str> {
@@ -1320,14 +1389,15 @@ fn validate_claude_count_tokens_request(request_body: Option<&Bytes>) -> Result<
     Ok(())
 }
 
-fn build_claude_invalid_request_response(detail: &'static str) -> Response<Body> {
-    let body = build_core_error_body_for_client_format(
+fn build_claude_invalid_request_response(trace_id: &str, detail: &'static str) -> Response<Body> {
+    let mut body = build_core_error_body_for_client_format(
         "claude:messages",
         detail,
         None,
         LocalCoreSyncErrorKind::InvalidRequest,
     )
     .expect("Claude core error format should be available");
+    body["trace_id"] = Value::String(trace_id.to_string());
     (http::StatusCode::BAD_REQUEST, Json(body)).into_response()
 }
 
@@ -1365,15 +1435,22 @@ fn maybe_build_local_antigravity_v1internal_response(
         ),
         "record_code_assist_metrics" => Some(Json(json!({})).into_response()),
         "write_trajectory_acls" => Some(Json(json!({})).into_response()),
-        "set_user_settings" => Some(build_antigravity_set_user_settings_response(request_body)),
+        "set_user_settings" => Some(build_antigravity_set_user_settings_response(
+            request_context.trace_id.as_str(),
+            request_body,
+        )),
         "stream_generate_content" => None,
         _ => None,
     }
 }
 
-fn build_antigravity_set_user_settings_response(request_body: Option<&Bytes>) -> Response<Body> {
+fn build_antigravity_set_user_settings_response(
+    trace_id: &str,
+    request_body: Option<&Bytes>,
+) -> Response<Body> {
     let Some(request_body) = request_body else {
         return build_ai_public_error_response(
+            trace_id,
             http::StatusCode::BAD_REQUEST,
             ANTIGRAVITY_USER_SETTINGS_MISSING_BODY_DETAIL,
         );
@@ -1382,6 +1459,7 @@ fn build_antigravity_set_user_settings_response(request_body: Option<&Bytes>) ->
         Ok(payload) => payload,
         Err(_) => {
             return build_ai_public_error_response(
+                trace_id,
                 http::StatusCode::BAD_REQUEST,
                 ANTIGRAVITY_USER_SETTINGS_INVALID_JSON_DETAIL,
             );
@@ -1393,6 +1471,7 @@ fn build_antigravity_set_user_settings_response(request_body: Option<&Bytes>) ->
         .cloned()
     else {
         return build_ai_public_error_response(
+            trace_id,
             http::StatusCode::BAD_REQUEST,
             ANTIGRAVITY_USER_SETTINGS_INVALID_DETAIL,
         );
@@ -1713,9 +1792,15 @@ async fn maybe_build_local_gemini_video_operations_response(
     if request_context.request_path == "/v1beta/operations" {
         return Some(match request_context.request_method {
             http::Method::GET => {
-                build_local_gemini_video_operations_list_response(state, decision).await
+                build_local_gemini_video_operations_list_response(
+                    state,
+                    decision,
+                    request_context.trace_id.as_str(),
+                )
+                .await
             }
             _ => build_ai_public_error_response(
+                request_context.trace_id.as_str(),
                 http::StatusCode::METHOD_NOT_ALLOWED,
                 AI_PUBLIC_METHOD_NOT_ALLOWED_DETAIL,
             ),
@@ -1731,14 +1816,25 @@ async fn maybe_build_local_gemini_video_operations_response(
 
     Some(match request_context.request_method {
         http::Method::GET => {
-            build_local_gemini_video_operation_detail_response(state, decision, operation_path)
-                .await
+            build_local_gemini_video_operation_detail_response(
+                state,
+                decision,
+                operation_path,
+                request_context.trace_id.as_str(),
+            )
+            .await
         }
         http::Method::POST if operation_path.ends_with(":cancel") => {
-            build_local_gemini_video_operation_cancel_response(state, decision, operation_path)
-                .await
+            build_local_gemini_video_operation_cancel_response(
+                state,
+                decision,
+                operation_path,
+                request_context.trace_id.as_str(),
+            )
+            .await
         }
         _ => build_ai_public_error_response(
+            request_context.trace_id.as_str(),
             http::StatusCode::METHOD_NOT_ALLOWED,
             AI_PUBLIC_METHOD_NOT_ALLOWED_DETAIL,
         ),
@@ -1748,9 +1844,11 @@ async fn maybe_build_local_gemini_video_operations_response(
 async fn build_local_gemini_video_operations_list_response(
     state: &AppState,
     decision: &GatewayControlDecision,
+    trace_id: &str,
 ) -> Response<Body> {
     let Some(user_id) = allowed_ai_public_user_id(decision) else {
         return build_ai_public_error_response(
+            trace_id,
             http::StatusCode::UNAUTHORIZED,
             AI_PUBLIC_UNAUTHORIZED_DETAIL,
         );
@@ -1766,6 +1864,7 @@ async fn build_local_gemini_video_operations_list_response(
         Ok(tasks) => tasks,
         Err(_) => {
             return build_ai_public_internal_error_response(
+                trace_id,
                 "gemini_video_operations_list",
                 "data_store_unavailable",
             );
@@ -1784,18 +1883,21 @@ async fn build_local_gemini_video_operation_detail_response(
     state: &AppState,
     decision: &GatewayControlDecision,
     operation_path: &str,
+    trace_id: &str,
 ) -> Response<Body> {
     let task =
         match find_user_gemini_video_task_for_operation(state, decision, operation_path).await {
             Ok(Some(task)) => task,
             Ok(None) => {
                 return build_ai_public_error_response(
+                    trace_id,
                     http::StatusCode::NOT_FOUND,
                     GEMINI_VIDEO_TASK_NOT_FOUND_DETAIL,
                 );
             }
             Err(_) => {
                 return build_ai_public_internal_error_response(
+                    trace_id,
                     "gemini_video_operation_detail",
                     "data_store_unavailable",
                 );
@@ -1809,9 +1911,11 @@ async fn build_local_gemini_video_operation_cancel_response(
     state: &AppState,
     decision: &GatewayControlDecision,
     operation_path: &str,
+    trace_id: &str,
 ) -> Response<Body> {
     let Some(user_id) = allowed_ai_public_user_id(decision) else {
         return build_ai_public_error_response(
+            trace_id,
             http::StatusCode::UNAUTHORIZED,
             AI_PUBLIC_UNAUTHORIZED_DETAIL,
         );
@@ -1821,12 +1925,14 @@ async fn build_local_gemini_video_operation_cancel_response(
             Ok(Some(task)) => task,
             Ok(None) => {
                 return build_ai_public_error_response(
+                    trace_id,
                     http::StatusCode::NOT_FOUND,
                     GEMINI_VIDEO_TASK_NOT_FOUND_DETAIL,
                 );
             }
             Err(_) => {
                 return build_ai_public_internal_error_response(
+                    trace_id,
                     "gemini_video_operation_cancel_lookup",
                     "data_store_unavailable",
                 );
@@ -1836,20 +1942,25 @@ async fn build_local_gemini_video_operation_cancel_response(
     match crate::async_task::cancel_video_task_record_for_user(state, &task.id, user_id).await {
         Ok(_) => Json(json!({})).into_response(),
         Err(CancelVideoTaskError::NotFound) => build_ai_public_error_response(
+            trace_id,
             http::StatusCode::NOT_FOUND,
             GEMINI_VIDEO_TASK_NOT_FOUND_DETAIL,
         ),
         Err(CancelVideoTaskError::InvalidStatus(status)) => build_ai_public_error_response(
+            trace_id,
             http::StatusCode::BAD_REQUEST,
             format!(
                 "Cannot cancel task with status: {}",
                 video_task_status_name(status)
             ),
         ),
-        Err(CancelVideoTaskError::Response(response)) => {
-            build_ai_public_upstream_error_response(response, "gemini_video_operation_cancel")
-        }
+        Err(CancelVideoTaskError::Response(response)) => build_ai_public_upstream_error_response(
+            trace_id,
+            response,
+            "gemini_video_operation_cancel",
+        ),
         Err(CancelVideoTaskError::Gateway(_)) => build_ai_public_internal_error_response(
+            trace_id,
             "gemini_video_operation_cancel",
             "cancel_execution_failed",
         ),
@@ -2013,6 +2124,7 @@ fn video_task_status_name(status: VideoTaskStatus) -> &'static str {
 }
 
 fn build_ai_public_error_response(
+    trace_id: &str,
     status: http::StatusCode,
     detail: impl Into<String>,
 ) -> Response<Body> {
@@ -2027,10 +2139,11 @@ fn build_ai_public_error_response(
     } else {
         detail
     };
-    build_ai_public_error_payload(status, public_detail)
+    build_ai_public_error_payload(status, public_detail, trace_id)
 }
 
 fn build_openai_public_error_response(
+    trace_id: &str,
     status: http::StatusCode,
     detail: impl Into<String>,
 ) -> Response<Body> {
@@ -2048,12 +2161,14 @@ fn build_openai_public_error_response(
         _ if status.is_server_error() => LocalCoreSyncErrorKind::ServerError,
         _ => LocalCoreSyncErrorKind::InvalidRequest,
     };
-    let body = build_core_error_body_for_client_format("openai:image", &detail, None, kind)
+    let mut body = build_core_error_body_for_client_format("openai:image", &detail, None, kind)
         .unwrap_or_else(|| json!({ "error": { "message": detail } }));
+    body["trace_id"] = Value::String(trace_id.to_string());
     (status, Json(body)).into_response()
 }
 
 fn build_ai_public_internal_error_response(
+    trace_id: &str,
     operation: &'static str,
     error_category: &'static str,
 ) -> Response<Body> {
@@ -2066,10 +2181,12 @@ fn build_ai_public_internal_error_response(
     build_ai_public_error_payload(
         http::StatusCode::INTERNAL_SERVER_ERROR,
         AI_PUBLIC_INTERNAL_ERROR_DETAIL,
+        trace_id,
     )
 }
 
 fn build_ai_public_upstream_error_response(
+    trace_id: &str,
     response: Response<Body>,
     operation: &'static str,
 ) -> Response<Body> {
@@ -2093,28 +2210,34 @@ fn build_ai_public_upstream_error_response(
     } else {
         AI_PUBLIC_UPSTREAM_ERROR_DETAIL
     };
-    build_ai_public_error_payload(status, detail)
+    build_ai_public_error_payload(status, detail, trace_id)
 }
 
 fn build_ai_public_error_payload(
     status: http::StatusCode,
     detail: impl Into<String>,
+    trace_id: &str,
 ) -> Response<Body> {
-    (status, Json(json!({ "detail": detail.into() }))).into_response()
+    (
+        status,
+        Json(json!({ "detail": detail.into(), "trace_id": trace_id })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_ai_public_error_response, build_ai_public_upstream_error_response,
-        build_gemini_file_mapping_payload, build_openai_public_error_response,
-        gemini_video_task_error_projection, parse_multipart_fields,
-        parse_openai_image_validation_input, validate_claude_count_tokens_request,
-        validate_openai_image_n, OpenAiImageOperation, StoredGeminiFileMapping,
-        AI_PUBLIC_UPSTREAM_ERROR_DETAIL, CLAUDE_COUNT_TOKENS_BODY_REQUIRED_DETAIL,
-        CLAUDE_COUNT_TOKENS_INVALID_JSON_DETAIL, CLAUDE_COUNT_TOKENS_MESSAGES_REQUIRED_DETAIL,
-        CLAUDE_COUNT_TOKENS_MODEL_REQUIRED_DETAIL, MAX_MULTIPART_PARTS,
-        MAX_MULTIPART_PART_HEADER_BYTES, OPENAI_IMAGE_INVALID_MULTIPART_DETAIL,
+        build_ai_public_error_response, build_ai_public_internal_error_response,
+        build_ai_public_upstream_error_response, build_gemini_file_mapping_payload,
+        build_openai_public_error_response, gemini_video_task_error_projection,
+        parse_multipart_fields, parse_openai_image_validation_input,
+        validate_claude_count_tokens_request, validate_openai_image_n, OpenAiImageOperation,
+        StoredGeminiFileMapping, AI_PUBLIC_UPSTREAM_ERROR_DETAIL,
+        CLAUDE_COUNT_TOKENS_BODY_REQUIRED_DETAIL, CLAUDE_COUNT_TOKENS_INVALID_JSON_DETAIL,
+        CLAUDE_COUNT_TOKENS_MESSAGES_REQUIRED_DETAIL, CLAUDE_COUNT_TOKENS_MODEL_REQUIRED_DETAIL,
+        MAX_MULTIPART_PARTS, MAX_MULTIPART_PART_HEADER_BYTES,
+        OPENAI_IMAGE_INVALID_MULTIPART_DETAIL,
     };
     use aether_data_contracts::repository::video_tasks::{StoredVideoTask, VideoTaskStatus};
     use axum::body::{to_bytes, Body, Bytes};
@@ -2124,6 +2247,7 @@ mod tests {
     #[tokio::test]
     async fn ai_public_server_errors_do_not_expose_internal_details() {
         let response = build_ai_public_error_response(
+            "trace-server-error-123",
             StatusCode::INTERNAL_SERVER_ERROR,
             "database connection failed: password=internal-secret",
         );
@@ -2141,6 +2265,7 @@ mod tests {
     #[tokio::test]
     async fn openai_local_validation_errors_use_openai_error_envelope() {
         let response = build_openai_public_error_response(
+            "trace-openai-validation-123",
             StatusCode::BAD_REQUEST,
             "Image API JSON request body is invalid",
         );
@@ -2160,6 +2285,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_ai_public_error_envelopes_include_the_request_trace_id() {
+        let trace_id = "trace-local-ai-public-123";
+        let upstream_response = axum::http::Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .body(Body::empty())
+            .expect("upstream response should build");
+        let responses = vec![
+            build_ai_public_error_response(trace_id, StatusCode::BAD_REQUEST, "invalid request"),
+            build_openai_public_error_response(
+                trace_id,
+                StatusCode::BAD_REQUEST,
+                "invalid request",
+            ),
+            build_ai_public_internal_error_response(trace_id, "test_operation", "test_error"),
+            build_ai_public_upstream_error_response(trace_id, upstream_response, "test_operation"),
+        ];
+
+        for response in responses {
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("error response body should read");
+            let payload: serde_json::Value =
+                serde_json::from_slice(&body).expect("error response should be JSON");
+            assert_eq!(payload["trace_id"], trace_id);
+        }
+    }
+
+    #[tokio::test]
     async fn ai_public_upstream_errors_discard_the_upstream_response_body() {
         let upstream_response = axum::http::Response::builder()
             .status(StatusCode::UNAUTHORIZED)
@@ -2168,7 +2321,11 @@ mod tests {
             ))
             .expect("upstream response should build");
 
-        let response = build_ai_public_upstream_error_response(upstream_response, "test_operation");
+        let response = build_ai_public_upstream_error_response(
+            "trace-upstream-error-123",
+            upstream_response,
+            "test_operation",
+        );
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let body = to_bytes(response.into_body(), usize::MAX)

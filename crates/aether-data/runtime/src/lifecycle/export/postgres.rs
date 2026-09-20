@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "recharge_restore_tests.rs"]
+mod recharge_restore_tests;
+
 pub async fn export_postgres_core_jsonl(
     pool: &crate::driver::postgres::PostgresPool,
     created_at_unix_secs: u64,
@@ -85,6 +89,15 @@ async fn import_postgres_plan_with_options(
 ) -> Result<usize, DataLayerError> {
     let identity_scope = IdentityImportScope::from_plan(plan)?;
     let mut tx = pool.begin().await.map_sql_err()?;
+    if plan.manifest.domains.contains(&ExportDomain::Wallets) {
+        // Historical receipt INSERTs must not authorize a fresh recovery budget.
+        // Keep this transaction-local flag through COMMIT: enqueue is deferred.
+        // PostgreSQL clears it on both commit and rollback before pool reuse.
+        sqlx::query("SET LOCAL aether.recharge_recovery_restore = 'on'")
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+    }
     let identity_state = capture_postgres_identity_import_state(&mut tx, &identity_scope).await?;
     let mut imported = 0usize;
     let mut column_cache = BTreeMap::<String, PostgresImportColumns>::new();

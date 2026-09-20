@@ -972,6 +972,24 @@ impl AppState {
         Ok(entry)
     }
 
+    pub(crate) async fn upsert_system_config_entry_with_audit(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+        description: Option<&str>,
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<crate::data::state::StoredSystemConfigEntry>, GatewayError> {
+        let entry = self
+            .data
+            .upsert_system_config_entry_with_audit(key, value, description, audit)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if let Some(entry) = entry.as_ref() {
+            self.remember_system_config_write(entry.key.as_str(), Some(entry.value.clone()));
+        }
+        Ok(entry)
+    }
+
     pub(crate) async fn delete_system_config_value(&self, key: &str) -> Result<bool, GatewayError> {
         let deleted = self
             .data
@@ -1856,6 +1874,20 @@ impl AppState {
                 self.background_data.read_usage_counter_pending_health(),
                 crate::clock::current_unix_secs(),
             );
+        let admin_audit_delivery_metrics = async {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                self.background_data.admin_audit_delivery_summary(),
+            )
+            .await
+            {
+                Ok(Ok(summary)) => crate::audit::delivery_summary_metric_samples(
+                    &summary,
+                    crate::clock::current_unix_secs(),
+                ),
+                Ok(Err(_)) | Err(_) => Vec::new(),
+            }
+        };
         let (
             distributed_request_metrics,
             distributed_websocket_connection_metrics,
@@ -1864,6 +1896,7 @@ impl AppState {
             redis_runtime_metrics,
             usage_queue_health_metrics,
             usage_counter_pending_health_metrics,
+            admin_audit_delivery_metrics,
         ) = tokio::join!(
             distributed_request_metrics,
             distributed_websocket_connection_metrics,
@@ -1872,6 +1905,7 @@ impl AppState {
             redis_runtime_metrics,
             usage_queue_health_metrics,
             usage_counter_pending_health_metrics,
+            admin_audit_delivery_metrics,
         );
         samples.extend(distributed_request_metrics);
         samples.extend(distributed_websocket_connection_metrics);
@@ -1880,6 +1914,7 @@ impl AppState {
         samples.extend(redis_runtime_metrics);
         samples.extend(usage_queue_health_metrics);
         samples.extend(usage_counter_pending_health_metrics);
+        samples.extend(admin_audit_delivery_metrics);
         if let Some(queue) = self.request_candidate_queue.as_ref() {
             samples.extend(queue.metric_samples());
         }
@@ -2157,6 +2192,80 @@ impl AppState {
         )
     }
 
+    pub(crate) async fn hydrate_scheduler_affinity_target(
+        &self,
+        cache_key: &str,
+        ttl: Duration,
+        max_entries: usize,
+    ) -> Option<SchedulerAffinityTarget> {
+        if self.runtime_state.is_memory() {
+            return self.read_scheduler_affinity_target(cache_key, ttl);
+        }
+
+        let epoch = self.scheduler_affinity_epoch();
+        let raw = match self.runtime_state.kv_get(cache_key).await {
+            Ok(Some(raw)) => raw,
+            Ok(None) => {
+                self.remove_scheduler_affinity_cache_entry(cache_key);
+                return None;
+            }
+            Err(_) => return self.read_scheduler_affinity_target(cache_key, ttl),
+        };
+        let Some(value) = serde_json::from_str::<serde_json::Value>(&raw).ok() else {
+            self.remove_scheduler_affinity_cache_entry(cache_key);
+            return None;
+        };
+        let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+        let Some(stored_epoch) = value
+            .get("scheduler_affinity_epoch")
+            .and_then(serde_json::Value::as_u64)
+        else {
+            self.remove_scheduler_affinity_cache_entry(cache_key);
+            return None;
+        };
+        let Some(expire_at) = value.get("expire_at").and_then(serde_json::Value::as_u64) else {
+            self.remove_scheduler_affinity_cache_entry(cache_key);
+            return None;
+        };
+        if stored_epoch != epoch || expire_at <= now_unix_secs {
+            self.remove_scheduler_affinity_cache_entry(cache_key);
+            return None;
+        }
+        let Some((provider_id, endpoint_id, key_id)) = value
+            .get("provider_id")
+            .and_then(serde_json::Value::as_str)
+            .zip(value.get("endpoint_id").and_then(serde_json::Value::as_str))
+            .zip(value.get("key_id").and_then(serde_json::Value::as_str))
+            .map(|((provider_id, endpoint_id), key_id)| (provider_id, endpoint_id, key_id))
+        else {
+            self.remove_scheduler_affinity_cache_entry(cache_key);
+            return None;
+        };
+        let target = SchedulerAffinityTarget {
+            provider_id: provider_id.trim().to_string(),
+            endpoint_id: endpoint_id.trim().to_string(),
+            key_id: key_id.trim().to_string(),
+        };
+        if target.provider_id.is_empty()
+            || target.endpoint_id.is_empty()
+            || target.key_id.is_empty()
+        {
+            self.remove_scheduler_affinity_cache_entry(cache_key);
+            return None;
+        }
+        if self.scheduler_affinity_epoch() != epoch {
+            return None;
+        }
+        self.scheduler_affinity_cache.insert_for_epoch(
+            cache_key.to_string(),
+            target.clone(),
+            Duration::from_secs(expire_at.saturating_sub(now_unix_secs)),
+            max_entries,
+            epoch,
+        );
+        Some(target)
+    }
+
     pub(crate) fn remember_scheduler_affinity_target(
         &self,
         cache_key: &str,
@@ -2308,6 +2417,18 @@ impl AppState {
                 background_state.clone(),
                 self.usage_counter_flush_metrics.clone(),
             ),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_RECHARGE_RECOVERY,
+            crate::maintenance::spawn_recharge_recovery_worker(background_state.clone()),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_REFUND_NOTIFICATIONS,
+            crate::maintenance::spawn_refund_notification_worker(background_state.clone()),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_ADMIN_AUDIT_DELIVERY,
+            crate::maintenance::spawn_admin_audit_delivery_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_PROVIDER_QUOTA_RESET,
@@ -4048,7 +4169,7 @@ fn usage_queue_health_metric_samples(
         MetricLabel::new("group", snapshot.consumer_group.clone()),
     ];
     let dlq_labels = vec![MetricLabel::new("stream", snapshot.dlq_stream_key.clone())];
-    vec![
+    let mut samples = vec![
         MetricSample::new(
             "usage_queue_health_unavailable",
             "Whether usage runtime queue health could not be read for this scrape.",
@@ -4103,8 +4224,34 @@ fn usage_queue_health_metric_samples(
             MetricKind::Gauge,
             snapshot.dlq_length,
         )
-        .with_labels(dlq_labels),
-    ]
+        .with_labels(dlq_labels.clone()),
+    ];
+    if let Some(capacity) = &snapshot.dlq_capacity {
+        samples.extend([
+            MetricSample::new(
+                "usage_queue_dlq_max_length",
+                "Configured retention threshold for the usage dead-letter stream; Redis trimming is approximate.",
+                MetricKind::Gauge,
+                capacity.max_length,
+            )
+            .with_labels(dlq_labels.clone()),
+            MetricSample::new(
+                "usage_queue_dlq_utilization_per_mille",
+                "Retained usage dead-letter entries divided by the retention threshold, capped at 1000.",
+                MetricKind::Gauge,
+                u64::from(capacity.utilization_per_mille),
+            )
+            .with_labels(dlq_labels.clone()),
+            MetricSample::new(
+                "usage_queue_dlq_at_retention_boundary",
+                "Whether usage dead-letter retention is at or above the trimming threshold; not a count of lost events.",
+                MetricKind::Gauge,
+                u64::from(capacity.at_retention_boundary),
+            )
+            .with_labels(dlq_labels),
+        ]);
+    }
+    samples
 }
 
 async fn usage_queue_health_metric_samples_with_timeout<F, E>(
@@ -5115,8 +5262,8 @@ mod tests {
         assert_eq!(returned.first(), Some(&stale_sample));
         assert_eq!(
             returned.len(),
-            5,
-            "cached sample plus four live audit signals"
+            9,
+            "cached sample plus four live audit signals and four redrive outcome signals"
         );
 
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -5153,12 +5300,61 @@ mod tests {
 
         assert_eq!(
             samples.len(),
-            5,
-            "service status plus four live audit signals"
+            9,
+            "service status plus four live audit signals and four redrive outcome signals"
         );
         assert_eq!(samples[0].name, "service_up");
         assert_eq!(samples[0].value, 1);
         assert!(state.metric_snapshot.read().await.is_none());
+    }
+
+    #[test]
+    fn usage_queue_health_metrics_report_capacity_without_inventing_unavailable_samples() {
+        let mut health = crate::usage::UsageQueueHealthSnapshot {
+            enabled: true,
+            configured: true,
+            stream_key: "usage:events".to_string(),
+            consumer_group: "usage_consumers".to_string(),
+            dlq_stream_key: "usage:events:dlq".to_string(),
+            stream_length: 0,
+            group_pending: 0,
+            group_lag: None,
+            oldest_pending_idle_ms: None,
+            dlq_length: 6,
+            dlq_capacity: Some(
+                aether_runtime_state::RuntimeQueueCapacitySignal::from_stats(
+                    aether_runtime_state::RuntimeQueueStats {
+                        stream_length: 6,
+                        ..Default::default()
+                    },
+                    5,
+                ),
+            ),
+        };
+        let samples = super::usage_queue_health_metric_samples(&health);
+        for (name, value) in [
+            ("usage_queue_dlq_max_length", 5),
+            ("usage_queue_dlq_utilization_per_mille", 1000),
+            ("usage_queue_dlq_at_retention_boundary", 1),
+        ] {
+            let sample = samples
+                .iter()
+                .find(|sample| sample.name == name)
+                .expect("capacity metric");
+            assert_eq!(sample.value, value);
+            assert_eq!(
+                sample.labels,
+                vec![super::MetricLabel::new("stream", "usage:events:dlq")]
+            );
+        }
+        health.dlq_capacity = None;
+        let samples = super::usage_queue_health_metric_samples(&health);
+        assert!(!samples
+            .iter()
+            .any(|sample| sample.name == "usage_queue_dlq_at_retention_boundary"));
+        assert!(!samples
+            .iter()
+            .any(|sample| sample.name == "usage_queue_dlq_utilization_per_mille"));
     }
 
     #[tokio::test]

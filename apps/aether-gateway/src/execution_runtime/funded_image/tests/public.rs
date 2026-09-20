@@ -1,4 +1,12 @@
 use super::*;
+
+#[cfg(unix)]
+#[path = "public/crash.rs"]
+mod crash_tests;
+
+#[path = "public/receipts.rs"]
+mod receipt_tests;
+
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::driver::postgres::SqlxBillingReadRepository;
 use aether_data::repository::{
@@ -24,7 +32,7 @@ enum Account {
 }
 
 struct PublicBilling {
-    models: InMemoryBillingReadRepository,
+    models: Arc<dyn BillingReadRepository>,
     grants: SqlxBillingReadRepository,
 }
 
@@ -99,6 +107,20 @@ fn candidate() -> StoredMinimalCandidateSelectionRow {
     }
 }
 
+fn retry_candidate() -> StoredMinimalCandidateSelectionRow {
+    let mut row = candidate();
+    row.provider_id = "p-b".into();
+    // Keep the primary candidate deterministic for tests that assert the
+    // first attempt's provider; retry coverage still reaches this candidate
+    // after the primary attempt fails.
+    row.provider_priority = 20;
+    row.provider_name = "images".into();
+    row.endpoint_id = "e-b".into();
+    row.key_id = "pk-b".into();
+    row.key_name = "image-key-retry".into();
+    row
+}
+
 impl Fixture {
     async fn hard_cost_policy(&self, limit: f64) {
         let policy = json!([{"type":"usage_policy","rules":[{"metric":"actual_cost_usd","window":{"kind":"calendar_day","timezone":"UTC"},"limit":limit}]}]);
@@ -114,6 +136,23 @@ impl Fixture {
     }
 
     async fn public_state(&self, account: Account, upstream: &str) -> AppState {
+        self.public_state_with_models(
+            account,
+            upstream,
+            Arc::new(InMemoryBillingReadRepository::seed([
+                pricing("a"),
+                pricing("b"),
+            ])),
+        )
+        .await
+    }
+
+    async fn public_state_with_models(
+        &self,
+        account: Account,
+        upstream: &str,
+        models: Arc<dyn BillingReadRepository>,
+    ) -> AppState {
         match account {
             Account::User => (),
             Account::Standalone => {
@@ -184,12 +223,50 @@ impl Fixture {
             None,
             None,
         );
+        let retry_provider = StoredProviderCatalogProvider::new(
+            "p-b".into(),
+            "images".into(),
+            None,
+            "openai".into(),
+        )
+        .unwrap()
+        .with_transport_fields(
+            true,
+            false,
+            false,
+            None,
+            Some(2),
+            None,
+            Some(10.0),
+            None,
+            None,
+        );
         let base_url = upstream
             .trim_end_matches("/v1/images/generations")
             .to_string();
         let endpoint = StoredProviderCatalogEndpoint::new(
             "e-a".into(),
             "p-a".into(),
+            "openai:image".into(),
+            Some("openai".into()),
+            Some("image".into()),
+            true,
+        )
+        .unwrap()
+        .with_transport_fields(
+            base_url.clone(),
+            None,
+            None,
+            Some(2),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let retry_endpoint = StoredProviderCatalogEndpoint::new(
+            "e-b".into(),
+            "p-b".into(),
             "openai:image".into(),
             Some("openai".into()),
             Some("image".into()),
@@ -223,13 +300,38 @@ impl Fixture {
             None,
         )
         .unwrap();
+        let retry_key = StoredProviderCatalogKey::new(
+            "pk-b".into(),
+            "p-b".into(),
+            "image-key-retry".into(),
+            "api_key".into(),
+            None,
+            true,
+        )
+        .unwrap()
+        .with_transport_fields(
+            Some(json!(["openai:image"])),
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                "sk-public-upstream-fixture",
+            )
+            .unwrap(),
+            None,
+            None,
+            Some(json!({"openai:image":1})),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let data = GatewayDataState::with_auth_candidate_selection_provider_catalog_request_candidates_usage_billing_and_wallet_for_tests(
             auth,
-            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([candidate()])),
-            Arc::new(InMemoryProviderCatalogReadRepository::seed(vec![provider],vec![endpoint],vec![key])),
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([candidate(), retry_candidate()])),
+            Arc::new(InMemoryProviderCatalogReadRepository::seed(vec![provider, retry_provider],vec![endpoint, retry_endpoint],vec![key, retry_key])),
             Arc::new(InMemoryRequestCandidateRepository::default()),
             Arc::new(SqlxUsageReadRepository::new(self.pool.clone())),
-            Arc::new(PublicBilling { models: InMemoryBillingReadRepository::seed([pricing("a")]), grants: SqlxBillingReadRepository::new(self.pool.clone()) }),
+            Arc::new(PublicBilling { models, grants: SqlxBillingReadRepository::new(self.pool.clone()) }),
             Arc::new(SqlxWalletRepository::new(self.pool.clone())),
             DEVELOPMENT_ENCRYPTION_KEY,
         ).with_settlement_writer_for_tests(Arc::new(SqlxSettlementRepository::new(self.pool.clone())));

@@ -5,6 +5,7 @@ use super::{
     InMemoryVideoTaskRepository, StoredAuthApiKeySnapshot, UpsertVideoTask, VideoTaskLookupKey,
     VideoTaskReadRepository, VideoTaskStatus, VideoTaskWriteRepository, DEVELOPMENT_ENCRYPTION_KEY,
 };
+use crate::constants::TRACE_ID_HEADER;
 use crate::data::GatewayDataState;
 use crate::image_capabilities::openai_image_gateway_max_generation_count;
 use crate::tests::{
@@ -26,7 +27,7 @@ use aether_data_contracts::repository::candidate_selection::{
     StoredRequestedModelCandidateRowsQuery,
 };
 use aether_data_contracts::repository::global_models::{
-    StoredAdminGlobalModel, UpdateAdminGlobalModelRecord,
+    StoredAdminGlobalModel, StoredPublicGlobalModel, UpdateAdminGlobalModelRecord,
 };
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogReadRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
@@ -337,6 +338,7 @@ fn sample_gemini_video_task(
 ) -> UpsertVideoTask {
     let completed = matches!(status, VideoTaskStatus::Completed);
     UpsertVideoTask {
+        row_revision: 0,
         id: id.to_string(),
         short_id: Some(short_id.to_string()),
         request_id: format!("request-{id}"),
@@ -3627,6 +3629,362 @@ async fn gateway_does_not_locally_reject_image_model_name_on_chat_completions() 
 }
 
 #[tokio::test]
+async fn gateway_classifies_authenticated_unknown_chat_model_as_not_found() {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-openai-unknown-model")),
+        unrestricted_models_snapshot("key-unknown-model", "user-unknown-model"),
+    )]));
+    let global_model_repository = Arc::new(InMemoryGlobalModelReadRepository::seed(Vec::new()));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                    Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(
+                        Vec::new(),
+                    )),
+                    auth_repository,
+                )
+                .with_global_model_repository_for_tests(global_model_repository)
+                .with_system_default_routing_group_for_tests(),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let request = json!({
+        "model": "gpt-missing-public-model",
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    let response = client
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .bearer_auth("sk-openai-unknown-model")
+        .json(&request)
+        .send()
+        .await
+        .expect("authenticated request should complete");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.headers()[EXECUTION_PATH_HEADER],
+        EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS
+    );
+    assert!(!response.headers().contains_key("retry-after"));
+    let trace_id = response.headers()[TRACE_ID_HEADER]
+        .to_str()
+        .expect("trace header")
+        .to_string();
+    let payload: serde_json::Value = response.json().await.expect("OpenAI error JSON");
+    assert_eq!(payload["error"]["type"], "not_found_error");
+    assert_eq!(payload["error"]["code"], "model_not_found");
+    assert_eq!(payload["trace_id"], trace_id);
+
+    let response = client
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .json(&request)
+        .send()
+        .await
+        .expect("anonymous request should complete");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let payload: serde_json::Value = response.json().await.expect("authentication error JSON");
+    assert_ne!(payload["error"]["code"], "model_not_found");
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_keeps_declared_but_unavailable_chat_model_retryable() {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-openai-known-unavailable-model")),
+        unrestricted_models_snapshot(
+            "key-known-unavailable-model",
+            "user-known-unavailable-model",
+        ),
+    )]));
+    let global_model_repository = Arc::new(InMemoryGlobalModelReadRepository::seed(vec![
+        StoredPublicGlobalModel::new(
+            "global-known-unavailable".to_string(),
+            "gpt-known-unavailable".to_string(),
+            Some("Known unavailable model".to_string()),
+            true,
+            None,
+            None,
+            None,
+            None,
+            0,
+        )
+        .expect("global model should build"),
+    ]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                    Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(
+                        Vec::new(),
+                    )),
+                    auth_repository,
+                )
+                .with_global_model_repository_for_tests(global_model_repository)
+                .with_system_default_routing_group_for_tests(),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .bearer_auth("sk-openai-known-unavailable-model")
+        .json(&json!({
+            "model": "gpt-known-unavailable",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .expect("request should complete");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.headers()[EXECUTION_PATH_HEADER],
+        EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS
+    );
+    let payload: serde_json::Value = response.json().await.expect("OpenAI error JSON");
+    assert_eq!(payload["error"]["type"], "server_error");
+    assert_ne!(payload["error"]["code"], "model_not_found");
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_keeps_scheduler_declared_chat_alias_retryable() {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-openai-known-alias-model")),
+        unrestricted_models_snapshot("key-known-alias-model", "user-known-alias-model"),
+    )]));
+    let mut declared_but_unavailable = sample_models_candidate_row(
+        "provider-known-alias",
+        "openai",
+        "openai:chat",
+        "gpt-known-canonical",
+        10,
+    );
+    declared_but_unavailable.global_model_mappings = Some(vec!["gpt-known-alias".to_string()]);
+    declared_but_unavailable.model_is_active = false;
+    declared_but_unavailable.model_is_available = false;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                    Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+                        declared_but_unavailable,
+                    ])),
+                    auth_repository,
+                )
+                .with_global_model_repository_for_tests(Arc::new(
+                    InMemoryGlobalModelReadRepository::seed(Vec::new()),
+                ))
+                .with_system_default_routing_group_for_tests(),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .bearer_auth("sk-openai-known-alias-model")
+        .json(&json!({
+            "model": "gpt-known-alias",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .expect("request should complete");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.headers()[EXECUTION_PATH_HEADER],
+        EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS
+    );
+    let payload: serde_json::Value = response.json().await.expect("OpenAI error JSON");
+    assert_ne!(payload["error"]["code"], "model_not_found");
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_keeps_unavailable_provider_model_names_and_aliases_retryable() {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-openai-unavailable-provider-model")),
+        unrestricted_models_snapshot(
+            "key-unavailable-provider-model",
+            "user-unavailable-provider-model",
+        ),
+    )]));
+    let mut declared_but_unavailable = sample_models_candidate_row(
+        "provider-unavailable-provider-model",
+        "openai",
+        "openai:chat",
+        "gpt-known-canonical",
+        10,
+    );
+    declared_but_unavailable.model_provider_model_name = "upstream-known-model".to_string();
+    declared_but_unavailable.model_provider_model_mappings = Some(vec![
+        aether_data_contracts::repository::candidate_selection::StoredProviderModelMapping {
+            name: "upstream-known-alias".to_string(),
+            priority: 1,
+            api_formats: Some(vec!["openai:chat".to_string()]),
+            endpoint_ids: None,
+            operations: None,
+        },
+    ]);
+    declared_but_unavailable.model_is_active = false;
+    declared_but_unavailable.model_is_available = false;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                    Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+                        declared_but_unavailable,
+                    ])),
+                    auth_repository,
+                )
+                .with_global_model_repository_for_tests(Arc::new(
+                    InMemoryGlobalModelReadRepository::seed(Vec::new()),
+                ))
+                .with_system_default_routing_group_for_tests(),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    for model in ["upstream-known-model", "upstream-known-alias"] {
+        let response = client
+            .post(format!("{gateway_url}/v1/chat/completions"))
+            .bearer_auth("sk-openai-unavailable-provider-model")
+            .json(&json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hello"}]
+            }))
+            .send()
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers()[EXECUTION_PATH_HEADER],
+            EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS
+        );
+        let payload: serde_json::Value = response.json().await.expect("OpenAI error JSON");
+        assert_ne!(payload["error"]["code"], "model_not_found");
+    }
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_keeps_model_directive_base_model_retryable_when_unavailable() {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-openai-known-directive-model")),
+        unrestricted_models_snapshot("key-known-directive-model", "user-known-directive-model"),
+    )]));
+    let mut declared_but_unavailable = sample_models_candidate_row(
+        "provider-known-directive",
+        "openai",
+        "openai:chat",
+        "gpt-5.6-sol",
+        10,
+    );
+    declared_but_unavailable.model_is_active = false;
+    declared_but_unavailable.model_is_available = false;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                    Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+                        declared_but_unavailable,
+                    ])),
+                    auth_repository,
+                )
+                .with_global_model_repository_for_tests(Arc::new(
+                    InMemoryGlobalModelReadRepository::seed(Vec::new()),
+                ))
+                .with_system_config_values_for_tests(vec![(
+                    "enable_model_directives".to_string(),
+                    json!(true),
+                )])
+                .with_system_default_routing_group_for_tests(),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .bearer_auth("sk-openai-known-directive-model")
+        .json(&json!({
+            "model": "gpt-5.6-sol-high",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .expect("request should complete");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.headers()[EXECUTION_PATH_HEADER],
+        EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS
+    );
+    let payload: serde_json::Value = response.json().await.expect("OpenAI error JSON");
+    assert_ne!(payload["error"]["code"], "model_not_found");
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_classifies_authenticated_unknown_image_model_as_not_found() {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-openai-unknown-image-model")),
+        unrestricted_models_snapshot("key-unknown-image-model", "user-unknown-image-model"),
+    )]));
+    let global_model_repository = Arc::new(InMemoryGlobalModelReadRepository::seed(Vec::new()));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                    Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(
+                        Vec::new(),
+                    )),
+                    auth_repository,
+                )
+                .with_global_model_repository_for_tests(global_model_repository)
+                .with_system_default_routing_group_for_tests(),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/images/generations"))
+        .bearer_auth("sk-openai-unknown-image-model")
+        .json(&json!({"model": "missing-image-model", "prompt": "draw"}))
+        .send()
+        .await
+        .expect("image request should complete");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.headers()[EXECUTION_PATH_HEADER],
+        EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS
+    );
+    assert!(!response.headers().contains_key("retry-after"));
+    let payload: serde_json::Value = response.json().await.expect("OpenAI error JSON");
+    assert_eq!(payload["error"]["type"], "not_found_error");
+    assert_eq!(payload["error"]["code"], "model_not_found");
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_image_invalid_request_fixtures_match_real_router_responses() {
     let upstream_hits = Arc::new(AtomicUsize::new(0));
     let upstream_hits_for_handler = Arc::clone(&upstream_hits);
@@ -3707,6 +4065,90 @@ async fn gateway_image_invalid_request_fixtures_match_real_router_responses() {
         assert!(payload.get("detail").is_none(), "{id} legacy envelope");
         assert_eq!(upstream_hits.load(Ordering::SeqCst), 0, "{id}");
     }
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_chat_invalid_request_fixture_matches_real_router_response() {
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let upstream_hits_for_handler = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/{*path}",
+        any(move |_request: Request| {
+            let hits = Arc::clone(&upstream_hits_for_handler);
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (StatusCode::OK, Json(json!({"unexpected_upstream": true})))
+            }
+        }),
+    );
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-chat-contract")),
+        unrestricted_models_snapshot("key-chat-contract", "user-chat-contract"),
+    )]));
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(upstream_url)
+            .with_auth_api_key_data_reader_for_tests(auth_repository),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let fixture: serde_json::Value =
+        serde_json::from_str(crate::tests::api_contract_fixtures::FIXTURE)
+            .expect("compatibility fixture should parse");
+    let case = fixture["cases"]
+        .as_array()
+        .expect("fixture cases")
+        .iter()
+        .find(|case| case["id"] == "openai-chat-invalid-request")
+        .expect("missing required chat fixture");
+    let trace_id = "trace-openai-chat-invalid-request";
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!(
+            "{gateway_url}{}",
+            case["endpoint"].as_str().expect("endpoint")
+        ))
+        .header("authorization", "Bearer sk-chat-contract")
+        .header("x-trace-id", trace_id)
+        .json(&case["request"])
+        .send()
+        .await
+        .expect("chat request should complete");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        u64::from(response.status().as_u16()),
+        case["status"].as_u64().expect("fixture HTTP status")
+    );
+    assert_eq!(response.headers()["x-trace-id"], trace_id);
+    assert_eq!(
+        response.headers()[EXECUTION_PATH_HEADER],
+        EXECUTION_PATH_LOCAL_AI_PUBLIC
+    );
+    assert!(case["retry_after"].is_null());
+    assert!(!response.headers().contains_key("retry-after"));
+    let payload: serde_json::Value = response.json().await.expect("OpenAI error JSON");
+    assert_eq!(payload["error"]["type"], case["error_type"]);
+    assert_eq!(payload["error"]["code"], case["error_code"]);
+    assert!(payload.get("detail").is_none());
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
+
+    let response = client
+        .post(format!(
+            "{gateway_url}{}",
+            case["endpoint"].as_str().expect("endpoint")
+        ))
+        .json(&case["request"])
+        .send()
+        .await
+        .expect("anonymous request should complete");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let payload: serde_json::Value = response.json().await.expect("authentication error JSON");
+    assert_ne!(payload["error"]["type"], case["error_type"]);
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
 
     gateway_handle.abort();
     upstream_handle.abort();
@@ -3987,13 +4429,16 @@ async fn gateway_hides_gemini_operation_detail_and_cancel_from_non_owner() {
         .await
         .expect("cross-user detail request should complete");
     assert_eq!(detail_response.status(), StatusCode::NOT_FOUND);
-    assert_eq!(
-        detail_response
-            .json::<serde_json::Value>()
-            .await
-            .expect("json body should parse"),
-        json!({ "detail": "Video task not found" })
-    );
+    let detail_trace_id = detail_response.headers()[TRACE_ID_HEADER]
+        .to_str()
+        .expect("trace header")
+        .to_string();
+    let detail_payload: serde_json::Value = detail_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(detail_payload["detail"], "Video task not found");
+    assert_eq!(detail_payload["trace_id"], detail_trace_id);
 
     let cancel_response = client
         .post(format!(
@@ -4006,13 +4451,16 @@ async fn gateway_hides_gemini_operation_detail_and_cancel_from_non_owner() {
         .await
         .expect("cross-user cancel request should complete");
     assert_eq!(cancel_response.status(), StatusCode::NOT_FOUND);
-    assert_eq!(
-        cancel_response
-            .json::<serde_json::Value>()
-            .await
-            .expect("json body should parse"),
-        json!({ "detail": "Video task not found" })
-    );
+    let cancel_trace_id = cancel_response.headers()[TRACE_ID_HEADER]
+        .to_str()
+        .expect("trace header")
+        .to_string();
+    let cancel_payload: serde_json::Value = cancel_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(cancel_payload["detail"], "Video task not found");
+    assert_eq!(cancel_payload["trace_id"], cancel_trace_id);
 
     let stored = repository
         .find(VideoTaskLookupKey::Id("task-gemini-operation-owner"))
@@ -4103,13 +4551,16 @@ async fn gateway_hides_gemini_video_file_from_non_owner_and_allows_owner_rotated
         .await
         .expect("foreign request should complete");
     assert_eq!(foreign_response.status(), StatusCode::NOT_FOUND);
-    assert_eq!(
-        foreign_response
-            .json::<serde_json::Value>()
-            .await
-            .expect("json body should parse"),
-        json!({"detail": "File not found"})
-    );
+    let foreign_trace_id = foreign_response.headers()[TRACE_ID_HEADER]
+        .to_str()
+        .expect("trace header")
+        .to_string();
+    let foreign_payload: serde_json::Value = foreign_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(foreign_payload["detail"], "File not found");
+    assert_eq!(foreign_payload["trace_id"], foreign_trace_id);
     assert_eq!(*fallback_probe_hits.lock().expect("mutex should lock"), 0);
 
     let owner_response = client
@@ -4122,13 +4573,14 @@ async fn gateway_hides_gemini_video_file_from_non_owner_and_allows_owner_rotated
     assert_ne!(owner_response.status(), StatusCode::NOT_FOUND);
     assert_ne!(owner_response.status(), StatusCode::TEMPORARY_REDIRECT);
     assert_eq!(owner_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(
-        owner_response
-            .json::<serde_json::Value>()
-            .await
-            .expect("json body should parse"),
-        json!({"detail": "Service temporarily unavailable"})
-    );
+    let owner_trace_id = owner_response.headers()[TRACE_ID_HEADER]
+        .to_str()
+        .expect("trace header")
+        .to_string();
+    let owner_payload: serde_json::Value =
+        owner_response.json().await.expect("json body should parse");
+    assert_eq!(owner_payload["detail"], "Service temporarily unavailable");
+    assert_eq!(owner_payload["trace_id"], owner_trace_id);
     assert_eq!(*fallback_probe_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

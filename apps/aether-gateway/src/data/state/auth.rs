@@ -1,17 +1,18 @@
 use super::{
-    ActivateManagementTokenIfMatches, AuthApiKeyLookupKey, CompareAndSwapLdapConfigResult,
-    CreateManagementTokenRecord, DataLayerError, GatewayAuthApiKeySnapshot, GatewayDataState,
-    InitializeAuthWalletOutcome, LdapBindPasswordUpdate, ManagementTokenCounterDelta,
-    ManagementTokenListQuery, ProxyNodeCounterDelta, ProxyNodeHeartbeatMutation,
-    ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation, ProxyNodeRegistrationMutation,
-    ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation, ProxyNodeTunnelStatusMutation,
-    RegenerateManagementTokenSecret, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
-    StoredLdapModuleConfig, StoredManagementToken, StoredManagementTokenListPage,
-    StoredManagementTokenWithUser, StoredOAuthProviderConfig, StoredOAuthProviderModuleConfig,
-    StoredProxyFleetMetricsBucket, StoredProxyNode, StoredProxyNodeEvent,
-    StoredProxyNodeMetricsBucket, StoredUserAuthRecord, StoredUserOAuthLinkSummary,
-    StoredUserPreferenceRecord, StoredUserSessionRecord, StoredWalletSnapshot,
-    UpdateManagementTokenRecord, UpsertOAuthProviderConfigRecord,
+    ActivateManagementTokenIfMatches, AdminUserSessionRevocationOutcome,
+    AdminUserSessionsRevocationOutcome, AuthApiKeyLookupKey, CompareAndSwapLdapConfigResult,
+    CreateAdminAuditLog, CreateManagementTokenRecord, DataLayerError, GatewayAuthApiKeySnapshot,
+    GatewayDataState, InitializeAuthWalletOutcome, LdapBindPasswordUpdate,
+    ManagementTokenCounterDelta, ManagementTokenListQuery, ProxyNodeCounterDelta,
+    ProxyNodeHeartbeatMutation, ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation,
+    ProxyNodeRegistrationMutation, ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation,
+    ProxyNodeTunnelStatusMutation, RegenerateManagementTokenSecret, StoredAuthApiKeyExportRecord,
+    StoredAuthApiKeySnapshot, StoredLdapModuleConfig, StoredManagementToken,
+    StoredManagementTokenListPage, StoredManagementTokenWithUser, StoredOAuthProviderConfig,
+    StoredOAuthProviderModuleConfig, StoredProxyFleetMetricsBucket, StoredProxyNode,
+    StoredProxyNodeEvent, StoredProxyNodeMetricsBucket, StoredUserAuthRecord,
+    StoredUserOAuthLinkSummary, StoredUserPreferenceRecord, StoredUserSessionRecord,
+    StoredWalletSnapshot, UpdateManagementTokenRecord, UpsertOAuthProviderConfigRecord,
 };
 use crate::LocalMutationOutcome;
 use aether_data::repository::auth::ResolvedAuthApiKeySnapshotReader;
@@ -203,6 +204,23 @@ impl GatewayDataState {
                     .await
             }
             None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn replace_user_group_members_with_audit(
+        &self,
+        group_id: &str,
+        user_ids: &[String],
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<Vec<aether_data::repository::users::StoredUserGroupMember>>, DataLayerError>
+    {
+        match &self.user_reader {
+            Some(repository) => {
+                repository
+                    .replace_user_group_members_with_audit(group_id, user_ids, audit)
+                    .await
+            }
+            None => Ok(None),
         }
     }
 
@@ -1506,6 +1524,37 @@ impl GatewayDataState {
         };
         repository
             .revoke_all_user_sessions(user_id, revoked_at, reason)
+            .await
+    }
+
+    pub(crate) async fn admin_revoke_user_session_with_audit(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+        audit: &CreateAdminAuditLog,
+    ) -> Result<Option<AdminUserSessionRevocationOutcome>, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(None);
+        };
+        repository
+            .admin_revoke_user_session_with_audit(user_id, session_id, revoked_at, reason, audit)
+            .await
+    }
+
+    pub(crate) async fn admin_revoke_all_user_sessions_with_audit(
+        &self,
+        user_id: &str,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+        audit: &CreateAdminAuditLog,
+    ) -> Result<Option<AdminUserSessionsRevocationOutcome>, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(None);
+        };
+        repository
+            .admin_revoke_all_user_sessions_with_audit(user_id, revoked_at, reason, audit)
             .await
     }
 

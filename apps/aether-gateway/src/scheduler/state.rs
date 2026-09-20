@@ -8,11 +8,19 @@ use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
 use aether_scheduler_core::SchedulerAffinityTarget;
 use async_trait::async_trait;
 
+use crate::orchestration::{HalfOpenProbeClaim, HalfOpenProbeClaimOutcome};
 use crate::GatewayError;
 
 #[async_trait]
 pub(crate) trait SchedulerRuntimeState {
     async fn read_provider_quota_snapshot(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<StoredProviderQuotaSnapshot>, GatewayError>;
+
+    /// Send admission uses this authority read after a plan has already been
+    /// selected, so a short-lived quota cache cannot admit an exhausted provider.
+    async fn read_provider_quota_snapshot_uncached(
         &self,
         provider_id: &str,
     ) -> Result<Option<StoredProviderQuotaSnapshot>, GatewayError>;
@@ -31,6 +39,35 @@ pub(crate) trait SchedulerRuntimeState {
         &self,
         limit: usize,
     ) -> Result<Vec<StoredRequestCandidate>, GatewayError>;
+
+    async fn try_acquire_half_open_probe(
+        &self,
+        provider_key_id: &str,
+        api_format: &str,
+        circuit_breaker_by_format: Option<&serde_json::Value>,
+        now_unix_secs: u64,
+    ) -> HalfOpenProbeClaimOutcome {
+        let _ = (
+            provider_key_id,
+            api_format,
+            circuit_breaker_by_format,
+            now_unix_secs,
+        );
+        // Test and alternate scheduler state implementations have no shared
+        // lock backend. Treat a due probe as unavailable rather than allowing
+        // an un-fenced send.
+        HalfOpenProbeClaimOutcome::Unavailable
+    }
+
+    async fn renew_half_open_probe(&self, claim: &HalfOpenProbeClaim) -> bool {
+        let _ = claim;
+        false
+    }
+
+    async fn release_half_open_probe(&self, claim: HalfOpenProbeClaim) -> bool {
+        let _ = claim;
+        false
+    }
 
     fn provider_key_rpm_reset_at(&self, key_id: &str, now_unix_secs: u64) -> Option<u64>;
 

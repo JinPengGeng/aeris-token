@@ -8,17 +8,20 @@ use http::header::{HeaderName, HeaderValue};
 use http::StatusCode;
 
 use crate::constants::{
-    CONTROL_EXECUTED_HEADER, CONTROL_EXECUTE_FALLBACK_HEADER, EXECUTION_PATH_HEADER,
+    CONTROL_EXECUTED_HEADER, CONTROL_EXECUTE_FALLBACK_HEADER,
+    EXECUTION_PATH_EXECUTION_RUNTIME_SYNC, EXECUTION_PATH_HEADER, EXECUTION_PATH_LOCAL_AUTH_DENIED,
 };
 
 use super::{build_router, start_server};
 
-// Keep these runtime-miss fixtures in the unresolved internal context case:
-// the caller supplies a credential, while the gateway has no auth reader.
+// Keep the task-read fixtures in the unresolved internal context case: the
+// caller supplies a credential, while the gateway has no auth reader. GET
+// task reads must remain an enumerability-safe 404 rather than falling
+// through to a public or control-execute route.
 const INTERNAL_AUTH_CONTEXT_TEST_BEARER: &str = "Bearer sk-context-reader-unavailable";
 
 #[tokio::test]
-async fn gateway_hides_video_task_from_unauthenticated_caller_with_opt_in_headers() {
+async fn gateway_hides_video_task_when_auth_context_is_unavailable_even_with_opt_in_header() {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
     let public_hits = Arc::new(Mutex::new(0usize));
@@ -74,6 +77,10 @@ async fn gateway_hides_video_task_from_unauthenticated_caller_with_opt_in_header
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.headers()[EXECUTION_PATH_HEADER],
+        EXECUTION_PATH_EXECUTION_RUNTIME_SYNC
+    );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(payload, crate::video_tasks::not_found_body());
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
@@ -84,7 +91,7 @@ async fn gateway_hides_video_task_from_unauthenticated_caller_with_opt_in_header
 }
 
 #[tokio::test]
-async fn gateway_hides_video_task_without_calling_public_or_control_upstream() {
+async fn gateway_hides_video_task_when_auth_context_is_unavailable_without_opt_in_header() {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
     let public_hits = Arc::new(Mutex::new(0usize));
@@ -143,12 +150,15 @@ async fn gateway_hides_video_task_without_calling_public_or_control_upstream() {
             http::header::AUTHORIZATION,
             INTERNAL_AUTH_CONTEXT_TEST_BEARER,
         )
-        .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .send()
         .await
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.headers()[EXECUTION_PATH_HEADER],
+        EXECUTION_PATH_EXECUTION_RUNTIME_SYNC
+    );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(payload, crate::video_tasks::not_found_body());
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
@@ -167,7 +177,7 @@ async fn gateway_hides_video_task_without_calling_public_or_control_upstream() {
 }
 
 #[tokio::test]
-async fn gateway_hides_video_task_from_unauthenticated_caller_without_opt_in_headers() {
+async fn gateway_rejects_video_get_without_credentials_at_auth_boundary() {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
     let public_hits = Arc::new(Mutex::new(0usize));
@@ -209,17 +219,18 @@ async fn gateway_hides_video_task_from_unauthenticated_caller_without_opt_in_hea
 
     let response = reqwest::Client::new()
         .get(format!("{gateway_url}/v1/videos/task-123"))
-        .header(
-            http::header::AUTHORIZATION,
-            INTERNAL_AUTH_CONTEXT_TEST_BEARER,
-        )
         .send()
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers()[EXECUTION_PATH_HEADER],
+        EXECUTION_PATH_LOCAL_AUTH_DENIED
+    );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload, crate::video_tasks::not_found_body());
+    assert_eq!(payload["error"]["type"], "authentication_error");
+    assert_eq!(payload["error"]["message"], "Invalid API key");
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 

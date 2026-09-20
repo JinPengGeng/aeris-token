@@ -193,7 +193,7 @@ async fn handle_live_http(
                 error.status_code(),
                 error.client_message(),
                 "multipart_parse_failed",
-            )
+            );
         }
     };
     let Some(client_model) = offer

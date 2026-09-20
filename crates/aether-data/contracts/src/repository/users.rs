@@ -613,6 +613,19 @@ pub struct StoredUserSessionRecord {
     pub security_version: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminUserSessionRevocationOutcome {
+    Revoked,
+    AlreadyRevoked,
+    NotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminUserSessionsRevocationOutcome {
+    Revoked(u64),
+    NotFound,
+}
+
 impl std::fmt::Debug for StoredUserSessionRecord {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -1090,6 +1103,18 @@ pub trait UserReadRepository: Send + Sync {
         user_ids: &[String],
     ) -> Result<Vec<StoredUserGroupMember>, crate::DataLayerError>;
 
+    /// Returns `None` without writing when this adapter cannot atomically commit
+    /// membership replacement and the durable audit intent in the same database.
+    async fn replace_user_group_members_with_audit(
+        &self,
+        group_id: &str,
+        user_ids: &[String],
+        audit: &crate::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<Vec<StoredUserGroupMember>>, crate::DataLayerError> {
+        let _ = (group_id, user_ids, audit);
+        Ok(None)
+    }
+
     async fn list_user_groups_for_user(
         &self,
         user_id: &str,
@@ -1534,6 +1559,34 @@ pub trait UserReadRepository: Send + Sync {
         revoked_at: DateTime<Utc>,
         reason: &str,
     ) -> Result<u64, crate::DataLayerError>;
+
+    /// Atomically revoke one session and enqueue its administrator audit fact.
+    /// `None` means this repository does not provide the durable transaction;
+    /// callers may retain their existing non-durable fallback.
+    async fn admin_revoke_user_session_with_audit(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        revoked_at: DateTime<Utc>,
+        reason: &str,
+        audit: &crate::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<AdminUserSessionRevocationOutcome>, crate::DataLayerError> {
+        let _ = (user_id, session_id, revoked_at, reason, audit);
+        Ok(None)
+    }
+
+    /// Atomically revoke every active session and enqueue one administrator
+    /// audit fact. `None` preserves the legacy repository fallback.
+    async fn admin_revoke_all_user_sessions_with_audit(
+        &self,
+        user_id: &str,
+        revoked_at: DateTime<Utc>,
+        reason: &str,
+        audit: &crate::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<AdminUserSessionsRevocationOutcome>, crate::DataLayerError> {
+        let _ = (user_id, revoked_at, reason, audit);
+        Ok(None)
+    }
 
     async fn count_active_admin_users(&self) -> Result<u64, crate::DataLayerError>;
 

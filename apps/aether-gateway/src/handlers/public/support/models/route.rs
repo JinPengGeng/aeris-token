@@ -80,7 +80,11 @@ fn build_models_read_fallback_response(
         Some("detail") => {
             let model_id = models_detail_id(&request_context.request_path)
                 .unwrap_or_else(|| "unknown".to_string());
-            build_models_not_found_response(&model_id, api_format)
+            build_models_not_found_response(
+                request_context.trace_id.as_str(),
+                &model_id,
+                api_format,
+            )
         }
         _ => build_empty_models_list_response(api_format),
     }
@@ -318,7 +322,10 @@ pub(super) async fn maybe_build_local_models_route_response(
 
     let auth_context = decision.auth_context.as_ref()?;
     if !auth_context.access_allowed || auth_context.local_rejection.is_some() {
-        return Some(build_models_auth_error_response(api_format));
+        return Some(build_models_auth_error_response(
+            request_context.trace_id.as_str(),
+            api_format,
+        ));
     }
     let now_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -349,10 +356,16 @@ pub(super) async fn maybe_build_local_models_route_response(
             api_key_id = %auth_context.api_key_id,
             "gateway models route rejected a request whose authenticated API key snapshot disappeared"
         );
-        return Some(build_models_auth_error_response(api_format));
+        return Some(build_models_auth_error_response(
+            request_context.trace_id.as_str(),
+            api_format,
+        ));
     };
     if !auth_snapshot.currently_usable {
-        return Some(build_models_auth_error_response(api_format));
+        return Some(build_models_auth_error_response(
+            request_context.trace_id.as_str(),
+            api_format,
+        ));
     }
     let auth_snapshot = Some(auth_snapshot);
 
@@ -456,7 +469,11 @@ pub(super) async fn maybe_build_local_models_route_response(
                 }
             };
             let Some(row) = rows.first() else {
-                return Some(build_models_not_found_response(&model_id, api_format));
+                return Some(build_models_not_found_response(
+                    request_context.trace_id.as_str(),
+                    &model_id,
+                    api_format,
+                ));
             };
             let response = match api_format {
                 "claude:messages" => build_claude_model_detail_response(row),
@@ -465,7 +482,10 @@ pub(super) async fn maybe_build_local_models_route_response(
             };
             Some(response)
         }
-        _ => Some(build_models_auth_error_response(api_format)),
+        _ => Some(build_models_auth_error_response(
+            request_context.trace_id.as_str(),
+            api_format,
+        )),
     }
 }
 

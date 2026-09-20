@@ -1,3 +1,4 @@
+pub(crate) mod attempt_lifecycle;
 pub(crate) mod candidate_loop;
 mod orchestration;
 mod outcome;
@@ -10,10 +11,14 @@ mod sync_path;
 pub(crate) use crate::request_candidate_runtime::{
     persist_available_local_candidate, persist_skipped_local_candidate,
 };
+pub(crate) use attempt_lifecycle::{
+    wrap_response_body_with_attempt_lifecycle, AttemptLifecycle, RequestCommitBarrier,
+};
 pub(crate) use candidate_loop::{
-    execute_stream_plan_and_reports, execute_stream_plan_and_reports_with_transfer_tracker,
-    execute_sync_plan_and_reports, execute_sync_plan_and_reports_with_transfer_tracker,
-    mark_unused_local_candidate_items, ProviderTransferTracker,
+    current_internal_attempt_budget_handle, execute_stream_plan_and_reports,
+    execute_stream_plan_and_reports_with_transfer_tracker, execute_sync_plan_and_reports,
+    execute_sync_plan_and_reports_with_transfer_tracker, mark_unused_local_candidate_items,
+    reserve_internal_request_attempt, InternalAttemptBudgetHandle, ProviderTransferTracker,
 };
 pub(crate) use orchestration::*;
 pub(crate) use outcome::{

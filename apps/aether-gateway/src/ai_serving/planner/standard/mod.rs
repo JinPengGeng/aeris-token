@@ -65,6 +65,7 @@ pub(crate) use crate::ai_serving::{
 };
 pub(crate) use crate::ai_serving::{
     build_standard_request_body, build_standard_request_body_with_model_directives,
+    build_standard_request_body_with_model_directives_and_request_headers_and_history_scope,
     build_standard_request_body_with_model_directives_and_request_headers_and_reasoning_replay_policy,
     convert_openai_chat_request_to_claude_request, convert_openai_chat_request_to_gemini_request,
     convert_openai_chat_request_to_openai_responses_request, extract_openai_text_content,

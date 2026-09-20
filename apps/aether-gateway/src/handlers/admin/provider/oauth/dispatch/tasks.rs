@@ -16,6 +16,16 @@ use axum::{
 const PROVIDER_AGENT_IDENTITY_IMPORT_KIND: &str = "agent_identity";
 const PROVIDER_OAUTH_BATCH_IMPORT_KIND: &str = "oauth_batch";
 const PROVIDER_COOKIE_AUTHORIZE_IMPORT_KIND: &str = "cookie_authorize";
+const ADMIN_AUDIT_EVENT_AGENT_IDENTITY_IMPORT_COMPLETED: &str =
+    "admin_provider_oauth_agent_identity_import_completed_viewed";
+const ADMIN_AUDIT_EVENT_AGENT_IDENTITY_IMPORT_FAILED: &str =
+    "admin_provider_oauth_agent_identity_import_failed_viewed";
+const ADMIN_AUDIT_EVENT_COOKIE_TASK_COMPLETED: &str =
+    "admin_provider_oauth_cookie_task_completed_viewed";
+const ADMIN_AUDIT_EVENT_COOKIE_TASK_FAILED: &str = "admin_provider_oauth_cookie_task_failed_viewed";
+const ADMIN_AUDIT_EVENT_BATCH_TASK_COMPLETED: &str =
+    "admin_provider_oauth_batch_task_completed_viewed";
+const ADMIN_AUDIT_EVENT_BATCH_TASK_FAILED: &str = "admin_provider_oauth_batch_task_failed_viewed";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderOAuthTaskRouteKind {
@@ -147,20 +157,20 @@ async fn handle_admin_provider_oauth_import_task_status(
     let response = Json(payload).into_response();
     let (completed_event, failed_event, action, target_type) = match route_kind {
         ProviderOAuthTaskRouteKind::AgentIdentity => (
-            "admin_provider_oauth_agent_identity_import_completed_viewed",
-            "admin_provider_oauth_agent_identity_import_failed_viewed",
+            ADMIN_AUDIT_EVENT_AGENT_IDENTITY_IMPORT_COMPLETED,
+            ADMIN_AUDIT_EVENT_AGENT_IDENTITY_IMPORT_FAILED,
             "view_provider_agent_identity_import_terminal_state",
             "provider_agent_identity_import_task",
         ),
         ProviderOAuthTaskRouteKind::CookieAuthorize => (
-            "admin_provider_oauth_cookie_task_completed_viewed",
-            "admin_provider_oauth_cookie_task_failed_viewed",
+            ADMIN_AUDIT_EVENT_COOKIE_TASK_COMPLETED,
+            ADMIN_AUDIT_EVENT_COOKIE_TASK_FAILED,
             "view_provider_oauth_cookie_task_terminal_state",
             "provider_oauth_cookie_task",
         ),
         ProviderOAuthTaskRouteKind::BatchImport => (
-            "admin_provider_oauth_batch_task_completed_viewed",
-            "admin_provider_oauth_batch_task_failed_viewed",
+            ADMIN_AUDIT_EVENT_BATCH_TASK_COMPLETED,
+            ADMIN_AUDIT_EVENT_BATCH_TASK_FAILED,
             "view_provider_oauth_batch_task_terminal_state",
             "provider_oauth_batch_task",
         ),

@@ -24,6 +24,7 @@ pub(super) fn sample_transport(
 
 pub(super) fn sample_persistence(provider_api_format: &str) -> LocalVideoTaskPersistence {
     LocalVideoTaskPersistence {
+        row_revision: 0,
         request_id: "request-123".to_string(),
         username: Some("user".to_string()),
         api_key_name: Some("primary".to_string()),

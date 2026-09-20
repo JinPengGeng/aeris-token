@@ -314,6 +314,7 @@ async fn validate_empty_drill_database(
         let predicate = match table.as_str() {
             "user_groups" => " WHERE NOT (id = '00000000-0000-0000-0000-000000000001' AND name = 'Default' AND normalized_name = 'default')",
             "system_configs" => " WHERE NOT (id = '00000000-0000-0000-0000-000000000002' AND key = 'default_user_group_id' AND value::jsonb = '\"00000000-0000-0000-0000-000000000001\"'::jsonb)",
+            "recharge_recovery_activation" => " WHERE NOT (version = 1 AND enabled IS TRUE)",
             _ => "",
         };
         let query = format!(

@@ -5,6 +5,7 @@ use aether_crypto::{decrypt_python_fernet_ciphertext, encrypt_python_fernet_plai
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::current_unix_timestamp_secs;
 use crate::{
     GeminiVideoTaskSeed, LocalVideoTaskReadResponse, LocalVideoTaskRegistryMutation,
     LocalVideoTaskSnapshot, OpenAiVideoTaskSeed, VideoTaskRegistry, VideoTaskStore,
@@ -63,6 +64,28 @@ impl VideoTaskStore for InMemoryVideoTaskStore {
         if let Ok(mut registry) = self.registry.lock() {
             registry.insert(snapshot);
         }
+    }
+
+    fn replace_local_snapshot(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        replacement: LocalVideoTaskSnapshot,
+    ) -> bool {
+        let Ok(mut registry) = self.registry.lock() else {
+            return false;
+        };
+        registry.replace_local_snapshot(expected, replacement)
+    }
+
+    fn enrich_terminal_presentation(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        projected: &LocalVideoTaskSnapshot,
+    ) -> bool {
+        let Ok(mut registry) = self.registry.lock() else {
+            return false;
+        };
+        registry.enrich_terminal_presentation(expected, projected)
     }
 
     fn read_openai(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse> {
@@ -173,7 +196,8 @@ impl FileVideoTaskStore {
                 .ok_or_else(|| invalid_store_data("video task store purpose mismatch"))?;
             let mut registry: VideoTaskRegistry = serde_json::from_str(plaintext)
                 .map_err(|_| invalid_store_data("decrypted video task store is invalid"))?;
-            let needs_rewrite = registry.sanitize_persisted_diagnostics();
+            let mut needs_rewrite = registry.sanitize_persisted_diagnostics();
+            needs_rewrite |= registry.prune_terminal_at(current_unix_timestamp_secs());
             return Ok(LoadedVideoTaskRegistry {
                 registry,
                 persisted_file,
@@ -190,6 +214,7 @@ impl FileVideoTaskStore {
             let mut registry: VideoTaskRegistry = serde_json::from_str(&plaintext)
                 .map_err(|_| invalid_store_data("decrypted video task store is invalid"))?;
             registry.sanitize_persisted_diagnostics();
+            registry.prune_terminal_at(current_unix_timestamp_secs());
             return Ok(LoadedVideoTaskRegistry {
                 registry,
                 persisted_file,
@@ -373,6 +398,22 @@ impl VideoTaskStore for FileVideoTaskStore {
         });
     }
 
+    fn replace_local_snapshot(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        replacement: LocalVideoTaskSnapshot,
+    ) -> bool {
+        self.mutate_registry(|registry| registry.replace_local_snapshot(expected, replacement))
+    }
+
+    fn enrich_terminal_presentation(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        projected: &LocalVideoTaskSnapshot,
+    ) -> bool {
+        self.mutate_registry(|registry| registry.enrich_terminal_presentation(expected, projected))
+    }
+
     fn read_openai(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse> {
         let registry = self.registry.lock().ok()?;
         registry.read_openai(task_id)
@@ -443,6 +484,7 @@ mod tests {
         LocalVideoTaskSnapshot::Gemini(GeminiVideoTaskSeed {
             local_short_id: "task-sensitive".to_string(),
             upstream_operation_name: "operations/upstream-sensitive".to_string(),
+            created_at_unix_secs: current_unix_timestamp_secs(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
             model: "veo-3".to_string(),
@@ -455,6 +497,7 @@ mod tests {
                 "url": "https://internal.test/result?token=metadata-query-secret"
             }),
             persistence: LocalVideoTaskPersistence {
+                row_revision: 0,
                 request_id: "request-1".to_string(),
                 username: Some("alice".to_string()),
                 api_key_name: Some("primary".to_string()),
@@ -522,6 +565,31 @@ mod tests {
         assert!(!task.metadata.to_string().contains("private-debug"));
         assert!(record.request_metadata.is_none());
         drop(restored);
+        cleanup_store_path(&path);
+    }
+
+    #[test]
+    fn loading_file_store_compacts_expired_terminal_snapshots() {
+        let path = temp_store_path("terminal-retention");
+        let mut snapshot = sensitive_gemini_snapshot();
+        let LocalVideoTaskSnapshot::Gemini(seed) = &mut snapshot else {
+            unreachable!("fixture should be Gemini");
+        };
+        seed.created_at_unix_secs = current_unix_timestamp_secs()
+            .saturating_sub(crate::store_registry::VIDEO_TASK_TERMINAL_RETENTION_SECS + 1);
+        let mut registry = VideoTaskRegistry::default();
+        registry.insert(snapshot);
+        let bytes = encrypted_video_task_store_bytes(DEVELOPMENT_ENCRYPTION_KEY, &registry)
+            .expect("expired registry should serialize");
+        std::fs::write(&path, bytes).expect("expired registry should be written");
+
+        let store = FileVideoTaskStore::new(&path, DEVELOPMENT_ENCRYPTION_KEY)
+            .expect("expired registry should load");
+        assert!(store.clone_gemini("task-sensitive").is_none());
+        assert!(!std::fs::read(&path)
+            .expect("rewritten store should be readable")
+            .is_empty());
+
         cleanup_store_path(&path);
     }
 

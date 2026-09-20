@@ -433,7 +433,7 @@ async fn gateway_adds_cors_headers_to_proxied_responses_inner() {
         .header("origin", "http://localhost:3000")
         .header(http::header::AUTHORIZATION, "Bearer sk-client-openai-cors")
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("proxy request should succeed");

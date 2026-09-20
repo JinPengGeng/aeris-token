@@ -73,6 +73,11 @@ jobs:
         run: |
           python3 tests/metrics_acceptance_harness.py \
             --evidence-dir "$RUNNER_TEMP/prometheus-evidence/delivery"
+      - name: Verify DLQ capacity alert delivery and recovery
+        shell: bash
+        run: |
+          python3 tests/metrics_acceptance_harness.py --scenario dlq \
+            --evidence-dir "$RUNNER_TEMP/prometheus-evidence/dlq-delivery"
       - name: Upload reproducible validation evidence
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5

@@ -4,6 +4,7 @@ mod formula_engine;
 mod models;
 mod precision;
 mod pricing;
+mod provider_cost;
 mod schema;
 mod service;
 mod token_normalization;
@@ -28,6 +29,15 @@ pub use pricing::{
     BillingPricingConfigurationError, BillingPricingResolution, BillingPricingSource,
     BillingUsageInput,
 };
+pub use provider_cost::{
+    calculate_provider_cost_amount, estimate_provider_cost_component,
+    estimate_provider_request_cost, provider_cost_token_quantities_from_standardized_usage,
+    resolve_provider_cost_price, CostCertainty, ProviderCostDimension,
+    ProviderCostEstimateComponent, ProviderCostEstimateError, ProviderCostEstimateInput,
+    ProviderCostInputPriceMode, ProviderCostPrice, ProviderCostPriceError,
+    ProviderCostRequestEstimate, ProviderCostSnapshot, ProviderCostTokenQuantities,
+    ProviderCostUnit, PROVIDER_COST_SCALE,
+};
 pub use schema::{
     BillingSnapshot, BillingSnapshotStatus, CostResult, BILLING_SNAPSHOT_SCHEMA_VERSION,
 };
@@ -37,5 +47,7 @@ pub use service::image_authorization::{
 };
 pub use service::BillingService;
 pub use token_normalization::{
-    normalize_input_tokens_for_billing, normalize_total_input_context_for_cache_hit_rate,
+    normalize_input_tokens_for_billing,
+    normalize_input_tokens_for_billing_with_known_cache_semantics,
+    normalize_total_input_context_for_cache_hit_rate,
 };

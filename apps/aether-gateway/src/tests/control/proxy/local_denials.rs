@@ -272,6 +272,7 @@ async fn gateway_quota_fixture_denials_reach_real_routes_without_hitting_control
             assert!(!response.headers().contains_key("retry-after"));
             let payload: serde_json::Value =
                 response.json().await.expect("response json should parse");
+            assert_eq!(payload["trace_id"], trace_id);
             assert_eq!(payload["error"]["type"], case["error_type"], "{path}");
             assert_eq!(payload["error"]["code"], case["error_code"], "{path}");
             assert_eq!(payload["error"]["message"], "Insufficient quota");
@@ -380,7 +381,7 @@ async fn gateway_locally_denies_invalid_trusted_snapshot_without_hitting_control
     );
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
     assert_eq!(payload["error"]["type"], "authentication_error");
-    assert_eq!(payload["error"]["message"], "无效的API密钥");
+    assert_eq!(payload["error"]["message"], "Invalid API key");
 
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -466,7 +467,7 @@ async fn gateway_locally_denies_missing_wallet_without_hitting_control_or_upstre
     );
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
     assert_eq!(payload["error"]["type"], "permission_error");
-    assert_eq!(payload["error"]["message"], "钱包不可用");
+    assert_eq!(payload["error"]["message"], "Wallet unavailable");
 
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -537,7 +538,7 @@ async fn gateway_locally_denies_invalid_bearer_api_key_without_hitting_control_o
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
     assert!(payload.get("type").is_none());
     assert_eq!(payload["error"]["type"], "authentication_error");
-    assert_eq!(payload["error"]["message"], "无效的API密钥");
+    assert_eq!(payload["error"]["message"], "Invalid API key");
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
@@ -767,7 +768,7 @@ async fn gateway_locally_denies_disallowed_claude_api_format_without_hitting_con
     assert_eq!(payload["error"]["type"], "permission_error");
     assert_eq!(
         payload["error"]["message"],
-        "当前用户、用户组或密钥的访问控制策略不允许访问 claude:messages 格式"
+        "The access policy for the current user, user group, or API key does not allow access to API format claude:messages"
     );
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -851,7 +852,7 @@ async fn gateway_locally_denies_disallowed_provider_without_hitting_control_or_u
     assert_eq!(payload["error"]["type"], "permission_error");
     assert_eq!(
         payload["error"]["message"],
-        "当前用户、用户组或密钥的访问控制策略不允许访问 claude 提供商"
+        "The access policy for the current user, user group, or API key does not allow access to provider claude"
     );
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -924,7 +925,7 @@ async fn gateway_locally_denies_disallowed_gemini_model_without_hitting_control_
     assert_eq!(payload["error"]["type"], "http_error");
     assert_eq!(
         payload["error"]["message"],
-        "当前用户、用户组或密钥的访问控制策略不允许访问模型 gemini-2.5-pro"
+        "The access policy for the current user, user group, or API key does not allow access to model gemini-2.5-pro"
     );
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -1023,8 +1024,9 @@ async fn gateway_locally_denies_locked_trusted_snapshot_without_hitting_control_
         assert_eq!(payload["error"]["type"], case["error_type"]);
         assert_eq!(
             payload["error"]["message"],
-            "该密钥已被管理员锁定，请联系管理员"
+            "This API key has been locked by an administrator. Contact an administrator."
         );
+        assert_eq!(payload["trace_id"], "trace-control-locked-trusted-1");
         if case["envelope"] == "claude" {
             assert_eq!(payload["type"], "error");
         }
@@ -1105,7 +1107,7 @@ async fn gateway_locally_denies_disallowed_openai_model_without_hitting_control_
     assert_eq!(payload["error"]["type"], "permission_error");
     assert_eq!(
         payload["error"]["message"],
-        "当前用户、用户组或密钥的访问控制策略不允许访问模型 gpt-5"
+        "The access policy for the current user, user group, or API key does not allow access to model gpt-5"
     );
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -1157,7 +1159,7 @@ async fn gateway_locally_denies_disallowed_claude_model_with_anthropic_permissio
     assert_eq!(payload["error"]["type"], "permission_error");
     assert_eq!(
         payload["error"]["message"],
-        "当前用户、用户组或密钥的访问控制策略不允许访问模型 claude-sonnet-4-5"
+        "The access policy for the current user, user group, or API key does not allow access to model claude-sonnet-4-5"
     );
 
     gateway_handle.abort();

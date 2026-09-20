@@ -295,6 +295,7 @@ fn rust_authoritative_service_applies_cancel_and_delete_mutations() {
     service.record_snapshot(LocalVideoTaskSnapshot::Gemini(GeminiVideoTaskSeed {
         local_short_id: "short12345678".to_string(),
         upstream_operation_name: "operations/ext-video-task-123".to_string(),
+        created_at_unix_secs: 1_712_345_678,
         user_id: Some("user-123".to_string()),
         api_key_id: Some("key-123".to_string()),
         model: "veo-3".to_string(),
@@ -346,6 +347,26 @@ fn rust_authoritative_service_applies_cancel_and_delete_mutations() {
     assert_eq!(deleted_openai.status_code, 404);
     assert_eq!(
         deleted_openai.body_json,
+        json!({"detail": "Video task was cancelled"}),
+        "cancellation is terminal and cannot be changed into deletion",
+    );
+    let mut completed = service
+        .snapshot_for_route(Some("openai"), "/v1/videos/task-local-123")
+        .unwrap();
+    let LocalVideoTaskSnapshot::OpenAi(seed) = &mut completed else {
+        unreachable!()
+    };
+    seed.status = LocalVideoTaskStatus::Completed;
+    service.record_snapshot(completed);
+    service.apply_finalize_mutation(
+        "/v1/videos/task-local-123",
+        "openai_video_delete_sync_finalize",
+    );
+    assert_eq!(
+        service
+            .read_response(Some("openai"), "/v1/videos/task-local-123")
+            .unwrap()
+            .body_json,
         json!({"detail": "Video task not found"})
     );
 }

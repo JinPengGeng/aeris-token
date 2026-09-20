@@ -68,15 +68,29 @@ Router test: one passed, zero failed/ignored, covering both fixture rows in
 does not claim a second human maintainer approval. The final PR head still
 requires all four protected GitHub contexts before merge.
 
+## Model classification follow-up (2026-09-18)
+
+The #440 model-classification slice is now applied for authenticated Chat and
+Images runtime misses with `candidate_list_empty`: a direct public global-model lookup
+distinguishes an absent model (`404`, OpenAI `not_found_error`,
+`code=model_not_found`) from a declared model whose providers are currently
+unselectable (`503`). Focused Router regressions exercise both paths and also
+verify that the same unknown-model request without credentials stays `401` and
+does not expose the model classification.
+
+The classifier only runs after existing public authentication and policy gates.
+It deliberately preserves `503` if the model directory or scheduler declaration
+read fails or is not configured. Scheduler-declared canonical names and aliases
+are retained as known models even when no provider is currently selectable.
+Other public route families remain separate work.
+
 ## Remaining acceptance and rollback
 
-Issue #254 remains open. `GET /v1/models/:id` has a model-not-found response,
-but the inference fallback in `handlers/proxy/mod.rs` still maps an empty
-candidate list to `503` unless capacity classification selects `429`. A model
-that does not exist must be distinguished from an existing model with no
-currently available provider before changing this behavior. Existing
-Chat/Images model-not-found fixture rows express a target contract; this slice
-does not claim they pass through real inference routes.
+Issue #254 remains open. The generic inference fallback still maps runtime
+misses to `503` unless capacity classification selects `429`; the new Chat
+classification only changes `candidate_list_empty` after a successful direct
+public-model lookup. The Images generation route has the same unknown-model
+Router acceptance; its remaining fixture and edit-route coverage are separate.
 
 Other public authentication, policy and execution messages may still be
 Chinese, with no `Accept-Language` contract. Provider-specific success examples

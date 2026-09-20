@@ -203,6 +203,8 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
                 client_session_affinity: input.client_session_affinity.as_ref(),
                 routing_policy: input.routing_policy.as_ref(),
                 scheduler_affinity_epoch: eligible.orchestration.scheduler_affinity_epoch,
+                scheduler_generation: eligible.orchestration.scheduler_generation,
+                scheduler_page_ordinal: eligible.orchestration.scheduler_page_ordinal,
                 sticky_key_attempts: eligible.orchestration.sticky_key_attempts,
                 client_requested_stream: body_json
                     .get("stream")

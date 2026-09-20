@@ -102,7 +102,7 @@ async fn gateway_locally_denies_openai_chat_after_repeated_execution_runtime_mis
             )
             .header(http::header::CONTENT_TYPE, "application/json")
             .header(TRACE_ID_HEADER, trace_id)
-            .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+            .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
             .send()
             .await
             .expect("request should succeed");
@@ -133,7 +133,7 @@ async fn gateway_locally_denies_openai_chat_after_repeated_execution_runtime_mis
         assert_eq!(payload["error"]["type"], "server_error");
         assert_eq!(
             payload["error"]["message"],
-            "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商"
+            "The request has no valid user or API key authentication context, so an upstream provider cannot be selected"
         );
     }
 
@@ -232,7 +232,7 @@ async fn gateway_locally_denies_openai_chat_when_control_api_is_configured_witho
             INTERNAL_AUTH_CONTEXT_TEST_BEARER,
         )
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -264,7 +264,7 @@ async fn gateway_locally_denies_openai_chat_when_control_api_is_configured_witho
     assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(
         payload["error"]["message"],
-        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商"
+        "The request has no valid user or API key authentication context, so an upstream provider cannot be selected"
     );
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -348,7 +348,7 @@ async fn gateway_locally_denies_openai_chat_stream_after_execution_runtime_miss_
             INTERNAL_AUTH_CONTEXT_TEST_BEARER,
         )
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");
@@ -380,7 +380,7 @@ async fn gateway_locally_denies_openai_chat_stream_after_execution_runtime_miss_
     assert_eq!(payload["error"]["type"], "server_error");
     assert_eq!(
         payload["error"]["message"],
-        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商"
+        "The request has no valid user or API key authentication context, so an upstream provider cannot be selected"
     );
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -545,8 +545,13 @@ async fn assert_ai_route_locally_denied_after_execution_runtime_miss_with_reques
                 .and_then(|value| value.to_str().ok()),
             None
         );
+        let trace_id = response.headers()[TRACE_ID_HEADER]
+            .to_str()
+            .expect("trace header")
+            .to_string();
         let payload: serde_json::Value = response.json().await.expect("body should parse");
-        assert_eq!(payload, json!({"detail": "File not found"}));
+        assert_eq!(payload["detail"], "File not found");
+        assert_eq!(payload["trace_id"], trace_id);
         assert_eq!(*control_execute_hits.lock().expect("mutex should lock"), 0);
         assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
         assert_eq!(
@@ -613,7 +618,7 @@ async fn gateway_locally_denies_openai_responses_after_execution_runtime_miss_wi
         "responses",
         "openai:responses",
         "{\"model\":\"gpt-5\",\"input\":\"hello\"}",
-        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商",
+        "The request has no valid user or API key authentication context, so an upstream provider cannot be selected",
     )
     .await;
 }
@@ -627,7 +632,7 @@ async fn gateway_locally_denies_claude_messages_after_execution_runtime_miss_wit
         "chat",
         "claude:messages",
         "{\"model\":\"claude-sonnet-4-5\",\"messages\":[]}",
-        "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商",
+        "The request lacks the authentication, model, or configuration context required for local execution, so an upstream provider cannot be selected",
     )
     .await;
 }
@@ -641,7 +646,7 @@ async fn gateway_locally_denies_openai_responses_stream_after_execution_runtime_
         "responses",
         "openai:responses",
         "{\"model\":\"gpt-5\",\"input\":\"hello\",\"stream\":true}",
-        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商",
+        "The request has no valid user or API key authentication context, so an upstream provider cannot be selected",
     )
     .await;
 }
@@ -655,7 +660,7 @@ async fn gateway_locally_denies_claude_messages_stream_after_execution_runtime_m
         "chat",
         "claude:messages",
         "{\"model\":\"claude-sonnet-4-5\",\"messages\":[],\"stream\":true}",
-        "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商",
+        "The request lacks the authentication, model, or configuration context required for local execution, so an upstream provider cannot be selected",
     )
     .await;
 }
@@ -669,7 +674,7 @@ async fn gateway_locally_denies_openai_responses_compact_after_execution_runtime
         "responses:compact",
         "openai:responses:compact",
         "{\"model\":\"gpt-5\",\"input\":\"hello\"}",
-        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商",
+        "The request has no valid user or API key authentication context, so an upstream provider cannot be selected",
     )
     .await;
 }
@@ -683,7 +688,7 @@ async fn gateway_locally_denies_openai_responses_compact_stream_after_execution_
         "responses:compact",
         "openai:responses:compact",
         "{\"model\":\"gpt-5\",\"input\":\"hello\",\"stream\":true}",
-        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商",
+        "The request has no valid user or API key authentication context, so an upstream provider cannot be selected",
     )
     .await;
 }
@@ -697,7 +702,7 @@ async fn gateway_locally_denies_gemini_generate_after_execution_runtime_miss_wit
         "chat",
         "gemini:generate_content",
         "{\"contents\":[]}",
-        "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商",
+        "The request lacks the authentication, model, or configuration context required for local execution, so an upstream provider cannot be selected",
     )
     .await;
 }
@@ -711,7 +716,7 @@ async fn gateway_locally_denies_gemini_v1_generate_after_execution_runtime_miss_
         "chat",
         "gemini:generate_content",
         "{\"contents\":[]}",
-        "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商",
+        "The request lacks the authentication, model, or configuration context required for local execution, so an upstream provider cannot be selected",
     )
     .await;
 }
@@ -725,7 +730,7 @@ async fn gateway_locally_denies_gemini_stream_after_execution_runtime_miss_witho
         "chat",
         "gemini:generate_content",
         "{\"contents\":[]}",
-        "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商",
+        "The request lacks the authentication, model, or configuration context required for local execution, so an upstream provider cannot be selected",
     )
     .await;
 }
@@ -739,7 +744,7 @@ async fn gateway_locally_denies_openai_video_after_execution_runtime_miss_withou
         "video",
         "openai:video",
         "{\"model\":\"sora-2\"}",
-        "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径",
+        "The OpenAI Video request cannot be executed locally: no matching execution path is available",
     )
     .await;
 }
@@ -753,7 +758,7 @@ async fn gateway_locally_denies_gemini_video_after_execution_runtime_miss_withou
         "video",
         "gemini:video",
         "{\"instances\":[]}",
-        "当前 Gemini Public 请求无法在本地执行：没有匹配到可用的执行路径",
+        "The Gemini Public request cannot be executed locally: no matching execution path is available",
     )
     .await;
 }
@@ -769,7 +774,7 @@ async fn gateway_locally_denies_gemini_files_root_after_execution_runtime_miss_w
         "files",
         "gemini:generate_content",
         None,
-        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径",
+        "The Gemini Files request cannot be executed locally: no matching execution path is available",
     )
     .await;
 }
@@ -785,7 +790,7 @@ async fn gateway_locally_denies_gemini_files_download_after_execution_runtime_mi
         "files",
         "gemini:generate_content",
         None,
-        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径",
+        "The Gemini Files request cannot be executed locally: no matching execution path is available",
     )
     .await;
 }
@@ -801,7 +806,7 @@ async fn gateway_locally_denies_gemini_files_upload_after_execution_runtime_miss
         "files",
         "gemini:generate_content",
         Some("{\"file\":{}}"),
-        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径",
+        "The Gemini Files request cannot be executed locally: no matching execution path is available",
     )
     .await;
 }

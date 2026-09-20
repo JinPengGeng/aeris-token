@@ -333,8 +333,13 @@ async fn gateway_locally_denies_gemini_files_download_control_sync_even_with_opt
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let trace_id = response.headers()[TRACE_ID_HEADER]
+        .to_str()
+        .expect("trace header")
+        .to_string();
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(payload["detail"], "File not found");
+    assert_eq!(payload["trace_id"], trace_id);
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
@@ -414,8 +419,13 @@ async fn gateway_locally_denies_gemini_files_download_control_sync_without_opt_i
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let trace_id = response.headers()[TRACE_ID_HEADER]
+        .to_str()
+        .expect("trace header")
+        .to_string();
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(payload["detail"], "File not found");
+    assert_eq!(payload["trace_id"], trace_id);
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(
@@ -490,8 +500,13 @@ async fn gateway_skips_gemini_files_download_control_sync_without_opt_in_header_
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let trace_id = response.headers()[TRACE_ID_HEADER]
+        .to_str()
+        .expect("trace header")
+        .to_string();
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(payload["detail"], "File not found");
+    assert_eq!(payload["trace_id"], trace_id);
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
@@ -721,13 +736,16 @@ async fn gateway_rejects_gemini_files_get_key_mismatch_without_fallback_and_allo
             .await
             .expect("foreign file request should complete");
         assert_eq!(foreign_response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            foreign_response
-                .json::<serde_json::Value>()
-                .await
-                .expect("foreign response should be JSON"),
-            json!({"detail": "File not found"})
-        );
+        let trace_id = foreign_response.headers()[TRACE_ID_HEADER]
+            .to_str()
+            .expect("trace header")
+            .to_string();
+        let payload: serde_json::Value = foreign_response
+            .json()
+            .await
+            .expect("foreign response should be JSON");
+        assert_eq!(payload["detail"], "File not found");
+        assert_eq!(payload["trace_id"], trace_id);
     }
     assert!(
         seen_execution_runtime

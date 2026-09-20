@@ -66,7 +66,10 @@ also returns an English `n` range message.
 
 The missing-prompt and missing-edit-images examples in the
 [compatibility fixtures](compatibility-fixtures.md) are checked through the
-actual authenticated Router. Authentication, policy and execution errors have
-their own message-language and model-lookup limits; this is not a promise that
-every Images error is English or that every unknown image model returns `404`.
-See the [public error contract](error-contract.md) for those boundaries.
+actual authenticated Router. For an authenticated Images request that reaches
+candidate selection, an absent public global model returns `404` with
+`error.code=model_not_found`; a declared model or alias with no selectable
+provider remains a retryable `503`. Authentication, policy and execution errors
+have their own message-language limits, so this is not a promise that every
+Images error is English. See the [public error contract](error-contract.md) for
+the model-classification boundary.

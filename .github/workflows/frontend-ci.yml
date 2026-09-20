@@ -13,6 +13,7 @@ on:
       - ".github/automation-policy.yml"
       - ".github/automation/**"
       - ".github/change-filters.yml"
+      - ".github/dependabot.yml"
       - ".github/upstream-sync-policy.yml"
       - ".github/workflows/scripts/**"
       - ".github/workflows/frontend-ci.yml"

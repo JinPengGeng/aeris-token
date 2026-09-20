@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use aether_data_contracts::repository::candidate_selection::{
     MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
-    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
+    StoredGlobalModelDeclaration, StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
     StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
     StoredProviderModelMapping, StoredRequestedModelCandidateRowsQuery,
 };
@@ -286,6 +286,28 @@ ORDER BY
   endpoint_id ASC,
   key_id ASC,
   model_id ASC
+"#;
+
+const LIST_DECLARED_GLOBAL_MODELS_FOR_API_FORMAT_SQL: &str = r#"
+SELECT DISTINCT
+  gm.name AS global_model_name,
+  CASE
+    WHEN gm.config IS NOT NULL THEN gm.config -> 'model_mappings'
+    ELSE NULL
+  END AS global_model_mappings,
+  p.provider_type AS provider_type,
+  pe.id AS endpoint_id,
+  m.provider_model_name AS provider_model_name,
+  m.provider_model_mappings AS provider_model_mappings
+FROM provider_endpoints pe
+INNER JOIN providers p
+  ON p.id = pe.provider_id
+INNER JOIN models m
+  ON m.provider_id = pe.provider_id
+INNER JOIN global_models gm
+  ON gm.id = m.global_model_id
+WHERE LOWER(pe.api_format) = LOWER($1)
+ORDER BY global_model_name ASC
 "#;
 
 const LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL: &str = r#"
@@ -794,6 +816,35 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         Ok(dedupe_candidate_selection_rows(rows))
     }
 
+    pub async fn list_declared_global_models_for_api_format(
+        &self,
+        api_format: &str,
+    ) -> Result<Vec<StoredGlobalModelDeclaration>, DataLayerError> {
+        let canonical_api_format = normalize_api_format(api_format);
+        let mut declarations = Vec::new();
+        for api_format in api_format_aliases(&canonical_api_format) {
+            declarations.extend(
+                Self::collect_query_rows(
+                    sqlx::query(LIST_DECLARED_GLOBAL_MODELS_FOR_API_FORMAT_SQL)
+                        .bind(api_format)
+                        .fetch(&self.pool),
+                    map_global_model_declaration,
+                )
+                .await?,
+            );
+        }
+        declarations.sort_by(|left, right| {
+            left.global_model_name
+                .cmp(&right.global_model_name)
+                .then(left.global_model_mappings.cmp(&right.global_model_mappings))
+                .then(left.provider_type.cmp(&right.provider_type))
+                .then(left.endpoint_id.cmp(&right.endpoint_id))
+                .then(left.provider_model_name.cmp(&right.provider_model_name))
+        });
+        declarations.dedup();
+        Ok(declarations)
+    }
+
     pub async fn list_for_exact_api_format_page(
         &self,
         query: &StoredApiFormatCandidateRowsQuery,
@@ -1221,6 +1272,13 @@ impl MinimalCandidateSelectionReadRepository for SqlxMinimalCandidateSelectionRe
         Self::list_for_exact_api_format(self, api_format).await
     }
 
+    async fn list_declared_global_models_for_api_format(
+        &self,
+        api_format: &str,
+    ) -> Result<Vec<StoredGlobalModelDeclaration>, DataLayerError> {
+        Self::list_declared_global_models_for_api_format(self, api_format).await
+    }
+
     async fn list_for_exact_api_format_page(
         &self,
         query: &StoredApiFormatCandidateRowsQuery,
@@ -1318,6 +1376,24 @@ fn map_candidate_selection_row(
         model_supports_streaming: row.try_get("model_supports_streaming").map_postgres_err()?,
         model_is_active: row.try_get("model_is_active").map_postgres_err()?,
         model_is_available: row.try_get("model_is_available").map_postgres_err()?,
+    })
+}
+
+fn map_global_model_declaration(
+    row: &sqlx::postgres::PgRow,
+) -> Result<StoredGlobalModelDeclaration, DataLayerError> {
+    Ok(StoredGlobalModelDeclaration {
+        global_model_name: row.try_get("global_model_name").map_postgres_err()?,
+        global_model_mappings: parse_string_list(
+            row.try_get("global_model_mappings").map_postgres_err()?,
+            "global_models.config.model_mappings",
+        )?,
+        provider_type: row.try_get("provider_type").map_postgres_err()?,
+        endpoint_id: row.try_get("endpoint_id").map_postgres_err()?,
+        provider_model_name: row.try_get("provider_model_name").map_postgres_err()?,
+        provider_model_mappings: parse_provider_model_mappings(
+            row.try_get("provider_model_mappings").map_postgres_err()?,
+        )?,
     })
 }
 
@@ -1638,6 +1714,106 @@ mod tests {
         let pool = factory.connect_lazy().expect("pool should build");
         let repository = SqlxMinimalCandidateSelectionReadRepository::new(pool);
         let _ = repository.pool();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+    async fn live_declared_global_models_include_unavailable_model_aliases() {
+        let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+            .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("test database should connect");
+        let repository = SqlxMinimalCandidateSelectionReadRepository::new(pool.clone());
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let global_model_id = uuid::Uuid::new_v4().to_string();
+        let model_id = uuid::Uuid::new_v4().to_string();
+        let global_model_name = format!("declared-global-name-{suffix}");
+        let provider_model_name = format!("declared-provider-name-{suffix}");
+        let provider_mapping_name = format!("declared-provider-alias-{suffix}");
+
+        sqlx::query("INSERT INTO providers (id, name, provider_type) VALUES ($1, $2, 'custom')")
+            .bind(&provider_id)
+            .bind(format!("declared-provider-{suffix}"))
+            .execute(&pool)
+            .await
+            .expect("provider fixture should insert");
+        sqlx::query(
+            "INSERT INTO provider_endpoints (id, provider_id, api_format, base_url, is_active) VALUES ($1, $2, 'openai:chat', 'https://example.invalid', true)",
+        )
+        .bind(&endpoint_id)
+        .bind(&provider_id)
+        .execute(&pool)
+        .await
+        .expect("endpoint fixture should insert");
+        sqlx::query(
+            "INSERT INTO global_models (id, name, display_name, is_active, config) VALUES ($1, $2, $2, false, $3)",
+        )
+        .bind(&global_model_id)
+        .bind(&global_model_name)
+        .bind(json!({ "model_mappings": [format!("declared-global-alias-{suffix}")] }))
+        .execute(&pool)
+        .await
+        .expect("global model fixture should insert");
+        sqlx::query(
+            "INSERT INTO models (id, provider_id, global_model_id, provider_model_name, provider_model_mappings, is_active, is_available) VALUES ($1, $2, $3, $4, $5, false, false)",
+        )
+        .bind(&model_id)
+        .bind(&provider_id)
+        .bind(&global_model_id)
+        .bind(&provider_model_name)
+        .bind(json!([{ "name": provider_mapping_name, "api_formats": ["openai:chat"] }]))
+        .execute(&pool)
+        .await
+        .expect("unavailable model fixture should insert");
+
+        let declarations = repository
+            .list_declared_global_models_for_api_format("openai:chat")
+            .await
+            .expect("declared model query should execute");
+        let declaration = declarations
+            .iter()
+            .find(|value| value.global_model_name == global_model_name)
+            .expect("disabled and unavailable model should remain declared");
+        assert_eq!(declaration.provider_model_name, provider_model_name);
+        assert_eq!(declaration.endpoint_id, endpoint_id);
+        assert!(declaration
+            .global_model_mappings
+            .as_ref()
+            .is_some_and(|mappings| mappings
+                .iter()
+                .any(|value| value.starts_with("declared-global-alias-"))));
+        assert!(declaration
+            .provider_model_mappings
+            .as_ref()
+            .is_some_and(|mappings| mappings
+                .iter()
+                .any(|value| value.name == provider_mapping_name)));
+
+        sqlx::query("DELETE FROM models WHERE id = $1")
+            .bind(&model_id)
+            .execute(&pool)
+            .await
+            .expect("model fixture should delete");
+        sqlx::query("DELETE FROM provider_endpoints WHERE id = $1")
+            .bind(&endpoint_id)
+            .execute(&pool)
+            .await
+            .expect("endpoint fixture should delete");
+        sqlx::query("DELETE FROM global_models WHERE id = $1")
+            .bind(&global_model_id)
+            .execute(&pool)
+            .await
+            .expect("global model fixture should delete");
+        sqlx::query("DELETE FROM providers WHERE id = $1")
+            .bind(&provider_id)
+            .execute(&pool)
+            .await
+            .expect("provider fixture should delete");
     }
 
     #[test]

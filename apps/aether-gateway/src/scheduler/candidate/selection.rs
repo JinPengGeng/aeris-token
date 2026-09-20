@@ -3,7 +3,7 @@ use crate::data::candidate_selection::MinimalCandidateSelectionRowSource;
 use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
 use crate::scheduler::config::{SchedulerOrderingConfig, SchedulerSchedulingMode};
 use crate::GatewayError;
-use aether_scheduler_core::ClientSessionAffinity;
+use aether_scheduler_core::{ClientSessionAffinity, SchedulerAffinityTarget};
 
 use super::affinity::{
     build_scheduler_affinity_cache_key, has_explicit_session_affinity, remember_scheduler_affinity,
@@ -89,6 +89,7 @@ pub(super) async fn select_minimal_candidate(
             client_session_affinity,
             ordering_config.scheduling_mode,
         ),
+        None,
     )
     .await?
     .0
@@ -222,6 +223,7 @@ pub(super) async fn collect_selectable_candidates_with_skip_reasons_and_ordering
         ranking_seed,
         ordering_config,
         priority_affinity_key,
+        None,
     )
     .await
 }
@@ -239,6 +241,7 @@ pub(super) async fn collect_selectable_enumerated_candidates_with_skip_reasons(
     ranking_seed: u64,
     ordering_config: SchedulerOrderingConfig,
     priority_affinity_key: Option<&str>,
+    affinity_target: Option<&Option<SchedulerAffinityTarget>>,
 ) -> Result<
     (
         Vec<SchedulerMinimalCandidateSelectionCandidate>,
@@ -259,8 +262,9 @@ pub(super) async fn collect_selectable_enumerated_candidates_with_skip_reasons(
         global_model_name,
         client_session_affinity,
     );
-    let cached_affinity_target = if ordering_config.scheduling_mode
-        == SchedulerSchedulingMode::CacheAffinity
+    let cached_affinity_target = if let Some(target) = affinity_target {
+        target.clone()
+    } else if ordering_config.scheduling_mode == SchedulerSchedulingMode::CacheAffinity
         && has_explicit_session_affinity(client_session_affinity)
     {
         affinity_cache_key.as_deref().and_then(|cache_key| {

@@ -597,9 +597,36 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
                 None,
             )));
         };
+        let audit = crate::audit::build_system_config_update_audit(
+            decision,
+            &config_key,
+            request_context.client_ip.as_deref(),
+        );
         return Ok(Some(
-            match apply_admin_system_config_update(state, &config_key, request_body).await? {
-                Ok(payload) => attach_admin_audit_response(
+            match apply_admin_system_config_update(state, &config_key, request_body, audit.as_ref())
+                .await?
+            {
+                Ok((payload, true)) => {
+                    let mut response = attach_admin_audit_response(
+                        Json(payload).into_response(),
+                        "admin_system_config_updated",
+                        "update_system_config",
+                        "system_config",
+                        &config_key,
+                    );
+                    response
+                        .extensions_mut()
+                        .insert(crate::audit::DurableAdminAuditEnqueued);
+                    response
+                        .extensions_mut()
+                        .insert(crate::audit::PendingAdminAudit(
+                            audit
+                                .clone()
+                                .expect("durable audit enqueue requires an audit intent"),
+                        ));
+                    response
+                }
+                Ok((payload, false)) => attach_admin_audit_response(
                     Json(payload).into_response(),
                     "admin_system_config_updated",
                     "update_system_config",

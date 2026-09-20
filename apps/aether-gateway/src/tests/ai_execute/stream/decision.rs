@@ -388,7 +388,7 @@ async fn gateway_executes_openai_chat_stream_via_local_decision_gate_without_exe
             "Bearer sk-client-openai-local-stream",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-local-stream-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");
@@ -1822,7 +1822,7 @@ async fn gateway_executes_openai_chat_stream_with_custom_path_via_local_decision
         .header("x-drop-me", "drop-openai-stream")
         .header(TRACE_ID_HEADER, "trace-openai-chat-custom-stream-123")
         .body(
-            "{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true,\"metadata\":{\"client\":\"desktop-openai-stream\"},\"temperature\":0.3}",
+            "{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true,\"metadata\":{\"client\":\"desktop-openai-stream\"},\"temperature\":0.3}",
         )
         .send()
         .await
@@ -2346,7 +2346,7 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
             TRACE_ID_HEADER,
             "trace-openai-chat-local-stream-failover-123",
         )
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");

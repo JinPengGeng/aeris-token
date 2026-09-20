@@ -27,6 +27,10 @@ struct OperationalPermission {
     write: bool,
     requires_full_admin_role: bool,
     audit_action: Option<&'static str>,
+    /// Metrics are polled frequently and must remain observational. Recording
+    /// their management-token authentication would enqueue usage deltas on
+    /// every scrape and make the metrics endpoint mutate billing state.
+    record_token_usage: bool,
 }
 
 pub(crate) fn mount_operational_routes(
@@ -221,16 +225,21 @@ async fn authorize_operational_request_inner(
                 )
                 .await;
             }
-            let client_ip = client_ip.to_string();
-            if let Err(err) = state
-                .record_management_token_usage(&authenticated.token.id, Some(client_ip.as_str()))
-                .await
-            {
-                warn!(
-                    token_id = %authenticated.token.id,
-                    error = ?err,
-                    "gateway failed to record operational management token usage"
-                );
+            if permission.record_token_usage {
+                let client_ip = client_ip.to_string();
+                if let Err(err) = state
+                    .record_management_token_usage(
+                        &authenticated.token.id,
+                        Some(client_ip.as_str()),
+                    )
+                    .await
+                {
+                    warn!(
+                        token_id = %authenticated.token.id,
+                        error = ?err,
+                        "gateway failed to record operational management token usage"
+                    );
+                }
             }
             audit
         }
@@ -255,6 +264,7 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             write: false,
             requires_full_admin_role: false,
             audit_action: None,
+            record_token_usage: false,
         });
     }
     if path.starts_with("/_gateway/async-tasks/video-tasks") {
@@ -268,6 +278,7 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             write,
             requires_full_admin_role: false,
             audit_action: None,
+            record_token_usage: true,
         });
     }
     if path.starts_with("/_gateway/audit/auth/users/") {
@@ -276,6 +287,7 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             write: false,
             requires_full_admin_role: false,
             audit_action: Some("read_current_auth_policy"),
+            record_token_usage: true,
         });
     }
     if path.starts_with("/_gateway/audit/request-audit/") {
@@ -288,6 +300,7 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             write: false,
             requires_full_admin_role: true,
             audit_action: Some("read_request_audit_bundle"),
+            record_token_usage: true,
         });
     }
     if path.starts_with("/_gateway/audit/request-candidates/")
@@ -302,6 +315,7 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             } else {
                 "read_request_decision_trace"
             }),
+            record_token_usage: true,
         });
     }
     if path.starts_with("/_gateway/audit/") {
@@ -310,6 +324,7 @@ fn operational_permission(method: &http::Method, path: &str) -> Option<Operation
             write: false,
             requires_full_admin_role: false,
             audit_action: Some("read_request_usage"),
+            record_token_usage: true,
         });
     }
     None
@@ -368,4 +383,28 @@ fn operational_error_response(
         HeaderValue::from_static("no-store"),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_permission_is_observational() {
+        let permission = operational_permission(&http::Method::GET, "/_gateway/metrics")
+            .expect("metrics route must be configured");
+
+        assert!(!permission.record_token_usage);
+    }
+
+    #[test]
+    fn other_management_token_routes_record_usage() {
+        let permission = operational_permission(
+            &http::Method::GET,
+            "/_gateway/audit/request-usage/request-1",
+        )
+        .expect("audit route must be configured");
+
+        assert!(permission.record_token_usage);
+    }
 }

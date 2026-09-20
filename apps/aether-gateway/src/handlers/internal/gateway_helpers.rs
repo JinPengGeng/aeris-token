@@ -32,6 +32,10 @@ use axum::Json;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+#[path = "gateway_helpers/video_projection_tests.rs"]
+mod video_projection_tests;
+
 fn insert_execution_runtime_candidate_fields(
     payload: &mut serde_json::Map<String, serde_json::Value>,
     value: bool,
@@ -309,10 +313,15 @@ pub(crate) async fn maybe_build_internal_finalize_video_response(
                 report_mode,
                 local_task_snapshot,
             } = outcome;
-            if let Some(snapshot) = local_task_snapshot {
-                let _ = state.upsert_video_task_snapshot(&snapshot).await?;
-                state.video_tasks.record_snapshot(snapshot);
-            }
+            // Reporting describes the completed upstream operation, even if the
+            // local task row changed or its persistence backend is unavailable.
+            let projection_result = match local_task_snapshot {
+                Some(snapshot) => state
+                    .upsert_video_task_snapshot(&snapshot)
+                    .await
+                    .map(|outcome| outcome.accepted()),
+                None => Ok(true),
+            };
             match report_mode {
                 crate::video_tasks::VideoTaskSyncReportMode::InlineSync => {
                     crate::usage::submit_sync_report(state, report_payload).await?;
@@ -320,6 +329,12 @@ pub(crate) async fn maybe_build_internal_finalize_video_response(
                 crate::video_tasks::VideoTaskSyncReportMode::Background => {
                     crate::usage::spawn_sync_report(state.clone(), report_payload);
                 }
+            }
+            if !projection_result? {
+                return Err(GatewayError::Client {
+                    status: http::StatusCode::CONFLICT,
+                    message: "Video task changed while the operation was in progress".to_string(),
+                });
             }
             let mut response = response;
             response.headers_mut().insert(
@@ -339,22 +354,30 @@ pub(crate) async fn maybe_build_internal_finalize_video_response(
             signature.as_str(),
             payload.report_context.as_ref(),
         );
-        if let Some(request_path) = request_path {
-            state
-                .video_tasks
-                .apply_finalize_mutation(request_path.as_str(), payload.report_kind.as_str());
-            if let Some(snapshot) = state
-                .video_tasks
-                .snapshot_for_route(decision.route_family.as_deref(), request_path.as_str())
-            {
-                let _ = state.upsert_video_task_snapshot(&snapshot).await?;
+        let projection_result = match request_path {
+            Some(request_path) => {
+                state
+                    .persist_video_task_finalize(
+                        decision.route_family.as_deref(),
+                        request_path.as_str(),
+                        payload.report_kind.as_str(),
+                        payload.report_context.as_ref(),
+                    )
+                    .await
             }
-        }
+            None => Ok(true),
+        };
         if let Some(success_report_kind) =
             resolve_local_sync_success_background_report_kind(payload.report_kind.as_str())
         {
             payload.report_kind = success_report_kind.to_string();
             crate::usage::spawn_sync_report(state.clone(), payload);
+        }
+        if !projection_result? {
+            return Err(GatewayError::Client {
+                status: http::StatusCode::CONFLICT,
+                message: "Video task changed while the operation was in progress".to_string(),
+            });
         }
         response.headers_mut().insert(
             HeaderName::from_static(CONTROL_EXECUTED_HEADER),

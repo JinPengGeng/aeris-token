@@ -246,6 +246,8 @@ observe_admission() {
       .error.retryable == true and .error.failover_disposition == "retry_request"
     ' "$record.json" >/dev/null
     [[ "$(awk 'tolower($1) == "retry-after:" {gsub("\r", "", $2); print $2}' "$record.headers")" == 1 ]]
+  elif [[ "$admission_status" == 503 ]]; then
+    [[ "$(awk 'tolower($1) == "retry-after:" {gsub("\r", "", $2); print $2}' "$record.headers")" == 1 ]]
   else
     [[ "$(awk 'tolower($1) == "retry-after:" {count++} END {print count+0}' "$record.headers")" == 0 ]]
   fi

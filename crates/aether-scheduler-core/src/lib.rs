@@ -1,4 +1,5 @@
 mod affinity;
+mod attempt_budget;
 mod auth;
 mod candidate;
 mod emergency_chain;
@@ -16,6 +17,9 @@ pub use affinity::{
     build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope,
     candidate_affinity_hash, candidate_key, matches_affinity_target, ClientSessionAffinity,
     SchedulerAffinityScope, SchedulerAffinityTarget,
+};
+pub use attempt_budget::{
+    AttemptBudget, AttemptBudgetError, DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_CREDENTIAL_ATTEMPTS,
 };
 pub use auth::{
     api_format_matches_allowed_value, auth_constraints_allow_api_format,

@@ -660,6 +660,37 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn admin_revoke_user_session_with_audit(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<
+        Option<aether_data::repository::users::AdminUserSessionRevocationOutcome>,
+        GatewayError,
+    > {
+        self.app
+            .admin_revoke_user_session_with_audit(user_id, session_id, revoked_at, reason, audit)
+            .await
+    }
+
+    pub(crate) async fn admin_revoke_all_user_sessions_with_audit(
+        &self,
+        user_id: &str,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<
+        Option<aether_data::repository::users::AdminUserSessionsRevocationOutcome>,
+        GatewayError,
+    > {
+        self.app
+            .admin_revoke_all_user_sessions_with_audit(user_id, revoked_at, reason, audit)
+            .await
+    }
+
     pub(crate) async fn list_auth_api_key_snapshots_by_ids(
         &self,
         api_key_ids: &[String],

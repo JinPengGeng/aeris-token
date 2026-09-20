@@ -35,6 +35,7 @@ pub struct LocalVideoTaskFollowUpPlan {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalVideoTaskReadRefreshPlan {
+    pub snapshot: LocalVideoTaskSnapshot,
     pub plan: ExecutionPlan,
     pub projection_target: LocalVideoTaskProjectionTarget,
 }
@@ -190,6 +191,8 @@ impl std::fmt::Debug for LocalVideoTaskTransportBridgeInput {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalVideoTaskPersistence {
+    #[serde(default)]
+    pub row_revision: i64,
     pub request_id: String,
     pub username: Option<String>,
     pub api_key_name: Option<String>,
@@ -281,6 +284,10 @@ impl std::fmt::Debug for OpenAiVideoTaskSeed {
 pub struct GeminiVideoTaskSeed {
     pub local_short_id: String,
     pub upstream_operation_name: String,
+    /// Unix seconds when the local task was created. Older persisted snapshots
+    /// omit this field and are treated as having unknown age by retention.
+    #[serde(default)]
+    pub created_at_unix_secs: u64,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
     pub model: String,

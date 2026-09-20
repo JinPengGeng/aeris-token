@@ -593,13 +593,24 @@ mod tests {
         use crate::api::{
             build_cross_format_openai_chat_request_body_with_provider_context as chat,
             build_cross_format_openai_responses_request_body_with_provider_context as responses,
-            record_converted_response_history,
+            conversation_history_scope, record_converted_response_history,
         };
         let response_id = "resp_provider_context_seam_history";
-        let scope = "provider-context-seam-history";
+        let scope = conversation_history_scope(
+            "provider-context-seam-user",
+            "provider-context-seam-history",
+        )
+        .expect("test identities should produce a scope");
+        let other_scope = conversation_history_scope(
+            "other-provider-context-seam-user",
+            "provider-context-seam-history",
+        )
+        .expect("test identities should produce a scope");
         record_converted_response_history(&json!({
             "needs_conversion":true, "client_api_format":"openai:responses",
-            "provider_api_format":"openai:chat", "api_key_id":scope,
+            "provider_api_format":"openai:chat",
+            "user_id":"provider-context-seam-user",
+            "api_key_id":"provider-context-seam-history",
             "original_request_body":{"model":"client", "input":"first"}
         }), &json!({"id":response_id, "status":"completed", "output":[{
             "type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"remembered"}]
@@ -633,14 +644,14 @@ mod tests {
             if use_chat {
                 // The legacy Chat alternate-shape path does not hydrate scoped
                 // Responses history. Preserve that behavior during this refactor.
-                assert!(build(Some(scope)).is_none());
+                assert!(build(Some(scope.as_str())).is_none());
                 continue;
             }
-            let output = build(Some(scope)).expect("expand scoped history");
+            let output = build(Some(scope.as_str())).expect("expand scoped history");
             assert_eq!(output["contents"][0]["parts"][0]["text"], "first");
             assert_eq!(output["contents"][1]["parts"][0]["text"], "remembered");
             assert_eq!(output["contents"][2]["parts"][0]["text"], "second");
-            assert!(build(Some("different-seam-key")).is_none());
+            assert!(build(Some(other_scope.as_str())).is_none());
         }
     }
 

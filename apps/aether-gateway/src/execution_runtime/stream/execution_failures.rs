@@ -23,10 +23,11 @@ use crate::execution_runtime::submission::{
 };
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, classify_failure_disposition,
-    resolve_local_failover_analysis_for_attempt,
+    apply_local_execution_effect, apply_local_execution_effect_with_origin,
+    classify_failure_disposition_with_origin, failure_origin_from_embedded_upstream_error,
+    failure_origin_from_upstream_response, resolve_local_failover_analysis_for_attempt_with_origin,
     resolve_local_transport_failover_analysis_for_attempt, with_upstream_response_report_context,
-    LocalAdaptiveRateLimitEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
+    FailureOrigin, LocalAdaptiveRateLimitEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
     LocalExecutionEffectContext, LocalFailoverAnalysis, LocalFailoverDecision,
     LocalHealthFailureEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
 };
@@ -43,6 +44,7 @@ pub(super) struct StreamFailureReport {
     upstream_status_code: Option<u16>,
     transport_error: bool,
     honor_http_failover: bool,
+    failure_origin: FailureOrigin,
     extra_error_fields: Map<String, Value>,
     provider_body_json: Option<Value>,
 }
@@ -131,6 +133,7 @@ impl StreamFailureReport {
             upstream_status_code: _,
             transport_error: _,
             honor_http_failover: _,
+            failure_origin: _,
             mut extra_error_fields,
             provider_body_json,
         } = self;
@@ -176,6 +179,7 @@ pub(super) fn build_stream_failure_report(
         upstream_status_code: Some(status_code),
         transport_error: false,
         honor_http_failover: false,
+        failure_origin: FailureOrigin::Internal,
         extra_error_fields: Map::new(),
         provider_body_json: None,
     }
@@ -194,6 +198,7 @@ pub(super) fn build_stream_transport_failure_report(
         upstream_status_code: None,
         transport_error: true,
         honor_http_failover: false,
+        failure_origin: FailureOrigin::Transport,
         extra_error_fields: Map::new(),
         provider_body_json: None,
     }
@@ -239,6 +244,13 @@ pub(super) fn build_stream_failure_from_execution_error(
         upstream_status_code: error.upstream_status,
         transport_error,
         honor_http_failover: error.upstream_status.is_some(),
+        failure_origin: if transport_error {
+            FailureOrigin::Transport
+        } else if let Some(status) = error.upstream_status {
+            failure_origin_from_upstream_response(status, Some(error.message.as_str()))
+        } else {
+            FailureOrigin::Internal
+        },
         extra_error_fields: error_object,
         provider_body_json: None,
     }
@@ -269,6 +281,10 @@ pub(super) fn build_stream_failure_from_provider_error_body(
         upstream_status_code: Some(status_code),
         transport_error: false,
         honor_http_failover: true,
+        failure_origin: failure_origin_from_embedded_upstream_error(
+            status_code,
+            serde_json::to_string(body_json).ok().as_deref(),
+        ),
         extra_error_fields: Map::new(),
         provider_body_json: Some(body_json.clone()),
     }
@@ -396,6 +412,13 @@ fn stream_failure_body_field<'a>(
         .and_then(Value::as_str)
 }
 
+fn error_body_text(payload: &GatewaySyncReportRequest) -> Option<String> {
+    payload
+        .body_json
+        .as_ref()
+        .and_then(|body| serde_json::to_string(body).ok())
+}
+
 async fn record_stream_sync_failure(
     state: &AppState,
     plan: &ExecutionPlan,
@@ -404,6 +427,7 @@ async fn record_stream_sync_failure(
     candidate_status_code: Option<u16>,
     started_at_unix_ms: Option<u64>,
     handling: StreamFailureHandling,
+    failure_origin: FailureOrigin,
 ) -> LocalFailoverAnalysis {
     let error_type = stream_failure_body_field(payload, "type").unwrap_or("internal");
     let error_message = stream_failure_body_field(payload, "message").unwrap_or_default();
@@ -411,12 +435,13 @@ async fn record_stream_sync_failure(
         .body_json
         .as_ref()
         .and_then(|body_json| serde_json::to_string(body_json).ok());
-    let failure_analysis = resolve_local_failover_analysis_for_attempt(
+    let failure_analysis = resolve_local_failover_analysis_for_attempt_with_origin(
         state,
         plan,
         report_context,
         payload.status_code,
         error_body.as_deref(),
+        failure_origin,
     )
     .await;
     if matches!(error_type, "first_byte_timeout" | "read_timeout") {
@@ -430,7 +455,7 @@ async fn record_stream_sync_failure(
         )
         .await;
     }
-    apply_local_execution_effect(
+    apply_local_execution_effect_with_origin(
         state,
         LocalExecutionEffectContext {
             plan,
@@ -440,9 +465,10 @@ async fn record_stream_sync_failure(
             status_code: payload.status_code,
             classification: failure_analysis.classification,
         }),
+        failure_origin,
     )
     .await;
-    apply_local_execution_effect(
+    apply_local_execution_effect_with_origin(
         state,
         LocalExecutionEffectContext {
             plan,
@@ -453,9 +479,10 @@ async fn record_stream_sync_failure(
             classification: failure_analysis.classification,
             headers: Some(&payload.headers),
         }),
+        failure_origin,
     )
     .await;
-    apply_local_execution_effect(
+    apply_local_execution_effect_with_origin(
         state,
         LocalExecutionEffectContext {
             plan,
@@ -465,6 +492,7 @@ async fn record_stream_sync_failure(
             status_code: payload.status_code,
             classification: failure_analysis.classification,
         }),
+        failure_origin,
     )
     .await;
     apply_local_execution_effect(
@@ -479,7 +507,7 @@ async fn record_stream_sync_failure(
         }),
     )
     .await;
-    apply_local_execution_effect(
+    apply_local_execution_effect_with_origin(
         state,
         LocalExecutionEffectContext {
             plan,
@@ -491,6 +519,7 @@ async fn record_stream_sync_failure(
             headers: &payload.headers,
             error_body: error_body.as_deref(),
         }),
+        failure_origin,
     )
     .await;
     let retrying_next_candidate = matches!(
@@ -589,16 +618,35 @@ pub(super) async fn handle_prefetch_provider_private_stream_error(
         Some(status_code),
         None,
         StreamFailureHandling::HonorLocalFailover,
+        if upstream_status_code == status_code {
+            failure_origin_from_upstream_response(status_code, error_body_text(&payload).as_deref())
+        } else {
+            failure_origin_from_embedded_upstream_error(
+                status_code,
+                error_body_text(&payload).as_deref(),
+            )
+        },
     )
     .await;
     if matches!(
         failure_analysis.decision,
         LocalFailoverDecision::RetryNextCandidate
     ) {
-        let failure_disposition = classify_failure_disposition(
+        let failure_disposition = classify_failure_disposition_with_origin(
             &plan.provider_api_format,
             failure_analysis.classification,
             status_code,
+            if upstream_status_code == status_code {
+                failure_origin_from_upstream_response(
+                    status_code,
+                    error_body_text(&payload).as_deref(),
+                )
+            } else {
+                failure_origin_from_embedded_upstream_error(
+                    status_code,
+                    error_body_text(&payload).as_deref(),
+                )
+            },
         );
         if let Some(retry_scope) = retry_scope_out {
             *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
@@ -661,6 +709,7 @@ pub(super) async fn handle_prefetch_stream_failure(
     let transport_error = failure.transport_error;
     let candidate_status_code = failure.upstream_status_code;
     let honor_http_failover = failure.honor_http_failover;
+    let failure_origin = failure.failure_origin;
     let mut payload = build_stream_failure_sync_payload(
         trace_id,
         report_kind.to_string(),
@@ -704,6 +753,7 @@ pub(super) async fn handle_prefetch_stream_failure(
         } else {
             StreamFailureHandling::Terminal
         },
+        failure_origin,
     )
     .await;
     if honor_local_failover
@@ -712,10 +762,11 @@ pub(super) async fn handle_prefetch_stream_failure(
             LocalFailoverDecision::RetryNextCandidate
         )
     {
-        let failure_disposition = classify_failure_disposition(
+        let failure_disposition = classify_failure_disposition_with_origin(
             &plan.provider_api_format,
             failure_analysis.classification,
             payload.status_code,
+            failure_origin,
         );
         if let Some(retry_scope) = retry_scope_out {
             *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
@@ -873,6 +924,7 @@ pub(super) async fn submit_midstream_stream_failure(
         background_report_kind.unwrap_or_else(|| "execution_runtime_stream_error".to_string());
 
     let candidate_status_code = failure.upstream_status_code;
+    let failure_origin = failure.failure_origin;
     let payload = build_stream_failure_sync_payload(
         trace_id,
         report_kind,
@@ -890,6 +942,7 @@ pub(super) async fn submit_midstream_stream_failure(
         candidate_status_code,
         Some(started_at_unix_ms),
         StreamFailureHandling::Terminal,
+        failure_origin,
     )
     .await;
     if !submit_background_report {

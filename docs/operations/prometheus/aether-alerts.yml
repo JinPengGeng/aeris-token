@@ -49,6 +49,29 @@ groups:
           deduplication: Group by alertname and stream; inhibit backlog alerts while the gateway is down.
           rollback: Do not delete the DLQ; pause redrive and restore the last known-good consumer if processing is suspect.
 
+      - alert: AetherUsageDeadLetterCapacityWarning
+        expr: aether_gateway_usage_queue_dlq_utilization_per_mille >= 800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Usage dead-letter retention is approaching its threshold
+          description: DLQ entries occupy at least 80 percent of the configured retention threshold; preserve evidence and investigate consumers before trimming occurs.
+          runbook: docs/operations/observability-runbook.md#usage-dlq
+          deduplication: Group by alertname, job, instance and stream; inhibit this warning while the retention boundary alert is firing.
+          rollback: Restore consumers or pause incoming traffic under the incident procedure; do not clear the DLQ to silence the alert.
+
+      - alert: AetherUsageDeadLetterRetentionBoundary
+        expr: aether_gateway_usage_queue_dlq_at_retention_boundary == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: Usage dead-letter retention has reached its trimming threshold
+          description: Redis approximate MAXLEN may trim older events at this threshold; this gauge is capacity risk, not proof or a count of lost events.
+          runbook: docs/operations/observability-runbook.md#usage-dlq
+          deduplication: Group by alertname, job, instance and stream; retain cluster labels and inhibit the capacity warning for the same series.
+          rollback: Preserve available evidence and reduce inflow; increasing retention requires a Redis memory budget and is not a substitute for fixing consumers.
+
       - alert: AetherBillingGuardFailOpen
         expr: sum by (component, operation) (increase(aether_gateway_billing_fail_open_total[10m])) > 0
         for: 2m

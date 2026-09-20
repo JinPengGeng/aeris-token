@@ -33,6 +33,8 @@ pub(crate) struct LocalExecutionCandidateMetadata {
     pub(crate) pool_key_index: Option<u32>,
     pub(crate) pool_key_lease: Option<RuntimeLockLease>,
     pub(crate) scheduler_affinity_epoch: Option<u64>,
+    pub(crate) scheduler_generation: Option<u64>,
+    pub(crate) scheduler_page_ordinal: Option<u32>,
     /// Routing-policy `sticky_key_attempts` in effect for this request. `None`
     /// means the policy default applies.
     pub(crate) sticky_key_attempts: Option<u32>,
@@ -45,6 +47,56 @@ pub(crate) const POOL_KEY_LEASE_OWNER_REPORT_FIELD: &str = "pool_key_lease_owner
 pub(crate) const POOL_KEY_LEASE_TOKEN_REPORT_FIELD: &str = "pool_key_lease_token";
 pub(crate) const POOL_KEY_LEASE_FENCING_REPORT_FIELD: &str = "pool_key_lease_fencing_token";
 pub(crate) const POOL_KEY_LEASE_TTL_MS_REPORT_FIELD: &str = "pool_key_lease_ttl_ms";
+pub(crate) const ATTEMPT_BUDGET_STOP_REASON_REPORT_FIELD: &str = "attempt_budget_stop_reason";
+pub(crate) const ATTEMPT_BUDGET_ATTEMPTS_REPORT_FIELD: &str = "attempt_budget_attempts";
+pub(crate) const ATTEMPT_BUDGET_CREDENTIAL_ATTEMPTS_REPORT_FIELD: &str =
+    "attempt_budget_credential_attempts";
+pub(crate) const ATTEMPT_BUDGET_PROVIDER_SWITCHES_REPORT_FIELD: &str =
+    "attempt_budget_provider_switches";
+
+pub(crate) fn attempt_budget_exhaustion_report_context(
+    report_context: Option<Value>,
+    reason: aether_scheduler_core::AttemptBudgetError,
+) -> Option<Value> {
+    let mut report_context = report_context.unwrap_or_else(|| Value::Object(Default::default()));
+    if !report_context.is_object() {
+        report_context = Value::Object(Default::default());
+    }
+    report_context
+        .as_object_mut()
+        .expect("object ensured")
+        .insert(
+            ATTEMPT_BUDGET_STOP_REASON_REPORT_FIELD.to_string(),
+            Value::String(reason.as_str().to_string()),
+        );
+    Some(report_context)
+}
+
+pub(crate) fn attempt_budget_exhaustion_report_context_with_snapshot(
+    report_context: Option<Value>,
+    reason: aether_scheduler_core::AttemptBudgetError,
+    attempts: usize,
+    credential_attempts: usize,
+    provider_switches: usize,
+) -> Option<Value> {
+    let mut report_context = attempt_budget_exhaustion_report_context(report_context, reason)?;
+    let object = report_context
+        .as_object_mut()
+        .expect("attempt budget report context is an object");
+    object.insert(
+        ATTEMPT_BUDGET_ATTEMPTS_REPORT_FIELD.to_string(),
+        Value::from(attempts as u64),
+    );
+    object.insert(
+        ATTEMPT_BUDGET_CREDENTIAL_ATTEMPTS_REPORT_FIELD.to_string(),
+        Value::from(credential_attempts as u64),
+    );
+    object.insert(
+        ATTEMPT_BUDGET_PROVIDER_SWITCHES_REPORT_FIELD.to_string(),
+        Value::from(provider_switches as u64),
+    );
+    Some(report_context)
+}
 
 /// Pool-expanded keys encode `pool_key_index * STRIDE + retry_index` into the
 /// persisted `retry_index` so a pool group's keys stay ordered in one candidate
@@ -81,6 +133,13 @@ pub(crate) fn local_execution_candidate_metadata_from_report_context(
         scheduler_affinity_epoch: report_context
             .and_then(|value| value.get(SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD))
             .and_then(Value::as_u64),
+        scheduler_generation: report_context
+            .and_then(|value| value.get("scheduler_generation"))
+            .and_then(Value::as_u64),
+        scheduler_page_ordinal: report_context
+            .and_then(|value| value.get("scheduler_page_ordinal"))
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
         sticky_key_attempts: report_context
             .and_then(|value| value.get(STICKY_KEY_ATTEMPTS_REPORT_FIELD))
             .and_then(Value::as_u64)
@@ -209,9 +268,13 @@ mod tests {
     use serde_json::json;
 
     use super::{
+        attempt_budget_exhaustion_report_context,
+        attempt_budget_exhaustion_report_context_with_snapshot,
         attempt_identity_from_report_context,
         local_execution_candidate_metadata_from_report_context, next_same_key_retry_attempt,
         next_same_key_retry_index, ExecutionAttemptIdentity, LocalExecutionCandidateMetadata,
+        ATTEMPT_BUDGET_ATTEMPTS_REPORT_FIELD, ATTEMPT_BUDGET_CREDENTIAL_ATTEMPTS_REPORT_FIELD,
+        ATTEMPT_BUDGET_PROVIDER_SWITCHES_REPORT_FIELD, ATTEMPT_BUDGET_STOP_REASON_REPORT_FIELD,
         POOL_KEY_RETRY_INDEX_STRIDE,
     };
     use aether_ai_serving::{AiExecutionAttempt, AiSyncAttempt};
@@ -391,8 +454,48 @@ mod tests {
                     ttl_ms: 900000,
                 }),
                 scheduler_affinity_epoch: None,
+                scheduler_generation: None,
+                scheduler_page_ordinal: None,
                 sticky_key_attempts: Some(3),
             }
+        );
+    }
+
+    #[test]
+    fn attempt_budget_stop_reason_is_reported_without_payload() {
+        let context = attempt_budget_exhaustion_report_context(
+            None,
+            aether_scheduler_core::AttemptBudgetError::AttemptsExhausted,
+        )
+        .expect("report context should be created");
+        assert_eq!(
+            context[ATTEMPT_BUDGET_STOP_REASON_REPORT_FIELD],
+            json!("attempts_exhausted")
+        );
+    }
+
+    #[test]
+    fn attempt_budget_snapshot_is_reported_with_stop_reason() {
+        let context = attempt_budget_exhaustion_report_context_with_snapshot(
+            None,
+            aether_scheduler_core::AttemptBudgetError::ProviderSwitchesExhausted,
+            7,
+            2,
+            3,
+        )
+        .expect("report context should be created");
+        assert_eq!(context[ATTEMPT_BUDGET_ATTEMPTS_REPORT_FIELD], json!(7));
+        assert_eq!(
+            context[ATTEMPT_BUDGET_CREDENTIAL_ATTEMPTS_REPORT_FIELD],
+            json!(2)
+        );
+        assert_eq!(
+            context[ATTEMPT_BUDGET_PROVIDER_SWITCHES_REPORT_FIELD],
+            json!(3)
+        );
+        assert_eq!(
+            context[ATTEMPT_BUDGET_STOP_REASON_REPORT_FIELD],
+            json!("provider_switches_exhausted")
         );
     }
 }

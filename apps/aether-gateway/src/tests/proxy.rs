@@ -1150,7 +1150,7 @@ async fn gateway_forwards_public_request_to_remote_tunnel_owner_before_fallback_
         .header(TRACE_ID_HEADER, "trace-tunnel-affinity-forward-1")
         .header(http::header::COOKIE, "session=must-not-forward")
         .header("cookie2", "legacy-session=must-not-forward")
-        .body("{\"model\":\"gpt-4.1\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-4.1\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -1185,7 +1185,7 @@ async fn gateway_forwards_public_request_to_remote_tunnel_owner_before_fallback_
     assert_eq!(owner_request.path, "/v1/chat/completions?stream=false");
     assert_eq!(
         owner_request.body,
-        "{\"model\":\"gpt-4.1\",\"messages\":[]}"
+        "{\"model\":\"gpt-4.1\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
     );
     assert_eq!(owner_request.trace_id, "trace-tunnel-affinity-forward-1");
     assert_eq!(owner_request.gateway_marker, "rust-phase3b-affinity");

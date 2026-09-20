@@ -11,6 +11,8 @@ use crate::{AppState, GatewayError};
 use axum::body::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use tracing::warn;
 
 pub(crate) const IMPORTANT_NOTIFICATION_ENABLED_KEY: &str = "module.important_notification.enabled";
@@ -23,7 +25,12 @@ pub(crate) const IMPORTANT_NOTIFICATION_DEFAULT_CHANNEL_KEY: &str =
     "module.important_notification.default_channel";
 pub(crate) const IMPORTANT_NOTIFICATION_ITEMS_KEY: &str = "module.important_notification.items";
 pub(crate) const PROVIDER_QUOTA_ALERT_ITEM_KEY: &str = "provider_quota_alert";
+pub(crate) const USER_BALANCE_LOW_ITEM_KEY: &str = "user_balance_low";
+pub(crate) const USER_BALANCE_LOW_THRESHOLD_KEY: &str =
+    "module.important_notification.user_balance_low_threshold";
 pub(crate) const USER_REFUND_STATUS_ITEM_KEY: &str = "user_refund_status";
+pub(crate) const USER_RECHARGE_RECOVERY_ITEM_KEY: &str = "user_recharge_recovery";
+pub(crate) const RECHARGE_RECOVERY_REVIEW_ITEM_KEY: &str = "recharge_recovery_review";
 
 // Notification configuration is administrator-controlled but is also read on
 // request paths. Bound fan-out and template materialization so a malformed or
@@ -36,6 +43,9 @@ const MAX_NOTIFICATION_ITEMS: usize = 128;
 const MAX_NOTIFICATION_ITEM_KEY_BYTES: usize = 128;
 const MAX_NOTIFICATION_ITEM_NAME_BYTES: usize = 512;
 const MAX_NOTIFICATION_TEMPLATE_BYTES: usize = 256 * 1024;
+const DEFAULT_USER_BALANCE_LOW_THRESHOLD_USD: f64 = 10.0;
+
+static LOW_BALANCE_NOTIFIED_WALLETS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImportantNotification {
@@ -194,16 +204,17 @@ pub(crate) async fn send_user_important_notification_email(
         return Ok(single_report("item", false, "通知项未启用"));
     }
     if !item.user_email_enabled {
-        return Ok(single_report("user_email", false, "通知项未启用用户邮件"));
+        // No transport was attempted: retain this as a configuration skip.
+        return Ok(single_report("item", false, "通知项未启用用户邮件"));
     }
     let notification = apply_notification_item_template(Some(item), notification, variables);
     let smtp_config = match read_smtp_delivery_config(state).await? {
         Some(config) => config,
-        None => return Ok(single_report("user_email", false, "SMTP 配置不完整")),
+        None => return Ok(single_report("none", false, "SMTP 配置不完整")),
     };
     let user_email = user_email.trim();
     if user_email.is_empty() {
-        return Ok(single_report("user_email", false, "用户邮箱为空"));
+        return Ok(single_report("none", false, "用户邮箱为空"));
     }
     match send_single_email_notification(smtp_config, user_email, &notification).await {
         Ok(()) => Ok(single_report("user_email", true, "用户邮件通知已发送")),
@@ -216,6 +227,131 @@ pub(crate) async fn send_user_important_notification_email(
             ))
         }
     }
+}
+
+pub(crate) async fn maybe_send_user_low_balance_notification(
+    state: &AppState,
+    wallet: &aether_data::repository::wallet::StoredWalletSnapshot,
+) -> Result<(), GatewayError> {
+    let config = read_important_notification_config(state).await?;
+    let threshold = state
+        .read_system_config_json_value(USER_BALANCE_LOW_THRESHOLD_KEY)
+        .await?
+        .as_ref()
+        .and_then(parse_nonnegative_f64)
+        .unwrap_or(DEFAULT_USER_BALANCE_LOW_THRESHOLD_USD);
+    let balance = wallet.balance + wallet.gift_balance;
+    if !wallet.limit_mode.eq_ignore_ascii_case("finite")
+        || !wallet.status.eq_ignore_ascii_case("active")
+    {
+        if balance.is_finite() && balance >= threshold {
+            release_low_balance_notification(&wallet.id);
+        }
+        return Ok(());
+    }
+    if !balance.is_finite() {
+        return Ok(());
+    }
+    if balance >= threshold {
+        release_low_balance_notification(&wallet.id);
+        return Ok(());
+    }
+    let Some(item) = find_notification_item(&config, USER_BALANCE_LOW_ITEM_KEY) else {
+        return Ok(());
+    };
+    if !config.module_enabled || !item.enabled || !item.user_email_enabled {
+        return Ok(());
+    }
+    let Some(user_id) = wallet.user_id.as_deref().filter(|id| !id.trim().is_empty()) else {
+        return Ok(());
+    };
+    if state
+        .read_user_preferences(user_id)
+        .await?
+        .is_some_and(|preferences| !preferences.email_notifications || !preferences.usage_alerts)
+    {
+        return Ok(());
+    }
+    let Some(user) = state.find_user_auth_by_id(user_id).await? else {
+        return Ok(());
+    };
+    if user.is_deleted || !user.is_active || !user.email_verified {
+        return Ok(());
+    }
+    let Some(email) = user
+        .email
+        .as_deref()
+        .filter(|email| !email.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    if !claim_low_balance_notification(&wallet.id, balance, threshold) {
+        return Ok(());
+    }
+
+    let balance = format!("{balance:.4}");
+    let threshold = format!("{threshold:.4}");
+    let report = send_user_important_notification_email(
+        state,
+        USER_BALANCE_LOW_ITEM_KEY,
+        email,
+        ImportantNotification {
+            title: "余额不足提醒".into(),
+            markdown_body: format!(
+                "你的账户余额 ${balance} 已低于提醒阈值 ${threshold}，请及时处理。"
+            ),
+            text_body: format!("你的账户余额 ${balance} 已低于提醒阈值 ${threshold}，请及时处理。"),
+        },
+        &[
+            ("user_email", email.to_string()),
+            ("balance", balance),
+            ("threshold_amount", threshold),
+        ],
+    )
+    .await;
+    let report = match report {
+        Ok(report) => report,
+        Err(err) => {
+            release_low_balance_notification(&wallet.id);
+            return Err(err);
+        }
+    };
+    if !report.success {
+        release_low_balance_notification(&wallet.id);
+        warn!(
+            wallet_id = %wallet.id,
+            user_id,
+            "low balance notification did not reach a channel"
+        );
+    }
+    Ok(())
+}
+
+fn claim_low_balance_notification(wallet_id: &str, balance: f64, threshold: f64) -> bool {
+    let mut notified = LOW_BALANCE_NOTIFIED_WALLETS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("low balance notification state should lock");
+    if !balance.is_finite() || balance >= threshold {
+        notified.remove(wallet_id);
+        return false;
+    }
+    notified.insert(wallet_id.to_string())
+}
+
+fn release_low_balance_notification(wallet_id: &str) {
+    LOW_BALANCE_NOTIFIED_WALLETS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("low balance notification state should lock")
+        .remove(wallet_id);
+}
+
+fn parse_nonnegative_f64(value: &Value) -> Option<f64> {
+    let parsed = value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse::<f64>().ok())?;
+    (parsed.is_finite() && parsed >= 0.0).then_some(parsed)
 }
 
 async fn important_notification_has_configured_channel(
@@ -484,6 +620,26 @@ fn parse_notification_item(value: &Value) -> Option<ImportantNotificationItemCon
 fn default_notification_items() -> Vec<ImportantNotificationItemConfig> {
     vec![
         ImportantNotificationItemConfig {
+            key: USER_RECHARGE_RECOVERY_ITEM_KEY.to_string(),
+            name: "充值后历史欠费处理结果".to_string(),
+            enabled: true,
+            channel: Some(ImportantNotificationChannelFilter::Email),
+            title_template: None,
+            markdown_template: None,
+            text_template: None,
+            user_email_enabled: true,
+        },
+        ImportantNotificationItemConfig {
+            key: RECHARGE_RECOVERY_REVIEW_ITEM_KEY.to_string(),
+            name: "历史欠费追扣待处理".to_string(),
+            enabled: true,
+            channel: None,
+            title_template: None,
+            markdown_template: None,
+            text_template: None,
+            user_email_enabled: false,
+        },
+        ImportantNotificationItemConfig {
             key: PROVIDER_QUOTA_ALERT_ITEM_KEY.to_string(),
             name: "号池额度不足".to_string(),
             enabled: true,
@@ -494,19 +650,7 @@ fn default_notification_items() -> Vec<ImportantNotificationItemConfig> {
             user_email_enabled: false,
         },
         ImportantNotificationItemConfig {
-            key: "provider_pool_abnormal".to_string(),
-            name: "号池异常".to_string(),
-            enabled: true,
-            channel: None,
-            title_template: Some("号池异常：{provider_name}".to_string()),
-            markdown_template: Some(
-                "号池 `{provider_name}` 出现异常，请检查服务状态。".to_string(),
-            ),
-            text_template: Some("号池 {provider_name} 出现异常，请检查服务状态。".to_string()),
-            user_email_enabled: false,
-        },
-        ImportantNotificationItemConfig {
-            key: "user_balance_low".to_string(),
+            key: USER_BALANCE_LOW_ITEM_KEY.to_string(),
             name: "用户余额不足".to_string(),
             enabled: true,
             channel: Some(ImportantNotificationChannelFilter::Email),
@@ -671,7 +815,7 @@ async fn maybe_send_email_notification(
 
     reports.push(ImportantNotificationChannelReport {
         channel: "email",
-        success: sent > 0,
+        success: sent > 0 && failed == 0,
         message: if failed == 0 {
             format!("邮件通知已发送给 {sent} 个收件人")
         } else {
@@ -857,8 +1001,9 @@ fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_notification_item_template, important_notification_configured, parse_channel_filter,
-        parse_notification_items, parse_recipient_list, ImportantNotification,
+        apply_notification_item_template, claim_low_balance_notification,
+        important_notification_configured, parse_channel_filter, parse_notification_items,
+        parse_recipient_list, release_low_balance_notification, ImportantNotification,
         ImportantNotificationChannelFilter, IMPORTANT_NOTIFICATION_EMAIL_ENABLED_KEY,
         IMPORTANT_NOTIFICATION_EMAIL_RECIPIENTS_KEY, MAX_NOTIFICATION_ITEMS,
         MAX_NOTIFICATION_RECIPIENTS, MAX_NOTIFICATION_RECIPIENT_BYTES,
@@ -991,6 +1136,23 @@ mod tests {
             parse_channel_filter("bark"),
             Some(ImportantNotificationChannelFilter::Bark)
         );
+    }
+
+    #[test]
+    fn low_balance_notification_fires_once_until_balance_recovers() {
+        let wallet_id = format!("test-low-balance-{}", uuid::Uuid::new_v4());
+        assert!(claim_low_balance_notification(&wallet_id, 9.0, 10.0));
+        assert!(!claim_low_balance_notification(&wallet_id, 8.0, 10.0));
+        assert!(!claim_low_balance_notification(&wallet_id, 10.0, 10.0));
+        assert!(claim_low_balance_notification(&wallet_id, 7.0, 10.0));
+    }
+
+    #[test]
+    fn low_balance_notification_release_allows_delivery_retry() {
+        let wallet_id = format!("test-low-balance-retry-{}", uuid::Uuid::new_v4());
+        assert!(claim_low_balance_notification(&wallet_id, 9.0, 10.0));
+        release_low_balance_notification(&wallet_id);
+        assert!(claim_low_balance_notification(&wallet_id, 9.0, 10.0));
     }
 
     #[test]

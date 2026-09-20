@@ -1,15 +1,24 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::ai_serving::{
+    GEMINI_FILES_DELETE_PLAN_KIND, GEMINI_FILES_UPLOAD_PLAN_KIND,
+    GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND, GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND,
+    OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
+};
+use aether_ai_serving::attempt_loop::AiAttemptBudgetExhaustion;
 use aether_ai_serving::{
-    run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopOutcome, AiAttemptLoopPort,
-    AiAttemptRetryScope, AiExecutionAttempt,
+    run_ai_attempt_loop, AiAttemptAdmission, AiAttemptExecutionOutcome, AiAttemptLoopOutcome,
+    AiAttemptLoopPort, AiAttemptRetryScope, AiExecutionAttempt,
 };
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_runtime::{AdmissionPermit, ConcurrencyPermit};
 use aether_scheduler_core::{
-    parse_request_candidate_report_context, SchedulerRequestCandidateStatusUpdate,
+    parse_request_candidate_report_context, AttemptBudget, SchedulerRequestCandidateStatusUpdate,
 };
 use async_trait::async_trait;
 use axum::body::Body;
@@ -19,7 +28,10 @@ use tokio::sync::OnceCell;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, info, warn, Instrument};
 
-use crate::ai_serving::LocalExecutionAttemptSource;
+use crate::ai_serving::{
+    LocalExecutionAttemptSource, OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND,
+    OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND,
+};
 use crate::clock::current_unix_ms;
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::{
@@ -31,7 +43,8 @@ use crate::execution_runtime::{
 };
 use crate::executor::{
     attach_deferred_usage_context, build_local_execution_exhaustion,
-    mark_deferred_upstream_response, LocalExecutionRequestOutcome,
+    mark_deferred_upstream_response, wrap_response_body_with_attempt_lifecycle, AttemptLifecycle,
+    LocalExecutionRequestOutcome,
 };
 use crate::handlers::shared::provider_pool::release_admin_provider_pool_key_lease;
 use crate::log_ids::short_request_id;
@@ -44,7 +57,8 @@ use crate::orchestration::{
 };
 use crate::privacy::RedactionExecutionCandidateId;
 use crate::request_candidate_runtime::{
-    record_local_request_candidate_status, RequestCandidateRuntimeWriter,
+    record_local_request_candidate_extra_data, record_local_request_candidate_status,
+    RequestCandidateRuntimeWriter,
 };
 use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AppState, GatewayError};
@@ -55,6 +69,32 @@ const UPSTREAM_EXECUTION_GATE_HOLD_STREAM_RESPONSE_ENV: &str =
     "AETHER_GATEWAY_UPSTREAM_EXECUTION_GATE_HOLD_STREAM_RESPONSE";
 const UPSTREAM_EXECUTION_GATE_STREAM_HOLD_MODE_ENV: &str =
     "AETHER_GATEWAY_UPSTREAM_EXECUTION_GATE_STREAM_HOLD_MODE";
+
+fn operation_allows_retry_replay(plan_kind: &str) -> bool {
+    !matches!(
+        plan_kind,
+        // These operations can cause a durable upstream effect. At this
+        // point the candidate has already been sent, so replaying it on the
+        // same key or another candidate could duplicate that effect.
+        OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND
+            | OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND
+            | OPENAI_IMAGE_STREAM_PLAN_KIND
+            | OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND
+            | OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND
+            | OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND
+            | OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND
+            | GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND
+            | GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND
+            | GEMINI_FILES_UPLOAD_PLAN_KIND
+            | GEMINI_FILES_DELETE_PLAN_KIND
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetryReplayDecision {
+    admitted: bool,
+    reason: &'static str,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct BackgroundAdmissionPermit {
@@ -75,6 +115,44 @@ fn attach_redaction_execution_candidate(response: &mut Response<Body>, candidate
         response
             .extensions_mut()
             .insert(RedactionExecutionCandidateId::new(candidate_id));
+    }
+}
+
+fn wrap_attempt_execution_outcome(
+    execution: AiAttemptExecutionOutcome<Response<Body>>,
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    lifecycle: AttemptLifecycle,
+) -> AiAttemptExecutionOutcome<Response<Body>> {
+    match execution {
+        AiAttemptExecutionOutcome::Responded(mut response) => {
+            attach_redaction_execution_candidate(&mut response, plan.candidate_id.as_deref());
+            AiAttemptExecutionOutcome::Responded(wrap_response_body_with_attempt_lifecycle(
+                response, lifecycle,
+            ))
+        }
+        AiAttemptExecutionOutcome::Retry {
+            scope,
+            fallback_response,
+        } => match fallback_response {
+            Some(mut response) => {
+                attach_redaction_execution_candidate(&mut response, plan.candidate_id.as_deref());
+                attach_deferred_usage_context(&mut response, plan, report_context);
+                AiAttemptExecutionOutcome::Retry {
+                    scope,
+                    fallback_response: Some(wrap_response_body_with_attempt_lifecycle(
+                        response, lifecycle,
+                    )),
+                }
+            }
+            None => {
+                lifecycle.mark_terminal();
+                AiAttemptExecutionOutcome::Retry {
+                    scope,
+                    fallback_response: None,
+                }
+            }
+        },
     }
 }
 
@@ -284,6 +362,9 @@ where
     type Error = GatewayError;
 
     async fn should_skip_attempt(&self, attempt: &T) -> Result<bool, Self::Error> {
+        if self.transfer_tracker.client_committed() {
+            return Ok(true);
+        }
         Ok(should_skip_provider_transfer_attempt(
             self.transfer_tracker,
             self.trace_id,
@@ -293,8 +374,41 @@ where
         .await)
     }
 
+    async fn admit_attempt(&self, attempt: &T) -> Result<AiAttemptAdmission, Self::Error> {
+        Ok(admit_request_attempt(
+            self.state,
+            self.transfer_tracker,
+            self.trace_id,
+            self.plan_kind,
+            attempt,
+        )
+        .await)
+    }
+
+    async fn deadline_exhaustion_report_context(
+        &self,
+        attempt: &T,
+    ) -> Result<Option<serde_json::Value>, Self::Error> {
+        Ok(attempt_budget_report_context(
+            attempt,
+            aether_scheduler_core::AttemptBudgetError::DeadlineExceeded,
+        ))
+    }
+
+    async fn attempt_budget_remaining(&self) -> Result<Option<Duration>, Self::Error> {
+        Ok(request_attempt_budget_remaining(self.transfer_tracker).await)
+    }
+
+    async fn take_internal_attempt_budget_exhaustion(
+        &self,
+        attempt: &T,
+    ) -> Result<Option<AiAttemptBudgetExhaustion>, Self::Error> {
+        Ok(take_internal_attempt_budget_exhaustion(self.transfer_tracker, attempt).await)
+    }
+
     async fn record_attempt_started(&self, attempt: &T) -> Result<(), Self::Error> {
         record_provider_transfer_attempt_started(self.transfer_tracker, attempt).await;
+        record_local_candidate_attempt_started(self.state, attempt).await;
         Ok(())
     }
 
@@ -312,6 +426,12 @@ where
         )
         .await;
         Ok(())
+    }
+
+    async fn admit_retry_replay(&self, attempt: &T) -> Result<bool, Self::Error> {
+        let decision = self.transfer_tracker.retry_replay_decision(self.plan_kind);
+        record_local_candidate_replay_decision(self.state, attempt, decision).await;
+        Ok(decision.admitted)
     }
 
     async fn execute_attempt(
@@ -394,22 +514,35 @@ where
         {
             return Ok(AiAttemptExecutionOutcome::Responded(response));
         }
+        let lifecycle = self.transfer_tracker.begin_attempt_lifecycle();
+        lifecycle.mark_sent();
+        record_local_candidate_lifecycle_phase(
+            self.state,
+            plan,
+            attempt.report_context_ref(),
+            "sent_but_uncommitted",
+        )
+        .await;
         let upstream_execution_gate_held_started_at = std::time::Instant::now();
         let deferred_report_context = report_context.clone();
-        let execution = execute_execution_runtime_sync_with_retry_scope(
-            self.state,
-            self.parts.uri.path(),
-            plan.clone(),
-            self.trace_id,
-            self.decision,
-            self.plan_kind,
-            attempt.report_kind(),
-            report_context,
+        let execution = scope_request_attempt_budget(
+            self.transfer_tracker,
+            execute_execution_runtime_sync_with_retry_scope(
+                self.state,
+                self.parts.uri.path(),
+                plan.clone(),
+                self.trace_id,
+                self.decision,
+                self.plan_kind,
+                attempt.report_kind(),
+                report_context,
+            ),
         )
         .await;
         let execution = match execution {
             Ok(execution) => execution,
             Err(error) => {
+                lifecycle.mark_terminal();
                 release_plan_usage_policy_cost_best_effort(
                     self.state,
                     self.decision,
@@ -427,24 +560,12 @@ where
                 .elapsed()
                 .as_millis() as u64,
         );
-        let mut execution = execution;
-        match &mut execution {
-            AiAttemptExecutionOutcome::Responded(response) => {
-                attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
-            }
-            AiAttemptExecutionOutcome::Retry {
-                fallback_response: Some(response),
-                ..
-            } => {
-                attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
-                attach_deferred_usage_context(response, plan, deferred_report_context.as_ref());
-            }
-            AiAttemptExecutionOutcome::Retry {
-                fallback_response: None,
-                ..
-            } => {}
-        }
-        Ok(execution)
+        Ok(wrap_attempt_execution_outcome(
+            execution,
+            plan,
+            deferred_report_context.as_ref(),
+            lifecycle,
+        ))
     }
 
     async fn mark_unused_attempts(&self, attempts: Vec<T>) -> Result<(), Self::Error> {
@@ -675,11 +796,33 @@ struct ProviderTransferState {
     limits: Option<ProviderTransferLimits>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ProviderTransferStateTracker {
     by_provider: BTreeMap<String, ProviderTransferState>,
     exhausted_provider_ids: BTreeSet<String>,
     global: GlobalTransferState,
+    attempt_budget: AttemptBudget,
+    internal_attempt_budget_exhaustion: Option<InternalAttemptBudgetExhaustion>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InternalAttemptBudgetExhaustion {
+    reason: aether_scheduler_core::AttemptBudgetError,
+    attempts: usize,
+    credential_attempts: usize,
+    provider_switches: usize,
+}
+
+impl Default for ProviderTransferStateTracker {
+    fn default() -> Self {
+        Self {
+            by_provider: BTreeMap::new(),
+            exhausted_provider_ids: BTreeSet::new(),
+            global: GlobalTransferState::default(),
+            attempt_budget: AttemptBudget::new(std::time::Instant::now()),
+            internal_attempt_budget_exhaustion: None,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -751,12 +894,98 @@ impl GlobalTransferState {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProviderTransferTracker {
     state: std::sync::Arc<tokio::sync::Mutex<ProviderTransferStateTracker>>,
+    request_commit_barrier: crate::executor::RequestCommitBarrier,
     daily_usage_outcome: Arc<OnceCell<crate::daily_usage_limit::FrontdoorDailyUsageOutcome>>,
     usage_policy_reservation: Option<crate::plan_usage_policy::PlanUsageReservationContext>,
     usage_policy_reservation_plan:
         std::sync::Arc<std::sync::Mutex<Option<aether_contracts::ExecutionPlan>>>,
     usage_policy_cost_reserved: std::sync::Arc<AtomicBool>,
     _background_admission_permit: Option<BackgroundAdmissionPermit>,
+}
+
+tokio::task_local! {
+    static REQUEST_ATTEMPT_BUDGET_TRACKER: ProviderTransferTracker;
+}
+
+#[derive(Clone)]
+pub(crate) struct InternalAttemptBudgetHandle {
+    tracker: ProviderTransferTracker,
+}
+
+impl InternalAttemptBudgetHandle {
+    pub(crate) async fn reserve(
+        &self,
+        plan: &aether_contracts::ExecutionPlan,
+    ) -> Result<Option<Duration>, aether_scheduler_core::AttemptBudgetError> {
+        reserve_internal_request_attempt_on_tracker(&self.tracker, plan).await
+    }
+}
+
+pub(crate) fn current_internal_attempt_budget_handle() -> Option<InternalAttemptBudgetHandle> {
+    REQUEST_ATTEMPT_BUDGET_TRACKER
+        .try_with(|tracker| InternalAttemptBudgetHandle {
+            tracker: tracker.clone(),
+        })
+        .ok()
+}
+
+pub(crate) async fn scope_request_attempt_budget<T>(
+    tracker: &ProviderTransferTracker,
+    future: impl Future<Output = T>,
+) -> T {
+    if REQUEST_ATTEMPT_BUDGET_TRACKER.try_with(|_| ()).is_ok() {
+        return future.await;
+    }
+    REQUEST_ATTEMPT_BUDGET_TRACKER
+        .scope(tracker.clone(), future)
+        .await
+}
+
+/// Reserves one additional physical send performed inside the current
+/// candidate attempt. The outer attempt already reserved the first send, so
+/// callers invoke this only immediately before an internal retry.
+pub(crate) async fn reserve_internal_request_attempt(
+    plan: &aether_contracts::ExecutionPlan,
+) -> Result<Option<Duration>, aether_scheduler_core::AttemptBudgetError> {
+    let Some(handle) = current_internal_attempt_budget_handle() else {
+        // Standalone execution-runtime tests and deployments have no Gateway
+        // request tracker. Their caller owns any cross-process attempt budget.
+        return Ok(None);
+    };
+    handle.reserve(plan).await
+}
+
+async fn reserve_internal_request_attempt_on_tracker(
+    tracker: &ProviderTransferTracker,
+    plan: &aether_contracts::ExecutionPlan,
+) -> Result<Option<Duration>, aether_scheduler_core::AttemptBudgetError> {
+    let now = std::time::Instant::now();
+    let request_timeout_ms = plan
+        .timeouts
+        .as_ref()
+        .and_then(|timeouts| timeouts.total_ms);
+    let mut state = tracker.state.lock().await;
+    let result = state.attempt_budget.reserve(
+        plan.provider_id.as_str(),
+        plan.key_id.as_str(),
+        request_timeout_ms,
+        now,
+    );
+    let result = result.and_then(|()| state.attempt_budget.remaining(now));
+    if let Err(reason) = result {
+        let attempts = state.attempt_budget.attempts();
+        let credential_attempts = state
+            .attempt_budget
+            .credential_attempts(plan.key_id.as_str());
+        let provider_switches = state.attempt_budget.provider_switches();
+        state.internal_attempt_budget_exhaustion = Some(InternalAttemptBudgetExhaustion {
+            reason,
+            attempts,
+            credential_attempts,
+            provider_switches,
+        });
+    }
+    result
 }
 
 impl ProviderTransferTracker {
@@ -769,6 +998,7 @@ impl ProviderTransferTracker {
             .cloned();
         Self {
             state: Default::default(),
+            request_commit_barrier: Default::default(),
             daily_usage_outcome: Arc::new(OnceCell::new()),
             usage_policy_reservation,
             usage_policy_reservation_plan: Default::default(),
@@ -781,6 +1011,38 @@ impl ProviderTransferTracker {
         self.usage_policy_reservation
             .as_ref()
             .map(crate::plan_usage_policy::PlanUsageReservationContext::token)
+    }
+
+    fn begin_attempt_lifecycle(&self) -> AttemptLifecycle {
+        AttemptLifecycle::new(self.request_commit_barrier.clone())
+    }
+
+    fn client_committed(&self) -> bool {
+        self.request_commit_barrier.is_client_committed()
+    }
+
+    fn retry_replay_decision(&self, plan_kind: &str) -> RetryReplayDecision {
+        if self.client_committed() {
+            return RetryReplayDecision {
+                admitted: false,
+                reason: "client_committed",
+            };
+        }
+        if !operation_allows_retry_replay(plan_kind) {
+            return RetryReplayDecision {
+                admitted: false,
+                reason: "operation_not_replayable",
+            };
+        }
+        RetryReplayDecision {
+            admitted: true,
+            reason: "admitted",
+        }
+    }
+
+    #[cfg(test)]
+    fn retry_replay_admitted(&self, plan_kind: &str) -> bool {
+        self.retry_replay_decision(plan_kind).admitted
     }
 
     fn record_usage_policy_reservation_plan(&self, plan: &aether_contracts::ExecutionPlan) {
@@ -1055,6 +1317,97 @@ async fn record_provider_transfer_attempt_started<Attempt>(
         .record_attempt_started(attempt.execution_plan(), Instant::now());
 }
 
+fn candidate_trace_report_context(
+    report_context: Option<serde_json::Value>,
+    lifecycle_phase: Option<&str>,
+) -> Option<serde_json::Value> {
+    let mut report_context =
+        report_context.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+    if !report_context.is_object() {
+        report_context = serde_json::Value::Object(Default::default());
+    }
+    let object = report_context
+        .as_object_mut()
+        .expect("candidate trace report context is an object");
+    if let Some(lifecycle_phase) = lifecycle_phase {
+        object.insert(
+            "attempt_lifecycle_phase".to_string(),
+            serde_json::Value::String(lifecycle_phase.to_string()),
+        );
+    }
+    Some(report_context)
+}
+
+async fn record_local_candidate_attempt_started<Attempt>(
+    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+    attempt: &Attempt,
+) where
+    Attempt: AiExecutionAttempt,
+{
+    let started_at_unix_ms = current_unix_ms();
+    let report_context = candidate_trace_report_context(attempt.report_context(), Some("prepared"));
+    record_local_request_candidate_status(
+        state,
+        attempt.execution_plan(),
+        report_context.as_ref(),
+        SchedulerRequestCandidateStatusUpdate {
+            status: RequestCandidateStatus::Pending,
+            status_code: None,
+            error_type: None,
+            error_message: None,
+            latency_ms: None,
+            started_at_unix_ms: Some(started_at_unix_ms),
+            finished_at_unix_ms: None,
+        },
+    )
+    .await;
+}
+
+async fn record_local_candidate_lifecycle_phase(
+    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    lifecycle_phase: &'static str,
+) {
+    record_local_request_candidate_extra_data(
+        state,
+        plan,
+        report_context,
+        RequestCandidateStatus::Pending,
+        None,
+        None,
+        serde_json::json!({ "attempt_lifecycle_phase": lifecycle_phase }),
+    )
+    .await;
+}
+
+async fn record_local_candidate_replay_decision<Attempt>(
+    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+    attempt: &Attempt,
+    decision: RetryReplayDecision,
+) where
+    Attempt: AiExecutionAttempt,
+{
+    record_local_request_candidate_extra_data(
+        state,
+        attempt.execution_plan(),
+        attempt.report_context_ref(),
+        RequestCandidateStatus::Failed,
+        None,
+        None,
+        serde_json::json!({ "retry_replay_admitted": decision.admitted }),
+    )
+    .await;
+    debug!(
+        event_name = "candidate_retry_replay_decision",
+        log_type = "event",
+        candidate_id = ?attempt.execution_plan().candidate_id,
+        retry_replay_admitted = decision.admitted,
+        retry_replay_reason = decision.reason,
+        "gateway recorded final candidate replay admission decision"
+    );
+}
+
 async fn record_provider_transfer_attempt_failed<Attempt>(
     state: &AppState,
     tracker: &ProviderTransferTracker,
@@ -1068,6 +1421,135 @@ async fn record_provider_transfer_attempt_failed<Attempt>(
     let reached = provider_transfer_timeout_after_failure(state, &mut tracker, attempt).await;
     if let Some(reached) = reached {
         log_provider_transfer_limit_reached(trace_id, plan_kind, &reached);
+    }
+}
+
+fn attempt_budget_report_context<Attempt: AiExecutionAttempt>(
+    attempt: &Attempt,
+    reason: aether_scheduler_core::AttemptBudgetError,
+) -> Option<serde_json::Value> {
+    crate::orchestration::attempt_budget_exhaustion_report_context(attempt.report_context(), reason)
+}
+
+fn attempt_budget_report_context_with_snapshot<Attempt: AiExecutionAttempt>(
+    attempt: &Attempt,
+    reason: aether_scheduler_core::AttemptBudgetError,
+    snapshot: (usize, usize, usize),
+) -> Option<serde_json::Value> {
+    crate::orchestration::attempt_budget_exhaustion_report_context_with_snapshot(
+        attempt.report_context(),
+        reason,
+        snapshot.0,
+        snapshot.1,
+        snapshot.2,
+    )
+}
+
+async fn take_internal_attempt_budget_exhaustion<Attempt: AiExecutionAttempt>(
+    tracker: &ProviderTransferTracker,
+    attempt: &Attempt,
+) -> Option<AiAttemptBudgetExhaustion> {
+    let exhaustion = tracker
+        .state
+        .lock()
+        .await
+        .internal_attempt_budget_exhaustion
+        .take()?;
+    Some(AiAttemptBudgetExhaustion {
+        report_context: attempt_budget_report_context_with_snapshot(
+            attempt,
+            exhaustion.reason,
+            (
+                exhaustion.attempts,
+                exhaustion.credential_attempts,
+                exhaustion.provider_switches,
+            ),
+        ),
+    })
+}
+
+async fn admit_request_attempt<Attempt>(
+    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+    tracker: &ProviderTransferTracker,
+    trace_id: &str,
+    plan_kind: &str,
+    attempt: &Attempt,
+) -> AiAttemptAdmission
+where
+    Attempt: AiExecutionAttempt,
+{
+    let plan = attempt.execution_plan();
+    let now = std::time::Instant::now();
+    let request_timeout_ms = plan
+        .timeouts
+        .as_ref()
+        .and_then(|timeouts| timeouts.total_ms);
+    let mut tracker_state = tracker.state.lock().await;
+    let result = tracker_state.attempt_budget.reserve(
+        plan.provider_id.as_str(),
+        plan.key_id.as_str(),
+        request_timeout_ms,
+        now,
+    );
+    let result = result.and_then(|()| tracker_state.attempt_budget.remaining(now));
+    let snapshot = (
+        tracker_state.attempt_budget.attempts(),
+        tracker_state
+            .attempt_budget
+            .credential_attempts(plan.key_id.as_str()),
+        tracker_state.attempt_budget.provider_switches(),
+    );
+    drop(tracker_state);
+
+    match result {
+        Ok(remaining) => AiAttemptAdmission::Admit { remaining },
+        Err(reason) => {
+            let report_context = candidate_trace_report_context(
+                attempt_budget_report_context_with_snapshot(attempt, reason, snapshot),
+                Some("prepared"),
+            );
+            let finished_at_unix_ms = current_unix_ms();
+            record_local_request_candidate_status(
+                state,
+                plan,
+                report_context.as_ref(),
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Skipped,
+                    status_code: None,
+                    error_type: Some("request_attempt_budget_exhausted".to_string()),
+                    error_message: Some(reason.as_str().to_string()),
+                    latency_ms: None,
+                    started_at_unix_ms: None,
+                    finished_at_unix_ms: Some(finished_at_unix_ms),
+                },
+            )
+            .await;
+            warn!(
+                event_name = "request_attempt_budget_exhausted",
+                log_type = "event",
+                trace_id,
+                plan_kind,
+                reason = reason.as_str(),
+                attempts = snapshot.0,
+                credential_attempts = snapshot.1,
+                provider_switches = snapshot.2,
+                "gateway stopped candidate execution after exhausting the request-wide attempt budget"
+            );
+            AiAttemptAdmission::Stop { report_context }
+        }
+    }
+}
+
+async fn request_attempt_budget_remaining(tracker: &ProviderTransferTracker) -> Option<Duration> {
+    match tracker
+        .state
+        .lock()
+        .await
+        .attempt_budget
+        .remaining(std::time::Instant::now())
+    {
+        Ok(remaining) => remaining,
+        Err(_) => Some(Duration::ZERO),
     }
 }
 
@@ -1093,19 +1575,66 @@ where
     // A same-key retry derived after a candidate-scoped failure runs before
     // the source is asked for the next candidate.
     let mut pending_same_key_retry: Option<Attempt> = None;
-
     loop {
         let attempt = match pending_same_key_retry.take() {
             Some(attempt) => attempt,
             None => {
                 let next_started_at = std::time::Instant::now();
+                let request_remaining = port.attempt_budget_remaining().await?;
+                if request_remaining.is_some_and(|remaining| remaining.is_zero()) {
+                    let Some((last_plan, last_report_context)) = last_attempted.take() else {
+                        return Err(GatewayError::LocalExecutionPlanningTimeout {
+                            trace_id: trace_id.to_string(),
+                            phase: "candidate_source",
+                            timeout_ms: 0,
+                        });
+                    };
+                    let report_context =
+                        crate::orchestration::attempt_budget_exhaustion_report_context(
+                            last_report_context,
+                            aether_scheduler_core::AttemptBudgetError::DeadlineExceeded,
+                        );
+                    let remaining = source.drain_execution_attempts().await?;
+                    port.mark_unused_attempts(remaining).await?;
+                    return Ok(LocalExecutionRequestOutcome::Exhausted(
+                        port.build_exhaustion(last_plan, report_context).await?,
+                    ));
+                }
+                let candidate_timeout = request_remaining
+                    .map(|remaining| remaining.min(planning_timeout))
+                    .unwrap_or(planning_timeout);
+                let request_deadline_limited =
+                    request_remaining.is_some_and(|remaining| remaining <= planning_timeout);
                 let next_attempt = next_execution_attempt_with_timeout(
                     source,
                     trace_id,
                     plan_kind,
-                    planning_timeout,
+                    candidate_timeout,
                 )
-                .await?;
+                .await;
+                let next_attempt = match next_attempt {
+                    Ok(next_attempt) => next_attempt,
+                    Err(_) if request_deadline_limited => {
+                        let Some((last_plan, last_report_context)) = last_attempted.take() else {
+                            return Err(GatewayError::LocalExecutionPlanningTimeout {
+                                trace_id: trace_id.to_string(),
+                                phase: "candidate_source",
+                                timeout_ms: candidate_timeout.as_millis() as u64,
+                            });
+                        };
+                        let report_context =
+                            crate::orchestration::attempt_budget_exhaustion_report_context(
+                                last_report_context,
+                                aether_scheduler_core::AttemptBudgetError::DeadlineExceeded,
+                            );
+                        let remaining = source.drain_execution_attempts().await?;
+                        port.mark_unused_attempts(remaining).await?;
+                        return Ok(LocalExecutionRequestOutcome::Exhausted(
+                            port.build_exhaustion(last_plan, report_context).await?,
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                };
                 observe_gateway_stage_ms(
                     "stream_candidate_next",
                     next_started_at.elapsed().as_millis() as u64,
@@ -1122,9 +1651,37 @@ where
             source.skip_provider(provider_id.as_str()).await?;
             continue;
         }
+        let remaining_budget = match port.admit_attempt(&attempt).await? {
+            AiAttemptAdmission::Admit { remaining } => remaining,
+            AiAttemptAdmission::Stop { report_context } => {
+                let last_plan = attempt.execution_plan().clone();
+                port.mark_unused_attempts(vec![attempt]).await?;
+                let remaining = source.drain_execution_attempts().await?;
+                port.mark_unused_attempts(remaining).await?;
+                return Ok(LocalExecutionRequestOutcome::Exhausted(
+                    port.build_exhaustion(last_plan, report_context).await?,
+                ));
+            }
+        };
         port.record_attempt_started(&attempt).await?;
         let execute_started_at = std::time::Instant::now();
-        let execution = match port.execute_attempt(&attempt).await {
+        let execution_result = match remaining_budget {
+            Some(remaining) => match timeout(remaining, port.execute_attempt(&attempt)).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let last_plan = attempt.execution_plan().clone();
+                    let report_context = port.deadline_exhaustion_report_context(&attempt).await?;
+                    port.record_attempt_failed(&attempt).await?;
+                    let remaining = source.drain_execution_attempts().await?;
+                    port.mark_unused_attempts(remaining).await?;
+                    return Ok(LocalExecutionRequestOutcome::Exhausted(
+                        port.build_exhaustion(last_plan, report_context).await?,
+                    ));
+                }
+            },
+            None => port.execute_attempt(&attempt).await,
+        };
+        let execution = match execution_result {
             Ok(execution) => execution,
             Err(err) => {
                 let remaining = source.drain_execution_attempts().await?;
@@ -1132,6 +1689,18 @@ where
                 return Err(err);
             }
         };
+        if let Some(exhaustion) = port
+            .take_internal_attempt_budget_exhaustion(&attempt)
+            .await?
+        {
+            port.record_attempt_failed(&attempt).await?;
+            let remaining = source.drain_execution_attempts().await?;
+            port.mark_unused_attempts(remaining).await?;
+            return Ok(LocalExecutionRequestOutcome::Exhausted(
+                port.build_exhaustion(attempt.execution_plan().clone(), exhaustion.report_context)
+                    .await?,
+            ));
+        }
         observe_gateway_stage_ms(
             "stream_candidate_execute",
             execute_started_at.elapsed().as_millis() as u64,
@@ -1153,6 +1722,23 @@ where
             } => {
                 if attempt_fallback_response.is_some() {
                     fallback_response = attempt_fallback_response;
+                }
+                if !port.admit_retry_replay(&attempt).await? {
+                    port.record_attempt_failed(&attempt).await?;
+                    let remaining = source.drain_execution_attempts().await?;
+                    port.mark_unused_attempts(remaining).await?;
+                    return match fallback_response {
+                        Some(response) => Ok(LocalExecutionRequestOutcome::responded(
+                            mark_deferred_upstream_response(response),
+                        )),
+                        None => Ok(LocalExecutionRequestOutcome::Exhausted(
+                            port.build_exhaustion(
+                                attempt.execution_plan().clone(),
+                                attempt.report_context(),
+                            )
+                            .await?,
+                        )),
+                    };
                 }
                 if scope == AiAttemptRetryScope::Candidate {
                     pending_same_key_retry = port.next_same_key_retry(&attempt).await?;
@@ -1256,6 +1842,9 @@ where
     type Error = GatewayError;
 
     async fn should_skip_attempt(&self, attempt: &T) -> Result<bool, Self::Error> {
+        if self.transfer_tracker.client_committed() {
+            return Ok(true);
+        }
         Ok(should_skip_provider_transfer_attempt(
             self.transfer_tracker,
             self.trace_id,
@@ -1265,8 +1854,41 @@ where
         .await)
     }
 
+    async fn admit_attempt(&self, attempt: &T) -> Result<AiAttemptAdmission, Self::Error> {
+        Ok(admit_request_attempt(
+            self.state,
+            self.transfer_tracker,
+            self.trace_id,
+            self.plan_kind,
+            attempt,
+        )
+        .await)
+    }
+
+    async fn deadline_exhaustion_report_context(
+        &self,
+        attempt: &T,
+    ) -> Result<Option<serde_json::Value>, Self::Error> {
+        Ok(attempt_budget_report_context(
+            attempt,
+            aether_scheduler_core::AttemptBudgetError::DeadlineExceeded,
+        ))
+    }
+
+    async fn attempt_budget_remaining(&self) -> Result<Option<Duration>, Self::Error> {
+        Ok(request_attempt_budget_remaining(self.transfer_tracker).await)
+    }
+
+    async fn take_internal_attempt_budget_exhaustion(
+        &self,
+        attempt: &T,
+    ) -> Result<Option<AiAttemptBudgetExhaustion>, Self::Error> {
+        Ok(take_internal_attempt_budget_exhaustion(self.transfer_tracker, attempt).await)
+    }
+
     async fn record_attempt_started(&self, attempt: &T) -> Result<(), Self::Error> {
         record_provider_transfer_attempt_started(self.transfer_tracker, attempt).await;
+        record_local_candidate_attempt_started(self.state, attempt).await;
         Ok(())
     }
 
@@ -1284,6 +1906,12 @@ where
         )
         .await;
         Ok(())
+    }
+
+    async fn admit_retry_replay(&self, attempt: &T) -> Result<bool, Self::Error> {
+        let decision = self.transfer_tracker.retry_replay_decision(self.plan_kind);
+        record_local_candidate_replay_decision(self.state, attempt, decision).await;
+        Ok(decision.admitted)
     }
 
     async fn execute_attempt(
@@ -1360,12 +1988,15 @@ where
         prewarm_direct_reqwest_candidate_client(plan);
         let watchdog_report_context_owned = report_context.clone();
         let watchdog_report_context = watchdog_report_context_owned.as_ref();
+        let lifecycle = self.transfer_tracker.begin_attempt_lifecycle();
+        let execution_lifecycle = lifecycle.clone();
         let execution_state = self.state.clone();
         let execution_trace_id = self.trace_id.to_string();
         let execution_plan_kind = self.plan_kind.to_string();
         let execution_decision = self.decision.clone();
         let execution_report_kind = attempt.report_kind();
         let execution_plan = plan.clone();
+        let execution_trace_report_context = attempt.report_context();
         let execution_transfer_tracker = self.transfer_tracker.clone();
         let stop_on_transport_errors = matches!(
             resolve_local_transport_failover_analysis_for_attempt(
@@ -1397,14 +2028,25 @@ where
                 {
                     return Ok(AiAttemptExecutionOutcome::Responded(response));
                 }
-                execute_execution_runtime_stream_with_retry_scope(
+                execution_lifecycle.mark_sent();
+                record_local_candidate_lifecycle_phase(
                     &execution_state,
-                    execution_plan,
-                    execution_trace_id.as_str(),
-                    &execution_decision,
-                    execution_plan_kind.as_str(),
-                    execution_report_kind,
-                    report_context,
+                    &execution_plan,
+                    execution_trace_report_context.as_ref(),
+                    "sent_but_uncommitted",
+                )
+                .await;
+                scope_request_attempt_budget(
+                    &execution_transfer_tracker,
+                    execute_execution_runtime_stream_with_retry_scope(
+                        &execution_state,
+                        execution_plan,
+                        execution_trace_id.as_str(),
+                        &execution_decision,
+                        execution_plan_kind.as_str(),
+                        execution_report_kind,
+                        report_context,
+                    ),
                 )
                 .await
             },
@@ -1413,6 +2055,7 @@ where
         let execution = match execution {
             Ok(execution) => execution,
             Err(error) => {
+                lifecycle.mark_terminal();
                 release_plan_usage_policy_cost_best_effort(
                     self.state,
                     self.decision,
@@ -1424,7 +2067,7 @@ where
                 return Err(error);
             }
         };
-        let mut execution = match execution {
+        let execution = match execution {
             StreamCandidateWatchdogOutcome::TransportTimeout => {
                 // The watchdog sits outside the stream runtime, so its timeout
                 // bypasses the normal stream failure report. Project the same
@@ -1477,23 +2120,12 @@ where
             }
             StreamCandidateWatchdogOutcome::Executed(execution) => execution,
         };
-        match &mut execution {
-            AiAttemptExecutionOutcome::Responded(response) => {
-                attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
-            }
-            AiAttemptExecutionOutcome::Retry {
-                fallback_response: Some(response),
-                ..
-            } => {
-                attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
-                attach_deferred_usage_context(response, plan, watchdog_report_context);
-            }
-            AiAttemptExecutionOutcome::Retry {
-                fallback_response: None,
-                ..
-            } => {}
-        }
-        Ok(execution)
+        Ok(wrap_attempt_execution_outcome(
+            execution,
+            plan,
+            watchdog_report_context,
+            lifecycle,
+        ))
     }
 
     async fn mark_unused_attempts(&self, attempts: Vec<T>) -> Result<(), Self::Error> {
@@ -2257,6 +2889,10 @@ pub(crate) async fn mark_unused_local_candidate_items<T, FPlan, FContext>(
 mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
+    use crate::ai_serving::{
+        GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND, GEMINI_FILES_LIST_PLAN_KIND,
+        OPENAI_VIDEO_CONTENT_PLAN_KIND,
+    };
     use aether_contracts::{
         ExecutionPlan, ExecutionResult, ExecutionTimeouts, RequestBody, ResponseBody,
     };
@@ -2272,10 +2908,95 @@ mod tests {
     };
     use aether_data_contracts::DataLayerError;
     use async_trait::async_trait;
+    use futures_util::StreamExt;
     use serde_json::json;
     use tokio::sync::Mutex;
 
     use super::*;
+
+    #[test]
+    fn operation_replay_policy_blocks_compact_plan_kinds() {
+        for plan_kind in [
+            OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND,
+            OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND,
+        ] {
+            assert!(
+                !operation_allows_retry_replay(plan_kind),
+                "{plan_kind} must not replay upstream execution"
+            );
+        }
+    }
+
+    #[test]
+    fn operation_replay_policy_blocks_sent_effectful_plan_kinds() {
+        for plan_kind in [
+            OPENAI_IMAGE_STREAM_PLAN_KIND,
+            OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
+            OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
+            OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
+            OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
+            GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND,
+            GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND,
+            GEMINI_FILES_UPLOAD_PLAN_KIND,
+            GEMINI_FILES_DELETE_PLAN_KIND,
+        ] {
+            assert!(
+                !operation_allows_retry_replay(plan_kind),
+                "{plan_kind} must not replay a sent upstream operation"
+            );
+        }
+    }
+
+    #[test]
+    fn operation_replay_policy_allows_retryable_image_sync() {
+        assert!(operation_allows_retry_replay(OPENAI_IMAGE_SYNC_PLAN_KIND));
+    }
+
+    #[test]
+    fn operation_replay_policy_keeps_ordinary_chat_and_responses_retriable() {
+        for plan_kind in [
+            "openai_chat_sync",
+            "openai_responses_sync",
+            "claude_chat_sync",
+            GEMINI_FILES_GET_PLAN_KIND,
+            GEMINI_FILES_LIST_PLAN_KIND,
+            GEMINI_FILES_DOWNLOAD_PLAN_KIND,
+            OPENAI_VIDEO_CONTENT_PLAN_KIND,
+        ] {
+            assert!(
+                operation_allows_retry_replay(plan_kind),
+                "{plan_kind} is read or text generation, not a gateway-executed side effect"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn earlier_fallback_body_yield_blocks_new_attempt_replay() {
+        let tracker = ProviderTransferTracker::default();
+        let fallback_lifecycle = tracker.begin_attempt_lifecycle();
+        fallback_lifecycle.mark_sent();
+        let fallback_response = wrap_response_body_with_attempt_lifecycle(
+            Response::new(Body::from("earlier fallback")),
+            fallback_lifecycle,
+        );
+        let next_attempt_lifecycle = tracker.begin_attempt_lifecycle();
+        next_attempt_lifecycle.mark_sent();
+
+        assert!(tracker.retry_replay_admitted("openai_chat_sync"));
+        let mut fallback_body = fallback_response.into_body().into_data_stream();
+        assert_eq!(
+            fallback_body
+                .next()
+                .await
+                .expect("fallback frame")
+                .expect("fallback data")
+                .as_ref(),
+            b"earlier fallback"
+        );
+        assert!(!tracker.retry_replay_admitted("openai_chat_sync"));
+        drop(fallback_body);
+        assert!(!tracker.retry_replay_admitted("openai_chat_sync"));
+    }
 
     struct TestRequestCandidateWriter {
         records: Mutex<Vec<UpsertRequestCandidateRecord>>,
@@ -2466,6 +3187,8 @@ mod tests {
         state: &'a AppState,
         tracker: ProviderTransferTracker,
         retry_scope: AiAttemptRetryScope,
+        retry_replay_admitted: bool,
+        retry_fallback_response: bool,
         executed: StdMutex<Vec<&'static str>>,
         unused: StdMutex<Vec<&'static str>>,
     }
@@ -2480,6 +3203,8 @@ mod tests {
                 state,
                 tracker,
                 retry_scope: AiAttemptRetryScope::Candidate,
+                retry_replay_admitted: true,
+                retry_fallback_response: false,
                 executed: StdMutex::new(Vec::new()),
                 unused: StdMutex::new(Vec::new()),
             }
@@ -2490,6 +3215,34 @@ mod tests {
                 state,
                 tracker: ProviderTransferTracker::default(),
                 retry_scope,
+                retry_replay_admitted: true,
+                retry_fallback_response: false,
+                executed: StdMutex::new(Vec::new()),
+                unused: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn with_replay_rejection(state: &'a AppState) -> Self {
+            Self {
+                state,
+                tracker: ProviderTransferTracker::default(),
+                retry_scope: AiAttemptRetryScope::Candidate,
+                retry_replay_admitted: false,
+                retry_fallback_response: true,
+                executed: StdMutex::new(Vec::new()),
+                unused: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn with_operation_replay_policy(state: &'a AppState, plan_kind: &str) -> Self {
+            let tracker = ProviderTransferTracker::default();
+            let retry_replay_admitted = tracker.retry_replay_admitted(plan_kind);
+            Self {
+                state,
+                tracker,
+                retry_scope: AiAttemptRetryScope::Candidate,
+                retry_replay_admitted,
+                retry_fallback_response: false,
                 executed: StdMutex::new(Vec::new()),
                 unused: StdMutex::new(Vec::new()),
             }
@@ -2515,6 +3268,41 @@ mod tests {
             .await)
         }
 
+        async fn admit_attempt(
+            &self,
+            attempt: &TransferTestAttempt,
+        ) -> Result<AiAttemptAdmission, Self::Error> {
+            Ok(admit_request_attempt(
+                self.state,
+                &self.tracker,
+                "trace-transfer-test",
+                "transfer_test",
+                attempt,
+            )
+            .await)
+        }
+
+        async fn deadline_exhaustion_report_context(
+            &self,
+            attempt: &TransferTestAttempt,
+        ) -> Result<Option<serde_json::Value>, Self::Error> {
+            Ok(attempt_budget_report_context(
+                attempt,
+                aether_scheduler_core::AttemptBudgetError::DeadlineExceeded,
+            ))
+        }
+
+        async fn attempt_budget_remaining(&self) -> Result<Option<Duration>, Self::Error> {
+            Ok(request_attempt_budget_remaining(&self.tracker).await)
+        }
+
+        async fn take_internal_attempt_budget_exhaustion(
+            &self,
+            attempt: &TransferTestAttempt,
+        ) -> Result<Option<AiAttemptBudgetExhaustion>, Self::Error> {
+            Ok(take_internal_attempt_budget_exhaustion(&self.tracker, attempt).await)
+        }
+
         async fn record_attempt_started(
             &self,
             attempt: &TransferTestAttempt,
@@ -2538,6 +3326,13 @@ mod tests {
             Ok(())
         }
 
+        async fn admit_retry_replay(
+            &self,
+            _attempt: &TransferTestAttempt,
+        ) -> Result<bool, Self::Error> {
+            Ok(self.retry_replay_admitted)
+        }
+
         async fn execute_attempt(
             &self,
             attempt: &TransferTestAttempt,
@@ -2545,6 +3340,11 @@ mod tests {
             self.executed.lock().unwrap().push(attempt.label);
             Ok(if attempt.plan.provider_id == "provider-b" {
                 AiAttemptExecutionOutcome::Responded(Response::new(Body::from("ok")))
+            } else if self.retry_fallback_response {
+                AiAttemptExecutionOutcome::Retry {
+                    scope: self.retry_scope,
+                    fallback_response: Some(Response::new(Body::from("fallback"))),
+                }
             } else {
                 AiAttemptExecutionOutcome::retry(self.retry_scope)
             })
@@ -2640,6 +3440,284 @@ mod tests {
         ]
     }
 
+    fn replay_policy_test_attempts() -> Vec<TransferTestAttempt> {
+        let mut sent_plan = test_plan(None);
+        sent_plan.provider_id = "provider-a".to_string();
+        sent_plan.endpoint_id = "endpoint-a".to_string();
+        sent_plan.key_id = "key-a".to_string();
+        let mut next_plan = sent_plan.clone();
+        next_plan.provider_id = "provider-b".to_string();
+        next_plan.endpoint_id = "endpoint-b".to_string();
+        next_plan.key_id = "key-b".to_string();
+
+        vec![
+            TransferTestAttempt {
+                label: "sent-primary",
+                plan: sent_plan,
+                report_context: json!({
+                    "candidate_index": 0,
+                    "retry_index": 0,
+                }),
+            },
+            TransferTestAttempt {
+                label: "next-candidate",
+                plan: next_plan,
+                report_context: json!({
+                    "candidate_index": 1,
+                    "retry_index": 0,
+                }),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn candidate_trace_producers_record_start_send_and_final_replay_decision() {
+        let writer = TestRequestCandidateWriter::default();
+        let attempt = replay_policy_test_attempts()
+            .into_iter()
+            .next()
+            .expect("test attempt");
+
+        record_local_candidate_attempt_started(&writer, &attempt).await;
+        record_local_candidate_lifecycle_phase(
+            &writer,
+            attempt.execution_plan(),
+            attempt.report_context_ref(),
+            "sent_but_uncommitted",
+        )
+        .await;
+        record_local_candidate_replay_decision(
+            &writer,
+            &attempt,
+            RetryReplayDecision {
+                admitted: false,
+                reason: "operation_not_replayable",
+            },
+        )
+        .await;
+
+        let records = writer.records.lock().await;
+        assert_eq!(records.len(), 3);
+        assert!(records.iter().all(|record| record.id == "cand_watchdog"));
+        assert_eq!(records[0].status, RequestCandidateStatus::Pending);
+        assert!(records[0].started_at_unix_ms.is_some());
+        assert_eq!(
+            records[0].extra_data.as_ref().unwrap()["attempt_lifecycle_phase"],
+            "prepared"
+        );
+        assert_eq!(
+            records[1].extra_data.as_ref().unwrap()["attempt_lifecycle_phase"],
+            "sent_but_uncommitted"
+        );
+        assert_eq!(records[2].status, RequestCandidateStatus::Failed);
+        assert_eq!(
+            records[2].extra_data.as_ref().unwrap()["retry_replay_admitted"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn attempt_budget_stop_records_a_skipped_candidate_with_snapshot() {
+        let writer = TestRequestCandidateWriter::default();
+        let tracker = ProviderTransferTracker::default();
+        let attempt = replay_policy_test_attempts()
+            .into_iter()
+            .next()
+            .expect("test attempt");
+
+        for index in 0..aether_scheduler_core::DEFAULT_MAX_ATTEMPTS {
+            let mut admitted_attempt = attempt.clone();
+            admitted_attempt.plan.key_id = format!("key-{index}");
+            assert!(matches!(
+                admit_request_attempt(
+                    &writer,
+                    &tracker,
+                    "trace-budget-stop",
+                    "test",
+                    &admitted_attempt,
+                )
+                .await,
+                AiAttemptAdmission::Admit { .. }
+            ));
+        }
+        let mut exhausted_attempt = attempt.clone();
+        exhausted_attempt.plan.key_id = "key-exhausted".to_string();
+        let admission = admit_request_attempt(
+            &writer,
+            &tracker,
+            "trace-budget-stop",
+            "test",
+            &exhausted_attempt,
+        )
+        .await;
+        assert!(matches!(admission, AiAttemptAdmission::Stop { .. }));
+
+        let records = writer.records.lock().await;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, RequestCandidateStatus::Skipped);
+        assert_eq!(
+            records[0].extra_data.as_ref().unwrap()["attempt_budget_stop_reason"],
+            "attempts_exhausted"
+        );
+        assert_eq!(
+            records[0].extra_data.as_ref().unwrap()["attempt_budget_attempts"],
+            aether_scheduler_core::DEFAULT_MAX_ATTEMPTS as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_retry_uses_the_same_budget_without_double_counting_initial_send() {
+        let writer = TestRequestCandidateWriter::default();
+        let tracker = ProviderTransferTracker::default();
+        let attempt = replay_policy_test_attempts()
+            .into_iter()
+            .next()
+            .expect("test attempt");
+        tracker.state.lock().await.attempt_budget =
+            AttemptBudget::new(std::time::Instant::now()).with_limits(3, 3, 3);
+
+        assert!(matches!(
+            admit_request_attempt(
+                &writer,
+                &tracker,
+                "trace-internal-retry-budget",
+                "test",
+                &attempt,
+            )
+            .await,
+            AiAttemptAdmission::Admit { .. }
+        ));
+        assert_eq!(tracker.state.lock().await.attempt_budget.attempts(), 1);
+
+        let reservation =
+            scope_request_attempt_budget(&tracker, reserve_internal_request_attempt(&attempt.plan))
+                .await;
+        assert!(reservation.is_ok());
+        let tracker_state = tracker.state.lock().await;
+        assert_eq!(tracker_state.attempt_budget.attempts(), 2);
+        assert_eq!(
+            tracker_state
+                .attempt_budget
+                .credential_attempts(attempt.plan.key_id.as_str()),
+            2
+        );
+        assert!(tracker_state.internal_attempt_budget_exhaustion.is_none());
+    }
+
+    #[tokio::test]
+    async fn internal_retry_budget_exhaustion_uses_existing_stop_context() {
+        let writer = TestRequestCandidateWriter::default();
+        let tracker = ProviderTransferTracker::default();
+        let attempt = replay_policy_test_attempts()
+            .into_iter()
+            .next()
+            .expect("test attempt");
+        tracker.state.lock().await.attempt_budget =
+            AttemptBudget::new(std::time::Instant::now()).with_limits(1, 2, 1);
+
+        assert!(matches!(
+            admit_request_attempt(
+                &writer,
+                &tracker,
+                "trace-internal-retry-exhausted",
+                "test",
+                &attempt,
+            )
+            .await,
+            AiAttemptAdmission::Admit { .. }
+        ));
+        let reservation =
+            scope_request_attempt_budget(&tracker, reserve_internal_request_attempt(&attempt.plan))
+                .await;
+        assert_eq!(
+            reservation,
+            Err(aether_scheduler_core::AttemptBudgetError::AttemptsExhausted)
+        );
+
+        let exhaustion = take_internal_attempt_budget_exhaustion(&tracker, &attempt)
+            .await
+            .expect("internal exhaustion should be retained for the attempt loop");
+        let report_context = exhaustion
+            .report_context
+            .expect("internal exhaustion should preserve report context");
+        assert_eq!(
+            report_context["attempt_budget_stop_reason"],
+            "attempts_exhausted"
+        );
+        assert_eq!(report_context["attempt_budget_attempts"], 1);
+        assert_eq!(report_context["attempt_budget_credential_attempts"], 1);
+        assert!(take_internal_attempt_budget_exhaustion(&tracker, &attempt)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn captured_budget_handle_keeps_the_same_budget_after_task_scope_exits() {
+        let writer = TestRequestCandidateWriter::default();
+        let tracker = ProviderTransferTracker::default();
+        let attempt = replay_policy_test_attempts()
+            .into_iter()
+            .next()
+            .expect("test attempt");
+        tracker.state.lock().await.attempt_budget =
+            AttemptBudget::new(std::time::Instant::now()).with_limits(2, 2, 1);
+
+        assert!(matches!(
+            admit_request_attempt(
+                &writer,
+                &tracker,
+                "trace-captured-budget-handle",
+                "test",
+                &attempt,
+            )
+            .await,
+            AiAttemptAdmission::Admit { .. }
+        ));
+        let handle = scope_request_attempt_budget(&tracker, async {
+            current_internal_attempt_budget_handle().expect("budget handle should be in scope")
+        })
+        .await;
+        assert!(current_internal_attempt_budget_handle().is_none());
+
+        assert!(handle.reserve(&attempt.plan).await.is_ok());
+        assert_eq!(
+            handle.reserve(&attempt.plan).await,
+            Err(aether_scheduler_core::AttemptBudgetError::AttemptsExhausted)
+        );
+        assert_eq!(tracker.state.lock().await.attempt_budget.attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn sent_effectful_operations_stop_before_a_second_candidate_send() {
+        let state = AppState::new().expect("state should build");
+        for plan_kind in [
+            OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
+            GEMINI_FILES_UPLOAD_PLAN_KIND,
+        ] {
+            let port = TransferTestPort::with_operation_replay_policy(&state, plan_kind);
+            let outcome = run_ai_attempt_loop(&port, replay_policy_test_attempts())
+                .await
+                .expect("effectful attempt loop should finish");
+
+            assert!(matches!(outcome, AiAttemptLoopOutcome::Exhausted(_)));
+            assert_eq!(port.executed.lock().unwrap().as_slice(), ["sent-primary"]);
+            assert_eq!(port.unused.lock().unwrap().as_slice(), ["next-candidate"]);
+        }
+
+        for plan_kind in ["openai_responses_sync", GEMINI_FILES_GET_PLAN_KIND] {
+            let port = TransferTestPort::with_operation_replay_policy(&state, plan_kind);
+            let outcome = run_ai_attempt_loop(&port, replay_policy_test_attempts())
+                .await
+                .expect("read or generation attempt loop should finish");
+
+            assert!(matches!(outcome, AiAttemptLoopOutcome::Responded(_)));
+            assert_eq!(
+                port.executed.lock().unwrap().as_slice(),
+                ["sent-primary", "next-candidate"]
+            );
+        }
+    }
+
     #[tokio::test]
     async fn static_loop_allows_same_key_retries_then_skips_next_transfer() {
         let state = AppState::new().expect("state should build");
@@ -2719,6 +3797,43 @@ mod tests {
             ["a-key1-retry0", "a-key2-retry0", "a-key2-retry1"]
         );
         assert_eq!(source.skipped_providers, ["provider-a", "provider-b"]);
+    }
+
+    #[tokio::test]
+    async fn dynamic_loop_replay_rejection_preserves_fallback_and_stops_candidates() {
+        let state = AppState::new().expect("state should build");
+        let port = TransferTestPort::with_replay_rejection(&state);
+        let mut source = TransferTestAttemptSource {
+            attempts: transfer_test_attempts().into(),
+            skipped_providers: Vec::new(),
+        };
+
+        let outcome = run_dynamic_attempt_loop(
+            &port,
+            &mut source,
+            "trace-replay-rejection",
+            OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("replay rejection should preserve the fallback response");
+
+        match outcome {
+            LocalExecutionRequestOutcome::Responded(response) => {
+                assert!(crate::executor::is_deferred_upstream_response(&response));
+            }
+            _ => panic!("replay rejection should return the preserved fallback response"),
+        }
+        assert_eq!(port.executed.lock().unwrap().as_slice(), ["a-key1-retry0"]);
+        assert_eq!(
+            port.unused.lock().unwrap().as_slice(),
+            [
+                "a-key2-retry0",
+                "a-key2-retry1",
+                "a-key3-retry0",
+                "b-key1-retry0"
+            ]
+        );
     }
 
     #[test]
@@ -2879,6 +3994,110 @@ mod tests {
             ["a-key1-retry0", "b-key1-retry0"]
         );
         assert_eq!(source.skipped_providers, ["provider-a"]);
+    }
+
+    #[tokio::test]
+    async fn dynamic_loop_stops_at_request_wide_attempt_budget() {
+        let state = AppState::new().expect("state should build");
+        let port = TransferTestPort::new(&state);
+        let mut attempts = Vec::new();
+        for index in 0..40 {
+            let mut attempt = transfer_test_attempts().remove(0);
+            attempt.report_context["candidate_index"] = json!(1);
+            attempt.report_context["local_failover_policy"]["max_transfer_count"] = json!(0);
+            attempt.plan.key_id = format!("key-{index}");
+            attempts.push(attempt);
+        }
+        let mut source = TransferTestAttemptSource {
+            attempts: attempts.into(),
+            skipped_providers: Vec::new(),
+        };
+
+        let outcome = run_dynamic_attempt_loop(
+            &port,
+            &mut source,
+            "trace-request-attempt-budget",
+            "request_attempt_budget",
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("budget exhaustion should be a normal exhaustion outcome");
+
+        assert!(matches!(
+            outcome,
+            LocalExecutionRequestOutcome::Exhausted(_)
+        ));
+        assert_eq!(
+            port.executed.lock().unwrap().len(),
+            aether_scheduler_core::DEFAULT_MAX_ATTEMPTS
+        );
+        assert_eq!(port.unused.lock().unwrap().len(), 8);
+    }
+
+    #[tokio::test]
+    async fn static_loop_stops_at_the_same_request_wide_attempt_budget() {
+        let state = AppState::new().expect("state should build");
+        let port = TransferTestPort::new(&state);
+        let mut attempts = Vec::new();
+        for index in 0..40 {
+            let mut attempt = transfer_test_attempts().remove(0);
+            attempt.report_context["candidate_index"] = json!(1);
+            attempt.report_context["local_failover_policy"]["max_transfer_count"] = json!(0);
+            attempt.plan.key_id = format!("key-{index}");
+            attempts.push(attempt);
+        }
+
+        let outcome = run_ai_attempt_loop(&port, attempts)
+            .await
+            .expect("budget exhaustion should be a normal exhaustion outcome");
+
+        assert!(matches!(outcome, AiAttemptLoopOutcome::Exhausted(_)));
+        assert_eq!(
+            port.executed.lock().unwrap().len(),
+            aether_scheduler_core::DEFAULT_MAX_ATTEMPTS
+        );
+        assert_eq!(port.unused.lock().unwrap().len(), 8);
+    }
+
+    #[tokio::test]
+    async fn credential_attempt_budget_is_shared_across_static_and_dynamic_loops() {
+        let state = AppState::new().expect("state should build");
+        let tracker = ProviderTransferTracker::default();
+        let static_port = TransferTestPort::with_tracker(&state, tracker.clone());
+        let mut attempts = Vec::new();
+        for _ in 0..aether_scheduler_core::DEFAULT_MAX_CREDENTIAL_ATTEMPTS {
+            let mut attempt = transfer_test_attempts().remove(0);
+            attempt.report_context["candidate_index"] = json!(1);
+            attempts.push(attempt);
+        }
+        let static_outcome = run_ai_attempt_loop(&static_port, attempts)
+            .await
+            .expect("static loop should exhaust its candidates");
+        assert!(matches!(static_outcome, AiAttemptLoopOutcome::Exhausted(_)));
+
+        let dynamic_port = TransferTestPort::with_tracker(&state, tracker);
+        let mut next = transfer_test_attempts().remove(0);
+        next.report_context["candidate_index"] = json!(1);
+        let mut source = TransferTestAttemptSource {
+            attempts: vec![next].into(),
+            skipped_providers: Vec::new(),
+        };
+        let dynamic_outcome = run_dynamic_attempt_loop(
+            &dynamic_port,
+            &mut source,
+            "trace-shared-credential-budget",
+            "shared_credential_budget",
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("credential budget exhaustion should be a normal outcome");
+
+        assert!(matches!(
+            dynamic_outcome,
+            LocalExecutionRequestOutcome::Exhausted(_)
+        ));
+        assert!(dynamic_port.executed.lock().unwrap().is_empty());
+        assert_eq!(dynamic_port.unused.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -107,8 +107,17 @@ pub(super) async fn verify_live_reads(
     )
     .await;
     let limited_id = create_token(state, admin, limited_raw, &["admin:usage:read"]).await;
+    let monitoring_read_raw = "ae-forensic-monitoring-read-secret";
+    let monitoring_read_id = create_token(
+        state,
+        admin,
+        monitoring_read_raw,
+        &["admin:monitoring:read"],
+    )
+    .await;
     let full = authenticated_operational_client(full_raw);
     let limited = authenticated_operational_client(limited_raw);
+    let monitoring_read = authenticated_operational_client(monitoring_read_raw);
     let auth_path = format!("/_gateway/audit/auth/users/{}/api-keys/{key_id}", admin.id);
     let mut request_ids = std::collections::HashSet::new();
 
@@ -252,11 +261,113 @@ pub(super) async fn verify_live_reads(
             }
         }
     }
-    // Permission-denied tokens retain the existing usage-tracking semantics.
-    // Production token deltas are batched; flush through the same repository
-    // boundary before inspecting the durable projection.
+
+    // Operational audit routes authorize before recording token usage. Keep
+    // this assertion before exercising admin-proxy, whose tracking contract
+    // also includes authenticated requests that are later denied permission.
     state.data.flush_usage_counter_deltas(100).await.unwrap();
-    for (id, expected_used) in [(&full_id, true), (&limited_id, false)] {
+    let limited_used: bool =
+        sqlx::query_scalar("SELECT last_used_at IS NOT NULL FROM management_tokens WHERE id=$1")
+            .bind(&limited_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert!(!limited_used);
+
+    let delivery_id = uuid::Uuid::now_v7().to_string();
+    let delivery_payload = json!({
+        "id": delivery_id, "event_type": "admin_mutation", "user_id": null,
+        "api_key_id": null, "description": "delivery operations fixture",
+        "ip_address": null, "user_agent": null, "request_id": "delivery-ops",
+        "event_metadata": {"schema_version":1,"event_name":"admin_system_config_updated",
+            "status":"completed","method":"PUT","path":"/fixture","action":"fixture",
+            "target_type":"fixture","target_id":"fixture"},
+        "status_code": 200, "error_message": null, "created_at": chrono::Utc::now(),
+    });
+    sqlx::query("INSERT INTO admin_audit_delivery(event_id,payload,state,attempt_count,dead_lettered_at,last_error_code) VALUES($1,$2,'dead_letter',12,clock_timestamp(),'invalid_payload')")
+        .bind(&delivery_id).bind(&delivery_payload).execute(pool).await.unwrap();
+    let list = monitoring_read
+        .get(format!(
+            "{gateway}/api/admin/monitoring/audit-deliveries?state=dead_letter&limit=1"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_body: Value = list.json().await.unwrap();
+    assert_eq!(list_body["items"][0]["event_id"], delivery_id);
+    assert!(list_body["items"][0].get("payload").is_none());
+    assert_eq!(
+        monitoring_read
+            .post(format!(
+                "{gateway}/api/admin/monitoring/audit-deliveries/{delivery_id}/redrive"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    for client in [&limited, &restricted] {
+        assert_eq!(
+            client
+                .post(format!(
+                    "{gateway}/api/admin/monitoring/audit-deliveries/{delivery_id}/redrive"
+                ))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        Client::new()
+            .post(format!(
+                "{gateway}/api/admin/monitoring/audit-deliveries/{delivery_id}/redrive"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let redrive = full
+        .post(format!(
+            "{gateway}/api/admin/monitoring/audit-deliveries/{delivery_id}/redrive"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(redrive.status(), StatusCode::OK);
+    let after: (String, i32, Value) = sqlx::query_as(
+        "SELECT state,attempt_count,payload FROM admin_audit_delivery WHERE event_id=$1",
+    )
+    .bind(&delivery_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!((after.0.as_str(), after.1), ("pending", 0));
+    assert_eq!(after.2, delivery_payload);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let tracked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM audit_logs WHERE event_metadata->>'event_name'='admin_audit_delivery_redrive_requested' AND event_metadata->>'target_id' LIKE '%' || $1 || '%' AND event_metadata->>'management_token_id'=$2 AND event_metadata->>'status'='completed' AND status_code=200)")
+                .bind(&delivery_id).bind(&full_id).fetch_one(pool).await.unwrap();
+            if tracked { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+
+    // Admin-proxy records successfully authenticated tokens before permission
+    // checks, including the limited token's denied redrive above. Flush batched
+    // deltas through the production boundary before inspecting the projection.
+    state.data.flush_usage_counter_deltas(100).await.unwrap();
+    for (id, expected_used) in [
+        (&full_id, true),
+        (&limited_id, true),
+        (&monitoring_read_id, true),
+    ] {
         let used: bool = sqlx::query_scalar(
             "SELECT last_used_at IS NOT NULL FROM management_tokens WHERE id=$1",
         )
@@ -264,7 +375,7 @@ pub(super) async fn verify_live_reads(
         .fetch_one(pool)
         .await
         .unwrap();
-        assert_eq!(used, expected_used);
+        assert_eq!(used, expected_used, "management token {id}");
     }
     let before = read_events(pool).await.len();
     for method in [Method::GET, Method::HEAD] {

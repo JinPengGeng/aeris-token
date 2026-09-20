@@ -13,7 +13,7 @@ const ACTIVE_STATES: &str = "('prepared', 'dispatched', 'reconciliation_pending'
 pub(super) mod attempts;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 fn invalid(message: &str) -> DataLayerError {
     DataLayerError::InvalidInput(message.to_string())
@@ -775,9 +775,24 @@ async fn finalize_inner(
     Ok(Some(reservation))
 }
 
+pub(super) struct RechargeRecoveryScope {
+    pub wallet_id: String,
+    pub user_id: Option<String>,
+    pub max_cost_units: u64,
+    pub receipt_id: String,
+}
+
 pub(super) async fn recover(
     tx: &mut PostgresTransaction,
     input: RecoverInsufficientQuotaInput,
+) -> Result<Option<RequestFundsRecoveryOutcome>, DataLayerError> {
+    recover_scoped(tx, input, None).await
+}
+
+pub(super) async fn recover_scoped(
+    tx: &mut PostgresTransaction,
+    input: RecoverInsufficientQuotaInput,
+    scope: Option<RechargeRecoveryScope>,
 ) -> Result<Option<RequestFundsRecoveryOutcome>, DataLayerError> {
     let mode: Option<String> =
         sqlx::query_scalar("SELECT billing_mode FROM usage WHERE request_id = $1 FOR UPDATE")
@@ -809,7 +824,7 @@ pub(super) async fn recover(
         ));
     }
     let price_evidence: Option<Value> = row.try_get("price_evidence").map_postgres_err()?;
-    if previous.is_none()
+    if (previous.is_none() || scope.is_some())
         && price_evidence
             .as_ref()
             .and_then(|value| value.get("status"))
@@ -843,10 +858,55 @@ pub(super) async fn recover(
         api_key_id,
         api_key_is_standalone: standalone,
     };
+    if let Some(scope) = &scope {
+        if identity.user_id != scope.user_id {
+            return Err(invalid("recovery owner changed"));
+        }
+        // Callbacks lock wallet before API key. Background recovery never waits
+        // for either lock while holding the other: contention rolls back into
+        // durable retry before any financial changes are made.
+        let claimed_wallet: Option<String> =
+            sqlx::query_scalar("SELECT id FROM wallets WHERE id=$1 FOR UPDATE NOWAIT")
+                .bind(&scope.wallet_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_postgres_err()?;
+        if claimed_wallet.is_none() {
+            return Err(invalid("recovery wallet no longer exists"));
+        }
+        if let Some(key) = &identity.api_key_id {
+            // Keep ownership fixed through the debit and receipt commit.
+            let locked_key = sqlx::query(
+                "SELECT user_id,is_standalone FROM api_keys WHERE id = $1 FOR SHARE NOWAIT",
+            )
+            .bind(key)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_postgres_err()?
+            .ok_or_else(|| invalid("recovery API key no longer exists"))?;
+            if locked_key
+                .try_get::<Option<String>, _>("user_id")
+                .map_postgres_err()?
+                != scope.user_id
+                || locked_key
+                    .try_get::<bool, _>("is_standalone")
+                    .map_postgres_err()?
+                    != identity.api_key_is_standalone
+            {
+                return Err(invalid("recovery API key owner changed"));
+            }
+        }
+    }
     let Some(wallet) = locked_wallet(tx, &identity).await? else {
         return Ok(None);
     };
     let wallet_id: String = wallet.try_get("id").map_postgres_err()?;
+    if scope
+        .as_ref()
+        .is_some_and(|scope| scope.wallet_id != wallet_id)
+    {
+        return Err(invalid("recovery wallet identity changed"));
+    }
     let wallet_status: String = wallet.try_get("status").map_postgres_err()?;
     if wallet_status != "active" {
         return Err(invalid("recovery wallet is unavailable"));
@@ -899,7 +959,11 @@ pub(super) async fn recover(
     let consumed: f64 = wallet.try_get("total_consumed").map_postgres_err()?;
     let (available_recharge, available_gift) =
         wallet_available_units(tx, &wallet_id, recharge, gift).await?;
-    let collect = due.min(available_recharge + available_gift);
+    let collect = if let Some(scope) = &scope {
+        due.min(available_recharge).min(scope.max_cost_units)
+    } else {
+        due.min(available_recharge + available_gift)
+    };
     let recharge_debit = collect.min(available_recharge);
     let gift_debit = collect - recharge_debit;
     let after_recharge = if recharge_debit == 0 {
@@ -924,6 +988,15 @@ pub(super) async fn recover(
         .await
         .map_postgres_err()?;
     let mut settlement = super::settlement_from_row(&existing)?;
+    if scope.is_some()
+        && previously_collected == 0
+        && settlement
+            .wallet_balance_before
+            .zip(settlement.wallet_balance_after)
+            .is_some_and(|(before, after)| before > after)
+    {
+        return Err(invalid("historical wallet debit requires manual review"));
+    }
     if collect > 0 {
         sqlx::query("UPDATE wallets SET balance = $2, gift_balance = $3, total_consumed = $4, updated_at = NOW() WHERE id = $1")
             .bind(&wallet_id).bind(after_recharge).bind(after_gift).bind(consumed + request_funds_usd(collect))
@@ -931,7 +1004,7 @@ pub(super) async fn recover(
         sqlx::query("UPDATE request_fund_recoveries SET collected_cost_units = collected_cost_units + $2, updated_at = NOW() WHERE request_id = $1")
             .bind(&input.request_id).bind(collect as i64).execute(&mut **tx).await.map_postgres_err()?;
         sqlx::query("INSERT INTO request_fund_collection_receipts (id, request_id, collected_cost_units, recharge_before, recharge_after, gift_before, gift_after) VALUES ($1,$2,$3,$4,$5,$6,$7)")
-            .bind(uuid::Uuid::new_v4().to_string()).bind(&input.request_id).bind(collect as i64)
+            .bind(scope.as_ref().map(|scope| scope.receipt_id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string())).bind(&input.request_id).bind(collect as i64)
             .bind(recharge).bind(after_recharge).bind(gift).bind(after_gift)
             .execute(&mut **tx).await.map_postgres_err()?;
         settlement.wallet_id = Some(wallet_id);

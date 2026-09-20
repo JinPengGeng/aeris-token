@@ -299,6 +299,7 @@ mod tests {
     fn legacy_gemini_video_task() -> aether_data_contracts::repository::video_tasks::StoredVideoTask
     {
         UpsertVideoTask {
+            row_revision: 0,
             id: "legacy-gemini-task".to_string(),
             short_id: Some("legacy-short".to_string()),
             request_id: "legacy-request".to_string(),

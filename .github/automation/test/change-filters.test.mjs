@@ -50,6 +50,7 @@ const EXPECTED_GROUPS = {
     '.github/ai-executors.json',
     '.github/automation-policy.yml',
     '.github/change-filters.yml',
+    '.github/dependabot.yml',
     '.github/automation/**',
     '.github/upstream-sync-policy.yml',
     '.github/workflows/**',
@@ -72,6 +73,7 @@ test('both CI workflows consume the shared change filters file', () => {
 test('frontend push routing includes the shared change filters file', () => {
   const text = fs.readFileSync(path.join(repoRoot, '.github/workflows/frontend-ci.yml'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(text, /^      - "\.github\/change-filters\.yml"$/m);
+  assert.match(text, /^      - "\.github\/dependabot\.yml"$/m);
 });
 
 test('the runtime matcher loads the shared file from the trusted checkout', () => {
@@ -108,6 +110,7 @@ test('matcher classifies representative paths exactly like the CI filters', () =
     [['deploy.sh'], ['rust']],
     // Automation and workflow changes.
     [['.github/agents.yml'], ['automation']],
+    [['.github/dependabot.yml'], ['automation']],
     [['.github/automation/src/engine.mjs'], ['automation']],
     [['.github/change-filters.yml'], ['automation', 'rust']],
     [['.github/workflows/rust-ci.yml'], ['automation', 'data', 'rust']],

@@ -153,7 +153,7 @@ async fn readiness_singleflight_cache_and_cancelled_client_bound_amplification()
         let started = started.clone();
         requests.push(tokio::spawn(async move {
             readiness
-                .probe(move || async move {
+                .probe(healthy(), move || async move {
                     hits.fetch_add(1, Ordering::SeqCst);
                     started.notify_one();
                     release.notified().await;
@@ -171,14 +171,16 @@ async fn readiness_singleflight_cache_and_cancelled_client_bound_amplification()
     }
     for _ in 0..128 {
         let result = readiness
-            .probe(|| async { panic!("a fresh cache must not start another probe") })
+            .probe(healthy(), || async {
+                panic!("a fresh cache must not start another probe")
+            })
             .await;
         assert!(result.unwrap().ready());
     }
     tokio::time::advance(CACHE_TTL).await;
     let hits_probe = hits.clone();
     let failed = readiness
-        .probe(move || async move {
+        .probe(healthy(), move || async move {
             hits_probe.fetch_add(1, Ordering::SeqCst);
             Dependencies {
                 database: Check::new(true, CheckStatus::Failed),
@@ -190,10 +192,70 @@ async fn readiness_singleflight_cache_and_cancelled_client_bound_amplification()
     assert!(!failed.ready());
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     assert!(!readiness
-        .probe(|| async { panic!("failed results also need negative caching") })
+        .probe(healthy(), || async {
+            panic!("failed results also need negative caching")
+        })
         .await
         .unwrap()
         .ready());
+}
+
+#[tokio::test]
+async fn readiness_panicking_probe_releases_existing_waiters() {
+    let readiness = Arc::new(Readiness::default());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+
+    let leader = {
+        let readiness = readiness.clone();
+        let started = started.clone();
+        let release = release.clone();
+        tokio::spawn(async move {
+            readiness
+                .probe(healthy(), move || async move {
+                    started.notify_one();
+                    release.notified().await;
+                    panic!("readiness probe panic should fail its flight");
+                })
+                .await
+        })
+    };
+    started.notified().await;
+
+    let follower = {
+        let readiness = readiness.clone();
+        tokio::spawn(async move { readiness.probe(healthy(), || async { healthy() }).await })
+    };
+    tokio::task::yield_now().await;
+    release.notify_one();
+
+    let (leader, follower) = tokio::time::timeout(Duration::from_secs(1), async {
+        (leader.await.unwrap(), follower.await.unwrap())
+    })
+    .await
+    .expect("all waiters must be released after a probe panic");
+    for result in [leader, follower] {
+        let snapshot = result.expect("panic flight should publish a failure snapshot");
+        assert!(!snapshot.ready());
+        assert_eq!(snapshot.database.status, CheckStatus::Failed);
+        assert_eq!(snapshot.redis.status, CheckStatus::Failed);
+    }
+    let cached = readiness
+        .probe(healthy(), || async {
+            panic!("panic result should be cached")
+        })
+        .await
+        .expect("panic result should be negatively cached");
+    assert!(!cached.ready());
+
+    let no_dependencies = Readiness::default();
+    let failed_without_dependencies = no_dependencies
+        .probe(Dependencies::unchecked(false, false), || async {
+            panic!("a panicking probe must fail closed without dependencies")
+        })
+        .await
+        .expect("panic should still publish a snapshot");
+    assert!(!failed_without_dependencies.ready());
 }
 
 #[tokio::test(start_paused = true)]
@@ -205,7 +267,7 @@ async fn readiness_closing_interrupts_probe_wait_and_cannot_use_cached_green() {
     let signal = started.clone();
     let request = tokio::spawn(async move {
         readiness
-            .probe(move || async move {
+            .probe(healthy(), move || async move {
                 signal.notify_one();
                 tokio::time::sleep(PROBE_TIMEOUT).await;
                 healthy()

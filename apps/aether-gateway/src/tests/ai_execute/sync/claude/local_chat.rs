@@ -756,7 +756,7 @@ async fn gateway_surfaces_candidate_list_empty_reason_for_claude_chat_runtime_mi
     assert_eq!(payload["error"]["type"], "overloaded_error");
     assert_eq!(
         payload["error"]["message"],
-        "没有可用提供商支持模型 claude-sonnet-4-5 的同步请求"
+        "No available provider supports model claude-sonnet-4-5 for this synchronous request"
     );
 
     let stored_candidates = request_candidate_repository

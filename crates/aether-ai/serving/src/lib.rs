@@ -53,8 +53,8 @@ pub use aether_pool_core::{
     REQUEST_FAILURE_PENALTY, UNSCHEDULABLE_SCORE_CAP,
 };
 pub use attempt_loop::{
-    run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopOutcome, AiAttemptLoopPort,
-    AiAttemptRetryScope, AiExecutionAttempt, STICKY_KEY_ATTEMPTS_REPORT_FIELD,
+    run_ai_attempt_loop, AiAttemptAdmission, AiAttemptExecutionOutcome, AiAttemptLoopOutcome,
+    AiAttemptLoopPort, AiAttemptRetryScope, AiExecutionAttempt, STICKY_KEY_ATTEMPTS_REPORT_FIELD,
 };
 pub use attempt_plan::{
     build_ai_execution_decision_from_plan, build_ai_execution_plan_from_decision,

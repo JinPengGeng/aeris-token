@@ -18,15 +18,16 @@ The current fixture-driven HTTP coverage is:
 | Rows | Actual route coverage |
 | --- | --- |
 | Quota and permission denials for Chat, Responses, Embeddings and Claude Messages | Authenticated Router tests read these rows and assert the actual error response, trace header and absence of `Retry-After`; quota requests also cover streaming before commitment. |
+| `openai-chat-invalid-request` | An authenticated Router test submits the empty-messages fixture and asserts `400`, the OpenAI envelope/type/code, `x-trace-id`, no `Retry-After` and zero upstream calls. The same payload without credentials remains `401`. |
 | `openai-images-invalid-request`, `openai-images-edits-invalid-request` | Authenticated Router tests submit the exact fixture payloads, assert `400`, the OpenAI envelope/type/code and `x-trace-id`, and verify no `Retry-After` or upstream execution. |
 | Remaining rows | Formatter and metadata checks; endpoint/status/header coverage must not be inferred from the row alone. |
 
 The Images generation-count overflow regression separately exercises its real
 Router response with the same status/type/trace/retry-header checks. It is not
-an additional fixture row. Images model-not-found and Chat invalid-request/
-model-not-found rows still need route-level acceptance. In particular, missing
-model fixtures describe the target contract: `GET /v1/models/:id` returning
-`404/model_not_found` does not prove that inference POST requests do the same.
+an additional fixture row. Separate authenticated Chat and Images Router tests
+cover unknown-model `404/model_not_found` and declared-but-unavailable `503`;
+those tests do not consume the model-not-found fixture rows directly. A
+`GET /v1/models/:id` result alone does not prove inference POST behavior.
 See the [current model-lookup boundary](error-contract.md#conversion-and-model-errors).
 
 Each row records:

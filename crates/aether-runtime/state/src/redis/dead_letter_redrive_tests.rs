@@ -94,6 +94,9 @@ async fn redis_dead_letter_redrive_is_idempotent_and_retention_bounded() {
         "destination retention grew beyond bounded MAXLEN slack: {:?}",
         destination_stats
     );
+    let capacity = RuntimeQueueCapacitySignal::from_stats(destination_stats, destination_maxlen);
+    assert!(capacity.at_retention_boundary);
+    assert_eq!(capacity.utilization_per_mille, 1000);
     let destination_page = RuntimeQueueStore::read_stream_page(
         &runtime,
         destination,

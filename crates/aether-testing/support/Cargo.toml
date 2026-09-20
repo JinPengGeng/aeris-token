@@ -7,4 +7,4 @@ repository.workspace = true
 description = "Small dependency-light integration test helpers for Aether"
 
 [dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util"] }

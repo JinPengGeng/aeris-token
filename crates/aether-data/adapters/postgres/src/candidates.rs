@@ -476,7 +476,12 @@ fn postgres_candidate_upsert_sql(template: &str) -> String {
             "__AETHER_CANDIDATE_EXTRA_DATA__",
             "CASE WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped') \
              AND (EXCLUDED.status <> request_candidates.status OR EXCLUDED.extra_data IS NULL) \
-             THEN request_candidates.extra_data ELSE EXCLUDED.extra_data END",
+             THEN request_candidates.extra_data \
+             WHEN EXCLUDED.extra_data IS NULL THEN NULL \
+             ELSE ((CASE WHEN json_typeof(request_candidates.extra_data) = 'object' \
+               AND position(chr(92) || 'u0000' IN request_candidates.extra_data::text) = 0 \
+               THEN request_candidates.extra_data::jsonb ELSE '{}'::jsonb END) || \
+               EXCLUDED.extra_data::jsonb)::json END",
         )
 }
 
@@ -1457,9 +1462,12 @@ mod tests {
             assert!(
                 sql.contains("COALESCE(EXCLUDED.error_message, request_candidates.error_message)")
             );
-            assert!(sql.contains("THEN request_candidates.extra_data ELSE EXCLUDED.extra_data END"));
+            assert!(sql.contains("WHEN EXCLUDED.extra_data IS NULL THEN NULL"));
+            assert!(sql.contains(
+                "position(chr(92) || 'u0000' IN request_candidates.extra_data::text) = 0"
+            ));
+            assert!(sql.contains("EXCLUDED.extra_data::jsonb)::json END"));
             assert!(sql.contains("required_capabilities = EXCLUDED.required_capabilities"));
-            assert!(!sql.contains("COALESCE(request_candidates.extra_data"));
             assert!(!sql.contains("request_candidates.required_capabilities"));
             assert!(sql.contains("ELSE 'unclassified_skip' END"));
             assert!(sql.contains("ELSE 'unclassified_error' END"));
@@ -1669,19 +1677,40 @@ VALUES ($1, $2, 0, 0, 'pending', $3, $4, $5::json, $6::json, $7, NOW())
             pending.status = RequestCandidateStatus::Pending;
             pending.status_code = None;
             pending.error_message = None;
-            pending.extra_data = None;
+            pending.extra_data = (write_path != 2).then_some(json!({
+                "scheduler_generation": 11,
+                "scheduler_page_ordinal": 2,
+                "ranking_index": 5,
+                "ranking_mode": "CacheAffinity",
+                "promoted_by": "cached_affinity",
+            }));
             repository
                 .upsert(pending.clone())
                 .await
                 .expect("pending seed should persist");
+            let mut sent = pending.clone();
+            sent.extra_data = Some(json!({
+                "attempt_lifecycle_phase": "sent_but_uncommitted",
+            }));
             if write_path == 0 {
                 repository
-                    .upsert(failed)
+                    .upsert(sent)
+                    .await
+                    .expect("pending lifecycle trace should merge");
+            } else {
+                repository
+                    .upsert_many(vec![sent])
+                    .await
+                    .expect("batch pending lifecycle trace should merge");
+            }
+            if write_path == 0 {
+                repository
+                    .upsert(failed.clone())
                     .await
                     .expect("single failure should persist");
             } else {
                 repository
-                    .upsert_many(vec![failed])
+                    .upsert_many(vec![failed.clone()])
                     .await
                     .expect("batch failure should persist");
             }
@@ -1700,6 +1729,21 @@ VALUES ($1, $2, 0, 0, 'pending', $3, $4, $5::json, $6::json, $7, NOW())
                     .upsert_many(vec![pending])
                     .await
                     .expect("late batch should persist");
+            }
+            let mut replay_decision = failed;
+            replay_decision.status_code = None;
+            replay_decision.error_message = None;
+            replay_decision.extra_data = Some(json!({"retry_replay_admitted": false}));
+            if write_path == 0 {
+                repository
+                    .upsert(replay_decision)
+                    .await
+                    .expect("same-terminal replay decision should merge");
+            } else {
+                repository
+                    .upsert_many(vec![replay_decision])
+                    .await
+                    .expect("same-terminal batch replay decision should merge");
             }
             let stored = repository
                 .list_by_request_id(&request_id)
@@ -1725,6 +1769,17 @@ VALUES ($1, $2, 0, 0, 'pending', $3, $4, $5::json, $6::json, $7, NOW())
                 "model"
             );
             assert_eq!(extra["error_flow"]["message"], "original upstream failure");
+            assert_eq!(extra["attempt_lifecycle_phase"], "sent_but_uncommitted");
+            assert_eq!(extra["retry_replay_admitted"], false);
+            if write_path != 2 {
+                assert_eq!(extra["scheduler_generation"], 11);
+                assert_eq!(extra["scheduler_page_ordinal"], 2);
+                assert_eq!(extra["ranking_index"], 5);
+                assert_eq!(extra["ranking_mode"], "CacheAffinity");
+                assert_eq!(extra["promoted_by"], "cached_affinity");
+            } else {
+                assert!(extra.get("scheduler_generation").is_none());
+            }
             let mut public = stored[0].clone();
             public.sanitize_sensitive_diagnostics();
             assert!(!serde_json::to_string(&public)

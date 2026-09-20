@@ -1236,6 +1236,18 @@ impl AppState {
         self.open_provider_catalog_providers(providers).await
     }
 
+    pub(crate) async fn read_provider_catalog_providers_by_ids_strong(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<provider_catalog::StoredProviderCatalogProvider>, GatewayError> {
+        let providers = self
+            .data
+            .list_provider_catalog_providers_by_ids_strong(provider_ids)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.open_provider_catalog_providers(providers).await
+    }
+
     pub(crate) async fn read_provider_catalog_endpoints_by_ids(
         &self,
         endpoint_ids: &[String],
@@ -1243,6 +1255,18 @@ impl AppState {
         let endpoints = self
             .data
             .list_provider_catalog_endpoints_by_ids(endpoint_ids)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.open_provider_catalog_endpoints(endpoints).await
+    }
+
+    pub(crate) async fn read_provider_catalog_endpoints_by_ids_strong(
+        &self,
+        endpoint_ids: &[String],
+    ) -> Result<Vec<provider_catalog::StoredProviderCatalogEndpoint>, GatewayError> {
+        let endpoints = self
+            .data
+            .list_provider_catalog_endpoints_by_ids_strong(endpoint_ids)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         self.open_provider_catalog_endpoints(endpoints).await

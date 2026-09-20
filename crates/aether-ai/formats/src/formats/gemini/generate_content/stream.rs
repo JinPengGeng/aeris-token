@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use crate::formats::gemini::generate_content::response::{
-    gemini_candidate_grounding, gemini_grounding_citations,
+    gemini_candidate_grounding, gemini_grounding_citations, GeminiCitationText,
 };
 use crate::formats::shared::response::{build_generated_tool_call_id, canonicalize_tool_arguments};
 use crate::formats::shared::sse::encode_json_sse;
@@ -34,6 +34,8 @@ pub struct GeminiProviderState {
     started: bool,
     finished: bool,
     text_parts: BTreeMap<usize, String>,
+    citation_text_parts: BTreeMap<usize, GeminiCitationText>,
+    emitted_text_characters: usize,
     reasoning_parts: BTreeMap<usize, String>,
     reasoning_signatures: BTreeMap<usize, String>,
     content_parts: BTreeMap<usize, CanonicalContentPart>,
@@ -84,12 +86,10 @@ impl GeminiProviderState {
         let Some(grounding) = self.grounding.take() else {
             return;
         };
-        let text = self
-            .text_parts
-            .values()
-            .map(String::as_str)
-            .collect::<String>();
-        let citations = gemini_grounding_citations(&grounding, &text);
+        let citations = gemini_grounding_citations(&grounding, &self.citation_text_parts)
+            .into_iter()
+            .map(|(_, citation)| citation)
+            .collect::<Vec<_>>();
         if citations.is_empty() {
             return;
         }
@@ -212,7 +212,24 @@ impl GeminiProviderState {
                         text.to_string()
                     };
                     *previous = text;
+                    // Signature-only parts amend provider state; they do not
+                    // replace previously emitted source text at this index.
+                    let source_text = part_object.get("text").and_then(Value::as_str);
+                    if source_text.is_none()
+                        || (is_reasoning && source_text.is_some_and(|text| !text.is_empty()))
+                    {
+                        self.citation_text_parts.remove(&index);
+                    }
                     if !delta.is_empty() {
+                        if !is_reasoning {
+                            if part_object.get("text").and_then(Value::as_str).is_some() {
+                                self.citation_text_parts
+                                    .entry(index)
+                                    .or_default()
+                                    .append(&delta, self.emitted_text_characters);
+                            }
+                            self.emitted_text_characters += delta.chars().count();
+                        }
                         out.push(CanonicalStreamFrame {
                             id: id.clone(),
                             model: model.clone(),
@@ -240,6 +257,24 @@ impl GeminiProviderState {
                         }
                     }
                     continue;
+                }
+                // Only an explicit content-kind change invalidates the text
+                // source. Unknown/signature-only metadata does not erase it.
+                if !self.terminal_observation_only
+                    && [
+                        "functionResponse",
+                        "function_response",
+                        "functionCall",
+                        "function_call",
+                        "inlineData",
+                        "inline_data",
+                        "fileData",
+                        "file_data",
+                    ]
+                    .iter()
+                    .any(|key| part_object.contains_key(*key))
+                {
+                    self.citation_text_parts.remove(&index);
                 }
                 if let Some(function_response) = part_object
                     .get("functionResponse")
@@ -1020,6 +1055,104 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn grounding_retains_answer_across_signature_only_metadata_parts() {
+        for metadata in [
+            json!({"thoughtSignature": "signature"}),
+            json!({"text": "", "thoughtSignature": "signature"}),
+        ] {
+            let context = json!({});
+            let mut state = GeminiProviderState::default();
+            state
+                .push_line(
+                    &context,
+                    data_line(json!({"candidates": [{
+                        "content": {"parts": [{"text": "中"}]}
+                    }]})),
+                )
+                .expect("answer");
+            let frames = state
+                .push_line(
+                    &context,
+                    data_line(json!({"candidates": [{
+                        "content": {"parts": [metadata]}, "finishReason": "STOP",
+                        "groundingMetadata": {
+                            "groundingChunks": [{"web": {"uri": "https://example.com/source"}}],
+                            "groundingSupports": [{"segment": {"endIndex": 3, "text": "中"},
+                                "groundingChunkIndices": [0]}]
+                        }
+                    }]})),
+                )
+                .expect("metadata");
+            let citations = frames
+                .iter()
+                .filter_map(|frame| match &frame.event {
+                    CanonicalStreamEvent::Citations(citations) => Some(citations),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            assert_eq!(citations.len(), 1);
+            assert_eq!(citations[0]["cited_text"], "中");
+            assert_eq!(citations[0]["start_index"], 0);
+            assert_eq!(citations[0]["end_index"], 1);
+        }
+    }
+
+    #[test]
+    fn grounding_uses_emission_order_and_rejects_noncontiguous_source_spans() {
+        let context = json!({});
+        let mut state = GeminiProviderState::default();
+        let mut frames = state
+            .push_line(
+                &context,
+                data_line(json!({"candidates": [{
+                    "content": {"parts": [{"text": "A"}, {"text": "B"}]}
+                }]})),
+            )
+            .expect("first frame");
+        frames.extend(state.push_line(&context, data_line(json!({"candidates": [{
+            "content": {"parts": [{"text": "AC"}, {"text": "BD"}]},
+            "finishReason": "STOP", "groundingMetadata": {
+                "groundingChunks": [{"web": {"uri": "https://example.com/source"}}],
+                "groundingSupports": [
+                    {"segment": {"partIndex": 0, "endIndex": 2, "text": "AC"}, "groundingChunkIndices": [0]},
+                    {"segment": {"partIndex": 1, "startIndex": 1, "endIndex": 2, "text": "D"}, "groundingChunkIndices": [0]},
+                    {"segment": {"partIndex": 1, "endIndex": 2, "text": "stale"}, "groundingChunkIndices": [0]}
+                ]
+            }
+        }]}))).expect("last frame"));
+        let text = frames
+            .iter()
+            .filter_map(|frame| match &frame.event {
+                CanonicalStreamEvent::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, "ABCD");
+        let citation_frames = frames
+            .iter()
+            .enumerate()
+            .filter_map(|(index, frame)| match &frame.event {
+                CanonicalStreamEvent::Citations(citations) => Some((index, citations)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(citation_frames.len(), 1);
+        assert_eq!(citation_frames[0].1.len(), 1);
+        assert_eq!(citation_frames[0].1[0]["cited_text"], "D");
+        assert_eq!(citation_frames[0].1[0]["start_index"], 3);
+        assert_eq!(citation_frames[0].1[0]["end_index"], 4);
+        assert!(matches!(
+            frames[citation_frames[0].0 + 1].event,
+            CanonicalStreamEvent::Finish { .. }
+        ));
+        assert!(state
+            .finish(&context)
+            .expect("finish is idempotent")
+            .is_empty());
+    }
+
     fn observation_record(parts: Vec<Value>, finish_reason: Option<&str>) -> Value {
         let mut record = json!({
             "responseId": "resp_observation",
@@ -1062,6 +1195,8 @@ mod tests {
 
     fn assert_observer_has_no_content_buffers(observer: &GeminiProviderState) {
         assert!(observer.text_parts.is_empty());
+        assert!(observer.citation_text_parts.is_empty());
+        assert_eq!(observer.emitted_text_characters, 0);
         assert!(observer.reasoning_parts.is_empty());
         assert!(observer.reasoning_signatures.is_empty());
         assert!(observer.content_parts.is_empty());

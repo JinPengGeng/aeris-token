@@ -135,7 +135,8 @@ async fn assert_missing_credential_401(response: reqwest::Response, trace_id: &s
     );
     let payload: serde_json::Value = response.json().await.expect("authentication JSON");
     assert_eq!(payload["error"]["type"], "authentication_error");
-    assert_eq!(payload["error"]["message"], "无效的API密钥");
+    assert_eq!(payload["error"]["message"], "Invalid API key");
+    assert_eq!(payload["trace_id"], trace_id);
     assert!(payload["error"]["code"].is_null());
 }
 

@@ -20,6 +20,8 @@ use aether_data_contracts::repository::candidates::{
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
+use aether_runtime_state::{RedisClientConfig, RuntimeState};
+use aether_testkit::ManagedRedisServer;
 use sha2::{Digest, Sha256};
 
 use crate::data::GatewayDataState;
@@ -301,7 +303,7 @@ async fn gateway_completes_sync_response_on_local_execution_runtime_path_impl() 
             "Bearer sk-client-openai-async-report",
         )
         .header(TRACE_ID_HEADER, "req-openai-chat-async-report-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -424,7 +426,7 @@ async fn gateway_stops_execution_runtime_stream_when_client_disconnects_impl() {
             "Bearer sk-client-openai-stream-disconnect",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-stream-disconnect-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");
@@ -510,7 +512,7 @@ async fn gateway_settles_stream_attempt_when_client_disconnects_before_first_byt
             TRACE_ID_HEADER,
             "trace-openai-chat-stream-precommit-disconnect-123",
         )
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send();
 
     // Drop the in-flight request the way a downstream client does when its own
@@ -644,7 +646,7 @@ async fn gateway_returns_error_body_when_prefetch_detects_embedded_stream_error_
             TRACE_ID_HEADER,
             "trace-openai-chat-stream-prefetch-error-123",
         )
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");
@@ -690,4 +692,471 @@ async fn gateway_returns_error_body_when_prefetch_detects_embedded_stream_error_
     gateway_handle.abort();
     execution_runtime_handle.abort();
     upstream_handle.abort();
+}
+
+#[test]
+#[ignore = "requires a shared isolated Redis server"]
+fn redis_two_gateways_do_not_replay_a_stream_after_client_commit() {
+    run_lifecycle_test(
+        "redis_two_gateways_do_not_replay_a_stream_after_client_commit",
+        redis_two_gateways_do_not_replay_a_stream_after_client_commit_impl,
+    );
+}
+
+async fn redis_two_gateways_do_not_replay_a_stream_after_client_commit_impl() {
+    let redis_url = std::env::var("AETHER_TEST_REDIS_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty());
+    let managed_redis = if redis_url.is_none() {
+        Some(
+            ManagedRedisServer::start()
+                .await
+                .expect("shared-request acceptance needs an isolated Redis server"),
+        )
+    } else {
+        None
+    };
+    let redis_url = redis_url.unwrap_or_else(|| {
+        managed_redis
+            .as_ref()
+            .expect("managed Redis server should be available")
+            .redis_url()
+            .to_owned()
+    });
+    let key_prefix = format!("aether-shared-request-no-replay-{}", uuid::Uuid::new_v4());
+    let runtime = || async {
+        Arc::new(
+            RuntimeState::redis(
+                RedisClientConfig {
+                    url: redis_url.clone(),
+                    key_prefix: Some(key_prefix.clone()),
+                },
+                Some(1_000),
+            )
+            .await
+            .expect("gateway RuntimeState should connect to the shared Redis namespace"),
+        )
+    };
+
+    let execution_runtime_hits = Arc::new(Mutex::new(0usize));
+    let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
+    let sent_authorizations = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sent_authorizations_clone = Arc::clone(&sent_authorizations);
+    let release_disconnect = Arc::new(tokio::sync::Notify::new());
+    let release_disconnect_clone = Arc::clone(&release_disconnect);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/stream",
+        any(move |request: Request| {
+            let hits = Arc::clone(&execution_runtime_hits_clone);
+            let sent_authorizations = Arc::clone(&sent_authorizations_clone);
+            let release_disconnect = Arc::clone(&release_disconnect_clone);
+            async move {
+                *hits.lock().expect("runtime hit lock should lock") += 1;
+                let (_parts, body) = request.into_parts();
+                let payload = axum::body::to_bytes(body, usize::MAX)
+                    .await
+                    .expect("execution runtime request body should read");
+                let authorization = serde_json::from_slice::<serde_json::Value>(&payload)
+                    .expect("execution runtime request should be JSON")
+                    .get("headers")
+                    .and_then(|headers| headers.get("authorization"))
+                    .and_then(serde_json::Value::as_str)
+                    .expect("execution runtime payload should retain authorization")
+                    .to_string();
+                sent_authorizations
+                    .lock()
+                    .expect("runtime authorization lock should lock")
+                    .push(authorization);
+                let body_stream = async_stream::stream! {
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                        b"{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n"
+                    ));
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                        b"{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"committed-first-byte\\\"}\\n\\n\"}}\n"
+                    ));
+                    release_disconnect.notified().await;
+                    yield Err(std::io::Error::other("upstream disconnected after first client byte"));
+                };
+                let mut response = Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from_stream(body_stream))
+                    .expect("runtime response should build");
+                response.headers_mut().insert(
+                    http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/x-ndjson"),
+                );
+                response
+            }
+        }),
+    );
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+
+    let mut backup_row = sample_local_openai_candidate_row();
+    backup_row.key_id = "key-openai-lifecycle-local-2".to_string();
+    backup_row.key_name = "backup".to_string();
+    backup_row.key_internal_priority = 6;
+    backup_row.key_global_priority_by_format = Some(json!({"openai:chat": 2}));
+    backup_row.model_id = "model-openai-lifecycle-local-2".to_string();
+    let mut backup_key = sample_local_openai_key();
+    backup_key.id = backup_row.key_id.clone();
+    backup_key.name = backup_row.key_name.clone();
+    backup_key.encrypted_api_key = Some(
+        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-openai-backup")
+            .expect("backup key should encrypt"),
+    );
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        sample_local_openai_candidate_row(),
+        backup_row,
+    ]));
+    let catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_local_openai_provider()],
+        vec![sample_local_openai_endpoint()],
+        vec![sample_local_openai_key(), backup_key],
+    ));
+    let auth = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-client-shared-no-replay")),
+        sample_local_openai_auth_snapshot("api-key-shared-no-replay", "user-shared-no-replay"),
+    )]));
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::default());
+    let gateway_a_state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
+        .with_runtime_state(runtime().await)
+        .with_data_state_for_tests(
+            GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                auth,
+                candidates,
+                catalog,
+                Arc::clone(&request_candidates),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        );
+    // A separate AppState proves this is a shared-backend deployment fixture;
+    // request ownership itself remains local to the receiving gateway.
+    let _gateway_b_state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_runtime_state(runtime().await);
+    let (gateway_url, gateway_handle) =
+        start_server(build_router_with_state(gateway_a_state)).await;
+
+    let mut response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-client-shared-no-replay",
+        )
+        .header(TRACE_ID_HEADER, "trace-shared-no-replay")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
+        .send()
+        .await
+        .expect("stream request should reach the production gateway dispatch path");
+    assert_eq!(response.status(), StatusCode::OK);
+    let first_chunk = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        next_non_keepalive_chunk(&mut response),
+    )
+    .await
+    .expect("gateway should expose the first SSE frame before the fixture deadline");
+    assert_eq!(
+        first_chunk,
+        Bytes::from_static(b"data: {\"id\":\"committed-first-byte\"}\n\n")
+    );
+    // The fixture cannot fault until reqwest has observed the first public
+    // SSE frame, so this exercises the post-commit rather than precommit path.
+    release_disconnect.notify_one();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), response.chunk())
+        .await
+        .expect("released upstream disconnect should reach the client promptly");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        *execution_runtime_hits
+            .lock()
+            .expect("runtime hit lock should lock"),
+        1,
+        "a post-commit stream failure must not send the next candidate"
+    );
+    // The scheduler may select either eligible key first. The no-replay
+    // contract concerns the other key, independently of ranking order.
+    let unsent_key_id = match sent_authorizations
+        .lock()
+        .expect("runtime authorization lock should lock")
+        .as_slice()
+    {
+        [authorization] if authorization == "Bearer sk-upstream-openai" => {
+            "key-openai-lifecycle-local-2"
+        }
+        [authorization] if authorization == "Bearer sk-upstream-openai-backup" => {
+            "key-openai-lifecycle-local-1"
+        }
+        sent => panic!("expected exactly one configured credential, got {sent:?}"),
+    };
+    let stored_candidates = request_candidates
+        .list_by_request_id("trace-shared-no-replay")
+        .await
+        .expect("candidate trace should read");
+    // Lazy selection need not materialize every unused candidate. If the
+    // other key has a persisted row, it must remain unused; the runtime call
+    // count above independently proves that it was never sent.
+    assert!(stored_candidates.iter().all(|candidate| {
+        candidate.key_id.as_deref() != Some(unsent_key_id)
+            || candidate.status == RequestCandidateStatus::Unused
+    }));
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    drop(managed_redis);
+}
+
+#[test]
+#[ignore = "requires a shared isolated Redis server"]
+fn redis_two_gateways_keep_attempt_budget_request_local_and_bounded() {
+    run_lifecycle_test(
+        "redis_two_gateways_keep_attempt_budget_request_local_and_bounded",
+        redis_two_gateways_keep_attempt_budget_request_local_and_bounded_impl,
+    );
+}
+
+async fn redis_two_gateways_keep_attempt_budget_request_local_and_bounded_impl() {
+    const REQUEST_ATTEMPT_LIMIT: usize = aether_scheduler_core::DEFAULT_MAX_ATTEMPTS;
+    let redis_url = std::env::var("AETHER_TEST_REDIS_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty());
+    let managed_redis = if redis_url.is_none() {
+        Some(
+            ManagedRedisServer::start()
+                .await
+                .expect("shared-request acceptance needs an isolated Redis server"),
+        )
+    } else {
+        None
+    };
+    let redis_url = redis_url.unwrap_or_else(|| {
+        managed_redis
+            .as_ref()
+            .expect("managed Redis server should be available")
+            .redis_url()
+            .to_owned()
+    });
+    let key_prefix = format!("aether-shared-request-budget-{}", uuid::Uuid::new_v4());
+    let runtime = || async {
+        Arc::new(
+            RuntimeState::redis(
+                RedisClientConfig {
+                    url: redis_url.clone(),
+                    key_prefix: Some(key_prefix.clone()),
+                },
+                Some(1_000),
+            )
+            .await
+            .expect("gateway RuntimeState should connect to the shared Redis namespace"),
+        )
+    };
+
+    let budget_runtime_hits = Arc::new(Mutex::new(0usize));
+    let budget_runtime_hits_clone = Arc::clone(&budget_runtime_hits);
+    let independent_runtime_hits = Arc::new(Mutex::new(0usize));
+    let independent_runtime_hits_clone = Arc::clone(&independent_runtime_hits);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| {
+            let budget_hits = Arc::clone(&budget_runtime_hits_clone);
+            let independent_hits = Arc::clone(&independent_runtime_hits_clone);
+            async move {
+                let trace_id = request
+                    .headers()
+                    .get(TRACE_ID_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                if trace_id == "trace-shared-budget-exhaustion" {
+                    *budget_hits
+                        .lock()
+                        .expect("budget runtime hit lock should lock") += 1;
+                    Json(json!({
+                        "request_id": trace_id,
+                        "status_code": 429,
+                        "headers": {"content-type": "application/json"},
+                        "body": {"json_body": {"error": {
+                            "message": "quota reached",
+                            "type": "rate_limit_error"
+                        }}},
+                        "telemetry": {"elapsed_ms": 1}
+                    }))
+                } else {
+                    *independent_hits
+                        .lock()
+                        .expect("independent runtime hit lock should lock") += 1;
+                    Json(json!({
+                        "request_id": trace_id,
+                        "status_code": 200,
+                        "headers": {"content-type": "application/json"},
+                        "body": {"json_body": {
+                            "id": "chatcmpl-independent-request",
+                            "object": "chat.completion",
+                            "model": "gpt-5",
+                            "choices": []
+                        }},
+                        "telemetry": {"elapsed_ms": 1}
+                    }))
+                }
+            }
+        }),
+    );
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+
+    // Each row has its own key, avoiding the per-credential limit. Keeping
+    // the provider constant also isolates the request-wide attempts limit from
+    // the independent provider-switch limit.
+    let budget_rows = (0..=REQUEST_ATTEMPT_LIMIT)
+        .map(|index| {
+            let mut row = sample_local_openai_candidate_row();
+            row.key_id = format!("key-openai-shared-budget-{index}");
+            row.key_name = format!("budget-key-{index}");
+            row.key_internal_priority = index as i32;
+            row.key_global_priority_by_format = Some(json!({"openai:chat": index + 1}));
+            row.model_id = format!("model-openai-shared-budget-{index}");
+            row
+        })
+        .collect::<Vec<_>>();
+    let budget_keys = budget_rows
+        .iter()
+        .map(|row| {
+            let mut key = sample_local_openai_key();
+            key.id = row.key_id.clone();
+            key.name = row.key_name.clone();
+            key
+        })
+        .collect::<Vec<_>>();
+    let budget_request_candidates = Arc::new(InMemoryRequestCandidateRepository::default());
+    let budget_state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
+        .with_runtime_state(runtime().await)
+        .with_data_state_for_tests(
+            GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+                    Some(hash_api_key("sk-client-shared-budget")),
+                    sample_local_openai_auth_snapshot("api-key-shared-budget", "user-shared-budget"),
+                )])),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(budget_rows)),
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![sample_local_openai_provider()],
+                    vec![sample_local_openai_endpoint()],
+                    budget_keys,
+                )),
+                Arc::clone(&budget_request_candidates),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        );
+    let independent_state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_runtime_state(runtime().await)
+        .with_data_state_for_tests(
+            GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+                    Some(hash_api_key("sk-client-shared-independent")),
+                    sample_local_openai_auth_snapshot(
+                        "api-key-shared-independent",
+                        "user-shared-independent",
+                    ),
+                )])),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+                    sample_local_openai_candidate_row(),
+                ])),
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![sample_local_openai_provider()],
+                    vec![sample_local_openai_endpoint()],
+                    vec![sample_local_openai_key()],
+                )),
+                Arc::new(InMemoryRequestCandidateRepository::default()),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        );
+    let (budget_gateway_url, budget_gateway_handle) =
+        start_server(build_router_with_state(budget_state)).await;
+    let (independent_gateway_url, independent_gateway_handle) =
+        start_server(build_router_with_state(independent_state)).await;
+
+    let exhausted = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("budget client should build")
+        .post(format!("{budget_gateway_url}/v1/chat/completions"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-client-shared-budget",
+        )
+        .header(TRACE_ID_HEADER, "trace-shared-budget-exhaustion")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
+        .send()
+        .await
+        .expect("budget request should reach production gateway dispatch");
+    assert_eq!(exhausted.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        exhausted
+            .headers()
+            .get(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("execution_runtime_candidates_exhausted")
+    );
+    assert_eq!(
+        *budget_runtime_hits
+            .lock()
+            .expect("budget runtime hit lock should lock"),
+        REQUEST_ATTEMPT_LIMIT,
+        "a 33rd candidate must be stopped by the request-wide AttemptBudget"
+    );
+    let stored = budget_request_candidates
+        .list_by_request_id("trace-shared-budget-exhaustion")
+        .await
+        .expect("budget candidate trace should read");
+    assert_eq!(stored.len(), REQUEST_ATTEMPT_LIMIT + 1);
+    assert_eq!(
+        stored
+            .iter()
+            .filter(|candidate| candidate.status == RequestCandidateStatus::Failed)
+            .count(),
+        REQUEST_ATTEMPT_LIMIT
+    );
+    let stopped = stored
+        .iter()
+        .find(|candidate| candidate.status == RequestCandidateStatus::Skipped)
+        .expect("the candidate after the fixed request limit should be recorded");
+    assert_eq!(stopped.status, RequestCandidateStatus::Skipped);
+    assert_eq!(
+        stopped.error_type.as_deref(),
+        Some("request_attempt_budget_exhausted")
+    );
+    assert_eq!(stopped.error_message.as_deref(), Some("attempts_exhausted"));
+    assert_eq!(
+        stopped
+            .extra_data
+            .as_ref()
+            .and_then(|value| value.get("attempt_budget_attempts")),
+        Some(&json!(REQUEST_ATTEMPT_LIMIT)),
+    );
+
+    let independent = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("independent client should build")
+        .post(format!("{independent_gateway_url}/v1/chat/completions"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-client-shared-independent",
+        )
+        .header(TRACE_ID_HEADER, "trace-shared-budget-independent")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
+        .send()
+        .await
+        .expect("independent gateway request should complete");
+    assert_eq!(independent.status(), StatusCode::OK);
+    assert_eq!(
+        *independent_runtime_hits
+            .lock()
+            .expect("independent runtime hit lock should lock"),
+        1,
+        "a separate request on the other gateway owns a fresh logical budget"
+    );
+
+    budget_gateway_handle.abort();
+    independent_gateway_handle.abort();
+    execution_runtime_handle.abort();
+    drop(managed_redis);
 }

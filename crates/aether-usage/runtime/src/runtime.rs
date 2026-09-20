@@ -9,7 +9,8 @@ use aether_contracts::ExecutionTelemetry;
 use aether_data_contracts::repository::usage::UpsertUsageRecord;
 use aether_data_contracts::DataLayerError;
 use aether_runtime_state::{
-    RuntimeQueuePage, RuntimeQueueRedriveOutcome, RuntimeQueueStats, RuntimeQueueStore,
+    RuntimeQueueCapacitySignal, RuntimeQueuePage, RuntimeQueueRedriveOutcome, RuntimeQueueStats,
+    RuntimeQueueStore,
 };
 use async_trait::async_trait;
 use futures_util::{FutureExt, StreamExt};
@@ -590,6 +591,8 @@ pub struct UsageQueueHealthSnapshot {
     pub group_lag: Option<u64>,
     pub oldest_pending_idle_ms: Option<u64>,
     pub dlq_length: u64,
+    /// Absent when the queue is disabled or no backend is configured.
+    pub dlq_capacity: Option<RuntimeQueueCapacitySignal>,
 }
 
 const USAGE_BODY_CAPTURE_POLICY_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -4087,6 +4090,7 @@ impl UsageRuntime {
             group_lag: None,
             oldest_pending_idle_ms: None,
             dlq_length: 0,
+            dlq_capacity: None,
         };
         if !self.config.enabled {
             return Ok(snapshot);
@@ -4101,6 +4105,10 @@ impl UsageRuntime {
         let dlq_stats = runner.stats(&self.config.dlq_stream_key, None).await?;
         snapshot.apply_stream_stats(stream_stats);
         snapshot.dlq_length = dlq_stats.stream_length;
+        snapshot.dlq_capacity = Some(RuntimeQueueCapacitySignal::from_stats(
+            dlq_stats,
+            self.config.dlq_stream_maxlen,
+        ));
         Ok(snapshot)
     }
 
@@ -5371,7 +5379,6 @@ impl UsageRuntime {
         };
 
         let write_succeeded = if let Err(err) = enrich_terminal_event(data, event).await {
-            aether_runtime::record_billing_enrichment_failure();
             warn!(
                 event_name = "usage_terminal_direct_fallback_enrichment_failed",
                 log_type = "event",
@@ -6957,7 +6964,9 @@ mod tests {
         StoredRequestUsageAudit, UpsertUsageRecord, UsageBodyCaptureState,
     };
     use aether_data_contracts::DataLayerError;
-    use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeQueueStore, RuntimeState};
+    use aether_runtime_state::{
+        MemoryRuntimeStateConfig, RuntimeQueueRedriveOutcome, RuntimeQueueStore, RuntimeState,
+    };
     use async_trait::async_trait;
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -7099,6 +7108,100 @@ mod tests {
             assert_eq!(metadata["provider_cache_ttl_minutes"], 30);
             assert_eq!(budget.retained_bytes(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn dlq_redrive_replays_exact_payload_once_and_keeps_poison_entries() {
+        let queue: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let store = QueueConfiguredUsageStore {
+            inner: NoRedisUsageStore::default(),
+            queue: Arc::clone(&queue),
+        };
+        let runtime = UsageRuntime::new(UsageRuntimeConfig::default()).expect("usage runtime");
+        let original_fields = BTreeMap::from([
+            ("event_type".to_string(), "completed".to_string()),
+            ("payload".to_string(), "original-event".to_string()),
+            ("request_id".to_string(), "request-223-contract".to_string()),
+        ]);
+        let dead_letter_payload = json!({
+            "entry_id": "7-0",
+            "fields": original_fields.clone(),
+            "error": "permanent provider failure"
+        });
+        let source_id = queue
+            .append_fields_with_maxlen(
+                "usage:events:dlq",
+                &BTreeMap::from([
+                    ("payload".to_string(), dead_letter_payload.to_string()),
+                    ("error_class".to_string(), "poison".to_string()),
+                ]),
+                None,
+            )
+            .await
+            .expect("seed valid DLQ payload");
+
+        let first = runtime
+            .redrive_dead_letter(&store, &source_id)
+            .await
+            .expect("valid payload should redrive");
+        let destination_id = match first {
+            RuntimeQueueRedriveOutcome::Redriven { destination_id } => destination_id,
+            other => panic!("unexpected first redrive outcome: {other:?}"),
+        };
+        let destination_page = queue
+            .read_stream_page("usage:events", "0-0", 10)
+            .await
+            .expect("read replayed event");
+        assert_eq!(destination_page.entries.len(), 1);
+        assert_eq!(destination_page.entries[0].fields, original_fields);
+
+        let retry = runtime
+            .redrive_dead_letter(&store, &source_id)
+            .await
+            .expect("duplicate redrive should be idempotent");
+        assert_eq!(
+            retry,
+            RuntimeQueueRedriveOutcome::AlreadyRedriven { destination_id }
+        );
+        assert_eq!(
+            queue
+                .read_stream_page("usage:events", "0-0", 10)
+                .await
+                .expect("read destination after retry")
+                .entries
+                .len(),
+            1,
+            "a duplicate redrive must not append a second usage event"
+        );
+
+        let poison_payload = json!({
+            "entry_id": "8-0",
+            "fields": {},
+            "error": "malformed poison"
+        });
+        let poison_id = queue
+            .append_fields_with_maxlen(
+                "usage:events:dlq",
+                &BTreeMap::from([("payload".to_string(), poison_payload.to_string())]),
+                None,
+            )
+            .await
+            .expect("seed poison payload");
+        let poison_result = runtime.redrive_dead_letter(&store, &poison_id).await;
+        assert!(matches!(
+            poison_result,
+            Err(DataLayerError::InvalidInput(message))
+                if message.contains("payload fields cannot be empty")
+        ));
+        assert!(
+            queue
+                .read_stream_entry("usage:events:dlq", &poison_id)
+                .await
+                .expect("inspect poison entry")
+                .is_some(),
+            "poison entries must remain available for operator inspection"
+        );
     }
 
     #[tokio::test]
@@ -9121,6 +9224,11 @@ mod tests {
                 ..UsageEventData::default()
             },
         );
+        let before = aether_runtime::logging_metric_samples()
+            .into_iter()
+            .find(|sample| sample.name == "billing_enrichment_failures_total")
+            .expect("billing enrichment metric should be exported")
+            .value;
         assert!(
             !runtime
                 .try_write_terminal_direct_fallback(&store, &mut event, "test_retry")
@@ -9131,6 +9239,28 @@ mod tests {
         assert_eq!(snapshot.terminal_direct_fallback_failed_total, 1);
         assert_eq!(snapshot.terminal_direct_fallback_succeeded_total, 0);
         assert_eq!(snapshot.terminal_direct_fallback_in_flight, 0);
+        assert_eq!(store.enrichment_calls.load(Ordering::Acquire), 1);
+        let after = aether_runtime::logging_metric_samples()
+            .into_iter()
+            .find(|sample| sample.name == "billing_enrichment_failures_total")
+            .expect("billing enrichment metric should remain exported")
+            .value;
+        assert!(
+            after > before,
+            "direct fallback enrichment failure must be visible in the shared billing counter"
+        );
+        let rendered = aether_runtime::metrics::render_prometheus_text(
+            &aether_runtime::logging_metric_samples(),
+        );
+        let metric_name = aether_runtime::metrics::metrics_namespace()
+            .map(|namespace| format!("{namespace}_billing_enrichment_failures_total"))
+            .unwrap_or_else(|| "billing_enrichment_failures_total".to_string());
+        let help_line = format!("# HELP {metric_name} ");
+        assert_eq!(
+            rendered.matches(&help_line).count(),
+            1,
+            "the counter must render as one Prometheus metric family"
+        );
 
         assert!(
             runtime
@@ -14739,6 +14869,89 @@ mod tests {
         let snapshot = runtime.metrics_snapshot();
         assert_eq!(snapshot.terminal_direct_fallback_succeeded_total, 1);
         assert_eq!(snapshot.enqueue_retry_scheduled_total, 0);
+    }
+
+    #[tokio::test]
+    async fn queue_health_exposes_dlq_capacity_and_clears_after_removal() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            dlq_stream_maxlen: 5,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: Arc::clone(&queue),
+        };
+        let runtime = UsageRuntime::new(config.clone()).unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..4 {
+            ids.push(
+                queue
+                    .append_fields_with_maxlen(
+                        &config.dlq_stream_key,
+                        &BTreeMap::from([("payload".to_string(), "fixture".to_string())]),
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let snapshot = runtime.queue_health_snapshot(&store).await.unwrap();
+        assert_eq!(snapshot.dlq_length, 4);
+        let capacity = snapshot.dlq_capacity.unwrap();
+        assert_eq!(capacity.max_length, 5);
+        assert_eq!(capacity.utilization_per_mille, 800);
+        assert!(!capacity.at_retention_boundary);
+        for _ in 0..2 {
+            ids.push(
+                queue
+                    .append_fields_with_maxlen(
+                        &config.dlq_stream_key,
+                        &BTreeMap::from([("payload".to_string(), "fixture".to_string())]),
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let capacity = runtime
+            .queue_health_snapshot(&store)
+            .await
+            .unwrap()
+            .dlq_capacity
+            .unwrap();
+        assert_eq!(capacity.stream_length, 6);
+        assert_eq!(capacity.utilization_per_mille, 1000);
+        assert!(capacity.at_retention_boundary);
+        queue.delete(&config.dlq_stream_key, &ids).await.unwrap();
+        let capacity = runtime
+            .queue_health_snapshot(&store)
+            .await
+            .unwrap()
+            .dlq_capacity
+            .unwrap();
+        assert_eq!(capacity.stream_length, 0);
+        assert_eq!(capacity.utilization_per_mille, 0);
+        assert!(!capacity.at_retention_boundary);
+        assert!(runtime
+            .queue_health_snapshot(&NoRedisUsageStore::default())
+            .await
+            .unwrap()
+            .dlq_capacity
+            .is_none());
+        let disabled = UsageRuntime::new(UsageRuntimeConfig {
+            enabled: false,
+            ..config
+        })
+        .unwrap();
+        assert!(disabled
+            .queue_health_snapshot(&store)
+            .await
+            .unwrap()
+            .dlq_capacity
+            .is_none());
     }
 
     #[tokio::test]

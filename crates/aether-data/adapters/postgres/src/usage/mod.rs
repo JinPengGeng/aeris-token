@@ -1998,6 +1998,9 @@ FROM usage
 LEFT JOIN usage_settlement_snapshots
   ON usage_settlement_snapshots.request_id = usage.request_id
 WHERE usage.status IN ('pending', 'streaming')
+  -- Attempt-funded parents are projected from durable attempt facts. A timeout
+  -- cannot turn an unknown charge, open admission or reconciliation into void.
+  AND usage.billing_mode = 'legacy'
   AND usage.created_at < $1
 ORDER BY usage.created_at ASC, usage.request_id ASC
 LIMIT $2
@@ -2024,6 +2027,7 @@ SET status = 'completed',
     error_message = NULL,
     error_category = NULL
 WHERE request_id = $1
+  AND billing_mode = 'legacy'
 "#;
 
 const SELECT_LATEST_FAILED_CANDIDATE_FOR_STALE_REQUESTS_SQL: &str = r#"
@@ -2047,6 +2051,7 @@ SET status = 'failed',
     error_message = NULL,
     error_category = $3
 WHERE request_id = $1
+  AND billing_mode = 'legacy'
 "#;
 
 const UPDATE_FAILED_VOID_STALE_USAGE_SQL: &str = r#"
@@ -2063,6 +2068,7 @@ WITH updated_usage AS (
         actual_total_cost_usd = 0,
         actual_request_cost_usd = 0
     WHERE request_id = $1
+      AND billing_mode = 'legacy'
     RETURNING request_id
 )
 INSERT INTO usage_settlement_snapshots (

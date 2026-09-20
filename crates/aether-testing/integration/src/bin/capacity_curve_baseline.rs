@@ -985,3 +985,142 @@ fn print_usage() {
         "usage: cargo run -p aether-integration-tests --bin capacity_curve_baseline -- [--points 8,16,32,64,128,256] [--requests-per-point-multiplier 8] [--sync-delay-ms 75] [--stream-chunk-delay-ms 25] [--tunnel-hold-ms 75] [--timeout-ms 10000] [--saturation-latency-multiplier 4] [--output /tmp/capacity_curve_baseline.json]"
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn non_2xx_complete_responses_are_capacity_failures() {
+        // Exercise real HTTP and the shared probe: a fully read error response
+        // is transport-complete, but must not count as useful capacity.
+        struct Case {
+            name: &'static str,
+            statuses: &'static [u16],
+            successful: usize,
+            rejected: usize,
+            failed: usize,
+            reason: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "429",
+                statuses: &[429, 429, 429],
+                successful: 0,
+                rejected: 0,
+                failed: 3,
+                reason: Some("failures_observed"),
+            },
+            Case {
+                name: "500",
+                statuses: &[500, 500, 500],
+                successful: 0,
+                rejected: 0,
+                failed: 3,
+                reason: Some("failures_observed"),
+            },
+            Case {
+                name: "502",
+                statuses: &[502, 502, 502],
+                successful: 0,
+                rejected: 0,
+                failed: 3,
+                reason: Some("failures_observed"),
+            },
+            Case {
+                name: "503",
+                statuses: &[503, 503, 503],
+                successful: 0,
+                rejected: 3,
+                failed: 0,
+                reason: Some("admission_rejections_observed"),
+            },
+            Case {
+                name: "mixed",
+                statuses: &[200, 429, 500, 502, 201],
+                successful: 2,
+                rejected: 0,
+                failed: 3,
+                reason: Some("failures_observed"),
+            },
+            Case {
+                name: "mixed rejection",
+                statuses: &[200, 503, 500],
+                successful: 1,
+                rejected: 1,
+                failed: 1,
+                reason: Some("failures_observed"),
+            },
+            Case {
+                name: "healthy",
+                statuses: &[200, 201, 202],
+                successful: 3,
+                rejected: 0,
+                failed: 0,
+                reason: None,
+            },
+        ];
+        for case in cases {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let seen = Arc::clone(&requests);
+            let statuses = case.statuses;
+            let server = SpawnedServer::start(Router::new().route(
+                "/probe",
+                any(move || {
+                    let index = seen.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        (
+                            StatusCode::from_u16(statuses[index]).unwrap(),
+                            "complete fixture body",
+                        )
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+            let total = statuses.len();
+            let result = run_http_load_probe(&HttpLoadProbeConfig {
+                url: format!("{}/probe", server.base_url()),
+                total_requests: total,
+                concurrency: 2,
+                response_mode: HttpLoadProbeResponseMode::FullBody,
+                timeout: Duration::from_secs(5),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            assert_eq!(requests.load(Ordering::SeqCst), total, "{}", case.name);
+            assert_eq!(result.completed_requests, total, "{}", case.name);
+            assert_eq!(result.failed_requests, 0, "{}", case.name);
+            let point = capacity_point(
+                2,
+                total,
+                1_000,
+                result,
+                GateMetricSnapshot {
+                    in_flight: 0,
+                    available_permits: 2,
+                    high_watermark: 2,
+                    rejected_total: 0,
+                },
+            );
+            assert_eq!(point.successful_requests, case.successful, "{}", case.name);
+            assert_eq!(point.failed_requests, case.failed, "{}", case.name);
+            assert_eq!(point.rejected_requests, case.rejected, "{}", case.name);
+            assert_eq!(
+                point.throughput_rps, case.successful as u64,
+                "{}",
+                case.name
+            );
+            let saturation = detect_saturation_point(&[point], u64::MAX);
+            assert_eq!(
+                saturation.as_ref().map(|s| s.reason.as_str()),
+                case.reason,
+                "{}",
+                case.name
+            );
+        }
+    }
+}

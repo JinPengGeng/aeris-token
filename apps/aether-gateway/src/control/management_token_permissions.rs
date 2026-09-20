@@ -508,7 +508,13 @@ fn access_for_route(method: &http::Method, decision: &GatewayControlDecision) ->
         ) | (Some("admin:providers"), Some("update_provider"))
             | (
                 Some("admin:provider_query"),
-                Some("query_models" | "test_model" | "test_model_failover")
+                Some(
+                    "query_models"
+                        | "test_model"
+                        | "test_model_failover"
+                        | "emergency_chain_execute"
+                        | "emergency_chain_revoke"
+                )
             )
             | (
                 Some("admin:provider_oauth"),
@@ -571,7 +577,10 @@ fn access_for_route(method: &http::Method, decision: &GatewayControlDecision) ->
                 Some("admin:usage"),
                 Some("detail" | "curl" | "replay" | "dlq_redrive")
             )
-            | (Some("admin:monitoring"), Some("trace_request"))
+            | (
+                Some("admin:monitoring"),
+                Some("trace_request" | "audit_delivery_redrive")
+            )
             | (Some("admin:tasks"), Some("detail" | "events"))
             | (
                 Some("admin:pool"),
@@ -1242,7 +1251,13 @@ mod tests {
         let write_permissions = vec!["admin:provider_query:write".to_string()];
         let admin_permissions = vec!["admin:provider_query:admin".to_string()];
 
-        for route_kind in ["query_models", "test_model", "test_model_failover"] {
+        for route_kind in [
+            "query_models",
+            "test_model",
+            "test_model_failover",
+            "emergency_chain_execute",
+            "emergency_chain_revoke",
+        ] {
             let decision = GatewayControlDecision::synthetic(
                 format!("/api/admin/provider-query/{route_kind}"),
                 Some("admin_proxy".to_string()),
@@ -1578,6 +1593,11 @@ mod tests {
             ("admin:usage", "replay", http::Method::POST),
             ("admin:usage", "dlq_redrive", http::Method::POST),
             ("admin:monitoring", "trace_request", http::Method::GET),
+            (
+                "admin:monitoring",
+                "audit_delivery_redrive",
+                http::Method::POST,
+            ),
         ];
 
         for (signature, route_kind, method) in cases {

@@ -34,11 +34,12 @@ pub(crate) fn openai_chat_reasoning_texts(
                 if detail.get("type").and_then(Value::as_str) == Some("reasoning.encrypted") {
                     return None;
                 }
-                let text = detail
-                    .get("text")
-                    .or_else(|| detail.get("summary"))
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.is_empty())?;
+                let text = ["text", "summary"].iter().find_map(|key| {
+                    detail
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                })?;
                 let index = detail
                     .get("index")
                     .and_then(Value::as_u64)
@@ -54,8 +55,12 @@ pub(crate) fn openai_chat_reasoning_texts(
     // past any key that is present but carries no string.
     ["reasoning_content", "reasoning"]
         .iter()
-        .find_map(|key| object.get(*key).and_then(Value::as_str))
-        .filter(|text| !text.is_empty())
+        .find_map(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+        })
         .map(|text| vec![(None, text.to_string())])
         .unwrap_or_default()
 }
@@ -240,6 +245,23 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn empty_reasoning_aliases_fall_through_to_readable_text() {
+        for fields in [
+            json!({"reasoning_content": "", "reasoning": "kept"}),
+            json!({"reasoning_content": null, "reasoning": "kept"}),
+            json!({"reasoning_details": [{"type": "reasoning.summary", "text": "", "summary": "kept"}]}),
+            json!({"reasoning_details": [{"type": "reasoning.summary", "text": null, "summary": "kept"}]}),
+        ] {
+            let mut message = fields;
+            message["role"] = json!("assistant");
+            message["content"] = json!("done");
+            let response = from_raw(&json!({"choices": [{"index": 0, "message": message,
+                "finish_reason": "stop"}]}))
+            .expect("response");
+            assert_eq!(thinking_texts(&response), vec!["kept"]);
+        }
+    }
     #[test]
     fn openrouter_reasoning_details_become_thinking_blocks() {
         let response = from_raw(&json!({

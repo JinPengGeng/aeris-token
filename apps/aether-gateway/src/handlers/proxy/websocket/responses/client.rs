@@ -33,7 +33,7 @@ use super::request::{
 use super::state::BoundResponsesConnection;
 use super::turn::{
     prepare_responses_websocket_turn_decision, ResponsesWebSocketTurnObservation,
-    ResponsesWebSocketTurnOutcome,
+    ResponsesWebSocketTurnOutcome, UpstreamRequestState,
 };
 use super::turn_state::LogicalTurn;
 use super::upstream::{
@@ -762,6 +762,8 @@ async fn forward_pinned_continuation(
         &logical_turn_id,
         1,
     );
+    let mut logical = LogicalTurn::new(client_event.clone(), turn_index, logical_turn_id.clone());
+    let lifecycle = logical.begin_attempt_lifecycle().into_terminal_guard();
     let mut turn = match begin_responses_websocket_turn_with_planned_lease(
         state,
         &context.trace_id,
@@ -801,10 +803,20 @@ async fn forward_pinned_continuation(
         return RelayDisposition::UpstreamError("responses_websocket_send_failed");
     };
     match send_responses_websocket_upstream_message(
+        &decision,
         upstream,
         WreqWsMessage::text(outbound),
+        logical.attempt_budget_mut(),
         plan_usage_permit.as_ref(),
-        |request_state| turn.record_upstream_request_state(request_state),
+        |request_state| {
+            if matches!(
+                request_state,
+                UpstreamRequestState::PossiblySent | UpstreamRequestState::Sent
+            ) {
+                lifecycle.mark_sent();
+            }
+            turn.record_upstream_request_state(request_state);
+        },
     )
     .await
     {
@@ -823,6 +835,23 @@ async fn forward_pinned_continuation(
             )
             .await;
             return RelayDisposition::PlanUsagePermitLost;
+        }
+        Err(ResponsesWebSocketUpstreamSendError::AttemptBudgetExhausted(reason)) => {
+            queue_turn_finalization(
+                bound,
+                state,
+                turn,
+                ResponsesWebSocketTurnOutcome::upstream_connect_failed(reason.as_str()),
+            )
+            .await;
+            send_gateway_error_with_status(
+                client_socket,
+                429,
+                "request_attempt_budget_exhausted",
+                reason.as_str(),
+            )
+            .await;
+            return RelayDisposition::Continue;
         }
         Err(ResponsesWebSocketUpstreamSendError::Transport(_)) => {
             queue_turn_finalization(
@@ -843,14 +872,15 @@ async fn forward_pinned_continuation(
     bound.adapter = adapter;
     bound.decision_template = decision;
     bound.body_normalization = normalization;
-    bound.turn_state.begin(
-        LogicalTurn::new(client_event, turn_index, logical_turn_id)
+    bound.turn_state.begin_with_lifecycle(
+        logical
             .with_codex_fingerprint_context(codex_fingerprint_context)
             .with_provider_store(provider_event.get("store") == Some(&Value::Bool(true)))
             .with_turn_control(turn_control)
             .with_plan_usage_permit(plan_usage_permit)
             .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot),
         turn,
+        lifecycle,
     );
     bound.next_turn_index = bound.next_turn_index.saturating_add(1);
     debug!(
@@ -982,6 +1012,8 @@ async fn forward_replanned_response_create(
         &logical_turn_id,
         1,
     );
+    let mut logical = LogicalTurn::new(client_event.clone(), turn_index, logical_turn_id.clone());
+    let lifecycle = logical.begin_attempt_lifecycle().into_terminal_guard();
     let mut turn = match begin_responses_websocket_turn_with_planned_lease(
         state,
         &context.trace_id,
@@ -1042,10 +1074,20 @@ async fn forward_replanned_response_create(
             return RelayDisposition::UpstreamError("responses_websocket_send_failed");
         };
         match send_responses_websocket_upstream_message(
+            &decision,
             upstream,
             WreqWsMessage::text(outbound),
+            logical.attempt_budget_mut(),
             plan_usage_permit.as_ref(),
-            |request_state| turn.record_upstream_request_state(request_state),
+            |request_state| {
+                if matches!(
+                    request_state,
+                    UpstreamRequestState::PossiblySent | UpstreamRequestState::Sent
+                ) {
+                    lifecycle.mark_sent();
+                }
+                turn.record_upstream_request_state(request_state);
+            },
         )
         .await
         {
@@ -1064,6 +1106,23 @@ async fn forward_replanned_response_create(
                 )
                 .await;
                 return RelayDisposition::PlanUsagePermitLost;
+            }
+            Err(ResponsesWebSocketUpstreamSendError::AttemptBudgetExhausted(reason)) => {
+                queue_turn_finalization(
+                    bound,
+                    state,
+                    turn,
+                    ResponsesWebSocketTurnOutcome::upstream_connect_failed(reason.as_str()),
+                )
+                .await;
+                send_gateway_error_with_status(
+                    client_socket,
+                    429,
+                    "request_attempt_budget_exhausted",
+                    reason.as_str(),
+                )
+                .await;
+                return RelayDisposition::Continue;
             }
             Err(ResponsesWebSocketUpstreamSendError::Transport(_)) => {
                 queue_turn_finalization(
@@ -1097,14 +1156,15 @@ async fn forward_replanned_response_create(
         bound.responses_lite_static_config =
             uses_responses_lite.then_some(raw_responses_lite_static_config);
         bound.body_normalization = normalization;
-        bound.turn_state.begin(
-            LogicalTurn::new(client_event.clone(), turn_index, logical_turn_id.clone())
+        bound.turn_state.begin_with_lifecycle(
+            logical
                 .with_codex_fingerprint_context(codex_fingerprint_context.clone())
                 .with_provider_store(provider_event.get("store") == Some(&Value::Bool(true)))
                 .with_turn_control(turn_control)
                 .with_plan_usage_permit(plan_usage_permit)
                 .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot),
             turn,
+            lifecycle,
         );
         bound.next_turn_index = bound.next_turn_index.saturating_add(1);
         debug!(
@@ -1130,8 +1190,17 @@ async fn forward_replanned_response_create(
         normalization,
         &client_event,
         adapter,
+        logical.attempt_budget_mut(),
         plan_usage_permit.as_ref(),
-        |request_state| turn.record_upstream_request_state(request_state),
+        |request_state| {
+            if matches!(
+                request_state,
+                UpstreamRequestState::PossiblySent | UpstreamRequestState::Sent
+            ) {
+                lifecycle.mark_sent();
+            }
+            turn.record_upstream_request_state(request_state);
+        },
     )
     .await
     {
@@ -1150,6 +1219,23 @@ async fn forward_replanned_response_create(
             )
             .await;
             return RelayDisposition::PlanUsagePermitLost;
+        }
+        Err(ResponsesWebSocketUpstreamBindError::AttemptBudgetExhausted(reason)) => {
+            queue_turn_finalization(
+                bound,
+                state,
+                turn,
+                ResponsesWebSocketTurnOutcome::upstream_connect_failed(reason.as_str()),
+            )
+            .await;
+            send_gateway_error_with_status(
+                client_socket,
+                429,
+                "request_attempt_budget_exhausted",
+                reason.as_str(),
+            )
+            .await;
+            return RelayDisposition::Continue;
         }
         Err(ResponsesWebSocketUpstreamBindError::Transport(code)) => {
             queue_turn_finalization(
@@ -1206,14 +1292,15 @@ async fn forward_replanned_response_create(
     bound.body_normalization = replacement.body_normalization;
     bound.responses_lite_static_config = replacement.responses_lite_static_config;
     bound.binding_identity = replacement.binding_identity;
-    bound.turn_state.begin(
-        LogicalTurn::new(client_event, turn_index, logical_turn_id)
+    bound.turn_state.begin_with_lifecycle(
+        logical
             .with_codex_fingerprint_context(codex_fingerprint_context)
             .with_provider_store(provider_event.get("store") == Some(&Value::Bool(true)))
             .with_turn_control(turn_control)
             .with_plan_usage_permit(plan_usage_permit)
             .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot),
         turn,
+        lifecycle,
     );
     bound.next_turn_index = bound.next_turn_index.saturating_add(1);
     bound.upstream_response_headers = replacement.upstream_response_headers;
