@@ -3,8 +3,16 @@
 Refs #205. Implements the public trust-set overlap in
 [ADR-0045](../architecture/adr-0045-signed-tunnel-release-provenance.md).
 This is the Ed25519 signature on the exact bytes of `SHA256SUMS.txt` used by
-manual and heartbeat-triggered self-upgrades. It does not change gateway
-authentication, tunnel handshakes, database state, or the version-1 envelope.
+manual and heartbeat-triggered self-upgrades. Each signed manifest starts with
+`# aether-tunnel-release-tag=<tag>`, and the updater requires that marker to
+match the GitHub tag it requested. This prevents copying an older signed
+archive and manifest onto a newer tag to bypass the semantic-version check. It
+does not change gateway authentication, tunnel handshakes, database state, or
+the version-1 envelope.
+
+Manifests from releases created before this marker was introduced are rejected
+by the upgrade path as missing a release tag; publish a newly signed release
+before enabling upgrades on an installation that still needs an older asset.
 
 ## Build inputs and custody
 
@@ -151,7 +159,8 @@ With reviewed public inputs loaded, check a downloaded manifest before comparing
 the requested archive's SHA-256 against its authenticated checksum entry:
 
 ```sh
-.github/workflows/scripts/verify-tunnel-release.sh SHA256SUMS.txt SHA256SUMS.txt.sig
+AETHER_TUNNEL_RELEASE_TAG=tunnel-vX.Y.Z \
+  .github/workflows/scripts/verify-tunnel-release.sh SHA256SUMS.txt SHA256SUMS.txt.sig
 ```
 
 The publication/offline helper additionally pins `KEY_ID` to the expected signer;

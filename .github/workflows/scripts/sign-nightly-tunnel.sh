@@ -7,6 +7,10 @@ if [[ -z "${AETHER_TUNNEL_RELEASE_KEY_ID:-}" || -z "${AETHER_TUNNEL_RELEASE_PRIV
   echo 'release signing key configuration is missing; refusing to publish unsigned nightly tunnel artifacts' >&2
   exit 1
 fi
+if [[ -z "${AETHER_TUNNEL_RELEASE_TAG:-}" ]]; then
+  echo 'release tag is required for signed nightly tunnel artifacts' >&2
+  exit 1
+fi
 signing_key="${AETHER_TUNNEL_RELEASE_PRIVATE_KEY_PEM}"
 unset AETHER_TUNNEL_RELEASE_PRIVATE_KEY_PEM
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd -P)"

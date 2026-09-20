@@ -397,7 +397,11 @@ jobs:
 
       - name: Generate tunnel manifest
         working-directory: tunnel-assets
-        run: sha256sum aether-tunnel-linux-musl-amd64.tar.gz aether-tunnel-linux-musl-arm64.tar.gz > SHA256SUMS.txt
+        env:
+          RELEASE_TAG: ${{ needs.source.outputs.tag }}
+        run: |
+          printf '# aether-tunnel-release-tag=%s\n' "${RELEASE_TAG}" > SHA256SUMS.txt
+          sha256sum aether-tunnel-linux-musl-amd64.tar.gz aether-tunnel-linux-musl-arm64.tar.gz >> SHA256SUMS.txt
 
       - name: Sign nightly tunnel manifest
         working-directory: tunnel-assets
@@ -406,6 +410,7 @@ jobs:
           AETHER_TUNNEL_RELEASE_PUBLIC_KEY: ${{ vars.AETHER_TUNNEL_RELEASE_PUBLIC_KEY }}
           AETHER_TUNNEL_RELEASE_TRUST_KEYS: ${{ vars.AETHER_TUNNEL_RELEASE_TRUST_KEYS }}
           AETHER_TUNNEL_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.AETHER_TUNNEL_RELEASE_PRIVATE_KEY_PEM }}
+          AETHER_TUNNEL_RELEASE_TAG: ${{ needs.source.outputs.tag }}
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/.github/workflows/scripts/sign-nightly-tunnel.sh"
 

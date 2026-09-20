@@ -16,9 +16,9 @@ reject() {
     fi
 }
 check_inputs() { cargo run --quiet --locked --manifest-path "${VERIFIER_MANIFEST}" -- check "$@"; }
-verify() { "${VERIFY_SCRIPT}" "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/$1.sig"; }
+verify() { AETHER_TUNNEL_RELEASE_TAG=tunnel-v0.3.17 "${VERIFY_SCRIPT}" "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/$1.sig"; }
 
-printf 'abc123  aether-tunnel-linux-amd64.tar.gz\n' >"${FIXTURE}/SHA256SUMS.txt"
+printf '# aether-tunnel-release-tag=tunnel-v0.3.17\nabc123  aether-tunnel-linux-amd64.tar.gz\n' >"${FIXTURE}/SHA256SUMS.txt"
 for key in old new; do
     openssl genpkey -algorithm ED25519 -out "${FIXTURE}/${key}.pem" >/dev/null 2>&1
     openssl pkey -in "${FIXTURE}/${key}.pem" -pubout -outform DER \
@@ -72,18 +72,18 @@ binary="${CARGO_TARGET_DIR}/debug/tunnel-release-verifier"
 export AETHER_TUNNEL_RELEASE_TRUST_KEYS="${overlap}" AETHER_TUNNEL_RELEASE_KEY_ID=old
 cargo build --quiet --locked --manifest-path "${VERIFIER_MANIFEST}"
 sed '$d' "${FIXTURE}/new.sig" >"${FIXTURE}/new-valid.sig"
-"${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/old.sig"
-"${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/new-valid.sig"
+"${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/old.sig" tunnel-v0.3.17
+"${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/new-valid.sig" tunnel-v0.3.17
 export AETHER_TUNNEL_RELEASE_TRUST_KEYS="${retired}" AETHER_TUNNEL_RELEASE_KEY_ID=new
-"${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/old.sig"
+"${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/old.sig" tunnel-v0.3.17
 cargo build --quiet --locked --manifest-path "${VERIFIER_MANIFEST}"
-"${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/new-valid.sig"
-reject "${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/old.sig"
+"${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/new-valid.sig" tunnel-v0.3.17
+reject "${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/old.sig" tunnel-v0.3.17
 export AETHER_TUNNEL_RELEASE_TRUST_KEYS="" AETHER_TUNNEL_RELEASE_KEY_ID=old AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${old_public}"
 cargo build --quiet --locked --manifest-path "${VERIFIER_MANIFEST}"
-"${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/old.sig"
-reject "${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/new-valid.sig"
+"${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/old.sig" tunnel-v0.3.17
+reject "${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/new-valid.sig" tunnel-v0.3.17
 printf 'tampered\n' >>"${FIXTURE}/SHA256SUMS.txt"
-reject "${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/old.sig"
+reject "${binary}" verify-embedded "${FIXTURE}/SHA256SUMS.txt" "${FIXTURE}/old.sig" tunnel-v0.3.17
 
 echo "PASS: release trust inputs, embedded overlap, signer switch, retirement and tamper rejection"

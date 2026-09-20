@@ -84,6 +84,8 @@ assert_line "${TUNNEL_RELEASE_WORKFLOW}" \
     "          AETHER_TUNNEL_RELEASE_PUBLIC_KEY: \${{ vars.AETHER_TUNNEL_RELEASE_PUBLIC_KEY }}"
 assert_line "${TUNNEL_RELEASE_WORKFLOW}" \
     "          \"\${GITHUB_WORKSPACE}/.github/workflows/scripts/verify-tunnel-release.sh\""
+assert_line "${TUNNEL_RELEASE_WORKFLOW}" \
+    "          printf '# aether-tunnel-release-tag=%s\\n' \"\${GITHUB_REF_NAME}\" > SHA256SUMS.txt"
 [[ -x "${TUNNEL_VERIFY_SCRIPT}" ]] || fail_test "tunnel release verifier is not executable"
 assert_line "${TUNNEL_RELEASE_WORKFLOW}" \
     "          tar czf ../../../aether-tunnel-\${{ matrix.name }}.tar.gz aether-tunnel.exe"
@@ -97,7 +99,7 @@ VERIFY_FIXTURE="$(mktemp -d)"
 unset AETHER_TUNNEL_RELEASE_TRUST_KEYS AETHER_TUNNEL_RELEASE_KEY_ID AETHER_TUNNEL_RELEASE_PUBLIC_KEY
 cleanup_verify_fixture() { rm -rf -- "${VERIFY_FIXTURE}"; }
 trap cleanup_verify_fixture EXIT
-printf '%s\n' 'signed tunnel release fixture' >"${VERIFY_FIXTURE}/SHA256SUMS.txt"
+printf '%s\n' '# aether-tunnel-release-tag=tunnel-v0.3.17' 'signed tunnel release fixture' >"${VERIFY_FIXTURE}/SHA256SUMS.txt"
 openssl genpkey -algorithm ED25519 -out "${VERIFY_FIXTURE}/private.pem" >/dev/null 2>&1 \
     || fail_test "OpenSSL Ed25519 key generation is unavailable"
 openssl pkey -in "${VERIFY_FIXTURE}/private.pem" -pubout -outform DER \
@@ -110,20 +112,25 @@ openssl pkeyutl -sign -rawin -inkey "${VERIFY_FIXTURE}/private.pem" \
 signature="$(base64 <"${VERIFY_FIXTURE}/signature.bin" | tr -d '\n')"
 printf 'version=1\nkey_id=fixture-key\nsignature=%s\n' "${signature}" \
     >"${VERIFY_FIXTURE}/SHA256SUMS.txt.sig"
-if AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${public_key}" \
+if AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${public_key}" AETHER_TUNNEL_RELEASE_TAG=tunnel-v0.3.17 \
     "${TUNNEL_VERIFY_SCRIPT}" "${VERIFY_FIXTURE}/SHA256SUMS.txt" \
     "${VERIFY_FIXTURE}/SHA256SUMS.txt.sig" >/dev/null 2>&1; then
     fail_test "missing release key id was accepted"
 fi
-if AETHER_TUNNEL_RELEASE_KEY_ID=wrong-key AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${public_key}" \
+if AETHER_TUNNEL_RELEASE_KEY_ID=wrong-key AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${public_key}" AETHER_TUNNEL_RELEASE_TAG=tunnel-v0.3.17 \
     "${TUNNEL_VERIFY_SCRIPT}" "${VERIFY_FIXTURE}/SHA256SUMS.txt" \
     "${VERIFY_FIXTURE}/SHA256SUMS.txt.sig" >/dev/null 2>&1; then
     fail_test "mismatched release key id was accepted"
 fi
-AETHER_TUNNEL_RELEASE_KEY_ID=fixture-key AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${public_key}" \
+AETHER_TUNNEL_RELEASE_KEY_ID=fixture-key AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${public_key}" AETHER_TUNNEL_RELEASE_TAG=tunnel-v0.3.17 \
     "${TUNNEL_VERIFY_SCRIPT}" "${VERIFY_FIXTURE}/SHA256SUMS.txt" \
     "${VERIFY_FIXTURE}/SHA256SUMS.txt.sig" >/dev/null \
     || fail_test "valid release signature was rejected"
+if AETHER_TUNNEL_RELEASE_KEY_ID=fixture-key AETHER_TUNNEL_RELEASE_PUBLIC_KEY="${public_key}" AETHER_TUNNEL_RELEASE_TAG=tunnel-v0.3.18 \
+    "${TUNNEL_VERIFY_SCRIPT}" "${VERIFY_FIXTURE}/SHA256SUMS.txt" \
+    "${VERIFY_FIXTURE}/SHA256SUMS.txt.sig" >/dev/null 2>&1; then
+    fail_test "signed manifest was accepted for a different release tag"
+fi
 
 bash "${REPO_ROOT}/tests/tunnel_release_key_rotation_test.sh"
 
