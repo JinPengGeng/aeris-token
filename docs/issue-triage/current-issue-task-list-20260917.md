@@ -1,42 +1,19 @@
 # Current issue execution queue — updated 2026-09-20
 
-## Current batch still in integration
+## Current delivery status
 
-The latest hosted inventory remains 45 open issues and two open PRs. The active
-code batch covers three groups, not three remaining issues for the entire
-project:
+PR #447 contains the gateway implementation and its CI repair batch: audit
+inventory 146, scoped history, fresh catalog fixtures, English public errors
+and trace assertions, bounded waits for the two hanging tests, and the explicit
+cyber-policy failover setting. Image heartbeat tests now preserve the existing
+no-replay rule for sent image-generation operations. Live validation and merge
+results are recorded on PR #447 and Issue #443.
 
-- #51: use fresh catalog/runtime quota state at send admission, revalidate an
-  existing guard without counting its own request as concurrent occupancy, and
-  connect the shared WebSocket admission path.
-- #53: include OAuth refresh sends, Windsurf internal recovery sends and
-  Responses WebSocket quota rebinds in their existing request/turn budget.
-- #254: complete local error trace IDs and align the existing response fixtures.
-
-All #51/#53/#254 patches are integrated locally: precise initial `Pending`
-exclusion, revalidation retaining RPM, explicit WebSocket release, HTTP
-OAuth/Windsurf cross-task budgets, WebSocket logical budgets, error trace IDs,
-and model-404 usage consistency. The old HTTP-under-review state and the
-preceding 108-pass/two-failure fixture result are historical; compatibility
-fixtures are integrated. The three implementations were committed and pushed in PR #447 as
-`4ce1d4c7bfcc276a6d4083857274e56a43075fb3`. Integration with main is conflict-free;
-hosted CI exposed fixture and runner updates now being repaired. The preceding
-local targeted Gateway validation reports 456 passed,
-0 failed, and 2 ignored in
-`/Users/jinpeng/.agents/tmp/aeris-delivery-20260920/final-three-slices-20260920T175230.log`.
-The two ignored Redis targets were not rerun and are not passes. An integration
-compile found and repaired the remaining `LocalAdmission` caller in `server.rs`.
-Do not add this selection to historical totals. The separate `aether-ai-serving`
-`attempt_loop` addition passed 6, failed 0, and ignored 0; evidence is
-`/Users/jinpeng/.agents/tmp/aeris-delivery-20260920/serving-attempt-loop-final.json`.
-The full-repository format and diff checks also passed.
-
-Issue #443 and individual #51/#53/#254 progress comments were updated and read
-back on GitHub. PR #447 is MERGEABLE and awaiting required CI; #440 will be
-closed as superseded after #447 merges. The #254 public local errors are now
-English, including execution, capacity and IP access-control messages.
-Upstream `ba7c9f8b` remains an ancestor
-of fork main `5534ba54`: zero upstream commits are missing.
+The 14 issues pending closure are #44-#49, #51-#53, #247, #254, #255, #256,
+and #307. They close only when the integrating change merges. The next batch
+implements #218 Compose resource limits and #226 rustls feature selection in
+an isolated worktree. Required CI and review remain part of delivery; waiting
+for them does not block independent implementation work.
 
 ## Execution resumed on 2026-09-20
 

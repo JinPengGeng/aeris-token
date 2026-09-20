@@ -5262,8 +5262,8 @@ mod tests {
         assert_eq!(returned.first(), Some(&stale_sample));
         assert_eq!(
             returned.len(),
-            5,
-            "cached sample plus four live audit signals"
+            9,
+            "cached sample plus four live audit signals and four redrive outcome signals"
         );
 
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -5300,8 +5300,8 @@ mod tests {
 
         assert_eq!(
             samples.len(),
-            5,
-            "service status plus four live audit signals"
+            9,
+            "service status plus four live audit signals and four redrive outcome signals"
         );
         assert_eq!(samples[0].name, "service_up");
         assert_eq!(samples[0].value, 1);

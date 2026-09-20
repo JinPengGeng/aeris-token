@@ -544,10 +544,9 @@ pub(crate) fn classify_local_failover(
         return LocalFailoverClassification::StopStatusCode;
     }
 
-    if policy.stop_cyber_policy_errors
-        && input.status_code >= 400
-        && local_error_response_has_cyber_policy_code(input.response_text)
-    {
+    let cyber_policy_error =
+        input.status_code >= 400 && local_error_response_has_cyber_policy_code(input.response_text);
+    if policy.stop_cyber_policy_errors && cyber_policy_error {
         return LocalFailoverClassification::StopCyberPolicy;
     }
 
@@ -572,6 +571,10 @@ pub(crate) fn classify_local_failover(
         && !matches!(input.status_code, 401 | 403)
     {
         return LocalFailoverClassification::StopStatusCode;
+    }
+
+    if cyber_policy_error {
+        return LocalFailoverClassification::RetryUpstreamFailure;
     }
 
     if input.status_code == 200
@@ -1021,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn classifier_keeps_client_errors_stopped_when_cyber_policy_is_disabled() {
+    fn classifier_retries_cyber_errors_when_explicitly_enabled() {
         let policy = LocalFailoverPolicy {
             stop_cyber_policy_errors: false,
             ..LocalFailoverPolicy::default()
@@ -1032,6 +1035,24 @@ mod tests {
                 LocalFailoverInput::new(
                     400,
                     Some(r#"{"error":{"code":"cyber_policy","message":"flagged"}}"#)
+                )
+            ),
+            LocalFailoverClassification::RetryUpstreamFailure
+        );
+        assert_eq!(
+            classify_local_failover(
+                &policy,
+                LocalFailoverInput::new(400, Some(r#"{"error":{"code":"other"}}"#))
+            ),
+            LocalFailoverClassification::StopStatusCode
+        );
+        assert_eq!(
+            classify_local_failover(
+                &policy,
+                LocalFailoverInput::trusted(
+                    400,
+                    Some(r#"{"error":{"code":"cyber_policy"}}"#),
+                    FailureOrigin::Request,
                 )
             ),
             LocalFailoverClassification::StopStatusCode

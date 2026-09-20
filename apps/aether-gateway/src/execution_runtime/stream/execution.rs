@@ -8972,6 +8972,50 @@ mod tests {
         InMemoryProviderCatalogReadRepository::seed(vec![provider], vec![endpoint], vec![key])
     }
 
+    fn test_send_admission_catalog() -> Arc<InMemoryProviderCatalogReadRepository> {
+        let provider = StoredProviderCatalogProvider::new(
+            "prov-1".to_string(),
+            "test-provider".to_string(),
+            None,
+            "openai".to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            false,
+            false,
+            None,
+            Some(3),
+            None,
+            None,
+            None,
+            Some(json!({"failover_rules": {"stop_status_codes": [302]}})),
+        );
+        let endpoint = StoredProviderCatalogEndpoint::new(
+            "ep-1".to_string(),
+            "prov-1".to_string(),
+            "openai:chat".to_string(),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            true,
+        )
+        .expect("endpoint should build");
+        let key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "prov-1".to_string(),
+            "test-key".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![endpoint],
+            vec![key],
+        ))
+    }
+
     #[test]
     fn non_json_upstream_error_body_is_not_projected_to_clients() {
         let secret = b"Bearer upstream-secret https://user:password@example.test/private";
@@ -12621,7 +12665,8 @@ mod tests {
         let data = crate::data::GatewayDataState::with_proxy_node_repository_for_tests(Arc::new(
             InMemoryProxyNodeRepository::seed([node]),
         ))
-        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
+        .attach_provider_catalog_repository_for_tests(test_send_admission_catalog());
         AppState::new()
             .expect("app state should build")
             .with_data_state_for_tests(data)
@@ -15828,7 +15873,8 @@ mod tests {
                 crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
                     Arc::clone(&request_candidate_repository),
                     Arc::clone(&usage_repository),
-                ),
+                )
+                .attach_provider_catalog_repository_for_tests(test_send_admission_catalog()),
             )
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
                 enabled: true,
@@ -15993,7 +16039,8 @@ mod tests {
                 crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
                     Arc::clone(&request_candidate_repository),
                     Arc::clone(&usage_repository),
-                ),
+                )
+                .attach_provider_catalog_repository_for_tests(test_send_admission_catalog()),
             )
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
                 enabled: true,
@@ -16057,7 +16104,9 @@ mod tests {
             .await
         });
 
-        first_event_seen.notified().await;
+        tokio::time::timeout(Duration::from_secs(2), first_event_seen.notified())
+            .await
+            .expect("remote runtime should emit the first stream event");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let first_event_usage = loop {
             let usage = usage_repository
@@ -16079,7 +16128,9 @@ mod tests {
         assert!(!execution_task.is_finished());
 
         release_text.notify_one();
-        text_seen.notified().await;
+        tokio::time::timeout(Duration::from_secs(2), text_seen.notified())
+            .await
+            .expect("remote runtime should emit semantic text");
         let response = tokio::time::timeout(Duration::from_secs(1), execution_task)
             .await
             .expect("semantic text should commit the response")
@@ -16128,6 +16179,10 @@ mod tests {
 
         let state = AppState::new()
             .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::disabled()
+                    .attach_provider_catalog_repository_for_tests(test_send_admission_catalog()),
+            )
             .with_execution_runtime_override_base_url(format!("http://{addr}"));
         let plan = ExecutionPlan {
             request_id: "req-remote-runtime-sync-json-stream".into(),
@@ -16244,7 +16299,8 @@ mod tests {
                 .with_system_config_values_for_tests([(
                     "request_record_level".to_string(),
                     json!("full"),
-                )]),
+                )])
+                .attach_provider_catalog_repository_for_tests(test_send_admission_catalog()),
             )
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
                 enabled: true,
@@ -16255,9 +16311,9 @@ mod tests {
             request_id: "req-remote-runtime-stream-redirect".into(),
             candidate_id: Some("cand-remote-runtime-stream-redirect".into()),
             provider_name: Some("ChatGPTWeb".into()),
-            provider_id: "prov-redirect".into(),
-            endpoint_id: "ep-redirect".into(),
-            key_id: "key-redirect".into(),
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
             method: "POST".into(),
             url: "https://chatgpt.com/backend-api/codex/responses".into(),
             headers: BTreeMap::from([
@@ -16433,6 +16489,10 @@ mod tests {
 
         let state = AppState::new()
             .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::disabled()
+                    .attach_provider_catalog_repository_for_tests(test_send_admission_catalog()),
+            )
             .with_execution_runtime_override_base_url(format!("http://{addr}"));
         let plan = ExecutionPlan {
             request_id: "req-remote-runtime-image-sync-json-stream".into(),

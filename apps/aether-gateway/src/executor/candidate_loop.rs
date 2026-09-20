@@ -3,7 +3,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use aether_ai_formats::contracts::{
+use crate::ai_serving::{
     GEMINI_FILES_DELETE_PLAN_KIND, GEMINI_FILES_UPLOAD_PLAN_KIND,
     GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND, GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND,
     OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
@@ -2890,7 +2890,7 @@ pub(crate) async fn mark_unused_local_candidate_items<T, FPlan, FContext>(
 mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
-    use aether_ai_formats::contracts::{
+    use crate::ai_serving::{
         GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND, GEMINI_FILES_LIST_PLAN_KIND,
         OPENAI_VIDEO_CONTENT_PLAN_KIND,
     };

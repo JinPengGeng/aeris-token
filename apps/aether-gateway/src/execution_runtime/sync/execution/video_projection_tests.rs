@@ -32,10 +32,12 @@ async fn assert_video_projection_preserves_upstream_success(
     } else {
         provider_body.clone()
     };
-    let data = crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
-        Arc::clone(&candidates),
-        usages,
-    );
+    let data =
+        crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+            Arc::clone(&candidates),
+            usages,
+        )
+        .attach_provider_catalog_repository_for_tests(test_send_admission_catalog());
     let data = match projection {
         VideoProjectionFixture::Conflict => {
             data.attach_video_task_repository_for_tests(Arc::clone(&tasks))

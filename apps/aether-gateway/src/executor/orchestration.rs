@@ -1832,7 +1832,8 @@ mod tests {
         state.with_data_state_for_tests(
             crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
                 heartbeat_send_admission_catalog(attempts),
-            ),
+            )
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY),
         )
     }
 
@@ -2073,7 +2074,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openai_image_sync_heartbeat_attempts_retry_first_candidate_then_return_second() {
+    async fn openai_image_sync_heartbeat_does_not_replay_a_sent_first_candidate() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_override = Arc::clone(&call_count);
         let state = AppState::new()
@@ -2111,18 +2112,12 @@ mod tests {
         )
         .await
         .expect("heartbeat attempts should execute");
-        let LocalExecutionRequestOutcome::Responded(response) = outcome else {
-            panic!("second candidate should return a response");
-        };
-        let bytes = openai_image_sync_heartbeat_response_body_bytes(response).await;
-        let body: Value = serde_json::from_slice(&bytes).expect("body should decode");
-
-        assert_eq!(call_count.load(Ordering::SeqCst), 2);
-        assert_eq!(body, json!({"data": [{"b64_json": "second-candidate"}]}));
+        assert!(matches!(outcome, LocalExecutionRequestOutcome::NoPath));
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn openai_image_sync_heartbeat_retries_sticky_key_lazily_before_failover() {
+    async fn openai_image_sync_heartbeat_does_not_retry_a_sent_sticky_key() {
         let seen_plans = Arc::new(std::sync::Mutex::new(Vec::<(String, Option<String>)>::new()));
         let seen_plans_for_override = Arc::clone(&seen_plans);
         let state = AppState::new()
@@ -2146,8 +2141,8 @@ mod tests {
                     ))
                 }
             });
-        // Three total attempts on the sticky key; only one attempt is
-        // materialized up front, the other two are derived after each failure.
+        // A retryable read operation would derive two more sticky-key attempts.
+        // Image generation must stop after the initial upstream send instead.
         let attempts = vec![
             test_openai_image_heartbeat_attempt_with_sticky_key_attempts(
                 0,
@@ -2175,45 +2170,36 @@ mod tests {
         )
         .await
         .expect("heartbeat attempts should execute");
-        let LocalExecutionRequestOutcome::Responded(response) = outcome else {
-            panic!("second candidate should return a response");
-        };
-        let bytes = openai_image_sync_heartbeat_response_body_bytes(response).await;
-        let body: Value = serde_json::from_slice(&bytes).expect("body should decode");
-
         let seen_plans = seen_plans.lock().expect("mutex should lock").clone();
         assert_eq!(
             seen_plans
                 .iter()
                 .map(|(endpoint_id, _)| endpoint_id.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "endpoint-retry",
-                "endpoint-retry",
-                "endpoint-retry",
-                "endpoint-success"
-            ]
+            ["endpoint-retry"]
         );
-        let sticky_candidate_ids = seen_plans[..3]
+        let sticky_candidate_ids = seen_plans
             .iter()
             .map(|(_, candidate_id)| candidate_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            sticky_candidate_ids.len(),
-            3,
-            "each derived same-key retry must carry a fresh candidate id"
-        );
-        assert_eq!(body, json!({"data": [{"b64_json": "second-candidate"}]}));
+        assert_eq!(sticky_candidate_ids.len(), 1);
+        assert!(matches!(outcome, LocalExecutionRequestOutcome::NoPath));
     }
 
     #[tokio::test]
-    async fn openai_image_sync_heartbeat_honors_provider_transfer_limit() {
+    async fn openai_image_sync_heartbeat_does_not_transfer_a_sent_effectful_operation() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_for_override = Arc::clone(&call_count);
+        let seen_provider_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_provider_ids_for_override = Arc::clone(&seen_provider_ids);
         let state = AppState::new()
             .expect("state should build")
             .with_execution_runtime_sync_override_for_tests(move |plan| {
                 call_count_for_override.fetch_add(1, Ordering::SeqCst);
+                seen_provider_ids_for_override
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.provider_id.clone());
                 if plan.provider_id == "provider-fallback" {
                     Ok(test_openai_image_execution_result(
                         plan,
@@ -2262,14 +2248,15 @@ mod tests {
         )
         .await
         .expect("heartbeat attempts should execute");
-        let LocalExecutionRequestOutcome::Responded(response) = outcome else {
-            panic!("fallback provider should return a response");
-        };
-        let bytes = openai_image_sync_heartbeat_response_body_bytes(response).await;
-        let body: Value = serde_json::from_slice(&bytes).expect("body should decode");
-
-        assert_eq!(call_count.load(Ordering::SeqCst), 3);
-        assert_eq!(body, json!({"data": [{"b64_json": "fallback-provider"}]}));
+        assert!(matches!(outcome, LocalExecutionRequestOutcome::NoPath));
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            seen_provider_ids
+                .lock()
+                .expect("mutex should lock")
+                .as_slice(),
+            ["provider-openai"]
+        );
     }
 
     #[tokio::test]

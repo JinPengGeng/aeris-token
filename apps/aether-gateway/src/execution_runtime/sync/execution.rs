@@ -3772,9 +3772,15 @@ async fn execute_sync_via_remote_execution_runtime(
 mod tests {
     use super::*;
     include!("execution/video_projection_tests.rs");
-    use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
     use aether_data::repository::usage::InMemoryUsageReadRepository;
+    use aether_data::repository::{
+        candidates::InMemoryRequestCandidateRepository,
+        provider_catalog::InMemoryProviderCatalogReadRepository,
+    };
     use aether_data_contracts::repository::candidates::RequestCandidateReadRepository;
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    };
     use aether_data_contracts::repository::usage::UsageReadRepository;
     use aether_usage_runtime::UsageRuntimeConfig;
     use futures_util::{pin_mut, StreamExt as _};
@@ -3824,6 +3830,39 @@ mod tests {
             Some("openai:chat".to_string()),
         )
         .with_execution_runtime_candidate(true)
+    }
+
+    fn test_send_admission_catalog() -> Arc<InMemoryProviderCatalogReadRepository> {
+        let provider = StoredProviderCatalogProvider::new(
+            "provider-1".to_string(),
+            "test-provider".to_string(),
+            None,
+            "openai".to_string(),
+        )
+        .expect("provider should build");
+        let endpoint = StoredProviderCatalogEndpoint::new(
+            "endpoint-1".to_string(),
+            "provider-1".to_string(),
+            "openai:chat".to_string(),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            true,
+        )
+        .expect("endpoint should build");
+        let key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "test-key".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![endpoint],
+            vec![key],
+        ))
     }
 
     #[tokio::test]
@@ -4521,7 +4560,8 @@ mod tests {
                 crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
                     Arc::clone(&request_candidate_repository),
                     Arc::clone(&usage_repository),
-                ),
+                )
+                .attach_provider_catalog_repository_for_tests(test_send_admission_catalog()),
             )
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
                 enabled: true,
@@ -4596,8 +4636,9 @@ mod tests {
             .await
         });
 
-        request_seen_rx
+        tokio::time::timeout(Duration::from_secs(2), request_seen_rx)
             .await
+            .expect("upstream request should arrive before the test continues")
             .expect("upstream request should be observed");
         let mut active_usage = None;
         for _ in 0..50 {

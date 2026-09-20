@@ -1031,7 +1031,7 @@ async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversi
     assert_eq!(response_json["error"]["type"], "overloaded_error");
     assert_eq!(
         response_json["error"]["message"],
-        "没有可用提供商支持模型 gpt-5.4 的同步请求"
+        "No available provider supports model gpt-5.4 for this synchronous request"
     );
 
     let stored_candidates = request_candidate_repository
