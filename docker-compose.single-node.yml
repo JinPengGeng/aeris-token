@@ -7,6 +7,9 @@ services:
     image: postgres:15.19@sha256:5f72c7b5bd616308ccfd2e74d6be16fb06364e5eecbb815fe9dc6ab9761d2111
     container_name: aether-postgres
     shm_size: ${POSTGRES_SHM_SIZE:-512mb}
+    cpus: ${POSTGRES_CPU_LIMIT:-2.0}
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-3g}
+    pids_limit: ${POSTGRES_PIDS_LIMIT:-512}
     environment:
       POSTGRES_DB: aether
       POSTGRES_USER: postgres
@@ -45,6 +48,9 @@ services:
     # OCI index digest for the official multi-architecture redis:7.4.11-alpine image.
     image: redis:7.4.11-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     container_name: aether-redis
+    cpus: ${REDIS_CPU_LIMIT:-1.0}
+    mem_limit: ${REDIS_MEMORY_LIMIT:-512m}
+    pids_limit: ${REDIS_PIDS_LIMIT:-256}
     command: redis-server --dir /tmp --appendonly no --save "" --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env} --maxclients ${REDIS_MAXCLIENTS:-10000}
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
@@ -58,6 +64,9 @@ services:
   app:
     image: ${APP_IMAGE:-ghcr.io/jinpenggeng/aeris-token:latest}
     container_name: aether-app
+    cpus: ${AETHER_APP_CPU_LIMIT:-2.0}
+    mem_limit: ${AETHER_APP_MEMORY_LIMIT:-2g}
+    pids_limit: ${AETHER_APP_PIDS_LIMIT:-512}
     user: "10001:10001"
     read_only: true
     cap_drop:
