@@ -116,6 +116,48 @@ impl Fixture {
             pricing("a"),
             pricing("b"),
         ]));
+        let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            ["a", "b"]
+                .into_iter()
+                .map(|suffix| {
+                    StoredProviderCatalogProvider::new(
+                        format!("p-{suffix}"),
+                        format!("provider-{suffix}"),
+                        None,
+                        "openai".into(),
+                    )
+                    .expect("provider catalog fixture should build")
+                })
+                .collect(),
+            ["a", "b"]
+                .into_iter()
+                .map(|suffix| {
+                    StoredProviderCatalogEndpoint::new(
+                        format!("e-{suffix}"),
+                        format!("p-{suffix}"),
+                        "openai:image".into(),
+                        Some("openai".into()),
+                        Some("image".into()),
+                        true,
+                    )
+                    .expect("endpoint catalog fixture should build")
+                })
+                .collect(),
+            ["a", "b"]
+                .into_iter()
+                .map(|suffix| {
+                    StoredProviderCatalogKey::new(
+                        format!("pk-{suffix}"),
+                        format!("p-{suffix}"),
+                        format!("image-key-{suffix}"),
+                        "api_key".into(),
+                        None,
+                        true,
+                    )
+                    .expect("key catalog fixture should build")
+                })
+                .collect(),
+        ));
         let usage = Arc::new(SqlxUsageReadRepository::new(self.pool.clone()));
         let wallet = Arc::new(SqlxWalletRepository::new(self.pool.clone()));
         let settlement = Arc::new(SqlxSettlementRepository::new(self.pool.clone()));
@@ -123,6 +165,7 @@ impl Fixture {
             .unwrap()
             .with_data_state_for_tests(
                 GatewayDataState::with_usage_billing_and_wallet_for_tests(usage, billing, wallet)
+                    .attach_provider_catalog_repository_for_tests(provider_catalog)
                     .with_settlement_writer_for_tests(settlement),
             )
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
