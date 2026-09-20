@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
-use std::hash::{Hash, Hasher};
 
 pub const POOL_ACCOUNT_BLOCKED_SKIP_REASON: &str = "pool_account_blocked";
 pub const POOL_ACCOUNT_EXHAUSTED_SKIP_REASON: &str = "pool_account_exhausted";
@@ -597,9 +596,14 @@ fn group_sort_seed(
 }
 
 fn stable_hash_score(seed: &str) -> f64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    seed.hash(&mut hasher);
-    let value = hasher.finish();
+    // `DefaultHasher` is not a cross-process stability contract. Use a small,
+    // explicit hash so the same load-balance seed produces the same ordering
+    // after a restart or on another scheduler instance.
+    let mut value = 0xcbf29ce484222325u64;
+    for byte in seed.as_bytes() {
+        value ^= u64::from(*byte);
+        value = value.wrapping_mul(0x100000001b3);
+    }
     value as f64 / u64::MAX as f64
 }
 
@@ -827,6 +831,13 @@ fn runtime_cost_usage(runtime: &PoolRuntimeState, key_id: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_hash_score_uses_an_explicit_cross_process_algorithm() {
+        assert_eq!(stable_hash_score("aether"), 0.48229283731583694);
+        assert_eq!(stable_hash_score("aether"), stable_hash_score("aether"));
+        assert!(stable_hash_score("aether") < 1.0);
+    }
 
     #[test]
     fn pool_scheduler_groups_interleaved_candidates_and_reorders_internal_keys() {
