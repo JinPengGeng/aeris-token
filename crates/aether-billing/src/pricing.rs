@@ -453,7 +453,10 @@ impl BillingModelPricingSnapshot {
         };
         mapping
             .get(&normalized)
-            .and_then(|value| value.as_f64())
+            .and_then(Value::as_f64)
+            // A malformed multiplier must never turn a billable request into a
+            // free or negative charge. Keep the historical neutral fallback.
+            .filter(|multiplier| multiplier.is_finite() && *multiplier > 0.0)
             .unwrap_or(1.0)
     }
 }
@@ -789,6 +792,30 @@ mod tests {
             model_price_per_request: None,
             model_tiered_pricing,
         }
+    }
+
+    #[test]
+    fn invalid_api_format_multiplier_falls_back_to_neutral_rate() {
+        let mut pricing = snapshot(None, None);
+        pricing.provider_api_key_rate_multipliers = Some(json!({
+            "openai:chat": 0.0,
+            "openai:responses": -2.0,
+            "openai:image": "not-a-number",
+            "openai:audio": {}
+        }));
+
+        for format in [
+            Some("openai:chat"),
+            Some("openai:responses"),
+            Some("openai:image"),
+            Some("openai:audio"),
+        ] {
+            assert_eq!(pricing.rate_multiplier_for_api_format(format), 1.0);
+        }
+        assert_eq!(
+            pricing.rate_multiplier_for_api_format(Some("openai:valid")),
+            1.0
+        );
     }
 
     #[test]
