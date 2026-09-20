@@ -27,11 +27,14 @@ windows, counter reset, recovery, and output routing labels. The billing
 fixture uses actual production recorders and exporter; CI pins the Prometheus
 archive checksum and uploads its output and validation logs.
 
-Keep #307 open until failure injection proves each production producer path
-and the complete deployment scrape/alert acceptance has evidence. This change
-does not prove unique failed-event counts: the counters count entry into a
-failure branch, including retries that fail again. No production environment
-is accessed by these tests.
+Code review on 2026-09-18 confirmed the required production call sites are
+already wired: worker/direct/video enrichment and settlement failures, plus
+actual daily-quota/RPM fail-open branches. Existing focused tests and renderer
+contracts cover this implementation. Under the user's code-delivery priority,
+do not add another fault-injection campaign as a code-completion requirement.
+Track hosted integration and production scrape/receiver acceptance separately.
+Counters count entry into a failure branch, including retries that fail again;
+they do not count unique failed events.
 
 Rollback is a revert of this focused commit. That restores the known duplicate
 metadata parser failure; preserve the last validated exporter if downstream

@@ -398,7 +398,8 @@ where
             .unwrap();
         assert_eq!(
             native_view["status"],
-            if native { "done" } else { "completed" }
+            if native { "done" } else { "completed" },
+            "{path}: {native_view}"
         );
         if native {
             assert_eq!(native_view["video"]["respect_moderation"], true);

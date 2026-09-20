@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INVENTORY="${REPO_ROOT}/docs/issue-triage/issue-255-admin-mutation-inventory.txt"
+EXPECTED_EXPLICIT_EVENTS=142
 SCAN_PATHS=(
   "${REPO_ROOT}/apps/aether-gateway/src/handlers/admin"
   "${REPO_ROOT}/apps/aether-gateway/src/handlers/proxy/local.rs"
@@ -68,5 +69,12 @@ done < "${tmp_dir}/declared"
 grep -Fq -- 'admin_mutation_completed' "${REPO_ROOT}/apps/aether-gateway/src/audit/admin.rs"
 grep -Fq -- 'admin_mutation_failed' "${REPO_ROOT}/apps/aether-gateway/src/audit/admin.rs"
 
+actual_count="$(wc -l < "${tmp_dir}/declared" | tr -d ' ')"
+[[ "${actual_count}" == "${EXPECTED_EXPLICIT_EVENTS}" ]] || {
+  printf 'unexpected explicit audit event count: got %s, expected %s\n' \
+    "${actual_count}" "${EXPECTED_EXPLICIT_EVENTS}" >&2
+  exit 1
+}
+
 printf 'admin audit inventory is current (%s explicit events; generic fallback present)\n' \
-  "$(wc -l < "${tmp_dir}/declared" | tr -d ' ')"
+  "${actual_count}"

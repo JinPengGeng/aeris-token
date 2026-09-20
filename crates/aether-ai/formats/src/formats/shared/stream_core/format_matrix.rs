@@ -863,7 +863,9 @@ fn parse_gemini_error(payload: &Value) -> Option<(String, Option<String>, LocalC
 mod tests {
     use super::{StreamingStandardFormatMatrix, StreamingStandardTerminalObserver};
     use crate::formats::{
-        context::FormatContext, openai::namespace::NamespaceToolAliases, registry::convert_request,
+        context::FormatContext,
+        openai::{namespace::NamespaceToolAliases, responses::history::conversation_history_scope},
+        registry::convert_request,
     };
     use serde_json::{json, Value};
 
@@ -890,6 +892,198 @@ mod tests {
 
     fn event_only_line(event: &str) -> Vec<u8> {
         format!("event: {event}\n").into_bytes()
+    }
+
+    #[test]
+    fn streams_multipart_grounding_against_emitted_text_for_delta_and_cumulative_frames() {
+        for cumulative in [false, true] {
+            for client in ["openai:chat", "openai:responses", "claude:messages"] {
+                let context = report_context("gemini:generate_content", client);
+                let mut matrix = StreamingStandardFormatMatrix::default();
+                let first = json!({"candidates": [{"content": {"parts": [
+                    {"thought": true, "text": "private"}, {"text": "前"}, {"text": "中"}
+                ]}}]});
+                let last = json!({"candidates": [{"finishReason": "STOP", "content": {"parts": [
+                    {"thought": true, "text": "private"}, {"text": "前"},
+                    {"text": if cumulative { "中文" } else { "文" }}
+                ]}, "groundingMetadata": {
+                    "groundingChunks": [{"web": {"uri": "https://example.com/source"}}],
+                    "groundingSupports": [{"segment": {"partIndex": 2,
+                        "endIndex": 6, "text": "中文"}, "groundingChunkIndices": [0]}]
+                }}]});
+                let mut output = matrix
+                    .transform_line(&context, data_line(first))
+                    .expect("first");
+                output.extend(
+                    matrix
+                        .transform_line(&context, data_line(last))
+                        .expect("last"),
+                );
+                output.extend(matrix.finish(&context).expect("finish"));
+                let events = json_data_events(&output);
+                let annotations = if client == "openai:chat" {
+                    events
+                        .iter()
+                        .filter_map(|event| event["choices"][0]["delta"]["annotations"].as_array())
+                        .flatten()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else if client == "openai:responses" {
+                    events
+                        .iter()
+                        .filter(|event| event["type"] == "response.output_text.annotation.added")
+                        .map(|event| event["annotation"].clone())
+                        .collect::<Vec<_>>()
+                } else {
+                    let citations = events
+                        .iter()
+                        .filter(|event| event["delta"]["type"] == "citations_delta")
+                        .map(|event| &event["delta"]["citation"])
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        citations.len(),
+                        1,
+                        "{client} cumulative={cumulative}: {events:?}"
+                    );
+                    assert_eq!(citations[0]["cited_text"], "中文");
+                    continue;
+                };
+                assert_eq!(
+                    annotations.len(),
+                    1,
+                    "{client} cumulative={cumulative}: {events:?}"
+                );
+                assert_eq!(annotations[0]["start_index"], 1);
+                assert_eq!(annotations[0]["end_index"], 3);
+            }
+        }
+    }
+
+    #[test]
+    fn streams_reasoning_fallbacks_and_preserves_space_only_fragments() {
+        let context = report_context("openai:chat", "openai:responses");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = Vec::new();
+        for delta in [
+            json!({"reasoning_content": "", "reasoning": "Let"}),
+            json!({"reasoning_details": [{"text": null, "summary": " ", "index": 0}]}),
+            json!({"reasoning_details": [{"text": "", "summary": "me", "index": 0}]}),
+        ] {
+            output.extend(
+                matrix
+                    .transform_line(
+                        &context,
+                        data_line(json!({"choices": [{
+                            "index": 0, "delta": delta
+                        }]})),
+                    )
+                    .expect("reasoning"),
+            );
+        }
+        output.extend(matrix.finish(&context).expect("finish"));
+        let reasoning = json_data_events(&output)
+            .into_iter()
+            .filter(|event| event["type"] == "response.reasoning_summary_text.delta")
+            .filter_map(|event| event["delta"].as_str().map(str::to_owned))
+            .collect::<String>();
+        assert_eq!(reasoning, "Let me");
+    }
+    /// Gemini runs `googleSearch` inside Google, so a grounded streaming answer
+    /// carries its evidence as `groundingMetadata` on the final chunk and never
+    /// as a tool call. Each client family has to receive it in its own citation
+    /// shape, or the answer streams out unverifiable.
+    #[test]
+    fn streams_gemini_grounding_to_every_client_as_native_citations() {
+        let text = "今天是 2026 年";
+        let first = json!({
+            "responseId": "resp_grounded",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [{
+                "index": 0,
+                "content": {"role": "model", "parts": [{"text": text}]}
+            }]
+        });
+        let last = json!({
+            "responseId": "resp_grounded",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [{
+                "index": 0,
+                "finishReason": "STOP",
+                "content": {"role": "model", "parts": [{"text": text}]},
+                "groundingMetadata": {
+                    "webSearchQueries": ["current UTC date"],
+                    "groundingChunks": [{
+                        "web": {"uri": "https://time.gov/", "title": "time.gov"}
+                    }],
+                    "groundingSupports": [{
+                        "segment": {"startIndex": 0, "endIndex": 15},
+                        "groundingChunkIndices": [0]
+                    }]
+                }
+            }]
+        });
+
+        for (client_api_format, marker) in [
+            ("openai:chat", "\"annotations\":[{\"type\":\"url_citation\""),
+            (
+                "openai:responses",
+                "event: response.output_text.annotation.added\n",
+            ),
+            ("claude:messages", "\"type\":\"citations_delta\""),
+        ] {
+            let context = report_context("gemini:generate_content", client_api_format);
+            let mut matrix = StreamingStandardFormatMatrix::default();
+            let mut output = matrix
+                .transform_line(&context, data_line(first.clone()))
+                .expect("text chunk");
+            output.extend(
+                matrix
+                    .transform_line(&context, data_line(last.clone()))
+                    .expect("grounded chunk"),
+            );
+            output.extend(matrix.finish(&context).expect("finish"));
+            let sse = String::from_utf8(output).expect("valid SSE");
+
+            assert!(
+                sse.contains(marker),
+                "{client_api_format} missing citations: {sse}"
+            );
+            assert!(
+                sse.contains("https://time.gov/"),
+                "{client_api_format} missing source url: {sse}"
+            );
+        }
+    }
+
+    /// The citation frame is emitted once the answer is whole, so a provider
+    /// that closes the stream without a `finishReason` must still deliver it.
+    #[test]
+    fn streams_gemini_grounding_even_when_the_provider_never_sends_a_finish_reason() {
+        let context = report_context("gemini:generate_content", "openai:chat");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = matrix
+            .transform_line(
+                &context,
+                data_line(json!({
+                    "responseId": "resp_grounded",
+                    "modelVersion": "gemini-3.8-flash",
+                    "candidates": [{
+                        "index": 0,
+                        "content": {"role": "model", "parts": [{"text": "grounded"}]},
+                        "groundingMetadata": {
+                            "groundingChunks": [{"web": {"uri": "https://time.gov/"}}]
+                        }
+                    }]
+                })),
+            )
+            .expect("grounded chunk");
+        output.extend(matrix.finish(&context).expect("finish"));
+        let sse = String::from_utf8(output).expect("valid SSE");
+
+        assert!(
+            sse.contains("url_citation") && sse.contains("https://time.gov/"),
+            "{sse}"
+        );
     }
 
     #[test]
@@ -972,7 +1166,7 @@ mod tests {
             "{sse}"
         );
         assert!(
-            sse.contains("event: response.reasoning_summary_text.delta\n"),
+            !sse.contains("event: response.reasoning_summary_text.delta\n"),
             "{sse}"
         );
         assert!(sse.contains("\"delta\":\"checking\""), "{sse}");
@@ -1104,6 +1298,8 @@ mod tests {
             "client_api_format": "openai:responses",
             "mapped_model": "deepseek-v4-flash",
             "needs_conversion": true,
+            "user_id": "history-stream-user",
+            "api_key_id": "history-stream-key",
             "original_request_body": {
                 "model": "deepseek-v4-flash",
                 "input": [{"role": "user", "content": "perform a deep scan"}]
@@ -1185,6 +1381,8 @@ mod tests {
         assert!(persisted.payload.contains("resp_history_stream_test_1"));
         assert!(matrix.take_response_history_record().is_none());
 
+        let history_scope = conversation_history_scope("history-stream-user", "history-stream-key")
+            .expect("test identities should produce a history scope");
         let continuation = convert_request(
             "openai:responses",
             "openai:chat",
@@ -1197,7 +1395,7 @@ mod tests {
                     "output": "manifest-created"
                 }]
             }),
-            &FormatContext::default(),
+            &FormatContext::default().with_history_scope(history_scope),
         )
         .expect("streamed response history should restore the next Chat request");
         assert_eq!(continuation["messages"][1]["role"], "assistant");
@@ -1219,6 +1417,8 @@ mod tests {
             "client_api_format": "openai:responses",
             "mapped_model": "qwen",
             "needs_conversion": true,
+            "user_id": "namespace-history-user",
+            "api_key_id": "namespace-history-key",
             "original_request_body": {
                 "model": "qwen",
                 "input": [{"role": "user", "content": "write the report"}],

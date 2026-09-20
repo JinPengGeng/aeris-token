@@ -3,6 +3,7 @@ use crate::GatewayError;
 use axum::{body::Body, response::Response};
 
 mod activity;
+mod audit_delivery;
 mod cache;
 mod cache_affinity;
 mod cache_affinity_reads;

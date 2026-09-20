@@ -67,3 +67,33 @@ fn classifies_admin_provider_query_test_model_failover_as_admin_proxy_route() {
     );
     assert!(!decision.is_execution_runtime_candidate());
 }
+
+#[test]
+fn classifies_admin_provider_query_emergency_chain_routes() {
+    let headers = headers(&[]);
+    for (path, route_kind) in [
+        (
+            "/api/admin/provider-query/emergency-chain/execute",
+            "emergency_chain_execute",
+        ),
+        (
+            "/api/admin/provider-query/emergency-chain/grant-123/revoke",
+            "emergency_chain_revoke",
+        ),
+    ] {
+        let uri: Uri = path.parse().expect("uri should parse");
+        let decision = classify_control_route(&http::Method::POST, &uri, &headers)
+            .expect("route should classify");
+        assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+        assert_eq!(
+            decision.route_family.as_deref(),
+            Some("provider_query_manage")
+        );
+        assert_eq!(decision.route_kind.as_deref(), Some(route_kind));
+        assert_eq!(
+            decision.auth_endpoint_signature.as_deref(),
+            Some("admin:provider_query")
+        );
+        assert!(!decision.is_execution_runtime_candidate());
+    }
+}

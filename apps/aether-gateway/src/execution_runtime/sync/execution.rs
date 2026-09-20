@@ -65,15 +65,18 @@ use crate::execution_runtime::transport::{
 };
 use crate::execution_runtime::windsurf::maybe_execute_windsurf_sync;
 use crate::execution_runtime::{
-    ai_attempt_retry_scope_from_failure_disposition, analyze_local_candidate_failover_sync,
-    apply_endpoint_response_header_rules, attach_provider_response_headers_to_report_context,
-    local_failover_response_text, resolve_core_sync_error_finalize_report_kind,
-    should_fallback_to_control_sync, should_finalize_sync_response, LocalFailoverDecision,
+    admit_internal_retry_send, ai_attempt_retry_scope_from_failure_disposition,
+    analyze_local_candidate_failover_sync_with_origin, apply_endpoint_response_header_rules,
+    attach_provider_response_headers_to_report_context, local_failover_response_text,
+    resolve_core_sync_error_finalize_report_kind, should_fallback_to_control_sync,
+    should_finalize_sync_response, InternalRetrySendAdmission, LocalFailoverDecision,
 };
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, build_local_error_flow_metadata,
-    spawn_local_oauth_success_effect, trace_upstream_response_body, with_error_flow_report_context,
+    apply_local_execution_effect, apply_local_execution_effect_with_origin,
+    build_local_error_flow_metadata, failure_origin_from_embedded_upstream_error,
+    failure_origin_from_upstream_response, spawn_local_oauth_success_effect,
+    trace_upstream_response_body, with_error_flow_report_context,
     with_upstream_response_report_context, LocalAdaptiveRateLimitEffect,
     LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
     LocalExecutionEffectContext, LocalHealthFailureEffect, LocalHealthSuccessEffect,
@@ -91,6 +94,9 @@ use crate::request_diagnostics::{
     attach_current_request_diagnostics_and_candidate_start_timing_to_report_context,
     attach_request_diagnostics_to_report_context, calibrate_candidate_first_byte_elapsed_ms,
     current_request_diagnostics, RequestDiagnostics,
+};
+use crate::scheduler::send_admission::{
+    request_gateway_send_admission, GatewaySendAdmissionDecision,
 };
 use crate::usage::{spawn_sync_report, submit_sync_report};
 use crate::video_tasks::VideoTaskSyncReportMode;
@@ -145,6 +151,7 @@ struct SyncExecutionFailure {
     status_code: Option<u16>,
     latency_ms: Option<u64>,
     fallback_kind: Option<SyncExecutionFailureFallbackKind>,
+    stop_request: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,14 +431,36 @@ impl SyncExecutionFailure {
             }
             _ => None,
         };
+        let (error_type, status_code, stop_request) = match &err {
+            ExecutionRuntimeTransportError::LocalAdmission(
+                crate::execution_runtime::transport::LocalSendAdmissionError::BudgetExhausted(_),
+            ) => (
+                "request_attempt_budget_exhausted",
+                Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
+                false,
+            ),
+            ExecutionRuntimeTransportError::LocalAdmission(
+                crate::execution_runtime::transport::LocalSendAdmissionError::Skipped,
+            ) => ("send_admission_skipped", None, false),
+            ExecutionRuntimeTransportError::LocalAdmission(
+                crate::execution_runtime::transport::LocalSendAdmissionError::ContextUnavailable
+                | crate::execution_runtime::transport::LocalSendAdmissionError::Stopped,
+            ) => ("send_admission_stopped", None, true),
+            _ => (
+                fallback_kind
+                    .map(SyncExecutionFailureFallbackKind::error_type)
+                    .unwrap_or("execution_runtime_unavailable"),
+                fallback_kind.map(|_| StatusCode::BAD_GATEWAY.as_u16()),
+                false,
+            ),
+        };
         Self {
-            error_type: fallback_kind
-                .map(SyncExecutionFailureFallbackKind::error_type)
-                .unwrap_or("execution_runtime_unavailable"),
+            error_type,
             message: safe_transport_error_message(&err),
-            status_code: fallback_kind.map(|_| StatusCode::BAD_GATEWAY.as_u16()),
+            status_code,
             latency_ms: None,
             fallback_kind,
+            stop_request,
         }
     }
 
@@ -444,6 +473,7 @@ impl SyncExecutionFailure {
             status_code: Some(StatusCode::GATEWAY_TIMEOUT.as_u16()),
             latency_ms: Some(elapsed_ms),
             fallback_kind: None,
+            stop_request: false,
         }
     }
 }
@@ -711,7 +741,9 @@ async fn record_sync_terminal_usage_and_disarm_guard(
     terminal_guard.disarm();
 }
 
+#[allow(clippy::too_many_arguments)] // error trace fields mirror the upstream response context
 fn with_sync_error_trace_context(
+    plan: &ExecutionPlan,
     report_context: Option<&serde_json::Value>,
     status_code: u16,
     headers: &BTreeMap<String, String>,
@@ -719,6 +751,7 @@ fn with_sync_error_trace_context(
     body_bytes: &[u8],
     response_text: Option<&str>,
     local_failover_analysis: crate::orchestration::LocalFailoverAnalysis,
+    failure_origin: crate::orchestration::FailureOrigin,
 ) -> Option<serde_json::Value> {
     let body = trace_upstream_response_body(body_json, body_bytes);
     let upstream_context = with_upstream_response_report_context(
@@ -731,7 +764,13 @@ fn with_sync_error_trace_context(
     );
     with_error_flow_report_context(
         upstream_context.as_ref().or(report_context),
-        build_local_error_flow_metadata(status_code, response_text, local_failover_analysis),
+        build_local_error_flow_metadata(
+            plan.provider_api_format.as_str(),
+            status_code,
+            response_text,
+            local_failover_analysis,
+            failure_origin,
+        ),
     )
 }
 
@@ -1490,10 +1529,12 @@ async fn execute_direct_sync_runtime_candidate(
     model_name: &str,
     candidate_index: &str,
     progress_snapshot: Option<Arc<Mutex<OpenAiImageSyncProgressSnapshot>>>,
+    send_admission_guard: Option<Arc<crate::scheduler::send_admission::GatewaySendAdmissionGuard>>,
 ) -> Result<ExecutionResult, SyncExecutionFailure> {
-    if let Some(result) = maybe_execute_windsurf_sync(state, plan, report_context)
-        .await
-        .map_err(SyncExecutionFailure::from_transport)?
+    if let Some(result) =
+        maybe_execute_windsurf_sync(state, plan, report_context, send_admission_guard)
+            .await
+            .map_err(SyncExecutionFailure::from_transport)?
     {
         return Ok(result);
     }
@@ -2173,6 +2214,38 @@ async fn execute_execution_runtime_sync_impl(
             return Ok(None);
         }
     };
+    let _send_admission_guard = match request_gateway_send_admission(state, &plan).await {
+        GatewaySendAdmissionDecision::Admit(guard) => Arc::new(guard),
+        GatewaySendAdmissionDecision::Skip(skip) => {
+            let reason = skip.reason().as_str();
+            record_local_runtime_candidate_skip_reason(state, trace_id, reason);
+            if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
+                *retry_scope = AiAttemptRetryScope::Candidate;
+            }
+            record_local_request_candidate_status(
+                state,
+                &plan,
+                report_context.as_ref(),
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Skipped,
+                    status_code: None,
+                    error_type: Some(reason.to_string()),
+                    error_message: Some(format!("send admission skipped candidate: {reason}")),
+                    latency_ms: Some(0),
+                    started_at_unix_ms: Some(candidate_started_unix_secs),
+                    finished_at_unix_ms: Some(candidate_started_unix_secs),
+                },
+            )
+            .await;
+            return Ok(None);
+        }
+        GatewaySendAdmissionDecision::Stop(stop) => {
+            return Err(GatewayError::Internal(format!(
+                "send admission stopped before upstream dispatch: {}",
+                stop.reason().as_str()
+            )));
+        }
+    };
     let funded_attempt = crate::execution_runtime::funded_image::FundedImageAttempt::prepare(
         state,
         &plan,
@@ -2212,6 +2285,12 @@ async fn execute_execution_runtime_sync_impl(
     );
     terminal_guard.funded_attempt = funded_attempt.clone();
     let result = crate::execution_runtime::funded_image::attempt_scope(funded_attempt.clone(), async {
+    _send_admission_guard.ensure_alive().map_err(|reason| {
+        GatewayError::Internal(format!(
+            "send admission lease lost before upstream dispatch: {}",
+            reason.as_str()
+        ))
+    })?;
     if let Some(attempt) = funded_attempt.as_ref() {
         attempt.dispatch().await?;
     }
@@ -2245,11 +2324,15 @@ async fn execute_execution_runtime_sync_impl(
                         model_name.as_str(),
                         candidate_index.as_str(),
                         progress_snapshot.clone(),
+                        Some(Arc::clone(&_send_admission_guard)),
                     )
                     .await
                     {
                         Ok(result) => result,
                         Err(err) => {
+                            if err.stop_request {
+                                return Err(GatewayError::Internal(err.message));
+                            }
                             let failure_error_type = err.error_type;
                             let failure_message = err.message.clone();
                             let failure_latency_ms = err
@@ -2498,11 +2581,15 @@ async fn execute_execution_runtime_sync_impl(
                         model_name.as_str(),
                         candidate_index.as_str(),
                         progress_snapshot.clone(),
+                        Some(Arc::clone(&_send_admission_guard)),
                     )
                     .await
                     {
                         Ok(result) => result,
                         Err(err) => {
+                            if err.stop_request {
+                                return Err(GatewayError::Internal(err.message));
+                            }
                             let failure_error_type = err.error_type;
                             let failure_message = err.message.clone();
                             let failure_latency_ms = err
@@ -2711,6 +2798,7 @@ async fn execute_execution_runtime_sync_impl(
         body_base64,
         local_failover_response_text,
         local_failover_analysis,
+        failure_origin,
     ) = loop {
         spawn_local_oauth_success_effect(
             state.clone(),
@@ -2776,6 +2864,7 @@ async fn execute_execution_runtime_sync_impl(
         }
         let (mut result_error_type, mut result_error_message) =
             execution_error_details(result.error.as_ref(), body_json.as_ref());
+        let upstream_status_code = result.status_code;
         if result.status_code < 400 && body_json.is_none() {
             if let Some(error_body_json) =
                 extract_provider_private_stream_error_body(report_context.as_ref(), &body_bytes)
@@ -2794,6 +2883,17 @@ async fn execute_execution_runtime_sync_impl(
             &body_bytes,
             result.error.as_ref().map(|error| error.message.as_str()),
         );
+        let failure_origin = if upstream_status_code != result.status_code {
+            failure_origin_from_embedded_upstream_error(
+                result.status_code,
+                local_failover_response_text.as_deref(),
+            )
+        } else {
+            failure_origin_from_upstream_response(
+                result.status_code,
+                local_failover_response_text.as_deref(),
+            )
+        };
 
         if result.status_code >= 400
             && funded_attempt.is_none()
@@ -2810,61 +2910,67 @@ async fn execute_execution_runtime_sync_impl(
             )
             .await
         {
-            oauth_retry_attempted = true;
-            let retry_started_at_unix_ms = current_request_candidate_unix_ms();
-            let retry_request_order_id = uuid::Uuid::now_v7().to_string();
-            match crate::execution_runtime::execute_execution_runtime_sync_plan(
-                state,
-                Some(trace_id),
-                &plan,
-            )
-            .await
-            {
-                Ok(retry_result) => {
-                    let retry_response_observed_at_unix_ms = current_request_candidate_unix_ms();
-                    provider_response_observation = retry_result
-                        .response_observation
-                        .clone()
-                        .unwrap_or(ExecutionResponseObservation {
-                            request_started_at_unix_ms: retry_started_at_unix_ms,
-                            response_headers_observed_at_unix_ms:
-                                retry_response_observed_at_unix_ms,
-                            request_order_id: retry_request_order_id,
-                        });
-                    candidate_first_byte_elapsed_ms =
-                        calibrated_sync_candidate_first_byte_elapsed_ms(
-                            candidate_started_at,
-                            &retry_result,
+            if matches!(
+                admit_internal_retry_send(state, &plan, &_send_admission_guard, None).await?,
+                InternalRetrySendAdmission::Admit
+            ) {
+                oauth_retry_attempted = true;
+                let retry_started_at_unix_ms = current_request_candidate_unix_ms();
+                let retry_request_order_id = uuid::Uuid::now_v7().to_string();
+                match crate::execution_runtime::execute_execution_runtime_sync_plan(
+                    state,
+                    Some(trace_id),
+                    &plan,
+                )
+                .await
+                {
+                    Ok(retry_result) => {
+                        let retry_response_observed_at_unix_ms = current_request_candidate_unix_ms();
+                        provider_response_observation = retry_result
+                            .response_observation
+                            .clone()
+                            .unwrap_or(ExecutionResponseObservation {
+                                request_started_at_unix_ms: retry_started_at_unix_ms,
+                                response_headers_observed_at_unix_ms:
+                                    retry_response_observed_at_unix_ms,
+                                request_order_id: retry_request_order_id,
+                            });
+                        candidate_first_byte_elapsed_ms =
+                            calibrated_sync_candidate_first_byte_elapsed_ms(
+                                candidate_started_at,
+                                &retry_result,
+                            );
+                        result = retry_result;
+                        continue;
+                    }
+                    Err(err) => {
+                        warn!(
+                            event_name = "local_sync_oauth_retry_execution_failed",
+                            log_type = "ops",
+                            trace_id = %trace_id,
+                            request_id = %plan_request_id_for_log,
+                            candidate_id = ?plan_candidate_id,
+                            provider_name,
+                            endpoint_id,
+                            key_id,
+                            model_name,
+                            candidate_index = candidate_index.as_str(),
+                            error = ?err,
+                            "gateway oauth retry sync execution failed"
                         );
-                    result = retry_result;
-                    continue;
-                }
-                Err(err) => {
-                    warn!(
-                        event_name = "local_sync_oauth_retry_execution_failed",
-                        log_type = "ops",
-                        trace_id = %trace_id,
-                        request_id = %plan_request_id_for_log,
-                        candidate_id = ?plan_candidate_id,
-                        provider_name,
-                        endpoint_id,
-                        key_id,
-                        model_name,
-                        candidate_index = candidate_index.as_str(),
-                        error = ?err,
-                        "gateway oauth retry sync execution failed"
-                    );
+                    }
                 }
             }
         }
 
-        let local_failover_analysis = analyze_local_candidate_failover_sync(
+        let local_failover_analysis = analyze_local_candidate_failover_sync_with_origin(
             state,
             &plan,
             plan_kind,
             report_context.as_ref(),
             &result,
             local_failover_response_text.as_deref(),
+            failure_origin,
         )
         .await;
         break (
@@ -2877,6 +2983,7 @@ async fn execute_execution_runtime_sync_impl(
             body_base64,
             local_failover_response_text,
             local_failover_analysis,
+            failure_origin,
         );
     };
     let mut report_context = attach_provider_response_headers_to_report_context(
@@ -2887,7 +2994,7 @@ async fn execute_execution_runtime_sync_impl(
         &provider_response_observation.request_order_id,
     );
     if result.status_code >= 400 {
-        apply_local_execution_effect(
+        apply_local_execution_effect_with_origin(
             state,
             LocalExecutionEffectContext {
                 plan: &plan,
@@ -2897,9 +3004,10 @@ async fn execute_execution_runtime_sync_impl(
                 status_code: result.status_code,
                 classification: local_failover_analysis.classification,
             }),
+            failure_origin,
         )
         .await;
-        apply_local_execution_effect(
+        apply_local_execution_effect_with_origin(
             state,
             LocalExecutionEffectContext {
                 plan: &plan,
@@ -2910,9 +3018,10 @@ async fn execute_execution_runtime_sync_impl(
                 classification: local_failover_analysis.classification,
                 headers: Some(&headers),
             }),
+            failure_origin,
         )
         .await;
-        apply_local_execution_effect(
+        apply_local_execution_effect_with_origin(
             state,
             LocalExecutionEffectContext {
                 plan: &plan,
@@ -2922,6 +3031,7 @@ async fn execute_execution_runtime_sync_impl(
                 status_code: result.status_code,
                 classification: local_failover_analysis.classification,
             }),
+            failure_origin,
         )
         .await;
         apply_local_execution_effect(
@@ -2936,7 +3046,7 @@ async fn execute_execution_runtime_sync_impl(
             }),
         )
         .await;
-        apply_local_execution_effect(
+        apply_local_execution_effect_with_origin(
             state,
             LocalExecutionEffectContext {
                 plan: &plan,
@@ -2948,6 +3058,7 @@ async fn execute_execution_runtime_sync_impl(
                 headers: &headers,
                 error_body: local_failover_response_text.as_deref(),
             }),
+            failure_origin,
         )
         .await;
     }
@@ -2955,10 +3066,11 @@ async fn execute_execution_runtime_sync_impl(
         local_failover_analysis.decision,
         LocalFailoverDecision::RetryNextCandidate
     ) {
-        let failure_disposition = crate::orchestration::classify_failure_disposition(
+        let failure_disposition = crate::orchestration::classify_failure_disposition_with_origin(
             &plan.provider_api_format,
             local_failover_analysis.classification,
             result.status_code,
+            failure_origin,
         );
         if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
             *retry_scope =
@@ -2989,6 +3101,7 @@ async fn execute_execution_runtime_sync_impl(
         }
         let terminal_unix_secs = current_request_candidate_unix_ms();
         let error_trace_report_context = with_sync_error_trace_context(
+            &plan,
             report_context.as_ref(),
             result.status_code,
             &headers,
@@ -2996,6 +3109,7 @@ async fn execute_execution_runtime_sync_impl(
             &body_bytes,
             local_failover_response_text.as_deref(),
             local_failover_analysis,
+            failure_origin,
         );
         record_local_request_candidate_status(
             state,
@@ -3072,6 +3186,7 @@ async fn execute_execution_runtime_sync_impl(
     ) {
         let terminal_unix_secs = current_request_candidate_unix_ms();
         let error_trace_report_context = with_sync_error_trace_context(
+            &plan,
             report_context.as_ref(),
             result.status_code,
             &headers,
@@ -3079,6 +3194,7 @@ async fn execute_execution_runtime_sync_impl(
             &body_bytes,
             local_failover_response_text.as_deref(),
             local_failover_analysis,
+            failure_origin,
         );
         record_local_request_candidate_status(
             state,
@@ -3104,6 +3220,7 @@ async fn execute_execution_runtime_sync_impl(
     let error_flow_report_context = (result.status_code >= 400)
         .then(|| {
             with_sync_error_trace_context(
+                &plan,
                 report_context.as_ref(),
                 result.status_code,
                 &headers,
@@ -3111,6 +3228,7 @@ async fn execute_execution_runtime_sync_impl(
                 &body_bytes,
                 local_failover_response_text.as_deref(),
                 local_failover_analysis,
+                failure_origin,
             )
         })
         .flatten();
@@ -3260,6 +3378,8 @@ async fn execute_execution_runtime_sync_impl(
                     report_mode,
                     local_task_snapshot,
                 } = outcome;
+                // The upstream operation already succeeded. Persist that fact and disarm
+                // the abort guard before attempting a fallible local task projection.
                 apply_sync_success_effects(
                     state,
                     &plan,
@@ -3277,10 +3397,13 @@ async fn execute_execution_runtime_sync_impl(
                     &mut terminal_guard,
                 )
                 .await;
-                if let Some(snapshot) = local_task_snapshot {
-                    let _ = state.upsert_video_task_snapshot(&snapshot).await?;
-                    state.video_tasks.record_snapshot(snapshot);
-                }
+                let projection_result = match local_task_snapshot {
+                    Some(snapshot) => state
+                        .upsert_video_task_snapshot(&snapshot)
+                        .await
+                        .map(|outcome| outcome.accepted()),
+                    None => Ok(true),
+                };
                 match report_mode {
                     VideoTaskSyncReportMode::InlineSync => {
                         submit_sync_report(state, report_payload).await?;
@@ -3288,6 +3411,12 @@ async fn execute_execution_runtime_sync_impl(
                     VideoTaskSyncReportMode::Background => {
                         spawn_sync_report(state.clone(), report_payload);
                     }
+                }
+                if !projection_result? {
+                    return Err(GatewayError::Client {
+                        status: http::StatusCode::CONFLICT,
+                        message: "Video task changed while the operation was in progress".to_string(),
+                    });
                 }
                 return Ok(Some(attach_control_metadata_headers(
                     response,
@@ -3314,15 +3443,14 @@ async fn execute_execution_runtime_sync_impl(
                 &mut terminal_guard,
             )
             .await;
-            state
-                .video_tasks
-                .apply_finalize_mutation(request_path, payload.report_kind.as_str());
-            if let Some(snapshot) = state
-                .video_tasks
-                .snapshot_for_route(decision.route_family.as_deref(), request_path)
-            {
-                let _ = state.upsert_video_task_snapshot(&snapshot).await?;
-            }
+            let projection_result = state
+                .persist_video_task_finalize(
+                    decision.route_family.as_deref(),
+                    request_path,
+                    payload.report_kind.as_str(),
+                    payload.report_context.as_ref(),
+                )
+                .await;
             if let Some(success_report_kind) = background_success_report_kind {
                 payload.report_kind = success_report_kind.to_string();
             }
@@ -3338,6 +3466,12 @@ async fn execute_execution_runtime_sync_impl(
                     report_kind = %payload.report_kind,
                     "gateway local video finalize produced response without background success report mapping"
                 );
+            }
+            if !projection_result? {
+                return Err(GatewayError::Client {
+                    status: http::StatusCode::CONFLICT,
+                    message: "Video task changed while the operation was in progress".to_string(),
+                });
             }
             return Ok(Some(attach_control_metadata_headers(
                 response,
@@ -3637,6 +3771,7 @@ async fn execute_sync_via_remote_execution_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("execution/video_projection_tests.rs");
     use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
     use aether_data::repository::usage::InMemoryUsageReadRepository;
     use aether_data_contracts::repository::candidates::RequestCandidateReadRepository;
@@ -4329,6 +4464,7 @@ mod tests {
                 "key-1",
                 "gpt-5",
                 "0",
+                None,
                 None,
             )
             .await

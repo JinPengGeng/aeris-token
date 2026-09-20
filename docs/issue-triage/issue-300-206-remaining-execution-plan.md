@@ -1,100 +1,106 @@
 # #300 / #206 remaining execution contract
 
-Status: planning-only checkpoint for the fork. This document does not change
-pricing, wallet policy, database data, or public admission behavior. It records
-what is already evidenced at `main@4620ad4e6` and the evidence that is still
-required before either issue can be closed.
+Status: current local acceptance record and remaining-execution boundary. This
+document describes an **uncommitted** working tree based on
+`26638a4f72295b7f5cf4851a331efce7b2b5314b`. PR #447 still points at that
+base, so its remote/hosted checks do not cover the local changes or the
+2026-09-18 acceptance results recorded here. Do not close #300 or #206 from
+this document.
 
-## Current checkpoint
+The older `main@4620ad4e6` / PR #391 statements below are historical context
+only. They are not the current local acceptance boundary. This document does
+not establish production financial policy, alter wallet data, publish a
+deployment, or claim real supplier invoicing.
 
-The bounded image quote, token-bound attempt funds, hard plan quota, daily cost
-ledger, retention guard, and Gateway admission/dispatch wiring are present in
-the fork history. PR #391 was squash-merged as `acf02288d5c37220313a9aed8ec6c277009252a1`.
-Its hosted Data DB Live job exercised 34 exact targets and its Gateway live job
-exercised 17 PostgreSQL/HTTP targets; the issue record reports every target as
-`1 passed / 0 failed / 0 ignored`, with the required checks green.
+## Current local checkpoint
 
-The current evidence is limited to the fixed synchronous JSON image boundary.
-The Gateway runner is an explicit inventory in
-`tools/ci/run_gateway_attempt_funds_live_tests.sh`; its public fixture includes
-the four account classes, retries, unknown and late charges, quota races,
-wallet revocation, daily limits, and the deliberate stream/unbounded rejection.
-The corresponding implementation refuses paid multi-stage or streamed image
-execution before upstream dispatch when the request context says streaming or
-one of the unsupported provider projections
-(`apps/aether-gateway/src/execution_runtime/funded_image.rs`, lines 119-137).
-That refusal is a security boundary, not evidence that paid streaming is
-implemented.
+`docs/issue-triage/followup-acceptance-20260918.md` records the current local
+working-tree acceptance. The selected live inventories used disposable local
+PostgreSQL and synthetic sources:
 
-The parent issues remain open. GitHub currently labels #300 `status:in-progress`
-and #206 `status:triage`; the repository delivery queue classifies #206 as a
-`P1 | Split` parent (`docs/issue-triage/delivery-todo.md:318`). This is
-consistent with the merged PR's stated boundary:
-paid streaming/multi-stage work, full crash recovery, recharge recovery, and
-real provider billing receipts are outside the merged evidence.
+| Scope | Local result | Primary retained evidence |
+| --- | --- | --- |
+| PostgreSQL live inventory | 63 exact targets passed; zero failed and zero ignored. | `/Users/jinpeng/.agents/tmp/aeris-followup-20260918/live-gates/postgres-live.log` and `summary.json` |
+| Gateway funds, recharge, and refund inventory | 24 exact targets passed; zero failed and zero ignored. | `/Users/jinpeng/.agents/tmp/aeris-followup-20260918/live-gates/gateway-live.log` and `summary.json` |
+| Automatic recharge recovery | A committed local recharge collects eligible historical debt once, exposes wallet history, and survives SMTP retry without repeating money. | Gateway target `maintenance::runtime::recharge_recovery::live_tests::live_gateway_recharge_callback_collects_once_exposes_history_and_acks_smtp_retry` |
+| Synthetic supplier receipts | Normal, partial, over-count/over-price, specification drift, catalog-price drift, malformed/truncated, and late/unknown receipt paths passed locally with frozen quote evidence. | Gateway receipt targets and `AETHER_SYNTHETIC_RECEIPT_EVIDENCE` records in `gateway-live.log` |
+| Post-dispatch process death | The local parent kills the dispatched Gateway with SIGKILL, retains the Unknown hold across a new PID, then settles one late receipt exactly once after cleanup/replay. | `AETHER_IMAGE_CRASH_EVIDENCE` records in `gateway-live.log` |
 
-## Remaining work and acceptance contracts
+`live-gates/summary.json` reports `postgres: 63/0/0` and `gateway: 24/0/0`
+(passed/failed/ignored), with `synthetic_only: true`. This is local acceptance
+evidence, not a remote CI, staging, or production result. The retained logs
+contain the exact target names and state records; no credential, request-body,
+or real supplier receipt is asserted by this plan.
 
-| Track | Current evidence | Required implementation or exercise | External input required |
-| --- | --- | --- | --- |
-| Paid stream / multi-stage / conversion | The funded image gate returns a 422-style unsupported error before upstream dispatch; the live fixture asserts zero reservation and zero upstream calls for stream and unbounded requests. | Choose one contract: (A) retain fail-closed rejection for every paid stream, multi-stage, and unsupported conversion and publish the exact error/status matrix; or (B) implement a new quote/evidence path. If B is chosen, add per-attempt quote capture, partial-output facts, cancellation/timeout semantics, and provider-specific projection tests before enabling any route. | Product/API decision on whether these modes are billable; maximum outputs, dimensions, quality, formats, partial count, provider capabilities, and public error compatibility. |
-| Post-dispatch process crash | Prepared cancellation and in-process drop fallback are tested. A process that dies after `mark dispatched` and before an authoritative result is not represented by a completed staging drill. | Run a disposable staging kill/restart exercise after a real upstream dispatch. Verify the reservation remains `Unknown`/held, no timeout releases it, a later authoritative outcome settles once, replay after outbox cleanup is idempotent, and no parent or provider counter is duplicated. Add a durable recovery lease/worker only if the exercise shows the current operator procedure is insufficient. | Staging Gateway, PostgreSQL and Redis topology; permission to terminate/restart a worker; recovery SLO, lease/attempt limits, alert destination, and an approved unknown-hold escalation policy. |
-| Recharge / insufficient-quota recovery | PostgreSQL exposes idempotent `recover_insufficient_quota`; ordinary settlement still treats `insufficient_quota` as terminal. There is no verified payment-commit callback that schedules recovery. | After a recharge is durably committed, enqueue recovery using the frozen historical cost and receipts. Verify lock order (payment/wallet then usage), idempotent retries, no current-price re-evaluation, no duplicate debit, and a durable failed-recovery alert. Keep unpaid evidence retained. | Finance decision: automatic collection versus manual review, retry schedule/backoff, maximum collection, customer notification, and treatment of expired/partially paid debts. |
-| Enrichment failure | The runtime now has failure metrics and retry/DLQ-oriented paths in the delivery history, but the billing-integrity queue still requires an owner-signoff test at the current merged head. This is a #206 integrity gate, not a reason to alter image pricing here. | Force pricing-context/enrichment failure through direct, worker, queued, and replay paths. Prove no zero-cost terminal settlement, exactly-once failure metric, retained retry/DLQ evidence, and successful later enrichment without duplicate debit. | Failure-injection environment, retry/DLQ retention and alert SLO, owner for financial reconciliation, and approval of the current cancellation/enrichment billing contract. |
-| Signup credit / delivered debt | The delivery queue keeps signup credit and promotion eligibility under #253; #300 must not infer a credit policy from image funding tests. | Audit the account-creation credit decision and its ledger/entitlement effects in a disposable database. Verify default amount, eligibility, replay/idempotency, disabled/referral paths, and that historical debts are not silently forgiven. | Product/finance decision for default credit, eligibility, referrals/promotions, expiry, currency, and remediation of already-created accounts; owner sign-off and a representative fixture set. |
-| Real provider receipt / price drift | Tests use a local upstream fixture and frozen quote. They are not evidence for a real provider's billing receipt or revised price. | In a non-production provider account, capture the authoritative output/usage receipt, map it to the frozen quote, and verify below-ceiling collection, above-ceiling reconciliation, malformed/partial receipt retention, and duplicate receipt replay. Do not enable a route from this plan alone. | Provider sandbox credentials, receipt schema and request correlation contract, sandbox rate/cost limits, approved test budget, and finance treatment for price drift. |
-| Retention and replay after deployment | Retention predicates and attempt/daily-ledger tests are in the merged history; local fixtures use disposable databases. | Exercise cleanup while an attempt is prepared, dispatched-unknown, reconciliation-pending, or an insufficient-quota debt exists. Confirm obligations and frozen facts survive, then resolve and confirm a later cleanup removes only resolved rows. Replay usage/outbox after cleanup and compare balances and daily contributions. | Staging retention schedule, payload/body retention policy, backup/restore window, and approval to run cleanup against a disposable copy of representative data. |
-| Deployment and rollback | The merged PR documents drain-before-migration and forbids mixed old-writer/new-reader operation. This is a procedure, not a deployment record. | In a disposable or staging environment only, produce a runbook rehearsal: stop/drain test Gateway and usage writers, snapshot/backup, apply bootstrap+migrations, run the live runner, start new readers/writers, and verify rollback/forward-fix behavior. Never downgrade a binary that cannot read attempt facts. Any production execution requires separate explicit authorization and a change record. | Staging topology, migration owner, disposable backup/restore evidence, rollback authority, and test traffic-drain/health-check thresholds. Production topology or maintenance-window details are required only for a separately authorized production change. |
-| Database support matrix | Required hosted evidence is PostgreSQL. The contract text mentions multiple adapters, but no current evidence in this checkpoint proves identical Gateway attempt lifecycle semantics on MySQL/SQLite. | Either add adapter-specific lifecycle tests and required CI, or explicitly document PostgreSQL-only support for this feature and keep non-PostgreSQL paths fail-closed. Do not infer parity from compile success. | Supported-driver decision, CI services/versions, migration rollback constraints, and owner for each adapter. |
+## Accepted local implementation boundary
 
-## #206 residuals outside #300
+The automatic recharge collection contract in
+`issue-206-recharge-recovery.md` is implemented and locally verified for the
+selected scope. It is no longer pending implementation or a pending
+finance-choice question. The accepted local behavior is bounded to committed
+recharge principal, eligible legacy `insufficient_quota` debt with frozen
+evidence, durable idempotency, wallet history, retryable notification delivery,
+and preservation of unpaid residual debt. It does not authorize a change to
+signup/referral credit, historical debt remediation, current catalog repricing,
+gift balances, or attempt-funded Unknown/reconciliation obligations.
 
-These items must not be silently folded into the image funding change:
+The synthetic supplier-receipt matrix is also implemented and locally verified.
+It uses synthetic local upstream data and frozen quotes; it must not be
+described as actual supplier billing, a provider sandbox exercise, or proof of
+production cost provenance. Reconciliation-pending outcomes remain pending
+when the synthetic receipt exceeds the frozen quote or has unknown/invalid
+facts; malformed and truncated receipt cases retain the required financial
+state before their authoritative settlement path.
 
-1. `insufficient_quota` recovery policy is the same finance decision described
-   above and overlaps #253. The data API alone is not a user-visible recovery
-   workflow.
-2. Usage stream approximate trimming (`stream_maxlen`, currently configured in
-   `crates/aether-usage/runtime/src/config.rs`) and its loss metric/alert belong
-   to the runtime/operations track (#223/#217). They require a capacity budget,
-   retention policy, and alert threshold; changing the max length as part of
-   #300 would mix unrelated operational behavior.
-3. Cancellation charging outside the explicit image attempt contract remains a
-   product/contract question. Existing client-disconnect policy and the funded
-   image evidence must not be reinterpreted as a token-level billing decision.
-4. Historical rate multipliers and old settlement records need an audit and
-   remediation policy. They must not be rewritten opportunistically while
-   validating new image reservations.
+The local process-death drill now supplies a completed disposable exercise,
+rather than only an implementation description. Its evidence shows one
+upstream call, an 8,000,000-unit Unknown hold after SIGKILL, no debit while
+the result is unknown, one 7,000,000-unit late-receipt settlement, and no extra
+financial or counter effects after outbox cleanup and replay. This validates a
+bounded local manual recovery procedure; it is not an automatic orphan-recovery
+claim.
 
-## Evidence gates
+## Work still required before issue closure
 
-Before updating either issue or its Project card, collect all of the following:
+| Track | Local state | Remaining evidence or decision |
+| --- | --- | --- |
+| Paid stream / multi-stage / conversion | Still fail-closed before upstream dispatch for unsupported paid projections. | Product/API decision and, before enabling a billable route, an explicit quote, partial-output, cancellation/timeout, provider-projection, and public error contract. |
+| Automatic orphan recovery | No demonstrated production durable lease/worker closes abandoned admission, correlates an authoritative external receipt, and applies an approved Unknown-hold escalation SLO. | Define and implement the operational recovery mechanism if required, then verify it in staging/production under separately approved change control. The local manual drill does not satisfy this gate. |
+| Actual supplier billing | Synthetic local receipts passed. | Separately authorized real provider/supplier receipt evidence before claiming actual invoicing, provenance, or external settlement behavior. |
+| Recharge recovery rollout | Local automatic collection passed. | Deployment, migration/restore, operational monitoring, notification-channel, and production data evidence. Do not replay historical credits or change financial policy merely to deploy it. |
+| Retention and replay in an operated environment | Local cleanup/replay coverage exists for the exercised receipt and crash paths. | Staging/disposable rehearsal across prepared, dispatched-unknown, reconciliation-pending, and legacy-debt rows; confirm backup/restore and retention schedules preserve unresolved obligations. |
+| Database support matrix | The completed local live scope is PostgreSQL. | Establish adapter-specific lifecycle support and CI, or document PostgreSQL-only behavior and keep unsupported paths fail-closed. |
+| Enrichment, signup credit, and historical records | These are distinct #206/#253 and financial-governance concerns. | Owner-approved contracts and targeted evidence; do not infer them from the local recharge or synthetic-receipt acceptance. |
 
-1. A current `main` commit and PR status, plus the exact hosted runner logs for
-   every selected ignored target. A green aggregate job without exact target
-   counts is insufficient.
-2. A staging crash/restart artifact containing request ID, attempt IDs, frozen
-   quote hash, reservation states before/after restart, upstream call count,
-   final ledger/hold values, and replay result. Redact credentials and bodies.
-3. A staging recharge-recovery artifact containing payment commit ID, recovery
-   idempotency key, lock/retry timeline, collected amount, remaining debt, and
-   alert/notification result.
-4. A provider sandbox receipt artifact and a reconciliation report for normal,
-   partial, over-ceiling, malformed, and duplicate receipts.
-5. A staging/disposable deployment runbook rehearsal with backup/restore proof
-   and migration/rollback outcome. Production data must not be used for fixture
-   creation or exploratory repair; any production run requires separate
-   authorization and a change record.
+## Evidence required for an issue or deployment update
 
-Until these gates exist, keep #300 and #206 open and keep paid unsupported
-stream/multi-stage requests fail-closed. No code or configuration change should
-claim to implement the missing external evidence.
+Before updating #300, #206, a Project card, or a deployment record, retain the
+current commit/PR status and exact runner counts, then add only the evidence
+relevant to the claim being made:
 
-## Safe local verification (no policy change)
+1. For a production or staging recovery claim: an authorized crash/restart or
+   orphan-recovery artifact with request/attempt IDs, quote hash, hold and
+   ledger states, external-receipt correlation, replay result, and redaction of
+   credentials and bodies.
+2. For a recharge rollout claim: migration/activation proof, payment and job
+   identities, idempotency/retry history, collected and residual amounts,
+   notification outcome, and evidence that historical already-credited
+   payments were not newly authorized.
+3. For an actual supplier-billing claim: authentic provider receipt and
+   reconciliation evidence under separately authorized credentials and spend.
+4. For a deployment claim: backup/restore and drain/migration rehearsal,
+   health checks, rollback/forward-fix outcome, and the required change record.
 
-The existing no-upstream security boundary is already covered by the exact live
-fixture `public_tests::live_public_images_reject_unbounded_and_stream_before_every_account_shortcut`.
-The remaining work is environment- and policy-dependent, so this checkpoint
-does not add a second test that merely mirrors that implementation. A future
-change should first add the external decision and then add the smallest
-behavioral test for that decision before touching production code.
+Keep #300 and #206 open until their remaining product, production, and
+operational boundaries have evidence. Local acceptance does not authorize
+production financial changes or silently close a parent issue.
+
+## Historical context: main / PR #391
+
+PR #391 was squash-merged as `acf02288d5c37220313a9aed8ec6c277009252a1`.
+At the older `main@4620ad4e6` checkpoint, its hosted Data DB Live job exercised
+34 exact targets and its Gateway live job exercised 17 PostgreSQL/HTTP targets,
+reported as `1 passed / 0 failed / 0 ignored` per selected target. That record
+predates the uncommitted `26638a4f`-based work and is retained solely as
+historical provenance; it must not be used to omit the newer local recharge,
+receipt, or process-death acceptance results.

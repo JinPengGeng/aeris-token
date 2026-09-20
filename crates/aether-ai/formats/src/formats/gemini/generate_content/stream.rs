@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
+use crate::formats::gemini::generate_content::response::{
+    gemini_candidate_grounding, gemini_grounding_citations, GeminiCitationText,
+};
 use crate::formats::shared::response::{build_generated_tool_call_id, canonicalize_tool_arguments};
 use crate::formats::shared::sse::encode_json_sse;
 use crate::formats::shared::stream_core::common::*;
@@ -31,11 +34,17 @@ pub struct GeminiProviderState {
     started: bool,
     finished: bool,
     text_parts: BTreeMap<usize, String>,
+    citation_text_parts: BTreeMap<usize, GeminiCitationText>,
+    emitted_text_characters: usize,
     reasoning_parts: BTreeMap<usize, String>,
     reasoning_signatures: BTreeMap<usize, String>,
     content_parts: BTreeMap<usize, CanonicalContentPart>,
     tool_calls: BTreeMap<usize, GeminiProviderToolState>,
     tool_results: BTreeMap<usize, GeminiProviderToolResultState>,
+    /// Last `groundingMetadata` seen. Gemini resends it cumulatively, so the
+    /// newest copy is the complete one; citations are emitted once at finish,
+    /// when the answer text they index into is whole.
+    grounding: Option<Value>,
 }
 
 impl GeminiProviderState {
@@ -66,6 +75,29 @@ impl GeminiProviderState {
             event: CanonicalStreamEvent::Start,
         });
         self.started = true;
+    }
+
+    /// Turn the grounding metadata collected over the stream into citations.
+    ///
+    /// The offsets Gemini reports index into the finished answer, so this can
+    /// only run once the text is complete — hence a single frame just ahead of
+    /// `Finish` rather than a delta per chunk.
+    fn push_citations_frame(&mut self, id: &str, model: &str, out: &mut Vec<CanonicalStreamFrame>) {
+        let Some(grounding) = self.grounding.take() else {
+            return;
+        };
+        let citations = gemini_grounding_citations(&grounding, &self.citation_text_parts)
+            .into_iter()
+            .map(|(_, citation)| citation)
+            .collect::<Vec<_>>();
+        if citations.is_empty() {
+            return;
+        }
+        out.push(CanonicalStreamFrame {
+            id: id.to_string(),
+            model: model.to_string(),
+            event: CanonicalStreamEvent::Citations(citations),
+        });
     }
 
     fn unknown_frame(&self, report_context: &Value, payload: Value) -> CanonicalStreamFrame {
@@ -120,6 +152,11 @@ impl GeminiProviderState {
                 response_model.as_str(),
                 event_object.get("usageMetadata"),
             );
+            if !self.terminal_observation_only {
+                if let Some(grounding) = gemini_candidate_grounding(candidate_object) {
+                    self.grounding = Some(grounding.clone());
+                }
+            }
             let Some(content) = candidate_object.get("content").and_then(Value::as_object) else {
                 if let Some(payload) = terminal_error {
                     out.push(self.unknown_frame(report_context, payload));
@@ -175,7 +212,24 @@ impl GeminiProviderState {
                         text.to_string()
                     };
                     *previous = text;
+                    // Signature-only parts amend provider state; they do not
+                    // replace previously emitted source text at this index.
+                    let source_text = part_object.get("text").and_then(Value::as_str);
+                    if source_text.is_none()
+                        || (is_reasoning && source_text.is_some_and(|text| !text.is_empty()))
+                    {
+                        self.citation_text_parts.remove(&index);
+                    }
                     if !delta.is_empty() {
+                        if !is_reasoning {
+                            if part_object.get("text").and_then(Value::as_str).is_some() {
+                                self.citation_text_parts
+                                    .entry(index)
+                                    .or_default()
+                                    .append(&delta, self.emitted_text_characters);
+                            }
+                            self.emitted_text_characters += delta.chars().count();
+                        }
                         out.push(CanonicalStreamFrame {
                             id: id.clone(),
                             model: model.clone(),
@@ -203,6 +257,24 @@ impl GeminiProviderState {
                         }
                     }
                     continue;
+                }
+                // Only an explicit content-kind change invalidates the text
+                // source. Unknown/signature-only metadata does not erase it.
+                if !self.terminal_observation_only
+                    && [
+                        "functionResponse",
+                        "function_response",
+                        "functionCall",
+                        "function_call",
+                        "inlineData",
+                        "inline_data",
+                        "fileData",
+                        "file_data",
+                    ]
+                    .iter()
+                    .any(|key| part_object.contains_key(*key))
+                {
+                    self.citation_text_parts.remove(&index);
                 }
                 if let Some(function_response) = part_object
                     .get("functionResponse")
@@ -361,6 +433,7 @@ impl GeminiProviderState {
                 if has_tool_calls && finish_reason.as_deref().is_none_or(|value| value == "stop") {
                     finish_reason = Some("tool_calls".to_string());
                 }
+                self.push_citations_frame(&id, &model, &mut out);
                 out.push(CanonicalStreamFrame {
                     id,
                     model,
@@ -385,14 +458,17 @@ impl GeminiProviderState {
         }
         self.finished = true;
         let (id, model) = self.identity(report_context);
-        Ok(vec![CanonicalStreamFrame {
+        let mut out = Vec::new();
+        self.push_citations_frame(&id, &model, &mut out);
+        out.push(CanonicalStreamFrame {
             id,
             model,
             event: CanonicalStreamEvent::Finish {
                 finish_reason: None,
                 usage: None,
             },
-        }])
+        });
+        Ok(out)
     }
 }
 
@@ -674,6 +750,9 @@ impl GeminiClientEmitter {
                 None,
                 None,
             ),
+            // Only Gemini produces citations today, and a Gemini-to-Gemini
+            // stream keeps its own `groundingMetadata` on the passthrough path.
+            CanonicalStreamEvent::Citations(_) => Ok(Vec::new()),
             CanonicalStreamEvent::UnknownEvent(_) => Ok(Vec::new()),
             CanonicalStreamEvent::Finish {
                 finish_reason,
@@ -976,6 +1055,104 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn grounding_retains_answer_across_signature_only_metadata_parts() {
+        for metadata in [
+            json!({"thoughtSignature": "signature"}),
+            json!({"text": "", "thoughtSignature": "signature"}),
+        ] {
+            let context = json!({});
+            let mut state = GeminiProviderState::default();
+            state
+                .push_line(
+                    &context,
+                    data_line(json!({"candidates": [{
+                        "content": {"parts": [{"text": "中"}]}
+                    }]})),
+                )
+                .expect("answer");
+            let frames = state
+                .push_line(
+                    &context,
+                    data_line(json!({"candidates": [{
+                        "content": {"parts": [metadata]}, "finishReason": "STOP",
+                        "groundingMetadata": {
+                            "groundingChunks": [{"web": {"uri": "https://example.com/source"}}],
+                            "groundingSupports": [{"segment": {"endIndex": 3, "text": "中"},
+                                "groundingChunkIndices": [0]}]
+                        }
+                    }]})),
+                )
+                .expect("metadata");
+            let citations = frames
+                .iter()
+                .filter_map(|frame| match &frame.event {
+                    CanonicalStreamEvent::Citations(citations) => Some(citations),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            assert_eq!(citations.len(), 1);
+            assert_eq!(citations[0]["cited_text"], "中");
+            assert_eq!(citations[0]["start_index"], 0);
+            assert_eq!(citations[0]["end_index"], 1);
+        }
+    }
+
+    #[test]
+    fn grounding_uses_emission_order_and_rejects_noncontiguous_source_spans() {
+        let context = json!({});
+        let mut state = GeminiProviderState::default();
+        let mut frames = state
+            .push_line(
+                &context,
+                data_line(json!({"candidates": [{
+                    "content": {"parts": [{"text": "A"}, {"text": "B"}]}
+                }]})),
+            )
+            .expect("first frame");
+        frames.extend(state.push_line(&context, data_line(json!({"candidates": [{
+            "content": {"parts": [{"text": "AC"}, {"text": "BD"}]},
+            "finishReason": "STOP", "groundingMetadata": {
+                "groundingChunks": [{"web": {"uri": "https://example.com/source"}}],
+                "groundingSupports": [
+                    {"segment": {"partIndex": 0, "endIndex": 2, "text": "AC"}, "groundingChunkIndices": [0]},
+                    {"segment": {"partIndex": 1, "startIndex": 1, "endIndex": 2, "text": "D"}, "groundingChunkIndices": [0]},
+                    {"segment": {"partIndex": 1, "endIndex": 2, "text": "stale"}, "groundingChunkIndices": [0]}
+                ]
+            }
+        }]}))).expect("last frame"));
+        let text = frames
+            .iter()
+            .filter_map(|frame| match &frame.event {
+                CanonicalStreamEvent::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, "ABCD");
+        let citation_frames = frames
+            .iter()
+            .enumerate()
+            .filter_map(|(index, frame)| match &frame.event {
+                CanonicalStreamEvent::Citations(citations) => Some((index, citations)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(citation_frames.len(), 1);
+        assert_eq!(citation_frames[0].1.len(), 1);
+        assert_eq!(citation_frames[0].1[0]["cited_text"], "D");
+        assert_eq!(citation_frames[0].1[0]["start_index"], 3);
+        assert_eq!(citation_frames[0].1[0]["end_index"], 4);
+        assert!(matches!(
+            frames[citation_frames[0].0 + 1].event,
+            CanonicalStreamEvent::Finish { .. }
+        ));
+        assert!(state
+            .finish(&context)
+            .expect("finish is idempotent")
+            .is_empty());
+    }
+
     fn observation_record(parts: Vec<Value>, finish_reason: Option<&str>) -> Value {
         let mut record = json!({
             "responseId": "resp_observation",
@@ -1018,6 +1195,8 @@ mod tests {
 
     fn assert_observer_has_no_content_buffers(observer: &GeminiProviderState) {
         assert!(observer.text_parts.is_empty());
+        assert!(observer.citation_text_parts.is_empty());
+        assert_eq!(observer.emitted_text_characters, 0);
         assert!(observer.reasoning_parts.is_empty());
         assert!(observer.reasoning_signatures.is_empty());
         assert!(observer.content_parts.is_empty());

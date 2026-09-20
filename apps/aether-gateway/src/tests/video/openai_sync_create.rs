@@ -687,6 +687,7 @@ async fn gateway_executes_openai_video_remix_via_data_backed_local_follow_up_wit
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: "task-local-123".to_string(),
             short_id: Some("task-local-123".to_string()),
             request_id: "request-openai-video-remix-local-123".to_string(),

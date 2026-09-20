@@ -16,6 +16,12 @@ export CARGO_TERM_COLOR=never
 export AETHER_REQUIRE_LOCAL_REDIS_TESTS=1
 redis_binary="${AETHER_REDIS_SERVER_BIN:-redis-server}"
 probe_test=tests::redis_runtime_reuses_fixed_connections_for_repeated_operations
+half_open_probe_test=orchestration::half_open_probe::tests::redis_two_gateway_probe_claim_allows_one_owner_and_rejects_stale_operations
+send_admission_test=scheduler::send_admission::tests::redis_two_gateways_admit_one_due_half_open_probe_and_recheck_authority
+key_concurrency_test=scheduler::send_admission::tests::redis_two_gateways_key_concurrent_limit_admits_one_then_recovers_after_release
+scheduler_affinity_test=ai_serving::planner::candidate_source::tests::redis_affinity::redis_two_gateways_share_affinity_across_selector_pages_without_duplicates_or_omissions
+stream_client_commit_test=tests::ai_execute::lifecycle::redis_two_gateways_do_not_replay_a_stream_after_client_commit
+attempt_budget_locality_test=tests::ai_execute::lifecycle::redis_two_gateways_keep_attempt_budget_request_local_and_bounded
 
 {
   printf 'Revision: '
@@ -29,7 +35,7 @@ probe_test=tests::redis_runtime_reuses_fixed_connections_for_repeated_operations
 } 2>&1 | tee "$evidence_dir/environment.log"
 
 run_probe() {
-  cargo test -p aether-runtime-state --lib "$probe_test" -- --exact --nocapture --test-threads=1
+  cargo test --locked -p aether-runtime-state --lib "$probe_test" -- --exact --nocapture --test-threads=1
 }
 
 expect_strict_failure() {
@@ -63,9 +69,9 @@ grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$evidence_dir/optional-skip.lo
 
 # Run the full crate, including shared memory/Redis contracts whose names do
 # not contain "redis". Serial execution avoids contention in timing assertions.
-printf '>>> cargo test -p aether-runtime-state --lib -- --nocapture --test-threads=1\n' \
+printf '>>> cargo test --locked -p aether-runtime-state --lib -- --nocapture --test-threads=1\n' \
   | tee "$evidence_dir/runtime-tests.log"
-cargo test -p aether-runtime-state --lib -- --nocapture --test-threads=1 \
+cargo test --locked -p aether-runtime-state --lib -- --nocapture --test-threads=1 \
   2>&1 | tee -a "$evidence_dir/runtime-tests.log"
 grep -Fq 'Redis test fixture ready: isolated server' "$evidence_dir/runtime-tests.log"
 # Preserve the one deliberately ignored performance benchmark; no additional
@@ -77,5 +83,42 @@ if grep -Fq 'SKIP: optional Redis test' "$evidence_dir/runtime-tests.log"; then
   printf 'FAIL: strict Redis run contained an optional skip\n' >&2
   exit 1
 fi
+
+printf '>>> cargo test --locked -p aether-gateway --lib %s -- --ignored --exact --nocapture --test-threads=1\n' \
+  "$half_open_probe_test" | tee "$evidence_dir/half-open-probe.log"
+cargo test --locked -p aether-gateway --lib "$half_open_probe_test" -- --ignored --exact --nocapture --test-threads=1 \
+  2>&1 | tee -a "$evidence_dir/half-open-probe.log"
+grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$evidence_dir/half-open-probe.log"
+
+printf '>>> cargo test --locked -p aether-gateway --lib %s -- --ignored --exact --nocapture --test-threads=1\n' \
+  "$send_admission_test" | tee "$evidence_dir/send-admission.log"
+cargo test --locked -p aether-gateway --lib "$send_admission_test" -- --ignored --exact --nocapture --test-threads=1 \
+  2>&1 | tee -a "$evidence_dir/send-admission.log"
+grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$evidence_dir/send-admission.log"
+
+printf '>>> cargo test --locked -p aether-gateway --lib %s -- --ignored --exact --nocapture --test-threads=1\n' \
+  "$key_concurrency_test" | tee "$evidence_dir/key-concurrency.log"
+cargo test --locked -p aether-gateway --lib "$key_concurrency_test" -- --ignored --exact --nocapture --test-threads=1 \
+  2>&1 | tee -a "$evidence_dir/key-concurrency.log"
+grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$evidence_dir/key-concurrency.log"
+
+printf '>>> cargo test --locked -p aether-gateway --lib %s -- --ignored --exact --nocapture --test-threads=1\n' \
+  "$scheduler_affinity_test" | tee "$evidence_dir/scheduler-affinity.log"
+cargo test --locked -p aether-gateway --lib "$scheduler_affinity_test" -- --ignored --exact --nocapture --test-threads=1 \
+  2>&1 | tee -a "$evidence_dir/scheduler-affinity.log"
+grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$evidence_dir/scheduler-affinity.log"
+
+printf '>>> cargo test --locked -p aether-gateway --lib %s -- --ignored --exact --nocapture --test-threads=1\n' \
+  "$stream_client_commit_test" | tee "$evidence_dir/stream-client-commit.log"
+cargo test --locked -p aether-gateway --lib "$stream_client_commit_test" -- --ignored --exact --nocapture --test-threads=1 \
+  2>&1 | tee -a "$evidence_dir/stream-client-commit.log"
+grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$evidence_dir/stream-client-commit.log"
+
+printf '>>> cargo test --locked -p aether-gateway --lib %s -- --ignored --exact --nocapture --test-threads=1\n' \
+  "$attempt_budget_locality_test" | tee "$evidence_dir/attempt-budget-locality.log"
+cargo test --locked -p aether-gateway --lib "$attempt_budget_locality_test" -- --ignored --exact --nocapture --test-threads=1 \
+  2>&1 | tee -a "$evidence_dir/attempt-budget-locality.log"
+grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$evidence_dir/attempt-budget-locality.log"
+
 printf 'PASS: isolated strict Redis runtime tests, missing/startup failures, and optional local skip\n' \
   | tee "$evidence_dir/result.log"

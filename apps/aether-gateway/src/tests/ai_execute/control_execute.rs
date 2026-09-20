@@ -132,7 +132,7 @@ async fn gateway_locally_denies_sync_ai_control_execute_when_opted_in_and_execut
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .header(TRACE_ID_HEADER, "trace-sync-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -271,7 +271,7 @@ async fn gateway_locally_denies_stream_ai_control_execute_when_opted_in_and_exec
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
         .header(TRACE_ID_HEADER, "trace-stream-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");
@@ -422,7 +422,7 @@ async fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_exec
         )
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -567,7 +567,7 @@ async fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_exec
         )
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(CONTROL_EXECUTE_FALLBACK_HEADER, "true")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");

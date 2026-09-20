@@ -110,25 +110,29 @@ use crate::execution_runtime::transport::{
     format_wreq_upstream_request_error, record_manual_proxy_request_failure,
     record_manual_proxy_request_success, record_manual_proxy_stream_error,
     stream_first_byte_timeout_message, DirectSyncExecutionRuntime, DirectUpstreamResponse,
-    DirectUpstreamStreamExecution, ExecutionRuntimeTransportError,
+    DirectUpstreamStreamExecution, ExecutionRuntimeTransportError, LocalSendAdmissionError,
 };
 use crate::execution_runtime::windsurf::maybe_execute_windsurf_stream;
 use crate::execution_runtime::{
-    ai_attempt_retry_scope_from_failure_disposition, apply_endpoint_response_header_rules,
-    attach_provider_response_headers_to_report_context, local_failover_response_text,
-    resolve_core_stream_direct_finalize_report_kind,
+    admit_internal_retry_send, ai_attempt_retry_scope_from_failure_disposition,
+    apply_endpoint_response_header_rules, attach_provider_response_headers_to_report_context,
+    local_failover_response_text, resolve_core_stream_direct_finalize_report_kind,
     resolve_core_stream_error_finalize_report_kind,
-    resolve_local_candidate_failover_analysis_stream, should_fallback_to_control_stream,
-    should_retry_next_local_candidate_stream, LocalFailoverDecision,
+    resolve_local_candidate_failover_analysis_stream,
+    resolve_local_candidate_failover_analysis_stream_with_origin,
+    should_fallback_to_control_stream, should_retry_next_local_candidate_stream,
+    InternalRetrySendAdmission, LocalFailoverDecision,
 };
 use crate::execution_runtime::{
     MAX_ERROR_BODY_BYTES, MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES,
 };
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, build_local_error_flow_metadata, classify_failure_disposition,
+    apply_local_execution_effect, apply_local_execution_effect_with_origin,
+    build_local_error_flow_metadata, classify_failure_disposition_with_origin,
+    failure_origin_from_embedded_upstream_error, failure_origin_from_upstream_response,
     spawn_local_oauth_success_effect, trace_upstream_response_body, with_error_flow_report_context,
-    with_upstream_response_report_context, FailureDisposition, FailureTokenAction,
+    with_upstream_response_report_context, FailureDisposition, FailureOrigin, FailureTokenAction,
     LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
     LocalExecutionEffect, LocalExecutionEffectContext, LocalFailoverAnalysis,
     LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
@@ -147,6 +151,9 @@ use crate::request_diagnostics::{
     attach_current_request_diagnostics_to_report_context,
     attach_request_diagnostics_and_candidate_start_timing_to_report_context,
     current_request_diagnostics, RequestDiagnostics,
+};
+use crate::scheduler::send_admission::{
+    request_gateway_send_admission, GatewaySendAdmissionDecision,
 };
 use crate::stage_metrics::{
     attach_stage_trace_to_report_context, observe_gateway_stage_ms, observe_gateway_stage_trace_ms,
@@ -700,7 +707,9 @@ fn wrap_non_json_binary_stream_error_for_client(
     Ok(Some(body))
 }
 
+#[allow(clippy::too_many_arguments)] // error trace fields mirror the upstream response context
 fn with_stream_error_trace_context(
+    plan: &ExecutionPlan,
     report_context: Option<&Value>,
     status_code: u16,
     headers: &BTreeMap<String, String>,
@@ -708,6 +717,7 @@ fn with_stream_error_trace_context(
     body_bytes: &[u8],
     response_text: Option<&str>,
     local_failover_analysis: crate::orchestration::LocalFailoverAnalysis,
+    failure_origin: FailureOrigin,
 ) -> Option<Value> {
     let body = trace_upstream_response_body(body_json, body_bytes);
     let upstream_context = with_upstream_response_report_context(
@@ -720,7 +730,13 @@ fn with_stream_error_trace_context(
     );
     with_error_flow_report_context(
         upstream_context.as_ref().or(report_context),
-        build_local_error_flow_metadata(status_code, response_text, local_failover_analysis),
+        build_local_error_flow_metadata(
+            plan.provider_api_format.as_str(),
+            status_code,
+            response_text,
+            local_failover_analysis,
+            failure_origin,
+        ),
     )
 }
 
@@ -1348,6 +1364,7 @@ async fn execute_in_process_stream_with_oauth_retry(
     plan: &mut ExecutionPlan,
     trace_id: &str,
     report_context: Option<&Value>,
+    send_admission_guard: Option<&crate::scheduler::send_admission::GatewaySendAdmissionGuard>,
 ) -> Result<DirectUpstreamStreamExecution, InProcessStreamExecutionError> {
     let mut execution = execute_in_process_stream(state, plan, trace_id).await?;
     apply_stream_summary_report_context(&mut execution, report_context);
@@ -1406,9 +1423,20 @@ async fn execute_in_process_stream_with_oauth_retry(
         )
         .await
     {
-        drop(execution);
-        execution = execute_in_process_stream(state, plan, trace_id).await?;
-        apply_stream_summary_report_context(&mut execution, report_context);
+        let retry_admitted = match send_admission_guard {
+            Some(guard) => matches!(
+                admit_internal_retry_send(state, plan, guard, None).await?,
+                InternalRetrySendAdmission::Admit
+            ),
+            None => crate::executor::reserve_internal_request_attempt(plan)
+                .await
+                .is_ok(),
+        };
+        if retry_admitted {
+            drop(execution);
+            execution = execute_in_process_stream(state, plan, trace_id).await?;
+            apply_stream_summary_report_context(&mut execution, report_context);
+        }
     }
     Ok(execution)
 }
@@ -1417,6 +1445,7 @@ async fn execute_in_process_stream_with_oauth_retry(
 struct PrefetchedStreamFailure {
     status_code: u16,
     response_text: String,
+    failure_origin: FailureOrigin,
 }
 
 #[derive(Debug)]
@@ -1434,18 +1463,20 @@ async fn analyze_prefetched_stream_failure(
     report_context: Option<&Value>,
     failure: PrefetchedStreamFailure,
 ) -> AnalyzedPrefetchedStreamFailure {
-    let analysis = resolve_local_candidate_failover_analysis_stream(
+    let analysis = resolve_local_candidate_failover_analysis_stream_with_origin(
         state,
         plan,
         report_context,
         failure.status_code,
         Some(failure.response_text.as_str()),
+        failure.failure_origin,
     )
     .await;
-    let disposition = classify_failure_disposition(
+    let disposition = classify_failure_disposition_with_origin(
         plan.provider_api_format.as_str(),
         analysis.classification,
         failure.status_code,
+        failure.failure_origin,
     );
     AnalyzedPrefetchedStreamFailure {
         status_code: failure.status_code,
@@ -1556,6 +1587,10 @@ async fn prefetch_direct_anthropic_stream_failure(
                 return Some(PrefetchedStreamFailure {
                     status_code,
                     response_text,
+                    failure_origin: failure_origin_from_embedded_upstream_error(
+                        status_code,
+                        serde_json::to_string(&body_json).ok().as_deref(),
+                    ),
                 });
             }
         }
@@ -1901,6 +1936,7 @@ struct DirectPassthroughFinalizerCore {
     terminal_failure: Option<StreamFailureReport>,
     _provider_pool_in_flight_guard: Option<ProviderPoolInFlightGuard>,
     _upstream_target_permit: Option<crate::upstream_admission::UpstreamTargetAdmissionPermit>,
+    _send_admission_guard: Arc<crate::scheduler::send_admission::GatewaySendAdmissionGuard>,
 }
 
 impl DirectPassthroughFinalizer {
@@ -2283,6 +2319,7 @@ impl DirectPassthroughFinalizerCore {
             terminal_failure,
             _provider_pool_in_flight_guard,
             _upstream_target_permit,
+            _send_admission_guard,
         } = self;
 
         // Queue backpressure must not keep scarce upstream/provider permits
@@ -2647,6 +2684,22 @@ impl DirectPassthroughInlineBodyState {
                 finalizer.observe_first_body_poll();
             }
         }
+        if let Some(reason) = self
+            .finalizer
+            .as_ref()
+            .and_then(|finalizer| finalizer.core()._send_admission_guard.ensure_alive().err())
+        {
+            self.upstream_done = true;
+            self.finalized = true;
+            drop(self.finalizer.take());
+            return Some((
+                Err(IoError::other(format!(
+                    "send admission lease lost during upstream stream: {}",
+                    reason.as_str()
+                ))),
+                self,
+            ));
+        }
         loop {
             if self.upstream_done
                 || self
@@ -2663,6 +2716,22 @@ impl DirectPassthroughInlineBodyState {
                 self.upstream_done = true;
                 break;
             };
+            if let Some(reason) = self
+                .finalizer
+                .as_ref()
+                .and_then(|finalizer| finalizer.core()._send_admission_guard.ensure_alive().err())
+            {
+                self.upstream_done = true;
+                self.finalized = true;
+                drop(self.finalizer.take());
+                return Some((
+                    Err(IoError::other(format!(
+                        "send admission lease lost during upstream stream: {}",
+                        reason.as_str()
+                    ))),
+                    self,
+                ));
+            }
             let chunk = match item {
                 Ok(chunk) => chunk,
                 Err(message) => {
@@ -2973,6 +3042,7 @@ async fn execute_stream_from_direct_passthrough(
     execution: DirectUpstreamStreamExecution,
     in_flight_guard: Option<ProviderPoolInFlightGuard>,
     pending_recorded: bool,
+    send_admission_guard: Arc<crate::scheduler::send_admission::GatewaySendAdmissionGuard>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let DirectUpstreamStreamExecution {
         request_id: _,
@@ -3146,6 +3216,7 @@ async fn execute_stream_from_direct_passthrough(
             terminal_failure: None,
             _provider_pool_in_flight_guard: in_flight_guard,
             _upstream_target_permit: upstream_target_permit,
+            _send_admission_guard: send_admission_guard,
         });
         let body_stream = build_direct_passthrough_inline_body_stream(
             finalizer,
@@ -4016,6 +4087,39 @@ async fn execute_execution_runtime_stream_inner(
         "stream_provider_in_flight",
         provider_in_flight_started_at.elapsed().as_millis() as u64,
     );
+    let _send_admission_guard = match request_gateway_send_admission(state, &plan).await {
+        GatewaySendAdmissionDecision::Admit(guard) => Arc::new(guard),
+        GatewaySendAdmissionDecision::Skip(skip) => {
+            let reason = skip.reason().as_str();
+            record_local_runtime_candidate_skip_reason(state, trace_id, reason);
+            if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
+                *retry_scope = AiAttemptRetryScope::Candidate;
+            }
+            if let Some(snapshot) = request_candidate_status_snapshot.as_ref() {
+                record_local_request_candidate_status_snapshot(
+                    state,
+                    snapshot,
+                    SchedulerRequestCandidateStatusUpdate {
+                        status: RequestCandidateStatus::Skipped,
+                        status_code: None,
+                        error_type: Some(reason.to_string()),
+                        error_message: Some(format!("send admission skipped candidate: {reason}")),
+                        latency_ms: Some(0),
+                        started_at_unix_ms: Some(candidate_started_unix_secs),
+                        finished_at_unix_ms: Some(candidate_started_unix_secs),
+                    },
+                )
+                .await;
+            }
+            return Ok(None);
+        }
+        GatewaySendAdmissionDecision::Stop(stop) => {
+            return Err(GatewayError::Internal(format!(
+                "send admission stopped before upstream dispatch: {}",
+                stop.reason().as_str()
+            )));
+        }
+    };
     // Inline passthrough records its lifecycle seed after upstream headers are
     // available. Avoid constructing a throwaway seed on the common path.
     let mut lifecycle_seed = (!defer_stream_pending_for_direct_inline)
@@ -4063,6 +4167,12 @@ async fn execute_execution_runtime_stream_inner(
         .and_then(|context| context.candidate_index)
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
+    _send_admission_guard.ensure_alive().map_err(|reason| {
+        GatewayError::Internal(format!(
+            "send admission lease lost before upstream dispatch: {}",
+            reason.as_str()
+        ))
+    })?;
     match maybe_execute_grok_stream(&plan, report_context.as_ref()).await {
         Ok(Some(grok_stream)) => {
             return execute_stream_from_frame_stream_with_retry_scope(
@@ -4136,7 +4246,14 @@ async fn execute_execution_runtime_stream_inner(
             return Ok(None);
         }
     }
-    match maybe_execute_windsurf_stream(state, &plan, report_context.as_ref()).await {
+    match maybe_execute_windsurf_stream(
+        state,
+        &plan,
+        report_context.as_ref(),
+        Some(Arc::clone(&_send_admission_guard)),
+    )
+    .await
+    {
         Ok(Some(windsurf_stream)) => {
             return execute_stream_from_frame_stream_with_retry_scope(
                 state,
@@ -4160,6 +4277,14 @@ async fn execute_execution_runtime_stream_inner(
             .await;
         }
         Ok(None) => {}
+        Err(ExecutionRuntimeTransportError::LocalAdmission(
+            reason @ (LocalSendAdmissionError::ContextUnavailable
+            | LocalSendAdmissionError::Stopped),
+        )) => {
+            return Err(GatewayError::Internal(format!(
+                "Windsurf send admission stopped internal retry: {reason}"
+            )));
+        }
         Err(_err) => {
             let transport_error_message = "Windsurf stream execution unavailable".to_string();
             info!(
@@ -4363,6 +4488,7 @@ async fn execute_execution_runtime_stream_inner(
             &mut plan,
             trace_id,
             report_context.as_ref(),
+            Some(&_send_admission_guard),
         )
         .await
         {
@@ -4450,6 +4576,7 @@ async fn execute_execution_runtime_stream_inner(
                 execution,
                 provider_pool_in_flight_guard.take(),
                 lifecycle_pending_recorded,
+                _send_admission_guard,
             ))
             .await;
         }
@@ -4469,7 +4596,10 @@ async fn execute_execution_runtime_stream_inner(
             &execution.response_observation.request_order_id,
         );
         let stream_precommit_committed = execution.stream_precommit_committed;
-        let frame_stream = build_direct_execution_frame_stream(execution).boxed();
+        let frame_stream = hold_send_admission_for_frame_stream(
+            build_direct_execution_frame_stream(execution).boxed(),
+            _send_admission_guard,
+        );
         return execute_stream_from_frame_stream_with_retry_scope(
             state,
             plan,
@@ -4503,6 +4633,7 @@ async fn execute_execution_runtime_stream_inner(
                 &mut plan,
                 trace_id,
                 report_context.as_ref(),
+                Some(&_send_admission_guard),
             )
             .await
             {
@@ -4594,6 +4725,7 @@ async fn execute_execution_runtime_stream_inner(
                     execution,
                     provider_pool_in_flight_guard.take(),
                     lifecycle_pending_recorded,
+                    _send_admission_guard,
                 ))
                 .await;
             }
@@ -4614,7 +4746,10 @@ async fn execute_execution_runtime_stream_inner(
                 &execution.response_observation.request_order_id,
             );
             let stream_precommit_committed = execution.stream_precommit_committed;
-            let frame_stream = build_direct_execution_frame_stream(execution).boxed();
+            let frame_stream = hold_send_admission_for_frame_stream(
+                build_direct_execution_frame_stream(execution).boxed(),
+                _send_admission_guard,
+            );
             return execute_stream_from_frame_stream_with_retry_scope(
                 state,
                 plan,
@@ -5964,6 +6099,41 @@ async fn execute_stream_from_frame_stream(
     .await
 }
 
+fn hold_send_admission_for_frame_stream(
+    frame_stream: BoxStream<'static, Result<Bytes, IoError>>,
+    guard: Arc<crate::scheduler::send_admission::GatewaySendAdmissionGuard>,
+) -> BoxStream<'static, Result<Bytes, IoError>> {
+    futures_stream::unfold(
+        (frame_stream, guard, false),
+        |(mut frame_stream, guard, failed)| async move {
+            if failed {
+                return None;
+            }
+            if let Err(reason) = guard.ensure_alive() {
+                return Some((
+                    Err(IoError::other(format!(
+                        "send admission lease lost during upstream stream: {}",
+                        reason.as_str()
+                    ))),
+                    (frame_stream, guard, true),
+                ));
+            }
+            let item = frame_stream.next().await?;
+            if let Err(reason) = guard.ensure_alive() {
+                return Some((
+                    Err(IoError::other(format!(
+                        "send admission lease lost during upstream stream: {}",
+                        reason.as_str()
+                    ))),
+                    (frame_stream, guard, true),
+                ));
+            }
+            Some((item, (frame_stream, guard, false)))
+        },
+    )
+    .boxed()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_stream_from_frame_stream_with_retry_scope(
     state: &AppState,
@@ -6156,15 +6326,21 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             };
         let error_response_text =
             local_failover_response_text(client_body_json.as_ref(), &client_error_body, None);
-        let failover_analysis = resolve_local_candidate_failover_analysis_stream(
+        let failure_origin = if provider_private_error_decoded {
+            failure_origin_from_embedded_upstream_error(status_code, error_response_text.as_deref())
+        } else {
+            failure_origin_from_upstream_response(status_code, error_response_text.as_deref())
+        };
+        let failover_analysis = resolve_local_candidate_failover_analysis_stream_with_origin(
             state,
             &plan,
             report_context.as_ref(),
             status_code,
             error_response_text.as_deref(),
+            failure_origin,
         )
         .await;
-        apply_local_execution_effect(
+        apply_local_execution_effect_with_origin(
             state,
             LocalExecutionEffectContext {
                 plan: &plan,
@@ -6174,9 +6350,10 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 status_code,
                 classification: failover_analysis.classification,
             }),
+            failure_origin,
         )
         .await;
-        apply_local_execution_effect(
+        apply_local_execution_effect_with_origin(
             state,
             LocalExecutionEffectContext {
                 plan: &plan,
@@ -6187,9 +6364,10 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 classification: failover_analysis.classification,
                 headers: Some(&headers),
             }),
+            failure_origin,
         )
         .await;
-        apply_local_execution_effect(
+        apply_local_execution_effect_with_origin(
             state,
             LocalExecutionEffectContext {
                 plan: &plan,
@@ -6199,6 +6377,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 status_code,
                 classification: failover_analysis.classification,
             }),
+            failure_origin,
         )
         .await;
         apply_local_execution_effect(
@@ -6213,7 +6392,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             }),
         )
         .await;
-        apply_local_execution_effect(
+        apply_local_execution_effect_with_origin(
             state,
             LocalExecutionEffectContext {
                 plan: &plan,
@@ -6225,6 +6404,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 headers: &headers,
                 error_body: error_response_text.as_deref(),
             }),
+            failure_origin,
         )
         .await;
         let failover_decision = failover_analysis.decision;
@@ -6245,10 +6425,11 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             "gateway resolved execution runtime stream failover decision"
         );
         if matches!(failover_decision, LocalFailoverDecision::RetryNextCandidate) {
-            let failure_disposition = classify_failure_disposition(
+            let failure_disposition = classify_failure_disposition_with_origin(
                 &plan.provider_api_format,
                 failover_analysis.classification,
                 status_code,
+                failure_origin,
             );
             if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
                 *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
@@ -6278,6 +6459,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             }
             let terminal_unix_secs = current_request_candidate_unix_ms();
             let error_trace_report_context = with_stream_error_trace_context(
+                &plan,
                 report_context.as_ref(),
                 status_code,
                 &headers,
@@ -6285,6 +6467,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 &provider_error_body,
                 error_response_text.as_deref(),
                 failover_analysis,
+                failure_origin,
             );
             record_local_request_candidate_status(
                 state,
@@ -6330,6 +6513,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         {
             let terminal_unix_secs = current_request_candidate_unix_ms();
             let error_trace_report_context = with_stream_error_trace_context(
+                &plan,
                 report_context.as_ref(),
                 status_code,
                 &headers,
@@ -6337,6 +6521,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 &provider_error_body,
                 error_response_text.as_deref(),
                 failover_analysis,
+                failure_origin,
             );
             record_local_request_candidate_status(
                 state,
@@ -6385,6 +6570,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
 
         let client_response_headers = client_headers.clone();
         let error_trace_report_context = with_stream_error_trace_context(
+            &plan,
             report_context.as_ref(),
             status_code,
             &headers,
@@ -6392,6 +6578,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             &provider_error_body,
             error_response_text.as_deref(),
             failover_analysis,
+            failure_origin,
         );
         let payload = build_stream_error_sync_payload(
             trace_id,
@@ -6654,7 +6841,9 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                     Err(_) => {
                         if stream_commit_policy.requires_bounded_frame_wait() {
                             let failure = build_stream_transport_failure_report(
-                                "first_byte_timeout", "Upstream did not produce a semantic event before the first byte deadline", 504,
+                                "first_byte_timeout",
+                                "Upstream did not produce a semantic event before the first byte deadline",
+                                504,
                             );
                             return handle_prefetch_stream_failure(
                                 state,
@@ -7773,10 +7962,12 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                         "gateway failed to normalize execution runtime stream chunk"
                                     );
                                     terminal_failure = Some(build_stream_failure_report(
-                                            "execution_runtime_stream_rewrite_error",
-                                            format!("failed to normalize execution runtime stream chunk: {err:?}"),
-                                            502,
-                                        ));
+                                        "execution_runtime_stream_rewrite_error",
+                                        format!(
+                                            "failed to normalize execution runtime stream chunk: {err:?}"
+                                        ),
+                                        502,
+                                    ));
                                     break;
                                 }
                             }
@@ -7812,7 +8003,9 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                     );
                                     terminal_failure = Some(build_stream_failure_report(
                                         "execution_runtime_stream_rewrite_error",
-                                        format!("failed to rewrite execution runtime stream chunk: {err:?}"),
+                                        format!(
+                                            "failed to rewrite execution runtime stream chunk: {err:?}"
+                                        ),
                                         502,
                                     ));
                                     break;
@@ -8020,7 +8213,9 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                     );
                                     let failure = build_stream_failure_report(
                                         "execution_runtime_stream_rewrite_flush_error",
-                                        format!("failed to rewrite normalized private stream chunk during flush: {err:?}"),
+                                        format!(
+                                            "failed to rewrite normalized private stream chunk during flush: {err:?}"
+                                        ),
                                         502,
                                     );
                                     terminal_failure.get_or_insert(failure);
@@ -9418,17 +9613,19 @@ mod tests {
                 vec!["{\"warning\":\"capacity", " exhausted\"}"],
             ),
         ] {
-            assert!(execute_generic_stream_precommit(
-                chunks,
-                json!({ "failover_rules": {
+            assert!(
+                execute_generic_stream_precommit(
+                    chunks,
+                    json!({ "failover_rules": {
                     "success_failover_patterns": [{ "pattern": "capacity.*exhausted" }],
                 } }),
-                None,
-                false,
-                content_type,
-            )
-            .await
-            .is_none());
+                    None,
+                    false,
+                    content_type,
+                )
+                .await
+                .is_none()
+            );
         }
     }
 
@@ -9669,6 +9866,9 @@ mod tests {
             terminal_failure: None,
             _provider_pool_in_flight_guard: None,
             _upstream_target_permit: None,
+            _send_admission_guard: Arc::new(
+                crate::scheduler::send_admission::GatewaySendAdmissionGuard::without_probe(),
+            ),
             plan,
         })
     }
@@ -10442,19 +10642,46 @@ mod tests {
             "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
         ] {
             let mut state = direct_anthropic_inline_state("req-inline-idle-completed", Vec::new());
-            state.finalizer.as_mut().unwrap().core_mut().requires_anthropic_message_stop = false;
+            state
+                .finalizer
+                .as_mut()
+                .unwrap()
+                .core_mut()
+                .requires_anthropic_message_stop = false;
             state.stream_idle_timeout = Some(Duration::from_millis(5));
-            state.upstream = Some(futures_util::stream::iter(vec![Ok(Bytes::from(terminal))])
-                .chain(futures_util::stream::pending()).boxed());
-            let (first, mut state) = state.next_item().await.expect("terminal chunk should stream");
+            state.upstream = Some(
+                futures_util::stream::iter(vec![Ok(Bytes::from(terminal))])
+                    .chain(futures_util::stream::pending())
+                    .boxed(),
+            );
+            let (first, mut state) = state
+                .next_item()
+                .await
+                .expect("terminal chunk should stream");
             assert_eq!(first.unwrap(), Bytes::from(terminal));
-            assert!(state.finalizer.as_ref().unwrap().core().client_stream_completion_tracker.successful_completion());
+            assert!(
+                state
+                    .finalizer
+                    .as_ref()
+                    .unwrap()
+                    .core()
+                    .client_stream_completion_tracker
+                    .successful_completion()
+            );
             let item = tokio::time::timeout(Duration::from_secs(1), state.next_upstream_item())
-                .await.expect("teardown idle should finish");
+                .await
+                .expect("teardown idle should finish");
             assert!(item.is_none());
             assert!(state.upstream.is_none());
-            assert!(state.finalizer.as_ref().unwrap().terminal_failure().is_none(),
-                "successful protocol terminal must not become a read timeout");
+            assert!(
+                state
+                    .finalizer
+                    .as_ref()
+                    .unwrap()
+                    .terminal_failure()
+                    .is_none(),
+                "successful protocol terminal must not become a read timeout"
+            );
             discard_direct_test_finalizer(&mut state);
         }
     }
@@ -10662,6 +10889,7 @@ mod tests {
             &mut plan,
             "trace-non-agent-401",
             None,
+            None,
         )
         .await
         .expect("stream request should execute");
@@ -10739,6 +10967,7 @@ mod tests {
             &state,
             &mut plan,
             "trace-agent-non-task-401",
+            None,
             None,
         )
         .await
@@ -10870,6 +11099,7 @@ mod tests {
             &state,
             &mut plan,
             "trace-agent-invalid-task",
+            None,
             None,
         )
         .await
@@ -11009,6 +11239,7 @@ mod tests {
             &mut plan,
             "trace-anthropic-embedded-oauth-refresh",
             None,
+            None,
         )
         .await
         .expect("embedded authentication error should recover");
@@ -11120,6 +11351,7 @@ mod tests {
             &state,
             &mut plan,
             "trace-anthropic-http-oauth-permission",
+            None,
             None,
         )
         .await
@@ -11306,6 +11538,7 @@ mod tests {
             &state,
             &mut plan,
             "trace-anthropic-embedded-api-key",
+            None,
             None,
         )
         .await
@@ -11570,6 +11803,9 @@ mod tests {
             terminal_failure: None,
             _provider_pool_in_flight_guard: None,
             _upstream_target_permit: None,
+            _send_admission_guard: Arc::new(
+                crate::scheduler::send_admission::GatewaySendAdmissionGuard::without_probe(),
+            ),
             plan,
         });
         let mut body_state = DirectPassthroughInlineBodyState {
@@ -12304,7 +12540,11 @@ mod tests {
             .expect("response body should read");
         let body = String::from_utf8(body.to_vec()).expect("response body should be utf8");
         assert!(
-            body.contains("event: response.reasoning_summary_text.delta\n"),
+            body.contains("event: response.reasoning_text.delta\n"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("event: response.reasoning_summary_text.delta\n"),
             "{body}"
         );
         assert!(

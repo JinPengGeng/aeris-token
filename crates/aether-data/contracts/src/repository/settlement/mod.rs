@@ -1,9 +1,11 @@
 mod attempt_funding;
 mod funding;
+mod recharge_recovery;
 mod types;
 
 pub use attempt_funding::*;
 pub use funding::*;
+pub use recharge_recovery::*;
 
 pub use types::{
     finite_wallet_available_usd, plan_finite_wallet_debit, settlement_billable_cost_usd,

@@ -48,6 +48,43 @@ pub(crate) fn read_cached_scheduler_affinity_target(
         .read_scheduler_affinity_target(&cache_key, SCHEDULER_AFFINITY_TTL)
 }
 
+pub(crate) async fn hydrate_cached_scheduler_affinity_target(
+    state: PlannerAppState<'_>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    client_session_affinity: Option<&ClientSessionAffinity>,
+    client_api_format: &str,
+    requested_model: Option<&str>,
+    routing_policy: Option<&ResolvedRoutingPolicy>,
+) -> Option<SchedulerAffinityTarget> {
+    if !has_explicit_session_affinity(client_session_affinity) {
+        return None;
+    }
+    let requested_model = requested_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let api_key_id = auth_snapshot
+        .map(|snapshot| snapshot.api_key_id.trim())
+        .filter(|value| !value.is_empty())?;
+    let affinity_scope = scheduler_affinity_scope_for_routing_policy(routing_policy);
+    let cache_key =
+        build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+            api_key_id,
+            client_api_format,
+            requested_model,
+            client_session_affinity,
+            affinity_scope.as_ref(),
+        )?;
+
+    state
+        .app()
+        .hydrate_scheduler_affinity_target(
+            &cache_key,
+            SCHEDULER_AFFINITY_TTL,
+            PLANNER_SCHEDULER_AFFINITY_MAX_ENTRIES,
+        )
+        .await
+}
+
 pub(crate) fn remember_scheduler_affinity_for_candidate(
     state: PlannerAppState<'_>,
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,

@@ -16,7 +16,8 @@ OpenAI Chat, Responses, Embeddings, Rerank, and Images validation errors use:
   "error": {
     "message": "Image API JSON request body is invalid",
     "type": "invalid_request_error"
-  }
+  },
+  "trace_id": "trace-..."
 }
 ```
 
@@ -63,12 +64,13 @@ recognize OpenAI's quota response, but has this stable payload:
     "message": "Insufficient quota",
     "type": "insufficient_quota",
     "code": "credit_balance_exhausted"
-  }
+  },
+  "trace_id": "trace-..."
 }
 ```
 
 Claude Messages wallet denial uses HTTP `402` and
-`{"type":"error","error":{"type":"billing_error","code":"balance_exceeded","message":"Insufficient quota"}}`.
+`{"type":"error","error":{"type":"billing_error","code":"balance_exceeded","message":"Insufficient quota"},"trace_id":"trace-..."}`.
 Neither format exposes the balance, user/key identifiers, or internal billing
 details. Both retain `x-trace-id` for support correlation.
 
@@ -105,7 +107,8 @@ error. The response deliberately hides the backend error text:
     "trace_id": "trace-...",
     "retryable": true,
     "failover_disposition": "retry_request"
-  }
+  },
+  "trace_id": "trace-..."
 }
 ```
 
@@ -135,20 +138,33 @@ dropped. Correct the request or select a provider with an audited mapping;
 retrying the same unsupported conversion does not resolve the problem.
 
 Model-detail lookup (`GET /v1/models/:id`) returns HTTP `404` with
-`error.code=model_not_found` when no visible model matches. Inference POST
-requests do not yet distinguish all unknown-model cases from an empty candidate
-list caused by unavailable providers or configuration. That path can still
-return HTTP `503`; the existing Chat/Images model-not-found fixture rows are
-target contracts, not proof of inference route behavior. This classification
-gap remains tracked in Issue #254. Clients should check the requested model
-and provider configuration, and use bounded retries only when the cause is
-transient.
+`error.code=model_not_found` when no visible model matches. Authenticated Chat
+and Images inference apply the same distinction after local candidate selection fails:
+an absent public global-model record returns `404/not_found_error` with
+`model_not_found`, while a declared model with no selectable provider remains
+retryable `503/server_error`. The classifier runs after public authentication
+and access-policy rejection, so anonymous or unauthorized callers receive
+their existing `401`/`403` response instead of model-directory information.
+
+The classifier also checks scheduler-declared canonical names and model aliases
+before returning `404`, so a declared but currently unselectable alias remains
+`503`. If the public model directory or scheduler declaration read is unavailable,
+the gateway preserves the existing `503` runtime miss rather than treating an
+operational lookup failure as absence. Other inference route families retain
+their separate acceptance coverage.
 
 ## Message language and correlation
 
-Local image-field validation and exhausted-credit messages are English. Other
-authentication, access-policy and execution messages may still be Chinese;
-the gateway does not provide `Accept-Language` negotiation for this contract.
-Clients should branch on status and available type/code fields, not translated
-message text. `x-trace-id` is the correlation contract; a `trace_id` body field
-is present only on some error paths and must not be assumed for every response.
+Local request-validation, authentication, access-policy, wallet, usage-limit and
+admission-overload builders use English messages. Execution diagnostics and
+provider-supplied messages can use other languages; the gateway does not provide
+`Accept-Language` negotiation. Clients should branch on status and available
+type/code fields, not translated message text.
+
+The local JSON builders for those rejections, public resource errors, unknown
+models and traced gateway dependency/timeouts include a top-level `trace_id`
+matching `x-trace-id`. Dependency and timeout errors retain their existing nested
+`error.trace_id` for compatibility. This is an additive local-error contract:
+successful responses, provider body passthrough, SSE events and WebSocket frames
+keep their protocol payloads. Use `x-trace-id` as the common correlation field
+across all HTTP responses.

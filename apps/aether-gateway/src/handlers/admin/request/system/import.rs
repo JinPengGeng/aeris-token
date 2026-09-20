@@ -6770,7 +6770,7 @@ impl<'a> AdminAppState<'a> {
                 .map_err(|err| GatewayError::Internal(err.to_string()))?,
             );
             let update_result =
-                apply_admin_system_config_update(self, &key, &request_bytes).await?;
+                apply_admin_system_config_update(self, &key, &request_bytes, None).await?;
             match update_result {
                 Ok(_) => {
                     if exists {

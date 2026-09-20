@@ -1624,6 +1624,7 @@ import {
 } from '@/api/admin-payments'
 import type { PaymentOrder } from '@/api/wallet'
 import { parseApiError } from '@/utils/errorParser'
+import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { getI18nLocale, useI18n } from '@/i18n'
 import { log } from '@/utils/logger'
@@ -1681,6 +1682,7 @@ type PagedListResponse<T> = {
 }
 
 const { success, error: showError } = useToast()
+const { confirmDanger } = useConfirm()
 const { legacyT } = useI18n()
 const route = useRoute()
 
@@ -2349,7 +2351,11 @@ async function deleteRedeemBatch(batch: RedeemCodeBatch) {
     showError('已有兑换记录的批次不能删除')
     return
   }
-  if (!window.confirm(legacyT(`确认删除批次「${batch.name}」吗？删除后无法恢复。`))) {
+  const confirmed = await confirmDanger(
+    legacyT(`确认删除批次「${batch.name}」吗？删除后无法恢复。`),
+    legacyT('删除批次')
+  )
+  if (!confirmed) {
     return
   }
 

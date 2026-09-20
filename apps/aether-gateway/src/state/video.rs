@@ -2,7 +2,7 @@ use super::{AppState, GatewayError};
 
 use crate::{async_task, video_tasks};
 use aether_data_contracts::repository::video_tasks::{
-    StoredVideoTask, UpsertVideoTask, VideoTaskLookupKey, VideoTaskModelCount,
+    StoredVideoTask, UpsertVideoTask, VideoTaskClaim, VideoTaskLookupKey, VideoTaskModelCount,
     VideoTaskQueryFilter, VideoTaskStatusCount,
 };
 
@@ -11,6 +11,26 @@ pub(crate) enum VideoTaskRouteAccess {
     Allowed,
     NotFound,
     Denied,
+}
+
+#[derive(Debug)]
+pub(crate) enum VideoTaskSnapshotWrite {
+    Applied(StoredVideoTask),
+    Conflict,
+    NoWriter,
+}
+
+impl VideoTaskSnapshotWrite {
+    pub(crate) fn stored(&self) -> Option<&StoredVideoTask> {
+        match self {
+            Self::Applied(stored) => Some(stored),
+            Self::Conflict | Self::NoWriter => None,
+        }
+    }
+
+    pub(crate) fn accepted(&self) -> bool {
+        !matches!(self, Self::Conflict)
+    }
 }
 
 impl AppState {
@@ -82,7 +102,11 @@ impl AppState {
     pub(crate) async fn upsert_video_task_snapshot(
         &self,
         snapshot: &video_tasks::LocalVideoTaskSnapshot,
-    ) -> Result<Option<StoredVideoTask>, GatewayError> {
+    ) -> Result<VideoTaskSnapshotWrite, GatewayError> {
+        if !self.data.has_video_task_writer() {
+            self.video_tasks.record_snapshot(snapshot.clone());
+            return Ok(VideoTaskSnapshotWrite::NoWriter);
+        }
         let mut record = snapshot.to_upsert_record();
         // Reconstructed snapshots intentionally omit sensitive/request-only fields. Preserve the
         // persisted row's immutable identity and request-shape scalars before writing lifecycle
@@ -120,11 +144,184 @@ impl AppState {
             record.resolution = existing.resolution;
             record.aspect_ratio = existing.aspect_ratio;
             record.size = existing.size;
+
+            record.retry_count = existing.retry_count;
+            record.poll_count = existing.poll_count;
+            record.max_poll_count = existing.max_poll_count;
+            record.poll_interval_seconds = existing.poll_interval_seconds;
+            let task_id = record.id.clone();
+            let stored = self
+                .data
+                .update_active_video_task(record, None)
+                .await
+                .map_err(|err| GatewayError::Internal(err.to_string()))?;
+            if let Some(stored) = &stored {
+                self.publish_stored_video_task(stored, Some(snapshot))
+                    .await?;
+            } else {
+                self.restore_video_task_registry(&task_id, Some(snapshot))
+                    .await?;
+            }
+            return Ok(match stored {
+                Some(stored) => VideoTaskSnapshotWrite::Applied(stored),
+                None => VideoTaskSnapshotWrite::Conflict,
+            });
         }
-        self.data
-            .upsert_video_task(record)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+        // A snapshot that has already observed a database row cannot recreate it.
+        if record.row_revision > 0 {
+            return Ok(VideoTaskSnapshotWrite::Conflict);
+        }
+        let task_id = record.id.clone();
+        match self.data.upsert_video_task(record).await {
+            Ok(stored) => {
+                if let Some(stored) = &stored {
+                    self.publish_stored_video_task(stored, Some(snapshot))
+                        .await?;
+                }
+                Ok(match stored {
+                    Some(stored) => VideoTaskSnapshotWrite::Applied(stored),
+                    None => VideoTaskSnapshotWrite::Conflict,
+                })
+            }
+            Err(err) => {
+                // Another creator may have inserted between lookup and INSERT. Never
+                // publish the losing create snapshot or retry it with the winner's revision.
+                if self
+                    .restore_video_task_registry(&task_id, Some(snapshot))
+                    .await?
+                {
+                    Ok(VideoTaskSnapshotWrite::Conflict)
+                } else {
+                    Err(GatewayError::Internal(err.to_string()))
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn publish_stored_video_task(
+        &self,
+        task: &StoredVideoTask,
+        source: Option<&video_tasks::LocalVideoTaskSnapshot>,
+    ) -> Result<(), GatewayError> {
+        let cached = match task.effective_api_format() {
+            Some("openai:video") => self
+                .video_tasks
+                .snapshot_for_route(Some("openai"), &format!("/v1/videos/{}", task.id)),
+            Some("gemini:video") => self.video_tasks.snapshot_for_route(
+                Some("gemini"),
+                &format!(
+                    "/v1beta/models/{}/operations/{}",
+                    task.model.as_deref().unwrap_or_default(),
+                    task.short_id.as_deref().unwrap_or(&task.id)
+                ),
+            ),
+            _ => None,
+        };
+        let snapshot = source
+            .and_then(|snapshot| snapshot.with_committed_stored_task(task))
+            .or_else(|| {
+                cached.as_ref().and_then(|snapshot| {
+                    if snapshot.row_revision() == task.row_revision {
+                        snapshot.with_committed_stored_task(task)
+                    } else {
+                        snapshot.with_stored_task(task)
+                    }
+                })
+            })
+            .or_else(|| video_tasks::LocalVideoTaskSnapshot::from_stored_task(task));
+        let snapshot = match snapshot {
+            Some(snapshot) => Some(snapshot),
+            None => self.reconstruct_video_task_snapshot(task).await?,
+        };
+        if let Some(snapshot) = snapshot {
+            self.video_tasks.record_snapshot(snapshot);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn restore_video_task_registry(
+        &self,
+        task_id: &str,
+        source: Option<&video_tasks::LocalVideoTaskSnapshot>,
+    ) -> Result<bool, GatewayError> {
+        let Some(task) = self.find_video_task_by_id(task_id).await? else {
+            return Ok(false);
+        };
+        // A rejected update is only a transport fallback, never an authority for
+        // native presentation or lifecycle fields. Prefer the current cache below.
+        if let Some(source) = source {
+            if let Some(snapshot) = source.with_stored_task(&task) {
+                self.video_tasks.record_snapshot(snapshot);
+            }
+        }
+        self.publish_stored_video_task(&task, None).await?;
+        Ok(true)
+    }
+
+    pub(crate) async fn enrich_video_task_terminal_presentation(
+        &self,
+        expected: &video_tasks::LocalVideoTaskSnapshot,
+        projected: &video_tasks::LocalVideoTaskSnapshot,
+    ) -> Result<bool, GatewayError> {
+        if self.data.has_video_task_writer() {
+            let record = expected.to_upsert_record();
+            let Some(current) = self.find_video_task_by_id(&record.id).await? else {
+                return Ok(false);
+            };
+            if current.row_revision != expected.row_revision() || current.status != record.status {
+                self.publish_stored_video_task(&current, None).await?;
+                return Ok(false);
+            }
+        }
+        // The registry compares the entire original observation under its lock. This
+        // only fills provider presentation; database lifecycle and revision stay intact.
+        Ok(self
+            .video_tasks
+            .enrich_terminal_presentation(expected, projected))
+    }
+
+    pub(crate) async fn persist_video_task_finalize(
+        &self,
+        route_family: Option<&str>,
+        request_path: &str,
+        report_kind: &str,
+        report_context: Option<&serde_json::Value>,
+    ) -> Result<bool, GatewayError> {
+        let expected_revision = report_context
+            .and_then(|context| context.get("video_task_row_revision"))
+            .and_then(serde_json::Value::as_i64);
+        if self
+            .video_tasks
+            .snapshot_for_route(route_family, request_path)
+            .is_none()
+        {
+            self.hydrate_video_task_for_route(route_family, request_path)
+                .await?;
+        }
+        let Some(mut snapshot) = self
+            .video_tasks
+            .snapshot_for_route(route_family, request_path)
+        else {
+            return Ok(false);
+        };
+        if self.data.has_video_task_writer()
+            && (expected_revision != Some(snapshot.row_revision()) || snapshot.row_revision() <= 0)
+        {
+            let task_id = snapshot.to_upsert_record().id;
+            self.restore_video_task_registry(&task_id, Some(&snapshot))
+                .await?;
+            return Ok(false);
+        }
+        let expected_local = snapshot.clone();
+        if !snapshot.apply_finalize_report(report_kind) {
+            return Ok(false);
+        }
+        if !self.data.has_video_task_writer() {
+            return Ok(self
+                .video_tasks
+                .replace_local_snapshot(&expected_local, snapshot));
+        }
+        Ok(self.upsert_video_task_snapshot(&snapshot).await?.accepted())
     }
 
     pub(crate) async fn hydrate_video_task_for_route(
@@ -214,7 +411,7 @@ impl AppState {
         now_unix_secs: u64,
         claim_until_unix_secs: u64,
         limit: usize,
-    ) -> Result<Vec<StoredVideoTask>, GatewayError> {
+    ) -> Result<Vec<VideoTaskClaim>, GatewayError> {
         self.data
             .claim_due_video_tasks(now_unix_secs, claim_until_unix_secs, limit)
             .await
@@ -224,9 +421,10 @@ impl AppState {
     pub(crate) async fn update_active_video_task(
         &self,
         task: UpsertVideoTask,
+        fencing_token: Option<i64>,
     ) -> Result<Option<StoredVideoTask>, GatewayError> {
         self.data
-            .update_active_video_task(task)
+            .update_active_video_task(task, fencing_token)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }

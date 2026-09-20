@@ -17,6 +17,7 @@ mod collectors;
 mod payments;
 mod plans;
 mod presets;
+mod provider_costs;
 mod routes;
 mod rules;
 mod wallets;
@@ -266,7 +267,23 @@ pub(crate) async fn maybe_build_local_admin_billing_response(
         || (request_context.method() == http::Method::PATCH
             && path.starts_with("/api/admin/billing/plans/")
             && path.ends_with("/status")
-            && path.matches('/').count() == 6);
+            && path.matches('/').count() == 6)
+        || (request_context.method() == http::Method::GET
+            && matches!(
+                path,
+                "/api/admin/billing/provider-costs/prices"
+                    | "/api/admin/billing/provider-costs/prices/"
+                    | "/api/admin/billing/provider-costs/snapshots"
+                    | "/api/admin/billing/provider-costs/snapshots/"
+            ))
+        || (request_context.method() == http::Method::POST
+            && matches!(
+                path,
+                "/api/admin/billing/provider-costs/prices/import"
+                    | "/api/admin/billing/provider-costs/prices/import/"
+                    | "/api/admin/billing/provider-costs/snapshots/import"
+                    | "/api/admin/billing/provider-costs/snapshots/import/"
+            ));
 
     if !is_billing_route {
         return Ok(None);
@@ -299,6 +316,15 @@ pub(crate) async fn maybe_build_local_admin_billing_response(
     if let Some(response) =
         plans::maybe_build_local_admin_billing_plans_response(state, request_context, request_body)
             .await?
+    {
+        return Ok(Some(response));
+    }
+    if let Some(response) = provider_costs::maybe_build_local_admin_provider_costs_response(
+        state,
+        request_context,
+        request_body,
+    )
+    .await?
     {
         return Ok(Some(response));
     }

@@ -1,13 +1,45 @@
 use std::collections::BTreeMap;
 
 use aether_admin::observability::usage::admin_usage_safe_metadata_value;
-use aether_data::repository::audit::AuditLogListQuery;
+use aether_data_contracts::repository::audit::{
+    AdminAuditDeliveryListQuery, AdminAuditDeliveryPage, AdminAuditDeliveryRedriveOutcome,
+    AdminAuditDeliverySummary, AuditLogListQuery,
+};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 use super::{AppState, GatewayError};
 
 impl AppState {
+    pub(crate) async fn list_admin_audit_deliveries(
+        &self,
+        query: &AdminAuditDeliveryListQuery,
+    ) -> Result<AdminAuditDeliveryPage, GatewayError> {
+        self.data
+            .list_admin_audit_deliveries(query)
+            .await
+            .map_err(GatewayError::from_data_layer_error)
+    }
+
+    pub(crate) async fn admin_audit_delivery_summary(
+        &self,
+    ) -> Result<AdminAuditDeliverySummary, GatewayError> {
+        self.data
+            .admin_audit_delivery_summary()
+            .await
+            .map_err(GatewayError::from_data_layer_error)
+    }
+
+    pub(crate) async fn redrive_admin_audit_delivery(
+        &self,
+        event_id: &str,
+    ) -> Result<AdminAuditDeliveryRedriveOutcome, GatewayError> {
+        self.data
+            .redrive_admin_audit_delivery(event_id)
+            .await
+            .map_err(GatewayError::from_data_layer_error)
+    }
+
     pub(crate) async fn list_admin_audit_logs(
         &self,
         cutoff_time: DateTime<Utc>,

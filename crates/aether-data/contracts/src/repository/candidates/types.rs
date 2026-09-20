@@ -137,6 +137,7 @@ define_candidate_diagnostic_categories!(
         "proxy_error",
         "rate_limit_error",
         "read_timeout",
+        "request_attempt_budget_exhausted",
         "resource_exhausted",
         "retryable_upstream_status",
         "server_error",
@@ -960,12 +961,25 @@ fn sanitize_candidate_extra_data_object(
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut sanitized = serde_json::Map::new();
 
-    for field in ["gateway_execution_runtime", "stream_completed", "cache_1h"] {
+    for field in [
+        "gateway_execution_runtime",
+        "stream_completed",
+        "cache_1h",
+        "retry_replay_admitted",
+    ] {
         insert_candidate_bool(object, &mut sanitized, field);
     }
-    for field in ["first_byte_time_ms", "pool_key_index"] {
+    for field in [
+        "first_byte_time_ms",
+        "pool_key_index",
+        "scheduler_generation",
+        "attempt_budget_attempts",
+        "attempt_budget_credential_attempts",
+        "attempt_budget_provider_switches",
+    ] {
         insert_candidate_u64(object, &mut sanitized, field);
     }
+    insert_candidate_u32(object, &mut sanitized, "scheduler_page_ordinal");
     insert_candidate_i64(object, &mut sanitized, "priority_slot");
     insert_candidate_u64(object, &mut sanitized, "ranking_index");
 
@@ -1021,6 +1035,25 @@ fn sanitize_candidate_extra_data_object(
         "execution_path",
         sanitize_candidate_execution_path,
     );
+    insert_candidate_known_string(
+        object,
+        &mut sanitized,
+        "attempt_budget_stop_reason",
+        sanitize_candidate_attempt_budget_stop_reason,
+    );
+    insert_candidate_known_string(
+        object,
+        &mut sanitized,
+        "attempt_lifecycle_phase",
+        sanitize_candidate_attempt_lifecycle_phase,
+    );
+
+    if let Some(page_id) = object
+        .get("scheduler_page_id")
+        .and_then(sanitize_candidate_scheduler_page_id)
+    {
+        sanitized.insert("scheduler_page_id".to_string(), page_id);
+    }
 
     if let Some(url) = object
         .get("upstream_url")
@@ -1359,6 +1392,18 @@ fn sanitize_candidate_error_flow(value: &serde_json::Value) -> Option<serde_json
     insert_candidate_known_string(
         object,
         &mut summary,
+        "failure_origin",
+        sanitize_candidate_failure_origin,
+    );
+    if let Some(disposition) = object
+        .get("classifier_disposition")
+        .and_then(sanitize_candidate_classifier_disposition)
+    {
+        summary.insert("classifier_disposition".to_string(), disposition);
+    }
+    insert_candidate_known_string(
+        object,
+        &mut summary,
         "propagation",
         sanitize_candidate_error_propagation,
     );
@@ -1423,6 +1468,75 @@ fn sanitize_candidate_error_decision(value: &str) -> Option<&'static str> {
         "retry_next_candidate" => Some("retry_next_candidate"),
         "stop_local_failover" => Some("stop_local_failover"),
         "use_default" => Some("use_default"),
+        _ => None,
+    }
+}
+
+fn sanitize_candidate_failure_origin(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "request" => Some("request"),
+        "upstream_credential" => Some("upstream_credential"),
+        "upstream_provider" => Some("upstream_provider"),
+        "transport" => Some("transport"),
+        "internal" => Some("internal"),
+        "unknown" => Some("unknown"),
+        _ => None,
+    }
+}
+
+fn sanitize_candidate_classifier_disposition(
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let object = value.as_object()?;
+    let mut summary = serde_json::Map::new();
+    insert_candidate_known_string(
+        object,
+        &mut summary,
+        "retry_action",
+        sanitize_candidate_failure_retry_action,
+    );
+    insert_candidate_known_string(
+        object,
+        &mut summary,
+        "failure_scope",
+        sanitize_candidate_failure_scope,
+    );
+    insert_candidate_known_string(
+        object,
+        &mut summary,
+        "token_action",
+        sanitize_candidate_failure_token_action,
+    );
+    (!summary.is_empty()).then_some(serde_json::Value::Object(summary))
+}
+
+fn sanitize_candidate_failure_retry_action(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "stop" => Some("stop"),
+        "same_credential" => Some("same_credential"),
+        "next_candidate" => Some("next_candidate"),
+        "next_credential" => Some("next_credential"),
+        "next_endpoint" => Some("next_endpoint"),
+        _ => None,
+    }
+}
+
+fn sanitize_candidate_failure_scope(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Some("none"),
+        "credential" => Some("credential"),
+        "credential_model" => Some("credential_model"),
+        "endpoint" => Some("endpoint"),
+        "provider" => Some("provider"),
+        _ => None,
+    }
+}
+
+fn sanitize_candidate_failure_token_action(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Some("none"),
+        "force_refresh" => Some("force_refresh"),
+        "quarantine" => Some("quarantine"),
         _ => None,
     }
 }
@@ -1583,6 +1697,20 @@ fn insert_candidate_u64(
     }
 }
 
+fn insert_candidate_u32(
+    source: &serde_json::Map<String, serde_json::Value>,
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) {
+    if let Some(value) = source
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+    {
+        target.insert(field.to_string(), serde_json::Value::Number(value.into()));
+    }
+}
+
 fn insert_candidate_i64(
     source: &serde_json::Map<String, serde_json::Value>,
     target: &mut serde_json::Map<String, serde_json::Value>,
@@ -1617,6 +1745,39 @@ fn sanitize_candidate_phase(value: &str) -> Option<&'static str> {
         "provider_request" => Some("provider_request"),
         _ => None,
     }
+}
+
+fn sanitize_candidate_attempt_budget_stop_reason(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "attempts_exhausted" => Some("attempts_exhausted"),
+        "credential_attempts_exhausted" => Some("credential_attempts_exhausted"),
+        "provider_switches_exhausted" => Some("provider_switches_exhausted"),
+        "deadline_exceeded" => Some("deadline_exceeded"),
+        _ => None,
+    }
+}
+
+fn sanitize_candidate_attempt_lifecycle_phase(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "prepared" => Some("prepared"),
+        "sent_but_uncommitted" => Some("sent_but_uncommitted"),
+        "client_committed" => Some("client_committed"),
+        "terminal" => Some("terminal"),
+        _ => None,
+    }
+}
+
+fn sanitize_candidate_scheduler_page_id(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let object = value.as_object()?;
+    let generation = object.get("generation")?.as_u64()?;
+    let ordinal = object
+        .get("ordinal")?
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())?;
+    Some(serde_json::json!({
+        "generation": generation,
+        "ordinal": ordinal,
+    }))
 }
 
 fn sanitize_candidate_api_format(value: &str) -> Option<&'static str> {
@@ -2167,6 +2328,13 @@ mod tests {
                     "source": "upstream_response",
                     "classification": "retry_status_code",
                     "decision": "retry_next_candidate",
+                    "failure_origin": "upstream_credential",
+                    "classifier_disposition": {
+                        "retry_action": "next_credential",
+                        "failure_scope": "credential",
+                        "token_action": "force_refresh",
+                        "message": "secret"
+                    },
                     "propagation": "captured",
                     "retryable": true,
                     "status_code": 401,
@@ -2271,6 +2439,22 @@ mod tests {
         assert_eq!(extra["error_flow"]["stage"], "upstream");
         assert_eq!(extra["error_flow"]["retryable"], true);
         assert_eq!(extra["error_flow"]["status_code"], 401);
+        assert_eq!(extra["error_flow"]["failure_origin"], "upstream_credential");
+        assert_eq!(
+            extra["error_flow"]["classifier_disposition"]["retry_action"],
+            "next_credential"
+        );
+        assert_eq!(
+            extra["error_flow"]["classifier_disposition"]["failure_scope"],
+            "credential"
+        );
+        assert_eq!(
+            extra["error_flow"]["classifier_disposition"]["token_action"],
+            "force_refresh"
+        );
+        assert!(extra["error_flow"]["classifier_disposition"]
+            .get("message")
+            .is_none());
         assert_eq!(
             extra["error_flow"]["message"],
             "token vertex-secret rejected"
@@ -2428,6 +2612,13 @@ mod tests {
         record.error_type = Some("Upstream5xx".to_string());
         record.sanitize_for_persistence();
         assert_eq!(record.error_type.as_deref(), Some("upstream5xx"));
+        assert_eq!(
+            sanitize_request_candidate_error_type(Some(
+                "request_attempt_budget_exhausted".to_string(),
+            ))
+            .as_deref(),
+            Some("request_attempt_budget_exhausted")
+        );
 
         for reason in REQUEST_CANDIDATE_SKIP_REASONS {
             assert_eq!(
@@ -2500,6 +2691,15 @@ mod tests {
     #[test]
     fn admin_diagnostics_are_bounded_and_public_projection_removes_them() {
         let raw = json!({
+            "scheduler_generation": 11,
+            "scheduler_page_ordinal": 2,
+            "scheduler_page_id": {"generation": 11, "ordinal": 2, "lease_token": "secret"},
+            "attempt_budget_stop_reason": "attempts_exhausted",
+            "attempt_budget_attempts": 32,
+            "attempt_budget_credential_attempts": 16,
+            "attempt_budget_provider_switches": 4,
+            "attempt_lifecycle_phase": "client_committed",
+            "retry_replay_admitted": false,
             "upstream_response": {"status_code": 400, "body": "错误内容".repeat(20_000)},
             "error_flow": {"status_code": 400, "message": "private upstream failure"},
             "failure_diagnostic": {"path": "$.input", "message": "private conversion failure", "safe_to_show": false, "stage": "request", "details": {"code": "invalid_enum_value", "actual": "private-value"}},
@@ -2523,8 +2723,32 @@ mod tests {
             super::sanitize_request_candidate_extra_data_for_persistence(Some(admin.clone())),
             Some(admin.clone()),
         );
+        assert_eq!(
+            admin["scheduler_page_id"],
+            json!({"generation": 11, "ordinal": 2})
+        );
+        assert_eq!(admin["scheduler_generation"], 11);
+        assert_eq!(admin["scheduler_page_ordinal"], 2);
+        assert_eq!(admin["attempt_budget_stop_reason"], "attempts_exhausted");
+        assert_eq!(admin["attempt_budget_attempts"], 32);
+        assert_eq!(admin["attempt_budget_credential_attempts"], 16);
+        assert_eq!(admin["attempt_budget_provider_switches"], 4);
+        assert_eq!(admin["attempt_lifecycle_phase"], "client_committed");
+        assert_eq!(admin["retry_replay_admitted"], false);
         let public = super::sanitize_request_candidate_extra_data(Some(admin))
             .expect("public status should remain");
+        assert_eq!(
+            public["scheduler_page_id"],
+            json!({"generation": 11, "ordinal": 2})
+        );
+        assert_eq!(public["scheduler_generation"], 11);
+        assert_eq!(public["scheduler_page_ordinal"], 2);
+        assert_eq!(public["attempt_budget_stop_reason"], "attempts_exhausted");
+        assert_eq!(public["attempt_budget_attempts"], 32);
+        assert_eq!(public["attempt_budget_credential_attempts"], 16);
+        assert_eq!(public["attempt_budget_provider_switches"], 4);
+        assert_eq!(public["attempt_lifecycle_phase"], "client_committed");
+        assert_eq!(public["retry_replay_admitted"], false);
         assert_eq!(public["upstream_response"]["status_code"], 400);
         assert!(public["upstream_response"].get("body").is_none());
         assert!(public["error_flow"].get("message").is_none());

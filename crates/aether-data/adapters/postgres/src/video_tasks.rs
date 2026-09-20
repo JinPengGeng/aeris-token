@@ -3,7 +3,7 @@ use futures_util::{stream::TryStream, TryStreamExt};
 use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use aether_data_contracts::repository::video_tasks::{
-    StoredVideoTask, UpsertVideoTask, VideoTaskLookupKey, VideoTaskModelCount,
+    StoredVideoTask, UpsertVideoTask, VideoTaskClaim, VideoTaskLookupKey, VideoTaskModelCount,
     VideoTaskQueryFilter, VideoTaskReadRepository, VideoTaskStatus, VideoTaskStatusCount,
     VideoTaskWriteRepository,
 };
@@ -13,6 +13,7 @@ use crate::error::SqlxResultExt;
 
 const SELECT_VIDEO_TASK_COLUMNS_PREFIX: &str = r#"
   id,
+  row_revision,
   short_id,
   request_id,
   user_id,
@@ -130,6 +131,7 @@ fn list_due_sql() -> String {
 fn select_video_task_page_summary_columns() -> &'static str {
     r#"
   id,
+  row_revision,
   NULL::TEXT AS short_id,
   request_id,
   user_id,
@@ -189,10 +191,13 @@ fn claim_due_sql() -> String {
 )
 UPDATE video_tasks
 SET next_poll_at = TO_TIMESTAMP($4),
-    updated_at = TO_TIMESTAMP($5)
+    claim_fencing_token = claim_fencing_token + 1,
+    row_revision = row_revision + 1,
+    updated_at = GREATEST(updated_at, TO_TIMESTAMP($5))
 WHERE id IN (SELECT id FROM due)
 RETURNING
-{columns}
+{columns},
+claim_fencing_token
 "
     )
 }
@@ -313,8 +318,14 @@ ON CONFLICT (id) DO UPDATE SET
   created_at = COALESCE(video_tasks.created_at, EXCLUDED.created_at),
   submitted_at = EXCLUDED.submitted_at,
   completed_at = EXCLUDED.completed_at,
-  updated_at = EXCLUDED.updated_at
+  updated_at = GREATEST(video_tasks.updated_at, EXCLUDED.updated_at),
+  row_revision = video_tasks.row_revision + 1
 WHERE video_tasks.short_id IS NOT DISTINCT FROM EXCLUDED.short_id
+  AND video_tasks.row_revision = $38
+  AND (
+    (video_tasks.status IN ('pending', 'submitted', 'queued', 'processing') AND EXCLUDED.status <> 'deleted')
+    OR (EXCLUDED.status = 'deleted' AND video_tasks.status IN ('completed', 'failed'))
+  )
   AND video_tasks.request_id IS NOT DISTINCT FROM EXCLUDED.request_id
   AND video_tasks.user_id IS NOT DISTINCT FROM EXCLUDED.user_id
   AND video_tasks.api_key_id IS NOT DISTINCT FROM EXCLUDED.api_key_id
@@ -375,9 +386,15 @@ fn update_if_active_sql() -> String {
   created_at = COALESCE(created_at, TO_TIMESTAMP($34)),
   submitted_at = TO_TIMESTAMP($35),
   completed_at = TO_TIMESTAMP($36),
-  updated_at = TO_TIMESTAMP($37)
+  updated_at = GREATEST(updated_at, TO_TIMESTAMP($37)),
+  row_revision = row_revision + 1
 WHERE id = $1
-  AND status = ANY($38)
+  AND (
+    (status = ANY($38) AND $22 <> 'deleted')
+    OR ($22 = 'deleted' AND status = ANY($40))
+  )
+  AND ($39::BIGINT IS NULL OR claim_fencing_token = $39)
+  AND row_revision = $41
   AND short_id IS NOT DISTINCT FROM $2
   AND request_id IS NOT DISTINCT FROM $3
   AND user_id IS NOT DISTINCT FROM $4
@@ -815,12 +832,13 @@ impl SqlxVideoTaskRepository {
             .bind(task.submitted_at_unix_secs.map(|value| value as f64))
             .bind(task.completed_at_unix_secs.map(|value| value as f64))
             .bind(task.updated_at_unix_secs as f64)
+            .bind(task.row_revision)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?
             .ok_or_else(|| {
                 DataLayerError::InvalidInput(format!(
-                    "video task {task_id} conflicts with persisted immutable identity"
+                    "video task {task_id} conflicts with persisted identity or revision"
                 ))
             })?;
 
@@ -830,6 +848,7 @@ impl SqlxVideoTaskRepository {
     pub async fn update_if_active(
         &self,
         mut task: UpsertVideoTask,
+        fencing_token: Option<i64>,
     ) -> Result<Option<StoredVideoTask>, DataLayerError> {
         task.sanitize_for_persistence();
         let sql = update_if_active_sql();
@@ -891,6 +910,9 @@ impl SqlxVideoTaskRepository {
             .bind(task.completed_at_unix_secs.map(|value| value as f64))
             .bind(task.updated_at_unix_secs as f64)
             .bind(vec!["pending", "submitted", "queued", "processing"])
+            .bind(fencing_token)
+            .bind(vec!["completed", "failed"])
+            .bind(task.row_revision)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -903,7 +925,7 @@ impl SqlxVideoTaskRepository {
         now_unix_secs: u64,
         claim_until_unix_secs: u64,
         limit: usize,
-    ) -> Result<Vec<StoredVideoTask>, DataLayerError> {
+    ) -> Result<Vec<VideoTaskClaim>, DataLayerError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -919,13 +941,18 @@ impl SqlxVideoTaskRepository {
                 .bind(claim_until_unix_secs as f64)
                 .bind(now_unix_secs as f64)
                 .fetch(&self.pool),
-            map_video_task_row,
+            map_video_task_claim_row,
         )
         .await?;
         tasks.sort_by(|left, right| {
-            left.next_poll_at_unix_secs
-                .cmp(&right.next_poll_at_unix_secs)
-                .then_with(|| left.updated_at_unix_secs.cmp(&right.updated_at_unix_secs))
+            left.task
+                .next_poll_at_unix_secs
+                .cmp(&right.task.next_poll_at_unix_secs)
+                .then_with(|| {
+                    left.task
+                        .updated_at_unix_secs
+                        .cmp(&right.task.updated_at_unix_secs)
+                })
         });
         Ok(tasks)
     }
@@ -1022,8 +1049,9 @@ impl VideoTaskWriteRepository for SqlxVideoTaskRepository {
     async fn update_if_active(
         &self,
         task: UpsertVideoTask,
+        fencing_token: Option<i64>,
     ) -> Result<Option<StoredVideoTask>, DataLayerError> {
-        Self::update_if_active(self, task).await
+        Self::update_if_active(self, task, fencing_token).await
     }
 
     async fn claim_due(
@@ -1031,7 +1059,7 @@ impl VideoTaskWriteRepository for SqlxVideoTaskRepository {
         now_unix_secs: u64,
         claim_until_unix_secs: u64,
         limit: usize,
-    ) -> Result<Vec<StoredVideoTask>, DataLayerError> {
+    ) -> Result<Vec<VideoTaskClaim>, DataLayerError> {
         Self::claim_due(self, now_unix_secs, claim_until_unix_secs, limit).await
     }
 }
@@ -1133,7 +1161,7 @@ fn map_video_task_row(row: &PgRow) -> Result<StoredVideoTask, DataLayerError> {
             .map_postgres_err()?
             .as_str(),
     )?;
-    StoredVideoTask::new(
+    let mut task = StoredVideoTask::new(
         row.try_get("id").map_postgres_err()?,
         row.try_get("short_id").map_postgres_err()?,
         row.try_get("request_id").map_postgres_err()?,
@@ -1171,7 +1199,18 @@ fn map_video_task_row(row: &PgRow) -> Result<StoredVideoTask, DataLayerError> {
         row.try_get("error_message").map_postgres_err()?,
         row.try_get("video_url").map_postgres_err()?,
         row.try_get("request_metadata").map_postgres_err()?,
-    )
+    )?;
+    task.row_revision = row.try_get("row_revision").map_postgres_err()?;
+    Ok(task)
+}
+
+fn map_video_task_claim_row(row: &PgRow) -> Result<VideoTaskClaim, DataLayerError> {
+    Ok(VideoTaskClaim {
+        task: map_video_task_row(row)?,
+        fencing_token: row
+            .try_get::<i64, _>("claim_fencing_token")
+            .map_postgres_err()?,
+    })
 }
 
 #[cfg(test)]
@@ -1257,6 +1296,15 @@ mod tests {
         }
         assert!(sql.contains("NULL::jsonb AS original_request_body"));
         assert!(sql.contains("FOR UPDATE SKIP LOCKED"));
+        assert!(sql.contains("claim_fencing_token = claim_fencing_token + 1"));
+        assert!(sql.contains("claim_fencing_token"));
+
+        let update_sql = update_if_active_sql();
+        assert!(update_sql.contains("claim_fencing_token = $39"));
+        assert!(update_sql.contains("$39::BIGINT IS NULL"));
+        assert!(update_sql.contains("row_revision = $41"));
+        assert!(update_sql.contains("status = ANY($38) AND $22 <> 'deleted'"));
+        assert!(update_sql.contains("$22 = 'deleted' AND status = ANY($40)"));
     }
 
     #[tokio::test]
@@ -1280,6 +1328,7 @@ mod tests {
         for api_format in ["openai:video", "gemini:video"] {
             let task_id = uuid::Uuid::new_v4().to_string();
             let original = UpsertVideoTask {
+                row_revision: 0,
                 id: task_id.clone(),
                 short_id: Some(uuid::Uuid::new_v4().simple().to_string()[..16].to_string()),
                 request_id: format!("request-{task_id}"),
@@ -1327,13 +1376,18 @@ mod tests {
             assert_eq!(stored.api_key_name, original.api_key_name);
             assert!(stored.original_request_body.is_none());
             assert!(stored.request_metadata.is_none());
+            assert_eq!(stored.row_revision, 1);
+            assert!(repository.upsert(original.clone()).await.is_err());
 
             let mut claimed = repository
                 .claim_due(20, 50, 10)
                 .await
                 .expect("task should be claimed");
             assert_eq!(claimed.len(), 1);
-            let mut completion: UpsertVideoTask = claimed.pop().expect("claimed task").into();
+            let claim = claimed.pop().expect("claimed task");
+            assert_eq!(claim.task.row_revision, stored.row_revision + 1);
+            let fencing_token = claim.fencing_token;
+            let mut completion: UpsertVideoTask = claim.task.into();
             stored
                 .ensure_immutable_identity_matches(&completion)
                 .expect("claim must preserve task identity");
@@ -1341,10 +1395,56 @@ mod tests {
             let mut mismatched = completion.clone();
             mismatched.duration_seconds = Some(99);
             assert!(repository
-                .update_if_active(mismatched)
+                .update_if_active(mismatched, Some(fencing_token))
                 .await
                 .expect("guarded update should execute")
                 .is_none());
+
+            let mut reclaimed = repository
+                .claim_due(50, 80, 10)
+                .await
+                .expect("expired claim should be reclaimed");
+            assert_eq!(reclaimed.len(), 1);
+            let reclaimed_claim = reclaimed.pop().expect("reclaimed task");
+            let reclaimed_fencing_token = reclaimed_claim.fencing_token;
+            assert_eq!(reclaimed_fencing_token, fencing_token + 1);
+            assert_ne!(reclaimed_fencing_token, fencing_token);
+            assert_eq!(
+                reclaimed_claim.task.row_revision,
+                completion.row_revision + 1
+            );
+            let mut stale_completion = completion.clone();
+            stale_completion.status = VideoTaskStatus::Completed;
+            stale_completion.progress_percent = 100;
+            stale_completion.next_poll_at_unix_secs = None;
+            stale_completion.completed_at_unix_secs = Some(51);
+            stale_completion.updated_at_unix_secs = 51;
+            assert!(repository
+                .update_if_active(stale_completion.clone(), Some(fencing_token))
+                .await
+                .expect("stale update should execute")
+                .is_none());
+            assert!(repository
+                .update_if_active(stale_completion, None)
+                .await
+                .expect("stale snapshot without a claim should execute")
+                .is_none());
+
+            // Both writers observed the same row and second. Only one may commit.
+            let progress = UpsertVideoTask {
+                progress_percent: 60,
+                ..reclaimed_claim.task.clone().into()
+            };
+            let (first, second) = tokio::join!(
+                repository.update_if_active(progress.clone(), Some(reclaimed_fencing_token)),
+                repository.update_if_active(progress, Some(reclaimed_fencing_token)),
+            );
+            let first = first.expect("first CAS");
+            let second = second.expect("second CAS");
+            assert_ne!(first.is_some(), second.is_some());
+            let progressed = first.or(second).expect("one writer wins");
+
+            completion = progressed.into();
             completion.status = VideoTaskStatus::Completed;
             completion.progress_percent = 100;
             completion.next_poll_at_unix_secs = None;
@@ -1355,11 +1455,16 @@ mod tests {
                     .to_string(),
             );
             let completed = repository
-                .update_if_active(completion.clone())
+                .update_if_active(completion.clone(), Some(reclaimed_fencing_token))
                 .await
                 .expect("completion should execute")
                 .expect("matching active task should complete");
             assert_eq!(completed.video_url, completion.video_url);
+            assert_eq!(completed.row_revision, completion.row_revision + 1);
+            assert_eq!(
+                completed.updated_at_unix_secs, 50,
+                "clock skew must not lower the timestamp"
+            );
             let reloaded = repository
                 .find(VideoTaskLookupKey::Id(&task_id))
                 .await
@@ -1372,6 +1477,116 @@ mod tests {
             assert_eq!(reloaded.size, original.size);
             assert_eq!(reloaded.username, original.username);
             assert!(reloaded.request_metadata.is_none());
+            assert_eq!(reloaded.row_revision, completed.row_revision);
+            let summaries = repository
+                .list_page_summary(&VideoTaskQueryFilter::default(), 0, 100)
+                .await
+                .expect("admin summary projection must decode revisions");
+            assert_eq!(
+                summaries
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .expect("summary row")
+                    .row_revision,
+                completed.row_revision,
+            );
+
+            for (sql, key_delete) in [
+                (crate::auth::video_task_anonymization_sql(), true),
+                (crate::users::video_task_anonymization_sql(), false),
+            ] {
+                let id = uuid::Uuid::new_v4().to_string();
+                let identity = uuid::Uuid::new_v4().to_string();
+                let before = repository
+                    .upsert(UpsertVideoTask {
+                        id: id.clone(),
+                        short_id: Some(id[..16].to_string()),
+                        request_id: id.clone(),
+                        user_id: Some(identity.clone()),
+                        api_key_id: Some(identity.clone()),
+                        status: VideoTaskStatus::Processing,
+                        next_poll_at_unix_secs: None,
+                        ..original.clone()
+                    })
+                    .await
+                    .expect("anonymization fixture");
+                sqlx::query(sql)
+                    .bind(&identity)
+                    .execute(repository.pool())
+                    .await
+                    .expect("production anonymization SQL");
+                let after = repository
+                    .find(VideoTaskLookupKey::Id(&id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(after.row_revision, before.row_revision + 1);
+                assert!(after.api_key_name.is_none());
+                if !key_delete {
+                    assert!(after.username.is_none());
+                }
+                let stale: UpsertVideoTask = before.into();
+                assert!(repository
+                    .update_if_active(stale.clone(), None)
+                    .await
+                    .unwrap()
+                    .is_none());
+                assert!(repository.upsert(stale).await.is_err());
+                assert_eq!(
+                    repository
+                        .find(VideoTaskLookupKey::Id(&id))
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    after
+                );
+            }
+
+            for from in [
+                VideoTaskStatus::Pending,
+                VideoTaskStatus::Submitted,
+                VideoTaskStatus::Queued,
+                VideoTaskStatus::Processing,
+                VideoTaskStatus::Completed,
+                VideoTaskStatus::Failed,
+                VideoTaskStatus::Cancelled,
+                VideoTaskStatus::Expired,
+                VideoTaskStatus::Deleted,
+            ] {
+                for guarded in [false, true] {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let inserted = repository
+                        .upsert(UpsertVideoTask {
+                            id: id.clone(),
+                            short_id: Some(id[..16].to_string()),
+                            request_id: id,
+                            status: from,
+                            next_poll_at_unix_secs: None,
+                            ..original.clone()
+                        })
+                        .await
+                        .expect("matrix row");
+                    let update = UpsertVideoTask {
+                        status: VideoTaskStatus::Deleted,
+                        ..inserted.into()
+                    };
+                    let allowed =
+                        matches!(from, VideoTaskStatus::Completed | VideoTaskStatus::Failed);
+                    if guarded {
+                        assert_eq!(
+                            repository
+                                .update_if_active(update, None)
+                                .await
+                                .unwrap()
+                                .is_some(),
+                            allowed,
+                            "{from:?}"
+                        );
+                    } else {
+                        assert_eq!(repository.upsert(update).await.is_ok(), allowed, "{from:?}");
+                    }
+                }
+            }
         }
         repository.pool().close().await;
     }
@@ -1411,6 +1626,7 @@ mod tests {
         let _ = VideoTaskWriteRepository::upsert(
             &repository,
             UpsertVideoTask {
+                row_revision: 0,
                 id: "task-1".to_string(),
                 short_id: Some("short-task-1".to_string()),
                 request_id: "request-1".to_string(),
@@ -1459,6 +1675,7 @@ mod tests {
         let _ = VideoTaskWriteRepository::update_if_active(
             &repository,
             UpsertVideoTask {
+                row_revision: 0,
                 id: "task-1".to_string(),
                 short_id: Some("short-task-1".to_string()),
                 request_id: "request-1".to_string(),
@@ -1497,6 +1714,7 @@ mod tests {
                 video_url: None,
                 request_metadata: None,
             },
+            None,
         )
         .await;
     }

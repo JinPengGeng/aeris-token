@@ -79,8 +79,8 @@ live targets，在取消场景因 `terminal_facts` 为 NULL 失败。原因是
 与 admission closed 同时可见，保留后续严格状态断言。该修正未修改生产
 取消语义。环境文档修复 `cc62835c3` 的 Hosted shell fixtures 已通过。
 
-前门每日实际费用计数仍未完成，后续方案与验收见
-[每日费用账本决策](issue-300-daily-cost-ledger.md)。
+在此历史检查点，前门每日实际费用计数尚未完成；其后已集成，当前验收见
+本文顶部及[每日费用账本决策](issue-300-daily-cost-ledger.md)。
 
 ### 主线程实测修正
 
@@ -112,7 +112,11 @@ unlimited 的初版断言错误地要求现金余额变为 -.06。核对现有�
 - `live_public_images_reject_unbounded_and_stream_before_every_account_shortcut`
 - `live_public_image_retry_reserves_each_send_and_retains_unknown_hold`：真实公共请求候选重试；余额 .10 只发送首次 .08，余额 .20 可独立授权第二次并记 .06；两者均保留首次 Unknown hold，单父、多独立 attempt/token。
 
-每日硬额度仍是未完成项。合同提案记录在 `/private/tmp/aeris-attempt-daily-quota-contract-proposal.md`：必须与资金在同一事务占用 `known actual + held + 新授权`，Unknown 不可由旧 TTL/父失败分支释放；主线程还在协调独立 attempt quota 审查意见。本轮没有删除旧 token 拒绝或修改数据字段，不能把此拒绝算作每日硬额度集成完成。
+此处是 hard plan quota 接入前的历史记录：当时尚未完成与资金同事务的
+`known actual + held + 新授权` 准入，Unknown 不可由旧 TTL/父失败分支释放。
+该约束其后已由[逐 attempt hard plan quota](issue-300-attempt-quota.md) 实现，
+entitlement 的 grant 和 usage date 在授权时冻结。独立的 user/key 每日实际费用
+计数保留既定的 fail-open 前门检查语义；这里不再列出新增自然日硬准入任务。
 
 ## 集成复审修订
 

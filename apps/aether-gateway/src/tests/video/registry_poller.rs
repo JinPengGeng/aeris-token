@@ -19,6 +19,7 @@ use super::{
 
 fn sample_due_openai_task(upstream_base_url: &str) -> UpsertVideoTask {
     UpsertVideoTask {
+        row_revision: 0,
         id: "task-local-123".to_string(),
         short_id: Some("task-local-123".to_string()),
         request_id: "request-video-poller-local-123".to_string(),

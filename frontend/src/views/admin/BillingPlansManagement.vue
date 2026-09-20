@@ -1231,6 +1231,7 @@ import {
 } from '@/components/ui'
 import { EmptyState, LoadingState, MultiSelect } from '@/components/common'
 import { CardSection, PageContainer, PageHeader } from '@/components/layout'
+import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { useI18n } from '@/i18n'
 import { parseApiError } from '@/utils/errorParser'
@@ -1320,6 +1321,7 @@ const MAX_USAGE_POLICY_COST_USD = Number.MAX_SAFE_INTEGER / 100_000_000
 let localIdSequence = 0
 
 const { success, error: showError } = useToast()
+const { confirmDanger } = useConfirm()
 const { legacyT } = useI18n()
 
 const loading = ref(true)
@@ -2282,8 +2284,9 @@ async function togglePlanStatus(plan: BillingPlan) {
 
 async function deletePlan(plan: BillingPlan) {
   if (deletingPlanId.value) return
-  const confirmed = window.confirm(
-    legacyT(`确定删除套餐「${plan.title}」吗？\n\n已有订单或权益的套餐不能删除，请改为停用。删除后无法恢复。`)
+  const confirmed = await confirmDanger(
+    legacyT(`确定删除套餐「${plan.title}」吗？\n\n已有订单或权益的套餐不能删除，请改为停用。删除后无法恢复。`),
+    legacyT('删除套餐')
   )
   if (!confirmed) return
 

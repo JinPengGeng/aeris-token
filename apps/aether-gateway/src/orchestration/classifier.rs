@@ -14,16 +14,77 @@ struct ParsedLocalErrorResponse {
 pub(crate) struct LocalFailoverInput<'a> {
     pub(crate) status_code: u16,
     pub(crate) response_text: Option<&'a str>,
+    pub(crate) failure_origin: FailureOrigin,
 }
 
 impl<'a> LocalFailoverInput<'a> {
     pub(crate) fn new(status_code: u16, response_text: Option<&'a str>) -> Self {
+        Self::trusted(
+            status_code,
+            response_text,
+            failure_origin_from_upstream_response(status_code, response_text),
+        )
+    }
+
+    pub(crate) fn trusted(
+        status_code: u16,
+        response_text: Option<&'a str>,
+        failure_origin: FailureOrigin,
+    ) -> Self {
         Self {
             status_code,
             response_text: response_text
                 .map(str::trim)
                 .filter(|value| !value.is_empty()),
+            failure_origin,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureOrigin {
+    Request,
+    UpstreamCredential,
+    UpstreamProvider,
+    Transport,
+    Internal,
+    Unknown,
+}
+
+impl FailureOrigin {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::UpstreamCredential => "upstream_credential",
+            Self::UpstreamProvider => "upstream_provider",
+            Self::Transport => "transport",
+            Self::Internal => "internal",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+pub(crate) fn failure_origin_from_upstream_response(
+    status_code: u16,
+    response_text: Option<&str>,
+) -> FailureOrigin {
+    if status_code == 401 {
+        return FailureOrigin::UpstreamCredential;
+    }
+    if super::oauth_error::oauth_status_proves_access_token_invalid(status_code, response_text) {
+        return FailureOrigin::UpstreamCredential;
+    }
+    FailureOrigin::UpstreamProvider
+}
+
+pub(crate) fn failure_origin_from_embedded_upstream_error(
+    status_code: u16,
+    response_text: Option<&str>,
+) -> FailureOrigin {
+    if super::oauth_error::oauth_status_proves_access_token_invalid(status_code, response_text) {
+        FailureOrigin::UpstreamCredential
+    } else {
+        FailureOrigin::UpstreamProvider
     }
 }
 
@@ -88,6 +149,18 @@ pub(crate) enum FailureRetryAction {
     NextEndpoint,
 }
 
+impl FailureRetryAction {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::SameCredential => "same_credential",
+            Self::NextCandidate => "next_candidate",
+            Self::NextCredential => "next_credential",
+            Self::NextEndpoint => "next_endpoint",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FailureScope {
     None,
@@ -98,6 +171,16 @@ pub(crate) enum FailureScope {
 }
 
 impl FailureScope {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Credential => "credential",
+            Self::CredentialModel => "credential_model",
+            Self::Endpoint => "endpoint",
+            Self::Provider => "provider",
+        }
+    }
+
     pub(crate) const fn affects_credential(self) -> bool {
         matches!(self, Self::Credential | Self::CredentialModel)
     }
@@ -113,6 +196,16 @@ pub(crate) enum FailureTokenAction {
     ForceRefresh,
     #[allow(dead_code)]
     Quarantine,
+}
+
+impl FailureTokenAction {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ForceRefresh => "force_refresh",
+            Self::Quarantine => "quarantine",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +236,18 @@ pub(crate) const fn failure_disposition_from_local_classification(
     classification: LocalFailoverClassification,
     status_code: u16,
 ) -> FailureDisposition {
+    failure_disposition_from_local_classification_with_origin(
+        classification,
+        status_code,
+        FailureOrigin::UpstreamProvider,
+    )
+}
+
+pub(crate) const fn failure_disposition_from_local_classification_with_origin(
+    classification: LocalFailoverClassification,
+    status_code: u16,
+    failure_origin: FailureOrigin,
+) -> FailureDisposition {
     match classification {
         LocalFailoverClassification::StopStatusCode
         | LocalFailoverClassification::StopErrorPattern
@@ -159,18 +264,57 @@ pub(crate) const fn failure_disposition_from_local_classification(
             FailureTokenAction::None,
             status_code >= 400,
         ),
-        LocalFailoverClassification::RetrySuccessPattern => FailureDisposition::new(
-            FailureRetryAction::NextCandidate,
-            FailureScope::None,
-            FailureTokenAction::None,
-            false,
-        ),
+        LocalFailoverClassification::RetrySuccessPattern => {
+            retry_disposition_for_origin(failure_origin, status_code, false)
+        }
         LocalFailoverClassification::RetryStatusCode
-        | LocalFailoverClassification::RetryUpstreamFailure => FailureDisposition::new(
+        | LocalFailoverClassification::RetryUpstreamFailure => {
+            retry_disposition_for_origin(failure_origin, status_code, false)
+        }
+    }
+}
+
+const fn retry_disposition_for_origin(
+    failure_origin: FailureOrigin,
+    status_code: u16,
+    preserve_upstream_error: bool,
+) -> FailureDisposition {
+    match (failure_origin, status_code) {
+        (FailureOrigin::UpstreamCredential, 401) => FailureDisposition::new(
+            FailureRetryAction::NextCredential,
+            FailureScope::Credential,
+            FailureTokenAction::ForceRefresh,
+            preserve_upstream_error,
+        ),
+        (FailureOrigin::UpstreamCredential, 403) => FailureDisposition::new(
+            FailureRetryAction::NextCredential,
+            FailureScope::Credential,
+            FailureTokenAction::None,
+            preserve_upstream_error,
+        ),
+        (FailureOrigin::UpstreamProvider, 529) => FailureDisposition::new(
+            FailureRetryAction::NextEndpoint,
+            FailureScope::Provider,
+            FailureTokenAction::None,
+            preserve_upstream_error,
+        ),
+        (FailureOrigin::UpstreamProvider, 500..=599) => FailureDisposition::new(
+            FailureRetryAction::NextEndpoint,
+            FailureScope::Endpoint,
+            FailureTokenAction::None,
+            preserve_upstream_error,
+        ),
+        (FailureOrigin::UpstreamProvider, _) => FailureDisposition::new(
             FailureRetryAction::NextCandidate,
             FailureScope::None,
             FailureTokenAction::None,
-            false,
+            preserve_upstream_error,
+        ),
+        _ => FailureDisposition::new(
+            FailureRetryAction::Stop,
+            FailureScope::None,
+            FailureTokenAction::None,
+            true,
         ),
     }
 }
@@ -227,9 +371,8 @@ pub(crate) const fn classify_anthropic_failure_disposition(
             _ => generic,
         };
     }
-
     match status_code {
-        400 => FailureDisposition::new(
+        400 | 413 => FailureDisposition::new(
             FailureRetryAction::Stop,
             FailureScope::None,
             FailureTokenAction::None,
@@ -250,12 +393,6 @@ pub(crate) const fn classify_anthropic_failure_disposition(
         404 => FailureDisposition::new(
             FailureRetryAction::NextEndpoint,
             FailureScope::Endpoint,
-            FailureTokenAction::None,
-            true,
-        ),
-        413 => FailureDisposition::new(
-            FailureRetryAction::Stop,
-            FailureScope::None,
             FailureTokenAction::None,
             true,
         ),
@@ -281,6 +418,57 @@ pub(crate) const fn classify_anthropic_failure_disposition(
     }
 }
 
+pub(crate) const fn classify_anthropic_failure_disposition_with_origin(
+    classification: LocalFailoverClassification,
+    status_code: u16,
+    failure_origin: FailureOrigin,
+) -> FailureDisposition {
+    if matches!(
+        classification,
+        LocalFailoverClassification::StopStatusCode
+            | LocalFailoverClassification::StopErrorPattern
+            | LocalFailoverClassification::StopExecutionError
+            | LocalFailoverClassification::StopCyberPolicy
+    ) {
+        return if matches!(failure_origin, FailureOrigin::UpstreamCredential)
+            && matches!(status_code, 401 | 403)
+        {
+            classify_anthropic_failure_disposition(classification, status_code)
+        } else {
+            failure_disposition_from_local_classification_with_origin(
+                classification,
+                status_code,
+                failure_origin,
+            )
+        };
+    }
+
+    match failure_origin {
+        FailureOrigin::UpstreamProvider if matches!(status_code, 401 | 403) => {
+            failure_disposition_from_local_classification_with_origin(
+                classification,
+                status_code,
+                failure_origin,
+            )
+        }
+        FailureOrigin::UpstreamProvider => {
+            classify_anthropic_failure_disposition(classification, status_code)
+        }
+        FailureOrigin::UpstreamCredential if matches!(status_code, 401 | 403) => {
+            classify_anthropic_failure_disposition(classification, status_code)
+        }
+        FailureOrigin::UpstreamCredential
+        | FailureOrigin::Request
+        | FailureOrigin::Transport
+        | FailureOrigin::Internal
+        | FailureOrigin::Unknown => failure_disposition_from_local_classification_with_origin(
+            classification,
+            status_code,
+            failure_origin,
+        ),
+    }
+}
+
 pub(crate) fn classify_failure_disposition(
     provider_api_format: &str,
     classification: LocalFailoverClassification,
@@ -293,6 +481,30 @@ pub(crate) fn classify_failure_disposition(
         classify_anthropic_failure_disposition(classification, status_code)
     } else {
         failure_disposition_from_local_classification(classification, status_code)
+    }
+}
+
+pub(crate) fn classify_failure_disposition_with_origin(
+    provider_api_format: &str,
+    classification: LocalFailoverClassification,
+    status_code: u16,
+    failure_origin: FailureOrigin,
+) -> FailureDisposition {
+    if provider_api_format
+        .trim()
+        .eq_ignore_ascii_case("claude:messages")
+    {
+        classify_anthropic_failure_disposition_with_origin(
+            classification,
+            status_code,
+            failure_origin,
+        )
+    } else {
+        failure_disposition_from_local_classification_with_origin(
+            classification,
+            status_code,
+            failure_origin,
+        )
     }
 }
 
@@ -347,6 +559,21 @@ pub(crate) fn classify_local_failover(
         return LocalFailoverClassification::StopErrorPattern;
     }
 
+    if matches!(
+        input.failure_origin,
+        FailureOrigin::Request
+            | FailureOrigin::Transport
+            | FailureOrigin::Internal
+            | FailureOrigin::Unknown
+    ) {
+        return LocalFailoverClassification::StopStatusCode;
+    }
+    if input.failure_origin == FailureOrigin::UpstreamCredential
+        && !matches!(input.status_code, 401 | 403)
+    {
+        return LocalFailoverClassification::StopStatusCode;
+    }
+
     if input.status_code == 200
         && input.response_text.is_some_and(|text| {
             policy
@@ -362,14 +589,15 @@ pub(crate) fn classify_local_failover(
         return LocalFailoverClassification::RetryStatusCode;
     }
 
-    if should_failover_local_upstream_status(
-        input.status_code,
-        policy.retry_client_errors_by_default,
-    ) {
+    if should_failover_local_upstream_status(input.status_code, input.failure_origin) {
         return LocalFailoverClassification::RetryUpstreamFailure;
     }
 
-    LocalFailoverClassification::UseDefault
+    if input.status_code >= 400 {
+        LocalFailoverClassification::StopStatusCode
+    } else {
+        LocalFailoverClassification::UseDefault
+    }
 }
 
 pub(crate) fn local_failover_error_message(response_text: Option<&str>) -> Option<String> {
@@ -382,11 +610,12 @@ pub(crate) fn local_failover_error_message(response_text: Option<&str>) -> Optio
         .filter(|value| !value.is_empty())
 }
 
-fn should_failover_local_upstream_status(
-    status_code: u16,
-    retry_client_errors_by_default: bool,
-) -> bool {
-    status_code >= 500 || status_code >= 400 && retry_client_errors_by_default
+fn should_failover_local_upstream_status(status_code: u16, failure_origin: FailureOrigin) -> bool {
+    matches!(
+        (failure_origin, status_code),
+        (FailureOrigin::UpstreamCredential, 401 | 403)
+            | (FailureOrigin::UpstreamProvider, 408 | 429 | 500..=599)
+    )
 }
 
 fn local_error_response_has_cyber_policy_code(response_text: Option<&str>) -> bool {
@@ -617,9 +846,12 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        classify_anthropic_failure_disposition, classify_local_failover,
-        classify_local_transport_error, failure_disposition_from_local_classification,
-        FailureDisposition, FailureRetryAction, FailureScope, FailureTokenAction,
+        classify_anthropic_failure_disposition, classify_anthropic_failure_disposition_with_origin,
+        classify_failure_disposition, classify_local_failover, classify_local_transport_error,
+        failure_disposition_from_local_classification,
+        failure_disposition_from_local_classification_with_origin,
+        failure_origin_from_embedded_upstream_error, failure_origin_from_upstream_response,
+        FailureDisposition, FailureOrigin, FailureRetryAction, FailureScope, FailureTokenAction,
         LocalFailoverClassification, LocalFailoverInput, LocalTransportFailoverClassification,
     };
     use crate::orchestration::{LocalFailoverPolicy, LocalFailoverRegexRule};
@@ -784,12 +1016,12 @@ mod tests {
                 &policy,
                 LocalFailoverInput::new(400, Some(r#"{"error":{"code":"other"}}"#))
             ),
-            LocalFailoverClassification::RetryUpstreamFailure
+            LocalFailoverClassification::StopStatusCode
         );
     }
 
     #[test]
-    fn classifier_retries_cyber_policy_when_policy_disabled() {
+    fn classifier_keeps_client_errors_stopped_when_cyber_policy_is_disabled() {
         let policy = LocalFailoverPolicy {
             stop_cyber_policy_errors: false,
             ..LocalFailoverPolicy::default()
@@ -802,7 +1034,7 @@ mod tests {
                     Some(r#"{"error":{"code":"cyber_policy","message":"flagged"}}"#)
                 )
             ),
-            LocalFailoverClassification::RetryUpstreamFailure
+            LocalFailoverClassification::StopStatusCode
         );
     }
 
@@ -820,86 +1052,171 @@ mod tests {
     }
 
     #[test]
-    fn classifier_retries_all_error_statuses_without_custom_rule() {
-        for (status_code, response_text) in [
+    fn classifier_defaults_to_fail_closed_for_client_errors() {
+        for (status_code, failure_origin, expected) in [
             (
                 400,
-                "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long\"}}",
+                FailureOrigin::UpstreamProvider,
+                LocalFailoverClassification::StopStatusCode,
             ),
             (
-                400,
-                "{\"error\":{\"message\":\"Unsupported parameter: max_tokens is not supported with this model\"}}",
+                405,
+                FailureOrigin::UpstreamProvider,
+                LocalFailoverClassification::StopStatusCode,
             ),
             (
-                400,
-                "{\"error\":{\"message\":\"Unknown parameter: 'tools[0].n'.\"}}",
+                406,
+                FailureOrigin::UpstreamProvider,
+                LocalFailoverClassification::StopStatusCode,
             ),
             (
-                400,
-                "{\"error\":{\"message\":\"invalid model for this endpoint\"}}",
+                413,
+                FailureOrigin::UpstreamProvider,
+                LocalFailoverClassification::StopStatusCode,
             ),
             (
-                400,
-                "{\"error\":{\"message\":\"invalid `signature` in `thinking` block: signature is for a different request\"}}",
+                414,
+                FailureOrigin::UpstreamProvider,
+                LocalFailoverClassification::StopStatusCode,
             ),
             (
-                400,
-                "{\"error\":{\"message\":\"resource_exhausted: quota reached\"}}",
+                415,
+                FailureOrigin::UpstreamProvider,
+                LocalFailoverClassification::StopStatusCode,
+            ),
+            (
+                422,
+                FailureOrigin::UpstreamProvider,
+                LocalFailoverClassification::StopStatusCode,
             ),
             (
                 401,
-                "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your authentication token has been invalidated. Please try signing in again.\"}}",
-            ),
-            (
-                402,
-                "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"payment required: credit balance exhausted\"}}",
+                FailureOrigin::UpstreamCredential,
+                LocalFailoverClassification::RetryUpstreamFailure,
             ),
             (
                 403,
-                "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"verify your account before continuing\"}}",
+                FailureOrigin::UpstreamCredential,
+                LocalFailoverClassification::RetryUpstreamFailure,
             ),
-            (429, "{\"error\":{\"message\":\"rate limited\"}}"),
-            (500, "{\"error\":{\"message\":\"upstream failed\"}}"),
+            (
+                403,
+                FailureOrigin::UpstreamProvider,
+                LocalFailoverClassification::StopStatusCode,
+            ),
+            (
+                408,
+                FailureOrigin::UpstreamProvider,
+                LocalFailoverClassification::RetryUpstreamFailure,
+            ),
+            (
+                429,
+                FailureOrigin::UpstreamProvider,
+                LocalFailoverClassification::RetryUpstreamFailure,
+            ),
+            (
+                500,
+                FailureOrigin::UpstreamProvider,
+                LocalFailoverClassification::RetryUpstreamFailure,
+            ),
+            (
+                429,
+                FailureOrigin::Request,
+                LocalFailoverClassification::StopStatusCode,
+            ),
+            (
+                500,
+                FailureOrigin::Internal,
+                LocalFailoverClassification::StopStatusCode,
+            ),
+            (
+                500,
+                FailureOrigin::Unknown,
+                LocalFailoverClassification::StopStatusCode,
+            ),
         ] {
             assert_eq!(
                 classify_local_failover(
                     &LocalFailoverPolicy::default(),
-                    LocalFailoverInput::new(status_code, Some(response_text))
+                    LocalFailoverInput::trusted(status_code, None, failure_origin)
                 ),
-                LocalFailoverClassification::RetryUpstreamFailure
+                expected,
+                "status {status_code} with origin {failure_origin:?}",
             );
         }
     }
 
     #[test]
-    fn classifier_passes_through_client_errors_when_protocol_default_disables_failover() {
-        let policy = LocalFailoverPolicy {
-            retry_client_errors_by_default: false,
+    fn classifier_explicit_status_rules_override_defaults() {
+        let continue_policy = LocalFailoverPolicy {
+            continue_status_codes: [422].into_iter().collect(),
             ..LocalFailoverPolicy::default()
         };
 
-        for status_code in [400, 401, 429, 499] {
-            assert_eq!(
-                classify_local_failover(&policy, LocalFailoverInput::new(status_code, None)),
-                LocalFailoverClassification::UseDefault
-            );
-        }
         assert_eq!(
-            classify_local_failover(&policy, LocalFailoverInput::new(500, None)),
-            LocalFailoverClassification::RetryUpstreamFailure
+            classify_local_failover(&continue_policy, LocalFailoverInput::new(422, None)),
+            LocalFailoverClassification::RetryStatusCode
+        );
+        let stop_policy = LocalFailoverPolicy {
+            stop_status_codes: [429].into_iter().collect(),
+            ..LocalFailoverPolicy::default()
+        };
+        assert_eq!(
+            classify_local_failover(&stop_policy, LocalFailoverInput::new(429, None)),
+            LocalFailoverClassification::StopStatusCode
         );
     }
 
     #[test]
-    fn classifier_explicit_continue_rule_overrides_protocol_client_error_default() {
-        let policy = LocalFailoverPolicy {
-            continue_status_codes: [429].into_iter().collect(),
-            retry_client_errors_by_default: false,
+    fn trusted_credential_auth_defaults_to_next_credential() {
+        for (status_code, expected_token_action) in [
+            (401, FailureTokenAction::ForceRefresh),
+            (403, FailureTokenAction::None),
+        ] {
+            let classification = classify_local_failover(
+                &LocalFailoverPolicy::default(),
+                LocalFailoverInput::trusted(status_code, None, FailureOrigin::UpstreamCredential),
+            );
+            assert_eq!(
+                classification,
+                LocalFailoverClassification::RetryUpstreamFailure
+            );
+            let disposition = failure_disposition_from_local_classification_with_origin(
+                classification,
+                status_code,
+                FailureOrigin::UpstreamCredential,
+            );
+            assert_eq!(disposition.retry_action, FailureRetryAction::NextCredential);
+            assert_eq!(disposition.failure_scope, FailureScope::Credential);
+            assert_eq!(disposition.token_action, expected_token_action);
+        }
+    }
+
+    #[test]
+    fn trusted_credential_401_retries_by_default_and_honors_explicit_continue() {
+        let trusted_credential_401 = LocalFailoverInput::trusted(
+            401,
+            Some(r#"{"error":{"message":"invalid access token"}}"#),
+            FailureOrigin::UpstreamCredential,
+        );
+        assert_eq!(
+            classify_local_failover(&LocalFailoverPolicy::default(), trusted_credential_401),
+            LocalFailoverClassification::RetryUpstreamFailure
+        );
+
+        let explicit_continue = LocalFailoverPolicy {
+            continue_status_codes: [401].into_iter().collect(),
             ..LocalFailoverPolicy::default()
         };
-
         assert_eq!(
-            classify_local_failover(&policy, LocalFailoverInput::new(429, None)),
+            classify_local_failover(
+                &explicit_continue,
+                LocalFailoverInput::trusted(
+                    401,
+                    Some(r#"{"error":{"message":"invalid access token"}}"#),
+                    FailureOrigin::UpstreamCredential,
+                ),
+            ),
             LocalFailoverClassification::RetryStatusCode
         );
     }
@@ -980,6 +1297,23 @@ mod tests {
     }
 
     #[test]
+    fn legacy_anthropic_auth_failures_keep_credential_scope() {
+        for (status_code, token_action) in [
+            (401, FailureTokenAction::ForceRefresh),
+            (403, FailureTokenAction::None),
+        ] {
+            let disposition = classify_failure_disposition(
+                "claude:messages",
+                LocalFailoverClassification::RetryUpstreamFailure,
+                status_code,
+            );
+            assert_eq!(disposition.retry_action, FailureRetryAction::NextCredential);
+            assert_eq!(disposition.failure_scope, FailureScope::Credential);
+            assert_eq!(disposition.token_action, token_action);
+        }
+    }
+
+    #[test]
     fn anthropic_rate_limit_rotates_with_credential_model_scope() {
         let disposition = classify_anthropic_failure_disposition(
             LocalFailoverClassification::RetryUpstreamFailure,
@@ -990,6 +1324,19 @@ mod tests {
         assert_eq!(disposition.failure_scope, FailureScope::CredentialModel);
         assert!(disposition.failure_scope.affects_credential());
         assert!(!disposition.failure_scope.allows_key_wide_effects());
+        assert!(disposition.preserve_upstream_error);
+    }
+
+    #[test]
+    fn trusted_provider_anthropic_rate_limit_keeps_credential_model_rotation() {
+        let disposition = classify_anthropic_failure_disposition_with_origin(
+            LocalFailoverClassification::RetryUpstreamFailure,
+            429,
+            FailureOrigin::UpstreamProvider,
+        );
+
+        assert_eq!(disposition.retry_action, FailureRetryAction::NextCredential);
+        assert_eq!(disposition.failure_scope, FailureScope::CredentialModel);
         assert!(disposition.preserve_upstream_error);
     }
 
@@ -1028,6 +1375,45 @@ mod tests {
     }
 
     #[test]
+    fn trusted_provider_anthropic_not_found_keeps_endpoint_rotation() {
+        let disposition = classify_anthropic_failure_disposition_with_origin(
+            LocalFailoverClassification::RetryUpstreamFailure,
+            404,
+            FailureOrigin::UpstreamProvider,
+        );
+
+        assert_eq!(disposition.retry_action, FailureRetryAction::NextEndpoint);
+        assert_eq!(disposition.failure_scope, FailureScope::Endpoint);
+        assert!(disposition.preserve_upstream_error);
+    }
+
+    #[test]
+    fn trusted_provider_anthropic_explicit_403_continue_has_no_credential_retry_or_token_action() {
+        let policy = LocalFailoverPolicy {
+            continue_status_codes: [403].into_iter().collect(),
+            ..LocalFailoverPolicy::default()
+        };
+        let classification = classify_local_failover(
+            &policy,
+            LocalFailoverInput::trusted(
+                403,
+                Some(r#"{"error":{"message":"permission denied"}}"#),
+                FailureOrigin::UpstreamProvider,
+            ),
+        );
+        assert_eq!(classification, LocalFailoverClassification::RetryStatusCode);
+
+        let disposition = classify_anthropic_failure_disposition_with_origin(
+            classification,
+            403,
+            FailureOrigin::UpstreamProvider,
+        );
+        assert_eq!(disposition.retry_action, FailureRetryAction::NextCandidate);
+        assert_eq!(disposition.failure_scope, FailureScope::None);
+        assert_eq!(disposition.token_action, FailureTokenAction::None);
+    }
+
+    #[test]
     fn only_unscoped_and_credential_failures_allow_key_wide_effects() {
         assert!(FailureScope::None.allows_key_wide_effects());
         assert!(FailureScope::Credential.allows_key_wide_effects());
@@ -1052,5 +1438,84 @@ mod tests {
         );
         assert_eq!(overloaded.retry_action, FailureRetryAction::Stop);
         assert_eq!(overloaded.failure_scope, FailureScope::Provider);
+    }
+
+    #[test]
+    fn trusted_auth_origin_respects_explicit_stop_rules() {
+        let policy = LocalFailoverPolicy {
+            stop_status_codes: [401, 403].into_iter().collect(),
+            ..LocalFailoverPolicy::default()
+        };
+        for status_code in [401, 403] {
+            let input = LocalFailoverInput::trusted(
+                status_code,
+                Some(r#"{"error":{"message":"invalid access token"}}"#),
+                FailureOrigin::UpstreamCredential,
+            );
+            assert_eq!(
+                classify_local_failover(&policy, input),
+                LocalFailoverClassification::StopStatusCode
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_auth_stop_applies_credential_effects_only_to_trusted_credentials() {
+        for (status_code, token_action) in [
+            (401, FailureTokenAction::ForceRefresh),
+            (403, FailureTokenAction::None),
+        ] {
+            let disposition = classify_anthropic_failure_disposition_with_origin(
+                LocalFailoverClassification::StopStatusCode,
+                status_code,
+                FailureOrigin::UpstreamCredential,
+            );
+            assert_eq!(disposition.retry_action, FailureRetryAction::Stop);
+            assert_eq!(disposition.failure_scope, FailureScope::Credential);
+            assert_eq!(disposition.token_action, token_action);
+        }
+
+        for failure_origin in [
+            FailureOrigin::UpstreamProvider,
+            FailureOrigin::Request,
+            FailureOrigin::Internal,
+            FailureOrigin::Unknown,
+        ] {
+            for status_code in [401, 403] {
+                let disposition = classify_anthropic_failure_disposition_with_origin(
+                    LocalFailoverClassification::StopStatusCode,
+                    status_code,
+                    failure_origin,
+                );
+                assert_eq!(disposition.retry_action, FailureRetryAction::Stop);
+                assert_eq!(disposition.failure_scope, FailureScope::None);
+                assert_eq!(disposition.token_action, FailureTokenAction::None);
+            }
+        }
+    }
+
+    #[test]
+    fn direct_403_requires_trusted_oauth_proof() {
+        assert_eq!(
+            failure_origin_from_upstream_response(403, Some("permission denied")),
+            FailureOrigin::UpstreamProvider
+        );
+        assert_eq!(
+            failure_origin_from_upstream_response(403, Some("oauth token is expired")),
+            FailureOrigin::UpstreamCredential
+        );
+    }
+
+    #[test]
+    fn embedded_error_uses_parsed_status_and_never_infers_from_http_200() {
+        let body = Some("oauth token is expired");
+        assert_eq!(
+            failure_origin_from_embedded_upstream_error(200, body),
+            FailureOrigin::UpstreamProvider
+        );
+        assert_eq!(
+            failure_origin_from_embedded_upstream_error(403, body),
+            FailureOrigin::UpstreamCredential
+        );
     }
 }

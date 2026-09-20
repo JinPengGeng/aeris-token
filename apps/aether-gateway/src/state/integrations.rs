@@ -661,6 +661,13 @@ impl SchedulerRuntimeState for AppState {
         AppState::read_provider_quota_snapshot(self, provider_id).await
     }
 
+    async fn read_provider_quota_snapshot_uncached(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<StoredProviderQuotaSnapshot>, GatewayError> {
+        AppState::read_provider_quota_snapshot_uncached(self, provider_id).await
+    }
+
     async fn read_provider_catalog_providers_by_ids(
         &self,
         provider_ids: &[String],
@@ -680,6 +687,38 @@ impl SchedulerRuntimeState for AppState {
         limit: usize,
     ) -> Result<Vec<StoredRequestCandidate>, GatewayError> {
         AppState::read_recent_runtime_request_candidates(self, limit).await
+    }
+
+    async fn try_acquire_half_open_probe(
+        &self,
+        provider_key_id: &str,
+        api_format: &str,
+        circuit_breaker_by_format: Option<&serde_json::Value>,
+        now_unix_secs: u64,
+    ) -> crate::orchestration::HalfOpenProbeClaimOutcome {
+        crate::orchestration::try_acquire_half_open_probe(
+            self.runtime_state.as_ref(),
+            self.tunnel.local_instance_id(),
+            provider_key_id,
+            api_format,
+            circuit_breaker_by_format,
+            now_unix_secs,
+        )
+        .await
+    }
+
+    async fn renew_half_open_probe(
+        &self,
+        claim: &crate::orchestration::HalfOpenProbeClaim,
+    ) -> bool {
+        crate::orchestration::renew_half_open_probe(self.runtime_state.as_ref(), claim).await
+    }
+
+    async fn release_half_open_probe(
+        &self,
+        claim: crate::orchestration::HalfOpenProbeClaim,
+    ) -> bool {
+        crate::orchestration::release_half_open_probe(self.runtime_state.as_ref(), claim).await
     }
 
     fn provider_key_rpm_reset_at(&self, key_id: &str, now_unix_secs: u64) -> Option<u64> {

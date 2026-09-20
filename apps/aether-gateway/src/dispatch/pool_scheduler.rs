@@ -1998,12 +1998,16 @@ fn apply_pool_orchestration(
     orchestration: PoolCandidateOrchestration,
 ) -> EligibleLocalExecutionCandidate {
     let scheduler_affinity_epoch = candidate.orchestration.scheduler_affinity_epoch;
+    let scheduler_generation = candidate.orchestration.scheduler_generation;
+    let scheduler_page_ordinal = candidate.orchestration.scheduler_page_ordinal;
     let sticky_key_attempts = candidate.orchestration.sticky_key_attempts;
     candidate.orchestration = LocalExecutionCandidateMetadata {
         candidate_group_id: orchestration.candidate_group_id,
         pool_key_index: orchestration.pool_key_index,
         pool_key_lease: None,
         scheduler_affinity_epoch,
+        scheduler_generation,
+        scheduler_page_ordinal,
         sticky_key_attempts,
     };
     candidate
@@ -2364,6 +2368,8 @@ mod tests {
                 pool_key_index: Some(0),
                 pool_key_lease: None,
                 scheduler_affinity_epoch: None,
+                scheduler_generation: None,
+                scheduler_page_ordinal: None,
                 sticky_key_attempts: None,
             }
         );
@@ -2382,6 +2388,8 @@ mod tests {
                 pool_key_index: None,
                 pool_key_lease: None,
                 scheduler_affinity_epoch: None,
+                scheduler_generation: None,
+                scheduler_page_ordinal: None,
                 sticky_key_attempts: None,
             }
         );

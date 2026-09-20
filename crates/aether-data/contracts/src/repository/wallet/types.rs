@@ -2781,6 +2781,30 @@ pub trait WalletReadRepository: Send + Sync {
 
 #[async_trait]
 pub trait WalletWriteRepository: Send + Sync {
+    fn supports_refund_status_notifications(&self) -> bool {
+        false
+    }
+
+    async fn claim_refund_status_notifications(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<super::RefundStatusNotification>, crate::DataLayerError> {
+        let _ = limit;
+        Err(crate::DataLayerError::InvalidInput(
+            "refund notification outbox unavailable".into(),
+        ))
+    }
+
+    async fn complete_refund_status_notification(
+        &self,
+        input: super::CompleteRefundStatusNotificationInput,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = input;
+        Err(crate::DataLayerError::InvalidInput(
+            "refund notification outbox unavailable".into(),
+        ))
+    }
+
     /// Delete one wallet identified by its exact id and owner, but only when it has no
     /// financial or usage references. This is reserved for compensating a wallet created by
     /// an operation that has not completed; it must never be used to erase an established
@@ -2899,6 +2923,36 @@ pub trait WalletWriteRepository: Send + Sync {
         &self,
         input: CreateManualWalletRechargeInput,
     ) -> Result<Option<(StoredWalletSnapshot, StoredAdminPaymentOrder)>, crate::DataLayerError>;
+
+    /// `None` means unsupported without mutation; `Some(NotFound)` means the
+    /// wallet is missing. Applied results commit the business rows and intent
+    /// together. This does not add business request idempotency.
+    async fn adjust_wallet_balance_with_audit(
+        &self,
+        input: AdjustWalletBalanceInput,
+        audit: &crate::repository::audit::CreateAdminAuditLog,
+    ) -> Result<
+        Option<WalletMutationOutcome<(StoredWalletSnapshot, StoredAdminWalletTransaction)>>,
+        crate::DataLayerError,
+    > {
+        let _ = (input, audit);
+        Ok(None)
+    }
+
+    /// `None` means unsupported without mutation; `Some(NotFound)` means the
+    /// wallet is missing. Applied results commit the business rows and intent
+    /// together. This does not add business request idempotency.
+    async fn create_manual_wallet_recharge_with_audit(
+        &self,
+        input: CreateManualWalletRechargeInput,
+        audit: &crate::repository::audit::CreateAdminAuditLog,
+    ) -> Result<
+        Option<WalletMutationOutcome<(StoredWalletSnapshot, StoredAdminPaymentOrder)>>,
+        crate::DataLayerError,
+    > {
+        let _ = (input, audit);
+        Ok(None)
+    }
 
     async fn process_admin_wallet_refund(
         &self,

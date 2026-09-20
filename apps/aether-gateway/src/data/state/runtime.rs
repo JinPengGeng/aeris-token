@@ -1,13 +1,14 @@
 use super::{
     read_decision_trace, read_provider_transport_snapshot, read_request_candidate_trace,
-    AdjustWalletBalanceInput, AdminBillingCollectorRecord, AdminBillingCollectorWriteInput,
-    AdminBillingMutationOutcome, AdminBillingPresetApplyResult, AdminBillingRuleRecord,
-    AdminBillingRuleWriteInput, AdminPaymentOrderListQuery, AdminRedeemCodeBatchListQuery,
-    AdminRedeemCodeListQuery, AdminWalletLedgerQuery, AdminWalletListQuery,
-    AdminWalletRefundRequestListQuery, AnnouncementListQuery, AuditLogListQuery,
-    AuditLogWriteOutcome, BackgroundTaskListQuery, BackgroundTaskSummary,
-    BillingModelContextCacheKey, BillingModelContextCacheState, BillingModelContextInflightState,
-    BillingPlanRecord, BillingPlanWriteInput, CompareAndSwapPaymentOrderStripeClientSecretInput,
+    AdjustWalletBalanceInput, AdminAuditDeliveryFailureCode, AdminAuditDeliveryFailureOutcome,
+    AdminBillingCollectorRecord, AdminBillingCollectorWriteInput, AdminBillingMutationOutcome,
+    AdminBillingPresetApplyResult, AdminBillingRuleRecord, AdminBillingRuleWriteInput,
+    AdminPaymentOrderListQuery, AdminRedeemCodeBatchListQuery, AdminRedeemCodeListQuery,
+    AdminWalletLedgerQuery, AdminWalletListQuery, AdminWalletRefundRequestListQuery,
+    AnnouncementListQuery, AuditLogListQuery, AuditLogWriteOutcome, BackgroundTaskListQuery,
+    BackgroundTaskSummary, BillingModelContextCacheKey, BillingModelContextCacheState,
+    BillingModelContextInflightState, BillingPlanRecord, BillingPlanWriteInput,
+    ClaimedAdminAuditDelivery, CompareAndSwapPaymentOrderStripeClientSecretInput,
     CompleteAdminWalletRefundInput, CreateAdminAuditLog, CreateAdminRedeemCodeBatchInput,
     CreateAdminRedeemCodeBatchResult, CreateAnnouncementRecord, CreateManualWalletRechargeInput,
     CreatePlanPurchaseOrderInput, CreatePlanPurchaseOrderOutcome, CreateWalletRechargeOrderInput,
@@ -37,9 +38,13 @@ use super::{
     UpdateAdminWalletRefundGatewayInput, UpdateAnnouncementRecord,
     UpdateWalletRechargeCheckoutInput, UpsertBackgroundTaskEvent, UpsertBackgroundTaskRun,
     UpsertUsageRecord, UpsertVideoTask, UsageSettlementInput, UserDailyQuotaAvailabilityRecord,
-    UserPlanEntitlementRecord, VideoTaskLookupKey, VideoTaskModelCount, VideoTaskQueryFilter,
-    VideoTaskStatusCount, WalletDailyUsageAggregationInput, WalletDailyUsageAggregationResult,
-    WalletLookupKey, WalletMutationOutcome,
+    UserPlanEntitlementRecord, VideoTaskClaim, VideoTaskLookupKey, VideoTaskModelCount,
+    VideoTaskQueryFilter, VideoTaskStatusCount, WalletDailyUsageAggregationInput,
+    WalletDailyUsageAggregationResult, WalletLookupKey, WalletMutationOutcome,
+};
+use aether_data_contracts::repository::audit::{
+    AdminAuditDeliveryListQuery, AdminAuditDeliveryPage, AdminAuditDeliveryRedriveOutcome,
+    AdminAuditDeliverySummary,
 };
 use aether_data_contracts::repository::usage::{
     DailyActualCostCounts, DailyActualCostQuery, PendingUsageCleanupSummary,
@@ -184,6 +189,113 @@ impl GatewayDataState {
             ));
         };
         repository.create_admin_audit_log(record).await
+    }
+
+    pub(crate) fn has_admin_audit_delivery_backend(&self) -> bool {
+        self.durable_admin_audit_available()
+    }
+
+    pub(crate) async fn claim_admin_audit_deliveries(
+        &self,
+        limit: usize,
+        lease_seconds: u64,
+    ) -> Result<Vec<ClaimedAdminAuditDelivery>, DataLayerError> {
+        let Some(repository) = self
+            .backends
+            .as_ref()
+            .and_then(|backends| backends.write().audit_logs())
+        else {
+            return Err(DataLayerError::InvalidConfiguration(
+                "admin audit delivery is unavailable".to_string(),
+            ));
+        };
+        repository
+            .claim_admin_audit_deliveries(limit, lease_seconds)
+            .await
+    }
+
+    pub(crate) async fn deliver_admin_audit(
+        &self,
+        event_id: &str,
+        lease_token: uuid::Uuid,
+    ) -> Result<bool, DataLayerError> {
+        let Some(repository) = self
+            .backends
+            .as_ref()
+            .and_then(|backends| backends.write().audit_logs())
+        else {
+            return Err(DataLayerError::InvalidConfiguration(
+                "admin audit delivery is unavailable".to_string(),
+            ));
+        };
+        repository.deliver_admin_audit(event_id, lease_token).await
+    }
+
+    pub(crate) async fn fail_admin_audit_delivery(
+        &self,
+        event_id: &str,
+        lease_token: uuid::Uuid,
+        code: AdminAuditDeliveryFailureCode,
+    ) -> Result<AdminAuditDeliveryFailureOutcome, DataLayerError> {
+        let Some(repository) = self
+            .backends
+            .as_ref()
+            .and_then(|backends| backends.write().audit_logs())
+        else {
+            return Err(DataLayerError::InvalidConfiguration(
+                "admin audit delivery is unavailable".to_string(),
+            ));
+        };
+        repository
+            .fail_admin_audit_delivery(event_id, lease_token, code)
+            .await
+    }
+
+    pub(crate) async fn list_admin_audit_deliveries(
+        &self,
+        query: &AdminAuditDeliveryListQuery,
+    ) -> Result<AdminAuditDeliveryPage, DataLayerError> {
+        let repository = self
+            .backends
+            .as_ref()
+            .and_then(|b| b.write().audit_logs())
+            .ok_or_else(|| {
+                DataLayerError::InvalidConfiguration(
+                    "admin audit delivery is unavailable".to_string(),
+                )
+            })?;
+        repository.list_admin_audit_deliveries(query).await
+    }
+
+    pub(crate) async fn admin_audit_delivery_summary(
+        &self,
+    ) -> Result<AdminAuditDeliverySummary, DataLayerError> {
+        let repository = self
+            .backends
+            .as_ref()
+            .and_then(|b| b.write().audit_logs())
+            .ok_or_else(|| {
+                DataLayerError::InvalidConfiguration(
+                    "admin audit delivery is unavailable".to_string(),
+                )
+            })?;
+        repository.admin_audit_delivery_summary().await
+    }
+
+    pub(crate) async fn redrive_admin_audit_delivery(
+        &self,
+        event_id: &str,
+    ) -> Result<AdminAuditDeliveryRedriveOutcome, DataLayerError> {
+        let repository = self
+            .backends
+            .as_ref()
+            .and_then(|b| b.write().audit_logs())
+            .ok_or_else(|| {
+                DataLayerError::InvalidConfiguration(
+                    "admin audit delivery is unavailable".to_string(),
+                )
+            })?;
+        repository.redrive_admin_audit_delivery(event_id).await
     }
 
     const MAINTENANCE_POOL_IDLE_RESERVE_ENV: &'static str =
@@ -699,9 +811,10 @@ impl GatewayDataState {
     pub(crate) async fn update_active_video_task(
         &self,
         task: UpsertVideoTask,
+        fencing_token: Option<i64>,
     ) -> Result<Option<StoredVideoTask>, DataLayerError> {
         match &self.video_task_writer {
-            Some(repository) => repository.update_if_active(task).await,
+            Some(repository) => repository.update_if_active(task, fencing_token).await,
             None => Ok(None),
         }
     }
@@ -711,7 +824,7 @@ impl GatewayDataState {
         now_unix_secs: u64,
         claim_until_unix_secs: u64,
         limit: usize,
-    ) -> Result<Vec<StoredVideoTask>, DataLayerError> {
+    ) -> Result<Vec<VideoTaskClaim>, DataLayerError> {
         match &self.video_task_writer {
             Some(repository) => {
                 repository
@@ -1108,6 +1221,42 @@ impl GatewayDataState {
     ) -> Result<Option<(StoredWalletSnapshot, StoredAdminPaymentOrder)>, DataLayerError> {
         match &self.wallet_writer {
             Some(repository) => repository.create_manual_wallet_recharge(input).await,
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn adjust_wallet_balance_with_audit(
+        &self,
+        input: AdjustWalletBalanceInput,
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<
+        Option<WalletMutationOutcome<(StoredWalletSnapshot, StoredAdminWalletTransaction)>>,
+        DataLayerError,
+    > {
+        match &self.wallet_writer {
+            Some(repository) => {
+                repository
+                    .adjust_wallet_balance_with_audit(input, audit)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn create_manual_wallet_recharge_with_audit(
+        &self,
+        input: CreateManualWalletRechargeInput,
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<
+        Option<WalletMutationOutcome<(StoredWalletSnapshot, StoredAdminPaymentOrder)>>,
+        DataLayerError,
+    > {
+        match &self.wallet_writer {
+            Some(repository) => {
+                repository
+                    .create_manual_wallet_recharge_with_audit(input, audit)
+                    .await
+            }
             None => Ok(None),
         }
     }

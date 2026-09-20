@@ -5,8 +5,23 @@
 ## 开始前
 
 - 使用 `rust-toolchain.toml` 和 `.mise.toml` 固定的 Rust `1.95.0`。安装 mise 后执行 `mise install`；也可让 rustup 按仓库中的 `rust-toolchain.toml` 选择 toolchain。
+- `cargo fmt` 和 `cargo clippy` 分别需要 rustfmt、clippy 组件；若当前 toolchain 尚未安装它们，执行 `rustup component add rustfmt clippy`。
 - 本地开发需要 Docker、Node.js 和 make。首次运行 `make dev` 前复制 `.env.example` 为 `.env`，并设置 `ADMIN_PASSWORD`；该命令会在需要时启动本地 Postgres 和 Redis。
 - 不要提交 `.env`、访问令牌、数据库转储或生成的密钥。安全问题请遵循 [SECURITY.md](SECURITY.md)。
+
+## Fork 与分支
+
+没有本仓库写权限时，先在 GitHub 上 fork `JinPengGeng/aeris-token`，再将自己的 fork 作为 `origin`，将本仓作为 `upstream`。PR 的目标仓库和基分支始终是 `JinPengGeng/aeris-token:main`，不是 `fawney19/Aether`：
+
+```bash
+git clone https://github.com/<your-account>/aeris-token.git
+cd aeris-token
+git remote add upstream https://github.com/JinPengGeng/aeris-token.git
+git fetch upstream
+git switch -c <topic-branch> upstream/main
+```
+
+已有本仓写权限时，可直接克隆 `JinPengGeng/aeris-token` 并从 `main` 创建分支。上游 `fawney19/Aether` 只用于维护者同步和可独立补丁的上游化，不接收本仓 PR。
 
 ## 提交变更
 
@@ -30,11 +45,13 @@ cargo clippy -p <package> --all-targets -- -D warnings
 cargo test -p <package>
 ```
 
+`Makefile` 目前只提供开发和数据库操作目标，没有 `make test` 或 `make check`；请使用本节列出的 Cargo 命令，而不要假定这些目标存在。
+
 CI 的非网关/数据 Rust 测试使用 nextest。首次使用时安装 `cargo-nextest`，然后可执行：
 
 ```bash
 cargo install cargo-nextest --locked
-cargo nextest run --workspace --exclude aether-gateway --exclude aether-data --exclude aether-integration-tests
+cargo nextest run --workspace --exclude aether-gateway --exclude aether-data --exclude aether-integration-tests --exclude aether-runtime-state
 ```
 
 网关测试在 CI 中以 16 MiB Rust 栈运行；本地复现同一配置时使用：

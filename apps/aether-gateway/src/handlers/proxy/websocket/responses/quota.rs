@@ -8,6 +8,7 @@ use super::adapter::{
     resolve_responses_websocket_adapter, ResponsesWebSocketDrainDirective,
     ResponsesWebSocketRebindSafety,
 };
+use super::frame::ParsedResponsesWebSocketFrame;
 use super::lifecycle::{queue_turn_finalization, PreviousAttemptSettled};
 use super::ownership::{
     await_owned_responses_websocket_plan, begin_responses_websocket_turn_with_planned_lease,
@@ -17,7 +18,10 @@ use super::request::{
     build_planning_parts, planned_response_create_event, ResponsesLiteStaticConfig,
 };
 use super::state::BoundResponsesConnection;
-use super::turn::{prepare_responses_websocket_turn_decision, ResponsesWebSocketTurnOutcome};
+use super::turn::{
+    prepare_responses_websocket_turn_decision, ResponsesWebSocketTurnOutcome, UpstreamRequestState,
+};
+use super::turn_state::LogicalTurn;
 use super::upstream::{
     bind_responses_upstream, close_bound_upstream, ResponsesWebSocketUpstreamBindError,
 };
@@ -25,6 +29,10 @@ use crate::clock::current_unix_secs;
 use crate::handlers::proxy::websocket::ingress::WebSocketRequestContext;
 use crate::handlers::proxy::websocket::session::WEBSOCKET_LOG_TRANSPORT;
 use crate::handlers::proxy::websocket::transport::close_upstream_socket;
+use crate::orchestration::{
+    classify_failure_disposition_with_origin, failure_origin_from_upstream_response, FailureOrigin,
+    FailureRetryAction, LocalFailoverClassification,
+};
 use crate::AppState;
 
 const LOG_TARGET: &str = "aether_gateway::handlers::proxy::responses_ws";
@@ -39,6 +47,61 @@ macro_rules! warn {
     ($($arg:tt)*) => {
         tracing::warn!(target: LOG_TARGET, $($arg)*)
     };
+}
+
+/// Admits only a parsed terminal provider quota event to the transparent
+/// rebind path. Relay, client, and gateway failures have no upstream frame
+/// and must not synthesize this trusted origin.
+pub(super) fn terminal_upstream_quota_retry_is_admitted(
+    provider_api_format: Option<&str>,
+    frame: &ParsedResponsesWebSocketFrame<'_>,
+) -> bool {
+    let Some(terminal) = frame.terminal() else {
+        return false;
+    };
+    let Some(terminal_event) = frame.terminal_event() else {
+        return false;
+    };
+    if terminal.status_code != 429 || !is_usage_limit_error_event(terminal_event) {
+        return false;
+    }
+    let response_text = serde_json::to_string(terminal_event).ok();
+    let failure_origin =
+        failure_origin_from_upstream_response(terminal.status_code, response_text.as_deref());
+    quota_retry_is_admitted_by_failure_disposition(
+        provider_api_format.unwrap_or_default(),
+        terminal.status_code,
+        failure_origin,
+    )
+}
+
+fn quota_retry_is_admitted_by_failure_disposition(
+    provider_api_format: &str,
+    status_code: u16,
+    failure_origin: FailureOrigin,
+) -> bool {
+    matches!(
+        classify_failure_disposition_with_origin(
+            provider_api_format,
+            LocalFailoverClassification::RetryUpstreamFailure,
+            status_code,
+            failure_origin,
+        )
+        .retry_action,
+        FailureRetryAction::NextCandidate
+            | FailureRetryAction::NextCredential
+            | FailureRetryAction::NextEndpoint
+    )
+}
+
+pub(super) fn active_turn_allows_quota_retry(
+    retry_current_turn: bool,
+    turn: Option<&LogicalTurn>,
+) -> bool {
+    retry_current_turn
+        && turn.is_some_and(|turn| {
+            turn.quota_retry_admitted() && turn.quota_retry_block_reason().is_none()
+        })
 }
 
 pub(super) async fn detach_exhausted_upstream(
@@ -152,6 +215,7 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
     let turn_attempt = active.turn_attempt;
     let plan_usage_permit = active.plan_usage_permit.clone();
     let plan_usage_policy_snapshot = active.plan_usage_policy_snapshot.clone();
+    let lifecycle = active.begin_attempt_lifecycle().into_terminal_guard();
 
     let retry_exclusion_until_unix_secs = bound
         .pending_adapter_drain
@@ -295,13 +359,30 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
             return Ok(false);
         }
     };
+    // The replacement shares this logical response.create's budget. The
+    // reservation itself occurs inside the upstream send helper, after the
+    // replacement socket is connected and immediately before start_send.
+    let attempt_budget = bound
+        .turn_state
+        .logical_mut()
+        .expect("quota retry retains its logical turn")
+        .attempt_budget_mut();
     let mut replacement = match bind_responses_upstream(
         &decision,
         normalization,
         &client_event,
         adapter,
+        attempt_budget,
         plan_usage_permit.as_ref(),
-        |state| turn.record_upstream_request_state(state),
+        |state| {
+            if matches!(
+                state,
+                UpstreamRequestState::PossiblySent | UpstreamRequestState::Sent
+            ) {
+                lifecycle.mark_sent();
+            }
+            turn.record_upstream_request_state(state);
+        },
     )
     .await
     {
@@ -328,6 +409,30 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
                 "gateway stopped a transparent Responses WebSocket retry before its upstream send after the subscription plan concurrency lease became unhealthy"
             );
             return Err(());
+        }
+        Err(ResponsesWebSocketUpstreamBindError::AttemptBudgetExhausted(reason)) => {
+            turn.release_plan_usage_cost_before_upstream_send(
+                state,
+                "transparent_retry_attempt_budget_exhausted",
+            )
+            .await;
+            queue_turn_finalization(
+                bound,
+                state,
+                turn,
+                ResponsesWebSocketTurnOutcome::upstream_connect_failed(reason.as_str()),
+            )
+            .await;
+            warn!(
+                event_name = "responses_websocket_quota_retry_attempt_budget_exhausted",
+                log_type = "ops",
+                transport = WEBSOCKET_LOG_TRANSPORT,
+                websocket = true,
+                trace_id = %context.trace_id,
+                reason = reason.as_str(),
+                "gateway stopped a transparent Responses WebSocket retry after exhausting its logical attempt budget"
+            );
+            return Ok(false);
         }
         Err(ResponsesWebSocketUpstreamBindError::Transport(code)) => {
             turn.release_plan_usage_cost_before_upstream_send(
@@ -381,7 +486,7 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
     // 同一个 logical turn 的下一个 attempt 就位。状态不符时把 attempt 交回
     // drop guard 结算并让调用方走「透明重试失败」分支，不静默丢弃一条已经写了
     // pending usage 行、占着 candidate 和 pool key lease 的 attempt。
-    if let Err(orphan) = bound.turn_state.resume(turn) {
+    if let Err(orphan) = bound.turn_state.resume_with_lifecycle(turn, lifecycle) {
         let mut orphan = orphan;
         orphan
             .release_plan_usage_cost_before_upstream_send(
@@ -459,10 +564,77 @@ pub(super) fn mark_active_response_retry_unsafe(
 mod tests {
     use serde_json::json;
 
-    use super::responses_lite_static_config_after_rebind;
+    use super::{
+        active_turn_allows_quota_retry, quota_retry_is_admitted_by_failure_disposition,
+        responses_lite_static_config_after_rebind, terminal_upstream_quota_retry_is_admitted,
+    };
+    use crate::handlers::proxy::websocket::responses::frame::ParsedResponsesWebSocketFrame;
     use crate::handlers::proxy::websocket::responses::request::{
         prepare_responses_lite_continuation, ResponsesLiteStaticConfig,
     };
+    use crate::handlers::proxy::websocket::responses::turn_state::LogicalTurn;
+    use crate::orchestration::FailureOrigin;
+
+    #[test]
+    fn only_terminal_upstream_quota_events_pass_the_transparent_rebind_gate() {
+        let frame = ParsedResponsesWebSocketFrame::parse(
+            r#"{"type":"error","status_code":429,"error":{"type":"usage_limit_reached"}}"#,
+        )
+        .expect("quota event should parse");
+        assert!(terminal_upstream_quota_retry_is_admitted(
+            Some("openai:responses"),
+            &frame,
+        ));
+
+        let non_quota = ParsedResponsesWebSocketFrame::parse(
+            r#"{"type":"error","status_code":429,"error":{"type":"rate_limit_exceeded"}}"#,
+        )
+        .expect("rate-limit event should parse");
+        assert!(!terminal_upstream_quota_retry_is_admitted(
+            Some("openai:responses"),
+            &non_quota,
+        ));
+    }
+
+    #[test]
+    fn terminal_quota_admission_survives_until_a_later_close_drains_the_turn() {
+        let frame = ParsedResponsesWebSocketFrame::parse(
+            r#"{"type":"error","status_code":429,"error":{"type":"usage_limit_reached"}}"#,
+        )
+        .expect("quota event should parse");
+        let mut turn = LogicalTurn::new(
+            json!({"type": "response.create", "model": "gpt-5.6-sol"}),
+            1,
+            "quota-turn".to_string(),
+        );
+
+        if terminal_upstream_quota_retry_is_admitted(Some("openai:responses"), &frame) {
+            turn.admit_quota_retry();
+        }
+        assert!(active_turn_allows_quota_retry(true, Some(&turn)));
+
+        // A following close frame carries no parsed quota event. It should
+        // consume the trusted admission recorded by the terminal event.
+        assert!(active_turn_allows_quota_retry(true, Some(&turn)));
+        turn.mark_retry_unsafe("client_visible_response");
+        assert!(!active_turn_allows_quota_retry(true, Some(&turn)));
+    }
+
+    #[test]
+    fn non_upstream_origins_cannot_admit_transparent_quota_rebind() {
+        for failure_origin in [
+            FailureOrigin::Request,
+            FailureOrigin::Transport,
+            FailureOrigin::Internal,
+            FailureOrigin::Unknown,
+        ] {
+            assert!(!quota_retry_is_admitted_by_failure_disposition(
+                "openai:responses",
+                429,
+                failure_origin,
+            ));
+        }
+    }
 
     #[test]
     fn quota_rebind_preserves_the_raw_responses_lite_static_hash() {

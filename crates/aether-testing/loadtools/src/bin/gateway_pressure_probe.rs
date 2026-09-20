@@ -2542,11 +2542,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stop = Arc::new(AtomicBool::new(false));
     let summary = Arc::new(Mutex::new(GatewayPressureMetricsSummary::default()));
 
-    let baseline_samples = fetch_prometheus_samples(&config.metrics_url)
+    // The first authenticated scrape can lazily initialize the gateway's
+    // metrics/runtime observers. Capture a second sample after a short quiet
+    // interval so the settle baseline represents the warmed idle process
+    // rather than the pre-scrape task count.
+    let _initial_baseline_samples = fetch_prometheus_samples(&config.metrics_url)
         .await
         .map_err(|err| {
             std::io::Error::other(format!(
                 "gateway pressure probe metrics preflight failed: {err}"
+            ))
+        })?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let baseline_samples = fetch_prometheus_samples(&config.metrics_url)
+        .await
+        .map_err(|err| {
+            std::io::Error::other(format!(
+                "gateway pressure probe metrics baseline failed: {err}"
             ))
         })?;
     let missing_baseline_metrics = missing_required_preflight_metrics(&baseline_samples);

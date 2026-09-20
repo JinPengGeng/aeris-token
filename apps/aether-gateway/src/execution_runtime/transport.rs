@@ -715,6 +715,29 @@ pub(crate) fn safe_transport_error_message(error: &ExecutionRuntimeTransportErro
     sanitize_error_detail(&error.to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalSendAdmissionError {
+    ContextUnavailable,
+    Skipped,
+    BudgetExhausted(aether_scheduler_core::AttemptBudgetError),
+    Stopped,
+}
+
+impl std::fmt::Display for LocalSendAdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ContextUnavailable => formatter.write_str("context_unavailable"),
+            Self::Skipped => formatter.write_str("skipped"),
+            Self::BudgetExhausted(reason) => write!(
+                formatter,
+                "request_attempt_budget_exhausted:{}",
+                reason.as_str()
+            ),
+            Self::Stopped => formatter.write_str("stopped"),
+        }
+    }
+}
+
 pub(crate) fn format_wreq_upstream_request_error(err: &wreq::Error) -> String {
     let mut kinds = Vec::new();
     if err.is_connect() {
@@ -815,6 +838,8 @@ pub(crate) enum ExecutionRuntimeTransportError {
     UpstreamHttpStatus { status_code: u16, message: String },
     #[error("failed to execute upstream request: {}", sanitize_error_detail(.0))]
     UpstreamRequest(String),
+    #[error("local send admission failed: {0}")]
+    LocalAdmission(LocalSendAdmissionError),
     /// Same display as [`Self::UpstreamRequest`], but raised specifically when
     /// the stream first-byte timer expires while awaiting the upstream
     /// response. The structured variant lets the stream runtime apply the same
@@ -911,6 +936,10 @@ impl std::fmt::Debug for ExecutionRuntimeTransportError {
             Self::UpstreamRequest(detail) => formatter
                 .debug_tuple("UpstreamRequest")
                 .field(&sanitize_error_detail(detail))
+                .finish(),
+            Self::LocalAdmission(detail) => formatter
+                .debug_tuple("LocalAdmission")
+                .field(detail)
                 .finish(),
             Self::UpstreamFirstByteTimeout(detail) => formatter
                 .debug_tuple("UpstreamFirstByteTimeout")
@@ -1454,7 +1483,7 @@ pub(crate) async fn execute_sync_plan_with_report_context(
     }
 
     let _ = trace_id;
-    match maybe_execute_windsurf_sync(state, plan, None).await {
+    match maybe_execute_windsurf_sync(state, plan, None, None).await {
         Ok(Some(result)) => return Ok(result),
         Ok(None) => {}
         Err(err) => return Err(GatewayError::Internal(safe_transport_error_message(&err))),

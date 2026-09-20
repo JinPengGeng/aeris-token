@@ -2,6 +2,7 @@ use serde_json::{Map, Value};
 
 #[derive(Clone, Copy, Debug)]
 pub struct VideoFollowUpReportContextInput<'a> {
+    pub row_revision: i64,
     pub request_id: &'a str,
     pub user_id: &'a str,
     pub api_key_id: &'a str,
@@ -17,6 +18,7 @@ pub struct VideoFollowUpReportContextInput<'a> {
 
 pub fn build_video_follow_up_report_context(input: VideoFollowUpReportContextInput<'_>) -> Value {
     let VideoFollowUpReportContextInput {
+        row_revision,
         request_id,
         user_id,
         api_key_id,
@@ -31,6 +33,10 @@ pub fn build_video_follow_up_report_context(input: VideoFollowUpReportContextInp
     } = input;
 
     let mut context = Map::new();
+    context.insert(
+        "video_task_row_revision".to_string(),
+        Value::from(row_revision),
+    );
     context.insert(
         "request_id".to_string(),
         Value::String(request_id.to_string()),
@@ -109,6 +115,7 @@ mod tests {
     #[test]
     fn builds_follow_up_report_context_with_transport_metadata() {
         let context = build_video_follow_up_report_context(VideoFollowUpReportContextInput {
+            row_revision: 7,
             request_id: "req_123",
             user_id: "user_123",
             api_key_id: "key_123",

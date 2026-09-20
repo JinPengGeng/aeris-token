@@ -570,12 +570,11 @@ async fn gateway_executes_codex_search_with_responses_permission_and_search_cont
         .filter(|plan| plan["request_id"] == "trace-search-failover-1")
         .map(|plan| plan["provider_id"].clone())
         .collect::<Vec<_>>();
-    // Default sticky_key_attempts is 2: the first provider is retried once on
-    // the same key before failover advances to the second provider.
+    // A trusted provider 500 selects NextEndpoint, so failover skips the
+    // remaining same-endpoint retry and advances directly to the backup.
     assert_eq!(
         failover_plans,
         vec![
-            json!("provider-codex-search-1"),
             json!("provider-codex-search-1"),
             json!("provider-codex-search-2")
         ]
@@ -584,16 +583,17 @@ async fn gateway_executes_codex_search_with_responses_permission_and_search_cont
         .list_by_request_id("trace-search-failover-1")
         .await
         .expect("failover request candidates should read");
-    assert_eq!(failover_candidates.len(), 3);
-    for failed_candidate in &failover_candidates[..2] {
-        assert_eq!(failed_candidate.status, RequestCandidateStatus::Failed);
-        assert_eq!(failed_candidate.status_code, Some(500));
-    }
+    assert_eq!(failover_candidates.len(), 2);
     assert_eq!(
-        failover_candidates[2].status,
+        failover_candidates[0].status,
+        RequestCandidateStatus::Failed
+    );
+    assert_eq!(failover_candidates[0].status_code, Some(500));
+    assert_eq!(
+        failover_candidates[1].status,
         RequestCandidateStatus::Success
     );
-    assert_eq!(failover_candidates[2].status_code, Some(200));
+    assert_eq!(failover_candidates[1].status_code, Some(200));
 
     gateway_handle.abort();
     execution_runtime_handle.abort();

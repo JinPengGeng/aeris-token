@@ -28,6 +28,28 @@ export function formatWalletCurrency(
   return `$${amount.toFixed(decimals)}`
 }
 
+/** Recovery amounts are integer 1e-8 USD units, not wallet balance snapshots. */
+export function formatWalletCostUnits(units: number): string {
+  if (!Number.isSafeInteger(units) || units < 0) return '-'
+  const amount = BigInt(units)
+  const scale = BigInt(100_000_000)
+  const fraction = (amount % scale).toString().padStart(8, '0').replace(/0+$/, '').padEnd(2, '0')
+  return `$${amount / scale}.${fraction}`
+}
+
+export function rechargeRecoveryStateLabel(state: string): string {
+  const english = getI18nLocale() === 'en-US'
+  const labels: Record<string, [string, string]> = {
+    pending: ['等待处理', 'Pending'],
+    retry: ['等待重试', 'Awaiting retry'],
+    completed: ['本次处理完成', 'Recovery completed'],
+    waiting_next_recharge: ['等待下次充值', 'Awaiting next top-up'],
+    manual_review: ['等待人工处理', 'Awaiting review'],
+    source_unavailable: ['充值来源不可用', 'Top-up source unavailable'],
+  }
+  return labels[state]?.[english ? 1 : 0] ?? (english ? 'Status unconfirmed' : '状态待确认')
+}
+
 export function walletStatusBadge(status: string | null | undefined) {
   if (status === 'active') return 'success'
   if (status === 'suspended') return 'warning'
@@ -40,6 +62,7 @@ export function walletTransactionCategoryLabel(category: string | null | undefin
     recharge: '充值',
     gift: '赠款',
     adjust: '调账',
+    adjustment: '调账',
     refund: '退款',
   }
   if (!category) return '未知'
@@ -48,6 +71,7 @@ export function walletTransactionCategoryLabel(category: string | null | undefin
       recharge: 'Top-up',
       gift: 'Grant',
       adjust: 'Adjustment',
+      adjustment: 'Adjustment',
       refund: 'Refund',
     }
     return englishLabels[category] || category
@@ -76,6 +100,7 @@ export function walletTransactionReasonLabel(reasonCode: string | null | undefin
     gift_expire_reclaim: '赠款回收',
     adjust_admin: '人工调账',
     adjust_system: '系统调账',
+    historical_debt_recovery: '历史欠费追扣',
     refund_out: '退款扣减',
     refund_revert: '退款回补',
   }
@@ -90,6 +115,7 @@ export function walletTransactionReasonLabel(reasonCode: string | null | undefin
       gift_expire_reclaim: 'Grant reclaim',
       adjust_admin: 'Manual adjustment',
       adjust_system: 'System adjustment',
+      historical_debt_recovery: 'Historical debt recovery',
       refund_out: 'Refund deduction',
       refund_revert: 'Refund reversal',
     }

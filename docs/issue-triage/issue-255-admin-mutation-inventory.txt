@@ -8,6 +8,8 @@
 # The scanner covers handlers/admin plus the shared proxy and operational-audit
 # response boundaries that attach events directly through the audit module.
 
+admin_audit_delivery_redrive_requested
+admin_audit_deliveries_viewed
 admin_billing_preset_applied
 admin_default_user_group_set
 admin_endpoint_rules_revealed

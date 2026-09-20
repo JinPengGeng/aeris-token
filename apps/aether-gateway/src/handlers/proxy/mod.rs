@@ -13,7 +13,6 @@ pub(crate) use self::websocket::live::{live_websocket, maybe_handle_live_http};
 pub(crate) use self::websocket::realtime::realtime_websocket;
 pub(crate) use self::websocket::responses::responses_websocket;
 use super::internal::resolve_local_proxy_execution_path;
-pub(crate) use super::public::matches_model_mapping_for_models;
 use crate::ai_serving::api::{
     aggregate_claude_stream_sync_response, aggregate_gemini_stream_sync_response,
     aggregate_openai_chat_stream_sync_response, aggregate_openai_responses_stream_sync_response,
@@ -262,7 +261,7 @@ async fn maybe_promote_management_token_admin_principal(
         Err(crate::management_token_auth::ManagementTokenAuthError::Unavailable) => {
             return Err(GatewayError::Internal(
                 "management token authentication unavailable".to_string(),
-            ))
+            ));
         }
         Err(
             crate::management_token_auth::ManagementTokenAuthError::Missing
@@ -2036,7 +2035,7 @@ async fn proxy_request_inner(
                 aether_runtime_state::RuntimeSemaphoreError::InvalidConfiguration(message),
             )) => return Err(GatewayError::Internal(message)),
             Err(crate::plan_usage_policy::PlanUsageAdmissionError::Gateway(error)) => {
-                return Err(error)
+                return Err(error);
             }
         };
     let crate::plan_usage_policy::HttpPlanUsageAdmission {
@@ -2333,7 +2332,23 @@ async fn proxy_request_inner(
                 LocalExecutionRequestOutcome::NoPath => {}
             }
         }
-        if allow_control_execute_fallback {
+        // Do not send a permanently unknown public model through the emergency
+        // control-execute path, which cannot classify the model directory.
+        let pre_fallback_diagnostic = match classify_unknown_public_model(
+            &state,
+            control_decision,
+            state.take_local_execution_runtime_miss_diagnostic(&trace_id),
+        )
+        .await
+        {
+            Some(diagnostic) if diagnostic.reason == "model_not_found" => Some(diagnostic),
+            Some(diagnostic) => {
+                state.set_local_execution_runtime_miss_diagnostic(&trace_id, diagnostic);
+                None
+            }
+            None => None,
+        };
+        if allow_control_execute_fallback && pre_fallback_diagnostic.is_none() {
             match maybe_execute_via_control(
                 &state,
                 &parts,
@@ -2401,8 +2416,14 @@ async fn proxy_request_inner(
                 LocalExecutionRequestOutcome::NoPath => {}
             }
         }
-        let local_execution_runtime_miss_diagnostic =
-            state.take_local_execution_runtime_miss_diagnostic(&trace_id);
+        let local_execution_runtime_miss_diagnostic = pre_fallback_diagnostic
+            .or_else(|| state.take_local_execution_runtime_miss_diagnostic(&trace_id));
+        let local_execution_runtime_miss_diagnostic = classify_unknown_public_model(
+            &state,
+            control_decision,
+            local_execution_runtime_miss_diagnostic,
+        )
+        .await;
         let local_execution_runtime_miss_context =
             build_local_execution_runtime_miss_context(&state, &trace_id, control_decision).await;
         let auth_api_key_concurrency_limited = diagnostic_is_auth_api_key_concurrency_limited(
@@ -2540,15 +2561,26 @@ async fn proxy_request_inner(
             )
             .await;
         }
-        let mut response = build_local_http_error_response(
-            &trace_id,
-            control_decision,
-            local_execution_runtime_miss_status(provider_key_capacity_limited),
-            local_execution_runtime_miss_client_message(
-                local_execution_runtime_miss_detail.as_str(),
-            )
-            .as_str(),
-        )?;
+        let client_message = local_execution_runtime_miss_client_message(
+            local_execution_runtime_miss_detail.as_str(),
+        );
+        let mut response = if local_execution_runtime_miss_diagnostic
+            .as_ref()
+            .is_some_and(|diagnostic| diagnostic.reason == "model_not_found")
+        {
+            build_unknown_public_model_response(&trace_id, control_decision, &client_message)?
+        } else {
+            build_local_http_error_response_with_request_path(
+                &trace_id,
+                control_decision,
+                Some(parts.uri.path()),
+                local_execution_runtime_miss_status(
+                    provider_key_capacity_limited,
+                    local_execution_runtime_miss_diagnostic.as_ref(),
+                ),
+                &client_message,
+            )?
+        };
         let local_execution_runtime_miss_reason = local_execution_runtime_miss_diagnostic
             .as_ref()
             .map(|diagnostic| diagnostic.reason.trim())
@@ -2633,6 +2665,10 @@ fn local_execution_runtime_miss_diagnostic_detail(
                 diagnostic,
                 request_mode,
             ));
+        }
+        "model_not_found" => {
+            let model = diagnostic_requested_model(diagnostic).unwrap_or("unknown");
+            return Some(format!("The model '{model}' does not exist"));
         }
         "all_candidates_skipped" => {
             return Some(local_execution_runtime_miss_all_candidates_skipped_detail(
@@ -2885,12 +2921,188 @@ fn diagnostic_is_provider_key_capacity_limited(
             }))
 }
 
-fn local_execution_runtime_miss_status(provider_key_capacity_limited: bool) -> http::StatusCode {
+fn local_execution_runtime_miss_status(
+    provider_key_capacity_limited: bool,
+    diagnostic: Option<&LocalExecutionRuntimeMissDiagnostic>,
+) -> http::StatusCode {
+    if diagnostic.is_some_and(|diagnostic| diagnostic.reason == "model_not_found") {
+        return http::StatusCode::NOT_FOUND;
+    }
     if provider_key_capacity_limited {
         http::StatusCode::TOO_MANY_REQUESTS
     } else {
         http::StatusCode::SERVICE_UNAVAILABLE
     }
+}
+
+async fn classify_unknown_public_model(
+    state: &AppState,
+    control_decision: Option<&GatewayControlDecision>,
+    diagnostic: Option<LocalExecutionRuntimeMissDiagnostic>,
+) -> Option<LocalExecutionRuntimeMissDiagnostic> {
+    let diagnostic = diagnostic?;
+    if diagnostic.reason != "candidate_list_empty"
+        || !matches!(
+            diagnostic.route_family.as_deref(),
+            Some("openai" | "claude")
+        )
+        || !state.has_global_model_data_reader()
+    {
+        return Some(diagnostic);
+    }
+    let Some(model_name) = diagnostic_requested_model(&diagnostic) else {
+        return Some(diagnostic);
+    };
+    match state.get_public_global_model_by_name(model_name).await {
+        // A lookup failure is operationally ambiguous, so preserve the retryable
+        // runtime-miss result rather than declaring the model absent.
+        Ok(Some(_)) | Err(_) => Some(diagnostic),
+        Ok(None)
+            if requested_model_is_declared_by_scheduler(state, control_decision, model_name)
+                .await =>
+        {
+            Some(diagnostic)
+        }
+        Ok(None) => {
+            let mut classified = diagnostic;
+            classified.reason = "model_not_found".to_string();
+            Some(classified)
+        }
+    }
+}
+
+async fn requested_model_is_declared_by_scheduler(
+    state: &AppState,
+    control_decision: Option<&GatewayControlDecision>,
+    requested_model: &str,
+) -> bool {
+    let Some(decision) = control_decision else {
+        return true;
+    };
+    let Some(client_api_format) = decision
+        .auth_endpoint_signature
+        .as_deref()
+        .map(crate::ai_serving::normalize_api_format_alias)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+    for api_format in crate::ai_serving::request_candidate_api_formats(&client_api_format, false) {
+        let resolution = decision
+            .model_directive_policy
+            .resolve_reasoning(api_format, Some(requested_model));
+        let routing_model = resolution.base_model().unwrap_or(requested_model);
+        let Ok(declarations) = state
+            .list_declared_global_models_for_api_format(api_format)
+            .await
+        else {
+            return true;
+        };
+        if declarations
+            .iter()
+            .any(|declaration| declared_model_matches(declaration, routing_model, api_format))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn declared_model_matches(
+    declaration: &aether_data_contracts::repository::candidate_selection::StoredGlobalModelDeclaration,
+    requested_model: &str,
+    api_format: &str,
+) -> bool {
+    declaration.global_model_name == requested_model
+        || (default_provider_model_name_matches(declaration, api_format)
+            && declaration.provider_model_name == requested_model)
+        || declaration
+            .global_model_mappings
+            .as_ref()
+            .is_some_and(|mappings| {
+                mappings.iter().any(|mapping| {
+                    aether_scheduler_core::matches_model_mapping(mapping, requested_model)
+                })
+            })
+        || declaration
+            .provider_model_mappings
+            .as_ref()
+            .is_some_and(|mappings| {
+                mappings.iter().any(|mapping| {
+                    mapping.name == requested_model
+                        && provider_model_mapping_scope_matches(declaration, mapping, api_format)
+                })
+            })
+}
+
+fn default_provider_model_name_matches(
+    declaration: &aether_data_contracts::repository::candidate_selection::StoredGlobalModelDeclaration,
+    api_format: &str,
+) -> bool {
+    let Some(mappings) = declaration.provider_model_mappings.as_ref() else {
+        return true;
+    };
+    let mut has_explicit_default_mapping = false;
+    for mapping in mappings {
+        if mapping.name != declaration.provider_model_name {
+            continue;
+        }
+        has_explicit_default_mapping = true;
+        if provider_model_mapping_scope_matches(declaration, mapping, api_format) {
+            return true;
+        }
+    }
+    !has_explicit_default_mapping
+}
+
+fn provider_model_mapping_scope_matches(
+    declaration: &aether_data_contracts::repository::candidate_selection::StoredGlobalModelDeclaration,
+    mapping: &aether_data_contracts::repository::candidate_selection::StoredProviderModelMapping,
+    api_format: &str,
+) -> bool {
+    mapping.api_formats.as_ref().is_none_or(|formats| {
+        formats.iter().any(|mapping_api_format| {
+            aether_data_contracts::repository::candidate_selection::provider_model_mapping_api_format_covers(
+                &declaration.provider_type,
+                mapping_api_format,
+                api_format,
+            )
+        })
+    }) && mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
+        endpoint_ids
+            .iter()
+            .any(|endpoint_id| endpoint_id == &declaration.endpoint_id)
+    }) && mapping.operations.is_none()
+}
+
+fn build_unknown_public_model_response(
+    trace_id: &str,
+    control_decision: Option<&GatewayControlDecision>,
+    message: &str,
+) -> Result<Response<Body>, GatewayError> {
+    let client_format = control_decision
+        .and_then(|decision| decision.route_family.as_deref())
+        .filter(|family| *family == "claude")
+        .map(|_| "claude:messages")
+        .unwrap_or("openai:chat");
+    let mut payload = crate::ai_serving::build_core_error_body_for_client_format(
+        client_format,
+        message,
+        Some("model_not_found"),
+        crate::ai_serving::LocalCoreSyncErrorKind::NotFound,
+    )
+    .ok_or_else(|| GatewayError::Internal("unknown public model error format".to_string()))?;
+    payload["trace_id"] = serde_json::Value::String(trace_id.to_string());
+    let body =
+        serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
+    build_client_response_from_parts(
+        http::StatusCode::NOT_FOUND.as_u16(),
+        &headers,
+        Body::from(body),
+        trace_id,
+        control_decision,
+    )
 }
 
 fn local_execution_runtime_miss_route_detail(
@@ -3682,11 +3894,11 @@ mod tests {
             &mixed_failure
         )));
         assert_eq!(
-            local_execution_runtime_miss_status(true),
+            local_execution_runtime_miss_status(true, None),
             StatusCode::TOO_MANY_REQUESTS
         );
         assert_eq!(
-            local_execution_runtime_miss_status(false),
+            local_execution_runtime_miss_status(false, None),
             StatusCode::SERVICE_UNAVAILABLE
         );
     }

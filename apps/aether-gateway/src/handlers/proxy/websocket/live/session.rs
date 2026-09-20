@@ -1392,7 +1392,7 @@ async fn read_initial_session_update(
                     AxumWsMessage::Pong(_) => {}
                     AxumWsMessage::Close(_) => return Ok(None),
                     AxumWsMessage::Binary(_) => {
-                        return Err(super::protocol::LiveProtocolError::InitialEventMustBeText)
+                        return Err(super::protocol::LiveProtocolError::InitialEventMustBeText);
                     }
                 }
             }

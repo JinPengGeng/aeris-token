@@ -31,3 +31,10 @@ exit-status preservation and complete coverage of the six tracked npm lockfiles
 plus both Cargo lockfiles. After merge, the first scheduled or protected-branch
 run should be linked from #220 and #303 with the artifact names and retained
 expiry date.
+
+The npm command explicitly requests `--json`; naming its redirected output
+`audit.json` alone does not make npm's default human-readable report JSON.
+`dependency-audit-artifacts.test.mjs` executes the actual workflow shell block
+with a scanner fixture, parses the report and metadata, and verifies exit
+statuses 0, 1 and 42 are preserved. This local contract does not replace a
+hosted run or an audit against the live advisory database.

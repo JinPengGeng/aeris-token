@@ -194,6 +194,7 @@ async fn gateway_executes_openai_video_delete_via_reconstructed_data_backed_loca
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: "task-local-followup-123".to_string(),
             short_id: None,
             request_id: "request-openai-video-delete-local-123".to_string(),

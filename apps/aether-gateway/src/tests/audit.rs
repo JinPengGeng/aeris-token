@@ -27,8 +27,12 @@ use super::{
     CONTROL_CANDIDATE_ID_HEADER, CONTROL_REQUEST_ID_HEADER, TRACE_ID_HEADER,
 };
 
+mod admin_delivery_crash;
 mod admin_persistence;
+mod admin_sessions;
+mod group_members;
 mod operational_reads;
+mod wallet_balances;
 
 fn hash_api_key(value: &str) -> String {
     let mut hasher = Sha256::new();
@@ -255,7 +259,7 @@ async fn gateway_exposes_request_id_header_for_local_execution_response_impl() {
             "Bearer sk-client-openai-audit-bundle",
         )
         .header(TRACE_ID_HEADER, "req-direct-audit-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");

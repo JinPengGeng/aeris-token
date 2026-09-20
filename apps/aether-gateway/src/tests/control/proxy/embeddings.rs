@@ -1499,7 +1499,7 @@ async fn embeddings_route_rejects_chat_only_model_impl() {
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(
         payload["error"]["message"],
-        "当前用户、用户组或密钥的访问控制策略不允许访问模型 gpt-5"
+        "The access policy for the current user, user group, or API key does not allow access to model gpt-5"
     );
 
     gateway_handle.abort();
@@ -1546,7 +1546,7 @@ async fn embeddings_route_rejects_chat_only_api_format_impl() {
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(
         payload["error"]["message"],
-        "当前用户、用户组或密钥的访问控制策略不允许访问 openai:embedding 格式"
+        "The access policy for the current user, user group, or API key does not allow access to API format openai:embedding"
     );
 
     gateway_handle.abort();

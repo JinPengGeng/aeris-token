@@ -295,6 +295,7 @@ async fn build_local_public_support_response(
     if decision.route_family.as_deref() == Some("models") {
         if decision.auth_context.is_none() {
             return Some(build_models_auth_error_response(
+                request_context.trace_id.as_str(),
                 models_api_format(request_context).unwrap_or("openai:chat"),
             ));
         }

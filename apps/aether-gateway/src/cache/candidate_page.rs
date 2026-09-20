@@ -8,6 +8,7 @@ use aether_ai_serving::AiCandidatePreselectionOutcome;
 use aether_ai_serving::AiCandidateResolutionMode;
 use aether_routing_core::ResolvedRoutingPolicy;
 use aether_runtime::{MetricKind, MetricSample};
+use aether_scheduler_core::SchedulerAffinityTarget;
 use aether_scheduler_core::{
     normalize_api_format, ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate,
     SchedulerPageId, SchedulerRequestSnapshot,
@@ -107,6 +108,7 @@ pub(crate) struct CandidatePageCacheKey {
     use_api_format_alias_match: bool,
     client_session_affinity_hash: String,
     model_directive_policy_hash: String,
+    scheduler_affinity_target: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -190,7 +192,23 @@ impl CandidatePageCacheKey {
             use_api_format_alias_match,
             client_session_affinity_hash: client_session_affinity_key(client_session_affinity),
             model_directive_policy_hash: normalize_text_key(model_directive_policy_hash),
+            scheduler_affinity_target: String::new(),
         }
+    }
+
+    pub(crate) fn with_scheduler_affinity_target(
+        mut self,
+        target: Option<&SchedulerAffinityTarget>,
+    ) -> Self {
+        self.scheduler_affinity_target = target
+            .map(|target| {
+                format!(
+                    "{}\u{1f}{}\u{1f}{}",
+                    target.provider_id, target.endpoint_id, target.key_id
+                )
+            })
+            .unwrap_or_default();
+        self
     }
 }
 
@@ -233,6 +251,14 @@ impl CandidateResolvedPageCacheKey {
             page_id,
             resolution_mode: resolution_mode_name(resolution_mode),
         }
+    }
+
+    pub(crate) fn with_scheduler_affinity_target(
+        mut self,
+        target: Option<&SchedulerAffinityTarget>,
+    ) -> Self {
+        self.page_key = self.page_key.with_scheduler_affinity_target(target);
+        self
     }
 }
 

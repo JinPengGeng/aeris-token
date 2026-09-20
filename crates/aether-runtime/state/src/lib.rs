@@ -1241,6 +1241,34 @@ pub struct RuntimeQueueStats {
     pub oldest_pending_idle_ms: Option<u64>,
 }
 
+/// Bounded, low-cardinality capacity signal for a retained runtime stream.
+/// `utilization_per_mille` is clamped to 1000 and `at_retention_boundary` is
+/// true once the stream has reached its configured max length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RuntimeQueueCapacitySignal {
+    pub stream_length: u64,
+    pub max_length: u64,
+    pub utilization_per_mille: u16,
+    pub at_retention_boundary: bool,
+}
+
+impl RuntimeQueueCapacitySignal {
+    pub fn from_stats(stats: RuntimeQueueStats, max_length: usize) -> Self {
+        let max_length = max_length as u64;
+        let utilization_per_mille = if max_length == 0 {
+            0
+        } else {
+            ((u128::from(stats.stream_length) * 1000) / u128::from(max_length)).min(1000) as u16
+        };
+        Self {
+            stream_length: stats.stream_length,
+            max_length,
+            utilization_per_mille,
+            at_retention_boundary: max_length > 0 && stats.stream_length >= max_length,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeQueueReclaimConfig {
     pub min_idle_ms: u64,
@@ -2360,6 +2388,33 @@ mod tests {
     use std::path::PathBuf;
     use std::process::{Child, Command, Stdio};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn queue_capacity_signal_is_bounded_and_marks_retention_boundary() {
+        let signal = RuntimeQueueCapacitySignal::from_stats(
+            RuntimeQueueStats {
+                stream_length: 12,
+                ..RuntimeQueueStats::default()
+            },
+            10,
+        );
+        assert_eq!(signal.utilization_per_mille, 1000);
+        assert!(signal.at_retention_boundary);
+
+        let empty = RuntimeQueueCapacitySignal::from_stats(RuntimeQueueStats::default(), 10);
+        assert_eq!(empty.utilization_per_mille, 0);
+        assert!(!empty.at_retention_boundary);
+
+        let large = RuntimeQueueCapacitySignal::from_stats(
+            RuntimeQueueStats {
+                stream_length: (usize::MAX / 2) as u64,
+                ..Default::default()
+            },
+            usize::MAX,
+        );
+        assert_eq!(large.utilization_per_mille, 499);
+        assert!(!large.at_retention_boundary);
+    }
 
     async fn redis_test_connection(url: &str) -> ::redis::aio::MultiplexedConnection {
         ::redis::Client::open(url)

@@ -63,16 +63,49 @@ pub(in super::super) async fn build_admin_wallet_recharge_response(
     }
     let operator_id = admin_wallet_operator_id(request_context);
     let has_wallet_writer = state.has_wallet_data_writer();
-    let Some((wallet, payment_order)) = state
-        .admin_create_manual_wallet_recharge(
+    let audit = request_context.decision().and_then(|decision| {
+        crate::audit::build_admin_wallet_balance_audit(
+            decision,
             &wallet_id,
-            amount_usd,
-            &payment_method,
-            operator_id.as_deref(),
-            description.as_deref(),
+            true,
+            request_context.public().client_ip.as_deref(),
         )
-        .await?
-    else {
+    });
+    let durable = match audit.as_ref() {
+        Some(audit) => {
+            state
+                .app()
+                .admin_create_manual_wallet_recharge_with_audit(
+                    &wallet_id,
+                    amount_usd,
+                    &payment_method,
+                    operator_id.as_deref(),
+                    description.as_deref(),
+                    audit,
+                )
+                .await?
+        }
+        None => None,
+    };
+    use aether_data::repository::wallet::WalletMutationOutcome;
+    let durable_enqueued = matches!(durable, Some(WalletMutationOutcome::Applied(_)));
+    let result = match durable {
+        Some(WalletMutationOutcome::Applied(result)) => Some(result),
+        Some(WalletMutationOutcome::NotFound) => None,
+        Some(WalletMutationOutcome::Invalid(detail)) => return Err(GatewayError::Internal(detail)),
+        None => {
+            state
+                .admin_create_manual_wallet_recharge(
+                    &wallet_id,
+                    amount_usd,
+                    &payment_method,
+                    operator_id.as_deref(),
+                    description.as_deref(),
+                )
+                .await?
+        }
+    };
+    let Some((wallet, payment_order)) = result else {
         return if has_wallet_writer {
             Ok(build_admin_wallet_not_found_response())
         } else {
@@ -97,11 +130,22 @@ pub(in super::super) async fn build_admin_wallet_recharge_response(
         ),
     }))
     .into_response();
-    Ok(attach_admin_audit_response(
+    let mut response = attach_admin_audit_response(
         response,
         "admin_wallet_manual_recharge_created",
         "create_manual_wallet_recharge",
         "wallet",
         &wallet_id,
-    ))
+    );
+    if durable_enqueued {
+        response
+            .extensions_mut()
+            .insert(crate::audit::DurableAdminAuditEnqueued);
+        response
+            .extensions_mut()
+            .insert(crate::audit::PendingAdminAudit(
+                audit.expect("durable audit enqueue requires an audit intent"),
+            ));
+    }
+    Ok(response)
 }

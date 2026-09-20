@@ -147,6 +147,64 @@ async fn assert_admin_provider_query_route(
 }
 
 #[test]
+fn gateway_requires_admin_for_emergency_chain_execute() {
+    run_provider_query_test(
+        "gateway_requires_admin_for_emergency_chain_execute",
+        gateway_requires_admin_for_emergency_chain_execute_impl,
+    );
+}
+
+async fn gateway_requires_admin_for_emergency_chain_execute_impl() {
+    let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/emergency-chain/execute"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "audit-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "audit_admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-a",
+            "model": "model-a",
+            "targets": [{ "endpoint_id": "endpoint-a", "key_id": "key-a" }]
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    gateway_handle.abort();
+}
+
+#[test]
+fn gateway_handles_emergency_chain_execute_as_local_admin_route() {
+    run_provider_query_test(
+        "gateway_handles_emergency_chain_execute_as_local_admin_route",
+        gateway_handles_emergency_chain_execute_as_local_admin_route_impl,
+    );
+}
+
+async fn gateway_handles_emergency_chain_execute_as_local_admin_route_impl() {
+    assert_admin_provider_query_route(
+        "/api/admin/provider-query/emergency-chain/execute",
+        json!({
+            "provider_id": "provider-a",
+            "model": "model-a",
+            "targets": [{ "endpoint_id": "endpoint-a", "key_id": "key-a" }]
+        }),
+        StatusCode::SERVICE_UNAVAILABLE,
+        |payload| {
+            assert_eq!(
+                payload["detail"],
+                json!("Emergency chain persistence is unavailable")
+            );
+        },
+    )
+    .await;
+}
+
+#[test]
 fn gateway_handles_admin_provider_query_models_fetches_upstream_for_selected_key() {
     run_provider_query_test(
         "gateway_handles_admin_provider_query_models_fetches_upstream_for_selected_key",

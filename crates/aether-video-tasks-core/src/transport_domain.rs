@@ -67,6 +67,7 @@ fn trim_openai_video_resource_root(url: &str) -> Option<String> {
 impl LocalVideoTaskPersistence {
     pub fn from_report_context(report_context: &Map<String, Value>, plan: &ExecutionPlan) -> Self {
         Self {
+            row_revision: 0,
             request_id: context_text(report_context, "request_id")
                 .unwrap_or_else(|| plan.request_id.clone()),
             username: context_text(report_context, "username"),
@@ -101,6 +102,7 @@ impl LocalVideoTaskPersistence {
             .or_else(|| non_empty_owned(task.client_api_format.as_ref()))?;
 
         Some(Self {
+            row_revision: task.row_revision,
             request_id: task.request_id.clone(),
             username: task.username.clone(),
             api_key_name: task.api_key_name.clone(),

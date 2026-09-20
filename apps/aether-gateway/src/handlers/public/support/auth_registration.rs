@@ -13,6 +13,7 @@ use super::{
     GatewayError, Regex, Response, AUTH_REGISTER_RATE_LIMIT, AUTH_SEND_VERIFICATION_RATE_LIMIT,
     AUTH_VERIFICATION_STATUS_RATE_LIMIT, AUTH_VERIFY_EMAIL_RATE_LIMIT,
 };
+use crate::data::state::ReferralRewardConfig;
 use aether_admin::system::DEFAULT_USER_INITIAL_GIFT_USD;
 use serde::Deserialize;
 use std::net::IpAddr;
@@ -401,7 +402,7 @@ pub(super) async fn handle_auth_register(
     let payload = match serde_json::from_slice::<AuthRegisterRequest>(request_body) {
         Ok(value) => value,
         Err(_) => {
-            return build_auth_error_response(http::StatusCode::BAD_REQUEST, "输入验证失败", false)
+            return build_auth_error_response(http::StatusCode::BAD_REQUEST, "输入验证失败", false);
         }
     };
     let email = match normalize_auth_optional_email(payload.email.as_deref()) {
@@ -818,7 +819,7 @@ pub(super) async fn handle_auth_verify_email(
     let payload = match serde_json::from_slice::<AuthVerifyEmailRequest>(request_body) {
         Ok(value) => value,
         Err(_) => {
-            return build_auth_error_response(http::StatusCode::BAD_REQUEST, "输入验证失败", false)
+            return build_auth_error_response(http::StatusCode::BAD_REQUEST, "输入验证失败", false);
         }
     };
     let Some(email) = normalize_auth_email(&payload.email) else {
@@ -852,7 +853,7 @@ pub(super) async fn handle_auth_verify_email(
                 "auth_verification_challenge_lookup_failed",
                 &err,
                 AUTH_VERIFICATION_UNAVAILABLE_DETAIL,
-            )
+            );
         }
     };
     let Some(pending) = pending else {
@@ -958,6 +959,16 @@ pub(super) async fn handle_auth_verify_email(
             false,
         );
     }
+    if let Err(err) = apply_existing_user_email_verification_referral_reward(state, &email).await {
+        // The verified proof is already durable. Do not report a failed
+        // verification after consuming its one-time code; a later verified
+        // email operation can safely retry the idempotent reward trigger.
+        tracing::warn!(
+            event_name = "auth_email_verification_referral_apply_failed",
+            error = %crate::error::redact_error_debug(&err),
+            "failed to apply referral reward after email verification"
+        );
+    }
     build_auth_json_response(
         http::StatusCode::OK,
         json!({ "message": "邮箱验证成功", "success": true }),
@@ -981,7 +992,7 @@ pub(super) async fn handle_auth_verification_status(
     let payload = match serde_json::from_slice::<AuthVerificationStatusRequest>(request_body) {
         Ok(value) => value,
         Err(_) => {
-            return build_auth_error_response(http::StatusCode::BAD_REQUEST, "输入验证失败", false)
+            return build_auth_error_response(http::StatusCode::BAD_REQUEST, "输入验证失败", false);
         }
     };
     let Some(email) = normalize_auth_email(&payload.email) else {
@@ -1057,4 +1068,149 @@ pub(super) async fn handle_auth_verification_status(
         }),
         None,
     )
+}
+fn email_verification_referral_reward_amount(config: &ReferralRewardConfig) -> Option<f64> {
+    (config.headcount_enabled
+        && config.headcount_trigger == "email_verified"
+        && config.headcount_amount_usd.is_finite()
+        && config.headcount_amount_usd > 0.0)
+        .then_some(config.headcount_amount_usd)
+}
+
+fn existing_user_email_verification_eligible(
+    user: &aether_data::repository::users::StoredUserAuthRecord,
+    verified_email: &str,
+) -> bool {
+    user.auth_source.eq_ignore_ascii_case("local")
+        && user.is_active
+        && !user.is_deleted
+        && user.email.as_deref() == Some(verified_email)
+}
+
+async fn apply_existing_user_email_verification_referral_reward(
+    state: &AppState,
+    email: &str,
+) -> Result<(), GatewayError> {
+    let Some(user) = state.find_user_auth_by_identifier(email).await? else {
+        // Email verification normally precedes registration. There is no user
+        // or referral relationship to reconcile until registration succeeds.
+        return Ok(());
+    };
+    if !existing_user_email_verification_eligible(&user, email) {
+        return Ok(());
+    }
+    let user_id = if user.email_verified {
+        user.id
+    } else {
+        let Some(updated_user) = state
+            .update_local_auth_user_profile(&user.id, false, None, Some(true), None)
+            .await?
+        else {
+            return Ok(());
+        };
+        updated_user.id
+    };
+    let Some(config) = state.referral_reward_config().await? else {
+        return Ok(());
+    };
+    let Some(amount_usd) = email_verification_referral_reward_amount(&config) else {
+        return Ok(());
+    };
+    state
+        .data
+        .apply_registration_referral_reward(&user_id, amount_usd, "email_verified")
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        email_verification_referral_reward_amount, existing_user_email_verification_eligible,
+        ReferralRewardConfig,
+    };
+    use aether_data::repository::users::StoredUserAuthRecord;
+
+    fn user(
+        email: Option<&str>,
+        auth_source: &str,
+        is_active: bool,
+        is_deleted: bool,
+    ) -> StoredUserAuthRecord {
+        StoredUserAuthRecord::new(
+            "user-1".to_string(),
+            email.map(ToOwned::to_owned),
+            false,
+            "user-1".to_string(),
+            Some("password-hash".to_string()),
+            "user".to_string(),
+            auth_source.to_string(),
+            None,
+            None,
+            None,
+            is_active,
+            is_deleted,
+            None,
+            None,
+        )
+        .expect("local user fixture should build")
+    }
+
+    #[test]
+    fn email_verification_reward_requires_its_existing_configured_trigger() {
+        let enabled = ReferralRewardConfig {
+            percent_enabled: false,
+            percent_rate: 0.0,
+            headcount_enabled: true,
+            headcount_amount_usd: 3.5,
+            headcount_trigger: "email_verified".to_string(),
+        };
+        assert_eq!(
+            email_verification_referral_reward_amount(&enabled),
+            Some(3.5)
+        );
+
+        for config in [
+            ReferralRewardConfig {
+                headcount_enabled: false,
+                ..enabled.clone()
+            },
+            ReferralRewardConfig {
+                headcount_trigger: "registration".to_string(),
+                ..enabled.clone()
+            },
+            ReferralRewardConfig {
+                headcount_amount_usd: 0.0,
+                ..enabled
+            },
+        ] {
+            assert_eq!(email_verification_referral_reward_amount(&config), None);
+        }
+    }
+
+    #[test]
+    fn existing_email_verification_requires_active_local_exact_email_owner() {
+        let verified_email = "verified@example.com";
+        assert!(existing_user_email_verification_eligible(
+            &user(Some(verified_email), "local", true, false),
+            verified_email,
+        ));
+        assert!(!existing_user_email_verification_eligible(
+            &user(Some("other@example.com"), "local", true, false),
+            verified_email,
+        ));
+        assert!(!existing_user_email_verification_eligible(
+            &user(Some(verified_email), "oauth", true, false),
+            verified_email,
+        ));
+        assert!(!existing_user_email_verification_eligible(
+            &user(Some(verified_email), "local", false, false),
+            verified_email,
+        ));
+        assert!(!existing_user_email_verification_eligible(
+            &user(Some(verified_email), "local", true, true),
+            verified_email,
+        ));
+    }
 }

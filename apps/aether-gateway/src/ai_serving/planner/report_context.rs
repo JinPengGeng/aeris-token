@@ -60,6 +60,8 @@ pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) client_session_affinity: Option<&'a ClientSessionAffinity>,
     pub(crate) routing_policy: Option<&'a ResolvedRoutingPolicy>,
     pub(crate) scheduler_affinity_epoch: Option<u64>,
+    pub(crate) scheduler_generation: Option<u64>,
+    pub(crate) scheduler_page_ordinal: Option<u32>,
     /// Routing policy sticky-key attempt budget; read back by the attempt
     /// loop to derive same-key retries lazily.
     pub(crate) sticky_key_attempts: Option<u32>,
@@ -136,6 +138,27 @@ pub(crate) fn build_local_execution_report_context(
             SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD.to_string(),
             Value::Number(epoch.into()),
         );
+    }
+    if let Some(generation) = parts.scheduler_generation {
+        extra_fields.insert(
+            "scheduler_generation".to_string(),
+            Value::Number(generation.into()),
+        );
+    }
+    if let Some(page_ordinal) = parts.scheduler_page_ordinal {
+        extra_fields.insert(
+            "scheduler_page_ordinal".to_string(),
+            Value::Number(page_ordinal.into()),
+        );
+        if let Some(generation) = parts.scheduler_generation {
+            extra_fields.insert(
+                "scheduler_page_id".to_string(),
+                serde_json::json!({
+                    "generation": generation,
+                    "ordinal": page_ordinal,
+                }),
+            );
+        }
     }
     if let Some(sticky_key_attempts) = parts.sticky_key_attempts {
         extra_fields.insert(
@@ -382,6 +405,8 @@ mod tests {
                 client_session_affinity: Some(&client_session_affinity),
                 routing_policy: None,
                 scheduler_affinity_epoch: None,
+                scheduler_generation: Some(11),
+                scheduler_page_ordinal: Some(2),
                 sticky_key_attempts: None,
                 client_requested_stream: false,
                 upstream_is_stream: false,
@@ -410,6 +435,12 @@ mod tests {
         assert_eq!(
             report_context["request_path_and_query"],
             "/v1/chat/completions?limit=10"
+        );
+        assert_eq!(report_context["scheduler_generation"], json!(11));
+        assert_eq!(report_context["scheduler_page_ordinal"], json!(2));
+        assert_eq!(
+            report_context["scheduler_page_id"],
+            json!({"generation": 11, "ordinal": 2})
         );
     }
 
@@ -467,6 +498,8 @@ mod tests {
                 client_session_affinity: None,
                 routing_policy: None,
                 scheduler_affinity_epoch: None,
+                scheduler_generation: None,
+                scheduler_page_ordinal: None,
                 sticky_key_attempts: None,
                 client_requested_stream: false,
                 upstream_is_stream: true,
@@ -540,6 +573,8 @@ mod tests {
                 client_session_affinity: None,
                 routing_policy: None,
                 scheduler_affinity_epoch: None,
+                scheduler_generation: None,
+                scheduler_page_ordinal: None,
                 sticky_key_attempts: None,
                 client_requested_stream: false,
                 upstream_is_stream: false,

@@ -4,7 +4,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use super::{
-    StoredVideoTask, UpsertVideoTask, VideoTaskLookupKey, VideoTaskModelCount,
+    StoredVideoTask, UpsertVideoTask, VideoTaskClaim, VideoTaskLookupKey, VideoTaskModelCount,
     VideoTaskQueryFilter, VideoTaskReadRepository, VideoTaskStatus, VideoTaskStatusCount,
     VideoTaskWriteRepository,
 };
@@ -16,6 +16,7 @@ struct MemoryVideoTaskIndex {
     short_to_id: BTreeMap<String, String>,
     request_to_id: BTreeMap<String, String>,
     user_external_to_id: BTreeMap<(String, String), String>,
+    fencing_tokens: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Default)]
@@ -25,6 +26,7 @@ pub struct InMemoryVideoTaskRepository {
 
 impl InMemoryVideoTaskRepository {
     fn store_locked(index: &mut MemoryVideoTaskIndex, task: StoredVideoTask) -> StoredVideoTask {
+        index.fencing_tokens.entry(task.id.clone()).or_insert(0);
         if let Some(previous) = index.by_id.insert(task.id.clone(), task.clone()) {
             if let Some(short_id) = previous.short_id {
                 index.short_to_id.remove(&short_id);
@@ -376,6 +378,21 @@ impl VideoTaskWriteRepository for InMemoryVideoTaskRepository {
         if let Some(existing) = index.by_id.get(&task.id) {
             existing.ensure_immutable_identity_matches(&task)?;
             task.created_at_unix_ms = existing.created_at_unix_ms;
+            if task.row_revision != existing.row_revision {
+                return Err(DataLayerError::InvalidInput(
+                    "video task row revision conflict".to_string(),
+                ));
+            }
+            if !allows_transition(existing.status, task.status) {
+                return Err(DataLayerError::InvalidInput(
+                    "video task terminal state conflict".to_string(),
+                ));
+            }
+            task.updated_at_unix_secs =
+                task.updated_at_unix_secs.max(existing.updated_at_unix_secs);
+            task.row_revision = next_revision(existing.row_revision)?;
+        } else {
+            task.row_revision = 1;
         }
         Ok(Self::store_locked(&mut index, task.into_stored()))
     }
@@ -383,6 +400,7 @@ impl VideoTaskWriteRepository for InMemoryVideoTaskRepository {
     async fn update_if_active(
         &self,
         mut task: UpsertVideoTask,
+        fencing_token: Option<i64>,
     ) -> Result<Option<StoredVideoTask>, DataLayerError> {
         let mut index = self.index.write().expect("video task repository lock");
         if Self::ensure_unique_keys_available(&index, &task).is_err() {
@@ -391,13 +409,28 @@ impl VideoTaskWriteRepository for InMemoryVideoTaskRepository {
         let Some(existing) = index.by_id.get(&task.id) else {
             return Ok(None);
         };
-        if !existing.status.is_active() {
+        if fencing_token.is_some_and(|token| {
+            index
+                .fencing_tokens
+                .get(&task.id)
+                .copied()
+                .unwrap_or_default()
+                != token
+        }) {
+            return Ok(None);
+        }
+        if task.row_revision != existing.row_revision {
+            return Ok(None);
+        }
+        if !allows_transition(existing.status, task.status) {
             return Ok(None);
         }
         if existing.ensure_immutable_identity_matches(&task).is_err() {
             return Ok(None);
         }
         task.created_at_unix_ms = existing.created_at_unix_ms;
+        task.updated_at_unix_secs = task.updated_at_unix_secs.max(existing.updated_at_unix_secs);
+        task.row_revision = next_revision(existing.row_revision)?;
         Ok(Some(Self::store_locked(&mut index, task.into_stored())))
     }
 
@@ -406,7 +439,7 @@ impl VideoTaskWriteRepository for InMemoryVideoTaskRepository {
         now_unix_secs: u64,
         claim_until_unix_secs: u64,
         limit: usize,
-    ) -> Result<Vec<StoredVideoTask>, DataLayerError> {
+    ) -> Result<Vec<VideoTaskClaim>, DataLayerError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -437,17 +470,42 @@ impl VideoTaskWriteRepository for InMemoryVideoTaskRepository {
         });
         due_ids.truncate(limit);
 
+        // Validate the whole batch before mutating it, as the SQL statement does.
+        for id in &due_ids {
+            next_revision(index.by_id[id].row_revision)?;
+            next_revision(index.fencing_tokens.get(id).copied().unwrap_or_default())?;
+        }
+
         let mut claimed = Vec::with_capacity(due_ids.len());
         for id in due_ids {
+            let token = index.fencing_tokens.entry(id.clone()).or_insert(0);
+            *token += 1;
+            let fencing_token = *token;
             let Some(task) = index.by_id.get_mut(&id) else {
                 continue;
             };
             task.next_poll_at_unix_secs = Some(claim_until_unix_secs);
+            task.row_revision += 1;
             task.updated_at_unix_secs = now_unix_secs.max(task.updated_at_unix_secs);
-            claimed.push(task.clone());
+            claimed.push(VideoTaskClaim {
+                task: task.clone(),
+                fencing_token,
+            });
         }
         Ok(claimed)
     }
+}
+
+fn allows_transition(from: VideoTaskStatus, to: VideoTaskStatus) -> bool {
+    (from.is_active() && to != VideoTaskStatus::Deleted)
+        || (matches!(from, VideoTaskStatus::Completed | VideoTaskStatus::Failed)
+            && to == VideoTaskStatus::Deleted)
+}
+
+fn next_revision(value: i64) -> Result<i64, DataLayerError> {
+    value
+        .checked_add(1)
+        .ok_or_else(|| DataLayerError::UnexpectedValue("video task revision exhausted".to_string()))
 }
 
 #[cfg(test)]
@@ -464,6 +522,7 @@ mod tests {
         updated_at_unix_secs: u64,
     ) -> UpsertVideoTask {
         UpsertVideoTask {
+            row_revision: 0,
             id: id.to_string(),
             short_id: Some(format!("short-{id}")),
             request_id: format!("request-{id}"),
@@ -590,6 +649,7 @@ mod tests {
 
         let conflict = repo
             .upsert(UpsertVideoTask {
+                row_revision: 0,
                 id: "task-1".to_string(),
                 short_id: Some("short-task-1b".to_string()),
                 request_id: "request-task-1b".to_string(),
@@ -658,6 +718,23 @@ mod tests {
             .await
             .expect("find should succeed")
             .is_none());
+
+        let repo = InMemoryVideoTaskRepository::default();
+        repo.upsert(sample_task("task-1", VideoTaskStatus::Processing, 100))
+            .await
+            .expect("upsert should succeed");
+        assert!(repo
+            .update_if_active(
+                UpsertVideoTask {
+                    row_revision: 1,
+                    status: VideoTaskStatus::Deleted,
+                    ..sample_task("task-1", VideoTaskStatus::Deleted, 200)
+                },
+                None,
+            )
+            .await
+            .expect("active delete update should execute")
+            .is_none());
     }
 
     #[tokio::test]
@@ -670,6 +747,7 @@ mod tests {
 
         let updated = repo
             .upsert(UpsertVideoTask {
+                row_revision: 1,
                 status: VideoTaskStatus::Processing,
                 progress_percent: 50,
                 poll_count: 2,
@@ -696,13 +774,17 @@ mod tests {
             .expect("initial upsert should succeed");
 
         let result = repo
-            .update_if_active(UpsertVideoTask {
-                user_id: Some("attacker".to_string()),
-                status: VideoTaskStatus::Completed,
-                progress_percent: 100,
-                updated_at_unix_secs: 200,
-                ..task
-            })
+            .update_if_active(
+                UpsertVideoTask {
+                    row_revision: 1,
+                    user_id: Some("attacker".to_string()),
+                    status: VideoTaskStatus::Completed,
+                    progress_percent: 100,
+                    updated_at_unix_secs: 200,
+                    ..task
+                },
+                None,
+            )
             .await
             .expect("guarded update should execute");
         assert!(result.is_none());
@@ -728,6 +810,7 @@ mod tests {
 
         let short_id_conflict = repo
             .upsert(UpsertVideoTask {
+                row_revision: 0,
                 id: "task-2".to_string(),
                 request_id: "request-task-2".to_string(),
                 ..original.clone()
@@ -738,6 +821,7 @@ mod tests {
 
         let request_id_conflict = repo
             .upsert(UpsertVideoTask {
+                row_revision: 0,
                 id: "task-3".to_string(),
                 short_id: Some("short-task-3".to_string()),
                 ..original
@@ -775,6 +859,7 @@ mod tests {
             .await
             .expect("upsert should succeed");
         repo.upsert(UpsertVideoTask {
+            row_revision: 0,
             next_poll_at_unix_secs: Some(500),
             ..sample_task("task-3", VideoTaskStatus::Queued, 200)
         })
@@ -798,14 +883,58 @@ mod tests {
             .expect("upsert should succeed");
 
         let updated = repo
-            .update_if_active(UpsertVideoTask {
-                progress_percent: 100,
-                ..sample_task("task-1", VideoTaskStatus::Completed, 200)
-            })
+            .update_if_active(
+                UpsertVideoTask {
+                    row_revision: 1,
+                    progress_percent: 50,
+                    ..sample_task("task-1", VideoTaskStatus::Processing, 200)
+                },
+                None,
+            )
             .await
             .expect("update should succeed");
 
         assert!(updated.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_if_active_allows_terminal_deletion_only() {
+        let repo = InMemoryVideoTaskRepository::default();
+        repo.upsert(sample_task("task-1", VideoTaskStatus::Completed, 100))
+            .await
+            .expect("upsert should succeed");
+
+        let deleted = repo
+            .update_if_active(
+                UpsertVideoTask {
+                    row_revision: 1,
+                    status: VideoTaskStatus::Deleted,
+                    updated_at_unix_secs: 200,
+                    ..sample_task("task-1", VideoTaskStatus::Deleted, 200)
+                },
+                None,
+            )
+            .await
+            .expect("delete update should execute")
+            .expect("terminal deletion should be accepted");
+        assert_eq!(deleted.status, VideoTaskStatus::Deleted);
+
+        let repo = InMemoryVideoTaskRepository::default();
+        repo.upsert(sample_task("task-1", VideoTaskStatus::Completed, 100))
+            .await
+            .expect("upsert should succeed");
+        assert!(repo
+            .update_if_active(
+                UpsertVideoTask {
+                    row_revision: 1,
+                    status: VideoTaskStatus::Processing,
+                    ..sample_task("task-1", VideoTaskStatus::Processing, 200)
+                },
+                None,
+            )
+            .await
+            .expect("stale active update should execute")
+            .is_none());
     }
 
     #[tokio::test]
@@ -815,6 +944,7 @@ mod tests {
             .await
             .expect("upsert should succeed");
         repo.upsert(UpsertVideoTask {
+            row_revision: 0,
             model: Some("veo-3-fast".to_string()),
             user_id: Some("user-2".to_string()),
             client_api_format: Some("gemini:video".to_string()),
@@ -825,6 +955,7 @@ mod tests {
         .await
         .expect("upsert should succeed");
         repo.upsert(UpsertVideoTask {
+            row_revision: 0,
             model: Some("veo-3-fast".to_string()),
             user_id: Some("user-2".to_string()),
             client_api_format: Some("gemini:video".to_string()),
@@ -891,8 +1022,9 @@ mod tests {
             .await
             .expect("claim should succeed");
         assert_eq!(claimed.len(), 1);
-        assert_eq!(claimed[0].id, "task-2");
-        assert_eq!(claimed[0].next_poll_at_unix_secs, Some(130));
+        assert_eq!(claimed[0].task.id, "task-2");
+        assert_eq!(claimed[0].task.next_poll_at_unix_secs, Some(130));
+        assert_eq!(claimed[0].fencing_token, 1);
 
         let remaining = repo
             .list_due(100, 10)
@@ -900,5 +1032,178 @@ mod tests {
             .expect("list due should succeed");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, "task-1");
+    }
+
+    #[tokio::test]
+    async fn stale_claim_cannot_overwrite_a_newer_claim() {
+        let repo = InMemoryVideoTaskRepository::default();
+        repo.upsert(sample_task("task-1", VideoTaskStatus::Processing, 100))
+            .await
+            .expect("upsert should succeed");
+
+        let first = repo
+            .claim_due(100, 130, 1)
+            .await
+            .expect("first claim should succeed")
+            .pop()
+            .expect("first claim should be present");
+        let second = repo
+            .claim_due(130, 160, 1)
+            .await
+            .expect("expired task should be reclaimable")
+            .pop()
+            .expect("second claim should be present");
+        assert_eq!(first.fencing_token, 1);
+        assert_eq!(second.fencing_token, 2);
+
+        let mut stale_update: UpsertVideoTask = first.task.into();
+        stale_update.status = VideoTaskStatus::Completed;
+        stale_update.progress_percent = 100;
+        stale_update.updated_at_unix_secs = 140;
+        assert!(repo
+            .update_if_active(stale_update, Some(first.fencing_token))
+            .await
+            .expect("stale update should execute")
+            .is_none());
+
+        let mut current_update: UpsertVideoTask = second.task.into();
+        current_update.status = VideoTaskStatus::Completed;
+        current_update.progress_percent = 100;
+        current_update.updated_at_unix_secs = 141;
+        assert!(repo
+            .update_if_active(current_update, Some(second.fencing_token))
+            .await
+            .expect("current update should execute")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn revisions_fence_same_second_and_unbound_snapshot_writes() {
+        let repo = InMemoryVideoTaskRepository::default();
+        let input = sample_task("revision-task", VideoTaskStatus::Processing, 100);
+        let initial = repo.upsert(input.clone()).await.unwrap();
+        assert_eq!(initial.row_revision, 1);
+        assert!(repo.upsert(input.clone()).await.is_err());
+        assert!(repo.update_if_active(input, None).await.unwrap().is_none());
+
+        let first = UpsertVideoTask {
+            progress_percent: 40,
+            ..initial.clone().into()
+        };
+        let second = UpsertVideoTask {
+            status: VideoTaskStatus::Completed,
+            progress_percent: 100,
+            ..initial.into()
+        };
+        let (a, b) = tokio::join!(
+            repo.update_if_active(first, None),
+            repo.update_if_active(second, None)
+        );
+        assert_eq!(
+            usize::from(a.unwrap().is_some()) + usize::from(b.unwrap().is_some()),
+            1
+        );
+        let latest = repo
+            .find(VideoTaskLookupKey::Id("revision-task"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.row_revision, 2);
+        assert_eq!(latest.updated_at_unix_secs, 100);
+    }
+
+    #[tokio::test]
+    async fn claims_advance_revision_and_clock_skew_does_not_block_current_owner() {
+        let repo = InMemoryVideoTaskRepository::default();
+        let initial = repo
+            .upsert(sample_task(
+                "revision-task",
+                VideoTaskStatus::Processing,
+                100,
+            ))
+            .await
+            .unwrap();
+        let claim = repo.claim_due(100, 130, 1).await.unwrap().pop().unwrap();
+        assert_eq!(claim.task.row_revision, initial.row_revision + 1);
+        let stale = UpsertVideoTask {
+            status: VideoTaskStatus::Failed,
+            updated_at_unix_secs: 999,
+            ..initial.into()
+        };
+        assert!(repo.update_if_active(stale, None).await.unwrap().is_none());
+        let current = UpsertVideoTask {
+            status: VideoTaskStatus::Completed,
+            updated_at_unix_secs: 99,
+            ..claim.task.into()
+        };
+        let stored = repo
+            .update_if_active(current, Some(claim.fencing_token))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.row_revision, 3);
+        assert_eq!(stored.updated_at_unix_secs, 100);
+    }
+
+    #[tokio::test]
+    async fn deletion_transition_matrix_and_tombstones_are_enforced_by_both_writers() {
+        for from in [
+            VideoTaskStatus::Pending,
+            VideoTaskStatus::Submitted,
+            VideoTaskStatus::Queued,
+            VideoTaskStatus::Processing,
+            VideoTaskStatus::Completed,
+            VideoTaskStatus::Failed,
+            VideoTaskStatus::Cancelled,
+            VideoTaskStatus::Expired,
+            VideoTaskStatus::Deleted,
+        ] {
+            for guarded in [false, true] {
+                let repo = InMemoryVideoTaskRepository::default();
+                let stored = repo
+                    .upsert(sample_task("deletion-task", from, 100))
+                    .await
+                    .unwrap();
+                let update = UpsertVideoTask {
+                    status: VideoTaskStatus::Deleted,
+                    ..stored.into()
+                };
+                let allowed = matches!(from, VideoTaskStatus::Completed | VideoTaskStatus::Failed);
+                if guarded {
+                    assert_eq!(
+                        repo.update_if_active(update, None).await.unwrap().is_some(),
+                        allowed,
+                        "{from:?}"
+                    );
+                } else {
+                    assert_eq!(repo.upsert(update).await.is_ok(), allowed, "{from:?}");
+                }
+                let latest = repo
+                    .find(VideoTaskLookupKey::Id("deletion-task"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    latest.status,
+                    if allowed {
+                        VideoTaskStatus::Deleted
+                    } else {
+                        from
+                    }
+                );
+                if latest.status == VideoTaskStatus::Deleted {
+                    let resurrect = UpsertVideoTask {
+                        status: VideoTaskStatus::Processing,
+                        ..latest.into()
+                    };
+                    assert!(repo.upsert(resurrect.clone()).await.is_err());
+                    assert!(repo
+                        .update_if_active(resurrect, None)
+                        .await
+                        .unwrap()
+                        .is_none());
+                }
+            }
+        }
     }
 }

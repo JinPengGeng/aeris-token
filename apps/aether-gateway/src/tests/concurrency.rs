@@ -246,7 +246,7 @@ async fn gateway_rejects_second_in_flight_stream_request_with_distributed_overlo
             "Bearer sk-client-openai-concurrency",
         )
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("first request should succeed");
@@ -260,7 +260,7 @@ async fn gateway_rejects_second_in_flight_stream_request_with_distributed_overlo
             "Bearer sk-client-openai-concurrency",
         )
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("second request should complete");
@@ -350,7 +350,7 @@ async fn gateway_rejects_second_in_flight_stream_request_with_local_overload_imp
             "Bearer sk-client-openai-concurrency",
         )
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("first request should succeed");
@@ -364,7 +364,7 @@ async fn gateway_rejects_second_in_flight_stream_request_with_local_overload_imp
             "Bearer sk-client-openai-concurrency",
         )
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("second request should complete");
@@ -403,6 +403,55 @@ fn gateway_exposes_request_concurrency_metrics() {
         "gateway_exposes_request_concurrency_metrics",
         gateway_exposes_request_concurrency_metrics_impl,
     );
+}
+
+#[test]
+fn gateway_queue_health_exposes_dlq_capacity_over_authenticated_http() {
+    run_concurrency_test("gateway_queue_health_exposes_dlq_capacity", || async {
+        use aether_runtime_state::RuntimeQueueStore;
+        let runtime = Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let config = crate::usage::UsageRuntimeConfig {
+            enabled: true,
+            dlq_stream_maxlen: 5,
+            ..Default::default()
+        };
+        for _ in 0..6 {
+            runtime
+                .append_fields_with_maxlen(
+                    &config.dlq_stream_key,
+                    &std::collections::BTreeMap::from([("fixture".into(), "test".into())]),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let state = AppState::new()
+            .unwrap()
+            .with_runtime_state(runtime)
+            .with_usage_runtime_config(config)
+            .unwrap();
+        assert!(state.prewarm_metric_snapshot().await);
+        let (url, handle, token) = start_authenticated_operational_server(state).await;
+        let response = authenticated_operational_client(&token)
+            .get(format!("{url}/_gateway/metrics"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.unwrap();
+        for (name, value) in [
+            ("usage_queue_dlq_length", 6),
+            ("usage_queue_dlq_max_length", 5),
+            ("usage_queue_dlq_utilization_per_mille", 1000),
+            ("usage_queue_dlq_at_retention_boundary", 1),
+        ] {
+            assert!(
+                body.contains(&format!("{name}{{stream=\"usage:events:dlq\"}} {value}")),
+                "missing {name}: {body}"
+            );
+        }
+        handle.abort();
+    });
 }
 
 #[test]

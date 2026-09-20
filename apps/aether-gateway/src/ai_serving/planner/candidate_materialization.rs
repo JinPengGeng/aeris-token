@@ -28,8 +28,9 @@ use uuid::Uuid;
 use crate::ai_serving::planner::candidate_affinity_cache::remember_scheduler_affinity_for_candidate_with_routing_policy_at_epoch;
 use crate::ai_serving::planner::candidate_ranking::scheduler_ordering_config_for_routing_policy;
 use crate::ai_serving::planner::candidate_resolution::{
-    resolve_and_rank_logical_local_execution_candidates, EligibleLocalExecutionCandidate,
-    LocalExecutionCandidateKind, SkippedLocalExecutionCandidate,
+    resolve_and_rank_logical_local_execution_candidates,
+    resolve_and_rank_logical_local_execution_candidates_with_affinity_target,
+    EligibleLocalExecutionCandidate, LocalExecutionCandidateKind, SkippedLocalExecutionCandidate,
 };
 use crate::ai_serving::planner::candidate_source::{
     LocalCandidatePreselectionKeyMode, LocalCandidatePreselectionPageCursor,
@@ -1040,8 +1041,13 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
             }
 
             let resolve_started_at = std::time::Instant::now();
-            let (candidates, resolved_skipped) =
+            let (mut candidates, resolved_skipped) =
                 resolve_priority_candidate_page_with_cache(self, page_id, page.candidates).await;
+            for candidate in &mut candidates {
+                candidate.orchestration.scheduler_affinity_epoch = Some(page_id.generation());
+                candidate.orchestration.scheduler_generation = Some(page_id.generation());
+                candidate.orchestration.scheduler_page_ordinal = Some(page_id.ordinal());
+            }
             observe_gateway_stage_ms(
                 "candidate_page_resolve",
                 resolve_started_at.elapsed().as_millis() as u64,
@@ -1327,7 +1333,7 @@ async fn resolve_priority_candidate_page_with_cache(
     Vec<SkippedLocalExecutionCandidate>,
 ) {
     if !should_cache_resolved_candidate_page(cursor) {
-        return resolve_and_rank_logical_local_execution_candidates(
+        return resolve_and_rank_logical_local_execution_candidates_with_affinity_target(
             cursor.state,
             page_candidates,
             &cursor.client_api_format,
@@ -1339,6 +1345,7 @@ async fn resolve_priority_candidate_page_with_cache(
             cursor.sticky_session_token.as_deref(),
             cursor.request_auth_channel.as_deref(),
             cursor.resolution_mode,
+            cursor.page_cursor.affinity_target_snapshot(),
         )
         .await;
     }
@@ -1363,7 +1370,8 @@ async fn resolve_priority_candidate_page_with_cache(
             .resolved_page_cache_model_directive_policy_hash(),
         cursor.resolution_mode,
         page_id,
-    );
+    )
+    .with_scheduler_affinity_target(cursor.page_cursor.affinity_target());
     let page_candidates_for_fallback = page_candidates;
     let app = cursor.state.app();
     let cache = app.candidate_resolved_page_cache.clone();
@@ -1381,6 +1389,7 @@ async fn resolve_priority_candidate_page_with_cache(
     let request_auth_channel = cursor.request_auth_channel.as_deref();
     let resolution_mode = cursor.resolution_mode;
     let scheduling_snapshot = cursor.page_cursor.scheduling_snapshot();
+    let affinity_target = cursor.page_cursor.affinity_target();
     let cached = cache
         .get_or_load_once_stale_while_revalidating(
             key,
@@ -1400,6 +1409,7 @@ async fn resolve_priority_candidate_page_with_cache(
                     resolution_mode,
                     scheduling_snapshot,
                     page_id,
+                    affinity_target.cloned(),
                 )
             },
             || {
@@ -1416,6 +1426,7 @@ async fn resolve_priority_candidate_page_with_cache(
                     resolution_mode,
                     scheduling_snapshot,
                     page_id,
+                    affinity_target.cloned(),
                 )
             },
             CacheLoadObserver::new()
@@ -1441,7 +1452,7 @@ async fn resolve_priority_candidate_page_with_cache(
             if page_candidates_for_fallback.is_empty() {
                 return (Vec::new(), Vec::new());
             }
-            resolve_and_rank_logical_local_execution_candidates(
+            resolve_and_rank_logical_local_execution_candidates_with_affinity_target(
                 cursor.state,
                 page_candidates_for_fallback,
                 &cursor.client_api_format,
@@ -1453,6 +1464,7 @@ async fn resolve_priority_candidate_page_with_cache(
                 cursor.sticky_session_token.as_deref(),
                 cursor.request_auth_channel.as_deref(),
                 cursor.resolution_mode,
+                cursor.page_cursor.affinity_target_snapshot(),
             )
             .await
         }
@@ -1472,22 +1484,25 @@ async fn resolve_candidate_page_snapshot(
     resolution_mode: LocalCandidateResolutionMode,
     scheduling_snapshot: SchedulerRequestSnapshot,
     page_id: SchedulerPageId,
+    affinity_target: Option<aether_scheduler_core::SchedulerAffinityTarget>,
 ) -> Result<Option<Arc<CandidateResolvedPageSnapshot>>, GatewayError> {
     let state = PlannerAppState::new(&app);
-    let (candidates, resolved_skipped) = resolve_and_rank_logical_local_execution_candidates(
-        state,
-        page_candidates,
-        &client_api_format,
-        Some(&requested_model),
-        Some(&auth_snapshot),
-        client_session_affinity.as_ref(),
-        required_capabilities.as_ref(),
-        routing_policy.as_ref(),
-        None,
-        request_auth_channel.as_deref(),
-        resolution_mode,
-    )
-    .await;
+    let (candidates, resolved_skipped) =
+        resolve_and_rank_logical_local_execution_candidates_with_affinity_target(
+            state,
+            page_candidates,
+            &client_api_format,
+            Some(&requested_model),
+            Some(&auth_snapshot),
+            client_session_affinity.as_ref(),
+            required_capabilities.as_ref(),
+            routing_policy.as_ref(),
+            None,
+            request_auth_channel.as_deref(),
+            resolution_mode,
+            &affinity_target,
+        )
+        .await;
     Ok(Some(Arc::new(CandidateResolvedPageSnapshot {
         scheduling_snapshot,
         page_id,
@@ -2310,6 +2325,8 @@ mod tests {
                 pool_key_index,
                 pool_key_lease: None,
                 scheduler_affinity_epoch: None,
+                scheduler_generation: None,
+                scheduler_page_ordinal: None,
                 // These tests cover persistence shape, not same-key retries.
                 sticky_key_attempts: Some(1),
             },

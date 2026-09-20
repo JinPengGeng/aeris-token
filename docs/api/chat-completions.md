@@ -62,12 +62,13 @@ Local validation errors use the OpenAI envelope:
 The public status categories include `400` for invalid input,
 `401` for authentication failure, `403` for an access policy denial, `404` for a
 missing resource/model, `429` for a rate or quota limit, and `503` for
-provider/gateway unavailability. The model-detail endpoint
-`GET /v1/models/:id` reports `404` with `error.code=model_not_found` when no
-visible model matches. Chat inference does not yet make that distinction for
-every missing-model case: an empty candidate list can still return `503`.
-Check the model name and configured provider availability before repeatedly
-retrying such a response; see the [model error boundary](error-contract.md#conversion-and-model-errors).
+provider/gateway unavailability. For an authenticated Chat request that reaches
+candidate selection, an absent public global model returns `404` with
+`error.code=model_not_found`. A declared model or alias with no selectable
+provider remains a retryable `503`; check the model name and provider
+availability before retrying. Authentication and access-policy failures still
+return their own `401` or `403` response, without exposing model-directory
+information. See the [model error boundary](error-contract.md#conversion-and-model-errors).
 
 An exhausted wallet is not a rate-limit retry signal even though the HTTP
 status remains `429` for compatibility with OpenAI clients. It is returned as

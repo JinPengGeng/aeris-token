@@ -258,6 +258,13 @@ impl UsageSettlementWriter for GatewayDataState {
     > {
         GatewayDataState::settle_usage_observed(self, input).await
     }
+
+    async fn capture_provider_cost_for_usage(
+        &self,
+        usage: &StoredRequestUsageAudit,
+    ) -> Result<(), DataLayerError> {
+        GatewayDataState::capture_provider_cost_for_usage(self, usage).await
+    }
 }
 
 #[async_trait]

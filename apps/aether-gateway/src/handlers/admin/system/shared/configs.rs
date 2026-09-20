@@ -112,7 +112,9 @@ pub(crate) async fn apply_admin_system_config_update(
     state: &AdminAppState<'_>,
     requested_key: &str,
     request_body: &Bytes,
-) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError> {
+    audit: Option<&aether_data::repository::audit::CreateAdminAuditLog>,
+) -> Result<Result<(serde_json::Value, bool), (http::StatusCode, serde_json::Value)>, GatewayError>
+{
     if let Some(error) = external_models_proxy_node_config_owner_error(requested_key) {
         return Ok(Err(error));
     }
@@ -208,19 +210,45 @@ pub(crate) async fn apply_admin_system_config_update(
         value = json!(encrypted);
     }
 
-    let updated = state
-        .upsert_system_config_entry(&normalized_key, &value, description.as_deref())
-        .await?;
+    let (updated, durable_audit_enqueued) = if let Some(audit) = audit {
+        match state
+            .upsert_system_config_entry_with_audit(
+                &normalized_key,
+                &value,
+                description.as_deref(),
+                audit,
+            )
+            .await?
+        {
+            Some(updated) => (updated, true),
+            None => (
+                state
+                    .upsert_system_config_entry(&normalized_key, &value, description.as_deref())
+                    .await?,
+                false,
+            ),
+        }
+    } else {
+        (
+            state
+                .upsert_system_config_entry(&normalized_key, &value, description.as_deref())
+                .await?,
+            false,
+        )
+    };
     let display_value = if is_sensitive_admin_system_config_key(&normalized_key) {
         json!("********")
     } else {
         updated.value.clone()
     };
-    Ok(Ok(build_admin_system_config_updated_payload(
-        updated.key,
-        display_value,
-        updated.description,
-        updated.updated_at_unix_secs,
+    Ok(Ok((
+        build_admin_system_config_updated_payload(
+            updated.key,
+            display_value,
+            updated.description,
+            updated.updated_at_unix_secs,
+        ),
+        durable_audit_enqueued,
     )))
 }
 

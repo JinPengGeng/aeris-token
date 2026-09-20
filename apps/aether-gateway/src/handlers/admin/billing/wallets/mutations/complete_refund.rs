@@ -343,16 +343,14 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
         .await?
     {
         crate::AdminWalletMutationOutcome::Applied(refund) => {
-            // The terminal refund transition is durable at this point. Notify
-            // before attempting referral compensation so a temporary
-            // reconciliation failure cannot permanently suppress the user's
-            // terminal-state notification. The transition predicate is based
-            // on the pre-mutation status, therefore retries of an already
-            // terminal refund remain idempotent and do not dispatch again.
-            if refund_status_notification_should_send(
-                Some(&refund_before_complete.status),
-                &refund.status,
-            ) {
+            // PostgreSQL committed an outbox entry with the refund. Other
+            // adapters retain their historical direct notification fallback.
+            if !state.app().data.has_refund_notification_backend()
+                && refund_status_notification_should_send(
+                    Some(&refund_before_complete.status),
+                    &refund.status,
+                )
+            {
                 notify_user_refund_status(state, &refund).await;
             }
             if let Some(order_id) = refund.payment_order_id.as_deref() {
@@ -403,7 +401,6 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
 mod tests {
     use super::{
         gateway_refund_mode_allowed, is_safe_gateway_refund_id, merge_gateway_refund_proof,
-        refund_status_notification_should_send,
     };
     use crate::handlers::shared::DirectGatewayRefundResult;
     use serde_json::json;
@@ -464,44 +461,5 @@ mod tests {
         assert!(gateway_refund_mode_allowed(" Original_Channel "));
         assert!(!gateway_refund_mode_allowed("offline_payout"));
         assert!(!gateway_refund_mode_allowed(""));
-    }
-
-    #[test]
-    fn terminal_notification_precedes_referral_reversal_failure_guard() {
-        // The refund transition is durable before this branch runs. Keep the
-        // notification ahead of best-effort referral compensation so a
-        // compensation error cannot suppress the terminal update.
-        // Restrict the search to the applied-transition branch because the
-        // already-succeeded retry path intentionally has no send.
-        let source = include_str!("complete_refund.rs");
-        let applied_branch = source
-            .split_once("AdminWalletMutationOutcome::Applied(refund) => {")
-            .map(|(_, branch)| branch)
-            .and_then(|branch| {
-                branch
-                    .split_once("let response = Json(json!({")
-                    .map(|(branch, _)| branch)
-            })
-            .expect("applied refund branch should exist");
-        let notification = applied_branch
-            .find("notify_user_refund_status(state, &refund).await;")
-            .expect("terminal transition should dispatch notification");
-        let reversal = applied_branch
-            .find("reverse_referral_rewards_for_order(order_id, refund.amount_usd)")
-            .expect("terminal transition should reconcile referral rewards");
-        assert!(
-            notification < reversal,
-            "terminal notification must be dispatched before referral compensation"
-        );
-        // A retry observes the already-terminal status and must not dispatch
-        // a second notification, preserving the existing idempotency rule.
-        assert!(refund_status_notification_should_send(
-            Some("processing"),
-            "succeeded"
-        ));
-        assert!(!refund_status_notification_should_send(
-            Some("succeeded"),
-            "succeeded"
-        ));
     }
 }

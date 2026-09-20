@@ -984,6 +984,7 @@ export const MOCK_SYSTEM_CONFIGS: Array<{ key: string; value: unknown; descripti
   { key: 'module.important_notification.email_enabled', value: false, description: '通知服务邮件推送开关' },
   { key: 'module.important_notification.email_recipients', value: '', description: '通知服务管理员收件人' },
   { key: 'module.important_notification.default_channel', value: 'all', description: '通知服务全局推送服务' },
+  { key: 'module.important_notification.user_balance_low_threshold', value: 10, description: '用户低余额提醒阈值（美元）' },
   {
     key: 'module.important_notification.items',
     value: [
@@ -995,17 +996,6 @@ export const MOCK_SYSTEM_CONFIGS: Array<{ key: string; value: unknown; descripti
         title_template: '',
         markdown_template: '',
         text_template: '',
-        user_email_enabled: false,
-        system: true,
-      },
-      {
-        key: 'provider_pool_abnormal',
-        name: '号池异常',
-        enabled: true,
-        channel: 'global',
-        title_template: '号池异常：{provider_name}',
-        markdown_template: '号池 `{provider_name}` 出现异常，请检查服务状态。',
-        text_template: '号池 {provider_name} 出现异常，请检查服务状态。',
         user_email_enabled: false,
         system: true,
       },

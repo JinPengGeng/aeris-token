@@ -15,7 +15,9 @@ use async_trait::async_trait;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-use crate::ai_serving::planner::candidate_affinity_cache::has_explicit_session_affinity;
+use crate::ai_serving::planner::candidate_affinity_cache::{
+    has_explicit_session_affinity, hydrate_cached_scheduler_affinity_target,
+};
 use crate::ai_serving::planner::candidate_resolution::SkippedLocalExecutionCandidate;
 use crate::ai_serving::{GatewayAuthApiKeySnapshot, PlannerAppState};
 use crate::cache::{
@@ -385,6 +387,7 @@ pub(crate) struct LocalCandidatePreselectionPageCursor<'a> {
     fallback_scan_epoch: u32,
     exhausted_api_formats: BTreeSet<String>,
     seen_candidate_keys: BTreeSet<String>,
+    affinity_target: Option<aether_scheduler_core::SchedulerAffinityTarget>,
 }
 
 impl<'a> LocalCandidatePreselectionPageCursor<'a> {
@@ -430,8 +433,17 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             requested_model,
         );
 
-        let ranking_seed = request_distribution_seed();
         let generation = state.app().scheduler_affinity_epoch();
+        let affinity_target = hydrate_cached_scheduler_affinity_target(
+            state,
+            Some(auth_snapshot),
+            client_session_affinity,
+            client_api_format,
+            Some(requested_model),
+            routing_policy,
+        )
+        .await;
+        let ranking_seed = request_distribution_seed();
         let ordering_config =
             super::candidate_ranking::scheduler_ordering_config_for_routing_policy(routing_policy);
 
@@ -468,6 +480,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             fallback_scan_epoch: 0,
             exhausted_api_formats: BTreeSet::new(),
             seen_candidate_keys: BTreeSet::new(),
+            affinity_target,
         }
     }
 
@@ -607,6 +620,18 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         &self.model_directive_policy_cache_key
     }
 
+    pub(crate) fn affinity_target(
+        &self,
+    ) -> Option<&aether_scheduler_core::SchedulerAffinityTarget> {
+        self.affinity_target.as_ref()
+    }
+
+    pub(crate) fn affinity_target_snapshot(
+        &self,
+    ) -> &Option<aether_scheduler_core::SchedulerAffinityTarget> {
+        &self.affinity_target
+    }
+
     pub(crate) fn should_cache_current_priority_resolved_page(&self) -> bool {
         if !(self.priority_page_emitted
             && self.format_index == 0
@@ -674,7 +699,8 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             self.use_api_format_alias_match,
             self.client_session_affinity.as_ref(),
             &self.model_directive_policy_cache_key,
-        );
+        )
+        .with_scheduler_affinity_target(self.affinity_target.as_ref());
         let cache = self.state.app().candidate_page_cache.clone();
         let ttl = candidate_page_cache_ttl_from_env();
         let stale_ttl = candidate_page_cache_stale_ttl(ttl);
@@ -1320,6 +1346,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                 current_unix_secs(),
                 self.scheduling_snapshot.ranking_seed(),
                 self.ordering_config,
+                Some(&self.affinity_target),
             )
             .await?;
         let skipped_candidates = skipped_candidates
@@ -1517,6 +1544,8 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    mod redis_affinity;
 
     #[test]
     fn compaction_operation_excludes_non_responses_provider_formats() {

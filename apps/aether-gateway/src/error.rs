@@ -248,7 +248,8 @@ impl IntoResponse for GatewayError {
                     "error": {
                         "message": "gateway proxy unavailable",
                         "trace_id": trace_id,
-                    }
+                    },
+                    "trace_id": trace_id,
                 }));
                 let mut response = (StatusCode::BAD_GATEWAY, body).into_response();
                 let _ =
@@ -271,7 +272,8 @@ impl IntoResponse for GatewayError {
                         "trace_id": trace_id,
                         "retryable": true,
                         "failover_disposition": "retry_request",
-                    }
+                    },
+                    "trace_id": trace_id,
                 }));
                 let mut response = (StatusCode::BAD_GATEWAY, body).into_response();
                 let _ =
@@ -294,7 +296,8 @@ impl IntoResponse for GatewayError {
                     "error": {
                         "message": "gateway local execution planning timed out",
                         "trace_id": trace_id,
-                    }
+                    },
+                    "trace_id": trace_id,
                 }));
                 let mut response = (StatusCode::GATEWAY_TIMEOUT, body).into_response();
                 let _ =
@@ -316,7 +319,8 @@ impl IntoResponse for GatewayError {
                     "error": {
                         "message": "gateway admission queue timed out",
                         "trace_id": trace_id,
-                    }
+                    },
+                    "trace_id": trace_id,
                 }));
                 let mut response = (StatusCode::TOO_MANY_REQUESTS, body).into_response();
                 let _ =
@@ -499,8 +503,8 @@ mod tests {
         assert!(!fingerprint.contains("database-secret"));
     }
 
-    #[test]
-    fn admission_timeout_returns_429_with_retry_after_without_panicking() {
+    #[tokio::test]
+    async fn admission_timeout_returns_429_with_retry_after_without_panicking() {
         let trace_id = "trace-admission-timeout".to_string();
 
         let response = GatewayError::AdmissionTimeout {
@@ -525,6 +529,10 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some(trace_id.as_str())
         );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["trace_id"], trace_id);
+        assert_eq!(payload["error"]["trace_id"], trace_id);
     }
 
     #[tokio::test]
@@ -561,6 +569,7 @@ mod tests {
             let payload: serde_json::Value =
                 serde_json::from_slice(&body).expect("control error response should be JSON");
             assert_eq!(payload["error"]["code"], "control_unavailable");
+            assert_eq!(payload["trace_id"], "trace-control");
             assert_eq!(payload["error"]["retryable"], true);
             assert_eq!(payload["error"]["failover_disposition"], "retry_request");
             assert!(!String::from_utf8_lossy(&body).contains("secret"));

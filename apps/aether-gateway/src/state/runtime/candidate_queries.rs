@@ -5,6 +5,16 @@ use std::time::Duration;
 const PROVIDER_QUOTA_RUNTIME_CACHE_TTL: Duration = Duration::from_secs(5);
 
 impl AppState {
+    pub(crate) async fn list_declared_global_models_for_api_format(
+        &self,
+        api_format: &str,
+    ) -> Result<Vec<candidate_selection::StoredGlobalModelDeclaration>, GatewayError> {
+        self.data
+            .list_declared_global_models_for_api_format(api_format)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn list_minimal_candidate_selection_rows_for_api_format(
         &self,
         api_format: &str,
@@ -87,6 +97,20 @@ impl AppState {
                     .map_err(|err| GatewayError::Internal(err.to_string()))
             })
             .await
+    }
+
+    pub(crate) async fn read_provider_quota_snapshot_uncached(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<quota::StoredProviderQuotaSnapshot>, GatewayError> {
+        let provider_id = provider_id.trim();
+        if provider_id.is_empty() {
+            return Ok(None);
+        }
+        self.data
+            .find_provider_quota_by_provider_id(provider_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
     pub(crate) async fn read_provider_quota_snapshots(

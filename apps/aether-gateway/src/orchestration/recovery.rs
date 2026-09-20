@@ -1,7 +1,7 @@
 use super::classifier::{
-    classify_failure_disposition, classify_local_failover, classify_local_transport_error,
-    FailureRetryAction, LocalFailoverClassification, LocalFailoverInput,
-    LocalTransportFailoverClassification,
+    classify_failure_disposition_with_origin, classify_local_failover,
+    classify_local_transport_error, FailureOrigin, FailureRetryAction, LocalFailoverClassification,
+    LocalFailoverInput, LocalTransportFailoverClassification,
 };
 use super::LocalFailoverPolicy;
 
@@ -77,6 +77,20 @@ pub(crate) fn apply_provider_failure_disposition(
     status_code: u16,
     analysis: LocalFailoverAnalysis,
 ) -> LocalFailoverAnalysis {
+    apply_provider_failure_disposition_with_origin(
+        provider_api_format,
+        status_code,
+        analysis,
+        FailureOrigin::UpstreamProvider,
+    )
+}
+
+pub(crate) fn apply_provider_failure_disposition_with_origin(
+    provider_api_format: &str,
+    status_code: u16,
+    analysis: LocalFailoverAnalysis,
+    failure_origin: FailureOrigin,
+) -> LocalFailoverAnalysis {
     if status_code < 400
         && matches!(
             analysis.classification,
@@ -86,8 +100,12 @@ pub(crate) fn apply_provider_failure_disposition(
         return analysis;
     }
 
-    let disposition =
-        classify_failure_disposition(provider_api_format, analysis.classification, status_code);
+    let disposition = classify_failure_disposition_with_origin(
+        provider_api_format,
+        analysis.classification,
+        status_code,
+        failure_origin,
+    );
     let decision = match disposition.retry_action {
         FailureRetryAction::Stop | FailureRetryAction::SameCredential => {
             LocalFailoverDecision::StopLocalFailover
@@ -179,21 +197,23 @@ mod tests {
     }
 
     #[test]
-    fn recovery_retries_default_client_error_without_custom_rule() {
+    fn recovery_stops_default_client_error_without_custom_rule() {
         assert_eq!(
             recover_local_failover_decision(
                 &LocalFailoverPolicy::default(),
                 LocalFailoverInput::new(
                     400,
-                    Some("{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long\"}}")
+                    Some(
+                        "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long\"}}"
+                    )
                 )
             ),
-            LocalFailoverDecision::RetryNextCandidate
+            LocalFailoverDecision::StopLocalFailover
         );
     }
 
     #[test]
-    fn recovery_retries_any_error_status_without_custom_rule() {
+    fn recovery_stops_non_retryable_client_error_without_custom_rule() {
         assert_eq!(
             recover_local_failover_decision(
                 &LocalFailoverPolicy::default(),
@@ -202,7 +222,7 @@ mod tests {
                     Some("{\"error\":{\"message\":\"invalid `signature` in `thinking` block\"}}")
                 )
             ),
-            LocalFailoverDecision::RetryNextCandidate
+            LocalFailoverDecision::StopLocalFailover
         );
     }
 
@@ -212,14 +232,16 @@ mod tests {
             &LocalFailoverPolicy::default(),
             LocalFailoverInput::new(
                 400,
-                Some("{\"error\":{\"message\":\"Unsupported parameter: stream_options is not supported with this model\"}}"),
+                Some(
+                    "{\"error\":{\"message\":\"Unsupported parameter: stream_options is not supported with this model\"}}",
+                ),
             ),
         );
 
-        assert_eq!(analysis.decision, LocalFailoverDecision::RetryNextCandidate);
+        assert_eq!(analysis.decision, LocalFailoverDecision::StopLocalFailover);
         assert_eq!(
             analysis.classification,
-            LocalFailoverClassification::RetryUpstreamFailure
+            LocalFailoverClassification::StopStatusCode
         );
     }
 
@@ -245,7 +267,7 @@ mod tests {
     fn anthropic_failure_disposition_controls_candidate_retry() {
         let policy = LocalFailoverPolicy::default();
 
-        for status_code in [400, 413] {
+        for status_code in [400, 403, 404, 413] {
             let analysis = analyze_local_failover(
                 &policy,
                 LocalFailoverInput::new(status_code, Some(r#"{"error":{"message":"failed"}}"#)),
@@ -258,7 +280,7 @@ mod tests {
             );
         }
 
-        for status_code in [401, 403, 404, 429, 529] {
+        for status_code in [401, 429, 529] {
             let analysis = analyze_local_failover(
                 &policy,
                 LocalFailoverInput::new(status_code, Some(r#"{"error":{"message":"failed"}}"#)),

@@ -24,7 +24,7 @@ pub use aether_loadtools::{
 pub use aether_loadtools::{BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot};
 pub use aether_test_support::ManagedRedisServer;
 pub use fixtures::test_trace_id;
-pub use server::{reserve_local_port, SpawnedServer};
+pub use server::{reserve_local_port, ReservedListener, SpawnedServer};
 pub use tracing::{init_test_runtime, init_test_runtime_for, test_runtime_config};
 pub use wait::wait_until;
 

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "blocked_severities": ["HIGH", "CRITICAL"],
+  "expected_os_family": "debian",
+  "trivy_version": "0.74.0",
+  "trivy_linux_amd64_sha256": "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a",
+  "skopeo_image": "quay.io/skopeo/stable:v1.22.0@sha256:06dd47ee861e143268f0b811cdf1f9d6509b097945de447dbcdfb668ca15364c",
+  "db_repository": "ghcr.io/aquasecurity/trivy-db:2",
+  "db_max_age_hours": 24,
+  "clock_skew_seconds": 300
+}

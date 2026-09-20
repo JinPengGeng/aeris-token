@@ -66,6 +66,28 @@ impl VideoTaskStore for InMemoryVideoTaskStore {
         }
     }
 
+    fn replace_local_snapshot(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        replacement: LocalVideoTaskSnapshot,
+    ) -> bool {
+        let Ok(mut registry) = self.registry.lock() else {
+            return false;
+        };
+        registry.replace_local_snapshot(expected, replacement)
+    }
+
+    fn enrich_terminal_presentation(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        projected: &LocalVideoTaskSnapshot,
+    ) -> bool {
+        let Ok(mut registry) = self.registry.lock() else {
+            return false;
+        };
+        registry.enrich_terminal_presentation(expected, projected)
+    }
+
     fn read_openai(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse> {
         let registry = self.registry.lock().ok()?;
         registry.read_openai(task_id)
@@ -376,6 +398,22 @@ impl VideoTaskStore for FileVideoTaskStore {
         });
     }
 
+    fn replace_local_snapshot(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        replacement: LocalVideoTaskSnapshot,
+    ) -> bool {
+        self.mutate_registry(|registry| registry.replace_local_snapshot(expected, replacement))
+    }
+
+    fn enrich_terminal_presentation(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        projected: &LocalVideoTaskSnapshot,
+    ) -> bool {
+        self.mutate_registry(|registry| registry.enrich_terminal_presentation(expected, projected))
+    }
+
     fn read_openai(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse> {
         let registry = self.registry.lock().ok()?;
         registry.read_openai(task_id)
@@ -459,6 +497,7 @@ mod tests {
                 "url": "https://internal.test/result?token=metadata-query-secret"
             }),
             persistence: LocalVideoTaskPersistence {
+                row_revision: 0,
                 request_id: "request-1".to_string(),
                 username: Some("alice".to_string()),
                 api_key_name: Some("primary".to_string()),

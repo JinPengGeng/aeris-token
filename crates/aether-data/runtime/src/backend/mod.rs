@@ -10,6 +10,7 @@ mod leases;
 mod maintenance;
 #[cfg(feature = "postgres")]
 mod postgres;
+mod provider_costs;
 mod read;
 mod referrals;
 mod stats;
@@ -22,6 +23,7 @@ use crate::maintenance::DatabasePoolSummary;
 pub use leases::DataLeaseBackends;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresBackend;
+pub use provider_costs::ProviderCostDataState;
 pub use read::DataReadRepositories;
 pub use referrals::{
     ReferralAdminStats, ReferralDataState, ReferralMutationStatus, ReferralReconciliationSummary,

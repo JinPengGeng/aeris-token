@@ -102,7 +102,7 @@ async fn gateway_locally_denies_openai_chat_after_repeated_execution_runtime_mis
             )
             .header(http::header::CONTENT_TYPE, "application/json")
             .header(TRACE_ID_HEADER, trace_id)
-            .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+            .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
             .send()
             .await
             .expect("request should succeed");
@@ -232,7 +232,7 @@ async fn gateway_locally_denies_openai_chat_when_control_api_is_configured_witho
             INTERNAL_AUTH_CONTEXT_TEST_BEARER,
         )
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -348,7 +348,7 @@ async fn gateway_locally_denies_openai_chat_stream_after_execution_runtime_miss_
             INTERNAL_AUTH_CONTEXT_TEST_BEARER,
         )
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");

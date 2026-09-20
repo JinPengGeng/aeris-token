@@ -702,7 +702,7 @@ async fn gateway_executes_openai_chat_sync_via_local_decision_gate_without_execu
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(http::header::AUTHORIZATION, "Bearer sk-client-openai-local")
         .header(TRACE_ID_HEADER, "trace-openai-chat-local-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body(r#"{"model":"gpt-5","messages":[{"role":"user","content":"hello"}]}"#)
         .send()
         .await
         .expect("request should succeed");
@@ -1011,7 +1011,7 @@ async fn gateway_executes_openai_chat_sync_with_regex_model_mapping_in_execution
             "Bearer sk-client-openai-regex-mapping",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-regex-mapping-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -3782,7 +3782,7 @@ async fn gateway_executes_openai_chat_sync_with_custom_path_via_local_decision_g
         .header("x-drop-me", "drop-openai-chat")
         .header(TRACE_ID_HEADER, "trace-openai-chat-custom-path-123")
         .body(
-            "{\"model\":\"gpt-5\",\"messages\":[],\"metadata\":{\"client\":\"desktop-openai\"},\"temperature\":0.3}",
+            "{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"metadata\":{\"client\":\"desktop-openai\"},\"temperature\":0.3}",
         )
         .send()
         .await

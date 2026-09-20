@@ -499,7 +499,7 @@ pub fn extract_table_shapes(sql: &str) -> BTreeMap<String, BTreeSet<String>> {
     const PREFIX: &str = "CREATE TABLE IF NOT EXISTS ";
     let mut tables = BTreeMap::<String, BTreeSet<String>>::new();
     let mut current_table = None::<String>;
-    let mut skipping_table_constraint = false;
+    let mut expression_parenthesis_depth = None::<i32>;
     for line in sql.lines() {
         let trimmed = line.trim_start();
         let upper = trimmed.to_ascii_uppercase();
@@ -508,22 +508,30 @@ pub fn extract_table_shapes(sql: &str) -> BTreeMap<String, BTreeSet<String>> {
                 if trimmed.starts_with(");") || (trimmed.starts_with(')') && trimmed.ends_with(';'))
                 {
                     current_table = None;
-                    skipping_table_constraint = false;
+                    expression_parenthesis_depth = None;
                 } else if trimmed == ")" || trimmed == ")," {
-                    skipping_table_constraint = false;
-                } else if skipping_table_constraint {
-                    if table_definition_entry_ends(trimmed) {
-                        skipping_table_constraint = false;
+                    expression_parenthesis_depth = None;
+                } else if let Some(depth) = expression_parenthesis_depth.as_mut() {
+                    *depth += parenthesis_delta(trimmed);
+                    if *depth <= 0 {
+                        expression_parenthesis_depth = None;
                     }
                 } else if is_table_constraint_start(trimmed) {
-                    if !table_definition_entry_ends(trimmed) {
-                        skipping_table_constraint = true;
+                    let depth = parenthesis_delta(trimmed);
+                    if depth > 0 {
+                        expression_parenthesis_depth = Some(depth);
                     }
                 } else if let Some(column_name) = parse_create_table_column_name(trimmed) {
                     tables
                         .entry(table_name.clone())
                         .or_default()
                         .insert(column_name);
+                    if upper.contains("CHECK") {
+                        let depth = parenthesis_delta(trimmed);
+                        if depth > 0 {
+                            expression_parenthesis_depth = Some(depth);
+                        }
+                    }
                 }
             } else if let Some((table_name, column_name)) = parse_alter_table_add_column(trimmed) {
                 tables.entry(table_name).or_default().insert(column_name);
@@ -538,7 +546,7 @@ pub fn extract_table_shapes(sql: &str) -> BTreeMap<String, BTreeSet<String>> {
         {
             tables.entry(table.clone()).or_default();
             current_table = Some(table);
-            skipping_table_constraint = false;
+            expression_parenthesis_depth = None;
         }
     }
     tables
@@ -555,9 +563,12 @@ fn is_table_constraint_start(line: &str) -> bool {
     )
 }
 
-fn table_definition_entry_ends(line: &str) -> bool {
-    let line = line.trim_end();
-    line.ends_with(',') || line == ")" || line == ");"
+fn parenthesis_delta(line: &str) -> i32 {
+    line.chars().fold(0, |depth, ch| match ch {
+        '(' => depth + 1,
+        ')' => depth - 1,
+        _ => depth,
+    })
 }
 
 fn parse_create_table_column_name(line: &str) -> Option<String> {
@@ -887,6 +898,10 @@ CREATE TABLE IF NOT EXISTS "stats_daily" (
 CREATE TABLE IF NOT EXISTS public.users (
     id VARCHAR(64) PRIMARY KEY,
     email VARCHAR(320),
+    expires_at BIGINT CHECK (
+        expires_at > 0
+        AND expires_at < 86400
+    ),
     CHECK (
         (id IS NOT NULL AND email IS NULL)
         OR (id IS NULL AND email IS NOT NULL)
@@ -902,6 +917,7 @@ ALTER TABLE users ADD COLUMN ldap_dn VARCHAR(1024);
             shapes.get("users"),
             Some(&BTreeSet::from([
                 "email".to_string(),
+                "expires_at".to_string(),
                 "id".to_string(),
                 "ldap_dn".to_string()
             ]))
@@ -971,8 +987,16 @@ ALTER TABLE users ADD COLUMN ldap_dn VARCHAR(1024);
             .and_then(Path::parent)
             .expect("crate should live under workspace/crates/aether-data");
         let schema_dir = workspace.join("crates/aether-data/runtime/schema/logical");
-        let required_sql_paths = vec![workspace
-            .join("crates/aether-data/adapters/postgres/migrations/20260403000000_baseline.sql")];
+        let required_sql_paths = vec![
+            workspace
+                .join("crates/aether-data/adapters/postgres/migrations/20260403000000_baseline.sql"),
+            workspace
+                .join("crates/aether-data/runtime/schema/bootstrap/postgres/280_provider_cost_ledger.sql"),
+            workspace
+                .join("crates/aether-data/runtime/schema/bootstrap/postgres/290_provider_cost_snapshot_imports.sql"),
+            workspace
+                .join("crates/aether-data/runtime/schema/bootstrap/postgres/300_emergency_chain_grants.sql"),
+        ];
 
         let loaded = load_schema_sources(schema_dir).expect("workspace logical schema should load");
         check_required_tables(&loaded.schema, &required_sql_paths)

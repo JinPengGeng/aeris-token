@@ -392,6 +392,62 @@ pub(super) fn classify_admin_basic_family_route(
     } else if method == http::Method::GET
         && matches!(
             normalized_path,
+            "/api/admin/billing/provider-costs/prices"
+                | "/api/admin/billing/provider-costs/prices/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            "list_provider_cost_prices",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
+            "/api/admin/billing/provider-costs/prices/import"
+                | "/api/admin/billing/provider-costs/prices/import/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            "import_provider_cost_prices",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/admin/billing/provider-costs/snapshots"
+                | "/api/admin/billing/provider-costs/snapshots/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            "summarize_provider_cost_snapshots",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
+            "/api/admin/billing/provider-costs/snapshots/import"
+                | "/api/admin/billing/provider-costs/snapshots/import/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            "import_provider_cost_snapshots",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
             "/api/admin/billing/rules" | "/api/admin/billing/rules/"
         )
     {

@@ -44,7 +44,9 @@ use super::request::{
     validated_response_create_model, ResponsesLiteStaticConfig,
 };
 use super::state::BoundResponsesConnection;
-use super::turn::{prepare_responses_websocket_turn_decision, ResponsesWebSocketTurnOutcome};
+use super::turn::{
+    prepare_responses_websocket_turn_decision, ResponsesWebSocketTurnOutcome, UpstreamRequestState,
+};
 use super::turn_state::LogicalTurn;
 use super::upstream::{
     bind_responses_upstream, close_bound_upstream, ResponsesWebSocketUpstreamBindError,
@@ -914,6 +916,8 @@ async fn bootstrap_responses_websocket(
         &first_logical_turn_id,
         1,
     );
+    let mut logical = LogicalTurn::new(first_event.clone(), 1, first_logical_turn_id.clone());
+    let lifecycle = logical.begin_attempt_lifecycle().into_terminal_guard();
     let mut first_turn = match begin_responses_websocket_turn_with_planned_lease(
         &state,
         &context.trace_id,
@@ -949,8 +953,17 @@ async fn bootstrap_responses_websocket(
         normalization,
         &first_event,
         adapter,
+        logical.attempt_budget_mut(),
         plan_usage_permit.as_ref(),
-        |state| first_turn.record_upstream_request_state(state),
+        |state| {
+            if matches!(
+                state,
+                UpstreamRequestState::PossiblySent | UpstreamRequestState::Sent
+            ) {
+                lifecycle.mark_sent();
+            }
+            first_turn.record_upstream_request_state(state);
+        },
     )
     .await
     {
@@ -976,6 +989,37 @@ async fn bootstrap_responses_websocket(
                 "gateway stopped the initial Responses WebSocket turn before its upstream send after the subscription plan concurrency lease became unhealthy"
             );
             terminate_responses_websocket_for_plan_permit_loss(client_socket).await;
+            await_turn_finalization_handle(finalizer).await;
+            return None;
+        }
+        Err(ResponsesWebSocketUpstreamBindError::AttemptBudgetExhausted(reason)) => {
+            let finalizer = finalize_unbound_turn(
+                state.clone(),
+                first_turn,
+                ResponsesWebSocketTurnOutcome::upstream_connect_failed(reason.as_str()),
+            );
+            warn!(
+                event_name = "responses_websocket_initial_attempt_budget_exhausted",
+                log_type = "ops",
+                transport = WEBSOCKET_LOG_TRANSPORT,
+                websocket = true,
+                trace_id = %context.trace_id,
+                reason = reason.as_str(),
+                "gateway stopped the initial Responses WebSocket turn after exhausting its logical attempt budget"
+            );
+            send_gateway_error_with_status(
+                client_socket,
+                429,
+                "request_attempt_budget_exhausted",
+                reason.as_str(),
+            )
+            .await;
+            close_client_socket(
+                client_socket,
+                CLOSE_TRY_AGAIN,
+                "request_attempt_budget_exhausted",
+            )
+            .await;
             await_turn_finalization_handle(finalizer).await;
             return None;
         }
@@ -1026,14 +1070,15 @@ async fn bootstrap_responses_websocket(
     if let Some(session) = first_turn_redaction_session {
         register_initial_redaction_session(&mut bound, session);
     }
-    bound.turn_state.begin(
-        LogicalTurn::new(first_event, 1, first_logical_turn_id)
+    bound.turn_state.begin_with_lifecycle(
+        logical
             .with_codex_fingerprint_context(first_codex_fingerprint_context)
             .with_provider_store(first_provider_event.get("store") == Some(&Value::Bool(true)))
             .with_turn_control(turn_control)
             .with_plan_usage_permit(plan_usage_permit)
             .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot),
         first_turn,
+        lifecycle,
     );
 
     Some(bound)
@@ -2125,6 +2170,7 @@ mod tests {
             "stream": true,
             "background": true,
         }));
+        let mut attempt_budget = aether_scheduler_core::AttemptBudget::new(Instant::now());
 
         let mut bound = bind_responses_upstream(
             &decision,
@@ -2137,6 +2183,7 @@ mod tests {
             resolve_responses_websocket_adapter(
                 crate::orchestration::ResponsesWebSocketAdapter::Standard,
             ),
+            &mut attempt_budget,
             None,
             |_| {},
         )

@@ -126,7 +126,7 @@ async fn gateway_records_usage_for_execution_runtime_sync_when_runtime_enabled_i
             "Bearer sk-client-openai-usage-sync",
         )
         .header(TRACE_ID_HEADER, "req-usage-sync-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -263,7 +263,7 @@ async fn gateway_records_active_usage_before_execution_runtime_sync_result_arriv
                     "Bearer sk-client-openai-usage-sync-pending",
                 )
                 .header(TRACE_ID_HEADER, "req-usage-sync-pending-123")
-                .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+                .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
                 .send()
                 .await
                 .expect("request should succeed");
@@ -560,7 +560,7 @@ async fn gateway_records_usage_for_execution_runtime_stream_when_runtime_enabled
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/chat/completions"))
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");
@@ -690,7 +690,7 @@ async fn gateway_records_pending_usage_before_execution_runtime_stream_headers_a
                     "Bearer sk-client-openai-stream-pending",
                 )
                 .header(TRACE_ID_HEADER, "req-usage-stream-pending-123")
-                .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+                .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
                 .send()
                 .await
                 .expect("request should succeed");

@@ -41,15 +41,23 @@ pub(crate) async fn execute_video_task_refresh_plan(
 ) -> Result<bool, GatewayError> {
     match fetch_video_task_refresh_attempt(state, refresh_plan).await? {
         VideoTaskRefreshAttempt::Success { provider_body } => {
-            let projected = state
-                .video_tasks
-                .apply_read_refresh_projection(refresh_plan, &provider_body);
-            if projected {
-                if let Some(snapshot) = state.video_tasks.snapshot_for_refresh_plan(refresh_plan) {
-                    let _ = state.upsert_video_task_snapshot(&snapshot).await?;
-                }
+            let mut snapshot = refresh_plan.snapshot.clone();
+            snapshot.apply_provider_body(&provider_body);
+            if !refresh_plan.snapshot.is_active_for_refresh() {
+                return state
+                    .enrich_video_task_terminal_presentation(&refresh_plan.snapshot, &snapshot)
+                    .await;
             }
-            Ok(projected)
+            if !state.data.has_video_task_writer() {
+                return Ok(state
+                    .video_tasks
+                    .replace_local_snapshot(&refresh_plan.snapshot, snapshot));
+            }
+            let outcome = state.upsert_video_task_snapshot(&snapshot).await?;
+            if let Some(stored) = outcome.stored() {
+                finalize_video_task_if_terminal(state, stored).await;
+            }
+            Ok(outcome.accepted())
         }
         VideoTaskRefreshAttempt::Error(err) => {
             warn!(
@@ -77,7 +85,9 @@ async fn poll_video_tasks_once(state: &AppState, batch_size: usize) -> Result<us
         )
         .await?;
     let mut refreshed = 0usize;
-    for (index, task) in tasks.into_iter().enumerate() {
+    for (index, claim) in tasks.into_iter().enumerate() {
+        let task = claim.task;
+        let fencing_token = claim.fencing_token;
         let trace_id = format!("video-task-poller-{index}");
         let Some(snapshot) = state.reconstruct_video_task_snapshot(&task).await? else {
             continue;
@@ -100,13 +110,16 @@ async fn poll_video_tasks_once(state: &AppState, batch_size: usize) -> Result<us
                 else {
                     continue;
                 };
-                match state.update_active_video_task(updated).await? {
+                let mut projected_snapshot = snapshot.clone();
+                projected_snapshot.apply_provider_body(&provider_body);
+                match state
+                    .update_active_video_task(updated, Some(fencing_token))
+                    .await?
+                {
                     Some(stored) => {
-                        if let Some(snapshot) =
-                            state.reconstruct_video_task_snapshot(&stored).await?
-                        {
-                            state.video_tasks.record_snapshot(snapshot);
-                        }
+                        state
+                            .publish_stored_video_task(&stored, Some(&projected_snapshot))
+                            .await?;
                         info!(
                             event_name = "video_task_status_updated",
                             log_type = "event",
@@ -118,18 +131,24 @@ async fn poll_video_tasks_once(state: &AppState, batch_size: usize) -> Result<us
                         finalize_video_task_if_terminal(state, &stored).await;
                         refreshed += 1;
                     }
-                    None => continue,
+                    None => {
+                        state
+                            .restore_video_task_registry(&task.id, Some(&snapshot))
+                            .await?;
+                        continue;
+                    }
                 }
             }
             VideoTaskRefreshAttempt::Error(err) => {
                 let updated = build_failed_poll_update(&task, &err, now_unix_secs);
-                match state.update_active_video_task(updated).await? {
+                match state
+                    .update_active_video_task(updated, Some(fencing_token))
+                    .await?
+                {
                     Some(stored) => {
-                        if let Some(snapshot) =
-                            state.reconstruct_video_task_snapshot(&stored).await?
-                        {
-                            state.video_tasks.record_snapshot(snapshot);
-                        }
+                        state
+                            .publish_stored_video_task(&stored, Some(&snapshot))
+                            .await?;
                         info!(
                             event_name = "video_task_status_updated",
                             log_type = "event",
@@ -141,7 +160,12 @@ async fn poll_video_tasks_once(state: &AppState, batch_size: usize) -> Result<us
                         finalize_video_task_if_terminal(state, &stored).await;
                         refreshed += 1;
                     }
-                    None => continue,
+                    None => {
+                        state
+                            .restore_video_task_registry(&task.id, Some(&snapshot))
+                            .await?;
+                        continue;
+                    }
                 }
             }
         }
@@ -278,6 +302,7 @@ fn build_successful_poll_update(
     snapshot.apply_provider_body(provider_body);
 
     let mut record = snapshot.to_upsert_record();
+    record.row_revision = task.row_revision;
     record.id = task.id.clone();
     record.short_id = task.short_id.clone().or(record.short_id);
     record.request_id = task.request_id.clone();
@@ -360,6 +385,7 @@ fn build_failed_poll_update(
 
 fn stored_task_to_upsert(task: &StoredVideoTask) -> UpsertVideoTask {
     UpsertVideoTask {
+        row_revision: task.row_revision,
         id: task.id.clone(),
         short_id: task.short_id.clone(),
         request_id: task.request_id.clone(),
@@ -566,6 +592,7 @@ mod tests {
             error_message: None,
             video_url: None,
             persistence: LocalVideoTaskPersistence {
+                row_revision: 0,
                 request_id: "request-1".to_string(),
                 username: Some("user".to_string()),
                 api_key_name: Some("primary".to_string()),
@@ -596,6 +623,7 @@ mod tests {
         });
 
         StoredVideoTask {
+            row_revision: 0,
             id: "task-1".to_string(),
             short_id: Some("short-task-1".to_string()),
             request_id: "request-1".to_string(),

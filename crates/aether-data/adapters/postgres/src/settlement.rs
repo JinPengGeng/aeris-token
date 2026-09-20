@@ -16,6 +16,7 @@ use crate::error::SqlxResultExt;
 use crate::PostgresTransactionRunner;
 
 pub(crate) mod funding;
+mod recharge_recovery;
 
 const FIND_USAGE_FOR_SETTLEMENT_SQL: &str = r#"
 SELECT
@@ -699,6 +700,53 @@ ON CONFLICT (user_entitlement_id, request_id) WHERE attempt_id IS NULL DO NOTHIN
 
 #[async_trait]
 impl SettlementWriteRepository for SqlxSettlementRepository {
+    fn supports_recharge_recovery(&self) -> bool {
+        true
+    }
+
+    async fn process_recharge_recovery_batch(
+        &self,
+        batch_size: usize,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::settlement::StoredRechargeRecoveryJob>,
+        DataLayerError,
+    > {
+        self.process_recharge_jobs(batch_size).await
+    }
+    async fn list_recharge_recovery_jobs_for_user(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::settlement::StoredRechargeRecoveryJob>,
+        DataLayerError,
+    > {
+        self.list_recharge_jobs(user_id, limit).await
+    }
+    async fn claim_recharge_recovery_notifications(
+        &self,
+        limit: usize,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::settlement::RechargeRecoveryNotification>,
+        DataLayerError,
+    > {
+        self.tx_runner
+            .run(recharge_recovery::transaction_options(), |tx| {
+                Box::pin(recharge_recovery::claim_notifications(tx, limit))
+            })
+            .await
+    }
+    async fn complete_recharge_recovery_notification(
+        &self,
+        input:aether_data_contracts::repository::settlement::CompleteRechargeRecoveryNotificationInput,
+    ) -> Result<bool, DataLayerError> {
+        self.tx_runner
+            .run(recharge_recovery::transaction_options(), |tx| {
+                Box::pin(recharge_recovery::complete_notification(tx, input))
+            })
+            .await
+    }
+
     async fn reserve_request_attempt_funds(
         &self,
         input: aether_data_contracts::repository::settlement::ReserveRequestAttemptFundsInput,

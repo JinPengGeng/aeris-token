@@ -7,9 +7,10 @@ for env_file in "$root_dir"/deploy/multi-node/.env.node-*; do
   "$root_dir/tools/operations/check_multi_node_preflight.sh" "$env_file" >/dev/null
 done
 if command -v docker >/dev/null 2>&1; then
-  docker compose -f "$compose_file" config --quiet
+  for env_file in "$root_dir"/deploy/multi-node/.env.node-*; do
+    docker compose --env-file "$env_file" -f "$compose_file" config --quiet
+  done
 else
   echo "docker unavailable: skipped compose parser (env checks passed)" >&2
 fi
 echo "multi-node assets: PASS"
-

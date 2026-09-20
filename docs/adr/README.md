@@ -12,7 +12,7 @@
 
 | ADR | 状态（与架构索引一致） | 范围 |
 | --- | --- | --- |
-| [ADR-0044：Emergency chain domain boundary](../architecture/adr-0044-emergency-chain-domain.md) | Accepted（仅领域 scaffold） | grant 领域合同；Gateway wiring、持久化、审计和生产调度延期 |
+| [ADR-0044：Emergency chain domain boundary](../architecture/adr-0044-emergency-chain-domain.md) | Accepted（领域 scaffold + 管理员运维 v1） | 一次性持久化 grant 支持固定顺序同步 model-test；公共调度的 ledger/CAS 接线仍延期 |
 | [ADR-0045：Signed provenance for tunnel release upgrades](../architecture/adr-0045-signed-tunnel-release-provenance.md) | Accepted（核心验签已实现） | 发布清单签名/校验；完整发布矩阵和生产轮换演练延期 |
 | [ADR-0046：Bounded gateway readiness and health contract](../architecture/adr-0046-readiness-health-contract.md) | Accepted | readiness/health 合同；生产容量与告警验收延期 |
 | [ADR-0050：Tunnel signing key rotation overlap](../architecture/adr-0050-tunnel-signing-key-rotation.md) | Accepted（部分实现） | key ID、有效期、重叠和撤销语义；持久化与 wire integration 延期 |

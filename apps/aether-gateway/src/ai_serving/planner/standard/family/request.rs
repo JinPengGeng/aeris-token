@@ -591,14 +591,31 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             return Ok(None);
         }
     };
-    crate::ai_serving::hydrate_openai_response_history(
+    let history_skip_reason = crate::ai_serving::hydrate_openai_response_history(
         state,
         body_json,
         spec_metadata.api_format,
         provider_api_format,
+        input.auth_context.user_id.as_str(),
         input.auth_context.api_key_id.as_str(),
+        candidate.provider_id.as_str(),
+        candidate.endpoint_id.as_str(),
+        candidate.key_id.as_str(),
     )
     .await?;
+    if let Some(skip_reason) = history_skip_reason {
+        mark_skipped_local_standard_candidate(
+            state,
+            input,
+            trace_id,
+            candidate,
+            attempt.candidate_index,
+            &attempt.candidate_id,
+            skip_reason,
+        )
+        .await;
+        return Ok(None);
+    }
     let reasoning_replay_policy = openai_responses_reasoning_replay_policy(
         transport.provider.provider_type.as_str(),
         transport.endpoint.base_url.as_str(),
@@ -615,8 +632,12 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
     )
     .await?;
     let body_json = redaction.body_json.as_ref();
+    let history_scope = crate::ai_serving::conversation_history_scope(
+        input.auth_context.user_id.as_str(),
+        input.auth_context.api_key_id.as_str(),
+    );
     let mut provider_request_body =
-        match crate::ai_serving::planner::standard::build_standard_request_body_with_model_directives_and_request_headers_and_reasoning_replay_policy(
+        match crate::ai_serving::planner::standard::build_standard_request_body_with_model_directives_and_request_headers_and_history_scope(
             body_json,
             spec_metadata.api_format,
             &prepared_candidate.mapped_model,
@@ -630,6 +651,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
                 transport.endpoint.body_rules.as_ref()
             },
             Some(input.auth_context.api_key_id.as_str()),
+            history_scope.as_deref(),
             Some(effective_headers),
             false,
             reasoning_replay_policy,

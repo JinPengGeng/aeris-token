@@ -190,6 +190,96 @@ async fn pending_batch_is_opt_in_and_rejects_non_pending_before_connecting() {
 
 #[tokio::test]
 #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+async fn live_capture_states_agree_across_request_id_id_and_batch_reads() {
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url: std::env::var("AETHER_TEST_DATABASE_URL").unwrap(),
+        min_connections: 1,
+        max_connections: 2,
+        acquire_timeout_ms: 10_000,
+        idle_timeout_ms: 30_000,
+        max_lifetime_ms: 60_000,
+        statement_cache_capacity: 64,
+        require_ssl: false,
+    })
+    .unwrap();
+    let repository = SqlxUsageReadRepository::new(factory.connect_lazy().unwrap());
+    crate::run_migrations(repository.pool()).await.unwrap();
+
+    let states = [
+        UsageBodyCaptureState::Truncated,
+        UsageBodyCaptureState::Disabled,
+        UsageBodyCaptureState::Unavailable,
+        UsageBodyCaptureState::None,
+    ];
+    let fields = [
+        UsageBodyField::RequestBody,
+        UsageBodyField::ProviderRequestBody,
+        UsageBodyField::ResponseBody,
+        UsageBodyField::ClientResponseBody,
+    ];
+    for rotation in 0..states.len() {
+        let request_id = format!("capture-states-{}", uuid::Uuid::new_v4().simple());
+        let expected =
+            std::array::from_fn::<_, 4, _>(|index| states[(index + rotation) % states.len()]);
+        let mut record = fast_clear_usage_record(
+            &request_id,
+            "capture-state-test",
+            Utc::now().timestamp() as u64,
+            true,
+            UsageBodyCaptureState::None,
+            None,
+        );
+        record.request_body = None;
+        record.provider_request_body = None;
+        record.response_body = None;
+        record.client_response_body = None;
+        record.request_body_state = Some(expected[0]);
+        record.provider_request_body_state = Some(expected[1]);
+        record.response_body_state = Some(expected[2]);
+        record.client_response_body_state = Some(expected[3]);
+        repository.upsert(record).await.unwrap();
+
+        let by_request = repository
+            .find_by_request_id(&request_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let by_id = repository
+            .find_by_id(&by_request.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let by_ids = repository
+            .list_by_ids(std::slice::from_ref(&by_request.id))
+            .await
+            .unwrap();
+        assert_eq!(by_ids.len(), 1);
+        for (reader, stored) in [
+            ("request_id", &by_request),
+            ("id", &by_id),
+            ("ids", &by_ids[0]),
+        ] {
+            assert_eq!(stored.request_id, request_id);
+            for (index, field) in fields.iter().copied().enumerate() {
+                assert_eq!(
+                    stored.body_state(field),
+                    Some(expected[index]),
+                    "reader={reader}, field={field:?}, rotation={rotation}"
+                );
+                assert_eq!(stored.body_ref(field), None);
+            }
+        }
+        sqlx::query("DELETE FROM usage WHERE request_id = $1")
+            .bind(&request_id)
+            .execute(repository.pool())
+            .await
+            .unwrap();
+    }
+    repository.pool().close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
 async fn live_full_http_capture_round_trips_for_direct_and_batch_writes() {
     let factory = PostgresPoolFactory::new(PostgresPoolConfig {
         database_url: std::env::var("AETHER_TEST_DATABASE_URL").unwrap(),
@@ -3257,13 +3347,15 @@ fn usage_sql_canonical_openai_cache_case_preserves_effective_and_total_tokens() 
         aggregate_audit_summary
             .matches("WHEN effective_input_tokens = 0 AND total_input_context = 0")
             .count(),
-        2
+        1,
+        "the shared daily aggregate query should define the legacy token fallback once"
     );
     assert_eq!(
         aggregate_audit_summary
             .matches("+ output_tokens + cache_creation_tokens + cache_read_tokens")
             .count(),
-        2
+        1,
+        "the shared daily aggregate query should define canonical total tokens once"
     );
     assert!(!aggregate_audit_summary.contains("SUM(input_tokens + output_tokens)"));
 
@@ -3473,6 +3565,18 @@ fn usage_sql_reads_http_audits_for_single_record_fetches() {
     assert!(super::FIND_BY_ID_SQL.contains("LEFT JOIN usage_http_audits"));
     assert!(super::FIND_BY_REQUEST_ID_SQL.contains("http_request_body_ref"));
     assert!(super::FIND_BY_ID_SQL.contains("http_client_response_body_ref"));
+    for sql in [super::FIND_BY_REQUEST_ID_SQL, super::FIND_BY_ID_SQL] {
+        for field in [
+            "request_body",
+            "provider_request_body",
+            "response_body",
+            "client_response_body",
+        ] {
+            assert!(sql.contains(&format!(
+                "usage_http_audits.{field}_state AS http_{field}_state"
+            )));
+        }
+    }
 }
 
 #[test]

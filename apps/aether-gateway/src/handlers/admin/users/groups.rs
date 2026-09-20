@@ -230,10 +230,32 @@ pub(in super::super) async fn build_admin_replace_user_group_members_response(
     if known_users.len() != user_ids.len() {
         return Ok(bad_request_owned("成员包含不存在的用户".to_string()));
     }
-    let items = state
-        .replace_user_group_members(&group_id, &user_ids)
-        .await?;
-    Ok(attach_admin_audit_response(
+    let audit = request_context.decision().and_then(|decision| {
+        crate::audit::build_user_group_members_update_audit(
+            decision,
+            &group_id,
+            request_context.public().client_ip.as_deref(),
+        )
+    });
+    let durable_items = match audit.as_ref() {
+        Some(audit) => {
+            state
+                .app()
+                .replace_user_group_members_with_audit(&group_id, &user_ids, audit)
+                .await?
+        }
+        None => None,
+    };
+    let durable_enqueued = durable_items.is_some();
+    let items = match durable_items {
+        Some(items) => items,
+        None => {
+            state
+                .replace_user_group_members(&group_id, &user_ids)
+                .await?
+        }
+    };
+    let mut response = attach_admin_audit_response(
         Json(json!({
             "items": items.into_iter().map(|member| json!({
                 "group_id": member.group_id,
@@ -251,7 +273,18 @@ pub(in super::super) async fn build_admin_replace_user_group_members_response(
         "update_user_group_members",
         "user_group",
         &group_id,
-    ))
+    );
+    if durable_enqueued {
+        response
+            .extensions_mut()
+            .insert(crate::audit::DurableAdminAuditEnqueued);
+        response
+            .extensions_mut()
+            .insert(crate::audit::PendingAdminAudit(
+                audit.expect("durable audit enqueue requires an audit intent"),
+            ));
+    }
+    Ok(response)
 }
 
 async fn validate_default_group_member_replacement(

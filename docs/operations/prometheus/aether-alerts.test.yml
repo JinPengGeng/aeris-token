@@ -241,3 +241,41 @@ tests:
       - expr: 'ALERTS{alertname="AetherAdminAuditPersistenceFailures"}'
         eval_time: 15m
         exp_samples: []
+
+  - name: DLQ capacity warning observes threshold and clears when drained
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_usage_queue_dlq_utilization_per_mille{job="gateway",instance="one",stream="usage:events:dlq"}'
+        values: '799 800+0x5 0+0x5'
+      - series: 'aether_gateway_usage_queue_dlq_utilization_per_mille{job="gateway",instance="healthy",stream="usage:events:dlq"}'
+        values: '799+0x12'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="AetherUsageDeadLetterCapacityWarning",alertstate="firing"}'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="AetherUsageDeadLetterCapacityWarning",alertstate="firing"}'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherUsageDeadLetterCapacityWarning",alertstate="firing",severity="warning",job="gateway",instance="one",stream="usage:events:dlq"}'
+            value: 1
+      - expr: 'ALERTS{alertname="AetherUsageDeadLetterCapacityWarning"}'
+        eval_time: 7m
+        exp_samples: []
+
+  - name: DLQ retention boundary alerts immediately and resolves without treating missing data as healthy
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_usage_queue_dlq_at_retention_boundary{job="gateway",instance="one",stream="usage:events:dlq"}'
+        values: '0 1 1 0 stale'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="AetherUsageDeadLetterRetentionBoundary",alertstate="firing"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherUsageDeadLetterRetentionBoundary",alertstate="firing",severity="critical",job="gateway",instance="one",stream="usage:events:dlq"}'
+            value: 1
+      - expr: 'ALERTS{alertname="AetherUsageDeadLetterRetentionBoundary"}'
+        eval_time: 3m
+        exp_samples: []
+      - expr: aether_gateway_usage_queue_dlq_at_retention_boundary
+        eval_time: 5m
+        exp_samples: []

@@ -26,6 +26,8 @@ pub struct AdminMonitoringKeyAccountDisplay {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdminMonitoringRoute {
     AuditLogs,
+    AuditDeliveries,
+    AuditDeliveryRedrive,
     SystemStatus,
     SuspiciousActivities,
     UserBehavior,
@@ -1114,6 +1116,7 @@ pub fn match_admin_monitoring_route(
     match *method {
         http::Method::GET => match path {
             "/api/admin/monitoring/audit-logs" => Some(AdminMonitoringRoute::AuditLogs),
+            "/api/admin/monitoring/audit-deliveries" => Some(AdminMonitoringRoute::AuditDeliveries),
             "/api/admin/monitoring/system-status" => Some(AdminMonitoringRoute::SystemStatus),
             "/api/admin/monitoring/suspicious-activities" => {
                 Some(AdminMonitoringRoute::SuspiciousActivities)
@@ -1151,6 +1154,12 @@ pub fn match_admin_monitoring_route(
             }
             _ => None,
         },
+        http::Method::POST
+            if matches_dynamic_segments(path, "/api/admin/monitoring/audit-deliveries/", 2)
+                && path.ends_with("/redrive") =>
+        {
+            Some(AdminMonitoringRoute::AuditDeliveryRedrive)
+        }
         http::Method::DELETE => match path {
             "/api/admin/monitoring/resilience/error-stats" => {
                 Some(AdminMonitoringRoute::ResilienceErrorStats)

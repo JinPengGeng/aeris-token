@@ -19,7 +19,8 @@ use aether_data::repository::announcements::{
     CreateAnnouncementRecord, StoredAnnouncement, StoredAnnouncementPage, UpdateAnnouncementRecord,
 };
 use aether_data::repository::audit::{
-    AuditLogListQuery, AuditLogWriteOutcome, CreateAdminAuditLog, RequestAuditBundle,
+    AdminAuditDeliveryFailureCode, AdminAuditDeliveryFailureOutcome, AuditLogListQuery,
+    AuditLogWriteOutcome, ClaimedAdminAuditDelivery, CreateAdminAuditLog, RequestAuditBundle,
     StoredAdminAuditLogPage, StoredSuspiciousActivity, StoredUserAuditLogPage,
 };
 use aether_data::repository::auth::{
@@ -55,8 +56,8 @@ use aether_data::repository::proxy_nodes::{
 };
 pub(crate) use aether_data::repository::system::{AdminSystemStats, StoredSystemConfigEntry};
 use aether_data::repository::users::{
-    StoredUserAuthRecord, StoredUserExportRow, StoredUserOAuthLinkSummary, StoredUserSummary,
-    UserReadRepository,
+    AdminUserSessionRevocationOutcome, AdminUserSessionsRevocationOutcome, StoredUserAuthRecord,
+    StoredUserExportRow, StoredUserOAuthLinkSummary, StoredUserSummary, UserReadRepository,
 };
 pub(crate) use aether_data::repository::users::{
     StoredUserPreferenceRecord, StoredUserSessionRecord,
@@ -103,8 +104,9 @@ use aether_data_contracts::repository::billing::{
 };
 use aether_data_contracts::repository::candidate_selection::{
     MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
-    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateRowsByKeyIdsQuery,
-    StoredPoolKeyCandidateRowsQuery, StoredRequestedModelCandidateRowsQuery,
+    StoredGlobalModelDeclaration, StoredMinimalCandidateSelectionRow,
+    StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
+    StoredRequestedModelCandidateRowsQuery,
 };
 use aether_data_contracts::repository::candidates::{
     PublicHealthStatusCount, PublicHealthTimelineBucket, RequestCandidateReadRepository,
@@ -155,7 +157,7 @@ use aether_data_contracts::repository::usage::{
     UsageReadRepository, UsageWriteRepository,
 };
 use aether_data_contracts::repository::video_tasks::{
-    StoredVideoTask, UpsertVideoTask, VideoTaskLookupKey, VideoTaskModelCount,
+    StoredVideoTask, UpsertVideoTask, VideoTaskClaim, VideoTaskLookupKey, VideoTaskModelCount,
     VideoTaskQueryFilter, VideoTaskReadRepository, VideoTaskStatusCount, VideoTaskWriteRepository,
 };
 use aether_runtime_state::{RuntimeQueueStore, RuntimeState};
@@ -391,15 +393,19 @@ impl fmt::Debug for GatewayDataState {
 
 mod attempt_funds;
 mod auth;
+mod recharge_recovery;
+mod refund_notifications;
 pub(crate) use auth::resolve_group_effective_daily_usage_limit_policy;
 mod auth_api_key_cache;
 mod candidate_cache;
 mod catalog;
 mod core;
+mod emergency_chain;
 mod integrations;
 mod models;
 mod pool_scores;
 mod provider_catalog_cache;
+mod provider_costs;
 mod referrals;
 mod request_candidate_cache;
 mod routing_group_cache;

@@ -313,6 +313,7 @@ from variable names. Request candidate persistence is a mode (`full`, `terminal`
 | `AETHER_OPENAI_WS_PROBE_MODEL` | [bin/aether-openai-responses-ws-probe.rs](../../apps/aether-gateway/src/bin/aether-openai-responses-ws-probe.rs) |
 | `AETHER_OPENAI_WS_PROBE_URL` | [bin/aether-openai-responses-ws-probe.rs](../../apps/aether-gateway/src/bin/aether-openai-responses-ws-probe.rs) |
 | `AETHER_PUBLIC_BASE_URL` | [handlers/public/support/auth_cookie_policy.rs](../../apps/aether-gateway/src/handlers/public/support/auth_cookie_policy.rs), [handlers/public/support/install.rs](../../apps/aether-gateway/src/handlers/public/support/install.rs), [handlers/public/support/payment/epay.rs](../../apps/aether-gateway/src/handlers/public/support/payment/epay.rs) |
+| `AETHER_TEST_REDIS_URL` | [orchestration/half_open_probe.rs](../../apps/aether-gateway/src/orchestration/half_open_probe.rs), [scheduler/send_admission.rs](../../apps/aether-gateway/src/scheduler/send_admission.rs) |
 | `AETHER_TRUSTED_PROXY_CIDRS` | [headers.rs](../../apps/aether-gateway/src/headers.rs) |
 | `AETHER_TUNNEL_ATTACHMENT_TTL_SECS` | [tunnel/mod.rs](../../apps/aether-gateway/src/tunnel/mod.rs) |
 | `AETHER_TUNNEL_BASE_URL` | [execution_runtime/transport.rs](../../apps/aether-gateway/src/execution_runtime/transport.rs) |
@@ -366,3 +367,16 @@ from variable names. Request candidate persistence is a mode (`full`, `terminal`
 | `WINDSURFAPI_FORCE_GPT_NATIVE_DIALECT` | [execution_runtime/windsurf.rs](../../apps/aether-gateway/src/execution_runtime/windsurf.rs) |
 | `WINDSURFAPI_NATIVE_TOOL_BRIDGE` | [execution_runtime/windsurf.rs](../../apps/aether-gateway/src/execution_runtime/windsurf.rs) |
 | `WINDSURFAPI_NATIVE_TOOL_BRIDGE_OFF` | [execution_runtime/windsurf.rs](../../apps/aether-gateway/src/execution_runtime/windsurf.rs) |
+
+## Operational precedence and compatibility
+
+The following runtime groups have explicit compatibility behavior that cannot be derived from a variable name. They list source-confirmed defaults and precedence only; they never expose configured values.
+
+| Setting | Behavior | Source |
+| --- | --- | --- |
+| SQL data URL | `AETHER_DATABASE_URL` (or `--database-url`) wins; otherwise the legacy `AETHER_GATEWAY_DATA_POSTGRES_URL` is used, then `DATABASE_URL`. Empty values are ignored. | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| Data Redis URL | `AETHER_GATEWAY_DATA_REDIS_URL` (or `--data-redis-url`) wins over the compatibility fallback `REDIS_URL`. Empty values are ignored. | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| Data encryption key | `AETHER_GATEWAY_DATA_ENCRYPTION_KEY` (or `--data-encryption-key`) wins over the compatibility fallback `ENCRYPTION_KEY`. If both non-empty values differ, startup logs a warning and prefers the gateway-specific value. | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| JWT signing key | `JWT_SECRET_KEY` has no production default and is validated before the network service starts. It must be UTF-8, at least 32 bytes, and must not equal the documented development or placeholder values. | [local_auth_token.rs](../../apps/aether-gateway/src/local_auth_token.rs) |
+| Gateway instance identity | `AETHER_GATEWAY_INSTANCE_ID` wins over `HOSTNAME`. With neither set, gateway logs use `local`; tunnel ownership uses a process-specific `gateway-<pid>` value. Set an explicit value for multi-node tunnel routing. | [main.rs](../../apps/aether-gateway/src/main.rs), [tunnel/mod.rs](../../apps/aether-gateway/src/tunnel/mod.rs) |
+| Windsurf native tool bridge | `WINDSURFAPI_NATIVE_TOOL_BRIDGE` and `AETHER_WINDSURF_NATIVE_TOOL_BRIDGE` are equivalent enable switches; the corresponding `_OFF` switches are also equivalent. All four default to disabled when unset. | [execution_runtime/windsurf.rs](../../apps/aether-gateway/src/execution_runtime/windsurf.rs) |

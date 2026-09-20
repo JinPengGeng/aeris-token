@@ -804,15 +804,15 @@ where
             return Ok(());
         }
         let record = build_upsert_usage_record_from_event(event)?;
-        return data
-            .upsert_usage_record(record)
-            .await?
-            .map(|_| ())
-            .ok_or_else(|| {
-                DataLayerError::UnexpectedValue(
-                    "attempt parent usage writer returned no row".to_string(),
-                )
-            });
+        let stored = data.upsert_usage_record(record).await?.ok_or_else(|| {
+            DataLayerError::UnexpectedValue(
+                "attempt parent usage writer returned no row".to_string(),
+            )
+        })?;
+        if stored.status == "completed" {
+            data.capture_provider_cost_for_usage(&stored).await?;
+        }
+        return Ok(());
     }
     let reconciled = reconcile_usage_policy_cost_for_event_with_result(data, event).await?;
     let record = build_upsert_usage_record_from_event(event)?;

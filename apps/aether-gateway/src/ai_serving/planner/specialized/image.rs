@@ -11,7 +11,9 @@ use crate::ai_serving::planner::plan_builders::{
     build_passthrough_sync_plan_from_decision, build_standard_stream_plan_from_decision,
     AiStreamAttempt, AiSyncAttempt,
 };
-use crate::ai_serving::planner::runtime_miss::set_local_runtime_execution_exhausted_diagnostic;
+use crate::ai_serving::planner::runtime_miss::{
+    set_local_runtime_execution_exhausted_diagnostic, set_local_runtime_miss_diagnostic_reason,
+};
 use crate::ai_serving::planner::spec_metadata::local_openai_image_spec_metadata;
 use crate::ai_serving::GatewayControlDecision;
 use crate::ai_serving::{
@@ -173,6 +175,14 @@ pub(crate) async fn build_local_image_sync_attempt_source_for_kind<'a>(
     };
 
     if candidate_count == 0 {
+        set_local_runtime_miss_diagnostic_reason(
+            state,
+            trace_id,
+            decision,
+            plan_kind,
+            Some(input.requested_model.as_str()),
+            "candidate_list_empty",
+        );
         return Ok(None);
     }
 
@@ -233,6 +243,14 @@ pub(crate) async fn build_local_image_stream_attempt_source_for_kind<'a>(
     };
 
     if candidate_count == 0 {
+        set_local_runtime_miss_diagnostic_reason(
+            state,
+            trace_id,
+            decision,
+            plan_kind,
+            Some(input.requested_model.as_str()),
+            "candidate_list_empty",
+        );
         return Ok(None);
     }
 

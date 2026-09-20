@@ -45,6 +45,8 @@ impl VideoTaskStatus {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredVideoTask {
     pub id: String,
+    #[serde(default)]
+    pub row_revision: i64,
     pub short_id: Option<String>,
     pub request_id: String,
     pub user_id: Option<String>,
@@ -81,6 +83,14 @@ pub struct StoredVideoTask {
     pub error_message: Option<String>,
     pub video_url: Option<String>,
     pub request_metadata: Option<Value>,
+}
+
+/// A task claimed by a poller, together with the monotonically increasing
+/// token that fences updates from expired workers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoTaskClaim {
+    pub task: StoredVideoTask,
+    pub fencing_token: i64,
 }
 
 impl StoredVideoTask {
@@ -177,6 +187,7 @@ impl StoredVideoTask {
 
         let mut task = Self {
             id,
+            row_revision: 0,
             short_id,
             request_id,
             user_id,
@@ -292,6 +303,7 @@ impl StoredVideoTask {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpsertVideoTask {
     pub id: String,
+    pub row_revision: i64,
     pub short_id: Option<String>,
     pub request_id: String,
     pub user_id: Option<String>,
@@ -344,6 +356,7 @@ impl UpsertVideoTask {
         self.sanitize_for_persistence();
         StoredVideoTask {
             id: self.id,
+            row_revision: self.row_revision,
             short_id: self.short_id,
             request_id: self.request_id,
             user_id: self.user_id,
@@ -439,6 +452,7 @@ impl From<StoredVideoTask> for UpsertVideoTask {
     fn from(task: StoredVideoTask) -> Self {
         Self {
             id: task.id,
+            row_revision: task.row_revision,
             short_id: task.short_id,
             request_id: task.request_id,
             user_id: task.user_id,
@@ -580,9 +594,16 @@ pub trait VideoTaskWriteRepository: Send + Sync {
     async fn upsert(&self, task: UpsertVideoTask)
         -> Result<StoredVideoTask, crate::DataLayerError>;
 
+    /// Update only the exact `task.row_revision` read by the caller, advancing
+    /// the revision atomically. If provided, `fencing_token` must also own the claim.
+    /// Non-poller transitions may pass `None` and retain the existing identity
+    /// and active-status guards without participating in claim fencing. A
+    /// `Deleted` update is accepted only as a terminal tombstone transition
+    /// from `Completed` or `Failed`.
     async fn update_if_active(
         &self,
         task: UpsertVideoTask,
+        fencing_token: Option<i64>,
     ) -> Result<Option<StoredVideoTask>, crate::DataLayerError>;
 
     async fn claim_due(
@@ -590,7 +611,7 @@ pub trait VideoTaskWriteRepository: Send + Sync {
         now_unix_secs: u64,
         claim_until_unix_secs: u64,
         limit: usize,
-    ) -> Result<Vec<StoredVideoTask>, crate::DataLayerError>;
+    ) -> Result<Vec<VideoTaskClaim>, crate::DataLayerError>;
 }
 
 pub trait VideoTaskRepository:
@@ -768,6 +789,7 @@ mod tests {
     #[test]
     fn immutable_identity_validation_rejects_every_protected_field() {
         let task = UpsertVideoTask {
+            row_revision: 0,
             id: "task-1".to_string(),
             short_id: Some("short-1".to_string()),
             request_id: "request-1".to_string(),
@@ -809,6 +831,7 @@ mod tests {
         let stored = task.clone().into_stored();
 
         let same_identity_update = UpsertVideoTask {
+            row_revision: 0,
             status: VideoTaskStatus::Completed,
             progress_percent: 100,
             created_at_unix_ms: 2,
@@ -859,6 +882,7 @@ mod tests {
     #[test]
     fn upsert_sanitization_drops_sensitive_diagnostics() {
         let mut task = UpsertVideoTask {
+            row_revision: 0,
             id: "task-1".to_string(),
             short_id: None,
             request_id: "request-1".to_string(),

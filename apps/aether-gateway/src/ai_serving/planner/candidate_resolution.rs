@@ -11,7 +11,8 @@ use std::time::Instant;
 use tracing::warn;
 
 use aether_scheduler_core::{
-    ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate, SchedulerRankingOutcome,
+    ClientSessionAffinity, SchedulerAffinityTarget, SchedulerMinimalCandidateSelectionCandidate,
+    SchedulerRankingOutcome,
 };
 
 use crate::ai_serving::transport::provider_types::provider_runtime_policy;
@@ -67,6 +68,7 @@ struct GatewayLocalCandidateResolutionPort<'a> {
     required_capabilities: Option<&'a serde_json::Value>,
     routing_policy: Option<&'a ResolvedRoutingPolicy>,
     request_auth_channel: Option<&'a str>,
+    affinity_target: Option<&'a Option<SchedulerAffinityTarget>>,
 }
 
 #[async_trait]
@@ -210,6 +212,7 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
             self.client_session_affinity,
             self.required_capabilities,
             self.routing_policy,
+            self.affinity_target,
         )
         .await;
         observe_gateway_stage_ms(
@@ -255,6 +258,7 @@ pub(crate) async fn resolve_and_rank_local_execution_candidates(
         None,
         request_auth_channel,
         AiCandidateResolutionMode::Standard,
+        None,
     )
     .await
 }
@@ -287,6 +291,7 @@ pub(crate) async fn resolve_and_rank_local_execution_candidates_without_transpor
         None,
         request_auth_channel,
         AiCandidateResolutionMode::WithoutTransportPairGate,
+        None,
     )
     .await
 }
@@ -320,6 +325,43 @@ pub(crate) async fn resolve_and_rank_logical_local_execution_candidates(
         request_auth_channel,
         mode,
         false,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_and_rank_logical_local_execution_candidates_with_affinity_target(
+    state: PlannerAppState<'_>,
+    candidates: Vec<SchedulerMinimalCandidateSelectionCandidate>,
+    client_api_format: &str,
+    requested_model: Option<&str>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    client_session_affinity: Option<&ClientSessionAffinity>,
+    required_capabilities: Option<&serde_json::Value>,
+    routing_policy: Option<&ResolvedRoutingPolicy>,
+    sticky_session_token: Option<&str>,
+    request_auth_channel: Option<&str>,
+    mode: AiCandidateResolutionMode,
+    affinity_target: &Option<SchedulerAffinityTarget>,
+) -> (
+    Vec<EligibleLocalExecutionCandidate>,
+    Vec<SkippedLocalExecutionCandidate>,
+) {
+    resolve_and_rank_local_execution_candidates_with_pool_expansion(
+        state,
+        candidates,
+        client_api_format,
+        requested_model,
+        auth_snapshot,
+        client_session_affinity,
+        required_capabilities,
+        routing_policy,
+        sticky_session_token,
+        request_auth_channel,
+        mode,
+        false,
+        Some(affinity_target),
     )
     .await
 }
@@ -336,6 +378,7 @@ async fn resolve_and_rank_local_execution_candidates_with_mode(
     _sticky_session_token: Option<&str>,
     request_auth_channel: Option<&str>,
     mode: AiCandidateResolutionMode,
+    affinity_target: Option<&Option<SchedulerAffinityTarget>>,
 ) -> (
     Vec<EligibleLocalExecutionCandidate>,
     Vec<SkippedLocalExecutionCandidate>,
@@ -353,6 +396,7 @@ async fn resolve_and_rank_local_execution_candidates_with_mode(
         request_auth_channel,
         mode,
         false,
+        affinity_target,
     )
     .await
 }
@@ -371,6 +415,7 @@ async fn resolve_and_rank_local_execution_candidates_with_pool_expansion(
     request_auth_channel: Option<&str>,
     mode: AiCandidateResolutionMode,
     expand_pool_groups: bool,
+    affinity_target: Option<&Option<SchedulerAffinityTarget>>,
 ) -> (
     Vec<EligibleLocalExecutionCandidate>,
     Vec<SkippedLocalExecutionCandidate>,
@@ -384,6 +429,7 @@ async fn resolve_and_rank_local_execution_candidates_with_pool_expansion(
         required_capabilities,
         routing_policy,
         request_auth_channel,
+        affinity_target,
     };
 
     let request = AiCandidateResolutionRequest {

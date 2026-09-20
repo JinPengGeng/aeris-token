@@ -114,7 +114,8 @@ async fn gateway_public_chat_rejects_missing_malformed_and_invalid_credentials()
             let payload: serde_json::Value = response.json().await.expect("authentication JSON");
             assert!(payload.get("type").is_none());
             assert_eq!(payload["error"]["type"], "authentication_error");
-            assert_eq!(payload["error"]["message"], "无效的API密钥");
+            assert_eq!(payload["error"]["message"], "Invalid API key");
+            assert_eq!(payload["trace_id"], trace_id);
             assert!(payload["error"]["code"].is_null());
             assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
         }
@@ -161,6 +162,7 @@ async fn gateway_adjacent_public_routes_reject_missing_credentials_in_their_exis
         );
         assert!(!response.headers().contains_key("retry-after"), "{path}");
         let payload: serde_json::Value = response.json().await.expect("authentication JSON");
+        assert_eq!(payload["trace_id"], trace_id, "{path}");
         assert_eq!(payload["error"]["type"], expected_type, "{path}");
         if claude {
             assert_eq!(payload["type"], "error", "{path}");

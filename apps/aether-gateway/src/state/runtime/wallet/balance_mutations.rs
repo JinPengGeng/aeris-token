@@ -3,6 +3,107 @@ use crate::{AdminWalletPaymentOrderRecord, AdminWalletTransactionRecord, AppStat
 use super::admin_wallet_build_order_no;
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn admin_adjust_wallet_balance_with_audit(
+        &self,
+        wallet_id: &str,
+        amount_usd: f64,
+        balance_type: &str,
+        operator_id: Option<&str>,
+        description: Option<&str>,
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<
+        Option<
+            aether_data::repository::wallet::WalletMutationOutcome<(
+                aether_data::repository::wallet::StoredWalletSnapshot,
+                AdminWalletTransactionRecord,
+            )>,
+        >,
+        GatewayError,
+    > {
+        use aether_data::repository::wallet::WalletMutationOutcome;
+        #[cfg(test)]
+        if self.auth_wallet_store.is_some() {
+            return Ok(None);
+        }
+        let result = self
+            .data
+            .adjust_wallet_balance_with_audit(
+                aether_data::repository::wallet::AdjustWalletBalanceInput {
+                    wallet_id: wallet_id.to_string(),
+                    amount_usd,
+                    balance_type: balance_type.to_string(),
+                    operator_id: operator_id.map(ToOwned::to_owned),
+                    description: description.map(ToOwned::to_owned),
+                },
+                audit,
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if matches!(result, Some(WalletMutationOutcome::Applied(_))) {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(result.map(|outcome| match outcome {
+            WalletMutationOutcome::Applied((wallet, record)) => WalletMutationOutcome::Applied((
+                wallet,
+                stored_wallet_transaction_to_gateway(record),
+            )),
+            WalletMutationOutcome::NotFound => WalletMutationOutcome::NotFound,
+            WalletMutationOutcome::Invalid(detail) => WalletMutationOutcome::Invalid(detail),
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn admin_create_manual_wallet_recharge_with_audit(
+        &self,
+        wallet_id: &str,
+        amount_usd: f64,
+        payment_method: &str,
+        operator_id: Option<&str>,
+        description: Option<&str>,
+        audit: &aether_data::repository::audit::CreateAdminAuditLog,
+    ) -> Result<
+        Option<
+            aether_data::repository::wallet::WalletMutationOutcome<(
+                aether_data::repository::wallet::StoredWalletSnapshot,
+                AdminWalletPaymentOrderRecord,
+            )>,
+        >,
+        GatewayError,
+    > {
+        use aether_data::repository::wallet::WalletMutationOutcome;
+        #[cfg(test)]
+        if self.auth_wallet_store.is_some() {
+            return Ok(None);
+        }
+        let result = self
+            .data
+            .create_manual_wallet_recharge_with_audit(
+                aether_data::repository::wallet::CreateManualWalletRechargeInput {
+                    wallet_id: wallet_id.to_string(),
+                    amount_usd,
+                    payment_method: payment_method.to_string(),
+                    operator_id: operator_id.map(ToOwned::to_owned),
+                    description: description.map(ToOwned::to_owned),
+                    order_no: admin_wallet_build_order_no(chrono::Utc::now()),
+                },
+                audit,
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if matches!(result, Some(WalletMutationOutcome::Applied(_))) {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(result.map(|outcome| match outcome {
+            WalletMutationOutcome::Applied((wallet, record)) => WalletMutationOutcome::Applied((
+                wallet,
+                stored_admin_payment_order_to_gateway(record),
+            )),
+            WalletMutationOutcome::NotFound => WalletMutationOutcome::NotFound,
+            WalletMutationOutcome::Invalid(detail) => WalletMutationOutcome::Invalid(detail),
+        }))
+    }
+
     pub(crate) async fn admin_adjust_wallet_balance(
         &self,
         wallet_id: &str,

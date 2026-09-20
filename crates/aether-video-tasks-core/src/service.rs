@@ -78,6 +78,22 @@ impl VideoTaskService {
         self.store.insert(snapshot);
     }
 
+    pub fn replace_local_snapshot(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        replacement: LocalVideoTaskSnapshot,
+    ) -> bool {
+        self.store.replace_local_snapshot(expected, replacement)
+    }
+
+    pub fn enrich_terminal_presentation(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        projected: &LocalVideoTaskSnapshot,
+    ) -> bool {
+        self.store.enrich_terminal_presentation(expected, projected)
+    }
+
     pub fn hydrate_from_stored_task(&self, task: &StoredVideoTask) -> bool {
         let Some(snapshot) = LocalVideoTaskSnapshot::from_stored_task(task) else {
             return false;
@@ -277,12 +293,14 @@ impl VideoTaskService {
     ) -> Option<LocalVideoTaskReadRefreshPlan> {
         match snapshot {
             LocalVideoTaskSnapshot::OpenAi(seed) => Some(LocalVideoTaskReadRefreshPlan {
+                snapshot: LocalVideoTaskSnapshot::OpenAi(seed.clone()),
                 plan: seed.build_get_follow_up_plan(trace_id)?,
                 projection_target: LocalVideoTaskProjectionTarget::OpenAi {
                     task_id: seed.local_task_id.clone(),
                 },
             }),
             LocalVideoTaskSnapshot::Gemini(seed) => Some(LocalVideoTaskReadRefreshPlan {
+                snapshot: LocalVideoTaskSnapshot::Gemini(seed.clone()),
                 plan: seed.build_get_follow_up_plan(trace_id)?,
                 projection_target: LocalVideoTaskProjectionTarget::Gemini {
                     short_id: seed.local_short_id.clone(),
@@ -308,12 +326,14 @@ impl VideoTaskService {
                 let trace_id = format!("{trace_prefix}-{index}");
                 match snapshot {
                     LocalVideoTaskSnapshot::OpenAi(seed) => Some(LocalVideoTaskReadRefreshPlan {
+                        snapshot: LocalVideoTaskSnapshot::OpenAi(seed.clone()),
                         plan: seed.build_get_follow_up_plan(&trace_id)?,
                         projection_target: LocalVideoTaskProjectionTarget::OpenAi {
                             task_id: seed.local_task_id.clone(),
                         },
                     }),
                     LocalVideoTaskSnapshot::Gemini(seed) => Some(LocalVideoTaskReadRefreshPlan {
+                        snapshot: LocalVideoTaskSnapshot::Gemini(seed.clone()),
                         plan: seed.build_get_follow_up_plan(&trace_id)?,
                         projection_target: LocalVideoTaskProjectionTarget::Gemini {
                             short_id: seed.local_short_id.clone(),
@@ -348,12 +368,14 @@ impl VideoTaskService {
 
         match snapshot {
             LocalVideoTaskSnapshot::OpenAi(seed) => Some(LocalVideoTaskReadRefreshPlan {
+                snapshot: LocalVideoTaskSnapshot::OpenAi(seed.clone()),
                 plan: seed.build_get_follow_up_plan(trace_id)?,
                 projection_target: LocalVideoTaskProjectionTarget::OpenAi {
                     task_id: seed.local_task_id.clone(),
                 },
             }),
             LocalVideoTaskSnapshot::Gemini(seed) => Some(LocalVideoTaskReadRefreshPlan {
+                snapshot: LocalVideoTaskSnapshot::Gemini(seed.clone()),
                 plan: seed.build_get_follow_up_plan(trace_id)?,
                 projection_target: LocalVideoTaskProjectionTarget::Gemini {
                     short_id: seed.local_short_id.clone(),

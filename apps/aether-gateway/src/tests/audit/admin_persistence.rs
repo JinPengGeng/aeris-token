@@ -191,10 +191,12 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     let query_secret = "audit-fixture-query-secret";
     let cookie_secret = "audit-fixture-cookie-secret";
     let body_secret = "audit-fixture-description-secret";
+    let oversized_trace_id = "client-trace-".repeat(20);
     assert_audit_metrics(&client, &gateway, 0, 0, 0).await;
 
     let response = client
         .put(format!("{endpoint}?token={query_secret}"))
+        .header(crate::constants::TRACE_ID_HEADER, &oversized_trace_id)
         .header("cookie", format!("fixture_cookie={cookie_secret}"))
         .json(&json!({"value": false, "description": body_secret}))
         .send()
@@ -219,12 +221,27 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     assert_eq!(rows[0]["event_type"], "admin_mutation");
     assert_eq!(rows[0]["event_metadata"]["method"], "PUT");
     assert_eq!(rows[0]["event_metadata"]["status"], "completed");
+    assert!(rows[0]["request_id"].as_str().unwrap().len() <= 100);
+    assert_ne!(rows[0]["request_id"], oversized_trace_id);
+    assert!(rows[0]["ip_address"].as_str().is_some());
     for secret in [query_secret, cookie_secret, body_secret, token.as_str()] {
         assert!(!serde_json::to_string(&rows).unwrap().contains(secret));
     }
     assert!(rows[0]["user_agent"].is_null());
     assert!(rows[0]["error_message"].is_null());
     assert_audit_metrics(&client, &gateway, 1, 0, 0).await;
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM admin_audit_delivery
+         WHERE event_id=$1 AND state='pending'",
+    )
+    .bind(rows[0]["id"].as_str().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        queued, 1,
+        "the successful mutation commits a durable intent"
+    );
 
     let audit_url = format!("{gateway}/api/admin/monitoring/audit-logs?event_type=admin_mutation");
     let readback = client.get(&audit_url).send().await.unwrap();
@@ -387,11 +404,118 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
         .execute(&mut *lock)
         .await
         .unwrap();
+
+    // The business transaction and durable intent commit before the response
+    // finalizer reaches its blocked direct audit INSERT. Dropping the client
+    // future at that barrier proves client cancellation after commit. The
+    // server finalizer can continue; real process death has its own test.
+    // A new repository must converge with any continuing immediate writer.
+    let pending_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_delivery WHERE state='pending'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let cancelled_client = client.clone();
+    let cancelled_endpoint = endpoint.clone();
+    let cancelled = tokio::spawn(async move {
+        cancelled_client
+            .put(cancelled_endpoint)
+            .json(&json!({"value": true}))
+            .send()
+            .await
+    });
+    let cancelled_event_id: String = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let row: Option<String> = sqlx::query_scalar(
+                "SELECT event_id FROM admin_audit_delivery
+                 WHERE state='pending' ORDER BY created_at DESC,event_id DESC LIMIT 1",
+            )
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM admin_audit_delivery WHERE state='pending'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if count > pending_before {
+                break row.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("business commit should leave a durable intent before response");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                 WHERE datname=current_database() AND wait_event='advisory'
+                 AND query LIKE '%INSERT INTO audit_logs%')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("immediate writer must enter its real database barrier before client cancellation");
+    cancelled.abort();
+    let _ = cancelled.await;
+    assert_eq!(
+        state
+            .data
+            .find_system_config_value_strong("enable_format_conversion")
+            .await
+            .unwrap(),
+        Some(json!(true))
+    );
+    lock.rollback().await.unwrap();
+    let restarted_repository = PostgresAuditLogReadRepository::new(pool.clone());
+    loop {
+        let claimed = restarted_repository
+            .claim_admin_audit_deliveries(128, 30)
+            .await
+            .unwrap();
+        if claimed.is_empty() {
+            break;
+        }
+        for item in claimed {
+            assert!(restarted_repository
+                .deliver_admin_audit(&item.event_id, item.lease_token)
+                .await
+                .unwrap());
+        }
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM audit_logs WHERE id=$1")
+            .bind(&cancelled_event_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let recovered_rows = audit_rows(&pool).await;
+    assert_eq!(recovered_rows.len(), failed_rows.len() + 2);
+    for prior in &failed_rows {
+        assert!(recovered_rows.contains(prior));
+    }
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(255,391)")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
     let timeout_client = client.clone();
+    let timeout_endpoint = endpoint.clone();
     let request_started = std::time::Instant::now();
     let request = tokio::spawn(async move {
         timeout_client
-            .put(&endpoint)
+            .put(&timeout_endpoint)
             .json(&json!({"value": false}))
             .send()
             .await
@@ -438,8 +562,8 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
         Some(json!(false))
     );
     // Absence is provable only while this BEFORE INSERT lock is held.
-    assert_eq!(audit_rows(&pool).await, failed_rows);
-    assert_audit_metrics(&client, &gateway, 7, 2, 1).await;
+    assert_eq!(audit_rows(&pool).await, recovered_rows);
+    assert_audit_metrics(&client, &gateway, 8, 2, 1).await;
     lock.rollback().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -461,22 +585,62 @@ async fn live_admin_mutations_persist_before_response_and_protected_readback() {
     // Dropping the SQL future does not prove whether PostgreSQL committed.
     // Preserve either legitimate outcome, but never lose/replace earlier facts.
     let settled = audit_rows(&pool).await;
-    assert!((failed_rows.len()..=failed_rows.len() + 1).contains(&settled.len()));
-    for prior in &failed_rows {
+    assert!((recovered_rows.len()..=recovered_rows.len() + 1).contains(&settled.len()));
+    for prior in &recovered_rows {
         assert!(settled.contains(prior));
     }
-    if let Some(late) = settled.iter().find(|row| !failed_rows.contains(row)) {
+    if let Some(late) = settled.iter().find(|row| !recovered_rows.contains(row)) {
         assert_eq!(late["user_id"], admin_user.id);
         assert_eq!(late["status_code"], 200);
         assert_eq!(late["event_metadata"]["status"], "completed");
     }
     // A possible late commit does not erase the timeout, and scrapes add no attempts.
-    assert_audit_metrics(&client, &gateway, 7, 2, 1).await;
+    assert_audit_metrics(&client, &gateway, 8, 2, 1).await;
 
     sqlx::query("DROP TRIGGER wait_audit_fixture ON audit_logs")
         .execute(&pool)
         .await
         .unwrap();
+    // Enqueue is in the business transaction. Rejecting it must roll back the
+    // config update instead of returning success without a durable intent.
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_audit_enqueue_fixture() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'audit-enqueue-private-error'; END $$;
+         CREATE TRIGGER reject_audit_enqueue_fixture BEFORE INSERT ON admin_audit_delivery
+         FOR EACH ROW EXECUTE FUNCTION reject_audit_enqueue_fixture();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let rejected = client
+        .put(&endpoint)
+        .json(&json!({"value": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!rejected
+        .text()
+        .await
+        .unwrap()
+        .contains("audit-enqueue-private-error"));
+    assert_eq!(
+        state
+            .data
+            .find_system_config_value_strong("enable_format_conversion")
+            .await
+            .unwrap(),
+        Some(json!(false)),
+        "failed enqueue rolls back the business mutation"
+    );
+    sqlx::raw_sql(
+        "DROP TRIGGER reject_audit_enqueue_fixture ON admin_audit_delivery;
+         DROP FUNCTION reject_audit_enqueue_fixture();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
     super::operational_reads::verify_live_reads(
         &pool,
         &state,

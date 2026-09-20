@@ -216,6 +216,7 @@ async fn gateway_executes_openai_video_content_from_reconstructed_data_task_with
     let repository = Arc::new(InMemoryVideoTaskRepository::default());
     repository
         .upsert(UpsertVideoTask {
+            row_revision: 0,
             id: "task-content-local-123".to_string(),
             short_id: None,
             request_id: "request-openai-video-content-local-123".to_string(),

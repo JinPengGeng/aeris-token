@@ -1,10 +1,13 @@
 # ADR-0044: Emergency chain domain boundary
 
-Status: Accepted (domain scaffold only)
+Status: Accepted (Issue #44 administrator operations v1; scheduler scaffold deferred)
 
-This decision accepts the isolated domain contract that is present in the
-repository. It does not claim Gateway wiring, persistence, audit integration,
-or production scheduling support; those remain deferred as recorded below.
+This decision records two deliberately separate implementations: the sealed
+scheduler-domain scaffold, and a narrow synchronous administrator model-test
+route backed by a persisted one-shot grant. The administrator route does not
+claim to integrate the scheduler scaffold's opaque permit or unavailable
+ledger authority. That scaffold is retained as a possible design for a broader
+scheduler feature, not as an Issue #44 acceptance requirement.
 
 ## Context
 
@@ -59,14 +62,15 @@ Route/auth/time values are minted through `GatewayEmergencyChainAuthority`.
 returns `AuthoritativeLedgerUnavailable` for every production safe-skip proof
 request. A non-empty ledger-entry string is not authority evidence and cannot
 unlock progress. The test-only fixture used by this domain module is not
-compiled into production artifacts. The future ledger integration must verify a
-committed record for the exact request scope, chain hash, slot, permit/fencing
-identity, authorization instant, and observation instant before it can mint a
-proof. Both authorities have no safe public constructor, `Default`, `Clone`,
-or serde contract; ordinary dependency crates cannot forge them, and gateway
-dispatch authority cannot mint ledger proof. This preparatory slice deliberately
-exposes no bootstrap path, so the capability remains unusable until narrowly
-owned authority bootstraps are reviewed and added.
+compiled into production artifacts. If the deferred scheduler design is
+implemented, its ledger integration must verify a committed record for the exact
+request scope, chain hash, slot, permit/fencing identity, authorization instant,
+and observation instant before it can mint a proof. Both authorities have no
+safe public constructor, `Default`, `Clone`, or serde contract; ordinary
+dependency crates cannot forge them, and gateway dispatch authority cannot mint
+ledger proof. This preparatory slice deliberately exposes no bootstrap path, so
+the scheduler capability remains unusable until narrowly owned authority
+bootstraps are reviewed and added.
 
 `NormalRouting` requires `ServerNormalRoutingActivation`. Emergency principal
 and operation come from
@@ -83,6 +87,54 @@ cookies, client timestamps, or any other client-controlled field. Client input
 may identify an ordinary request, but cannot activate emergency mode, select its
 principal/operation, assert progress, or choose the gate clock.
 
+## Administrator operations v1
+
+The production Gateway exposes a separate, intentionally small operations
+path under `admin:provider_query`:
+
+- `POST /api/admin/provider-query/emergency-chain/execute` accepts one model,
+  one provider ID, and 1 to 32 explicitly ordered endpoint/key ID pairs.
+- `POST /api/admin/provider-query/emergency-chain/{grant_id}/revoke` revokes a
+  grant only for the administrator principal that owns it.
+- Both routes require an authenticated administrator principal and the
+  `admin:provider_query:admin` management-token permission when a management
+  token is used.
+- The server generates grant, request, nonce, fingerprint, hash, and time
+  fields. Grants have a fixed five-minute TTL and persist only IDs; credentials,
+  URLs, names, and caller timestamps are not grant fields.
+- Issuance and its audit record commit atomically. The grant is then consumed
+  once in a row-locking transaction before any upstream send. A crash after
+  consumption leaves the grant consumed; the Gateway never replays it.
+- The Gateway preserves the submitted target order and does not invoke normal
+  scheduler sorting, ranking, or fallback. It strong-reads the grant and the
+  current provider, endpoint, key, and uncached transport before every send.
+- v1 permits only synchronous text model-test formats. It does not accept
+  streaming or tools. It advances only after an explicit transient HTTP model
+  test failure (`408`, `429`, or `5xx`); success and all other outcomes stop the
+  chain.
+
+This route is an operations-only escape hatch. It is not a tenant request
+router, a generalized attempt ledger, or a replacement for the normal
+scheduler.
+
+## Issue #44 acceptance boundary
+
+Issue #44 asks for a request-scoped immutable failover chain for operations,
+with authorization, audit, bounded expiry, rollback, and no promotion into the
+default multi-tenant scheduler. The administrator operations v1 route is the
+accepted implementation of that scope: server-generated request identity and
+hashes bind an immutable ordered target list; administrator authorization and
+management-token permission protect issuance and revocation; issuance is
+atomically audited; the fixed five-minute expiry is rechecked before sends; and
+owner-bound revocation plus one-shot consumption provide rollback and replay
+protection. The separate route never participates in normal scheduler ordering
+or fallback.
+
+The opaque permit, authoritative attempt ledger, and versioned CAS send boundary
+below are deferred scheduler hardening for a separately approved public or
+tenant routing feature. They are not prerequisites for accepting or closing
+Issue #44's operations-only scope.
+
 ## Gate time semantics
 
 The `ServerEmergencyChainInstant` inside trusted context is the linearization
@@ -95,29 +147,36 @@ no domain send or completion path: a `FnOnce` closure call cannot prove that a
 physical upstream write happened, and returning `Ok` or `Err` cannot be treated
 as an authoritative attempt outcome.
 
-Future integration must add a gateway-owned dispatch port that consumes the
-opaque permit and, at the actual send boundary, obtains a fresh server time and
-live request context, strong-reads expiry/revocation/session version, rechecks
-all gate predicates, and wins a versioned CAS before revealing the target and
-performing exactly one physical send. A stale instance or CAS loser must never
-receive a send capability. No progress receipt may be created merely because a
-closure returned. Completion must be derived from the authoritative attempt
-ledger and committed with CAS. Safe skip uses
+If a future design integrates emergency routing into public or tenant
+scheduling, or requires cross-instance proof of exactly one physical send, it
+must add a gateway-owned dispatch port that consumes the opaque permit and, at
+the actual send boundary, obtains a fresh server time and live request context,
+strong-reads expiry/revocation/session version, rechecks all gate predicates,
+and wins a versioned CAS before revealing the target and performing exactly one
+physical send. A stale instance or CAS loser must never receive a send
+capability. No progress receipt may be created merely because a closure
+returned. Completion must be derived from the authoritative attempt ledger and
+committed with CAS. Safe skip uses
 `EmergencyChainSafeSkipProof`, minted only by the ledger authority after an
 authoritative materialization-ledger record is committed, and its transition
 must use the same CAS discipline. A client assertion or locally compressed
 candidate list is never proof of attempt or safe skip.
 
-## Deferred integration
+## Boundary between the two implementations
 
-This slice intentionally does not define administrator permissions, storage,
-audit persistence, admin HTTP routes, gateway wiring, or send-time strong-read
-transactions. Those controls must be added before the capability is enabled.
+The scheduler-domain permit remains unusable in production because
+`EmergencyChainLedgerAuthority` still cannot mint authoritative completion or
+safe-skip proof. The administrator v1 route does not construct or unwrap that
+permit. Its persisted one-shot consumption prevents replay, while its
+strong-read-before-send checks provide the narrower operations contract above.
+Public or tenant emergency scheduling is explicitly outside Issue #44. If that
+broader feature is separately approved, it must first adopt an authoritative
+attempt ledger and CAS send boundary such as the deferred design described here.
 
 ## Consequences
 
-Emergency routing cannot inherit normal scheduler ranking, silently omit a
-missing slot, or fall back to a target outside the grant. The domain slice makes
-the required invariants explicit, but the capability must remain disabled until
-the deferred authoritative ledger, CAS reservation/completion, audit, and
-send-time strong-read integration exists.
+The administrator model-test path can execute a short-lived fixed chain without
+inheriting normal scheduler ranking or falling back outside the grant. This
+satisfies Issue #44's operations-only boundary. Public and tenant emergency
+routing remains disabled and requires a separate decision; the opaque permit,
+ledger, and CAS scaffold remains available as a deferred design for that work.

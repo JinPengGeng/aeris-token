@@ -277,6 +277,13 @@ impl ProviderCatalogReadRepository for CachedProviderCatalogReadRepository {
         }
     }
 
+    async fn list_providers_by_ids_strong(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
+        self.inner.list_providers_by_ids_strong(provider_ids).await
+    }
+
     async fn list_endpoints_by_ids(
         &self,
         endpoint_ids: &[String],
@@ -294,6 +301,13 @@ impl ProviderCatalogReadRepository for CachedProviderCatalogReadRepository {
             ProviderCatalogCacheValue::Endpoints(items) => Ok(items),
             _ => Ok(Vec::new()),
         }
+    }
+
+    async fn list_endpoints_by_ids_strong(
+        &self,
+        endpoint_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+        self.inner.list_endpoints_by_ids_strong(endpoint_ids).await
     }
 
     async fn list_endpoints_by_provider_ids(

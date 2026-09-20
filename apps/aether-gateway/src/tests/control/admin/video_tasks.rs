@@ -87,6 +87,7 @@ fn sample_admin_video_task(
     prompt: &str,
 ) -> UpsertVideoTask {
     UpsertVideoTask {
+        row_revision: 0,
         id: id.to_string(),
         short_id: Some(format!("short-{id}")),
         request_id: format!("request-{id}"),

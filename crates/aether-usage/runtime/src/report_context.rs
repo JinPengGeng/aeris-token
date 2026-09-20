@@ -148,6 +148,7 @@ mod tests {
 
     fn sample_video_task() -> StoredVideoTask {
         StoredVideoTask {
+            row_revision: 0,
             id: "task-1".to_string(),
             short_id: Some("short-1".to_string()),
             request_id: "req-1".to_string(),

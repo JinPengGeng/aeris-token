@@ -20,7 +20,7 @@ list is kept in `issue-255-admin-mutation-inventory.txt` and checked by
 added or removed without updating the inventory, so the list remains reviewable
 and does not depend on a stale issue comment.
 
-The inventory currently contains 140 explicit event names across the admin
+The inventory currently contains 142 explicit event names across the admin
 handler tree and the two shared admin response boundaries. The generic fallback
 is intentionally not duplicated in the list; its two stable names are asserted
 directly against the finalizer source.

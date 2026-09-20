@@ -10,6 +10,7 @@ mod candidate_indices;
 mod classifier;
 mod codex_quota_breaker;
 mod effects;
+mod half_open_probe;
 mod health;
 mod oauth_error;
 mod policy;
@@ -21,7 +22,9 @@ pub(crate) use self::adaptive::{
     LocalAdaptiveRateLimitProjection, LocalAdaptiveSuccessProjection,
 };
 pub(crate) use self::attempt::{
-    attempt_identity_from_report_context, insert_pool_key_lease_report_context_fields,
+    attempt_budget_exhaustion_report_context,
+    attempt_budget_exhaustion_report_context_with_snapshot, attempt_identity_from_report_context,
+    insert_pool_key_lease_report_context_fields,
     local_execution_candidate_metadata_from_report_context, next_same_key_retry_attempt,
     ExecutionAttemptIdentity, LocalExecutionCandidateMetadata, POOL_KEY_RETRY_INDEX_STRIDE,
     ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD, SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
@@ -31,10 +34,12 @@ pub(crate) use self::candidate_indices::{
     scope_request_candidate_indices_with, RequestCandidateIndices,
 };
 pub(crate) use self::classifier::{
-    classify_anthropic_failure_disposition, classify_failure_disposition, classify_local_failover,
+    classify_anthropic_failure_disposition, classify_failure_disposition,
+    classify_failure_disposition_with_origin, classify_local_failover,
     classify_local_transport_error, failure_disposition_from_local_classification,
-    local_failover_error_message, FailureDisposition, FailureRetryAction, FailureScope,
-    FailureTokenAction, LocalFailoverClassification, LocalFailoverInput,
+    failure_origin_from_embedded_upstream_error, failure_origin_from_upstream_response,
+    local_failover_error_message, FailureDisposition, FailureOrigin, FailureRetryAction,
+    FailureScope, FailureTokenAction, LocalFailoverClassification, LocalFailoverInput,
     LocalTransportFailoverClassification,
 };
 pub(crate) use self::codex_quota_breaker::{
@@ -44,13 +49,17 @@ pub(crate) use self::codex_quota_breaker::{
     log_codex_quota_breaker_install_failure,
 };
 pub(crate) use self::effects::{
-    apply_local_execution_effect, apply_local_stream_failure_effects,
-    apply_local_stream_success_effects, release_local_pool_key_lease,
-    release_pool_key_lease_from_report_context, spawn_local_oauth_success_effect,
-    LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
-    LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-    LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect,
-    LocalPoolErrorEffect, LocalStreamFailureEffect,
+    apply_local_execution_effect, apply_local_execution_effect_with_origin,
+    apply_local_stream_failure_effects, apply_local_stream_success_effects,
+    release_local_pool_key_lease, release_pool_key_lease_from_report_context,
+    spawn_local_oauth_success_effect, LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect,
+    LocalAttemptFailureEffect, LocalExecutionEffect, LocalExecutionEffectContext,
+    LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
+    LocalOAuthSuccessEffect, LocalPoolErrorEffect, LocalStreamFailureEffect,
+};
+pub(crate) use self::half_open_probe::{
+    half_open_probe_is_due, release_half_open_probe, renew_half_open_probe,
+    try_acquire_half_open_probe, HalfOpenProbeClaim, HalfOpenProbeClaimOutcome,
 };
 pub(crate) use self::health::{
     project_local_failure_health, project_local_key_circuit_closed,
@@ -69,8 +78,8 @@ pub(crate) use self::policy::{
 };
 pub(crate) use self::recovery::{
     analyze_local_failover, analyze_local_transport_error, apply_provider_failure_disposition,
-    recover_local_failover_decision, LocalFailoverAnalysis, LocalFailoverDecision,
-    LocalTransportFailoverAnalysis,
+    apply_provider_failure_disposition_with_origin, recover_local_failover_decision,
+    LocalFailoverAnalysis, LocalFailoverDecision, LocalTransportFailoverAnalysis,
 };
 #[cfg(test)]
 pub(crate) use self::report_effects::clear_local_report_effect_caches_for_tests;
@@ -86,14 +95,40 @@ pub(crate) async fn resolve_local_failover_analysis_for_attempt(
     status_code: u16,
     response_text: Option<&str>,
 ) -> LocalFailoverAnalysis {
+    resolve_local_failover_analysis_for_attempt_with_origin(
+        state,
+        plan,
+        report_context,
+        status_code,
+        response_text,
+        failure_origin_from_upstream_response(status_code, response_text),
+    )
+    .await
+}
+
+pub(crate) async fn resolve_local_failover_analysis_for_attempt_with_origin(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    status_code: u16,
+    response_text: Option<&str>,
+    failure_origin: FailureOrigin,
+) -> LocalFailoverAnalysis {
     if attempt_identity_from_report_context(report_context).is_none() {
         return LocalFailoverAnalysis::use_default();
     }
 
     let policy = resolve_local_failover_policy(state, plan, report_context).await;
-    let analysis =
-        analyze_local_failover(&policy, LocalFailoverInput::new(status_code, response_text));
-    apply_provider_failure_disposition(&plan.provider_api_format, status_code, analysis)
+    let analysis = analyze_local_failover(
+        &policy,
+        LocalFailoverInput::trusted(status_code, response_text, failure_origin),
+    );
+    apply_provider_failure_disposition_with_origin(
+        &plan.provider_api_format,
+        status_code,
+        analysis,
+        failure_origin,
+    )
 }
 
 pub(crate) async fn resolve_local_failover_decision_for_attempt(
@@ -124,10 +159,18 @@ pub(crate) async fn resolve_local_transport_failover_analysis_for_attempt(
 }
 
 pub(crate) fn build_local_error_flow_metadata(
+    provider_api_format: &str,
     status_code: u16,
     response_text: Option<&str>,
     analysis: LocalFailoverAnalysis,
+    failure_origin: FailureOrigin,
 ) -> Value {
+    let failure_disposition = classify_failure_disposition_with_origin(
+        provider_api_format,
+        analysis.classification,
+        status_code,
+        failure_origin,
+    );
     let safe_to_expose = matches!(
         analysis.classification,
         LocalFailoverClassification::StopStatusCode
@@ -148,6 +191,12 @@ pub(crate) fn build_local_error_flow_metadata(
         "status_code": status_code,
         "classification": analysis.classification.as_str(),
         "decision": analysis.decision.as_str(),
+        "failure_origin": failure_origin.as_str(),
+        "classifier_disposition": {
+            "retry_action": failure_disposition.retry_action.as_str(),
+            "failure_scope": failure_disposition.failure_scope.as_str(),
+            "token_action": failure_disposition.token_action.as_str(),
+        },
         "retryable": matches!(analysis.decision, LocalFailoverDecision::RetryNextCandidate),
         "safe_to_expose": safe_to_expose,
         "propagation": propagation,
@@ -297,7 +346,7 @@ fn trace_header_is_sensitive(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::mask_trace_header_value;
+    use super::*;
 
     #[test]
     fn sensitive_header_masking_is_safe_for_unicode_values() {
@@ -312,6 +361,34 @@ mod tests {
         assert_eq!(
             mask_trace_header_value("x-api-key", "abcdefghijk"),
             "abcd****hijk"
+        );
+    }
+
+    #[test]
+    fn error_flow_metadata_uses_trusted_origin_for_disposition() {
+        let metadata = build_local_error_flow_metadata(
+            "openai:responses",
+            401,
+            None,
+            LocalFailoverAnalysis {
+                classification: LocalFailoverClassification::RetryStatusCode,
+                decision: LocalFailoverDecision::RetryNextCandidate,
+            },
+            FailureOrigin::UpstreamCredential,
+        );
+
+        assert_eq!(metadata["failure_origin"], "upstream_credential");
+        assert_eq!(
+            metadata["classifier_disposition"]["retry_action"],
+            "next_credential"
+        );
+        assert_eq!(
+            metadata["classifier_disposition"]["failure_scope"],
+            "credential"
+        );
+        assert_eq!(
+            metadata["classifier_disposition"]["token_action"],
+            "force_refresh"
         );
     }
 }

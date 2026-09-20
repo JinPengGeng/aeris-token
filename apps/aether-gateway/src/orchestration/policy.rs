@@ -40,7 +40,7 @@ impl Default for LocalFailoverPolicy {
             success_failover_patterns: Vec::new(),
             error_stop_patterns: Vec::new(),
             stop_cyber_policy_errors: true,
-            retry_client_errors_by_default: true,
+            retry_client_errors_by_default: false,
         }
     }
 }
@@ -138,10 +138,7 @@ pub(crate) fn local_failover_policy_from_transport(
             .and_then(|value| value.get("max_transfer_timeout_seconds"))
             .and_then(parse_u64_value)
             .unwrap_or(0),
-        retry_client_errors_by_default:
-            crate::ai_serving::api_format_defaults_to_client_error_failover(
-                &transport.endpoint.api_format,
-            ),
+        retry_client_errors_by_default: false,
         stop_cyber_policy_errors: true,
         stop_status_codes: rules
             .map(|value| {
@@ -225,7 +222,7 @@ pub(crate) fn local_failover_policy_from_report_context(
         retry_client_errors_by_default: object
             .get("retry_client_errors_by_default")
             .and_then(Value::as_bool)
-            .unwrap_or(true),
+            .unwrap_or(false),
     })
 }
 
@@ -553,7 +550,7 @@ mod tests {
                     status_codes: [422].into_iter().collect(),
                 }],
                 stop_cyber_policy_errors: true,
-                retry_client_errors_by_default: true,
+                retry_client_errors_by_default: false,
             })
         );
     }

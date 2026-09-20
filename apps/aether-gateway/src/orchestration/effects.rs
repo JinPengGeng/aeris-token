@@ -27,11 +27,12 @@ use tokio::sync::Mutex as TokioMutex;
 use tracing::warn;
 
 use super::{
-    classify_failure_disposition, local_failover_error_message, project_local_adaptive_rate_limit,
+    classify_failure_disposition, classify_failure_disposition_with_origin,
+    local_failover_error_message, project_local_adaptive_rate_limit,
     project_local_adaptive_success, project_local_failure_health, project_local_key_circuit_closed,
     project_local_key_circuit_failure, project_local_success_health,
-    resolve_local_failover_analysis_for_attempt, FailureScope, LocalFailoverAnalysis,
-    LocalFailoverClassification,
+    resolve_local_failover_analysis_for_attempt, FailureOrigin, FailureScope,
+    LocalFailoverAnalysis, LocalFailoverClassification,
 };
 use crate::ai_serving::extract_pool_sticky_session_token;
 use crate::client_session_affinity::{
@@ -390,13 +391,13 @@ pub(crate) async fn apply_local_execution_effect(
 ) {
     match effect {
         LocalExecutionEffect::AttemptFailure(effect) => {
-            record_attempt_failure_effect(state, context, effect).await;
+            record_attempt_failure_effect(state, context, effect, None).await;
         }
         LocalExecutionEffect::AdaptiveRateLimit(effect) => {
-            record_adaptive_rate_limit_effect(state, context, effect).await;
+            record_adaptive_rate_limit_effect(state, context, effect, None).await;
         }
         LocalExecutionEffect::HealthFailure(effect) => {
-            record_health_failure_effect(state, context, effect).await;
+            record_health_failure_effect(state, context, effect, None).await;
         }
         LocalExecutionEffect::HealthSuccess(effect) => {
             record_health_success_effect(state, context, effect).await;
@@ -419,7 +420,54 @@ pub(crate) async fn apply_local_execution_effect(
             release_local_pool_key_lease(state, context).await;
         }
         LocalExecutionEffect::PoolError(effect) => {
-            record_pool_error_effect(state, context, effect).await;
+            record_pool_error_effect(state, context, effect, None).await;
+            release_local_pool_key_lease(state, context).await;
+        }
+        LocalExecutionEffect::PoolStreamTimeout => {
+            record_pool_stream_timeout_effect(state, context).await;
+            release_local_pool_key_lease(state, context).await;
+        }
+    }
+}
+
+pub(crate) async fn apply_local_execution_effect_with_origin(
+    state: &AppState,
+    context: LocalExecutionEffectContext<'_>,
+    effect: LocalExecutionEffect<'_>,
+    failure_origin: FailureOrigin,
+) {
+    match effect {
+        LocalExecutionEffect::AttemptFailure(effect) => {
+            record_attempt_failure_effect(state, context, effect, Some(failure_origin)).await;
+        }
+        LocalExecutionEffect::AdaptiveRateLimit(effect) => {
+            record_adaptive_rate_limit_effect(state, context, effect, Some(failure_origin)).await;
+        }
+        LocalExecutionEffect::HealthFailure(effect) => {
+            record_health_failure_effect(state, context, effect, Some(failure_origin)).await;
+        }
+        LocalExecutionEffect::PoolError(effect) => {
+            record_pool_error_effect(state, context, effect, Some(failure_origin)).await;
+            release_local_pool_key_lease(state, context).await;
+        }
+        LocalExecutionEffect::HealthSuccess(effect) => {
+            record_health_success_effect(state, context, effect).await;
+        }
+        LocalExecutionEffect::AdaptiveSuccess(effect) => {
+            record_adaptive_success_effect(state, context, effect).await;
+        }
+        LocalExecutionEffect::OauthInvalidation(effect) => {
+            record_oauth_invalidation_effect(state, context, effect).await;
+        }
+        LocalExecutionEffect::OauthSuccess(effect) => {
+            record_oauth_success_effect(state, context, effect).await;
+        }
+        LocalExecutionEffect::PoolSuccessSync { payload } => {
+            record_sync_pool_success_effect(state, context, payload).await;
+            release_local_pool_key_lease(state, context).await;
+        }
+        LocalExecutionEffect::PoolSuccessStream { payload } => {
+            record_stream_pool_success_effect(state, context, payload).await;
             release_local_pool_key_lease(state, context).await;
         }
         LocalExecutionEffect::PoolStreamTimeout => {
@@ -885,11 +933,13 @@ async fn record_attempt_failure_effect(
     state: &AppState,
     context: LocalExecutionEffectContext<'_>,
     effect: LocalAttemptFailureEffect,
+    failure_origin: Option<FailureOrigin>,
 ) {
-    if !local_candidate_failure_should_invalidate_affinity_for_provider(
+    if !local_candidate_failure_should_invalidate_affinity_for_provider_with_optional_origin(
         &context.plan.provider_api_format,
         effect.classification,
         effect.status_code,
+        failure_origin,
     ) {
         return;
     }
@@ -956,11 +1006,13 @@ async fn record_adaptive_rate_limit_effect(
     state: &AppState,
     context: LocalExecutionEffectContext<'_>,
     effect: LocalAdaptiveRateLimitEffect<'_>,
+    failure_origin: Option<FailureOrigin>,
 ) {
-    if !local_candidate_failure_should_apply_key_effects(
+    if !local_candidate_failure_should_apply_key_effects_with_optional_origin(
         &context.plan.provider_api_format,
         effect.classification,
         effect.status_code,
+        failure_origin,
     ) {
         return;
     }
@@ -1244,11 +1296,13 @@ async fn record_health_failure_effect(
     state: &AppState,
     context: LocalExecutionEffectContext<'_>,
     effect: LocalHealthFailureEffect,
+    failure_origin: Option<FailureOrigin>,
 ) {
-    if !local_candidate_failure_should_apply_key_effects(
+    if !local_candidate_failure_should_apply_key_effects_with_optional_origin(
         &context.plan.provider_api_format,
         effect.classification,
         effect.status_code,
+        failure_origin,
     ) {
         return;
     }
@@ -1518,11 +1572,13 @@ async fn record_pool_error_effect(
     state: &AppState,
     context: LocalExecutionEffectContext<'_>,
     effect: LocalPoolErrorEffect<'_>,
+    failure_origin: Option<FailureOrigin>,
 ) {
-    if !local_candidate_failure_should_apply_key_effects(
+    if !local_candidate_failure_should_apply_key_effects_with_optional_origin(
         &context.plan.provider_api_format,
         effect.classification,
         effect.status_code,
+        failure_origin,
     ) {
         return;
     }
@@ -1870,6 +1926,73 @@ fn local_candidate_failure_should_invalidate_affinity_for_provider(
         && disposition.failure_scope == FailureScope::None)
 }
 
+fn local_candidate_failure_should_invalidate_affinity_for_provider_with_optional_origin(
+    provider_api_format: &str,
+    classification: LocalFailoverClassification,
+    status_code: u16,
+    failure_origin: Option<FailureOrigin>,
+) -> bool {
+    match failure_origin {
+        Some(failure_origin) => {
+            local_candidate_failure_should_invalidate_affinity_for_provider_with_origin(
+                provider_api_format,
+                classification,
+                status_code,
+                failure_origin,
+            )
+        }
+        None => local_candidate_failure_should_invalidate_affinity_for_provider(
+            provider_api_format,
+            classification,
+            status_code,
+        ),
+    }
+}
+
+fn local_candidate_failure_should_invalidate_affinity_for_provider_with_origin(
+    provider_api_format: &str,
+    classification: LocalFailoverClassification,
+    status_code: u16,
+    failure_origin: FailureOrigin,
+) -> bool {
+    if !local_candidate_failure_should_invalidate_affinity(classification, status_code) {
+        return false;
+    }
+    if matches!(
+        failure_origin,
+        FailureOrigin::Request
+            | FailureOrigin::Transport
+            | FailureOrigin::Internal
+            | FailureOrigin::Unknown
+    ) {
+        return false;
+    }
+    if failure_origin == FailureOrigin::UpstreamCredential {
+        return matches!(status_code, 401 | 403);
+    }
+    if matches!(
+        status_code,
+        400 | 401 | 403 | 405 | 406 | 413 | 414 | 415 | 422
+    ) {
+        return false;
+    }
+    if !provider_api_format
+        .trim()
+        .eq_ignore_ascii_case("claude:messages")
+    {
+        return true;
+    }
+
+    let disposition = classify_failure_disposition_with_origin(
+        provider_api_format,
+        classification,
+        status_code,
+        failure_origin,
+    );
+    !(disposition.retry_action == crate::orchestration::FailureRetryAction::Stop
+        && disposition.failure_scope == FailureScope::None)
+}
+
 fn local_candidate_failure_should_apply_key_effects(
     provider_api_format: &str,
     classification: LocalFailoverClassification,
@@ -1885,6 +2008,70 @@ fn local_candidate_failure_should_apply_key_effects(
     matches!(
         classify_failure_disposition(provider_api_format, classification, status_code)
             .failure_scope,
+        FailureScope::Credential
+    )
+}
+
+fn local_candidate_failure_should_apply_key_effects_with_optional_origin(
+    provider_api_format: &str,
+    classification: LocalFailoverClassification,
+    status_code: u16,
+    failure_origin: Option<FailureOrigin>,
+) -> bool {
+    match failure_origin {
+        Some(failure_origin) => local_candidate_failure_should_apply_key_effects_with_origin(
+            provider_api_format,
+            classification,
+            status_code,
+            failure_origin,
+        ),
+        None => local_candidate_failure_should_apply_key_effects(
+            provider_api_format,
+            classification,
+            status_code,
+        ),
+    }
+}
+
+fn local_candidate_failure_should_apply_key_effects_with_origin(
+    provider_api_format: &str,
+    classification: LocalFailoverClassification,
+    status_code: u16,
+    failure_origin: FailureOrigin,
+) -> bool {
+    if matches!(
+        failure_origin,
+        FailureOrigin::Request
+            | FailureOrigin::Transport
+            | FailureOrigin::Internal
+            | FailureOrigin::Unknown
+    ) {
+        return false;
+    }
+    if failure_origin == FailureOrigin::UpstreamCredential {
+        return matches!(status_code, 401 | 403);
+    }
+    if matches!(
+        status_code,
+        400 | 401 | 403 | 405 | 406 | 413 | 414 | 415 | 422
+    ) {
+        return false;
+    }
+    if !provider_api_format
+        .trim()
+        .eq_ignore_ascii_case("claude:messages")
+    {
+        return true;
+    }
+
+    matches!(
+        classify_failure_disposition_with_origin(
+            provider_api_format,
+            classification,
+            status_code,
+            failure_origin,
+        )
+        .failure_scope,
         FailureScope::Credential
     )
 }
@@ -2138,6 +2325,8 @@ mod tests {
         apply_local_execution_effect, apply_local_stream_failure_effects,
         apply_local_stream_success_effects, execution_plan_bearer_matches_transport,
         local_candidate_failure_should_apply_key_effects,
+        local_candidate_failure_should_apply_key_effects_with_origin,
+        local_candidate_failure_should_invalidate_affinity_for_provider_with_origin,
         local_candidate_failure_should_record_pool_error, pool_score_feedback_gate_allows,
         pool_score_hard_state_for_status, resolve_pool_feedback_context,
         LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
@@ -2147,7 +2336,7 @@ mod tests {
     };
     use crate::data::{GatewayDataConfig, GatewayDataState};
     use crate::orchestration::{
-        apply_local_report_effect, LocalFailoverClassification, LocalReportEffect,
+        apply_local_report_effect, FailureOrigin, LocalFailoverClassification, LocalReportEffect,
     };
     use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
     use crate::usage::GatewayStreamReportRequest;
@@ -3521,6 +3710,126 @@ mod tests {
             LocalFailoverClassification::RetryUpstreamFailure,
             503,
         ));
+    }
+
+    #[test]
+    fn trusted_provider_anthropic_403_does_not_apply_credential_key_effects() {
+        assert!(
+            !local_candidate_failure_should_apply_key_effects_with_origin(
+                "claude:messages",
+                LocalFailoverClassification::RetryStatusCode,
+                403,
+                FailureOrigin::UpstreamProvider,
+            )
+        );
+        assert!(
+            local_candidate_failure_should_apply_key_effects_with_origin(
+                "claude:messages",
+                LocalFailoverClassification::RetryStatusCode,
+                403,
+                FailureOrigin::UpstreamCredential,
+            )
+        );
+    }
+
+    #[test]
+    fn non_upstream_origins_do_not_apply_openai_effects() {
+        for failure_origin in [
+            FailureOrigin::Request,
+            FailureOrigin::Internal,
+            FailureOrigin::Unknown,
+        ] {
+            assert!(
+                !local_candidate_failure_should_apply_key_effects_with_origin(
+                    "openai:chat",
+                    LocalFailoverClassification::RetryStatusCode,
+                    500,
+                    failure_origin,
+                )
+            );
+            assert!(
+                !local_candidate_failure_should_invalidate_affinity_for_provider_with_origin(
+                    "openai:chat",
+                    LocalFailoverClassification::RetryStatusCode,
+                    500,
+                    failure_origin,
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_credential_auth_failures_apply_openai_key_effects() {
+        for status_code in [401, 403] {
+            assert!(
+                local_candidate_failure_should_apply_key_effects_with_origin(
+                    "openai:chat",
+                    LocalFailoverClassification::RetryStatusCode,
+                    status_code,
+                    FailureOrigin::UpstreamCredential,
+                )
+            );
+            assert!(
+                local_candidate_failure_should_invalidate_affinity_for_provider_with_origin(
+                    "openai:chat",
+                    LocalFailoverClassification::RetryStatusCode,
+                    status_code,
+                    FailureOrigin::UpstreamCredential,
+                )
+            );
+        }
+        assert!(
+            !local_candidate_failure_should_apply_key_effects_with_origin(
+                "openai:chat",
+                LocalFailoverClassification::RetryStatusCode,
+                403,
+                FailureOrigin::UpstreamProvider,
+            )
+        );
+    }
+
+    #[test]
+    fn trusted_provider_openai_semantic_errors_do_not_apply_effects() {
+        for status_code in [400, 401, 403, 405, 406, 413, 414, 415, 422] {
+            assert!(
+                !local_candidate_failure_should_apply_key_effects_with_origin(
+                    "openai:chat",
+                    LocalFailoverClassification::RetryStatusCode,
+                    status_code,
+                    FailureOrigin::UpstreamProvider,
+                )
+            );
+            assert!(
+                !local_candidate_failure_should_invalidate_affinity_for_provider_with_origin(
+                    "openai:chat",
+                    LocalFailoverClassification::RetryStatusCode,
+                    status_code,
+                    FailureOrigin::UpstreamProvider,
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_provider_openai_retryable_failures_keep_effects() {
+        for status_code in [429, 500] {
+            assert!(
+                local_candidate_failure_should_apply_key_effects_with_origin(
+                    "openai:chat",
+                    LocalFailoverClassification::RetryStatusCode,
+                    status_code,
+                    FailureOrigin::UpstreamProvider,
+                )
+            );
+            assert!(
+                local_candidate_failure_should_invalidate_affinity_for_provider_with_origin(
+                    "openai:chat",
+                    LocalFailoverClassification::RetryStatusCode,
+                    status_code,
+                    FailureOrigin::UpstreamProvider,
+                )
+            );
+        }
     }
 
     #[tokio::test]

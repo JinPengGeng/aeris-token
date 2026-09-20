@@ -15,9 +15,10 @@ driver (`Postgres`) in `aether-data-contracts`, with the runtime facade selectin
 the PostgreSQL adapter. Physical migrations remain under
 `adapters/postgres/migrations`; logical definitions live under `schema/logical`,
 generated audit output under `schema/generated`, and `compose_schema.sh check`
-is the drift guard. A new table must update the logical definition first and
-then the executable PostgreSQL migration when deployment compatibility requires
-it.
+is the drift guard for the generated schema, the 20260403 baseline, and the
+provider-cost/emergency-chain bootstrap fragments. New table work updates the
+logical definition first and registers the relevant executable schema input
+with the existing required-table check.
 
 Provider behavior is intentionally split by capability, but each capability has
 an explicit registration point:
@@ -61,14 +62,40 @@ a broad rewrite. The accepted settlement funding sample (`ab1dfa968`) touched
 21 files because its contract, PostgreSQL adapter, memory implementation,
 schema, and tests were changed together.
 
+Two production repository additions measured on 2026-09-20 provide a current
+baseline. The count below describes the data-layer extension surface, excluding
+Gateway routes, handlers, API documentation, and shared CI runner edits.
+
+| Sample | Contract | Concrete adapter | Runtime composition | Schema sources | Test boundary |
+| --- | --- | --- | --- | --- | --- |
+| Provider cost ledger | one `ProviderCostRepository` contract module | one PostgreSQL module | one compatibility re-export, one focused backend facade, and PostgreSQL backend registration | three PostgreSQL migrations and two bootstrap fragments | adapter/live PostgreSQL plus Gateway HTTP tests |
+| Emergency grant | one `EmergencyChainGrantRepository` contract module | one PostgreSQL module | one compatibility re-export and PostgreSQL backend registration | one PostgreSQL migration and one bootstrap fragment | adapter/live PostgreSQL plus Gateway HTTP test |
+
+Neither sample added MySQL or SQLite code. Neither required an in-memory
+production implementation: transaction and row-lock behavior are part of these
+contracts, and their authoritative acceptance uses PostgreSQL. This evidence
+does not support reintroducing a driver matrix or building a generic dialect
+registry. It also does not support merging provider capability registries with
+repository composition; the two changes exercised different extension axes.
+
+The samples exposed and resolved one bounded schema-governance gap. Their five new tables
+(`provider_cost_prices`, `provider_cost_snapshots`,
+`provider_cost_snapshot_imports`, `emergency_chain_grants`, and
+`emergency_chain_grant_targets`) now appear in logical definition 011 and its
+generated PostgreSQL output, including current price components and grant
+consumption fields. The check includes bootstrap fragments 280, 290 and 300,
+so a missing table or column fails the existing guard. Schema composition and
+all eight schema unit tests passed. This changes no runtime repository
+contract and does not require a second database driver.
+
 ## Change checklist and verification
 
 For a provider change, update only the capability surfaces it actually needs,
 then run the corresponding crate tests and the gateway architecture tests. For
 a repository or schema change, update the SQLx-independent contract, selected
-adapter(s), memory tests where present, logical schema, generated output, and
-the PostgreSQL migration; run `compose_schema.sh check` and the affected live
-or unit tests.
+adapter, memory tests only when an in-memory implementation is part of the
+contract, logical schema, generated output, bootstrap snapshot, and PostgreSQL
+migration; run `compose_schema.sh check` and the affected live or unit tests.
 
 The executable contract is
 `apps/aether-gateway/src/tests/architecture/issue_222.rs`. It verifies that
@@ -80,5 +107,15 @@ PostgreSQL-only boundary and documented migration sources.
 
 No generic provider registry spanning quota, model fetch, planner, admin import,
 and transport is introduced here. No trait splitting or migration squashing is
-approved by this ADR. Those changes require a concrete provider or repository
-sample with a before/after file and test measurement.
+approved by this ADR. The measured repository samples satisfy Issue #222's
+request for a current extension baseline and reject its historical four-driver
+premise. Any broader registry or trait split still requires a separate sample
+showing that the bounded registration points above caused the change cost.
+
+Issue #241's silent `GatewayDataConfig::with_redis_url` builder was removed by
+PR #305. Current deployment documentation defines PostgreSQL as the source of
+truth, Redis as the shared runtime coordination layer, and memory runtime state
+as development-only for a multi-node deployment. Money reservation, Redis-loss
+policy, cache invalidation, management API evolution, and tunnel capabilities
+remain independent decisions; this ADR does not combine them with data-layer
+extension work or claim that they are complete.

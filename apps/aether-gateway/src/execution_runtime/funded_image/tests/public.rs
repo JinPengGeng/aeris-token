@@ -1,4 +1,12 @@
 use super::*;
+
+#[cfg(unix)]
+#[path = "public/crash.rs"]
+mod crash_tests;
+
+#[path = "public/receipts.rs"]
+mod receipt_tests;
+
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::driver::postgres::SqlxBillingReadRepository;
 use aether_data::repository::{
@@ -24,7 +32,7 @@ enum Account {
 }
 
 struct PublicBilling {
-    models: InMemoryBillingReadRepository,
+    models: Arc<dyn BillingReadRepository>,
     grants: SqlxBillingReadRepository,
 }
 
@@ -114,6 +122,20 @@ impl Fixture {
     }
 
     async fn public_state(&self, account: Account, upstream: &str) -> AppState {
+        self.public_state_with_models(
+            account,
+            upstream,
+            Arc::new(InMemoryBillingReadRepository::seed([pricing("a")])),
+        )
+        .await
+    }
+
+    async fn public_state_with_models(
+        &self,
+        account: Account,
+        upstream: &str,
+        models: Arc<dyn BillingReadRepository>,
+    ) -> AppState {
         match account {
             Account::User => (),
             Account::Standalone => {
@@ -229,7 +251,7 @@ impl Fixture {
             Arc::new(InMemoryProviderCatalogReadRepository::seed(vec![provider],vec![endpoint],vec![key])),
             Arc::new(InMemoryRequestCandidateRepository::default()),
             Arc::new(SqlxUsageReadRepository::new(self.pool.clone())),
-            Arc::new(PublicBilling { models: InMemoryBillingReadRepository::seed([pricing("a")]), grants: SqlxBillingReadRepository::new(self.pool.clone()) }),
+            Arc::new(PublicBilling { models, grants: SqlxBillingReadRepository::new(self.pool.clone()) }),
             Arc::new(SqlxWalletRepository::new(self.pool.clone())),
             DEVELOPMENT_ENCRYPTION_KEY,
         ).with_settlement_writer_for_tests(Arc::new(SqlxSettlementRepository::new(self.pool.clone())));

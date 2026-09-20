@@ -240,6 +240,7 @@ impl GeminiVideoTaskSeed {
             report_kind: Some("gemini_video_cancel_sync_finalize".to_string()),
             report_context: Some(build_video_follow_up_report_context(
                 VideoFollowUpReportContextInput {
+                    row_revision: self.persistence.row_revision,
                     request_id: &self.persistence.request_id,
                     user_id: &user_id,
                     api_key_id: &api_key_id,
@@ -303,6 +304,7 @@ impl GeminiVideoTaskSeed {
             _ => None,
         };
         let mut record = UpsertVideoTask {
+            row_revision: self.persistence.row_revision,
             id: self.local_short_id.clone(),
             short_id: Some(self.local_short_id.clone()),
             request_id: self.persistence.request_id.clone(),
@@ -383,6 +385,7 @@ mod tests {
 
     fn sample_stored_task(status: VideoTaskStatus) -> StoredVideoTask {
         StoredVideoTask {
+            row_revision: 1,
             id: "task-gemini-123".to_string(),
             short_id: Some("localshort123".to_string()),
             request_id: "req-gemini-123".to_string(),
@@ -457,6 +460,7 @@ mod tests {
                 }
             }),
             persistence: LocalVideoTaskPersistence {
+                row_revision: 0,
                 request_id: "request-gemini-sensitive".to_string(),
                 username: Some("alice".to_string()),
                 api_key_name: Some("primary".to_string()),

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use super::{
     MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
-    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
+    StoredGlobalModelDeclaration, StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
     StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
     StoredRequestedModelCandidateRowsQuery,
 };
@@ -61,6 +61,37 @@ impl MinimalCandidateSelectionReadRepository for InMemoryMinimalCandidateSelecti
                 .then(left.model_id.cmp(&right.model_id))
         });
         Ok(rows)
+    }
+
+    async fn list_declared_global_models_for_api_format(
+        &self,
+        api_format: &str,
+    ) -> Result<Vec<StoredGlobalModelDeclaration>, DataLayerError> {
+        let mut declarations = self
+            .rows
+            .read()
+            .expect("candidate selection repository lock")
+            .iter()
+            .filter(|row| api_format_matches(&row.endpoint_api_format, api_format))
+            .map(|row| StoredGlobalModelDeclaration {
+                global_model_name: row.global_model_name.clone(),
+                global_model_mappings: row.global_model_mappings.clone(),
+                provider_type: row.provider_type.clone(),
+                endpoint_id: row.endpoint_id.clone(),
+                provider_model_name: row.model_provider_model_name.clone(),
+                provider_model_mappings: row.model_provider_model_mappings.clone(),
+            })
+            .collect::<Vec<_>>();
+        declarations.sort_by(|left, right| {
+            left.global_model_name
+                .cmp(&right.global_model_name)
+                .then(left.global_model_mappings.cmp(&right.global_model_mappings))
+                .then(left.provider_type.cmp(&right.provider_type))
+                .then(left.endpoint_id.cmp(&right.endpoint_id))
+                .then(left.provider_model_name.cmp(&right.provider_model_name))
+        });
+        declarations.dedup();
+        Ok(declarations)
     }
 
     async fn list_for_exact_api_format_page(

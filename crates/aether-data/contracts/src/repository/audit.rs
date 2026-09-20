@@ -257,6 +257,105 @@ pub enum AuditLogWriteOutcome {
     AlreadyExists,
 }
 
+pub const ADMIN_AUDIT_DELIVERY_MAX_CLAIM: usize = 128;
+pub const ADMIN_AUDIT_DELIVERY_MAX_LEASE_SECONDS: u64 = 300;
+pub const ADMIN_AUDIT_DELIVERY_MAX_ATTEMPTS: i32 = 12;
+pub const ADMIN_AUDIT_DELIVERY_MAX_PAGE: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminAuditDeliveryState {
+    Pending,
+    Leased,
+    Delivered,
+    DeadLetter,
+}
+
+impl AdminAuditDeliveryState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Leased => "leased",
+            Self::Delivered => "delivered",
+            Self::DeadLetter => "dead_letter",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminAuditDeliveryListQuery {
+    pub state: Option<AdminAuditDeliveryState>,
+    pub limit: usize,
+    pub before_created_at: Option<DateTime<Utc>>,
+    pub before_event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredAdminAuditDelivery {
+    pub event_id: String,
+    pub state: AdminAuditDeliveryState,
+    pub attempt_count: i32,
+    pub next_attempt_at: DateTime<Utc>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub last_error_code: Option<String>,
+    pub delivered_at: Option<DateTime<Utc>>,
+    pub dead_lettered_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdminAuditDeliveryPage {
+    pub items: Vec<StoredAdminAuditDelivery>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdminAuditDeliverySummary {
+    pub pending: u64,
+    pub leased: u64,
+    pub dead_letter: u64,
+    pub oldest_unresolved_created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminAuditDeliveryRedriveOutcome {
+    Redriven,
+    NotFound,
+    NotDeadLetter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedAdminAuditDelivery {
+    pub event_id: String,
+    pub lease_token: uuid::Uuid,
+    pub attempt_count: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminAuditDeliveryFailureCode {
+    InvalidPayload,
+    AuditInsertFailed,
+    DeliveryTimedOut,
+}
+
+impl AdminAuditDeliveryFailureCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidPayload => "invalid_payload",
+            Self::AuditInsertFailed => "audit_insert_failed",
+            Self::DeliveryTimedOut => "delivery_timed_out",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminAuditDeliveryFailureOutcome {
+    RetryScheduled,
+    DeadLettered,
+    StaleLease,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredAdminAuditLog {
     pub id: String,
@@ -365,6 +464,39 @@ pub trait AuditLogWriteRepository: Send + Sync {
         &self,
         record: &CreateAdminAuditLog,
     ) -> Result<AuditLogWriteOutcome, crate::DataLayerError>;
+
+    async fn claim_admin_audit_deliveries(
+        &self,
+        limit: usize,
+        lease_seconds: u64,
+    ) -> Result<Vec<ClaimedAdminAuditDelivery>, crate::DataLayerError>;
+
+    async fn deliver_admin_audit(
+        &self,
+        event_id: &str,
+        lease_token: uuid::Uuid,
+    ) -> Result<bool, crate::DataLayerError>;
+
+    async fn fail_admin_audit_delivery(
+        &self,
+        event_id: &str,
+        lease_token: uuid::Uuid,
+        code: AdminAuditDeliveryFailureCode,
+    ) -> Result<AdminAuditDeliveryFailureOutcome, crate::DataLayerError>;
+
+    async fn list_admin_audit_deliveries(
+        &self,
+        query: &AdminAuditDeliveryListQuery,
+    ) -> Result<AdminAuditDeliveryPage, crate::DataLayerError>;
+
+    async fn admin_audit_delivery_summary(
+        &self,
+    ) -> Result<AdminAuditDeliverySummary, crate::DataLayerError>;
+
+    async fn redrive_admin_audit_delivery(
+        &self,
+        event_id: &str,
+    ) -> Result<AdminAuditDeliveryRedriveOutcome, crate::DataLayerError>;
 }
 
 pub fn optional_json_from_text(

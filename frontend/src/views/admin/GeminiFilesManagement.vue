@@ -414,6 +414,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
+import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { getI18nLocale, useI18n } from '@/i18n'
 import Card from '@/components/ui/card.vue'
@@ -442,6 +443,7 @@ import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 
 const { toast } = useToast()
+const { confirmDanger, confirmWarning } = useConfirm()
 const { legacyT } = useI18n()
 
 // 状态
@@ -545,7 +547,11 @@ async function fetchMappings() {
 }
 
 async function deleteMapping(mapping: FileMappingResponse) {
-  if (!confirm(legacyT(`确定要删除映射 "${mapping.file_name}" 吗？\n\n注意：这只会删除映射记录，不会删除 Google 上的实际文件。`))) {
+  const confirmed = await confirmDanger(
+    legacyT(`确定要删除映射 "${mapping.file_name}" 吗？\n\n注意：这只会删除映射记录，不会删除 Google 上的实际文件。`),
+    legacyT('删除映射')
+  )
+  if (!confirmed) {
     return
   }
 
@@ -566,7 +572,11 @@ async function deleteMapping(mapping: FileMappingResponse) {
 }
 
 async function cleanupExpired() {
-  if (!confirm(legacyT('确定要清理所有过期的文件映射吗？'))) {
+  const confirmed = await confirmWarning(
+    legacyT('确定要清理所有过期的文件映射吗？'),
+    legacyT('清理过期映射')
+  )
+  if (!confirmed) {
     return
   }
 

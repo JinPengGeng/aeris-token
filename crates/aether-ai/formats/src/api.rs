@@ -201,8 +201,13 @@ pub use crate::formats::{
                 CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_PROMPT, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
             },
             history::{
+                commit_response_history_record, conversation_history_scope,
                 hydrate_response_history, record_converted_response_history,
-                response_history_is_loaded, response_history_storage_key, ResponseHistoryRecord,
+                response_history_is_loaded, response_history_storage_key,
+                try_record_converted_response_history, validate_native_response_history,
+                ConversationHistoryCapability, ConversationHistoryResolution,
+                ConversationHistoryResolutionError, ConversationHistoryResolver,
+                NativeResponseHistoryValidation, ResponseHistoryRecord,
             },
             spec::{
                 resolve_stream_spec as resolve_openai_responses_stream_spec,
@@ -219,14 +224,17 @@ pub use crate::formats::{
         standard_matrix::{
             build_standard_request_body, build_standard_request_body_with_model_directives,
             build_standard_request_body_with_model_directives_and_request_headers,
+            build_standard_request_body_with_model_directives_and_request_headers_and_history_scope,
             build_standard_request_body_with_model_directives_and_request_headers_and_reasoning_replay_policy,
         },
         standard_normalize::{
             build_cross_format_openai_chat_request_body,
             build_cross_format_openai_chat_request_body_with_model_directives,
+            build_cross_format_openai_chat_request_body_with_provider_context,
             build_cross_format_openai_responses_request_body,
             build_cross_format_openai_responses_request_body_with_model_directives,
             build_cross_format_openai_responses_request_body_with_model_directives_and_history_scope,
+            build_cross_format_openai_responses_request_body_with_provider_context,
             build_local_openai_chat_request_body,
             build_local_openai_chat_request_body_with_model_directives,
             build_local_openai_responses_request_body,

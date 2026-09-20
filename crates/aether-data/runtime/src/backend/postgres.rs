@@ -28,6 +28,7 @@ use crate::repository::candidates::{
     RequestCandidateReadRepository, RequestCandidateWriteRepository,
     SqlxRequestCandidateReadRepository,
 };
+use crate::repository::emergency_chain::EmergencyChainGrantRepository;
 use crate::repository::gemini_file_mappings::{
     GeminiFileMappingReadRepository, GeminiFileMappingWriteRepository,
     SqlxGeminiFileMappingRepository,
@@ -48,6 +49,7 @@ use crate::repository::provider_catalog::{
     ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
     SqlxProviderCatalogReadRepository,
 };
+use crate::repository::provider_cost::ProviderCostRepository;
 use crate::repository::proxy_nodes::{
     ProxyNodeReadRepository, ProxyNodeWriteRepository, SqlxProxyNodeRepository,
 };
@@ -131,6 +133,18 @@ impl PostgresBackend {
 
     pub fn billing_read_repository(&self) -> Arc<dyn BillingReadRepository> {
         Arc::new(SqlxBillingReadRepository::new(self.pool_clone()))
+    }
+
+    pub fn provider_cost_repository(&self) -> Arc<dyn ProviderCostRepository> {
+        Arc::new(aether_data_postgres::SqlxProviderCostRepository::new(
+            self.pool_clone(),
+        ))
+    }
+
+    pub fn emergency_chain_grant_repository(&self) -> Arc<dyn EmergencyChainGrantRepository> {
+        Arc::new(
+            aether_data_postgres::PostgresEmergencyChainGrantRepository::new(self.pool_clone()),
+        )
     }
 
     pub fn background_task_read_repository(&self) -> Arc<dyn BackgroundTaskReadRepository> {

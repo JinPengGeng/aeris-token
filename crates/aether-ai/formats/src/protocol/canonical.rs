@@ -16,6 +16,7 @@ pub use crate::protocol::stream::{CanonicalStreamEvent, CanonicalStreamFrame};
 
 pub(crate) const OPENAI_RESPONSES_EXTENSION_NAMESPACE: &str = "openai_responses";
 pub(crate) const OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE: &str = "openai_cli";
+pub(crate) const CLAUDE_EXTENSION_NAMESPACE: &str = "claude";
 const AETHER_EXTENSION_NAMESPACE: &str = "aether";
 const CLAUDE_MESSAGES_REQUEST_SOURCE_MARKER: &str = "claude_messages_request";
 const CLAUDE_SYSTEM_SOURCE_MARKER: &str = "claude_system";
@@ -4593,6 +4594,7 @@ fn coalesce_openai_responses_text_content(content: Vec<Value>) -> Vec<Value> {
     }
     let mut text = String::new();
     let mut annotations = Vec::new();
+    let mut text_offset = 0_i64;
     for part in &content {
         let Some(part_object) = part.as_object() else {
             return content;
@@ -4609,8 +4611,13 @@ fn coalesce_openai_responses_text_content(content: Vec<Value>) -> Vec<Value> {
         };
         text.push_str(part_text);
         if let Some(part_annotations) = part_object.get("annotations").and_then(Value::as_array) {
-            annotations.extend(part_annotations.iter().cloned());
+            annotations.extend(
+                part_annotations
+                    .iter()
+                    .map(|annotation| offset_openai_annotation_indices(annotation, text_offset)),
+            );
         }
+        text_offset += part_text.chars().count() as i64;
     }
     vec![json!({
         "type": "output_text",
@@ -5879,7 +5886,11 @@ pub(crate) fn canonical_block_to_claude(
             let mut out = Map::new();
             out.insert("type".to_string(), Value::String("text".to_string()));
             out.insert("text".to_string(), Value::String(text.clone()));
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::Thinking {
@@ -5899,7 +5910,11 @@ pub(crate) fn canonical_block_to_claude(
                     Value::String("redacted_thinking".to_string()),
                 );
                 out.insert("data".to_string(), Value::String(data.clone()));
-                out.extend(namespace_extension_object(extensions, "claude", &out));
+                out.extend(namespace_extension_object(
+                    extensions,
+                    CLAUDE_EXTENSION_NAMESPACE,
+                    &out,
+                ));
                 return Some(Some(Value::Object(out)));
             }
             if !matches!(role, CanonicalRole::Assistant) {
@@ -5920,7 +5935,11 @@ pub(crate) fn canonical_block_to_claude(
             if let Some(signature) = signature.as_ref().filter(|value| !value.is_empty()) {
                 out.insert("signature".to_string(), Value::String(signature.clone()));
             }
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::Image {
@@ -5945,7 +5964,11 @@ pub(crate) fn canonical_block_to_claude(
                 "source".to_string(),
                 claude_source_value(media_type.as_deref(), data.as_deref(), url.as_deref())?,
             );
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::File {
@@ -5968,7 +5991,11 @@ pub(crate) fn canonical_block_to_claude(
                 "source".to_string(),
                 claude_source_value(media_type.as_deref(), data.as_deref(), file_url.as_deref())?,
             );
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::Audio {
@@ -5988,7 +6015,11 @@ pub(crate) fn canonical_block_to_claude(
                     None,
                 )?,
             );
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::ToolUse {
@@ -6006,7 +6037,11 @@ pub(crate) fn canonical_block_to_claude(
             );
             out.insert("name".to_string(), Value::String(name.clone()));
             out.insert("input".to_string(), input);
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::ToolResult {
@@ -6035,7 +6070,11 @@ pub(crate) fn canonical_block_to_claude(
             if *is_error {
                 out.insert("is_error".to_string(), Value::Bool(true));
             }
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::Unknown {
@@ -8379,7 +8418,8 @@ mod tests {
         let rebuilt = canonical_to_openai_responses_request(&canonical, "gpt-5-upstream", false)
             .expect("openai responses request");
         assert_eq!(rebuilt["input"][0]["type"], "reasoning");
-        assert_eq!(rebuilt["input"][0]["summary"][0]["text"], "think");
+        assert_eq!(rebuilt["input"][0]["content"][0]["type"], "reasoning_text");
+        assert_eq!(rebuilt["input"][0]["content"][0]["text"], "think");
         assert_eq!(rebuilt["input"][0]["encrypted_content"], "enc_reasoning");
         assert_eq!(rebuilt["input"][1]["type"], "message");
         assert_eq!(rebuilt["input"][1]["content"][0]["text"], "done");

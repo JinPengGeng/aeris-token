@@ -2,6 +2,7 @@ use futures_util::TryStreamExt;
 use sqlx::Row;
 
 use crate::error::SqlxResultExt;
+use crate::repository::audit::CreateAdminAuditLog;
 use crate::repository::system::{
     AdminSystemStats, AdminSystemStatsDailyAggregate, AdminSystemStatsDailyApiKeyAggregate,
     AdminSystemStatsUserDailyAggregate,
@@ -517,7 +518,9 @@ WHERE provider_id IS NOT NULL
 UPDATE public.video_tasks
 SET provider_id = NULL,
     endpoint_id = NULL,
-    key_id = NULL
+    key_id = NULL,
+    row_revision = row_revision + 1,
+    updated_at = GREATEST(updated_at, NOW())
 WHERE provider_id IS NOT NULL
    OR endpoint_id IS NOT NULL
    OR key_id IS NOT NULL
@@ -741,7 +744,9 @@ WHERE user_id IN ({non_admin_users})
             r#"
 UPDATE public.video_tasks
 SET user_id = CASE WHEN user_id IN ({non_admin_users}) THEN NULL ELSE user_id END,
-    api_key_id = CASE WHEN api_key_id IN ({non_admin_keys}) THEN NULL ELSE api_key_id END
+    api_key_id = CASE WHEN api_key_id IN ({non_admin_keys}) THEN NULL ELSE api_key_id END,
+    row_revision = row_revision + 1,
+    updated_at = GREATEST(updated_at, NOW())
 WHERE user_id IN ({non_admin_users})
    OR api_key_id IN ({non_admin_keys})
 "#
@@ -1245,6 +1250,47 @@ impl PostgresBackend {
                 .map_postgres_err()?
                 .map(|value| value.max(0) as u64),
         })
+    }
+
+    pub async fn upsert_system_config_entry_with_audit(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+        description: Option<&str>,
+        audit: &CreateAdminAuditLog,
+    ) -> Result<StoredSystemConfigEntry, DataLayerError> {
+        audit.validate()?;
+        let payload = serde_json::to_value(audit).map_err(|error| {
+            DataLayerError::InvalidInput(format!(
+                "admin audit payload serialization failed: {error}"
+            ))
+        })?;
+        let mut tx = self.pool().begin().await.map_postgres_err()?;
+        let row = sqlx::query(UPSERT_SYSTEM_CONFIG_ENTRY_SQL)
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(key)
+            .bind(value)
+            .bind(description)
+            .fetch_one(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        sqlx::query("INSERT INTO admin_audit_delivery (event_id, payload) VALUES ($1, $2)")
+            .bind(&audit.id)
+            .bind(payload)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let entry = StoredSystemConfigEntry {
+            key: row.try_get("key").map_postgres_err()?,
+            value: row.try_get("value").map_postgres_err()?,
+            description: row.try_get("description").map_postgres_err()?,
+            updated_at_unix_secs: row
+                .try_get::<Option<i64>, _>("updated_at_unix_secs")
+                .map_postgres_err()?
+                .map(|value| value.max(0) as u64),
+        };
+        tx.commit().await.map_postgres_err()?;
+        Ok(entry)
     }
 
     pub async fn delete_system_config_value(&self, key: &str) -> Result<bool, DataLayerError> {

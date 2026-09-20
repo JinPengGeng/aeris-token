@@ -1,7 +1,11 @@
 use crate::ai_serving::{
-    hydrate_response_history, normalize_api_format_alias, record_converted_response_history,
-    response_history_is_loaded, response_history_storage_key, ResponseHistoryRecord,
+    commit_response_history_record, conversation_history_scope, hydrate_response_history,
+    response_history_is_loaded, response_history_storage_key,
+    try_record_converted_response_history, validate_native_response_history,
+    ConversationHistoryCapability, ConversationHistoryResolutionError, ConversationHistoryResolver,
+    NativeResponseHistoryValidation, ResponseHistoryRecord,
 };
+use axum::http::StatusCode;
 use serde_json::Value;
 use tracing::warn;
 
@@ -9,44 +13,79 @@ use crate::{AppState, GatewayError};
 
 const RESPONSE_HISTORY_SECRET_PURPOSE: &str = "openai-response-history";
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn hydrate_openai_response_history(
     state: &AppState,
     request: &Value,
     client_api_format: &str,
     provider_api_format: &str,
-    history_scope: &str,
-) -> Result<(), GatewayError> {
-    if normalize_api_format_alias(client_api_format) != "openai:responses"
-        || normalize_api_format_alias(provider_api_format) != "openai:chat"
-    {
-        return Ok(());
-    }
-    let Some(previous_response_id) = request
-        .get("previous_response_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(());
+    user_id: &str,
+    api_key_id: &str,
+    provider_id: &str,
+    endpoint_id: &str,
+    provider_key_id: &str,
+) -> Result<Option<&'static str>, GatewayError> {
+    let resolution =
+        match ConversationHistoryResolver::resolve(request, client_api_format, provider_api_format)
+        {
+            Ok(value) => value,
+            Err(ConversationHistoryResolutionError::Unsupported { .. }) => {
+                return Ok(Some("conversation_history_unsupported"));
+            }
+            Err(error) => {
+                return Err(GatewayError::Client {
+                    status: StatusCode::BAD_REQUEST,
+                    message: error.to_string(),
+                });
+            }
+        };
+    let Some(resolution) = resolution else {
+        return Ok(None);
     };
-    if response_history_is_loaded(previous_response_id, Some(history_scope)) {
-        return Ok(());
+    let Some(history_scope) = conversation_history_scope(user_id, api_key_id) else {
+        // Native IDs are provider-owned continuation handles. No local
+        // transcript or scope is required before forwarding them upstream.
+        return Ok(
+            (resolution.capability != ConversationHistoryCapability::Native)
+                .then_some("conversation_history_scope_unavailable"),
+        );
+    };
+    if resolution.capability != ConversationHistoryCapability::Native
+        && response_history_is_loaded(resolution.previous_response_id, Some(&history_scope))
+    {
+        return Ok(None);
     }
 
-    let storage_key = response_history_storage_key(previous_response_id, Some(history_scope));
+    let storage_key =
+        response_history_storage_key(resolution.previous_response_id, Some(&history_scope));
     let runtime_state = state.runtime_state();
-    let payload = runtime_state.kv_get(&storage_key).await.map_err(|error| {
-        warn!(
-            event_name = "openai_response_history_read_failed",
-            log_type = "ops",
-            backend = runtime_state.backend_kind().as_str(),
-            error = ?error,
-            "gateway failed to read shared OpenAI response history"
-        );
-        GatewayError::Internal("OpenAI response history lookup failed".to_string())
-    })?;
+    let payload = match runtime_state.kv_get(&storage_key).await {
+        Ok(payload) => payload,
+        Err(error) => {
+            warn!(
+                event_name = "openai_response_history_read_failed",
+                log_type = "ops",
+                backend = runtime_state.backend_kind().as_str(),
+                error = ?error,
+                "gateway skipped a candidate whose response history could not be read"
+            );
+            return Ok(
+                if resolution.capability == ConversationHistoryCapability::Native {
+                    None
+                } else {
+                    Some("conversation_history_lookup_failed")
+                },
+            );
+        }
+    };
     let Some(payload) = payload else {
-        return Ok(());
+        return Ok(
+            if resolution.capability == ConversationHistoryCapability::Native {
+                None
+            } else {
+                Some("conversation_history_unavailable")
+            },
+        );
     };
     let Some(payload) = crate::handlers::shared::open_runtime_secret_payload(
         state,
@@ -60,13 +99,31 @@ pub(crate) async fn hydrate_openai_response_history(
             backend = runtime_state.backend_kind().as_str(),
             "gateway rejected undecryptable shared OpenAI response history"
         );
-        return Err(GatewayError::Internal(
-            "OpenAI response history decryption failed".to_string(),
-        ));
+        return Ok(Some("conversation_history_unmaterializable"));
     };
-    if let Err(error) =
-        hydrate_response_history(previous_response_id, Some(history_scope), payload.as_str())
-    {
+    if resolution.capability == ConversationHistoryCapability::Native {
+        return Ok(
+            match validate_native_response_history(
+                resolution.previous_response_id,
+                &history_scope,
+                provider_api_format,
+                provider_id,
+                endpoint_id,
+                provider_key_id,
+                &payload,
+            ) {
+                Ok(NativeResponseHistoryValidation::CandidateMismatch) => {
+                    Some("conversation_history_binding_mismatch")
+                }
+                _ => None,
+            },
+        );
+    }
+    if let Err(error) = hydrate_response_history(
+        resolution.previous_response_id,
+        Some(&history_scope),
+        payload.as_str(),
+    ) {
         let _ = runtime_state.kv_delete(&storage_key).await;
         warn!(
             event_name = "openai_response_history_invalid",
@@ -75,11 +132,9 @@ pub(crate) async fn hydrate_openai_response_history(
             error = %error,
             "gateway rejected invalid shared OpenAI response history"
         );
-        return Err(GatewayError::Internal(
-            "OpenAI response history validation failed".to_string(),
-        ));
+        return Ok(Some("conversation_history_unmaterializable"));
     }
-    Ok(())
+    Ok(None)
 }
 
 pub(crate) async fn persist_response_history_record(
@@ -111,6 +166,8 @@ pub(crate) async fn persist_response_history_record(
             error = ?error,
             "gateway failed to persist shared OpenAI response history"
         );
+    } else {
+        commit_response_history_record(&record);
     }
 }
 
@@ -122,7 +179,7 @@ pub(crate) async fn persist_converted_response_history(
     let Some(response) = response else {
         return;
     };
-    if let Some(record) = record_converted_response_history(report_context, response) {
+    if let Ok(Some(record)) = try_record_converted_response_history(report_context, response) {
         persist_response_history_record(state, record).await;
     }
 }
@@ -174,18 +231,19 @@ mod tests {
     async fn response_history_is_encrypted_at_rest_and_hydrates() {
         let state = response_history_test_state();
         let response_id = "resp_gateway_encrypted_history_v1";
-        let scope = "response-history-encrypted-scope";
+        let api_key_id = "response-history-encrypted-scope";
+        let scope = crate::ai_serving::conversation_history_scope("tenant", api_key_id).unwrap();
         let marker = "private-response-history-marker";
-        let storage_key = response_history_storage_key(response_id, Some(scope));
-        let payload = response_history_payload(response_id, scope, marker);
+        let storage_key = response_history_storage_key(response_id, Some(&scope));
+        let payload = response_history_payload(response_id, &scope, marker);
 
         persist_response_history_record(
             &state,
-            ResponseHistoryRecord {
-                storage_key: storage_key.clone(),
+            ResponseHistoryRecord::from_persisted(
+                storage_key.clone(),
                 payload,
-                ttl: Duration::from_secs(6 * 60 * 60),
-            },
+                Duration::from_secs(6 * 60 * 60),
+            ),
         )
         .await;
 
@@ -204,13 +262,17 @@ mod tests {
             &json!({"previous_response_id": response_id}),
             "openai:responses",
             "openai:chat",
-            scope,
+            "tenant",
+            api_key_id,
+            "provider",
+            "endpoint",
+            "key",
         )
         .await
         .expect("encrypted history should hydrate");
         assert!(crate::ai_serving::response_history_is_loaded(
             response_id,
-            Some(scope)
+            Some(&scope)
         ));
     }
 
@@ -218,9 +280,10 @@ mod tests {
     async fn response_history_reader_rejects_and_deletes_legacy_plaintext() {
         let state = response_history_test_state();
         let response_id = "resp_gateway_legacy_history_v1";
-        let scope = "response-history-legacy-scope";
-        let storage_key = response_history_storage_key(response_id, Some(scope));
-        let payload = response_history_payload(response_id, scope, "legacy-private-history");
+        let api_key_id = "response-history-legacy-scope";
+        let scope = crate::ai_serving::conversation_history_scope("tenant", api_key_id).unwrap();
+        let storage_key = response_history_storage_key(response_id, Some(&scope));
+        let payload = response_history_payload(response_id, &scope, "legacy-private-history");
         state
             .runtime_kv_setex(&storage_key, &payload, 6 * 60 * 60)
             .await
@@ -231,18 +294,110 @@ mod tests {
             &json!({"previous_response_id": response_id}),
             "openai:responses",
             "openai:chat",
-            scope,
+            "tenant",
+            api_key_id,
+            "provider",
+            "endpoint",
+            "key",
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap(),
+            Some("conversation_history_unmaterializable")
+        );
         assert!(!crate::ai_serving::response_history_is_loaded(
             response_id,
-            Some(scope)
+            Some(&scope)
         ));
         assert!(state
             .runtime_kv_get(&storage_key)
             .await
             .expect("history lookup should succeed")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn native_continuation_allows_missing_local_history() {
+        let state = response_history_test_state();
+        let result = hydrate_openai_response_history(
+            &state,
+            &json!({"previous_response_id": "resp_native_provider_owned_only"}),
+            "openai:responses",
+            "openai:responses",
+            "native-history-user",
+            "native-history-key",
+            "native-provider",
+            "native-endpoint",
+            "native-credential",
+        )
+        .await
+        .expect("native continuation must not require local history");
+
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn native_continuation_allows_missing_local_scope() {
+        let state = response_history_test_state();
+        let result = hydrate_openai_response_history(
+            &state,
+            &json!({"previous_response_id": "resp_native_provider_owned_without_scope"}),
+            "openai:responses",
+            "openai:responses",
+            "",
+            "",
+            "native-provider",
+            "native-endpoint",
+            "native-credential",
+        )
+        .await
+        .expect("native continuation must not require a local history scope");
+
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn native_continuation_rejects_persisted_binding_mismatch() {
+        let state = response_history_test_state();
+        let user_id = "native-binding-user";
+        let api_key_id = "native-binding-api-key";
+        let response_id = "resp_native_binding_mismatch";
+        let record = crate::ai_serving::try_record_converted_response_history(
+            &json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses",
+                "user_id": user_id,
+                "api_key_id": api_key_id,
+                "provider_id": "native-provider",
+                "endpoint_id": "native-endpoint",
+                "key_id": "native-credential-a",
+                "original_request_body": {"input": "provider-owned turn"}
+            }),
+            &json!({
+                "id": response_id,
+                "status": "completed",
+                "output": []
+            }),
+        )
+        .expect("complete native response should prepare a history record")
+        .expect("completed native response should produce history");
+
+        persist_response_history_record(&state, record).await;
+
+        let result = hydrate_openai_response_history(
+            &state,
+            &json!({"previous_response_id": response_id}),
+            "openai:responses",
+            "openai:responses",
+            user_id,
+            api_key_id,
+            "native-provider",
+            "native-endpoint",
+            "native-credential-b",
+        )
+        .await
+        .expect("native binding mismatch should be a candidate skip");
+
+        assert_eq!(result, Some("conversation_history_binding_mismatch"));
     }
 }

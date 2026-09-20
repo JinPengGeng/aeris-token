@@ -240,6 +240,21 @@ impl StageMetric {
                 ]),
             );
         }
+        // Observations above the largest finite bucket still belong to the
+        // distribution. Export the total explicitly so consumers can account
+        // for every observation without joining the separate count metric.
+        samples.push(
+            MetricSample::new(
+                "gateway_stage_latency_bucket",
+                "Cumulative gateway stage latency observations less than or equal to the bucket upper bound.",
+                MetricKind::Counter,
+                self.count.load(Ordering::Relaxed),
+            )
+            .with_labels(vec![
+                MetricLabel::new("stage", self.stage),
+                MetricLabel::new("le_ms", "+Inf"),
+            ]),
+        );
         samples
     }
 }
@@ -669,6 +684,7 @@ mod tests {
         metric.observe(1);
         metric.observe(6);
         metric.observe(11);
+        metric.observe(10_001);
 
         let exclusive = metric
             .buckets
@@ -698,5 +714,19 @@ mod tests {
         assert_eq!(bucket_values[2], 2);
         assert_eq!(bucket_values[3], 3);
         assert_eq!(bucket_values[10], 3);
+        assert_eq!(bucket_values.last(), Some(&4));
+        assert_eq!(
+            samples
+                .iter()
+                .find(|sample| {
+                    sample.name == "gateway_stage_latency_bucket"
+                        && sample
+                            .labels
+                            .iter()
+                            .any(|label| label.key == "le_ms" && label.value == "+Inf")
+                })
+                .map(|sample| sample.value),
+            Some(4)
+        );
     }
 }

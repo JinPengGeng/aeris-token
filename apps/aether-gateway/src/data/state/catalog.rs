@@ -367,6 +367,16 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_provider_catalog_providers_by_ids_strong(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
+        match &self.provider_catalog_reader {
+            Some(repository) => repository.list_providers_by_ids_strong(provider_ids).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) async fn list_provider_catalog_providers(
         &self,
         active_only: bool,
@@ -383,6 +393,16 @@ impl GatewayDataState {
     ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
         match &self.provider_catalog_reader {
             Some(repository) => repository.list_endpoints_by_ids(endpoint_ids).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn list_provider_catalog_endpoints_by_ids_strong(
+        &self,
+        endpoint_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+        match &self.provider_catalog_reader {
+            Some(repository) => repository.list_endpoints_by_ids_strong(endpoint_ids).await,
             None => Ok(Vec::new()),
         }
     }

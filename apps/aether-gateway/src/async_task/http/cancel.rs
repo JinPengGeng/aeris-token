@@ -70,7 +70,6 @@ async fn cancel_video_task_record_inner(
     }
 
     let trace_id = format!("async-task-admin-cancel-{task_id}");
-    let mut finalize_mutation = None;
     if let Some(cancel_plan) = build_video_task_cancel_plan(&task) {
         let body_json = json!({});
         let follow_up = if let Some(user_id) = expected_user_id {
@@ -113,21 +112,13 @@ async fn cancel_video_task_record_inner(
             execute_video_task_cancel_plan(state, &trace_id, follow_up.plan)
                 .await
                 .map_err(CancelVideoTaskError::Response)?;
-            finalize_mutation = Some((
-                cancel_plan.request_path,
-                cancel_plan.report_kind.to_string(),
-            ));
-        } else if expected_user_id.is_none() {
-            finalize_mutation = Some((
-                cancel_plan.request_path,
-                cancel_plan.report_kind.to_string(),
-            ));
         }
     }
 
     let stored = match persist_cancelled_video_task(state, &task).await? {
         Some(stored) => stored,
         None => {
+            state.restore_video_task_registry(&task.id, None).await?;
             let current = match expected_user_id {
                 Some(user_id) => read_video_task_detail_for_user(state, task_id, user_id).await?,
                 None => read_video_task_detail(state, task_id).await?,
@@ -138,16 +129,13 @@ async fn cancel_video_task_record_inner(
             if !current.status.is_active() {
                 return Err(CancelVideoTaskError::InvalidStatus(current.status));
             }
-            return Err(CancelVideoTaskError::Gateway(GatewayError::Internal(
-                "video task repository is unavailable".to_string(),
-            )));
+            return Err(CancelVideoTaskError::Gateway(GatewayError::Client {
+                status: http::StatusCode::CONFLICT,
+                message: "Video task changed while cancellation was in progress".to_string(),
+            }));
         }
     };
-    if let Some((request_path, report_kind)) = finalize_mutation {
-        state
-            .video_tasks
-            .apply_finalize_mutation(&request_path, &report_kind);
-    }
+    state.publish_stored_video_task(&stored, None).await?;
     finalize_video_task_if_terminal(state, &stored).await;
     Ok(stored)
 }
@@ -156,7 +144,6 @@ async fn cancel_video_task_record_inner(
 struct VideoTaskCancelPlan<'a> {
     route_family: &'a str,
     plan_kind: &'a str,
-    report_kind: &'a str,
     request_path: String,
 }
 
@@ -167,7 +154,6 @@ fn build_video_task_cancel_plan(task: &StoredVideoTask) -> Option<VideoTaskCance
         "openai:video" => Some(VideoTaskCancelPlan {
             route_family: "openai",
             plan_kind: "openai_video_cancel_sync",
-            report_kind: "openai_video_cancel_sync_finalize",
             request_path: format!("/v1/videos/{}/cancel", task.id),
         }),
         "gemini:video" => {
@@ -180,7 +166,6 @@ fn build_video_task_cancel_plan(task: &StoredVideoTask) -> Option<VideoTaskCance
             Some(VideoTaskCancelPlan {
                 route_family: "gemini",
                 plan_kind: "gemini_video_cancel_sync",
-                report_kind: "gemini_video_cancel_sync_finalize",
                 request_path: format!("/v1beta/models/{model}/operations/{short_id}:cancel"),
             })
         }
@@ -240,47 +225,47 @@ async fn persist_cancelled_video_task(
     task: &StoredVideoTask,
 ) -> Result<Option<StoredVideoTask>, GatewayError> {
     let now_unix_secs = current_unix_secs();
-    state
-        .update_active_video_task(UpsertVideoTask {
-            id: task.id.clone(),
-            short_id: task.short_id.clone(),
-            request_id: task.request_id.clone(),
-            user_id: task.user_id.clone(),
-            api_key_id: task.api_key_id.clone(),
-            username: task.username.clone(),
-            api_key_name: task.api_key_name.clone(),
-            external_task_id: task.external_task_id.clone(),
-            provider_id: task.provider_id.clone(),
-            endpoint_id: task.endpoint_id.clone(),
-            key_id: task.key_id.clone(),
-            client_api_format: task.client_api_format.clone(),
-            provider_api_format: task.provider_api_format.clone(),
-            format_converted: task.format_converted,
-            model: task.model.clone(),
-            prompt: task.prompt.clone(),
-            original_request_body: None,
-            duration_seconds: task.duration_seconds,
-            resolution: task.resolution.clone(),
-            aspect_ratio: task.aspect_ratio.clone(),
-            size: task.size.clone(),
-            status: VideoTaskStatus::Cancelled,
-            progress_percent: task.progress_percent,
-            progress_message: None,
-            retry_count: task.retry_count,
-            poll_interval_seconds: task.poll_interval_seconds,
-            next_poll_at_unix_secs: None,
-            poll_count: task.poll_count,
-            max_poll_count: task.max_poll_count,
-            created_at_unix_ms: task.created_at_unix_ms,
-            submitted_at_unix_secs: task.submitted_at_unix_secs,
-            completed_at_unix_secs: Some(now_unix_secs),
-            updated_at_unix_secs: now_unix_secs,
-            error_code: task.error_code.clone(),
-            error_message: None,
-            video_url: task.video_url.clone(),
-            request_metadata: None,
-        })
-        .await
+    let update = UpsertVideoTask {
+        row_revision: task.row_revision,
+        id: task.id.clone(),
+        short_id: task.short_id.clone(),
+        request_id: task.request_id.clone(),
+        user_id: task.user_id.clone(),
+        api_key_id: task.api_key_id.clone(),
+        username: task.username.clone(),
+        api_key_name: task.api_key_name.clone(),
+        external_task_id: task.external_task_id.clone(),
+        provider_id: task.provider_id.clone(),
+        endpoint_id: task.endpoint_id.clone(),
+        key_id: task.key_id.clone(),
+        client_api_format: task.client_api_format.clone(),
+        provider_api_format: task.provider_api_format.clone(),
+        format_converted: task.format_converted,
+        model: task.model.clone(),
+        prompt: task.prompt.clone(),
+        original_request_body: None,
+        duration_seconds: task.duration_seconds,
+        resolution: task.resolution.clone(),
+        aspect_ratio: task.aspect_ratio.clone(),
+        size: task.size.clone(),
+        status: VideoTaskStatus::Cancelled,
+        progress_percent: task.progress_percent,
+        progress_message: None,
+        retry_count: task.retry_count,
+        poll_interval_seconds: task.poll_interval_seconds,
+        next_poll_at_unix_secs: None,
+        poll_count: task.poll_count,
+        max_poll_count: task.max_poll_count,
+        created_at_unix_ms: task.created_at_unix_ms,
+        submitted_at_unix_secs: task.submitted_at_unix_secs,
+        completed_at_unix_secs: Some(now_unix_secs),
+        updated_at_unix_secs: now_unix_secs,
+        error_code: task.error_code.clone(),
+        error_message: None,
+        video_url: task.video_url.clone(),
+        request_metadata: None,
+    };
+    state.update_active_video_task(update, None).await
 }
 
 #[cfg(test)]

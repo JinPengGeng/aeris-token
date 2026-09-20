@@ -7,6 +7,16 @@ use crate::{
 
 pub trait VideoTaskStore: std::fmt::Debug + Send + Sync {
     fn insert(&self, snapshot: LocalVideoTaskSnapshot);
+    fn replace_local_snapshot(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        replacement: LocalVideoTaskSnapshot,
+    ) -> bool;
+    fn enrich_terminal_presentation(
+        &self,
+        expected: &LocalVideoTaskSnapshot,
+        projected: &LocalVideoTaskSnapshot,
+    ) -> bool;
     fn read_openai(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse>;
     fn read_gemini(&self, short_id: &str) -> Option<LocalVideoTaskReadResponse>;
     fn clone_openai(&self, task_id: &str) -> Option<OpenAiVideoTaskSeed>;

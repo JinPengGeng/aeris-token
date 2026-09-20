@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use aether_scheduler_core::{AttemptBudget, AttemptBudgetError};
 use serde_json::Value;
 use wreq::ws::message::Message as WreqWsMessage;
 
@@ -25,12 +26,14 @@ use crate::handlers::proxy::websocket::transport::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ResponsesWebSocketUpstreamSendError {
     PlanUsagePermitLost,
+    AttemptBudgetExhausted(AttemptBudgetError),
     Transport(WebSocketWriteError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ResponsesWebSocketUpstreamBindError {
     PlanUsagePermitLost,
+    AttemptBudgetExhausted(AttemptBudgetError),
     Transport(&'static str),
 }
 
@@ -59,6 +62,7 @@ pub(super) async fn bind_responses_upstream<F>(
     normalization: ResponsesWebSocketBodyNormalization,
     initial_event: &Value,
     adapter: &'static dyn ResponsesWebSocketProtocolAdapter,
+    attempt_budget: &mut AttemptBudget,
     plan_usage_permit: Option<&aether_runtime::AdmissionPermit>,
     record_upstream_request_state: F,
 ) -> Result<BoundResponsesConnection, ResponsesWebSocketUpstreamBindError>
@@ -75,6 +79,7 @@ where
             normalization,
             initial_event,
             adapter,
+            attempt_budget,
             plan_usage_permit,
             record_upstream_request_state,
         ),
@@ -93,6 +98,7 @@ async fn bind_responses_upstream_inner<F>(
     normalization: ResponsesWebSocketBodyNormalization,
     initial_event: &Value,
     adapter: &'static dyn ResponsesWebSocketProtocolAdapter,
+    attempt_budget: &mut AttemptBudget,
     plan_usage_permit: Option<&aether_runtime::AdmissionPermit>,
     record_upstream_request_state: F,
 ) -> Result<BoundResponsesConnection, ResponsesWebSocketUpstreamBindError>
@@ -123,8 +129,10 @@ where
     let first_event = planned_response_create_event(decision, &normalization, initial_event)
         .map_err(ResponsesWebSocketUpstreamBindError::Transport)?;
     send_responses_websocket_upstream_message(
+        decision,
         &mut upstream.socket,
         WreqWsMessage::text(first_event),
+        attempt_budget,
         plan_usage_permit,
         record_upstream_request_state,
     )
@@ -132,6 +140,9 @@ where
     .map_err(|error| match error {
         ResponsesWebSocketUpstreamSendError::PlanUsagePermitLost => {
             ResponsesWebSocketUpstreamBindError::PlanUsagePermitLost
+        }
+        ResponsesWebSocketUpstreamSendError::AttemptBudgetExhausted(reason) => {
+            ResponsesWebSocketUpstreamBindError::AttemptBudgetExhausted(reason)
         }
         ResponsesWebSocketUpstreamSendError::Transport(_) => {
             ResponsesWebSocketUpstreamBindError::Transport(
@@ -198,8 +209,10 @@ where
 }
 
 pub(super) async fn send_responses_websocket_upstream_message<F>(
+    decision: &AiExecutionDecision,
     upstream: &mut wreq::ws::WebSocket,
     message: WreqWsMessage,
+    attempt_budget: &mut AttemptBudget,
     plan_usage_permit: Option<&aether_runtime::AdmissionPermit>,
     record_upstream_request_state: F,
 ) -> Result<(), ResponsesWebSocketUpstreamSendError>
@@ -210,6 +223,8 @@ where
     if !responses_websocket_plan_permit_is_healthy(plan_usage_permit) {
         return Err(ResponsesWebSocketUpstreamSendError::PlanUsagePermitLost);
     }
+    reserve_responses_websocket_attempt_budget(decision, attempt_budget)
+        .map_err(ResponsesWebSocketUpstreamSendError::AttemptBudgetExhausted)?;
     feed_upstream_message(upstream, message)
         .await
         .map_err(ResponsesWebSocketUpstreamSendError::Transport)?;
@@ -221,6 +236,37 @@ where
         .map_err(ResponsesWebSocketUpstreamSendError::Transport)?;
     record_upstream_request_state(UpstreamRequestState::Sent);
     Ok(())
+}
+
+fn reserve_responses_websocket_attempt_budget(
+    decision: &AiExecutionDecision,
+    attempt_budget: &mut AttemptBudget,
+) -> Result<(), AttemptBudgetError> {
+    // A planned physical attempt must always have a concrete provider/key
+    // identity. The sentinels make a malformed decision consume only its own
+    // bounded bucket rather than bypassing the budget entirely.
+    let provider_id = decision
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("responses-websocket-unresolved-provider");
+    let key_id = decision
+        .key_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("responses-websocket-unresolved-key");
+    let request_timeout_ms = decision
+        .timeouts
+        .as_ref()
+        .and_then(|timeouts| timeouts.total_ms);
+    attempt_budget.reserve(
+        provider_id,
+        key_id,
+        request_timeout_ms,
+        std::time::Instant::now(),
+    )
 }
 
 #[cfg(test)]
@@ -309,7 +355,8 @@ mod tests {
     use crate::ai_serving::AiExecutionDecision;
 
     use super::{
-        complete_responses_websocket_upstream_send, resolve_upstream_handshake_deadline,
+        complete_responses_websocket_upstream_send, reserve_responses_websocket_attempt_budget,
+        resolve_upstream_handshake_deadline, AttemptBudget, AttemptBudgetError,
         ResponsesWebSocketUpstreamBindError, DEFAULT_UPSTREAM_HANDSHAKE_DEADLINE_MS,
     };
     use crate::handlers::proxy::websocket::responses::turn::UpstreamRequestState;
@@ -609,11 +656,13 @@ mod tests {
         let adapter = resolve_responses_websocket_adapter(
             crate::orchestration::ResponsesWebSocketAdapter::Standard,
         );
+        let mut attempt_budget = AttemptBudget::new(std::time::Instant::now());
         let result = bind_responses_upstream(
             &decision,
             ResponsesWebSocketBodyNormalization::for_tests("test-model"),
             &json!({"type": "response.create", "model": "test-model"}),
             adapter,
+            &mut attempt_budget,
             None,
             |_| {},
         )
@@ -624,6 +673,25 @@ mod tests {
             ResponsesWebSocketUpstreamBindError::Transport(
                 "responses_websocket_upstream_handshake_timeout"
             )
+        );
+    }
+
+    #[test]
+    fn logical_budget_is_consumed_only_at_the_physical_upstream_send() {
+        let mut decision = sample_decision();
+        decision.provider_id = Some("provider-a".to_string());
+        decision.key_id = Some("key-a".to_string());
+        let now = std::time::Instant::now();
+        let mut budget = AttemptBudget::new(now).with_limits(1, 1, 1);
+
+        reserve_responses_websocket_attempt_budget(&decision, &mut budget)
+            .expect("first physical send must be admitted");
+        assert_eq!(budget.attempts(), 1);
+        assert_eq!(budget.credential_attempts("key-a"), 1);
+        assert_eq!(budget.provider_switches(), 0);
+        assert_eq!(
+            reserve_responses_websocket_attempt_budget(&decision, &mut budget),
+            Err(AttemptBudgetError::AttemptsExhausted)
         );
     }
 }

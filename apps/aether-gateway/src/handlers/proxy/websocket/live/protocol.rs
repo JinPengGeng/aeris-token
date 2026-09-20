@@ -170,9 +170,7 @@ impl LiveProtocolError {
             Self::InvalidModelQuery => {
                 "Codex Live WebSocket requires exactly one model query parameter"
             }
-            Self::InvalidLiveIntent => {
-                "Codex Live WebSocket requires intent=quicksilver"
-            }
+            Self::InvalidLiveIntent => "Codex Live WebSocket requires intent=quicksilver",
             Self::InvalidLiveArchitecture => {
                 "Codex Live WebRTC call creation requires architecture=avas"
             }
@@ -211,9 +209,7 @@ impl LiveProtocolError {
             Self::InitialSessionUpdateTimeout => {
                 "Timed out waiting for the initial Codex Live session.update event"
             }
-            Self::InvalidCallLocation => {
-                "Codex Live upstream returned an invalid call location"
-            }
+            Self::InvalidCallLocation => "Codex Live upstream returned an invalid call location",
         }
     }
 

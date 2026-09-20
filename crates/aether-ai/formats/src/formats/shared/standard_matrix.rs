@@ -23,6 +23,17 @@ use crate::formats::shared::standard_normalize::{
     is_claude_messages_shaped_body_on_openai_chat_endpoint,
 };
 
+/// Tool schema preservation is a format-conversion policy, shared by the
+/// standard matrix and provider-aware Chat/Responses entry points.
+pub(super) fn preserves_gemini_tool_schemas(
+    provider_type: &str,
+    provider_api_format: &str,
+) -> bool {
+    provider_type.trim().eq_ignore_ascii_case("antigravity")
+        && aether_ai_formats::normalize_api_format_alias(provider_api_format)
+            == "gemini:generate_content"
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_standard_request_body(
     body_json: &Value,
@@ -122,6 +133,39 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
     enable_model_directives: bool,
     reasoning_replay_policy: crate::formats::openai::responses::OpenAiResponsesReasoningReplayPolicy,
 ) -> Option<Value> {
+    build_standard_request_body_with_model_directives_and_request_headers_and_history_scope(
+        body_json,
+        client_api_format,
+        mapped_model,
+        provider_type,
+        provider_api_format,
+        request_path,
+        upstream_is_stream,
+        body_rules,
+        user_api_key_id,
+        user_api_key_id,
+        request_headers,
+        enable_model_directives,
+        reasoning_replay_policy,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_standard_request_body_with_model_directives_and_request_headers_and_history_scope(
+    body_json: &Value,
+    client_api_format: &str,
+    mapped_model: &str,
+    provider_type: &str,
+    provider_api_format: &str,
+    request_path: &str,
+    upstream_is_stream: bool,
+    body_rules: Option<&Value>,
+    user_api_key_id: Option<&str>,
+    history_scope: Option<&str>,
+    request_headers: Option<&http::HeaderMap>,
+    enable_model_directives: bool,
+    reasoning_replay_policy: crate::formats::openai::responses::OpenAiResponsesReasoningReplayPolicy,
+) -> Option<Value> {
     let reasoning_replay_policy = if provider_type.trim().eq_ignore_ascii_case("xai") {
         crate::formats::openai::responses::OpenAiResponsesReasoningReplayPolicy::XaiEncrypted
     } else {
@@ -131,7 +175,9 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
         .with_mapped_model(mapped_model)
         .with_request_path(request_path)
         .with_upstream_stream(upstream_is_stream);
-    if let Some(history_scope) = user_api_key_id {
+    format_context.preserve_gemini_tool_schemas =
+        preserves_gemini_tool_schemas(provider_type, provider_api_format);
+    if let Some(history_scope) = history_scope {
         format_context = format_context.with_history_scope(history_scope);
     }
     let source_api_format = compatible_source_format_for_standard_request(
@@ -139,6 +185,23 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
         client_api_format,
         provider_api_format,
     );
+    // Keep the specialized OpenAI builders' compatibility/history preprocessing
+    // when routing them through the provider-aware schema-preserving path.
+    let antigravity_chat_body = if format_context.preserve_gemini_tool_schemas
+        && matches!(
+            aether_ai_formats::normalize_api_format_alias(source_api_format.as_ref()).as_str(),
+            "openai:chat" | "openai:responses" | "openai:responses:compact"
+        ) {
+        Some(
+            crate::formats::shared::standard_normalize::chat_compatible_body_for_standard_source(
+                body_json,
+                source_api_format.as_ref(),
+                user_api_key_id,
+            )?,
+        )
+    } else {
+        None
+    };
     // DeepSeek and xAI replay opaque provider state. Preserve their native
     // Responses input items: canonical conversion can lose reasoning IDs and
     // encrypted-only items even when source and destination formats are equal.
@@ -152,9 +215,13 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
         Value::Object(object)
     } else {
         convert_request(
-            source_api_format.as_ref(),
+            if antigravity_chat_body.is_some() {
+                "openai:chat"
+            } else {
+                source_api_format.as_ref()
+            },
             provider_api_format,
-            body_json,
+            antigravity_chat_body.as_deref().unwrap_or(body_json),
             &format_context,
         )
         .ok()?
@@ -422,7 +489,9 @@ fn normalize_standard_request_to_openai_chat_request_cow<'a>(
 
 #[cfg(test)]
 mod tests {
-    use crate::formats::openai::responses::history::record_converted_response_history;
+    use crate::formats::openai::responses::history::{
+        conversation_history_scope, record_converted_response_history,
+    };
 
     use super::{
         build_standard_request_body, build_standard_request_body_from_canonical,
@@ -682,12 +751,13 @@ mod tests {
     }
 
     #[test]
-    fn standard_request_body_scopes_previous_response_history_by_api_key() {
+    fn standard_request_body_scopes_previous_response_history_by_tenant_and_api_key() {
         record_converted_response_history(
             &json!({
                 "needs_conversion": true,
                 "client_api_format": "openai:responses",
                 "provider_api_format": "openai:chat",
+                "user_id": "standard-history-user-a",
                 "api_key_id": "standard-history-key-a",
                 "original_request_body": {
                     "model": "source-model",
@@ -715,6 +785,12 @@ mod tests {
                 "output": "inspection-complete"
             }]
         });
+        let owner_scope =
+            conversation_history_scope("standard-history-user-a", "standard-history-key-a")
+                .expect("test identities should produce a scope");
+        let other_scope =
+            conversation_history_scope("standard-history-user-b", "standard-history-key-a")
+                .expect("test identities should produce a scope");
 
         let owner = build_standard_request_body(
             &continuation,
@@ -725,9 +801,9 @@ mod tests {
             "/v1/responses",
             false,
             None,
-            Some("standard-history-key-a"),
+            Some(owner_scope.as_str()),
         )
-        .expect("the owning API key should restore response history");
+        .expect("the owning tenant and API key should restore response history");
         assert_eq!(
             owner["messages"][1]["tool_calls"][0]["id"],
             "call_standard_history_scope_1"
@@ -746,7 +822,7 @@ mod tests {
             "/v1/responses",
             false,
             None,
-            Some("standard-history-key-b"),
+            Some(other_scope.as_str()),
         )
         .is_none());
     }
@@ -1949,6 +2025,66 @@ mod tests {
             "image/png"
         );
         assert_eq!(converted["tools"][0]["googleSearch"], json!({}));
+    }
+
+    #[test]
+    fn claude_client_web_search_tool_survives_conversion_to_gemini() {
+        let request = json!({
+            "model": "gemini-3-flash-preview",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "find the release notes"}],
+            "tools": [
+                {
+                    "name": "WebSearch",
+                    "description": "Search the web and use the results to inform responses",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "name": "Read",
+                    "description": "Read a file",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"file_path": {"type": "string"}},
+                        "required": ["file_path"]
+                    }
+                }
+            ]
+        });
+
+        let converted = build_standard_request_body(
+            &request,
+            "claude:messages",
+            "gemini-3-flash-preview",
+            "google",
+            "gemini:generate_content",
+            "/v1/messages",
+            false,
+            None,
+            None,
+        )
+        .expect("claude messages should convert to gemini");
+
+        let tools = converted["tools"]
+            .as_array()
+            .expect("tools should be an array");
+        assert!(
+            tools.iter().all(|tool| tool.get("googleSearch").is_none()
+                && tool.get("googleSearchRetrieval").is_none()),
+            "a client-declared WebSearch tool must not become server-side grounding: {tools:?}"
+        );
+
+        let declared: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool.get("functionDeclarations"))
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter_map(|declaration| declaration.get("name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(declared, vec!["WebSearch", "Read"], "{tools:?}");
     }
 
     #[test]

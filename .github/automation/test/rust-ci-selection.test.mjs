@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -124,6 +125,16 @@ test('every Rust and database job consumes changes, while all aggregate gates an
     shellFixtureStep.run,
     /bash tests\/aether_gateway_build_script_invalidation_test\.sh/u,
     'shell fixtures must enforce linked-worktree build-script freshness',
+  );
+  const gatewayIntegrationStep = workflow.jobs.test_gateway.steps.find((step) =>
+    step.name === 'Test gateway integration security contract');
+  assert.ok(gatewayIntegrationStep, 'gateway security integration target must be executed');
+  assert.match(shellFixtureStep.run, /bash tests\/postgres_live_test_gate_test\.sh/u,
+    'shell fixtures must reject live DB runs with zero executed tests');
+  assert.equal(
+    gatewayIntegrationStep.run,
+    'cargo nextest run -p aether-gateway --test admin_unsigned_identity_headers',
+    'gateway security integration target must use the pinned nextest command',
   );
   assert.ok(workflow.jobs.shell_security.steps.some((step) =>
     step.uses?.startsWith('dtolnay/rust-toolchain@') && step.with?.toolchain === '1.95.0'),
@@ -255,4 +266,104 @@ test('shell fixtures, Prometheus and every internal aggregate must succeed for b
       }
     }
   }
+});
+
+const managedReadinessStepName = 'Verify standalone support and managed PostgreSQL readiness contracts';
+const liveReadinessTargets = [
+  'postgres::tests::live_managed_postgres_restarts_cleanly_with_open_connections',
+  'postgres::tests::live_failed_postgres_stop_can_be_retried_without_losing_ownership',
+];
+
+function runManagedReadinessFixture(scenario) {
+  const step = workflow.jobs.test_gateway.steps.find((candidate) => candidate.name === managedReadinessStepName);
+  assert.ok(step, 'existing gateway job must execute managed service readiness contracts');
+  assert.equal(step.shell, 'bash');
+  const temporaryBase = process.env.AGENT_TMP_DIR || process.env.RUNNER_TEMP || path.join(os.homedir(), '.agents', 'tmp');
+  fs.mkdirSync(temporaryBase, { recursive: true });
+  const directory = fs.mkdtempSync(path.join(temporaryBase, 'aether-readiness-ci-fixture-'));
+  const commandLog = path.join(directory, 'commands.log');
+  const evidence = path.join(directory, 'evidence');
+  const prelude = `
+    cargo() {
+      printf '%s\\n' "$*" >> "$COMMAND_LOG"
+      local expected=1
+      if [[ "$*" == *'aether-test-support'* ]]; then expected=5; fi
+      if [[ "$SCENARIO" == support-zero && "$expected" == 5 ]]; then expected=0; fi
+      if [[ "$expected" == 1 ]]; then
+        case "$SCENARIO" in
+          live-zero) expected=0 ;;
+          live-two) expected=2 ;;
+          live-ignored) printf 'test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out\\n'; return 0 ;;
+          live-no-summary) return 0 ;;
+          live-failed) printf 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\\n'; return 0 ;;
+        esac
+      fi
+      printf 'test result: ok. %s passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\\n' "$expected"
+      if [[ "$SCENARIO" == live-duplicate && "$expected" == 1 ]]; then
+        printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\\n'
+      fi
+      if [[ "$SCENARIO" == cargo-fails ]]; then return 17; fi
+      return 0
+    }
+    if [[ "$SCENARIO" == tee-fails ]]; then
+      tee() { cat >/dev/null; return 23; }
+    fi
+  `;
+  try {
+    const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', prelude + step.run], {
+      env: {
+        PATH: process.env.PATH,
+        SCENARIO: scenario,
+        COMMAND_LOG: commandLog,
+        AETHER_TESTKIT_READINESS_EVIDENCE_DIR: evidence,
+      },
+      encoding: 'utf8',
+    });
+    assert.ifError(result.error);
+    assert.equal(result.signal, null);
+    const commands = fs.readFileSync(commandLog, 'utf8').trim().split('\n');
+    const logs = fs.readdirSync(evidence);
+    return { ...result, commands, logs };
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test('managed readiness contracts reuse the equipped gateway job and always retain evidence', () => {
+  const steps = workflow.jobs.test_gateway.steps;
+  const index = steps.findIndex((step) => step.name === managedReadinessStepName);
+  assert.ok(index >= 0);
+  assert.ok(steps.slice(0, index).some((step) => step.run?.includes('pg_config --bindir')),
+    'managed PostgreSQL binaries must be on PATH before the live tests');
+  assert.ok(steps.slice(0, index).some((step) => step.run?.includes('apt-get install -y redis-server')),
+    'reuse the existing managed-service dependencies');
+  const upload = steps.find((step) => step.with?.name === 'testkit-readiness');
+  assert.ok(upload);
+  assert.equal(upload.if, 'always()');
+  assert.equal(upload.with.path, 'target/testkit-readiness/');
+  assert.equal(steps[index].env.AETHER_TESTKIT_READINESS_EVIDENCE_DIR, 'target/testkit-readiness');
+
+  const result = runManagedReadinessFixture('success');
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(result.commands, [
+    'test --locked -p aether-test-support --lib -- --nocapture --test-threads=1 --color never',
+    ...liveReadinessTargets.map((target) =>
+      `test --locked -p aether-testkit --features postgres --lib ${target} -- --exact --ignored --nocapture --test-threads=1 --color never`),
+  ], 'support must compile alone and both ignored live tests must execute by exact name');
+  assert.deepEqual(new Set(result.logs), new Set([
+    'support-standalone.log',
+    ...liveReadinessTargets.map((target) => `${target.split('::').at(-1)}.log`),
+  ]));
+});
+
+test('managed readiness gate rejects empty, ignored, duplicate or failed runs and preserves Cargo/tee failure', () => {
+  for (const scenario of [
+    'support-zero', 'live-zero', 'live-two', 'live-ignored', 'live-no-summary', 'live-failed', 'live-duplicate',
+  ]) {
+    const result = runManagedReadinessFixture(scenario);
+    assert.notEqual(result.status, 0, `${scenario}: ${result.stdout}${result.stderr}`);
+    assert.ok(result.logs.includes('support-standalone.log'), `${scenario}: retain evidence on failure`);
+  }
+  assert.equal(runManagedReadinessFixture('cargo-fails').status, 17);
+  assert.equal(runManagedReadinessFixture('tee-fails').status, 23);
 });

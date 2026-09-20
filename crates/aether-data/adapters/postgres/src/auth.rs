@@ -883,7 +883,7 @@ WHERE id = $1
 
 const POSTGRES_ANONYMIZE_API_KEY_HISTORY_SQL: &[&str] = &[
     "UPDATE request_candidates SET api_key_name = NULL WHERE api_key_id = $1",
-    "UPDATE video_tasks SET api_key_name = NULL WHERE api_key_id = $1",
+    "UPDATE video_tasks SET api_key_name = NULL, row_revision = row_revision + 1, updated_at = GREATEST(updated_at, NOW()) WHERE api_key_id = $1",
     "UPDATE usage SET api_key_name = NULL WHERE api_key_id = $1",
     "UPDATE stats_daily_api_key SET api_key_name = NULL WHERE api_key_id = $1",
     "UPDATE audit_logs SET description = 'deleted API key event', ip_address = NULL, user_agent = NULL, event_metadata = NULL, error_message = NULL WHERE api_key_id = $1",
@@ -895,6 +895,15 @@ const POSTGRES_ANONYMIZE_API_KEY_HISTORY_SQL: &[&str] = &[
 
 const POSTGRES_DELETE_API_KEY_DEPENDENTS_SQL: &[&str] =
     &["DELETE FROM api_key_provider_mappings WHERE api_key_id = $1"];
+
+#[cfg(test)]
+pub(crate) fn video_task_anonymization_sql() -> &'static str {
+    POSTGRES_ANONYMIZE_API_KEY_HISTORY_SQL
+        .iter()
+        .copied()
+        .find(|sql| sql.starts_with("UPDATE video_tasks "))
+        .expect("video task API key anonymization statement")
+}
 
 #[derive(Debug, Clone)]
 pub struct SqlxAuthApiKeySnapshotReadRepository {
@@ -2154,6 +2163,9 @@ mod tests {
 
     #[test]
     fn api_key_delete_sql_preserves_ids_and_removes_private_snapshots() {
+        let video_sql = super::video_task_anonymization_sql();
+        assert!(video_sql.contains("row_revision = row_revision + 1"));
+        assert!(video_sql.contains("updated_at = GREATEST(updated_at, NOW())"));
         for table in [
             "request_candidates",
             "video_tasks",

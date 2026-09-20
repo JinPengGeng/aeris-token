@@ -276,7 +276,7 @@ async fn gateway_handles_local_openai_chat_sync_report_with_local_reporting_when
             "Bearer sk-client-openai-local-report-sync",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-local-report-sync-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -915,7 +915,9 @@ async fn gateway_records_failed_usage_when_all_local_openai_chat_candidates_exha
             TRACE_ID_HEADER,
             "trace-openai-chat-local-report-sync-failure-123",
         )
-        .body(Body::from("{\"model\":\"gpt-5\",\"messages\":[]}"))
+        .body(Body::from(
+            "{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}",
+        ))
         .expect("request should build");
     let response = send_request(gateway, request).await;
 
@@ -970,9 +972,9 @@ async fn gateway_records_failed_usage_when_all_local_openai_chat_candidates_exha
         .list_by_request_id("trace-openai-chat-local-report-sync-failure-123")
         .await
         .expect("request candidate trace should read");
-    // The only candidate is the sticky first key: the default policy retries
-    // it once on the same key before the request is exhausted.
-    assert_eq!(stored_candidates.len(), 2);
+    // The provider 503 excludes the only endpoint, exhausting the request
+    // without retrying the failed endpoint.
+    assert_eq!(stored_candidates.len(), 1);
     for candidate in &stored_candidates {
         assert_eq!(candidate.status, RequestCandidateStatus::Failed);
         assert_eq!(candidate.status_code, Some(503));
@@ -1051,7 +1053,9 @@ async fn gateway_records_failed_usage_when_sync_runtime_transport_is_unavailable
             TRACE_ID_HEADER,
             "trace-openai-chat-local-transport-unavailable-123",
         )
-        .body(Body::from("{\"model\":\"gpt-5\",\"messages\":[]}"))
+        .body(Body::from(
+            "{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}",
+        ))
         .expect("request should build");
     let response = send_request(gateway, request).await;
 
@@ -1195,7 +1199,9 @@ async fn sync_transport_error_policy_stops_or_retries_candidates_end_to_end_impl
                 "Bearer sk-client-transport-policy",
             )
             .header(TRACE_ID_HEADER, trace_id)
-            .body(Body::from("{\"model\":\"gpt-5\",\"messages\":[]}"))
+            .body(Body::from(
+                "{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}",
+            ))
             .expect("request should build");
         let response = send_request(gateway, request).await;
         let candidates = request_candidate_repository
@@ -1582,7 +1588,7 @@ async fn gateway_handles_local_openai_chat_stream_report_with_local_reporting_wh
             "Bearer sk-client-openai-local-report-stream",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-local-report-stream-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");
@@ -1791,7 +1797,7 @@ async fn gateway_ignores_legacy_max_response_body_size_for_stream_usage_impl() {
             TRACE_ID_HEADER,
             "trace-openai-chat-local-report-stream-truncated-123",
         )
-        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}")
         .send()
         .await
         .expect("request should succeed");

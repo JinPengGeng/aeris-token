@@ -17,7 +17,7 @@ where
 {
     let handle = std::thread::Builder::new()
         .name(name.to_string())
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -160,7 +160,7 @@ async fn gateway_settles_wallet_for_completed_execution_runtime_sync_usage_impl(
             "Bearer sk-client-openai-wallet-sync",
         )
         .header(TRACE_ID_HEADER, "req-usage-wallet-sync-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");

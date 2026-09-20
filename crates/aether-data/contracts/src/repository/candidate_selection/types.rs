@@ -46,6 +46,16 @@ pub struct StoredMinimalCandidateSelectionRow {
     pub model_is_available: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredGlobalModelDeclaration {
+    pub global_model_name: String,
+    pub global_model_mappings: Option<Vec<String>>,
+    pub provider_type: String,
+    pub endpoint_id: String,
+    pub provider_model_name: String,
+    pub provider_model_mappings: Option<Vec<StoredProviderModelMapping>>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StoredPoolKeyCandidateOrder {
     #[default]
@@ -146,6 +156,25 @@ pub trait MinimalCandidateSelectionReadRepository: Send + Sync {
         &self,
         api_format: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, crate::DataLayerError>;
+
+    async fn list_declared_global_models_for_api_format(
+        &self,
+        api_format: &str,
+    ) -> Result<Vec<StoredGlobalModelDeclaration>, crate::DataLayerError> {
+        Ok(self
+            .list_for_exact_api_format(api_format)
+            .await?
+            .into_iter()
+            .map(|row| StoredGlobalModelDeclaration {
+                global_model_name: row.global_model_name,
+                global_model_mappings: row.global_model_mappings,
+                provider_type: row.provider_type,
+                endpoint_id: row.endpoint_id,
+                provider_model_name: row.model_provider_model_name,
+                provider_model_mappings: row.model_provider_model_mappings,
+            })
+            .collect())
+    }
 
     async fn list_for_exact_api_format_page(
         &self,

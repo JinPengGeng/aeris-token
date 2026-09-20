@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::time::Duration;
 
 pub trait AiExecutionAttempt {
     fn execution_plan(&self) -> &aether_contracts::ExecutionPlan;
@@ -56,6 +57,21 @@ pub enum AiAttemptExecutionOutcome<Response> {
     },
 }
 
+#[derive(Debug)]
+pub enum AiAttemptAdmission {
+    Admit {
+        remaining: Option<Duration>,
+    },
+    Stop {
+        report_context: Option<serde_json::Value>,
+    },
+}
+
+#[derive(Debug)]
+pub struct AiAttemptBudgetExhaustion {
+    pub report_context: Option<serde_json::Value>,
+}
+
 impl<Response> AiAttemptExecutionOutcome<Response> {
     pub fn retry(scope: AiAttemptRetryScope) -> Self {
         Self::Retry {
@@ -90,12 +106,44 @@ where
         Ok(false)
     }
 
+    async fn admit_attempt(&self, _attempt: &Attempt) -> Result<AiAttemptAdmission, Self::Error> {
+        Ok(AiAttemptAdmission::Admit { remaining: None })
+    }
+
+    async fn deadline_exhaustion_report_context(
+        &self,
+        attempt: &Attempt,
+    ) -> Result<Option<serde_json::Value>, Self::Error> {
+        Ok(attempt.report_context())
+    }
+
+    async fn attempt_budget_remaining(&self) -> Result<Option<Duration>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Returns an exhaustion raised by a physical retry performed inside the
+    /// current logical candidate attempt. The default keeps transports that do
+    /// not perform internal sends unchanged.
+    async fn take_internal_attempt_budget_exhaustion(
+        &self,
+        _attempt: &Attempt,
+    ) -> Result<Option<AiAttemptBudgetExhaustion>, Self::Error> {
+        Ok(None)
+    }
+
     async fn record_attempt_started(&self, _attempt: &Attempt) -> Result<(), Self::Error> {
         Ok(())
     }
 
     async fn record_attempt_failed(&self, _attempt: &Attempt) -> Result<(), Self::Error> {
         Ok(())
+    }
+
+    /// The executor may reject replay for operations whose upstream execution
+    /// is not safely repeatable. The default keeps existing generic loops
+    /// unchanged until a transport supplies an operation-aware policy.
+    async fn admit_retry_replay(&self, _attempt: &Attempt) -> Result<bool, Self::Error> {
+        Ok(true)
     }
 
     /// After `attempt` failed with candidate scope, return the next attempt on
@@ -142,14 +190,55 @@ where
             port.mark_unused_attempts(vec![attempt]).await?;
             continue;
         }
+        let remaining_budget = match port.admit_attempt(&attempt).await? {
+            AiAttemptAdmission::Admit { remaining } => remaining,
+            AiAttemptAdmission::Stop { report_context } => {
+                let last_plan = attempt.execution_plan().clone();
+                port.mark_unused_attempts(vec![attempt]).await?;
+                port.mark_unused_attempts(remaining.collect()).await?;
+                return Ok(AiAttemptLoopOutcome::Exhausted(
+                    port.build_exhaustion(last_plan, report_context).await?,
+                ));
+            }
+        };
         port.record_attempt_started(&attempt).await?;
-        let execution = match port.execute_attempt(&attempt).await {
+        let execution_result = match remaining_budget {
+            Some(remaining_budget) => {
+                match tokio::time::timeout(remaining_budget, port.execute_attempt(&attempt)).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let last_plan = attempt.execution_plan().clone();
+                        let report_context =
+                            port.deadline_exhaustion_report_context(&attempt).await?;
+                        port.record_attempt_failed(&attempt).await?;
+                        port.mark_unused_attempts(remaining.collect()).await?;
+                        return Ok(AiAttemptLoopOutcome::Exhausted(
+                            port.build_exhaustion(last_plan, report_context).await?,
+                        ));
+                    }
+                }
+            }
+            None => port.execute_attempt(&attempt).await,
+        };
+        let execution = match execution_result {
             Ok(execution) => execution,
             Err(err) => {
                 port.mark_unused_attempts(remaining.collect()).await?;
                 return Err(err);
             }
         };
+        if let Some(exhaustion) = port
+            .take_internal_attempt_budget_exhaustion(&attempt)
+            .await?
+        {
+            let last_plan = attempt.execution_plan().clone();
+            port.record_attempt_failed(&attempt).await?;
+            port.mark_unused_attempts(remaining.collect()).await?;
+            return Ok(AiAttemptLoopOutcome::Exhausted(
+                port.build_exhaustion(last_plan, exhaustion.report_context)
+                    .await?,
+            ));
+        }
         match execution {
             AiAttemptExecutionOutcome::Responded(response) => {
                 port.mark_unused_attempts(remaining.collect()).await?;
@@ -162,6 +251,19 @@ where
                 port.record_attempt_failed(&attempt).await?;
                 if attempt_fallback_response.is_some() {
                     fallback_response = attempt_fallback_response;
+                }
+                if !port.admit_retry_replay(&attempt).await? {
+                    port.mark_unused_attempts(remaining.collect()).await?;
+                    return match fallback_response {
+                        Some(response) => Ok(AiAttemptLoopOutcome::Deferred(response)),
+                        None => Ok(AiAttemptLoopOutcome::Exhausted(
+                            port.build_exhaustion(
+                                attempt.execution_plan().clone(),
+                                attempt.report_context(),
+                            )
+                            .await?,
+                        )),
+                    };
                 }
                 if scope == AiAttemptRetryScope::Candidate {
                     pending_same_key_retry = port.next_same_key_retry(&attempt).await?;
@@ -314,12 +416,13 @@ impl AiExecutionAttempt for crate::dto::AiStreamAttempt {
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use async_trait::async_trait;
 
     use super::{
-        run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopPort, AiAttemptRetryScope,
-        AiExecutionAttempt,
+        run_ai_attempt_loop, AiAttemptAdmission, AiAttemptExecutionOutcome, AiAttemptLoopPort,
+        AiAttemptRetryScope, AiExecutionAttempt,
     };
 
     #[derive(Clone)]
@@ -347,9 +450,68 @@ mod tests {
         unused: Mutex<Vec<&'static str>>,
     }
 
+    struct ReplayRejectedPort {
+        executed: Mutex<Vec<&'static str>>,
+        failed: Mutex<Vec<&'static str>>,
+        unused: Mutex<Vec<&'static str>>,
+        fallback_response: Option<&'static str>,
+    }
+
     struct ScopedRetryPort {
         executed: Mutex<Vec<&'static str>>,
         unused: Mutex<Vec<&'static str>>,
+    }
+
+    struct DeadlinePort {
+        failed: Mutex<usize>,
+        unused: Mutex<Vec<&'static str>>,
+    }
+
+    #[async_trait]
+    impl AiAttemptLoopPort<TestAttempt> for DeadlinePort {
+        type Response = ();
+        type Exhaustion = &'static str;
+        type Error = &'static str;
+
+        async fn admit_attempt(
+            &self,
+            _attempt: &TestAttempt,
+        ) -> Result<AiAttemptAdmission, Self::Error> {
+            Ok(AiAttemptAdmission::Admit {
+                remaining: Some(Duration::from_millis(1)),
+            })
+        }
+
+        async fn execute_attempt(
+            &self,
+            _attempt: &TestAttempt,
+        ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error> {
+            std::future::pending().await
+        }
+
+        async fn record_attempt_failed(&self, _attempt: &TestAttempt) -> Result<(), Self::Error> {
+            *self.failed.lock().expect("failed count should lock") += 1;
+            Ok(())
+        }
+
+        async fn mark_unused_attempts(
+            &self,
+            attempts: Vec<TestAttempt>,
+        ) -> Result<(), Self::Error> {
+            self.unused
+                .lock()
+                .expect("unused attempts should lock")
+                .extend(attempts.into_iter().map(|attempt| attempt.id));
+            Ok(())
+        }
+
+        async fn build_exhaustion(
+            &self,
+            _last_plan: aether_contracts::ExecutionPlan,
+            _last_report_context: Option<serde_json::Value>,
+        ) -> Result<Self::Exhaustion, Self::Error> {
+            Ok("deadline")
+        }
     }
 
     #[async_trait]
@@ -440,6 +602,58 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl AiAttemptLoopPort<TestAttempt> for ReplayRejectedPort {
+        type Response = &'static str;
+        type Exhaustion = &'static str;
+        type Error = &'static str;
+
+        async fn execute_attempt(
+            &self,
+            attempt: &TestAttempt,
+        ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error> {
+            self.executed
+                .lock()
+                .expect("executed attempts should lock")
+                .push(attempt.id);
+            Ok(AiAttemptExecutionOutcome::Retry {
+                scope: AiAttemptRetryScope::Candidate,
+                fallback_response: self.fallback_response,
+            })
+        }
+
+        async fn record_attempt_failed(&self, attempt: &TestAttempt) -> Result<(), Self::Error> {
+            self.failed
+                .lock()
+                .expect("failed attempts should lock")
+                .push(attempt.id);
+            Ok(())
+        }
+
+        async fn admit_retry_replay(&self, _attempt: &TestAttempt) -> Result<bool, Self::Error> {
+            Ok(false)
+        }
+
+        async fn mark_unused_attempts(
+            &self,
+            attempts: Vec<TestAttempt>,
+        ) -> Result<(), Self::Error> {
+            self.unused
+                .lock()
+                .expect("unused attempts should lock")
+                .extend(attempts.into_iter().map(|attempt| attempt.id));
+            Ok(())
+        }
+
+        async fn build_exhaustion(
+            &self,
+            _last_plan: aether_contracts::ExecutionPlan,
+            _last_report_context: Option<serde_json::Value>,
+        ) -> Result<Self::Exhaustion, Self::Error> {
+            Ok("replay rejected")
+        }
+    }
+
     fn attempt(id: &'static str) -> TestAttempt {
         TestAttempt {
             id,
@@ -502,6 +716,98 @@ mod tests {
         assert_eq!(
             *port.unused.lock().expect("unused attempts should lock"),
             vec!["candidate-3"]
+        );
+    }
+
+    #[tokio::test]
+    async fn request_deadline_stops_static_execution_and_cleans_remaining_attempts() {
+        let port = DeadlinePort {
+            failed: Mutex::new(0),
+            unused: Mutex::new(Vec::new()),
+        };
+
+        let outcome =
+            run_ai_attempt_loop(&port, vec![attempt("candidate-1"), attempt("candidate-2")])
+                .await
+                .expect("deadline exhaustion is a normal loop outcome");
+
+        assert!(matches!(
+            outcome,
+            super::AiAttemptLoopOutcome::Exhausted("deadline")
+        ));
+        assert_eq!(*port.failed.lock().expect("failed count should lock"), 1);
+        assert_eq!(
+            *port.unused.lock().expect("unused attempts should lock"),
+            vec!["candidate-2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_replay_defers_fallback_and_marks_remaining_attempts_unused() {
+        let port = ReplayRejectedPort {
+            executed: Mutex::new(Vec::new()),
+            failed: Mutex::new(Vec::new()),
+            unused: Mutex::new(Vec::new()),
+            fallback_response: Some("upstream fallback"),
+        };
+
+        let outcome = run_ai_attempt_loop(
+            &port,
+            vec![
+                attempt("first"),
+                attempt("same-key-retry"),
+                attempt("next-candidate"),
+            ],
+        )
+        .await
+        .expect("replay rejection should preserve the fallback response");
+
+        assert!(matches!(
+            outcome,
+            super::AiAttemptLoopOutcome::Deferred("upstream fallback")
+        ));
+        assert_eq!(
+            *port.executed.lock().expect("executed attempts should lock"),
+            vec!["first"]
+        );
+        assert_eq!(
+            *port.failed.lock().expect("failed attempts should lock"),
+            vec!["first"]
+        );
+        assert_eq!(
+            *port.unused.lock().expect("unused attempts should lock"),
+            vec!["same-key-retry", "next-candidate"]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_replay_exhausts_without_fallback() {
+        let port = ReplayRejectedPort {
+            executed: Mutex::new(Vec::new()),
+            failed: Mutex::new(Vec::new()),
+            unused: Mutex::new(Vec::new()),
+            fallback_response: None,
+        };
+
+        let outcome = run_ai_attempt_loop(&port, vec![attempt("first"), attempt("next-candidate")])
+            .await
+            .expect("replay rejection should exhaust without a fallback response");
+
+        assert!(matches!(
+            outcome,
+            super::AiAttemptLoopOutcome::Exhausted("replay rejected")
+        ));
+        assert_eq!(
+            *port.executed.lock().expect("executed attempts should lock"),
+            vec!["first"]
+        );
+        assert_eq!(
+            *port.failed.lock().expect("failed attempts should lock"),
+            vec!["first"]
+        );
+        assert_eq!(
+            *port.unused.lock().expect("unused attempts should lock"),
+            vec!["next-candidate"]
         );
     }
 

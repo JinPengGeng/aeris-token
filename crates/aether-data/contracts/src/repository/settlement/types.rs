@@ -394,6 +394,47 @@ pub struct UsageSettlementWriteOutcome {
 
 #[async_trait]
 pub trait SettlementWriteRepository: Send + Sync {
+    fn supports_recharge_recovery(&self) -> bool {
+        false
+    }
+
+    async fn process_recharge_recovery_batch(
+        &self,
+        _batch_size: usize,
+    ) -> Result<Vec<super::StoredRechargeRecoveryJob>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "recharge recovery is unsupported".into(),
+        ))
+    }
+
+    async fn list_recharge_recovery_jobs_for_user(
+        &self,
+        _user_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<super::StoredRechargeRecoveryJob>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "recharge recovery is unsupported".into(),
+        ))
+    }
+
+    async fn claim_recharge_recovery_notifications(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<super::RechargeRecoveryNotification>, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "recharge recovery notifications are unsupported".into(),
+        ))
+    }
+
+    async fn complete_recharge_recovery_notification(
+        &self,
+        _input: super::CompleteRechargeRecoveryNotificationInput,
+    ) -> Result<bool, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidInput(
+            "recharge recovery notifications are unsupported".into(),
+        ))
+    }
+
     async fn reserve_request_attempt_funds(
         &self,
         _input: super::ReserveRequestAttemptFundsInput,

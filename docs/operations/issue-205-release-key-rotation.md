@@ -42,8 +42,12 @@ Tagged-release preflight and every native/cross build validate these inputs with
 the production parser. Cross builds explicitly forward only the three public
 inputs. The publication verifier uses that same parser and signature verifier,
 and additionally requires the signed envelope's ID to equal the active signer.
-`nightly.yml` and `release.yml` currently build the gateway only; they are not
-alternate tunnel release paths.
+The dedicated `build-tunnel.yml` workflow builds and signs tagged tunnel
+releases. `nightly.yml` also builds and signs optional Linux musl tunnel
+artifacts when the tunnel signing variables are configured; its gateway
+nightlies continue to work when tunnel signing is disabled. `release.yml`
+publishes the stable gateway packages and does not replace the dedicated
+tunnel release workflow.
 
 The deployed tunnel reads these values with `option_env!`: runtime environment,
 gateway instructions, and release metadata cannot add or remove trust. A manual

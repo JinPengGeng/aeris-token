@@ -319,6 +319,14 @@ fn referral_percent_rate_valid(percent_rate: f64) -> bool {
     percent_rate.is_finite() && percent_rate > 0.0 && percent_rate <= 100.0
 }
 
+fn referral_owns_first_paid_order(
+    newly_marked: bool,
+    recorded_order_id: Option<&str>,
+    order_id: &str,
+) -> bool {
+    newly_marked || recorded_order_id == Some(order_id)
+}
+
 fn referral_payment_method_excluded(payment_method: &str) -> bool {
     matches!(
         payment_method.trim().to_ascii_lowercase().as_str(),
@@ -797,10 +805,27 @@ WHERE ($1::TEXT IS NULL OR inviter_user_id = $1)
         let newly_marked_first_paid = self
             .mark_referral_first_paid_order(&relationship.id, &context.id)
             .await?;
-        // A replay of the winning order must repair a crash between marking
-        // first-paid and inserting its idempotent reward row.
-        let owns_first_paid_order = newly_marked_first_paid
-            || relationship.first_paid_order_id.as_deref() == Some(context.id.as_str());
+        // A concurrent callback can observe the relationship before another
+        // callback marks its first paid order. Re-read only after losing that
+        // claim so a normal duplicate callback can repair a crash between the
+        // durable mark and the idempotent reward insert.
+        let owns_first_paid_order = if referral_owns_first_paid_order(
+            newly_marked_first_paid,
+            relationship.first_paid_order_id.as_deref(),
+            &context.id,
+        ) {
+            true
+        } else {
+            self.find_referral_relationship(&relationship.id)
+                .await?
+                .is_some_and(|current| {
+                    referral_owns_first_paid_order(
+                        false,
+                        current.first_paid_order_id.as_deref(),
+                        &context.id,
+                    )
+                })
+        };
 
         let mut idempotency_keys = Vec::new();
         if config.percent_enabled && referral_percent_rate_valid(config.percent_rate) {
@@ -1980,36 +2005,53 @@ LIMIT 32
             .map_err(DataLayerError::postgres)?;
             let reward_amount = reward
                 .as_ref()
-                .and_then(|row| row.try_get::<f64, _>("amount_usd").ok())
+                .map(|row| {
+                    row.try_get::<f64, _>("amount_usd")
+                        .map_err(DataLayerError::postgres)
+                })
+                .transpose()?
                 .unwrap_or(0.0);
             let has_wallet_transaction = !wallet_transactions.is_empty();
-            let valid_wallet_transaction_ids = wallet_transactions
-                .into_iter()
-                .filter_map(|row| {
-                    let amount = row.try_get::<f64, _>("amount").ok()?;
-                    let balance_before = row.try_get::<f64, _>("balance_before").ok()?;
-                    let balance_after = row.try_get::<f64, _>("balance_after").ok()?;
-                    let recharge_balance_before =
-                        row.try_get::<f64, _>("recharge_balance_before").ok()?;
-                    let recharge_balance_after =
-                        row.try_get::<f64, _>("recharge_balance_after").ok()?;
-                    let gift_balance_before = row.try_get::<f64, _>("gift_balance_before").ok()?;
-                    let gift_balance_after = row.try_get::<f64, _>("gift_balance_after").ok()?;
-                    if !referral_credit_transaction_fact_valid(
-                        reward_amount,
-                        amount,
-                        balance_before,
-                        balance_after,
-                        recharge_balance_before,
-                        recharge_balance_after,
-                        gift_balance_before,
-                        gift_balance_after,
-                    ) {
-                        return None;
-                    }
-                    row.try_get::<String, _>("id").ok()
-                })
-                .collect::<Vec<_>>();
+            let mut valid_wallet_transaction_ids = Vec::new();
+            for row in wallet_transactions {
+                let amount = row
+                    .try_get::<f64, _>("amount")
+                    .map_err(DataLayerError::postgres)?;
+                let balance_before = row
+                    .try_get::<f64, _>("balance_before")
+                    .map_err(DataLayerError::postgres)?;
+                let balance_after = row
+                    .try_get::<f64, _>("balance_after")
+                    .map_err(DataLayerError::postgres)?;
+                let recharge_balance_before = row
+                    .try_get::<f64, _>("recharge_balance_before")
+                    .map_err(DataLayerError::postgres)?;
+                let recharge_balance_after = row
+                    .try_get::<f64, _>("recharge_balance_after")
+                    .map_err(DataLayerError::postgres)?;
+                let gift_balance_before = row
+                    .try_get::<f64, _>("gift_balance_before")
+                    .map_err(DataLayerError::postgres)?;
+                let gift_balance_after = row
+                    .try_get::<f64, _>("gift_balance_after")
+                    .map_err(DataLayerError::postgres)?;
+                if !referral_credit_transaction_fact_valid(
+                    reward_amount,
+                    amount,
+                    balance_before,
+                    balance_after,
+                    recharge_balance_before,
+                    recharge_balance_after,
+                    gift_balance_before,
+                    gift_balance_after,
+                ) {
+                    continue;
+                }
+                valid_wallet_transaction_ids.push(
+                    row.try_get::<String, _>("id")
+                        .map_err(DataLayerError::postgres)?,
+                );
+            }
             // Exactly one valid transaction fact is required.  If multiple
             // facts match the same reward, the historical write may already
             // have credited the wallet twice; silently choosing the first
@@ -2712,6 +2754,21 @@ mod tests {
                 "{value:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn referral_first_paid_owner_accepts_replayed_winning_order_only() {
+        assert!(referral_owns_first_paid_order(true, None, "order-1"));
+        assert!(referral_owns_first_paid_order(
+            false,
+            Some("order-1"),
+            "order-1"
+        ));
+        assert!(!referral_owns_first_paid_order(
+            false,
+            Some("order-2"),
+            "order-1"
+        ));
     }
 
     #[test]

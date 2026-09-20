@@ -10,6 +10,32 @@ pub(super) fn classify_admin_observability_family_route(
     if method == http::Method::POST
         && matches!(
             normalized_path,
+            "/api/admin/provider-query/emergency-chain/execute"
+                | "/api/admin/provider-query/emergency-chain/execute/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "provider_query_manage",
+            "emergency_chain_execute",
+            "admin:provider_query",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path_no_trailing.starts_with("/api/admin/provider-query/emergency-chain/")
+        && normalized_path_no_trailing.ends_with("/revoke")
+        && normalized_path_no_trailing.matches('/').count() == 6
+    {
+        Some(classified(
+            "admin_proxy",
+            "provider_query_manage",
+            "emergency_chain_revoke",
+            "admin:provider_query",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
             "/api/admin/provider-query/models" | "/api/admin/provider-query/models/"
         )
     {
@@ -68,6 +94,31 @@ pub(super) fn classify_admin_observability_family_route(
             "security_manage",
             "blacklist_remove",
             "admin:security",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/admin/monitoring/audit-deliveries" | "/api/admin/monitoring/audit-deliveries/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "monitoring",
+            "audit_deliveries",
+            "admin:monitoring",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path_no_trailing.starts_with("/api/admin/monitoring/audit-deliveries/")
+        && normalized_path_no_trailing.ends_with("/redrive")
+        && normalized_path_no_trailing.matches('/').count() == 6
+    {
+        Some(classified(
+            "admin_proxy",
+            "monitoring",
+            "audit_delivery_redrive",
+            "admin:monitoring",
             false,
         ))
     } else if method == http::Method::GET
@@ -605,6 +656,20 @@ pub(super) fn classify_admin_observability_family_route(
             "admin_proxy",
             "stats_manage",
             "cost_savings",
+            "admin:stats",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/admin/stats/leaderboard/user-groups"
+                | "/api/admin/stats/leaderboard/user-groups/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "stats_manage",
+            "leaderboard_user_groups",
             "admin:stats",
             false,
         ))

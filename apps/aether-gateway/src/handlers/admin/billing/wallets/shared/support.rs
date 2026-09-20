@@ -13,6 +13,10 @@ pub(in super::super) async fn notify_user_refund_status(
     state: &crate::handlers::admin::request::AdminAppState<'_>,
     refund: &crate::AdminWalletRefundRecord,
 ) -> bool {
+    // Durable backends own delivery; direct dispatch is only a legacy fallback.
+    if state.app().data.has_refund_notification_backend() {
+        return false;
+    }
     let Some(user_id) = refund
         .user_id
         .as_deref()
@@ -62,26 +66,35 @@ pub(in super::super) async fn notify_user_refund_status(
     }
 
     let status = refund_status_notification_label(&refund.status);
-    let failure_reason = refund
-        .failure_reason
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("")
-        .to_string();
+    // Admin failure reasons are free text and can contain pasted provider
+    // diagnostics or credentials. Only fixed user-facing wording enters email.
+    let failure_reason = if status == "failed" {
+        "退款未完成，请在账户中查看退款详情或联系管理员。"
+    } else {
+        ""
+    }
+    .to_string();
     let amount_usd = if refund.amount_usd.is_finite() {
         format!("{:.2}", refund.amount_usd)
     } else {
         "unknown".to_string()
     };
+    let mut text = format!(
+        "退款编号：{}\n金额：${}\n状态：{}",
+        refund.refund_no, amount_usd, status
+    );
+    if !failure_reason.is_empty() {
+        text.push('\n');
+        text.push_str(&failure_reason);
+    }
     let report = send_user_important_notification_email(
         state.app(),
         USER_REFUND_STATUS_ITEM_KEY,
         email,
         ImportantNotification {
             title: "退款状态更新".to_string(),
-            markdown_body: "你的退款申请状态已更新。".to_string(),
-            text_body: "你的退款申请状态已更新。".to_string(),
+            markdown_body: text.clone(),
+            text_body: text,
         },
         &[
             ("refund_no", refund.refund_no.clone()),
@@ -107,7 +120,11 @@ pub(in super::super) async fn notify_user_refund_status(
             return false;
         }
     }
-    true
+    report.is_ok_and(|report| {
+        report.success
+            && !report.channels.is_empty()
+            && report.channels.iter().all(|channel| channel.success)
+    })
 }
 
 pub(in super::super) fn refund_status_notification_should_send(
@@ -339,14 +356,7 @@ pub(in super::super) fn admin_wallet_build_order_no(now: chrono::DateTime<chrono
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        notify_user_refund_status, refund_status_notification_label,
-        refund_status_notification_should_send,
-    };
-    use crate::data::GatewayDataState;
-    use crate::{AdminWalletRefundRecord, AppState, GatewayUserPreferenceView};
-    use aether_data::repository::users::StoredUserAuthRecord;
-
+    use super::{refund_status_notification_label, refund_status_notification_should_send};
     #[test]
     fn refund_notification_status_is_bounded_to_known_terminal_values() {
         assert_eq!(refund_status_notification_label(" succeeded "), "succeeded");
@@ -375,71 +385,8 @@ mod tests {
             "processing"
         ));
     }
-
-    #[tokio::test]
-    async fn refund_notification_honors_email_preference_on_the_async_path() {
-        let app = AppState::new()
-            .expect("gateway should build")
-            .with_data_state_for_tests(
-                GatewayDataState::disabled().with_user_preferences_for_tests(std::iter::empty()),
-            )
-            .with_auth_users_for_tests([StoredUserAuthRecord::new(
-                "user-1".to_string(),
-                Some("alice@example.com".to_string()),
-                true,
-                "alice".to_string(),
-                None,
-                "user".to_string(),
-                "local".to_string(),
-                None,
-                None,
-                None,
-                true,
-                false,
-                None,
-                None,
-            )
-            .expect("auth user should build")]);
-        let state = crate::admin_api::AdminAppState::new(&app);
-        let refund = AdminWalletRefundRecord {
-            id: "refund-1".to_string(),
-            refund_no: "rf-refund-1".to_string(),
-            wallet_id: "wallet-1".to_string(),
-            user_id: Some("user-1".to_string()),
-            payment_order_id: None,
-            source_type: "manual".to_string(),
-            source_id: None,
-            refund_mode: "manual".to_string(),
-            amount_usd: 10.0,
-            status: "succeeded".to_string(),
-            reason: None,
-            failure_reason: None,
-            gateway_refund_id: None,
-            payout_method: None,
-            payout_reference: None,
-            payout_proof: None,
-            requested_by: Some("user-1".to_string()),
-            approved_by: None,
-            processed_by: None,
-            created_at_unix_ms: 1_710_000_000,
-            updated_at_unix_secs: 1_710_000_000,
-            processed_at_unix_secs: Some(1_710_000_000),
-            completed_at_unix_secs: Some(1_710_000_000),
-        };
-
-        assert!(notify_user_refund_status(&state, &refund).await);
-
-        let mut preferences = GatewayUserPreferenceView::default_for_user("user-1");
-        preferences.usage_alerts = false;
-        app.write_user_preferences(preferences.clone())
-            .await
-            .expect("preferences should update");
-        assert!(notify_user_refund_status(&state, &refund).await);
-
-        preferences.email_notifications = false;
-        app.write_user_preferences(preferences.clone())
-            .await
-            .expect("preferences should update");
-        assert!(!notify_user_refund_status(&state, &refund).await);
-    }
 }
+
+#[cfg(test)]
+#[path = "support/refund_notification_tests.rs"]
+mod refund_notification_tests;

@@ -9,7 +9,8 @@ use aether_contracts::ExecutionTelemetry;
 use aether_data_contracts::repository::usage::UpsertUsageRecord;
 use aether_data_contracts::DataLayerError;
 use aether_runtime_state::{
-    RuntimeQueuePage, RuntimeQueueRedriveOutcome, RuntimeQueueStats, RuntimeQueueStore,
+    RuntimeQueueCapacitySignal, RuntimeQueuePage, RuntimeQueueRedriveOutcome, RuntimeQueueStats,
+    RuntimeQueueStore,
 };
 use async_trait::async_trait;
 use futures_util::{FutureExt, StreamExt};
@@ -590,6 +591,8 @@ pub struct UsageQueueHealthSnapshot {
     pub group_lag: Option<u64>,
     pub oldest_pending_idle_ms: Option<u64>,
     pub dlq_length: u64,
+    /// Absent when the queue is disabled or no backend is configured.
+    pub dlq_capacity: Option<RuntimeQueueCapacitySignal>,
 }
 
 const USAGE_BODY_CAPTURE_POLICY_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -4087,6 +4090,7 @@ impl UsageRuntime {
             group_lag: None,
             oldest_pending_idle_ms: None,
             dlq_length: 0,
+            dlq_capacity: None,
         };
         if !self.config.enabled {
             return Ok(snapshot);
@@ -4101,6 +4105,10 @@ impl UsageRuntime {
         let dlq_stats = runner.stats(&self.config.dlq_stream_key, None).await?;
         snapshot.apply_stream_stats(stream_stats);
         snapshot.dlq_length = dlq_stats.stream_length;
+        snapshot.dlq_capacity = Some(RuntimeQueueCapacitySignal::from_stats(
+            dlq_stats,
+            self.config.dlq_stream_maxlen,
+        ));
         Ok(snapshot)
     }
 
@@ -5182,7 +5190,7 @@ impl UsageRuntime {
         &self,
         data: &T,
         queue: UsageQueue,
-        event: UsageEvent,
+        mut event: UsageEvent,
     ) -> TerminalPersistenceOutcome
     where
         T: UsageRuntimeAccess,
@@ -5215,7 +5223,20 @@ impl UsageRuntime {
                 .await;
         };
 
-        if let Err(err) = queue.enqueue(&event).await {
+        let enqueue_result = match queue.encode_event(&event) {
+            Ok(encoded) => {
+                if encoded.diagnostics_omitted
+                    && self
+                        .try_write_terminal_direct_fallback(data, &mut event, "queue_wire_limit")
+                        .await
+                {
+                    return TerminalPersistenceOutcome::PersistedDirectly;
+                }
+                queue.enqueue_encoded(encoded).await
+            }
+            Err(err) => Err(err),
+        };
+        if let Err(err) = enqueue_result {
             drop(_guard);
             if is_permanent_enqueue_error(&err) {
                 return self
@@ -13275,6 +13296,159 @@ mod tests {
         assert_eq!(queued.data.total_cost_usd, None);
     }
 
+    fn oversized_full_terminal_event(max_bytes: usize) -> (serde_json::Value, UsageEvent) {
+        let body = json!({"content": "full-body".repeat(max_bytes / 16)});
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "oversized-full-capture",
+            UsageEventData {
+                provider_name: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                status_code: Some(200),
+                total_tokens: Some(12),
+                request_body: Some(body.clone()),
+                provider_request_body: Some(body.clone()),
+                response_body: Some(body.clone()),
+                client_response_body: Some(body.clone()),
+                ..UsageEventData::default()
+            },
+        );
+        apply_usage_body_capture_policy_to_event(
+            UsageBodyCapturePolicy {
+                record_level: UsageRequestRecordLevel::Full,
+            },
+            &mut event,
+        );
+        (body, event)
+    }
+
+    #[tokio::test]
+    async fn oversized_full_terminal_capture_is_persisted_without_queue_truncation() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_terminal_events: true,
+            consumer_block_ms: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue_runner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(Arc::clone(&queue_runner), config.clone()).unwrap();
+        let store = EnrichmentCountingQueueStore {
+            records: Mutex::new(Vec::new()),
+            queue: queue_runner,
+            enrich_calls: AtomicUsize::new(0),
+        };
+        let runtime = UsageRuntime::new(config.clone()).unwrap();
+        let (body, event) = oversized_full_terminal_event(config.queue_payload_max_bytes);
+        assert!(
+            event
+                .to_bounded_stream_fields(config.queue_payload_max_bytes)
+                .unwrap()
+                .diagnostics_omitted
+        );
+
+        let outcome = runtime.enqueue_or_write_terminal(&store, event).await;
+
+        assert_eq!(
+            outcome,
+            super::TerminalPersistenceOutcome::PersistedDirectly
+        );
+        assert_eq!(store.enrich_calls.load(Ordering::Acquire), 1);
+        assert_eq!(queue.stats().await.unwrap().stream_length, 0);
+        let records = store.records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        for captured in [
+            &records[0].request_body,
+            &records[0].provider_request_body,
+            &records[0].response_body,
+            &records[0].client_response_body,
+        ] {
+            assert_eq!(captured.as_ref(), Some(&body));
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_full_terminal_capture_keeps_bounded_queue_fallback() {
+        for unavailable in ["writer", "write_failure", "worker_gate", "fallback_gate"] {
+            let config = UsageRuntimeConfig {
+                enabled: true,
+                queue_terminal_events: true,
+                consumer_block_ms: 1,
+                worker_record_concurrency_limit: Some(1),
+                ..UsageRuntimeConfig::default()
+            };
+            let queue_runner: Arc<dyn RuntimeQueueStore> =
+                Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+            let queue = UsageQueue::new(Arc::clone(&queue_runner), config.clone()).unwrap();
+            queue.ensure_consumer_group().await.unwrap();
+            let store = FailingWriteQueueConfiguredUsageStore {
+                queue: Arc::clone(&queue_runner),
+                upsert_attempts: Arc::new(AtomicUsize::new(0)),
+            };
+            let queue_only = QueueOnlyUsageStore {
+                queue: queue_runner,
+                upsert_attempts: Arc::clone(&store.upsert_attempts),
+            };
+            let runtime = UsageRuntime::new(config.clone()).unwrap();
+            let worker_permit = (unavailable == "worker_gate").then(|| {
+                runtime
+                    .worker_record_gate
+                    .as_ref()
+                    .unwrap()
+                    .try_acquire()
+                    .unwrap()
+            });
+            let fallback_permit = (unavailable == "fallback_gate").then(|| {
+                runtime
+                    .terminal_direct_fallback_state
+                    .try_acquire()
+                    .unwrap()
+            });
+            let (_, event) = oversized_full_terminal_event(config.queue_payload_max_bytes);
+
+            let outcome = if unavailable == "writer" {
+                runtime.enqueue_or_write_terminal(&queue_only, event).await
+            } else {
+                runtime.enqueue_or_write_terminal(&store, event).await
+            };
+
+            assert_eq!(
+                outcome,
+                super::TerminalPersistenceOutcome::Queued,
+                "{unavailable}"
+            );
+            assert_eq!(
+                store.upsert_attempts.load(Ordering::Acquire),
+                usize::from(unavailable == "write_failure")
+            );
+            let entries = queue
+                .read_group("oversized-capture-consumer")
+                .await
+                .unwrap();
+            assert_eq!(entries.len(), 1);
+            assert!(entries[0].fields["payload"].len() <= config.queue_payload_max_bytes);
+            let queued = UsageEvent::from_stream_fields(&entries[0].fields).unwrap();
+            assert_eq!(queued.data.total_tokens, Some(12));
+            for (body, state) in [
+                (&queued.data.request_body, queued.data.request_body_state),
+                (
+                    &queued.data.provider_request_body,
+                    queued.data.provider_request_body_state,
+                ),
+                (&queued.data.response_body, queued.data.response_body_state),
+                (
+                    &queued.data.client_response_body,
+                    queued.data.client_response_body_state,
+                ),
+            ] {
+                assert!(body.is_none());
+                assert_eq!(state, Some(UsageBodyCaptureState::Truncated));
+            }
+            assert_eq!(runtime.metrics_snapshot().terminal_enqueue_failed_total, 0);
+            drop((worker_permit, fallback_permit));
+        }
+    }
+
     #[tokio::test]
     async fn terminal_enqueue_failure_uses_bounded_direct_database_fallback() {
         let config = UsageRuntimeConfig {
@@ -14312,7 +14486,7 @@ mod tests {
             .iter()
             .any(|record| record.request_id == blocked_request_id));
 
-        release_build.notify_waiters();
+        release_build.notify_one();
         timeout(Duration::from_secs(2), async {
             loop {
                 let snapshot = runtime.metrics_snapshot();
@@ -14695,6 +14869,89 @@ mod tests {
         let snapshot = runtime.metrics_snapshot();
         assert_eq!(snapshot.terminal_direct_fallback_succeeded_total, 1);
         assert_eq!(snapshot.enqueue_retry_scheduled_total, 0);
+    }
+
+    #[tokio::test]
+    async fn queue_health_exposes_dlq_capacity_and_clears_after_removal() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            dlq_stream_maxlen: 5,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: Arc::clone(&queue),
+        };
+        let runtime = UsageRuntime::new(config.clone()).unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..4 {
+            ids.push(
+                queue
+                    .append_fields_with_maxlen(
+                        &config.dlq_stream_key,
+                        &BTreeMap::from([("payload".to_string(), "fixture".to_string())]),
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let snapshot = runtime.queue_health_snapshot(&store).await.unwrap();
+        assert_eq!(snapshot.dlq_length, 4);
+        let capacity = snapshot.dlq_capacity.unwrap();
+        assert_eq!(capacity.max_length, 5);
+        assert_eq!(capacity.utilization_per_mille, 800);
+        assert!(!capacity.at_retention_boundary);
+        for _ in 0..2 {
+            ids.push(
+                queue
+                    .append_fields_with_maxlen(
+                        &config.dlq_stream_key,
+                        &BTreeMap::from([("payload".to_string(), "fixture".to_string())]),
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let capacity = runtime
+            .queue_health_snapshot(&store)
+            .await
+            .unwrap()
+            .dlq_capacity
+            .unwrap();
+        assert_eq!(capacity.stream_length, 6);
+        assert_eq!(capacity.utilization_per_mille, 1000);
+        assert!(capacity.at_retention_boundary);
+        queue.delete(&config.dlq_stream_key, &ids).await.unwrap();
+        let capacity = runtime
+            .queue_health_snapshot(&store)
+            .await
+            .unwrap()
+            .dlq_capacity
+            .unwrap();
+        assert_eq!(capacity.stream_length, 0);
+        assert_eq!(capacity.utilization_per_mille, 0);
+        assert!(!capacity.at_retention_boundary);
+        assert!(runtime
+            .queue_health_snapshot(&NoRedisUsageStore::default())
+            .await
+            .unwrap()
+            .dlq_capacity
+            .is_none());
+        let disabled = UsageRuntime::new(UsageRuntimeConfig {
+            enabled: false,
+            ..config
+        })
+        .unwrap();
+        assert!(disabled
+            .queue_health_snapshot(&store)
+            .await
+            .unwrap()
+            .dlq_capacity
+            .is_none());
     }
 
     #[tokio::test]

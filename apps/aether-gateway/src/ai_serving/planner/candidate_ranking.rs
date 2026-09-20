@@ -17,7 +17,7 @@ use aether_scheduler_core::{
     SchedulerRankingContext, SchedulerRankingOutcome,
 };
 
-use super::candidate_affinity_cache::read_cached_scheduler_affinity_target;
+use super::candidate_affinity_cache::hydrate_cached_scheduler_affinity_target;
 use super::candidate_resolution::{EligibleLocalExecutionCandidate, LocalExecutionCandidateKind};
 use super::candidate_transport_ranking_facts::{
     resolve_cached_transport_ranking_facts, CandidateTransportRankingFactsCache,
@@ -31,6 +31,7 @@ struct GatewayLocalCandidateRankingPort<'a> {
     required_capabilities: Option<&'a serde_json::Value>,
     ordering_config: SchedulerOrderingConfig,
     routing_policy: Option<&'a ResolvedRoutingPolicy>,
+    affinity_target: Option<&'a Option<SchedulerAffinityTarget>>,
     transport_ranking_facts_cache: Mutex<CandidateTransportRankingFactsCache>,
 }
 
@@ -57,14 +58,18 @@ impl AiCandidateRankingPort for GatewayLocalCandidateRankingPort<'_> {
         normalized_client_api_format: &str,
         affinity_requested_model: Option<&str>,
     ) -> Result<Option<Self::AffinityTarget>, Self::Error> {
-        Ok(read_cached_scheduler_affinity_target(
+        if let Some(target) = self.affinity_target {
+            return Ok(target.clone());
+        }
+        Ok(hydrate_cached_scheduler_affinity_target(
             self.state,
             self.auth_snapshot,
             self.client_session_affinity,
             normalized_client_api_format,
             affinity_requested_model,
             self.routing_policy,
-        ))
+        )
+        .await)
     }
 
     fn cached_affinity_matches(
@@ -129,6 +134,7 @@ pub(crate) async fn rank_eligible_local_execution_candidates(
     client_session_affinity: Option<&ClientSessionAffinity>,
     required_capabilities: Option<&serde_json::Value>,
     routing_policy: Option<&ResolvedRoutingPolicy>,
+    affinity_target: Option<&Option<SchedulerAffinityTarget>>,
 ) -> Vec<EligibleLocalExecutionCandidate> {
     let ordering_config = scheduler_ordering_config_for_routing_policy(routing_policy);
     let port = GatewayLocalCandidateRankingPort {
@@ -139,6 +145,7 @@ pub(crate) async fn rank_eligible_local_execution_candidates(
         required_capabilities,
         ordering_config,
         routing_policy,
+        affinity_target,
         transport_ranking_facts_cache: Mutex::new(CandidateTransportRankingFactsCache::default()),
     };
 

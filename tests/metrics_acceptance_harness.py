@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack
+import hashlib
 import json
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -24,6 +26,9 @@ TOKEN = "metrics-fixture-token"
 ALERT = "AetherBillingGuardFailOpen"
 METRIC = "aether_gateway_billing_fail_open_total"
 OPERATIONS = {"daily_quota", "rpm"}
+DLQ_ALERT = "AetherUsageDeadLetterRetentionBoundary"
+DLQ_METRIC = "aether_gateway_usage_queue_dlq_at_retention_boundary"
+DLQ_STREAM = "aether:synthetic:delivery-drill:dlq"
 ROOT = Path(__file__).resolve().parent.parent
 LOCAL_HTTP = build_opener(ProxyHandler({}))
 
@@ -88,6 +93,17 @@ class Fixture:
                 and alert["labels"].get("component") == "gateway"
             }
         return OPERATIONS <= operations
+
+    def observed_dlq(self, status: str, instance: str) -> bool:
+        with self.lock:
+            return any(
+                alert.get("status") == status
+                and alert.get("labels") == {
+                    "alertname": DLQ_ALERT, "severity": "critical", "job": "aether",
+                    "instance": instance, "stream": DLQ_STREAM,
+                }
+                for delivery in self.deliveries for alert in delivery["alerts"]
+            )
 
 
 class LoopbackServer(ThreadingHTTPServer):
@@ -174,6 +190,8 @@ def main() -> int:
     parser.add_argument("--promtool-bin", default="promtool")
     parser.add_argument("--alertmanager-bin", default="alertmanager")
     parser.add_argument("--evidence-dir", type=Path, help="new directory for retained logs and results")
+    parser.add_argument("--scenario", choices=("billing", "dlq"), default="billing",
+                        help="DLQ uses the unchanged checked-in rule and synthetic capacity samples")
     args = parser.parse_args()
     for binary in (args.prometheus_bin, args.promtool_bin, args.alertmanager_bin):
         if shutil.which(binary) is None:
@@ -185,7 +203,14 @@ def main() -> int:
         evidence = Path(tempfile.mkdtemp(prefix="aeris-metrics-evidence-"))
     print(f"Evidence: {evidence}", flush=True)
 
-    healthy, failed = fixture_metrics(True), fixture_metrics(False)
+    if args.scenario == "dlq":
+        def dlq_payload(value):
+            return (f"# HELP {DLQ_METRIC} Synthetic retained DLQ length at the configured threshold.\n"
+                    f"# TYPE {DLQ_METRIC} gauge\n"
+                    f'{DLQ_METRIC}{{stream="{DLQ_STREAM}"}} {value}\n').encode()
+        healthy, failed = dlq_payload(0), dlq_payload(1)
+    else:
+        healthy, failed = fixture_metrics(True), fixture_metrics(False)
     for name, payload in (("healthy", healthy), ("failed", failed)):
         (evidence / f"{name}.prom").write_bytes(payload)
         result = subprocess.run([args.promtool_bin, "check", "metrics"], input=payload,
@@ -199,6 +224,11 @@ def main() -> int:
     fixture = Fixture(healthy)
     try:
         with ExitStack() as stack:
+            def terminate(signum, _frame):
+                raise SystemExit(128 + signum)
+
+            previous_sigterm = signal.signal(signal.SIGTERM, terminate)
+            stack.callback(signal.signal, signal.SIGTERM, previous_sigterm)
             state_dir = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="aeris-metrics-state-")))
             server = LoopbackServer(("127.0.0.1", 0), fixture.handler())
             stack.callback(server.server_close)
@@ -223,7 +253,8 @@ def main() -> int:
             # JSON is a YAML subset accepted by both binaries. No production config is edited.
             am_config = evidence / "alertmanager.json"
             write_json(am_config, {
-                "route": {"receiver": "fixture", "group_by": ["alertname", "component", "operation"],
+                "route": {"receiver": "fixture", "group_by": ["alertname", "component", "operation",
+                                                               "job", "instance", "stream"],
                           "group_wait": "0s", "group_interval": "1s", "repeat_interval": "1h"},
                 "receivers": [{"name": "fixture", "webhook_configs": [
                     {"url": f"http://{fixture_host}/alerts", "send_resolved": True}]}],
@@ -234,6 +265,11 @@ def main() -> int:
                 "expr": f"sum by (component, operation) (increase({METRIC}[10s])) > 0",
                 "for": "2s", "labels": {"severity": "critical"},
             }]}]})
+            if args.scenario == "dlq":
+                rules = ROOT / "docs/operations/prometheus/aether-alerts.yml"
+                # Retain exactly what the real rule evaluator reads, without rewriting
+                # thresholds, labels, pending periods, or annotations for this scenario.
+                (evidence / "checked-in-rules.yml").write_bytes(rules.read_bytes())
             prom_config = evidence / "prometheus.json"
             write_json(prom_config, {
                 "global": {"scrape_interval": "1s", "evaluation_interval": "1s", "scrape_timeout": "500ms"},
@@ -260,6 +296,35 @@ def main() -> int:
             wait_for("authenticated scrape", lambda: sample_is(prom_url, 'up{job="aether"}', 1), processes)
             wait_for("rejected unauthenticated scrape",
                      lambda: sample_is(prom_url, 'up{job="missing_token"}', 0), processes)
+            if args.scenario == "dlq":
+                wait_for("healthy capacity scrape", lambda: sample_is(
+                    prom_url, f'{DLQ_METRIC}{{job="aether"}}', 0), processes)
+                with fixture.lock:
+                    assert not fixture.deliveries, "healthy DLQ unexpectedly notified"
+                    fixture.payload = failed
+                wait_for("capacity threshold scrape", lambda: sample_is(
+                    prom_url, f'{DLQ_METRIC}{{job="aether"}}', 1), processes)
+                wait_for("checked-in DLQ alert firing with preserved routing labels",
+                         lambda: fixture.observed_dlq("firing", fixture_host), processes)
+                with fixture.lock:
+                    fixture.payload = healthy
+                wait_for("recovered capacity scrape", lambda: sample_is(
+                    prom_url, f'{DLQ_METRIC}{{job="aether"}}', 0), processes)
+                wait_for("DLQ resolved webhook with preserved routing labels",
+                         lambda: fixture.observed_dlq("resolved", fixture_host), processes)
+                assert sample_is(prom_url, 'up{job="aether"}', 1)
+                assert not query(prom_url, f'ALERTS{{alertname="{DLQ_ALERT}",alertstate="firing"}}')
+                (evidence / "targets.json").write_bytes(get(f"{prom_url}/api/v1/targets"))
+                write_json(evidence / "result.json", {
+                    "status": "passed", "scenario": "dlq", "fixture": "synthetic capacity samples",
+                    "alert": DLQ_ALERT,
+                    "rules_sha256": hashlib.sha256(rules.read_bytes()).hexdigest(),
+                    "delivery": "Prometheus -> Alertmanager v2 API -> webhook v4",
+                    "verified_labels": ["alertname", "severity", "job", "instance", "stream"],
+                    "production_rule_timing": "unchanged checked-in rule",
+                })
+                print("PASS: authenticated capacity scrape, checked-in DLQ rule, firing and resolved webhooks")
+                return 0
             wait_for("two baseline samples", lambda: bool(query(
                 prom_url, f'min(count_over_time({METRIC}{{job="aether"}}[10s])) >= 2')), processes)
             assert sample_is(prom_url, f'{METRIC}{{job="aether"}}', 0)

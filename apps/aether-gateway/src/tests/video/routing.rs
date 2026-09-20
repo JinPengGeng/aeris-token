@@ -82,10 +82,7 @@ async fn gateway_hides_video_task_when_auth_context_is_unavailable_even_with_opt
         EXECUTION_PATH_EXECUTION_RUNTIME_SYNC
     );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(
-        payload,
-        serde_json::json!({"detail": "Video task not found"})
-    );
+    assert_eq!(payload, crate::video_tasks::not_found_body());
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
@@ -163,10 +160,7 @@ async fn gateway_hides_video_task_when_auth_context_is_unavailable_without_opt_i
         EXECUTION_PATH_EXECUTION_RUNTIME_SYNC
     );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(
-        payload,
-        serde_json::json!({"detail": "Video task not found"})
-    );
+    assert_eq!(payload, crate::video_tasks::not_found_body());
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(
@@ -236,7 +230,7 @@ async fn gateway_rejects_video_get_without_credentials_at_auth_boundary() {
     );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(payload["error"]["type"], "authentication_error");
-    assert_eq!(payload["error"]["message"], "无效的API密钥");
+    assert_eq!(payload["error"]["message"], "Invalid API key");
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 

@@ -2,7 +2,7 @@ use super::{
     AdminGlobalModelListQuery, AdminProviderModelListQuery, CreateAdminGlobalModelRecord,
     DataLayerError, GatewayDataState, PublicCatalogModelListQuery, PublicCatalogModelSearchQuery,
     PublicGlobalModelQuery, StoredAdminGlobalModel, StoredAdminGlobalModelPage,
-    StoredAdminProviderModel, StoredApiFormatCandidateRowsQuery,
+    StoredAdminProviderModel, StoredApiFormatCandidateRowsQuery, StoredGlobalModelDeclaration,
     StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateRowsByKeyIdsQuery,
     StoredPoolKeyCandidateRowsQuery, StoredProviderActiveGlobalModel, StoredProviderModelStats,
     StoredPublicCatalogModel, StoredPublicGlobalModel, StoredPublicGlobalModelPage,
@@ -92,6 +92,27 @@ impl GatewayDataState {
             async {
                 match &self.minimal_candidate_selection_reader {
                     Some(repository) => repository.list_for_exact_api_format(api_format).await,
+                    None => Ok(Vec::new()),
+                }
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn list_declared_global_models_for_api_format(
+        &self,
+        api_format: &str,
+    ) -> Result<Vec<StoredGlobalModelDeclaration>, DataLayerError> {
+        crate::request_diagnostics::observe_db_operation(
+            "candidate_selection",
+            self.database_pool_summary(),
+            async {
+                match &self.minimal_candidate_selection_reader {
+                    Some(repository) => {
+                        repository
+                            .list_declared_global_models_for_api_format(api_format)
+                            .await
+                    }
                     None => Ok(Vec::new()),
                 }
             },

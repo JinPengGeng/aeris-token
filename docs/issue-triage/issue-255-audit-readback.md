@@ -2,6 +2,11 @@
 
 Date: 2026-09-13. Decision: Accepted for development, P1 / M.
 
+2026-09-17 follow-up: system-config PUT now has atomic audit delivery. See
+`issue-255-durable-audit-delivery.md` for its implementation and current acceptance.
+The no-outbox statements below describe this earlier checkpoint and the other
+mutation families, not the newly migrated system-config PUT path.
+
 ## Evidence and scope
 
 The original no-writer claim was fixed by #294 and the client-disconnect

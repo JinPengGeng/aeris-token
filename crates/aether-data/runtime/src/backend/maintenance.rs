@@ -8,6 +8,7 @@ use crate::maintenance::{
     StatsDailyAggregationSummary, StatsHourlyAggregationInput, StatsHourlyAggregationSummary,
     WalletDailyUsageAggregationInput, WalletDailyUsageAggregationResult,
 };
+use crate::repository::audit::CreateAdminAuditLog;
 use crate::repository::system::{
     AdminSystemPurgeSummary, AdminSystemPurgeTarget, AdminSystemStats,
     AdminSystemUsageAggregateImportMode, AdminSystemUsageAggregateImportSummary,
@@ -246,6 +247,22 @@ impl DataBackends {
         match self.sql_backend() {
             Some(backend) => backend
                 .upsert_system_config_entry(key, value, description)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn upsert_system_config_entry_with_audit(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+        description: Option<&str>,
+        audit: &CreateAdminAuditLog,
+    ) -> Result<Option<StoredSystemConfigEntry>, DataLayerError> {
+        match self.sql_backend() {
+            Some(backend) => backend
+                .upsert_system_config_entry_with_audit(key, value, description, audit)
                 .await
                 .map(Some),
             None => Ok(None),
@@ -507,6 +524,25 @@ impl<'a> SqlBackendRef<'a> {
             Self::Postgres(postgres) => {
                 postgres
                     .upsert_system_config_entry(key, value, description)
+                    .await
+            }
+            #[cfg(not(feature = "postgres"))]
+            Self::Disabled(_) => unreachable!("a SQL backend cannot exist without a driver"),
+        }
+    }
+
+    async fn upsert_system_config_entry_with_audit(
+        self,
+        key: &str,
+        value: &serde_json::Value,
+        description: Option<&str>,
+        audit: &CreateAdminAuditLog,
+    ) -> Result<StoredSystemConfigEntry, DataLayerError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                postgres
+                    .upsert_system_config_entry_with_audit(key, value, description, audit)
                     .await
             }
             #[cfg(not(feature = "postgres"))]

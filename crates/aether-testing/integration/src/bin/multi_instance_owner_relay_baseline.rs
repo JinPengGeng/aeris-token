@@ -1,14 +1,16 @@
 // Gateway-backed benchmark scenarios live outside the reusable testkit.
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use aether_gateway::tunnel_protocol as protocol;
 use aether_gateway::GatewayDataConfig;
+use aether_runtime_state::{RedisClientConfig, RuntimeState};
 use aether_testkit::{
     init_test_runtime_for, insert_tunnel_harness_auth_headers, prepare_aether_postgres_schema,
-    reserve_local_port, run_http_load_probe, wait_until, GatewayHarness, GatewayHarnessConfig,
-    HttpLoadProbeConfig, HttpLoadProbeResponseMode, HttpLoadProbeResult, ManagedPostgresServer,
-    ManagedRedisServer, TUNNEL_HARNESS_GENERATION, TUNNEL_HARNESS_MANAGEMENT_TOKEN,
+    run_http_load_probe, wait_until, GatewayHarness, GatewayHarnessConfig, HttpLoadProbeConfig,
+    HttpLoadProbeResponseMode, HttpLoadProbeResult, ManagedPostgresServer, ManagedRedisServer,
+    ReservedListener, TUNNEL_HARNESS_GENERATION, TUNNEL_HARNESS_MANAGEMENT_TOKEN,
 };
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Method;
@@ -20,6 +22,7 @@ use tokio_tungstenite::tungstenite::Message;
 const PROXY_TUNNEL_PATH: &str = "/api/internal/proxy-tunnel";
 const TUNNEL_RELAY_PATH_PREFIX: &str = "/api/internal/tunnel/relay";
 const NODE_ID: &str = "node-owner-relay-baseline";
+const RELAY_AUTH_SECRET: &[u8] = b"tunnel-harness-relay-secret-32-bytes-minimum";
 
 #[derive(Debug, Clone)]
 struct MultiInstanceOwnerRelayBaselineConfig {
@@ -50,6 +53,10 @@ impl Default for MultiInstanceOwnerRelayBaselineConfig {
 struct MultiInstanceOwnerRelayBaselineReport {
     suite: &'static str,
     redis_url: String,
+    runtime_key_prefix: String,
+    owner_runtime_backend: &'static str,
+    forwarder_runtime_backend: &'static str,
+    redis_attachment_observed: bool,
     postgres_url: String,
     owner_instance_id: &'static str,
     forwarder_instance_id: &'static str,
@@ -105,6 +112,14 @@ async fn run_suite(
         })
         .expect("redis url should be resolved");
 
+    let runtime_key_prefix = format!("aether-owner-relay-baseline-{}", uuid::Uuid::now_v7());
+    // Each Gateway owns independent Redis clients in the same run-scoped keyspace.
+    // Construction and explicit PING must succeed; there is no memory fallback.
+    let owner_runtime = redis_runtime_state(&redis_url, &runtime_key_prefix).await?;
+    let forwarder_runtime = redis_runtime_state(&redis_url, &runtime_key_prefix).await?;
+    let owner_runtime_backend = owner_runtime.backend_kind().as_str();
+    let forwarder_runtime_backend = forwarder_runtime.backend_kind().as_str();
+
     let managed_postgres = if config.postgres_url.is_none() {
         Some(ManagedPostgresServer::start().await?)
     } else {
@@ -125,12 +140,12 @@ async fn run_suite(
 
     let shared_data = GatewayDataConfig::from_postgres_url(postgres_url.clone(), false);
 
-    let owner_port = reserve_local_port()?;
-    let forwarder_port = reserve_local_port()?;
-    let owner_base_url = format!("http://127.0.0.1:{owner_port}");
-    let forwarder_base_url = format!("http://127.0.0.1:{forwarder_port}");
+    let owner_listener = ReservedListener::bind().await?;
+    let forwarder_listener = ReservedListener::bind().await?;
+    let owner_base_url = owner_listener.base_url();
+    let forwarder_base_url = forwarder_listener.base_url();
 
-    let owner_gateway = GatewayHarness::start_on_port(
+    let owner_gateway = GatewayHarness::start_with_listener_and_runtime_state(
         GatewayHarnessConfig {
             upstream_base_url: "http://127.0.0.1:1".to_string(),
             data_config: Some(shared_data.clone()),
@@ -139,10 +154,11 @@ async fn run_suite(
             tunnel_instance_id: Some("gateway-owner".to_string()),
             tunnel_relay_base_url: Some(owner_base_url.clone()),
         },
-        owner_port,
+        owner_listener,
+        owner_runtime,
     )
     .await?;
-    let forwarder_gateway = GatewayHarness::start_on_port(
+    let forwarder_gateway = GatewayHarness::start_with_listener_and_runtime_state(
         GatewayHarnessConfig {
             upstream_base_url: "http://127.0.0.1:1".to_string(),
             data_config: Some(shared_data),
@@ -151,13 +167,24 @@ async fn run_suite(
             tunnel_instance_id: Some("gateway-forwarder".to_string()),
             tunnel_relay_base_url: Some(forwarder_base_url.clone()),
         },
-        forwarder_port,
+        forwarder_listener,
+        forwarder_runtime.clone(),
     )
     .await?;
 
     let peer = connect_protocol_peer(owner_gateway.base_url(), config.chunk_delay).await?;
 
     wait_for_owner_attachment(&forwarder_base_url).await?;
+    let attachment = forwarder_runtime
+        .kv_get(&format!("tunnel:attachments:{NODE_ID}"))
+        .await?
+        .ok_or_else(|| std::io::Error::other("owner attachment missing from Redis"))?;
+    let attachment: serde_json::Value = serde_json::from_str(&attachment)?;
+    if attachment["gateway_instance_id"] != "gateway-owner"
+        || attachment["relay_base_url"] != owner_base_url
+    {
+        return Err(std::io::Error::other("Redis owner attachment identity mismatch").into());
+    }
 
     let direct_owner_relay = run_http_load_probe(&HttpLoadProbeConfig {
         url: format!(
@@ -165,7 +192,7 @@ async fn run_suite(
             owner_base = owner_gateway.base_url()
         ),
         method: Method::POST,
-        headers: relay_headers(),
+        headers: relay_headers(&relay_envelope(), "gateway-owner"),
         body: Some(relay_envelope()),
         total_requests: config.total_requests,
         concurrency: config.concurrency,
@@ -182,7 +209,7 @@ async fn run_suite(
             forwarder_base = forwarder_gateway.base_url()
         ),
         method: Method::POST,
-        headers: relay_headers(),
+        headers: relay_headers(&relay_envelope(), "gateway-forwarder"),
         body: Some(relay_envelope()),
         total_requests: config.total_requests,
         concurrency: config.concurrency,
@@ -200,6 +227,10 @@ async fn run_suite(
     Ok(MultiInstanceOwnerRelayBaselineReport {
         suite: "multi_instance_owner_relay_baseline",
         redis_url,
+        runtime_key_prefix,
+        owner_runtime_backend,
+        forwarder_runtime_backend,
+        redis_attachment_observed: true,
         postgres_url,
         owner_instance_id: "gateway-owner",
         forwarder_instance_id: "gateway-forwarder",
@@ -214,6 +245,22 @@ async fn run_suite(
     })
 }
 
+async fn redis_runtime_state(
+    redis_url: &str,
+    key_prefix: &str,
+) -> Result<Arc<RuntimeState>, Box<dyn std::error::Error>> {
+    let runtime = RuntimeState::redis(
+        RedisClientConfig {
+            url: redis_url.to_string(),
+            key_prefix: Some(key_prefix.to_string()),
+        },
+        Some(1_000),
+    )
+    .await?;
+    runtime.ping().await?;
+    Ok(Arc::new(runtime))
+}
+
 async fn wait_for_owner_attachment(forwarder_base_url: &str) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -224,10 +271,22 @@ async fn wait_for_owner_attachment(forwarder_base_url: &str) -> Result<(), Strin
         let client = client.clone();
         let target_url = target_url.clone();
         async move {
+            let envelope = relay_envelope();
             let response = client
                 .post(target_url)
+                .headers(
+                    relay_headers(&envelope, "gateway-forwarder")
+                        .into_iter()
+                        .map(|(key, value)| {
+                            (
+                                http::header::HeaderName::from_bytes(key.as_bytes()).unwrap(),
+                                http::header::HeaderValue::from_str(&value).unwrap(),
+                            )
+                        })
+                        .collect(),
+                )
                 .header("content-type", "application/octet-stream")
-                .body(relay_envelope())
+                .body(envelope)
                 .send()
                 .await;
             match response {
@@ -235,6 +294,12 @@ async fn wait_for_owner_attachment(forwarder_base_url: &str) -> Result<(), Strin
                     Ok(body) => body == "owner-relay-ok",
                     Err(_) => false,
                 },
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    eprintln!("owner attachment probe returned {status}: {body}");
+                    false
+                }
                 _ => false,
             }
         }
@@ -247,11 +312,62 @@ async fn wait_for_owner_attachment(forwarder_base_url: &str) -> Result<(), Strin
     }
 }
 
-fn relay_headers() -> std::collections::BTreeMap<String, String> {
-    std::collections::BTreeMap::from([(
-        "content-type".to_string(),
-        "application/octet-stream".to_string(),
-    )])
+fn relay_headers(
+    envelope: &[u8],
+    owner_instance_id: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let metadata_len =
+        u32::from_be_bytes(envelope[..4].try_into().expect("relay envelope header")) as usize;
+    let metadata_end = 4 + metadata_len;
+    let metadata = &envelope[..metadata_end];
+    let body = &envelope[metadata_end..];
+    let digest = aether_contracts::tunnel::tunnel_relay_payload_digest(metadata, body);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_secs();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let signature = aether_contracts::tunnel::sign_tunnel_relay_request(
+        RELAY_AUTH_SECRET,
+        "load-probe",
+        owner_instance_id,
+        NODE_ID,
+        "",
+        false,
+        timestamp,
+        &nonce,
+        &digest,
+    );
+    std::collections::BTreeMap::from([
+        (
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        ),
+        (
+            aether_contracts::tunnel::TUNNEL_RELAY_AUTH_SENDER_HEADER.to_string(),
+            "load-probe".to_string(),
+        ),
+        (
+            aether_contracts::tunnel::TUNNEL_RELAY_OWNER_INSTANCE_HEADER.to_string(),
+            owner_instance_id.to_string(),
+        ),
+        (
+            aether_contracts::tunnel::TUNNEL_RELAY_AUTH_TIMESTAMP_HEADER.to_string(),
+            timestamp.to_string(),
+        ),
+        (
+            aether_contracts::tunnel::TUNNEL_RELAY_AUTH_NONCE_HEADER.to_string(),
+            nonce,
+        ),
+        (
+            aether_contracts::tunnel::TUNNEL_RELAY_AUTH_PAYLOAD_HEADER.to_string(),
+            digest.encode_header_value(),
+        ),
+        (
+            aether_contracts::tunnel::TUNNEL_RELAY_AUTH_SIGNATURE_HEADER.to_string(),
+            signature,
+        ),
+    ])
 }
 
 fn relay_envelope() -> Vec<u8> {
@@ -311,6 +427,29 @@ async fn connect_protocol_peer(
 
     let (socket, _response) = tokio_tungstenite::connect_async(request).await?;
     let (mut sink, mut stream) = socket.split();
+    sink.send(Message::Binary(
+        protocol::encode_hello(&protocol::HelloPayload {
+            protocol_version: aether_contracts::tunnel::CURRENT_TUNNEL_PROTOCOL_VERSION,
+            capabilities: vec![
+                "flow-control".to_string(),
+                "reset-stream".to_string(),
+                "graceful-drain".to_string(),
+            ],
+            session_id: Some("owner-relay-baseline-session".to_string()),
+            replica_id: Some("owner-relay-baseline-replica".to_string()),
+        })
+        .into(),
+    ))
+    .await?;
+    sink.send(Message::Binary(
+        protocol::encode_settings(&protocol::SettingsPayload {
+            initial_stream_window_bytes: 4 * 1024 * 1024,
+            min_window_update_bytes: 1024 * 1024,
+            drain_deadline_ms: 30_000,
+        })
+        .into(),
+    ))
+    .await?;
     Ok(tokio::spawn(async move {
         while let Some(message) = stream.next().await {
             let Ok(message) = message else {
@@ -351,7 +490,7 @@ async fn seed_tunnel_auth(postgres_url: &str) -> Result<(), Box<dyn std::error::
 INSERT INTO users (
   id, email, username, role, auth_source, email_verified, is_active, is_deleted,
   created_at, updated_at
-) VALUES ($1, $2, $3, 'admin', 'local', TRUE, TRUE, FALSE, 1, 1)
+) VALUES ($1, $2, $3, 'admin', 'local', TRUE, TRUE, FALSE, now(), now())
 ON CONFLICT (id) DO UPDATE SET
   email = EXCLUDED.email,
   username = EXCLUDED.username,
@@ -378,7 +517,7 @@ ON CONFLICT (id) DO UPDATE SET
 INSERT INTO management_tokens (
   id, user_id, name, token_hash, token_prefix, permissions, usage_count,
   is_active, created_at, updated_at
-) VALUES ($1, $2, $3, $4, 'ae-tunnel-harness', $5, 0, TRUE, 1, 1)
+) VALUES ($1, $2, $3, $4, $6, $5, 0, TRUE, now(), now())
 ON CONFLICT (id) DO UPDATE SET
   user_id = EXCLUDED.user_id,
   name = EXCLUDED.name,
@@ -394,6 +533,12 @@ ON CONFLICT (id) DO UPDATE SET
     .bind("owner relay tunnel token")
     .bind(token_hash)
     .bind(serde_json::json!(["admin:proxy_nodes:admin"]))
+    .bind(
+        TUNNEL_HARNESS_MANAGEMENT_TOKEN
+            .chars()
+            .take(12)
+            .collect::<String>(),
+    )
     .execute(&mut *transaction)
     .await?;
 
@@ -406,7 +551,7 @@ INSERT INTO proxy_nodes (
   stream_errors
 ) VALUES (
   $1, $2, 'owner relay baseline node', '127.0.0.1', 0, 'offline', 30,
-  0, 0, FALSE, 1, 1, 0, TRUE, FALSE, 0, 0, 0
+  0, 0, FALSE, now(), now(), 0, TRUE, FALSE, 0, 0, 0
 )
 ON CONFLICT (id) DO UPDATE SET
   tunnel_generation = EXCLUDED.tunnel_generation,
@@ -450,7 +595,17 @@ where
             let payload = protocol::decode_payload(&data, &header).unwrap_or_default();
             let _ = serde_json::from_slice::<protocol::RequestMeta>(&payload);
         }
-        protocol::REQUEST_BODY if header.flags & protocol::FLAG_END_STREAM != 0 => {
+        protocol::REQUEST_BODY => {
+            let payload = protocol::decode_payload(&data, &header).unwrap_or_default();
+            if !payload.is_empty() {
+                sink.send(Message::Binary(
+                    protocol::encode_window_update(header.stream_id, payload.len() as u32).into(),
+                ))
+                .await?;
+            }
+            if header.flags & protocol::FLAG_END_STREAM == 0 {
+                return Ok(());
+            }
             let response_meta = protocol::ResponseMeta {
                 status: 200,
                 headers: vec![(

@@ -1,7 +1,7 @@
 mod types;
 
 pub use types::{
-    StoredVideoTask, UpsertVideoTask, VideoTaskLookupKey, VideoTaskModelCount,
+    StoredVideoTask, UpsertVideoTask, VideoTaskClaim, VideoTaskLookupKey, VideoTaskModelCount,
     VideoTaskQueryFilter, VideoTaskReadRepository, VideoTaskRepository, VideoTaskStatus,
     VideoTaskStatusCount, VideoTaskWriteRepository,
 };

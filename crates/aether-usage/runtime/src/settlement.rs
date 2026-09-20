@@ -52,6 +52,15 @@ pub trait UsageSettlementWriter: Send + Sync {
             newly_finalized: false,
         })
     }
+
+    /// Records an independently retryable provider-cost receipt after a completed
+    /// usage row has a confirmed terminal billing settlement.
+    async fn capture_provider_cost_for_usage(
+        &self,
+        _usage: &StoredRequestUsageAudit,
+    ) -> Result<(), DataLayerError> {
+        Ok(())
+    }
 }
 
 pub async fn reconcile_usage_policy_cost_for_event(
@@ -200,9 +209,14 @@ pub(crate) async fn settle_usage_with_reconciled_cost(
         }
     }
 
-    if usage.billing_status != "pending"
-        || (usage.status == "cancelled"
-            && !cancelled_request_fee_is_billable(usage.request_metadata.as_ref()))
+    if usage.billing_status != "pending" {
+        if completed_usage_has_final_billing_status(usage) {
+            writer.capture_provider_cost_for_usage(usage).await?;
+        }
+        return Ok(());
+    }
+    if usage.status == "cancelled"
+        && !cancelled_request_fee_is_billable(usage.request_metadata.as_ref())
     {
         return Ok(());
     }
@@ -223,11 +237,28 @@ pub(crate) async fn settle_usage_with_reconciled_cost(
         && usage.status == "completed"
         && outcome
             .settlement
+            .as_ref()
             .is_some_and(|settlement| settlement.billing_status == "insufficient_quota")
     {
         aether_runtime::record_billing_insufficient_quota();
     }
+    if usage.status == "completed"
+        && outcome
+            .settlement
+            .as_ref()
+            .is_some_and(|settlement| final_billing_status(&settlement.billing_status))
+    {
+        writer.capture_provider_cost_for_usage(usage).await?;
+    }
     Ok(())
+}
+
+fn completed_usage_has_final_billing_status(usage: &StoredRequestUsageAudit) -> bool {
+    usage.status == "completed" && final_billing_status(&usage.billing_status)
+}
+
+fn final_billing_status(billing_status: &str) -> bool {
+    matches!(billing_status, "settled" | "insufficient_quota")
 }
 
 fn plan_usage_reservation_reconciliation_is_deferred(metadata: Option<&serde_json::Value>) -> bool {
@@ -307,6 +338,10 @@ fn finite_cost(value: f64) -> Result<f64, DataLayerError> {
 mod tests {
     mod reconciliation_reuse {
         include!("settlement_reuse_tests.rs");
+    }
+
+    mod provider_cost_capture {
+        include!("settlement_provider_cost_capture_tests.rs");
     }
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

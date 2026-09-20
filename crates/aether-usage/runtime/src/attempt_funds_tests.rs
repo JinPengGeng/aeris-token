@@ -27,6 +27,7 @@ struct Store {
     fail_financial: AtomicBool,
     omit_parent: AtomicBool,
     financial: Mutex<Vec<UsageAttemptFundsEvent>>,
+    provider_cost_captures: AtomicUsize,
     parents: AtomicUsize,
     legacy: AtomicUsize,
     enrichment: AtomicUsize,
@@ -58,6 +59,15 @@ impl UsageSettlementWriter for Store {
     ) -> Result<Option<StoredUsageSettlement>, DataLayerError> {
         self.legacy.fetch_add(1, Ordering::Relaxed);
         Ok(None)
+    }
+
+    async fn capture_provider_cost_for_usage(
+        &self,
+        usage: &StoredRequestUsageAudit,
+    ) -> Result<(), DataLayerError> {
+        assert_eq!(usage.status, "completed");
+        self.provider_cost_captures.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -161,9 +171,34 @@ async fn attempt_outcomes_reach_worker_and_direct_without_finalizing_parent_or_l
             vec![*event.data.attempt_funds.unwrap()]
         );
         assert_eq!(store.parents.load(Ordering::Relaxed), 0);
+        assert_eq!(store.provider_cost_captures.load(Ordering::Relaxed), 0);
         assert_eq!(store.legacy.load(Ordering::Relaxed), 0);
         assert_eq!(store.enrichment.load(Ordering::Relaxed), 0);
     }
+}
+
+#[tokio::test]
+async fn funded_attempt_outcome_waits_for_completed_parent_lifecycle_before_cost_capture() {
+    let store = Store::default();
+    crate::worker::write_event_record(&store, &event())
+        .await
+        .expect("attempt outcome should persist");
+    assert_eq!(store.provider_cost_captures.load(Ordering::Relaxed), 0);
+
+    let mut parent = event();
+    parent.event_type = UsageEventType::Completed;
+    parent
+        .data
+        .attempt_funds
+        .as_mut()
+        .expect("attempt event exists")
+        .action = UsageAttemptFundsAction::ParentLifecycle;
+    crate::worker::write_event_record(&store, &parent)
+        .await
+        .expect("completed parent lifecycle should persist");
+
+    assert_eq!(store.parents.load(Ordering::Relaxed), 1);
+    assert_eq!(store.provider_cost_captures.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

@@ -7,6 +7,14 @@ use tracing::{info, warn};
 
 use crate::control::GatewayControlDecision;
 
+mod wallet_balances;
+pub(crate) use wallet_balances::build_admin_wallet_balance_audit;
+
+mod group_members;
+mod sessions;
+pub(crate) use group_members::build_user_group_members_update_audit;
+pub(crate) use sessions::build_admin_session_revocation_audit;
+
 #[derive(Debug, Clone)]
 pub(crate) struct AdminAuditEvent {
     pub(crate) event_name: &'static str,
@@ -21,6 +29,53 @@ pub(crate) struct AdminAuditEvent {
 /// before Hyper receives the response.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingAdminAudit(pub(crate) CreateAdminAuditLog);
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DurableAdminAuditEnqueued;
+
+pub(crate) fn build_system_config_update_audit(
+    decision: &GatewayControlDecision,
+    target_id: &str,
+    client_ip: Option<&str>,
+) -> Option<CreateAdminAuditLog> {
+    let principal = decision.admin_principal.as_ref()?;
+    let (target_id, target_truncated) =
+        sanitize_admin_audit_target_id_with_truncation(target_id.to_string());
+    let id = uuid::Uuid::now_v7().to_string();
+    Some(CreateAdminAuditLog {
+        id: id.clone(),
+        event_type: "admin_mutation".to_string(),
+        user_id: Some(principal.user_id.clone()),
+        api_key_id: None,
+        description: "admin action: update_system_config".to_string(),
+        ip_address: client_ip
+            .and_then(|value| value.parse::<std::net::IpAddr>().ok())
+            .map(|value| value.to_string()),
+        user_agent: None,
+        // Client trace headers are not length bounded. Keep the durable request
+        // correlation server-controlled while structured logs retain trace_id.
+        request_id: Some(id),
+        event_metadata: Some(json!({
+            "schema_version": 1,
+            "event_name": "admin_system_config_updated",
+            "status": "completed",
+            "admin_role": principal.user_role.as_str(),
+            "session_id": principal.session_id.as_deref(),
+            "management_token_id": principal.management_token_id.as_deref(),
+            "route_family": "system_manage",
+            "route_kind": "config_set",
+            "method": "PUT",
+            "path": "/api/admin/system/configs/[key]",
+            "action": "update_system_config",
+            "target_type": "system_config",
+            "target_id": target_id,
+            "target_truncated": target_truncated.then_some(true),
+        })),
+        status_code: Some(200),
+        error_message: None,
+        created_at: Utc::now(),
+    })
+}
 
 pub(crate) fn attach_admin_audit_event(
     response: &mut Response<Body>,
@@ -45,6 +100,10 @@ pub(crate) fn emit_admin_audit(
     control_decision: Option<&GatewayControlDecision>,
     client_ip: std::net::IpAddr,
 ) {
+    let durable_enqueued = response
+        .extensions()
+        .get::<DurableAdminAuditEnqueued>()
+        .is_some();
     let sanitized_path_and_query = sanitize_admin_audit_path(path_and_query);
     let Some(decision) = control_decision else {
         return;
@@ -164,7 +223,9 @@ pub(crate) fn emit_admin_audit(
         error_message: None,
         created_at: Utc::now(),
     };
-    response.extensions_mut().insert(PendingAdminAudit(record));
+    if !durable_enqueued {
+        response.extensions_mut().insert(PendingAdminAudit(record));
+    }
 }
 
 pub(crate) async fn persist_admin_audit(

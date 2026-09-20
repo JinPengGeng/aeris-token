@@ -25,7 +25,7 @@ use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
 use aether_scheduler_core::{
     candidate_model_names, candidate_supports_required_capability, matches_model_mapping,
     normalize_api_format, resolve_provider_model_name, select_provider_model_name,
-    ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate,
+    ClientSessionAffinity, SchedulerAffinityTarget, SchedulerMinimalCandidateSelectionCandidate,
 };
 use aether_wallet::{ProviderBillingType, ProviderQuotaSnapshot};
 use regex::Regex;
@@ -33,6 +33,10 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 pub(crate) use self::runtime::{
+    current_candidate_runtime_skip_reason,
+    current_candidate_runtime_skip_reason_excluding_pending_candidate,
+    current_candidate_runtime_skip_reason_for_revalidation,
+    read_candidate_runtime_selection_snapshot_with_fresh_catalog,
     select_with_auth_concurrency_wait, wait_for_auth_api_key_concurrency_retry,
 };
 pub(crate) use self::selection::{
@@ -189,6 +193,7 @@ pub(crate) async fn list_selectable_enumerated_candidates_with_skip_reasons(
     now_unix_secs: u64,
     ranking_seed: u64,
     ordering_config: SchedulerOrderingConfig,
+    affinity_target: Option<&Option<SchedulerAffinityTarget>>,
 ) -> Result<
     (
         Vec<SchedulerMinimalCandidateSelectionCandidate>,
@@ -213,6 +218,7 @@ pub(crate) async fn list_selectable_enumerated_candidates_with_skip_reasons(
         ranking_seed,
         ordering_config,
         priority_affinity_key,
+        affinity_target,
     )
     .await
 }

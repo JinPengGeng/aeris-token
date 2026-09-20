@@ -24,6 +24,7 @@ fn sample_video_task(
     client_api_format: &str,
 ) -> UpsertVideoTask {
     UpsertVideoTask {
+        row_revision: 0,
         id: id.to_string(),
         short_id: Some(format!("short-{id}")),
         request_id: format!("request-{id}"),
@@ -971,4 +972,336 @@ async fn user_scoped_video_task_cancel_rechecks_owner_before_side_effects() {
         .expect("task lookup should succeed")
         .expect("task should remain present");
     assert_eq!(stored.status, VideoTaskStatus::Processing);
+}
+
+#[tokio::test]
+async fn video_snapshot_conflicts_restore_authoritative_registry_without_rebasing_stale_work() {
+    use crate::video_tasks::{LocalVideoTaskSnapshot, LocalVideoTaskTransport};
+    let repository = Arc::new(InMemoryVideoTaskRepository::default());
+    let stored = repository
+        .upsert(sample_video_task(
+            "revision-conflict",
+            VideoTaskStatus::Processing,
+            100,
+            "sora-2",
+            "user-1",
+            "openai:video",
+        ))
+        .await
+        .unwrap();
+    let state = AppState::new()
+        .unwrap()
+        .with_video_task_data_repository_for_tests(Arc::clone(&repository));
+    let snapshot = LocalVideoTaskSnapshot::from_stored_task_with_transport(
+        &stored,
+        LocalVideoTaskTransport {
+            upstream_base_url: "https://example.test".to_string(),
+            provider_name: Some("openai".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "provider-key-1".to_string(),
+            headers: Default::default(),
+            content_type: None,
+            model_name: Some("sora-2".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        },
+    )
+    .unwrap();
+    state.video_tasks.record_snapshot(snapshot.clone());
+    let mut winner: UpsertVideoTask = stored.clone().into();
+    winner.progress_percent = 80;
+    // Same wall-clock second: only the revision establishes write ownership.
+    let winner = repository
+        .update_if_active(winner, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut stale = snapshot.clone();
+    stale.apply_provider_body(
+        json!({"status":"completed", "progress":100})
+            .as_object()
+            .unwrap(),
+    );
+    if let crate::video_tasks::LocalVideoTaskSnapshot::OpenAi(seed) = &mut stale {
+        seed.native_response = Some(json!({"status":"done", "provider_extension":"loser"}));
+        seed.expires_at_unix_secs = Some(999);
+    }
+    assert!(!state
+        .upsert_video_task_snapshot(&stale)
+        .await
+        .unwrap()
+        .accepted());
+    let current = state
+        .video_tasks
+        .snapshot_for_route(Some("openai"), "/v1/videos/revision-conflict")
+        .unwrap();
+    assert_eq!(current.row_revision(), winner.row_revision);
+    assert_eq!(
+        current.to_upsert_record().status,
+        VideoTaskStatus::Processing
+    );
+    assert_eq!(current.to_upsert_record().progress_percent, 80);
+    if let crate::video_tasks::LocalVideoTaskSnapshot::OpenAi(seed) = &current {
+        assert!(
+            seed.native_response.is_none(),
+            "conflict recovery cannot publish loser native data"
+        );
+        assert!(seed.expires_at_unix_secs.is_none());
+    }
+    assert!(!state
+        .persist_video_task_finalize(
+            Some("openai"),
+            "/v1/videos/revision-conflict",
+            "openai_video_cancel_sync_finalize",
+            Some(&json!({"video_task_row_revision":stored.row_revision})),
+        )
+        .await
+        .unwrap());
+    let after = repository
+        .find(VideoTaskLookupKey::Id(&stored.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.row_revision, winner.row_revision);
+    assert_eq!(after.status, VideoTaskStatus::Processing);
+
+    assert!(state
+        .persist_video_task_finalize(
+            Some("openai"),
+            "/v1/videos/revision-conflict",
+            "openai_video_cancel_sync_finalize",
+            Some(&json!({"video_task_row_revision":winner.row_revision})),
+        )
+        .await
+        .unwrap());
+    state.video_tasks.record_snapshot(snapshot);
+    assert_eq!(
+        state
+            .video_tasks
+            .snapshot_for_route(Some("openai"), "/v1/videos/revision-conflict")
+            .unwrap()
+            .to_upsert_record()
+            .status,
+        VideoTaskStatus::Cancelled
+    );
+    assert!(!state
+        .upsert_video_task_snapshot(&stale)
+        .await
+        .unwrap()
+        .accepted());
+    assert_eq!(
+        repository
+            .find(VideoTaskLookupKey::Id(&stored.id))
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        VideoTaskStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn video_snapshots_without_a_writer_remain_local_and_finalize_without_a_database_revision() {
+    use crate::video_tasks::{LocalVideoTaskSnapshot, LocalVideoTaskTransport};
+    let state = AppState::new().unwrap();
+    assert!(!state.data.has_video_task_writer());
+    let task = sample_video_task(
+        "local-no-writer",
+        VideoTaskStatus::Processing,
+        100,
+        "sora-2",
+        "user-1",
+        "openai:video",
+    )
+    .into_stored();
+    let mut snapshot = LocalVideoTaskSnapshot::from_stored_task_with_transport(
+        &task,
+        LocalVideoTaskTransport {
+            upstream_base_url: "https://example.test".to_string(),
+            provider_name: Some("openai".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "provider-key-1".to_string(),
+            headers: Default::default(),
+            content_type: None,
+            model_name: Some("sora-2".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        },
+    )
+    .unwrap();
+    let LocalVideoTaskSnapshot::OpenAi(seed) = &mut snapshot else {
+        unreachable!()
+    };
+    seed.persistence.row_revision = 0;
+    let outcome = state.upsert_video_task_snapshot(&snapshot).await.unwrap();
+    assert!(outcome.accepted());
+    assert!(
+        outcome.stored().is_none(),
+        "local mode must not invent a persisted row"
+    );
+    assert_eq!(
+        state
+            .video_tasks
+            .snapshot_for_route(Some("openai"), "/v1/videos/local-no-writer")
+            .unwrap()
+            .row_revision(),
+        0
+    );
+    assert!(state
+        .persist_video_task_finalize(
+            Some("openai"),
+            "/v1/videos/local-no-writer",
+            "openai_video_cancel_sync_finalize",
+            None
+        )
+        .await
+        .unwrap());
+    assert_eq!(
+        state
+            .video_tasks
+            .snapshot_for_route(Some("openai"), "/v1/videos/local-no-writer")
+            .unwrap()
+            .to_upsert_record()
+            .status,
+        VideoTaskStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn video_terminal_native_presentation_rechecks_revision_and_preserves_lifecycle() {
+    use crate::video_tasks::{LocalVideoTaskSnapshot, LocalVideoTaskTransport};
+    let repository = Arc::new(InMemoryVideoTaskRepository::default());
+    let mut input = sample_video_task(
+        "terminal-native",
+        VideoTaskStatus::Completed,
+        100,
+        "grok-imagine-video",
+        "user-1",
+        "openai:video",
+    );
+    input.video_url = Some("https://example.test/video.mp4".to_string());
+    input.client_api_format = Some("xai:video".to_string());
+    let row = repository.upsert(input).await.unwrap();
+    let state = AppState::new()
+        .unwrap()
+        .with_video_task_data_repository_for_tests(Arc::clone(&repository));
+    let expected = LocalVideoTaskSnapshot::from_stored_task_with_transport(
+        &row,
+        LocalVideoTaskTransport {
+            upstream_base_url: "https://example.test".to_string(),
+            provider_name: Some("xai".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "provider-key-1".to_string(),
+            headers: Default::default(),
+            content_type: None,
+            model_name: Some("grok-imagine-video".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        },
+    )
+    .unwrap();
+    state.video_tasks.record_snapshot(expected.clone());
+    let mut projected = expected.clone();
+    projected.apply_provider_body(
+        json!({"status":"done", "expires_at":300,
+        "video":{"url":"https://example.test/video.mp4", "respect_moderation":true},
+        "provider_extension":"preserved"})
+        .as_object()
+        .unwrap(),
+    );
+    assert!(state
+        .enrich_video_task_terminal_presentation(&expected, &projected)
+        .await
+        .unwrap());
+    let cached = state
+        .video_tasks
+        .snapshot_for_route(Some("openai"), "/v1/videos/terminal-native")
+        .unwrap();
+    let LocalVideoTaskSnapshot::OpenAi(seed) = &cached else {
+        unreachable!()
+    };
+    assert_eq!(
+        seed.native_response.as_ref().unwrap()["video"]["respect_moderation"],
+        true
+    );
+    assert_eq!(
+        seed.native_response.as_ref().unwrap()["provider_extension"],
+        "preserved"
+    );
+    assert_eq!(seed.expires_at_unix_secs, Some(300));
+    assert_eq!(seed.persistence.row_revision, row.row_revision);
+    assert!(seed
+        .build_get_follow_up_plan("no-repeat-native-fetch")
+        .is_none());
+    let unchanged = repository
+        .find(VideoTaskLookupKey::Id(&row.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.row_revision, row.row_revision);
+    assert_eq!(unchanged.status, VideoTaskStatus::Completed);
+    assert_eq!(unchanged.completed_at_unix_secs, row.completed_at_unix_secs);
+    assert!(
+        !state
+            .enrich_video_task_terminal_presentation(&expected, &projected)
+            .await
+            .unwrap(),
+        "an older display fetch cannot replace a populated authoritative view"
+    );
+
+    let mut deletion: UpsertVideoTask = unchanged.into();
+    deletion.status = VideoTaskStatus::Deleted;
+    let deleted = repository
+        .update_if_active(deletion, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!state
+        .enrich_video_task_terminal_presentation(&expected, &projected)
+        .await
+        .unwrap());
+    let cached = state
+        .video_tasks
+        .snapshot_for_route(Some("openai"), "/v1/videos/terminal-native")
+        .unwrap();
+    assert_eq!(cached.row_revision(), deleted.row_revision);
+    assert_eq!(cached.to_upsert_record().status, VideoTaskStatus::Deleted);
+    let LocalVideoTaskSnapshot::OpenAi(seed) = cached else {
+        unreachable!()
+    };
+    assert!(
+        seed.native_response.is_none(),
+        "a lost display fetch must not contaminate deletion"
+    );
+
+    let local = AppState::new().unwrap();
+    let mut local_expected = expected;
+    let LocalVideoTaskSnapshot::OpenAi(seed) = &mut local_expected else {
+        unreachable!()
+    };
+    seed.persistence.row_revision = 0;
+    let mut local_projected = projected;
+    let LocalVideoTaskSnapshot::OpenAi(seed) = &mut local_projected else {
+        unreachable!()
+    };
+    seed.persistence.row_revision = 0;
+    local.video_tasks.record_snapshot(local_expected.clone());
+    assert!(local
+        .enrich_video_task_terminal_presentation(&local_expected, &local_projected)
+        .await
+        .unwrap());
+    assert_eq!(
+        local
+            .video_tasks
+            .snapshot_for_route(Some("openai"), "/v1/videos/terminal-native")
+            .unwrap()
+            .row_revision(),
+        0
+    );
 }

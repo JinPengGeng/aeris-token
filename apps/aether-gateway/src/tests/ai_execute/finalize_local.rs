@@ -427,7 +427,7 @@ async fn gateway_executes_openai_chat_sync_upstream_stream_via_local_finalize_re
             "Bearer sk-client-openai-finalize-local",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-stream-sync-direct-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -899,7 +899,7 @@ async fn gateway_executes_openai_chat_cross_format_upstream_stream_via_local_fin
             "Bearer sk-client-openai-chat-xfmt-stream",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-xfmt-stream-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -2300,7 +2300,7 @@ async fn gateway_executes_openai_chat_cross_format_claude_upstream_sync_via_loca
             "Bearer sk-client-openai-chat-claude-direct-sync",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-claude-direct-sync-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");
@@ -2665,7 +2665,7 @@ async fn gateway_executes_openai_chat_cross_format_gemini_upstream_sync_via_loca
             "Bearer sk-client-openai-chat-gemini-direct-sync",
         )
         .header(TRACE_ID_HEADER, "trace-openai-chat-gemini-direct-sync-123")
-        .body("{\"model\":\"gpt-5\",\"messages\":[]}")
+        .body("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
         .send()
         .await
         .expect("request should succeed");

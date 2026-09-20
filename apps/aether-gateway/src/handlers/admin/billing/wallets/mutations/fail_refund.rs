@@ -59,10 +59,14 @@ pub(in super::super) async fn build_admin_wallet_fail_refund_response(
 
     // Read the current state before mutation so a notification is tied to a
     // real transition; terminal retries are rejected by the repository.
-    let refund_before_fail = state
-        .app()
-        .find_wallet_refund(&wallet_id, &refund_id)
-        .await?;
+    let refund_before_fail = if state.app().data.has_refund_notification_backend() {
+        None
+    } else {
+        state
+            .app()
+            .find_wallet_refund(&wallet_id, &refund_id)
+            .await?
+    };
 
     let operator_id = admin_wallet_operator_id(request_context);
     match state
@@ -70,12 +74,14 @@ pub(in super::super) async fn build_admin_wallet_fail_refund_response(
         .await?
     {
         crate::AdminWalletMutationOutcome::Applied((wallet, refund, transaction)) => {
-            if refund_status_notification_should_send(
-                refund_before_fail
-                    .as_ref()
-                    .map(|existing| existing.status.as_str()),
-                &refund.status,
-            ) {
+            if !state.app().data.has_refund_notification_backend()
+                && refund_status_notification_should_send(
+                    refund_before_fail
+                        .as_ref()
+                        .map(|existing| existing.status.as_str()),
+                    &refund.status,
+                )
+            {
                 notify_user_refund_status(state, &refund).await;
             }
             let owner = resolve_admin_wallet_owner_summary(state, &wallet).await?;

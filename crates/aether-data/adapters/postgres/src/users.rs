@@ -2,8 +2,10 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
+use aether_data_contracts::repository::audit::CreateAdminAuditLog;
 use aether_data_contracts::repository::users::{
     is_valid_bcrypt_hash, last_oauth_unbind_denial, normalize_user_group_name,
+    AdminUserSessionRevocationOutcome, AdminUserSessionsRevocationOutcome,
     BindUserOAuthLinkOutcome, BindUserOAuthLinkSessionExpectation, DeleteUserOAuthLinkOutcome,
     LdapAuthUserProvisioningOutcome, ResolveOAuthLinkedUserOutcome, StoredUserAuthRecord,
     StoredUserExportRow, StoredUserGroup, StoredUserGroupMember, StoredUserGroupMembership,
@@ -98,7 +100,7 @@ const POSTGRES_PREPARE_USER_FACTS_FOR_DELETION_SQL: &[&str] = &[
 
 const POSTGRES_ANONYMIZE_USER_HISTORY_SQL: &[&str] = &[
     "UPDATE request_candidates SET username = NULL, api_key_name = NULL WHERE user_id = $1",
-    "UPDATE video_tasks SET username = NULL, api_key_name = NULL WHERE user_id = $1",
+    "UPDATE video_tasks SET username = NULL, api_key_name = NULL, row_revision = row_revision + 1, updated_at = GREATEST(updated_at, NOW()) WHERE user_id = $1",
     "UPDATE usage SET username = NULL, api_key_name = NULL WHERE user_id = $1",
     "UPDATE stats_user_daily SET username = NULL WHERE user_id = $1",
     "UPDATE stats_user_summary SET username = NULL WHERE user_id = $1",
@@ -114,6 +116,15 @@ const POSTGRES_ANONYMIZE_USER_HISTORY_SQL: &[&str] = &[
 
 const POSTGRES_ANONYMIZE_USER_API_KEY_HISTORY_SQL: &str =
     "UPDATE stats_daily_api_key SET api_key_name = NULL WHERE api_key_id IN (SELECT id FROM api_keys WHERE user_id = $1)";
+
+#[cfg(test)]
+pub(crate) fn video_task_anonymization_sql() -> &'static str {
+    POSTGRES_ANONYMIZE_USER_HISTORY_SQL
+        .iter()
+        .copied()
+        .find(|sql| sql.starts_with("UPDATE video_tasks "))
+        .expect("video task user anonymization statement")
+}
 
 const LIST_USERS_BY_USERNAME_SEARCH_SQL: &str = r#"
 SELECT
@@ -1044,44 +1055,158 @@ WHERE id = $1
         group_id: &str,
         user_ids: &[String],
     ) -> Result<Vec<StoredUserGroupMember>, DataLayerError> {
-        let mut tx = self.pool.begin().await.map_postgres_err()?;
-        // Serialize membership replacement with the per-user CAS path by locking all affected
-        // users in deterministic order before deleting or inserting membership rows.
-        let mut locked_user_ids = normalized_ids(user_ids);
-        let existing_user_ids = sqlx::query_scalar::<_, String>(
-            "SELECT user_id FROM user_group_members WHERE group_id = $1 ORDER BY user_id",
-        )
-        .bind(group_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_postgres_err()?;
-        locked_user_ids.extend(existing_user_ids);
-        locked_user_ids.sort();
-        locked_user_ids.dedup();
-        if !locked_user_ids.is_empty() {
-            sqlx::query("SELECT id FROM users WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE")
-                .bind(&locked_user_ids)
-                .fetch_all(&mut *tx)
+        self.replace_user_group_members_inner(group_id, user_ids, None)
+            .await
+    }
+
+    pub async fn replace_user_group_members_with_audit(
+        &self,
+        group_id: &str,
+        user_ids: &[String],
+        audit: &aether_data_contracts::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<Vec<StoredUserGroupMember>>, DataLayerError> {
+        self.replace_user_group_members_inner(group_id, user_ids, Some(audit))
+            .await
+            .map(Some)
+    }
+
+    async fn replace_user_group_members_inner(
+        &self,
+        group_id: &str,
+        user_ids: &[String],
+        audit: Option<&aether_data_contracts::repository::audit::CreateAdminAuditLog>,
+    ) -> Result<Vec<StoredUserGroupMember>, DataLayerError> {
+        const MAX_LOCK_ATTEMPTS: u32 = 16;
+        let audit_payload = audit
+            .map(|record| {
+                record.validate()?;
+                serde_json::to_value(record).map_err(|_| {
+                    DataLayerError::InvalidInput(
+                        "invalid group membership audit intent".to_string(),
+                    )
+                })
+            })
+            .transpose()?;
+        let desired_user_ids = normalized_ids(user_ids);
+        for attempt in 0..MAX_LOCK_ATTEMPTS {
+            if attempt > 0 {
+                // No transaction/row locks survive a retry. Bound contention
+                // without spinning or replaying any membership/audit writes.
+                tokio::time::sleep(std::time::Duration::from_millis(1_u64 << attempt.min(7))).await;
+            }
+            let mut tx = self.pool.begin().await.map_postgres_err()?;
+            // The post-lock membership read must see commits that happened
+            // while this transaction waited for the group row.
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                .execute(&mut *tx)
                 .await
                 .map_postgres_err()?;
-        }
-        sqlx::query("DELETE FROM user_group_members WHERE group_id = $1")
-            .bind(group_id)
-            .execute(&mut *tx)
-            .await
-            .map_postgres_err()?;
-        for user_id in normalized_ids(user_ids) {
-            sqlx::query(
-                "INSERT INTO user_group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT (group_id, user_id) DO NOTHING",
+            let mut locked_user_ids = desired_user_ids.clone();
+            let existing_user_ids = sqlx::query_scalar::<_, String>(
+                "SELECT user_id FROM user_group_members WHERE group_id = $1 ORDER BY user_id",
             )
             .bind(group_id)
-            .bind(user_id)
-            .execute(&mut *tx)
+            .fetch_all(&mut *tx)
             .await
             .map_postgres_err()?;
+            locked_user_ids.extend(existing_user_ids);
+            locked_user_ids.sort();
+            locked_user_ids.dedup();
+            if !locked_user_ids.is_empty() {
+                // User CAS/add/delete all lock users before membership writes.
+                // Never wait holding a partial set: user deletion additionally
+                // locks active admins first, which can differ from ID order.
+                let locked = sqlx::query(
+                    "SELECT id FROM users WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE NOWAIT",
+                )
+                .bind(&locked_user_ids)
+                .fetch_all(&mut *tx)
+                .await;
+                if let Err(error) = locked {
+                    let unavailable = error
+                        .as_database_error()
+                        .and_then(|error| error.code())
+                        .is_some_and(|code| code == "55P03");
+                    tx.rollback().await.map_postgres_err()?;
+                    if unavailable {
+                        continue;
+                    }
+                    return Err(error).map_postgres_err();
+                }
+            }
+            // Group-first FOR UPDATE would deadlock against a user writer
+            // waiting on the group's FK KEY SHARE. Acquire it only after users;
+            // it serializes whole-group replaces and blocks new FK insertions.
+            let group_exists = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM user_groups WHERE id = $1 FOR UPDATE",
+            )
+            .bind(group_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            if group_exists.is_none() {
+                tx.rollback().await.map_postgres_err()?;
+                return Err(DataLayerError::InvalidInput(
+                    "user group does not exist".to_string(),
+                ));
+            }
+            let current_user_ids = sqlx::query_scalar::<_, String>(
+                "SELECT user_id FROM user_group_members WHERE group_id = $1 ORDER BY user_id",
+            )
+            .bind(group_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_postgres_err()?;
+            if current_user_ids
+                .iter()
+                .any(|id| locked_user_ids.binary_search(id).is_err())
+            {
+                // A writer committed while we waited. Do not acquire more user
+                // locks under the group lock: release everything and resnapshot.
+                tx.rollback().await.map_postgres_err()?;
+                continue;
+            }
+            sqlx::query("DELETE FROM user_group_members WHERE group_id = $1")
+                .bind(group_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+            for user_id in &desired_user_ids {
+                sqlx::query(
+                    "INSERT INTO user_group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT (group_id, user_id) DO NOTHING",
+                )
+                .bind(group_id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+            }
+            if let (Some(record), Some(payload)) = (audit, audit_payload.as_ref()) {
+                // A repeated intent ID must roll back the entire business transaction.
+                // Delivery retries operate only on the outbox, never on memberships.
+                sqlx::query("INSERT INTO admin_audit_delivery (event_id, payload) VALUES ($1, $2)")
+                    .bind(&record.id)
+                    .bind(payload)
+                    .execute(&mut *tx)
+                    .await
+                    .map_postgres_err()?;
+            }
+            // Read the response while the affected users are still locked, so a
+            // subsequent mutation cannot replace the result between commit and read.
+            let mut builder = QueryBuilder::<Postgres>::new(USER_GROUP_MEMBER_COLUMNS);
+            builder
+                .push(" WHERE user_group_members.group_id = ")
+                .push_bind(group_id)
+                .push(" ORDER BY users.username ASC, users.id ASC");
+            let members =
+                collect_query_rows(builder.build().fetch(&mut *tx), map_user_group_member_row)
+                    .await?;
+            tx.commit().await.map_postgres_err()?;
+            return Ok(members);
         }
-        tx.commit().await.map_postgres_err()?;
-        self.list_user_group_members(group_id).await
+        Err(DataLayerError::TimedOut(
+            "group membership replacement contention; retry the request".to_string(),
+        ))
     }
 
     pub async fn list_user_groups_for_user(
@@ -3190,6 +3315,107 @@ FOR UPDATE
         Ok(result.rows_affected())
     }
 
+    pub async fn admin_revoke_user_session_with_audit(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+        audit: &CreateAdminAuditLog,
+    ) -> Result<AdminUserSessionRevocationOutcome, DataLayerError> {
+        audit.validate()?;
+        let payload = serde_json::to_value(audit).map_err(|error| {
+            DataLayerError::InvalidInput(format!(
+                "admin audit payload serialization failed: {error}"
+            ))
+        })?;
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let revoked: Option<Option<chrono::DateTime<chrono::Utc>>> = sqlx::query_scalar(
+            "SELECT revoked_at FROM user_sessions WHERE user_id=$1 AND id=$2 FOR UPDATE",
+        )
+        .bind(user_id)
+        .bind(session_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        let Some(revoked) = revoked else {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(AdminUserSessionRevocationOutcome::NotFound);
+        };
+        let outcome = if revoked.is_some() {
+            AdminUserSessionRevocationOutcome::AlreadyRevoked
+        } else {
+            let changed = sqlx::query(
+                "UPDATE user_sessions SET revoked_at=$3,revoke_reason=$4,updated_at=$3 \
+                 WHERE user_id=$1 AND id=$2 AND revoked_at IS NULL",
+            )
+            .bind(user_id)
+            .bind(session_id)
+            .bind(revoked_at)
+            .bind(reason.chars().take(100).collect::<String>())
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?
+            .rows_affected();
+            if changed != 1 {
+                return Err(DataLayerError::UnexpectedValue(
+                    "locked user session was not revoked".to_string(),
+                ));
+            }
+            AdminUserSessionRevocationOutcome::Revoked
+        };
+        sqlx::query("INSERT INTO admin_audit_delivery(event_id,payload) VALUES($1,$2)")
+            .bind(&audit.id)
+            .bind(payload)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        tx.commit().await.map_postgres_err()?;
+        Ok(outcome)
+    }
+
+    pub async fn admin_revoke_all_user_sessions_with_audit(
+        &self,
+        user_id: &str,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+        audit: &CreateAdminAuditLog,
+    ) -> Result<AdminUserSessionsRevocationOutcome, DataLayerError> {
+        audit.validate()?;
+        let payload = serde_json::to_value(audit).map_err(|error| {
+            DataLayerError::InvalidInput(format!(
+                "admin audit payload serialization failed: {error}"
+            ))
+        })?;
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let user_exists: Option<String> =
+            sqlx::query_scalar("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        if user_exists.is_none() {
+            tx.rollback().await.map_postgres_err()?;
+            return Ok(AdminUserSessionsRevocationOutcome::NotFound);
+        }
+        let revoked = sqlx::query(REVOKE_ALL_USER_SESSIONS_SQL)
+            .bind(user_id)
+            .bind(revoked_at)
+            .bind(reason.chars().take(100).collect::<String>())
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?
+            .rows_affected();
+        sqlx::query("INSERT INTO admin_audit_delivery(event_id,payload) VALUES($1,$2)")
+            .bind(&audit.id)
+            .bind(payload)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        tx.commit().await.map_postgres_err()?;
+        Ok(AdminUserSessionsRevocationOutcome::Revoked(revoked))
+    }
+
     pub async fn count_active_local_admin_users_with_valid_password(
         &self,
     ) -> Result<u64, DataLayerError> {
@@ -3577,6 +3803,16 @@ impl UserReadRepository for SqlxUserReadRepository {
         user_ids: &[String],
     ) -> Result<Vec<StoredUserGroupMember>, DataLayerError> {
         self.replace_user_group_members(group_id, user_ids).await
+    }
+
+    async fn replace_user_group_members_with_audit(
+        &self,
+        group_id: &str,
+        user_ids: &[String],
+        audit: &aether_data_contracts::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<Vec<StoredUserGroupMember>>, DataLayerError> {
+        self.replace_user_group_members_with_audit(group_id, user_ids, audit)
+            .await
     }
 
     async fn list_user_groups_for_user(
@@ -4253,6 +4489,31 @@ FOR UPDATE OF users, user_sessions
             .await
     }
 
+    async fn admin_revoke_user_session_with_audit(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+        audit: &CreateAdminAuditLog,
+    ) -> Result<Option<AdminUserSessionRevocationOutcome>, DataLayerError> {
+        self.admin_revoke_user_session_with_audit(user_id, session_id, revoked_at, reason, audit)
+            .await
+            .map(Some)
+    }
+
+    async fn admin_revoke_all_user_sessions_with_audit(
+        &self,
+        user_id: &str,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+        audit: &CreateAdminAuditLog,
+    ) -> Result<Option<AdminUserSessionsRevocationOutcome>, DataLayerError> {
+        self.admin_revoke_all_user_sessions_with_audit(user_id, revoked_at, reason, audit)
+            .await
+            .map(Some)
+    }
+
     async fn count_active_admin_users(&self) -> Result<u64, DataLayerError> {
         self.count_active_admin_users().await
     }
@@ -4274,6 +4535,9 @@ mod admin_invariant_tests {
 
     #[test]
     fn active_admin_mutations_use_a_deterministic_postgres_row_lock() {
+        let video_sql = super::video_task_anonymization_sql();
+        assert!(video_sql.contains("row_revision = row_revision + 1"));
+        assert!(video_sql.contains("updated_at = GREATEST(updated_at, NOW())"));
         let normalized = POSTGRES_LOCK_ACTIVE_ADMINS_SQL
             .split_whitespace()
             .collect::<Vec<_>>()
@@ -4333,3 +4597,18 @@ mod admin_invariant_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod admin_session_audit_tests;
+
+#[cfg(test)]
+#[path = "users/admin_session_existence_tests.rs"]
+mod admin_session_existence_tests;
+
+#[cfg(test)]
+#[path = "users/group_audit_tests.rs"]
+mod group_audit_tests;
+
+#[cfg(test)]
+#[path = "users/group_concurrency_tests.rs"]
+mod group_concurrency_tests;

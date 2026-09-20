@@ -1,6 +1,7 @@
 use http::Uri;
 
 use super::{classify_control_route, headers, GatewayPublicRequestContext};
+use crate::control::management_token_required_permission;
 use crate::handlers::shared::local_proxy_route_requires_buffered_body;
 
 #[test]
@@ -39,6 +40,80 @@ fn classifies_admin_billing_apply_preset_as_admin_proxy_route() {
         Some("admin:billing")
     );
     assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
+fn classifies_admin_provider_cost_routes_as_billing_routes() {
+    let headers = headers(&[]);
+    let routes = [
+        (
+            http::Method::GET,
+            "/api/admin/billing/provider-costs/prices",
+            "list_provider_cost_prices",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/billing/provider-costs/prices/import",
+            "import_provider_cost_prices",
+        ),
+        (
+            http::Method::GET,
+            "/api/admin/billing/provider-costs/snapshots",
+            "summarize_provider_cost_snapshots",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/billing/provider-costs/snapshots/import",
+            "import_provider_cost_snapshots",
+        ),
+    ];
+
+    for (method, path, route_kind) in routes {
+        let uri: Uri = path.parse().expect("uri should parse");
+        let decision =
+            classify_control_route(&method, &uri, &headers).expect("route should classify");
+        assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+        assert_eq!(decision.route_family.as_deref(), Some("billing_manage"));
+        assert_eq!(decision.route_kind.as_deref(), Some(route_kind));
+        assert_eq!(
+            decision.auth_endpoint_signature.as_deref(),
+            Some("admin:billing")
+        );
+        let expected_permission = if method == http::Method::GET {
+            "admin:billing:read"
+        } else {
+            "admin:billing:write"
+        };
+        assert_eq!(
+            management_token_required_permission(&method, &decision).as_deref(),
+            Some(expected_permission)
+        );
+    }
+}
+
+#[test]
+fn admin_provider_cost_import_routes_buffer_request_body() {
+    let headers = headers(&[]);
+    for path in [
+        "/api/admin/billing/provider-costs/prices/import",
+        "/api/admin/billing/provider-costs/snapshots/import",
+    ] {
+        let method = http::Method::POST;
+        let uri: Uri = path.parse().expect("uri should parse");
+        let decision =
+            classify_control_route(&method, &uri, &headers).expect("route should classify");
+        let context = GatewayPublicRequestContext::from_request_parts(
+            "trace-provider-cost-import",
+            &method,
+            &uri,
+            &headers,
+            Some(decision),
+        );
+        assert!(
+            local_proxy_route_requires_buffered_body(&context),
+            "{path} should buffer request body"
+        );
+    }
 }
 
 #[test]

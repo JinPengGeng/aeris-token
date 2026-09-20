@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     GeminiVideoTaskSeed, LocalVideoTaskReadResponse, LocalVideoTaskRegistryMutation,
-    LocalVideoTaskSnapshot, LocalVideoTaskStatus, OpenAiVideoTaskSeed,
+    LocalVideoTaskSnapshot, OpenAiVideoTaskSeed,
 };
 
 /// Completed task snapshots contain prompts and provider metadata, so retain only a
@@ -24,6 +24,17 @@ pub struct VideoTaskRegistry {
 
 impl VideoTaskRegistry {
     pub fn insert(&mut self, mut snapshot: LocalVideoTaskSnapshot) {
+        let existing = match &snapshot {
+            LocalVideoTaskSnapshot::OpenAi(seed) => self.openai.get(&seed.local_task_id),
+            LocalVideoTaskSnapshot::Gemini(seed) => self.gemini.get(&seed.local_short_id),
+        };
+        // Bound snapshots are authoritative database observations. A delayed publisher may
+        // never replace a newer observation, or mutate the contents of the same revision.
+        if existing.is_some_and(|current| {
+            current.row_revision() > 0 && current.row_revision() >= snapshot.row_revision()
+        }) {
+            return;
+        }
         snapshot.sanitize_persisted_diagnostics();
         match &snapshot {
             LocalVideoTaskSnapshot::OpenAi(seed) => {
@@ -34,6 +45,51 @@ impl VideoTaskRegistry {
             }
         }
         self.prune_terminal();
+    }
+
+    pub fn replace_local_snapshot(
+        &mut self,
+        expected: &LocalVideoTaskSnapshot,
+        mut replacement: LocalVideoTaskSnapshot,
+    ) -> bool {
+        if expected.row_revision() != 0 || replacement.row_revision() != 0 {
+            return false;
+        }
+        let current = match expected {
+            LocalVideoTaskSnapshot::OpenAi(seed) => self.openai.get_mut(&seed.local_task_id),
+            LocalVideoTaskSnapshot::Gemini(seed) => self.gemini.get_mut(&seed.local_short_id),
+        };
+        let Some(current) = current else {
+            return false;
+        };
+        if current != expected {
+            return false;
+        }
+        replacement.sanitize_persisted_diagnostics();
+        *current = replacement;
+        self.prune_terminal();
+        true
+    }
+
+    pub fn enrich_terminal_presentation(
+        &mut self,
+        expected: &LocalVideoTaskSnapshot,
+        projected: &LocalVideoTaskSnapshot,
+    ) -> bool {
+        let Some(enriched) = expected.with_terminal_presentation(projected) else {
+            return false;
+        };
+        let LocalVideoTaskSnapshot::OpenAi(seed) = expected else {
+            return false;
+        };
+        let Some(current) = self.openai.get_mut(&seed.local_task_id) else {
+            return false;
+        };
+        if current != expected {
+            return false;
+        }
+        *current = enriched;
+        true
     }
 
     pub fn read_openai(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse> {
@@ -73,22 +129,24 @@ impl VideoTaskRegistry {
     }
 
     pub fn apply_mutation(&mut self, mutation: LocalVideoTaskRegistryMutation) {
-        match mutation {
-            LocalVideoTaskRegistryMutation::OpenAiCancelled { task_id } => {
-                if let Some(LocalVideoTaskSnapshot::OpenAi(seed)) = self.openai.get_mut(&task_id) {
-                    seed.status = LocalVideoTaskStatus::Cancelled;
-                }
-            }
-            LocalVideoTaskRegistryMutation::OpenAiDeleted { task_id } => {
-                if let Some(LocalVideoTaskSnapshot::OpenAi(seed)) = self.openai.get_mut(&task_id) {
-                    seed.status = LocalVideoTaskStatus::Deleted;
-                }
-            }
-            LocalVideoTaskRegistryMutation::GeminiCancelled { short_id } => {
-                if let Some(LocalVideoTaskSnapshot::Gemini(seed)) = self.gemini.get_mut(&short_id) {
-                    seed.status = LocalVideoTaskStatus::Cancelled;
-                }
-            }
+        let (snapshot, report_kind) = match mutation {
+            LocalVideoTaskRegistryMutation::OpenAiCancelled { task_id } => (
+                self.openai.get_mut(&task_id),
+                "openai_video_cancel_sync_finalize",
+            ),
+            LocalVideoTaskRegistryMutation::OpenAiDeleted { task_id } => (
+                self.openai.get_mut(&task_id),
+                "openai_video_delete_sync_finalize",
+            ),
+            LocalVideoTaskRegistryMutation::GeminiCancelled { short_id } => (
+                self.gemini.get_mut(&short_id),
+                "gemini_video_cancel_sync_finalize",
+            ),
+        };
+        // Legacy standalone stores may project locally. Database-bound rows must be
+        // changed by CAS and then published through insert instead.
+        if let Some(snapshot) = snapshot.filter(|snapshot| snapshot.row_revision() == 0) {
+            snapshot.apply_finalize_report(report_kind);
         }
         self.prune_terminal();
     }
@@ -97,6 +155,9 @@ impl VideoTaskRegistry {
         let Some(LocalVideoTaskSnapshot::OpenAi(seed)) = self.openai.get_mut(task_id) else {
             return false;
         };
+        if seed.persistence.row_revision > 0 {
+            return false;
+        }
         seed.apply_provider_body(provider_body);
         self.prune_terminal();
         true
@@ -106,6 +167,9 @@ impl VideoTaskRegistry {
         let Some(LocalVideoTaskSnapshot::Gemini(seed)) = self.gemini.get_mut(short_id) else {
             return false;
         };
+        if seed.persistence.row_revision > 0 {
+            return false;
+        }
         seed.apply_provider_body(provider_body);
         self.prune_terminal();
         true
@@ -173,7 +237,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{LocalVideoTaskPersistence, LocalVideoTaskTransport};
+    use crate::{LocalVideoTaskPersistence, LocalVideoTaskStatus, LocalVideoTaskTransport};
 
     fn gemini_snapshot(
         local_short_id: &str,
@@ -193,6 +257,7 @@ mod tests {
             error_message: None,
             metadata: json!({}),
             persistence: LocalVideoTaskPersistence {
+                row_revision: 0,
                 request_id: format!("request-{local_short_id}"),
                 username: None,
                 api_key_name: None,
@@ -289,6 +354,7 @@ mod tests {
             error_message: None,
             video_url: None,
             persistence: LocalVideoTaskPersistence {
+                row_revision: 0,
                 request_id: "request-openai-expired".to_string(),
                 username: None,
                 api_key_name: None,
@@ -343,6 +409,7 @@ mod tests {
             error_message: None,
             video_url: None,
             persistence: LocalVideoTaskPersistence {
+                row_revision: 0,
                 request_id: "request-openai-legacy-ms".to_string(),
                 username: None,
                 api_key_name: None,
@@ -368,5 +435,68 @@ mod tests {
 
         assert!(registry.prune_terminal_at(now));
         assert!(registry.read_openai("openai-legacy-ms").is_none());
+    }
+
+    #[test]
+    fn database_snapshots_publish_monotonically_and_reject_local_mutation() {
+        let mut registry = VideoTaskRegistry::default();
+        let mut latest = gemini_snapshot("revision-task", 100, LocalVideoTaskStatus::Processing);
+        let LocalVideoTaskSnapshot::Gemini(seed) = &mut latest else {
+            unreachable!()
+        };
+        seed.persistence.row_revision = 4;
+        seed.progress_percent = 80;
+        registry.insert(latest.clone());
+        for revision in [0, 2, 4] {
+            let mut delayed = latest.clone();
+            let LocalVideoTaskSnapshot::Gemini(seed) = &mut delayed else {
+                unreachable!()
+            };
+            seed.persistence.row_revision = revision;
+            seed.status = LocalVideoTaskStatus::Failed;
+            registry.insert(delayed);
+        }
+        registry.apply_mutation(LocalVideoTaskRegistryMutation::GeminiCancelled {
+            short_id: "revision-task".to_string(),
+        });
+        assert!(
+            !registry.project_gemini("revision-task", json!({"done": true}).as_object().unwrap())
+        );
+        let current = registry.clone_gemini("revision-task").unwrap();
+        assert_eq!(current.persistence.row_revision, 4);
+        assert_eq!(current.status, LocalVideoTaskStatus::Processing);
+        assert_eq!(current.progress_percent, 80);
+
+        let LocalVideoTaskSnapshot::Gemini(seed) = &mut latest else {
+            unreachable!()
+        };
+        seed.persistence.row_revision = 5;
+        seed.status = LocalVideoTaskStatus::Cancelled;
+        registry.insert(latest);
+        assert_eq!(
+            registry.clone_gemini("revision-task").unwrap().status,
+            LocalVideoTaskStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn local_refresh_compare_and_replace_cannot_overwrite_a_concurrent_cancel() {
+        let mut registry = VideoTaskRegistry::default();
+        registry.insert(gemini_snapshot(
+            "local-race",
+            100,
+            LocalVideoTaskStatus::Processing,
+        ));
+        let expected = LocalVideoTaskSnapshot::Gemini(registry.clone_gemini("local-race").unwrap());
+        let mut projected = expected.clone();
+        projected.apply_provider_body(json!({"done": true}).as_object().unwrap());
+        registry.apply_mutation(LocalVideoTaskRegistryMutation::GeminiCancelled {
+            short_id: "local-race".to_string(),
+        });
+        assert!(!registry.replace_local_snapshot(&expected, projected));
+        assert_eq!(
+            registry.clone_gemini("local-race").unwrap().status,
+            LocalVideoTaskStatus::Cancelled
+        );
     }
 }

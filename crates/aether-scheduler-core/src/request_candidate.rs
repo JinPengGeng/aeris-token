@@ -37,6 +37,16 @@ pub struct SchedulerRequestCandidateReportContext {
     pub promoted_by: Option<String>,
     pub demoted_by: Option<String>,
     pub routing_trace: Option<Value>,
+    pub scheduler_generation: Option<u64>,
+    pub scheduler_page_ordinal: Option<u32>,
+    pub attempt_budget_stop_reason: Option<String>,
+    pub attempt_budget_attempts: Option<u64>,
+    pub attempt_budget_credential_attempts: Option<u64>,
+    pub attempt_budget_provider_switches: Option<u64>,
+    /// The observed lifecycle state, when an execution path has emitted one.
+    pub attempt_lifecycle_phase: Option<String>,
+    /// The actual retry-loop admission result, distinct from classifier advice.
+    pub retry_replay_admitted: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +95,14 @@ struct ReportCandidateExtraDataInput {
     promoted_by: Option<String>,
     demoted_by: Option<String>,
     routing_trace: Option<Value>,
+    scheduler_generation: Option<u64>,
+    scheduler_page_ordinal: Option<u32>,
+    attempt_budget_stop_reason: Option<String>,
+    attempt_budget_attempts: Option<u64>,
+    attempt_budget_credential_attempts: Option<u64>,
+    attempt_budget_provider_switches: Option<u64>,
+    attempt_lifecycle_phase: Option<String>,
+    retry_replay_admitted: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +204,20 @@ pub fn parse_request_candidate_report_context(
             .get("routing_trace")
             .cloned()
             .filter(|value| !value.is_null()),
+        scheduler_generation: u64_field(report_context, "scheduler_generation"),
+        scheduler_page_ordinal: u32_field(report_context, "scheduler_page_ordinal"),
+        attempt_budget_stop_reason: string_field(report_context, "attempt_budget_stop_reason"),
+        attempt_budget_attempts: u64_field(report_context, "attempt_budget_attempts"),
+        attempt_budget_credential_attempts: u64_field(
+            report_context,
+            "attempt_budget_credential_attempts",
+        ),
+        attempt_budget_provider_switches: u64_field(
+            report_context,
+            "attempt_budget_provider_switches",
+        ),
+        attempt_lifecycle_phase: string_field(report_context, "attempt_lifecycle_phase"),
+        retry_replay_admitted: bool_field(report_context, "retry_replay_admitted"),
     })
 }
 
@@ -228,6 +260,14 @@ pub fn resolve_report_request_candidate_slot(
         promoted_by,
         demoted_by,
         routing_trace,
+        scheduler_generation,
+        scheduler_page_ordinal,
+        attempt_budget_stop_reason,
+        attempt_budget_attempts,
+        attempt_budget_credential_attempts,
+        attempt_budget_provider_switches,
+        attempt_lifecycle_phase,
+        retry_replay_admitted,
     } = metadata;
     let request_id = request_id?;
     let synthesized_extra_data = build_report_candidate_extra_data(ReportCandidateExtraDataInput {
@@ -253,6 +293,14 @@ pub fn resolve_report_request_candidate_slot(
         promoted_by,
         demoted_by,
         routing_trace,
+        scheduler_generation,
+        scheduler_page_ordinal,
+        attempt_budget_stop_reason,
+        attempt_budget_attempts,
+        attempt_budget_credential_attempts,
+        attempt_budget_provider_switches,
+        attempt_lifecycle_phase,
+        retry_replay_admitted,
     });
     let created_at_unix_ms = matched_candidate
         .as_ref()
@@ -377,6 +425,14 @@ pub fn build_execution_request_candidate_seed(
             promoted_by: metadata.promoted_by,
             demoted_by: metadata.demoted_by,
             routing_trace: metadata.routing_trace,
+            scheduler_generation: metadata.scheduler_generation,
+            scheduler_page_ordinal: metadata.scheduler_page_ordinal,
+            attempt_budget_stop_reason: metadata.attempt_budget_stop_reason,
+            attempt_budget_attempts: metadata.attempt_budget_attempts,
+            attempt_budget_credential_attempts: metadata.attempt_budget_credential_attempts,
+            attempt_budget_provider_switches: metadata.attempt_budget_provider_switches,
+            attempt_lifecycle_phase: metadata.attempt_lifecycle_phase,
+            retry_replay_admitted: metadata.retry_replay_admitted,
         })
     });
     append_seed_extra_data_from_report_context(&mut extra_data, &context);
@@ -543,6 +599,18 @@ fn build_local_request_candidate_extra_data(
         promoted_by: metadata.and_then(|metadata| metadata.promoted_by.clone()),
         demoted_by: metadata.and_then(|metadata| metadata.demoted_by.clone()),
         routing_trace: metadata.and_then(|metadata| metadata.routing_trace.clone()),
+        scheduler_generation: metadata.and_then(|metadata| metadata.scheduler_generation),
+        scheduler_page_ordinal: metadata.and_then(|metadata| metadata.scheduler_page_ordinal),
+        attempt_budget_stop_reason: metadata
+            .and_then(|metadata| metadata.attempt_budget_stop_reason.clone()),
+        attempt_budget_attempts: metadata.and_then(|metadata| metadata.attempt_budget_attempts),
+        attempt_budget_credential_attempts: metadata
+            .and_then(|metadata| metadata.attempt_budget_credential_attempts),
+        attempt_budget_provider_switches: metadata
+            .and_then(|metadata| metadata.attempt_budget_provider_switches),
+        attempt_lifecycle_phase: metadata
+            .and_then(|metadata| metadata.attempt_lifecycle_phase.clone()),
+        retry_replay_admitted: metadata.and_then(|metadata| metadata.retry_replay_admitted),
     })
 }
 
@@ -675,6 +743,14 @@ fn u32_field(value: &Value, key: &str) -> Option<u32> {
         .and_then(|object| u32_field_from_object(object, key))
 }
 
+fn u64_field(value: &Value, key: &str) -> Option<u64> {
+    value.as_object()?.get(key)?.as_u64()
+}
+
+fn bool_field(value: &Value, key: &str) -> Option<bool> {
+    value.as_object()?.get(key)?.as_bool()
+}
+
 fn u32_field_from_object(object: &Map<String, Value>, key: &str) -> Option<u32> {
     object
         .get(key)
@@ -761,6 +837,14 @@ fn build_report_candidate_extra_data(input: ReportCandidateExtraDataInput) -> Op
         promoted_by,
         demoted_by,
         routing_trace,
+        scheduler_generation,
+        scheduler_page_ordinal,
+        attempt_budget_stop_reason,
+        attempt_budget_attempts,
+        attempt_budget_credential_attempts,
+        attempt_budget_provider_switches,
+        attempt_lifecycle_phase,
+        retry_replay_admitted,
     } = input;
     let mut extra_data = Map::with_capacity(8);
     extra_data.insert("gateway_execution_runtime".to_string(), Value::Bool(true));
@@ -858,6 +942,57 @@ fn build_report_candidate_extra_data(input: ReportCandidateExtraDataInput) -> Op
     }
     if let Some(routing_trace) = routing_trace {
         extra_data.insert("routing_trace".to_string(), routing_trace);
+    }
+    if let Some(scheduler_generation) = scheduler_generation {
+        extra_data.insert(
+            "scheduler_generation".to_string(),
+            Value::Number(scheduler_generation.into()),
+        );
+    }
+    if let Some(scheduler_page_ordinal) = scheduler_page_ordinal {
+        extra_data.insert(
+            "scheduler_page_ordinal".to_string(),
+            Value::Number(scheduler_page_ordinal.into()),
+        );
+    }
+    if let (Some(generation), Some(ordinal)) = (scheduler_generation, scheduler_page_ordinal) {
+        extra_data.insert(
+            "scheduler_page_id".to_string(),
+            serde_json::json!({"generation": generation, "ordinal": ordinal}),
+        );
+    }
+    if let Some(attempt_budget_stop_reason) = attempt_budget_stop_reason {
+        extra_data.insert(
+            "attempt_budget_stop_reason".to_string(),
+            Value::String(attempt_budget_stop_reason),
+        );
+    }
+    for (field, value) in [
+        ("attempt_budget_attempts", attempt_budget_attempts),
+        (
+            "attempt_budget_credential_attempts",
+            attempt_budget_credential_attempts,
+        ),
+        (
+            "attempt_budget_provider_switches",
+            attempt_budget_provider_switches,
+        ),
+    ] {
+        if let Some(value) = value {
+            extra_data.insert(field.to_string(), Value::Number(value.into()));
+        }
+    }
+    if let Some(attempt_lifecycle_phase) = attempt_lifecycle_phase {
+        extra_data.insert(
+            "attempt_lifecycle_phase".to_string(),
+            Value::String(attempt_lifecycle_phase),
+        );
+    }
+    if let Some(retry_replay_admitted) = retry_replay_admitted {
+        extra_data.insert(
+            "retry_replay_admitted".to_string(),
+            Value::Bool(retry_replay_admitted),
+        );
     }
     (!extra_data.is_empty()).then_some(Value::Object(extra_data))
 }
@@ -1036,7 +1171,15 @@ mod tests {
                 "propagation": "suppressed"
             },
             "candidate_group_id": "pool-group-1",
-            "pool_key_index": 2
+            "pool_key_index": 2,
+            "scheduler_generation": 11,
+            "scheduler_page_ordinal": 2,
+            "attempt_budget_stop_reason": "attempts_exhausted",
+            "attempt_budget_attempts": 32,
+            "attempt_budget_credential_attempts": 16,
+            "attempt_budget_provider_switches": 4,
+            "attempt_lifecycle_phase": "terminal",
+            "retry_replay_admitted": false
         })))
         .expect("metadata");
 
@@ -1116,6 +1259,30 @@ mod tests {
                 .and_then(|value| value.get("pool_key_index")),
             Some(&json!(2))
         );
+        assert_eq!(
+            slot.extra_data
+                .as_ref()
+                .and_then(|value| value.get("scheduler_page_id")),
+            Some(&json!({"generation": 11, "ordinal": 2}))
+        );
+        assert_eq!(
+            slot.extra_data
+                .as_ref()
+                .and_then(|value| value.get("attempt_budget_stop_reason")),
+            Some(&json!("attempts_exhausted"))
+        );
+        assert_eq!(
+            slot.extra_data
+                .as_ref()
+                .and_then(|value| value.get("attempt_lifecycle_phase")),
+            Some(&json!("terminal"))
+        );
+        assert_eq!(
+            slot.extra_data
+                .as_ref()
+                .and_then(|value| value.get("retry_replay_admitted")),
+            Some(&json!(false))
+        );
     }
 
     #[test]
@@ -1151,7 +1318,15 @@ mod tests {
                 "retry_index": 2,
                 "user_id": "user-1",
                 "api_key_id": "api-key-1",
-                "client_api_format": "openai:chat"
+                "client_api_format": "openai:chat",
+                "scheduler_generation": 11,
+                "scheduler_page_ordinal": 2,
+                "attempt_budget_stop_reason": "deadline_exceeded",
+                "attempt_budget_attempts": 3,
+                "attempt_budget_credential_attempts": 2,
+                "attempt_budget_provider_switches": 1,
+                "attempt_lifecycle_phase": "sent_but_uncommitted",
+                "retry_replay_admitted": true
             })),
             123,
             "generated-1".to_string(),
@@ -1167,6 +1342,27 @@ mod tests {
                 .get("provider_id")
                 .and_then(Value::as_str),
             Some("provider-1")
+        );
+        assert_eq!(
+            seed.upsert_record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("scheduler_page_id")),
+            Some(&json!({"generation": 11, "ordinal": 2}))
+        );
+        assert_eq!(
+            seed.upsert_record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("attempt_budget_attempts")),
+            Some(&json!(3))
+        );
+        assert_eq!(
+            seed.upsert_record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("retry_replay_admitted")),
+            Some(&json!(true))
         );
 
         let finalized =
@@ -1203,6 +1399,14 @@ mod tests {
                     "priority_slot": 7,
                     "promoted_by": "cached_affinity",
                     "demoted_by": "cross_format",
+                    "scheduler_generation": 11,
+                    "scheduler_page_ordinal": 2,
+                    "attempt_budget_stop_reason": "provider_switches_exhausted",
+                    "attempt_budget_attempts": 9,
+                    "attempt_budget_credential_attempts": 3,
+                    "attempt_budget_provider_switches": 2,
+                    "attempt_lifecycle_phase": "client_committed",
+                    "retry_replay_admitted": false,
                     "routing_trace": {
                         "group_id": "routing-group-1",
                         "pool_expansion": [{
@@ -1304,6 +1508,27 @@ mod tests {
             record
                 .extra_data
                 .as_ref()
+                .and_then(|value| value.get("scheduler_page_id")),
+            Some(&json!({"generation": 11, "ordinal": 2}))
+        );
+        assert_eq!(
+            record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("attempt_budget_provider_switches")),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("attempt_lifecycle_phase")),
+            Some(&json!("client_committed"))
+        );
+        assert_eq!(
+            record
+                .extra_data
+                .as_ref()
                 .and_then(|value| value.get("routing_trace"))
                 .and_then(|value| value.get("group_id")),
             Some(&json!("routing-group-1"))
@@ -1370,7 +1595,13 @@ mod tests {
                     provider_id: Some("provider-1".to_string()),
                     endpoint_id: Some("endpoint-1".to_string()),
                     key_id: Some("key-1".to_string()),
-                    extra_data: None,
+                    extra_data: Some(json!({
+                        "scheduler_generation": 11,
+                        "scheduler_page_ordinal": 2,
+                        "scheduler_page_id": {"generation": 11, "ordinal": 2},
+                        "attempt_budget_stop_reason": "deadline_exceeded",
+                        "retry_replay_admitted": false
+                    })),
                     created_at_unix_ms: 10,
                     started_at_unix_ms: None,
                     finished_at_unix_ms: None,
@@ -1397,6 +1628,13 @@ mod tests {
                 .as_ref()
                 .and_then(|value| value.get("stream_completed")),
             Some(&json!(true))
+        );
+        assert_eq!(
+            record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("scheduler_page_id")),
+            Some(&json!({"generation": 11, "ordinal": 2}))
         );
     }
 

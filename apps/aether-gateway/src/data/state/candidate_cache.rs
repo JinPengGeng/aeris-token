@@ -8,7 +8,7 @@ use aether_cache::ExpiringMap;
 use aether_data::DataLayerError;
 use aether_data_contracts::repository::candidate_selection::{
     MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
-    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
+    StoredGlobalModelDeclaration, StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
     StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
     StoredRequestedModelCandidateRowsQuery,
 };
@@ -387,6 +387,15 @@ impl MinimalCandidateSelectionReadRepository for CachedMinimalCandidateSelection
             api_format: normalize_api_format_key(api_format),
         };
         self.get_or_load(key, || self.inner.list_for_exact_api_format(api_format))
+            .await
+    }
+
+    async fn list_declared_global_models_for_api_format(
+        &self,
+        api_format: &str,
+    ) -> Result<Vec<StoredGlobalModelDeclaration>, DataLayerError> {
+        self.inner
+            .list_declared_global_models_for_api_format(api_format)
             .await
     }
 
