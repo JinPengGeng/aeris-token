@@ -25,7 +25,6 @@ use crate::{AppState, GatewayError};
 
 const POLICY_CACHE_TTL: Duration = Duration::from_secs(5);
 const CONCURRENCY_GATE: &str = "plan_usage_concurrency";
-const DEFAULT_CALENDAR_TIMEZONE: &str = "Asia/Shanghai";
 const COST_RESERVATION_TTL_SECS: u64 = 24 * 60 * 60;
 const COST_RESERVATION_SAFE_HISTORY_SECS: u64 = 32 * 24 * 60 * 60;
 
@@ -1251,13 +1250,7 @@ fn effective_timezone_name(explicit: Option<&str>) -> String {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .or_else(|| {
-            std::env::var("APP_TIMEZONE")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| value.parse::<chrono_tz::Tz>().is_ok())
-        })
-        .unwrap_or_else(|| DEFAULT_CALENDAR_TIMEZONE.to_string())
+        .unwrap_or_else(|| crate::app_timezone::configured_app_timezone().to_string())
 }
 
 fn weekday_number(weekday: Weekday) -> u32 {

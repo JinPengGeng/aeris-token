@@ -22,6 +22,7 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogKey,
 };
 use aether_provider_pool::{ProviderPoolQuotaRequestSpec, ProviderPoolService};
+use aether_provider_transport::provider_types::provider_type_supports_quota_refresh as registered_provider_type_supports_quota_refresh;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
@@ -196,7 +197,7 @@ pub(crate) fn normalize_string_id_list(values: Option<Vec<String>>) -> Option<Ve
 }
 
 pub(crate) fn provider_type_supports_quota_refresh(provider_type: &str) -> bool {
-    ProviderPoolService::with_builtin_adapters().supports_quota_refresh(provider_type)
+    registered_provider_type_supports_quota_refresh(provider_type)
 }
 
 pub(crate) fn unsupported_provider_quota_refresh_message(provider_type: &str) -> String {
