@@ -1065,6 +1065,9 @@ pub struct UsageAuditSummaryQuery {
     pub created_from_unix_secs: u64,
     pub created_until_unix_secs: u64,
     pub user_id: Option<String>,
+    /// Optional bulk user scope used by current user-group reporting.
+    /// An empty list intentionally matches no usage rows.
+    pub user_ids: Option<Vec<String>>,
     pub provider_name: Option<String>,
     pub model: Option<String>,
 }
@@ -1471,6 +1474,9 @@ pub struct UsageTimeSeriesQuery {
     pub granularity: UsageTimeSeriesGranularity,
     pub tz_offset_minutes: i32,
     pub user_id: Option<String>,
+    /// Optional bulk user scope used by current user-group reporting.
+    /// An empty list intentionally matches no usage rows.
+    pub user_ids: Option<Vec<String>>,
     pub provider_name: Option<String>,
     pub model: Option<String>,
 }
@@ -1501,6 +1507,9 @@ pub struct UsageLeaderboardQuery {
     pub created_until_unix_secs: u64,
     pub group_by: UsageLeaderboardGroupBy,
     pub user_id: Option<String>,
+    /// Optional bulk user scope used by current user-group reporting.
+    /// An empty list intentionally matches no usage rows.
+    pub user_ids: Option<Vec<String>>,
     pub provider_name: Option<String>,
     pub model: Option<String>,
 }

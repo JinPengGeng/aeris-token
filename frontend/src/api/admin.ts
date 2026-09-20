@@ -717,6 +717,8 @@ export interface LeaderboardItem {
   requests: number
   tokens: number
   cost: number
+  member_count?: number
+  active_member_count?: number
 }
 
 export interface LeaderboardResponse {
@@ -725,6 +727,7 @@ export interface LeaderboardResponse {
   metric: string
   start_date?: string | null
   end_date?: string | null
+  attribution?: 'current_membership'
 }
 
 export interface CostForecastResponse {
@@ -1306,6 +1309,7 @@ export const adminApi = {
     model?: string
     include_inactive?: boolean
     exclude_admin?: boolean
+    user_group_id?: string
   }): Promise<LeaderboardResponse> {
     const cacheKey = buildCacheKey('admin:stats:leaderboard:users', params)
     return cachedRequest(
@@ -1314,6 +1318,35 @@ export const adminApi = {
         const response = await apiClient.get<LeaderboardResponse>('/api/admin/stats/leaderboard/users', {
           params
         })
+        return response.data
+      },
+      20 * 1000
+    )
+  },
+
+  async getLeaderboardUserGroups(params?: {
+    start_date?: string
+    end_date?: string
+    preset?: string
+    timezone?: string
+    tz_offset_minutes?: number
+    metric?: 'requests' | 'tokens' | 'cost'
+    order?: 'asc' | 'desc'
+    limit?: number
+    offset?: number
+    provider_name?: string
+    model?: string
+    include_inactive?: boolean
+    exclude_admin?: boolean
+  }): Promise<LeaderboardResponse> {
+    const cacheKey = buildCacheKey('admin:stats:leaderboard:user-groups', params)
+    return cachedRequest(
+      cacheKey,
+      async () => {
+        const response = await apiClient.get<LeaderboardResponse>(
+          '/api/admin/stats/leaderboard/user-groups',
+          { params }
+        )
         return response.data
       },
       20 * 1000
@@ -1603,6 +1636,7 @@ export const adminApi = {
       timezone?: string
       tz_offset_minutes?: number
       user_id?: string
+      user_group_id?: string
       model?: string
       provider_name?: string
     },
