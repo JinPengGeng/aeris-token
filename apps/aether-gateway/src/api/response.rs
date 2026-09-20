@@ -267,7 +267,7 @@ pub(crate) fn build_local_balance_denied_response(
     };
     let kind = LocalCoreSyncErrorKind::QuotaExhausted;
     let payload = client_format
-        .and_then(|format| build_core_error_body_for_client_format(format, &message, None, kind))
+        .and_then(|format| build_core_error_body_for_client_format(format, message, None, kind))
         .unwrap_or(fallback_payload);
     let body = serialize_local_error_payload(payload, trace_id)?;
     let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
