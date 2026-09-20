@@ -62,6 +62,7 @@ run_fixture() {
 run_fixture success
 grep -Fq 'PASS: selected isolated PostgreSQL live-DB tests' "$fixture/success.output"
 grep -Fq 'video_tasks::tests::live_video_task_capture_claim_and_completion_preserve_business_fields --lib -- --exact --include-ignored' "$fixture/success.calls"
+grep -Fq 'usage::tests::live_full_http_capture_round_trips_for_direct_and_batch_writes --lib -- --exact --include-ignored' "$fixture/success.calls"
 grep -Fq 'provider_catalog::tests::live_endpoint_health_score_mapping_preserves_null_legacy_and_decode_failures --lib -- --exact --include-ignored' "$fixture/success.calls"
 grep -Fq 'candidate_selection::tests::live_declared_global_models_include_unavailable_model_aliases --lib -- --exact --include-ignored' "$fixture/success.calls"
 grep -Fq 'candidates::tests::live_postgres_candidate_nul_is_sanitized_and_legacy_json_is_discarded --lib -- --exact --include-ignored' "$fixture/success.calls"
