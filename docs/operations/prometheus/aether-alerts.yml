@@ -72,6 +72,28 @@ groups:
           deduplication: Group by alertname, job, instance and stream; retain cluster labels and inhibit the capacity warning for the same series.
           rollback: Preserve available evidence and reduce inflow; increasing retention requires a Redis memory budget and is not a substitute for fixing consumers.
 
+      - alert: AetherUsageTerminalDeferredDrop
+        expr: increase(aether_gateway_usage_runtime_terminal_enqueue_deferred_dropped_total[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Terminal usage events were dropped after deferred persistence exhausted its fallback capacity
+          description: Any terminal usage deferred-drop increment violates the zero-loss budget and requires an immediate accounting reconciliation incident.
+          runbook: docs/operations/observability-runbook.md#usage-deferred-drop
+          deduplication: Group by alertname, job and instance; retain cluster and deployment labels so the affected gateway remains identifiable.
+          rollback: Restore Redis/runtime availability first and preserve receipt, request-id and log evidence; do not fabricate a usage record, settlement, or bill.
+
+      - alert: AetherUsageLifecycleDeferredDrop
+        expr: increase(aether_gateway_usage_runtime_lifecycle_enqueue_deferred_dropped_total[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Lifecycle usage events were dropped instead of retrying
+          description: Any lifecycle deferred-drop increment violates the zero-loss budget and requires an immediate accounting reconciliation incident.
+          runbook: docs/operations/observability-runbook.md#usage-deferred-drop
+          deduplication: Group by alertname, job and instance; retain cluster and deployment labels so the affected gateway remains identifiable.
+          rollback: Restore Redis/runtime availability first and preserve receipt, request-id and log evidence; do not fabricate a usage record, settlement, or bill.
+
       - alert: AetherBillingGuardFailOpen
         expr: sum by (component, operation) (increase(aether_gateway_billing_fail_open_total[10m])) > 0
         for: 2m

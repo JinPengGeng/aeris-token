@@ -23,6 +23,7 @@
 | [恢复的原子性与失败语义](restore-atomicity.md) | Accepted | 认证备份、分阶段补偿、隔离恢复和部分失败 |
 | [隧道版本兼容与协商](tunnel-version-compatibility.md) | Accepted | v1/v2/v3 的入口校验、v3 SETTINGS 和升级顺序 |
 | [Usage core/runtime 与重试、DLQ](usage-runtime-retry-dlq.md) | Accepted | 实际分层、入队重试、消费确认、死信恢复和保留边界 |
+| [Gateway 多实例缓存一致性](gateway-cache-consistency.md) | Accepted | 本地失效、跨实例有限 TTL 与关键授权强读的边界 |
 
 以上描述性记录于 2026-09-13 对 fork `JinPengGeng/aeris-token` 的已合并提交
 `4a74b11ef9a4756f897a33f1ce0b18475a2f040d` 重新读取源码、测试与运维文档后建立；
