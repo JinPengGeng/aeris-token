@@ -15,7 +15,7 @@ use aether_runtime::{
 use aether_runtime_state::{RuntimeSemaphore, RuntimeSemaphoreError, RuntimeSemaphoreSnapshot};
 use axum::body::{to_bytes, Body};
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::{header::RETRY_AFTER, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -810,7 +810,7 @@ fn execution_runtime_request_body_limit_bytes(configured_limit: u64) -> usize {
 }
 
 fn build_overloaded_response(message: &str) -> Response {
-    (
+    let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({
             "error": {
@@ -819,7 +819,11 @@ fn build_overloaded_response(message: &str) -> Response {
             }
         })),
     )
-        .into_response()
+        .into_response();
+    response
+        .headers_mut()
+        .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+    response
 }
 
 #[derive(Debug, Error)]
@@ -1435,6 +1439,10 @@ mod tests {
             .expect("second request should complete");
 
         assert_eq!(second_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            second_response.headers()[axum::http::header::RETRY_AFTER],
+            "1"
+        );
         assert_eq!(
             second_response
                 .json::<serde_json::Value>()
