@@ -701,8 +701,8 @@ mod tests {
         fixed_provider_template, provider_runtime_policy, provider_type_admin_oauth_template,
         provider_type_allows_auth_channel_mismatch_by_default, provider_type_oauth_is_bearer_like,
         provider_type_supports_local_embedding_transport,
-        provider_type_supports_local_same_format_transport, FixedProviderEndpointConfigValue,
-        ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES,
+        provider_type_supports_local_same_format_transport, provider_type_supports_quota_refresh,
+        FixedProviderEndpointConfigValue, ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES,
     };
 
     #[test]
