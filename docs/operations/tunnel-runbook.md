@@ -43,6 +43,18 @@ systemd/OpenRC 的日志落点和权限以 README 的安装说明为准。若配
 存在对外诊断端口。Tunnel 的 heartbeat 会上报连接和错误摘要，但它不是 Gateway
 的 Prometheus 抓取或告警投递验收。
 
+例如 `diagnostics_bind=127.0.0.1:9311` 时，可执行以下检查（按实际监听地址替换
+端口；诊断监听应保持在 loopback 上）：
+
+```sh
+curl --fail --silent http://127.0.0.1:9311/health
+curl --fail --silent http://127.0.0.1:9311/metrics | grep 'service_up{service="aether-tunnel"} 1'
+curl --fail --silent http://127.0.0.1:9311/stats
+```
+
+`/health` 和 `/stats` 返回 JSON；`/metrics` 返回 Prometheus 文本，且应包含
+`service_up{service="aether-tunnel"} 1`。未配置 `diagnostics_bind` 时跳过这些请求。
+
 ## 升级与回滚
 
 Linux/macOS 的 `sudo aether-tunnel upgrade [version]` 和 heartbeat 触发的升级都先
