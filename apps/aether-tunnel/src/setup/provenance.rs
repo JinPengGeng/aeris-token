@@ -17,12 +17,6 @@ const MAX_TRUST_KEYS: usize = 16;
 const MAX_TRUST_SET_BYTES: usize = 16 * 1024;
 const RELEASE_TAG_PREFIX: &str = "# aether-tunnel-release-tag=";
 
-/// Verify a release manifest against the public trust set configured at build time.
-pub(crate) fn verify_release_manifest(manifest: &[u8], envelope: &[u8]) -> anyhow::Result<String> {
-    let keys = embedded_trust_keys()?;
-    verify_release_manifest_with_keys(manifest, envelope, &keys)
-}
-
 /// Verify a release manifest and bind it to the release tag being downloaded.
 ///
 /// The tag marker is covered by the detached signature. Without this check, a
@@ -33,9 +27,8 @@ pub(crate) fn verify_release_manifest_for_tag(
     envelope: &[u8],
     expected_tag: &str,
 ) -> anyhow::Result<String> {
-    let key_id = verify_release_manifest(manifest, envelope)?;
-    verify_manifest_release_tag(manifest, expected_tag)?;
-    Ok(key_id)
+    let keys = embedded_trust_keys()?;
+    verify_release_manifest_for_tag_with_keys(manifest, envelope, expected_tag, &keys)
 }
 
 pub(crate) fn verify_release_manifest_for_tag_with_keys(
