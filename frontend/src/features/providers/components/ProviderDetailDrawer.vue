@@ -3333,7 +3333,7 @@ async function saveMultiplier(key: EndpointAPIKey, format: string) {
   const newMultiplier = parseFloat(String(editingMultiplierValue.value))
 
   // 验证输入有效性
-  if (!keyId || isNaN(newMultiplier)) {
+  if (!keyId || !Number.isFinite(newMultiplier)) {
     showError(legacyT('请输入有效的倍率值'))
     cancelEditMultiplier()
     multiplierSaving.value = false
@@ -3341,8 +3341,8 @@ async function saveMultiplier(key: EndpointAPIKey, format: string) {
   }
 
   // 验证合理范围
-  if (newMultiplier <= 0 || newMultiplier > 100) {
-    showError(legacyT('倍率必须在 0.01 到 100 之间'))
+  if (newMultiplier < 0 || newMultiplier > 100) {
+    showError(legacyT('倍率必须在 0 到 100 之间'))
     cancelEditMultiplier()
     multiplierSaving.value = false
     return

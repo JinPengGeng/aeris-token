@@ -15,11 +15,17 @@ change passes the unchanged required checks. This avoids repeating a full Rust
 and database run for every newly merged base. Close superseded PRs only after
 verifying the corresponding changes merged through #473.
 
+The batch also permits the supported zero-cost multiplier in the provider UI,
+removes the duplicate PostgreSQL feature-check alias, and keeps narrative API
+guides out of full Rust compilation while retaining all compiled documentation
+fixtures and required gates. The first combined CI found one target-admission
+fixture failure; its gate initialization is fixed and the exact regression now
+passes locally. The new head still requires the complete hosted checks.
+
 The original issues still contain development work. #222 retains trait/provider
-registration architecture work; #241 retains the administrator API evolution
-contract. #225's missing Messages/Videos behavior documents and historical PoC
-notice are being completed in this batch. These are not production acceptance
-requirements. Runtime configuration readers and their semantic documentation also
+registration architecture work. #241's administrator API lifecycle contract and
+#225's missing Messages/Videos behavior documents and historical PoC notice are
+implemented in this batch. Runtime configuration readers and their semantic documentation also
 remain a separate development scope. Compose CPU, memory, and PID limits already
 merged through #455; do not schedule that implementation again.
 
@@ -109,6 +115,12 @@ confirmed missing behavior and ordinary failure handling with the existing
 components. Do not expand an issue into speculative reconciliation, self-healing,
 exhaustive concurrency coverage or repeated fault drills. Keep focused tests
 and required project checks proportional to the actual change.
+
+Deliver independent agent patches through one integration batch. Keep a submitted
+batch unchanged while its checks run; repair actual failures together before the
+next push. Do not rebase every open PR after each merge. Run local Cargo checks
+from one stable integration worktree with the same target directory and build
+settings, so changing agent worktrees does not rebuild every local dependency.
 
 Track code completion separately from PR integration, production deployment
 and external acceptance. Those later stages must not block unrelated code

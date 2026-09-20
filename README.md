@@ -119,11 +119,14 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 
 - Responses: [OpenAI compatible `POST /v1/responses`](docs/api/responses.md)
 - Chat Completions: [OpenAI compatible `POST /v1/chat/completions`](docs/api/chat-completions.md)
+- Messages: [Claude compatible `POST /v1/messages`](docs/api/messages.md)
 - Models: [list and inspect `GET /v1/models`](docs/api/models.md)
 - Images: [OpenAI compatible generations / edits](docs/api/images.md)
+- Videos: [create and manage `POST /v1/videos` tasks](docs/api/videos.md)
 - 错误与重试：[公共 API 错误契约](docs/api/error-contract.md) · [兼容性验证范围](docs/api/compatibility-fixtures.md)
 - Embeddings: [OpenAI compatible `POST /v1/embeddings`](docs/api/embeddings.md)
 - Rerank: [OpenAI/Jina compatible `POST /v1/rerank`](docs/api/rerank.md)
+- 管理 API：[版本路径、权限与兼容性约定](docs/api/admin-api-lifecycle.md)
 - Responses WebSocket mode: [protocol and Aether behavior](docs/WebSocket-Mode.md)
 - WebSocket probes: [Codex](docs/operations/codex-responses-websocket-probe.md) · [OpenAI Responses](docs/operations/openai-responses-websocket-probe.md)
 

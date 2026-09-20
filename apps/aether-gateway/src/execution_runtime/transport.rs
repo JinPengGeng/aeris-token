@@ -7483,7 +7483,9 @@ mod tests {
         config.upstream_target_gate_is_auto = false;
         let state = AppState::new()
             .expect("app state should build")
-            .with_frontdoor_runtime_guard_config_for_tests(config);
+            .with_frontdoor_runtime_guard_config_for_tests(config)
+            // Rebuild target admission after replacing its test configuration.
+            .with_request_concurrency_limit(8);
         let plan = direct_timeout_plan(
             "https://same-target.example/v1/chat/completions".to_string(),
             false,
@@ -7497,13 +7499,16 @@ mod tests {
             .expect("target gate should be enabled");
 
         let result = execute_sync_plan(&state, Some("blocked"), &plan).await;
-        assert!(matches!(
-            result,
-            Err(GatewayError::AdmissionTimeout {
-                gate: "gateway_upstream_target",
-                ..
-            })
-        ));
+        assert!(
+            matches!(
+                result,
+                Err(GatewayError::AdmissionTimeout {
+                    gate: "gateway_upstream_target",
+                    ..
+                })
+            ),
+            "expected target admission timeout, got {result:?}"
+        );
         drop(held);
         assert!(state
             .upstream_target_admission
