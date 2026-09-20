@@ -1,4 +1,32 @@
-# Current issue execution queue — updated 2026-09-20
+# Current issue execution queue — updated 2026-09-21
+
+## Current delivery batch
+
+This checkpoint supersedes the historical counts and local-only status below.
+GitHub Issue #443 and delivery PR #473 hold the current integration result.
+Main includes #463 (exact cookie parsing), #464 (Tunnel diagnostics), #468
+(notification deployment runbook), and #469 (release image configuration).
+
+PR #473 combines #462, #465, #466, #467, #470, #471, and #472: public error
+redaction, strict release checksums, multiplier validation, production encryption
+key validation, signed release tags, and synchronous target admission. Original
+PR branches are preserved and their automatic merges are paused while the combined
+change passes the unchanged required checks. This avoids repeating a full Rust
+and database run for every newly merged base. Close superseded PRs only after
+verifying the corresponding changes merged through #473.
+
+The original issues still contain development work. #222 retains trait/provider
+registration architecture work; #241 retains the administrator API evolution
+contract. #225's missing Messages/Videos behavior documents and historical PoC
+notice are being completed in this batch. These are not production acceptance
+requirements. Runtime configuration readers and their semantic documentation also
+remain a separate development scope. Compose CPU, memory, and PID limits already
+merged through #455; do not schedule that implementation again.
+
+Recharge-triggered debt collection is implemented. Local supplier acceptance uses
+the synthetic data authorized by the user. Actual deployment, historical records,
+and unsupported paid-path contracts retain their own acceptance boundaries.
+Do not describe all open issues as either undeveloped code or production-only work.
 
 ## Current delivery status
 
