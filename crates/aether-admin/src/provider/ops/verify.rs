@@ -42,12 +42,13 @@ pub fn parse_verify_payload(
 }
 
 pub fn admin_provider_ops_extract_cookie_value(cookie_input: &str, key: &str) -> String {
-    if cookie_input.contains(&format!("{key}=")) {
-        for part in cookie_input.split(';') {
-            let trimmed = part.trim();
-            if let Some(value) = trimmed.strip_prefix(&format!("{key}=")) {
-                return value.trim().to_string();
-            }
+    for part in cookie_input.split(';') {
+        let trimmed = part.trim();
+        let Some((name, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if name.trim() == key {
+            return value.trim().to_string();
         }
     }
     cookie_input.trim().to_string()
@@ -156,7 +157,10 @@ pub fn admin_provider_ops_anyrouter_compute_acw_sc_v2(arg1: &str) -> Option<Stri
 }
 
 pub fn admin_provider_ops_anyrouter_parse_session_user_id(cookie_input: &str) -> Option<String> {
-    let session_cookie = admin_provider_ops_extract_cookie_value(cookie_input, "session");
+    let session_cookie = admin_provider_ops_extract_cookie_value(
+        admin_provider_ops_strip_cookie_header_prefix(cookie_input),
+        "session",
+    );
     let decoded = decode_python_urlsafe_b64(&session_cookie)?;
     let text = String::from_utf8_lossy(&decoded);
     let mut parts = text.split('|');
@@ -495,7 +499,10 @@ pub fn admin_provider_ops_verify_headers(
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
             {
-                let session = admin_provider_ops_extract_cookie_value(session_cookie, "session");
+                let session = admin_provider_ops_extract_cookie_value(
+                    admin_provider_ops_strip_cookie_header_prefix(session_cookie),
+                    "session",
+                );
                 cookies.push(format!("session={session}"));
                 if let Some(user_id) =
                     admin_provider_ops_anyrouter_parse_session_user_id(session_cookie)
@@ -900,10 +907,11 @@ mod tests {
         admin_provider_ops_anyrouter_compute_acw_sc_v2,
         admin_provider_ops_anyrouter_parse_session_user_id,
         admin_provider_ops_anyrouter_verify_payload, admin_provider_ops_cubence_verify_payload,
-        admin_provider_ops_frontend_updated_credentials, admin_provider_ops_generic_verify_payload,
-        admin_provider_ops_sub2api_verify_payload, admin_provider_ops_usage_api_verify_payload,
-        admin_provider_ops_verify_headers, parse_verify_payload,
-        ADMIN_PROVIDER_OPS_ANYROUTER_SESSION_PART_MAX_BYTES, ADMIN_PROVIDER_OPS_USER_AGENT,
+        admin_provider_ops_extract_cookie_value, admin_provider_ops_frontend_updated_credentials,
+        admin_provider_ops_generic_verify_payload, admin_provider_ops_sub2api_verify_payload,
+        admin_provider_ops_usage_api_verify_payload, admin_provider_ops_verify_headers,
+        parse_verify_payload, ADMIN_PROVIDER_OPS_ANYROUTER_SESSION_PART_MAX_BYTES,
+        ADMIN_PROVIDER_OPS_USER_AGENT,
     };
     use http::StatusCode;
     use reqwest::header::COOKIE;
@@ -933,6 +941,30 @@ mod tests {
     fn anyrouter_parse_session_user_id_accepts_padded_urlsafe_base64() {
         let actual = admin_provider_ops_anyrouter_parse_session_user_id(
             "session=MTIzfGVIaDRlQUpwWkFOcGJuU3F1d0RfVkhsNWVYa0lkWE5sY201aGJXVUdjM1J5YVc1bkRCQUFCV0ZzYVdObHxzaWc=",
+        );
+        assert_eq!(actual.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn extract_cookie_value_matches_exact_cookie_names_and_preserves_bare_tokens() {
+        assert_eq!(
+            admin_provider_ops_extract_cookie_value("monkey=wrong; key=right", "key"),
+            "right"
+        );
+        assert_eq!(
+            admin_provider_ops_extract_cookie_value("bare-token==", "key"),
+            "bare-token=="
+        );
+        assert_eq!(
+            admin_provider_ops_extract_cookie_value("monkey=wrong", "key"),
+            "monkey=wrong"
+        );
+    }
+
+    #[test]
+    fn anyrouter_parse_session_user_id_accepts_cookie_header_prefix() {
+        let actual = admin_provider_ops_anyrouter_parse_session_user_id(
+            "Cookie: session=MTIzfGVIaDRlQUpwWkFOcGJuU3F1d0RfVkhsNWVYa0lkWE5sY201aGJXVUdjM1J5YVc1bkRCQUFCV0ZzYVdObHxzaWc=",
         );
         assert_eq!(actual.as_deref(), Some("42"));
     }
