@@ -74,7 +74,8 @@ failure explanation, and the original text/plain and text/html assertions pass.
 Full native restoration passed with 100 public tables and four nonempty refund
 events, preserving retry/lease state and replay without changing money. JSONL
 imports do not provide notification continuation. Deployed delivery remains a
-separate acceptance step.
+separate acceptance step; use the [notification delivery deployment runbook](../operations/notification-delivery-runbook.md)
+for topology, configuration, smoke testing, and recovery evidence.
 
 ## Low-balance and configuration follow-up (2026-09-18)
 
