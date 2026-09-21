@@ -64,6 +64,10 @@ services:
   app:
     image: ${APP_IMAGE:-ghcr.io/jinpenggeng/aeris-token:latest}
     container_name: aether-app
+    # The gateway drains in-flight requests on SIGTERM; the default 10s grace
+    # period would SIGKILL mid-drain (readiness withdrawal + HTTP drain + usage
+    # flush can take ~70s with default timeouts).
+    stop_grace_period: ${AETHER_APP_STOP_GRACE_PERIOD:-90s}
     cpus: ${AETHER_APP_CPU_LIMIT:-2.0}
     mem_limit: ${AETHER_APP_MEMORY_LIMIT:-2g}
     pids_limit: ${AETHER_APP_PIDS_LIMIT:-512}

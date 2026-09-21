@@ -299,6 +299,7 @@ from variable names. Request candidate persistence is a mode (`full`, `terminal`
 | `AETHER_GATEWAY_UPSTREAM_POOL_IDLE_TIMEOUT_MS` | [execution_runtime/transport.rs](../../apps/aether-gateway/src/execution_runtime/transport.rs) |
 | `AETHER_GATEWAY_UPSTREAM_POOL_MAX_IDLE_PER_HOST` | [execution_runtime/transport.rs](../../apps/aether-gateway/src/execution_runtime/transport.rs) |
 | `AETHER_GATEWAY_UPSTREAM_STREAM_IDLE_TIMEOUT_MS` | [execution_runtime/stream_read_timeout.rs](../../apps/aether-gateway/src/execution_runtime/stream_read_timeout.rs) |
+| `AETHER_GATEWAY_UPSTREAM_TARGET_GATE_IDLE_TTL_MS` | [upstream_admission.rs](../../apps/aether-gateway/src/upstream_admission.rs) |
 | `AETHER_GATEWAY_UPSTREAM_TARGET_GATE_LIMIT` | [state/app.rs](../../apps/aether-gateway/src/state/app.rs) |
 | `AETHER_GATEWAY_UPSTREAM_TARGET_GATE_METRIC_LIMIT` | [upstream_admission.rs](../../apps/aether-gateway/src/upstream_admission.rs) |
 | `AETHER_GATEWAY_UPSTREAM_TARGET_GATE_QUEUE_BUDGET_MS` | [upstream_admission.rs](../../apps/aether-gateway/src/upstream_admission.rs) |

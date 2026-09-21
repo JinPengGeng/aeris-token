@@ -49,12 +49,14 @@ pub(crate) fn frontdoor_self_loop_public_ai_path(path: &str) -> bool {
             | "/v1/realtime/calls"
             | "/v1/live"
             | "/v1/alpha/search"
+            | "/v1/images/generations"
             | "/v1beta/files"
             | "/upload/v1beta/files"
             | "/v1beta/operations"
             | "/v1/videos"
     ) || path.starts_with("/v1/live/")
         || path.starts_with("/v1/videos/")
+        || path.starts_with("/v1/audio/")
         || path.starts_with("/v1beta/files/")
         || path.starts_with("/v1beta/operations/")
         || path.starts_with("/v1internal:")
@@ -140,9 +142,12 @@ fn configured_gateway_frontdoor_app_port() -> u16 {
 }
 
 fn normalize_host_for_frontdoor_loop_guard(host: &str) -> String {
+    // Strip the DNS root dot so dotted loopback aliases ("localhost.") cannot
+    // bypass the guard; IP literals with a trailing dot parse after stripping.
     host.trim()
         .trim_start_matches('[')
         .trim_end_matches(']')
+        .trim_end_matches('.')
         .to_ascii_lowercase()
 }
 
@@ -188,6 +193,86 @@ mod tests {
         assert!(gateway_frontdoor_self_loop_guard_matches_with_port(
             8084,
             "wss://localhost:8084/v1/realtime?model=gpt-realtime"
+        ));
+    }
+
+    #[test]
+    fn alternate_loopback_and_ipv4_mapped_hosts_are_blocked() {
+        for host in [
+            "127.0.0.2",
+            "127.42.0.99",
+            "127.255.255.255",
+            "::1",
+            "::ffff:127.0.0.1",
+            "::ffff:127.0.0.2",
+            "0:0:0:0:0:ffff:127.0.0.1",
+            "0.0.0.0",
+            "::",
+        ] {
+            let authority = if host.contains(':') && !host.starts_with('[') {
+                format!("[{host}]")
+            } else {
+                host.to_string()
+            };
+            assert!(
+                gateway_frontdoor_self_loop_guard_matches_with_port(
+                    8084,
+                    &format!("http://{authority}:8084/v1/chat/completions")
+                ),
+                "{host} must be treated as a loopback target"
+            );
+        }
+    }
+
+    #[test]
+    fn dotted_localhost_alias_is_blocked() {
+        assert!(gateway_frontdoor_self_loop_guard_matches_with_port(
+            8084,
+            "http://localhost.:8084/v1/chat/completions"
+        ));
+        assert!(gateway_frontdoor_self_loop_guard_matches_with_port(
+            8084,
+            "http://LOCALHOST.:8084/v1/chat/completions"
+        ));
+    }
+
+    #[test]
+    fn images_and_audio_paths_are_protected() {
+        for path in [
+            "/v1/images/generations",
+            "/v1/audio/speech",
+            "/v1/audio/transcriptions",
+            "/v1/audio/translations",
+        ] {
+            assert!(
+                frontdoor_self_loop_public_ai_path(path),
+                "{path} should be covered by the loop guard path list"
+            );
+            assert!(
+                gateway_frontdoor_self_loop_guard_matches_with_port(
+                    8084,
+                    &format!("http://127.0.0.1:8084{path}")
+                ),
+                "{path} loopback target must be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn non_public_ai_paths_and_other_ports_are_not_blocked() {
+        assert!(!frontdoor_self_loop_public_ai_path("/v1/models"));
+        assert!(!frontdoor_self_loop_public_ai_path("/v1/images/edits"));
+        assert!(!gateway_frontdoor_self_loop_guard_matches_with_port(
+            8084,
+            "http://127.0.0.1:8084/v1/models"
+        ));
+        assert!(!gateway_frontdoor_self_loop_guard_matches_with_port(
+            8084,
+            "http://127.0.0.1:9999/v1/chat/completions"
+        ));
+        assert!(!gateway_frontdoor_self_loop_guard_matches_with_port(
+            8084,
+            "http://example.com:8084/v1/chat/completions"
         ));
     }
 }
