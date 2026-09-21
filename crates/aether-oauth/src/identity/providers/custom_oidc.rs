@@ -23,6 +23,7 @@ const SERVER_MANAGED_AUTHORIZE_PARAMS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Default)]
+/// Data type: custom oidc identity oauth provider.
 pub struct CustomOidcIdentityOAuthProvider;
 
 #[async_trait]

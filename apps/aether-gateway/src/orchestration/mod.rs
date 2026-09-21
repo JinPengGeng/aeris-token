@@ -331,17 +331,7 @@ fn mask_trace_header_value(name: &str, value: &str) -> String {
 }
 
 fn trace_header_is_sensitive(name: &str) -> bool {
-    [
-        "authorization",
-        "x-api-key",
-        "api-key",
-        "x-goog-api-key",
-        "cookie",
-        "set-cookie",
-        "proxy-authorization",
-    ]
-    .iter()
-    .any(|candidate| name.trim().eq_ignore_ascii_case(candidate))
+    aether_data_contracts::repository::usage::header_name_is_sensitive(name)
 }
 
 #[cfg(test)]

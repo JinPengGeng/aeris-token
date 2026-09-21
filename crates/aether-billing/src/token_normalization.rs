@@ -24,6 +24,7 @@ fn parse_api_family(api_format: Option<&str>) -> ApiFamily {
     }
 }
 
+/// Function: normalize input tokens for billing.
 pub fn normalize_input_tokens_for_billing(
     api_format: Option<&str>,
     input_tokens: i64,
@@ -70,6 +71,7 @@ pub fn normalize_input_tokens_for_billing_with_known_cache_semantics(
     }
 }
 
+/// Function: normalize total input context for cache hit rate.
 pub fn normalize_total_input_context_for_cache_hit_rate(
     api_format: Option<&str>,
     input_tokens: i64,

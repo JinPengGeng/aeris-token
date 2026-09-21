@@ -13,10 +13,15 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use url::form_urlencoded;
 
+/// Constant: xai provider type.
 pub const XAI_PROVIDER_TYPE: &str = "xai";
+/// Constant: xai device code url.
 pub const XAI_DEVICE_CODE_URL: &str = "https://auth.x.ai/oauth2/device/code";
+/// Constant: xai token url.
 pub const XAI_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
+/// Constant: xai client id.
 pub const XAI_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+/// Constant: xai oauth scopes.
 pub const XAI_OAUTH_SCOPES: &[&str] = &[
     "openid",
     "profile",
@@ -25,19 +30,25 @@ pub const XAI_OAUTH_SCOPES: &[&str] = &[
     "grok-cli:access",
     "api:access",
 ];
+/// Constant: xai device code grant type.
 pub const XAI_DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
 const DEFAULT_DEVICE_EXPIRES_IN_SECS: u64 = 600;
 const DEFAULT_DEVICE_POLL_INTERVAL_SECS: u64 = 5;
 
 #[derive(Debug, Clone, PartialEq)]
+/// Enumeration: xai device poll outcome.
 pub enum XaiDevicePollOutcome {
+    /// Variant: pending.
     Pending,
+    /// Variant: slow down.
     SlowDown,
+    /// Variant: authorized.
     Authorized(Box<ProviderOAuthTokenSet>),
 }
 
 #[derive(Clone)]
+/// Data type: xai provider oauth adapter.
 pub struct XaiProviderOAuthAdapter {
     inner: GenericProviderOAuthAdapter,
     device_url_override: Option<String>,
@@ -67,6 +78,7 @@ impl Default for XaiProviderOAuthAdapter {
 }
 
 impl XaiProviderOAuthAdapter {
+    /// Method: with endpoint overrides.
     pub fn with_endpoint_overrides(
         mut self,
         device_url: impl Into<String>,
@@ -83,6 +95,7 @@ impl XaiProviderOAuthAdapter {
             .unwrap_or_else(|| XAI_DEVICE_CODE_URL.to_string())
     }
 
+    /// Method: start device flow.
     pub async fn start_device_flow(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -117,6 +130,7 @@ impl XaiProviderOAuthAdapter {
         parse_device_authorization(&payload)
     }
 
+    /// Method: poll device token.
     pub async fn poll_device_token(
         &self,
         executor: &dyn OAuthHttpExecutor,
