@@ -1,6 +1,6 @@
 mod ai_public;
 mod catalog_helpers;
-mod support;
+pub(crate) mod support;
 mod system_modules_helpers;
 
 pub(crate) use self::ai_public::{

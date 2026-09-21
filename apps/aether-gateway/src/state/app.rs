@@ -84,6 +84,22 @@ pub const DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES: usize = 10_000;
 pub const DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS: u64 = 10;
 pub const DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS: u64 = 10;
 
+pub const DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS: u64 = 1_000;
+pub const MAX_ADMIN_SECURITY_CACHE_TTL_MS: u64 = 30_000;
+
+#[derive(Debug, Clone, Copy)]
+pub struct AdminSecurityCacheConfig {
+    pub cache_ttl: Duration,
+}
+
+impl Default for AdminSecurityCacheConfig {
+    fn default() -> Self {
+        Self {
+            cache_ttl: Duration::from_millis(DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AuthContextCacheConfig {
     pub max_entries: usize,
@@ -486,6 +502,9 @@ pub struct AppState {
     pub(crate) owner_forward_client: reqwest::Client,
     pub(crate) auth_context_cache: Arc<AuthContextCache>,
     pub(crate) auth_context_cache_config: AuthContextCacheConfig,
+    pub(crate) admin_security_cache_config: AdminSecurityCacheConfig,
+    /// 公开回调基础地址（如 epay 支付回跳），来自启动配置。
+    pub(crate) public_base_url: Option<String>,
     pub(crate) auth_snapshot_cache: Arc<AuthSnapshotCache>,
     pub(crate) admin_security_blacklist_cache: Arc<ValueCache<String, bool>>,
     pub(crate) admin_security_whitelist_cache: Arc<ValueCache<String, Vec<String>>>,

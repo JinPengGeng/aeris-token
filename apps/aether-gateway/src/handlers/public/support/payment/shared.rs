@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use axum::{body::Body, http, response::Response};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
@@ -75,11 +77,29 @@ impl std::fmt::Debug for NormalizedPaymentCallbackRequest {
     }
 }
 
+/// 启动期由 clap 解析(`--payment-callback-secret` /
+/// `PAYMENT_CALLBACK_SECRET`)后通过 [`init_payment_callback_secret`] 注入。
+static PAYMENT_CALLBACK_SECRET: OnceLock<Option<String>> = OnceLock::new();
+
+/// 注入启动期解析后的支付回调密钥（仅首次调用生效）。
+pub fn init_payment_callback_secret(secret: Option<String>) {
+    let _ = PAYMENT_CALLBACK_SECRET.set(secret);
+}
+
 pub(super) fn payment_callback_secret() -> Option<String> {
+    if let Some(configured) = PAYMENT_CALLBACK_SECRET.get() {
+        return configured.clone();
+    }
+    // 未注入启动配置时保持既有进程内测试路径可用。
     std::env::var("PAYMENT_CALLBACK_SECRET")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| payment_callback_secret_is_strong(value))
+}
+
+/// 启动 fail-fast 校验用的强度检查。
+pub fn payment_callback_secret_is_strong_public_api(value: &str) -> bool {
+    payment_callback_secret_is_strong(value)
 }
 
 fn payment_callback_secret_is_strong(value: &str) -> bool {

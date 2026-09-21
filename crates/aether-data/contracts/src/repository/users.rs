@@ -1726,6 +1726,235 @@ fn parse_string_list_array(
     Ok(items)
 }
 
+/// 细粒度能力 trait 试点（#222 受控试点）：用户组读取面。
+///
+/// `UserReadRepository` 目前承载 74 个方法，用户组查询面是其中内聚的一组。
+/// 本 trait 通过为 `T: UserReadRepository` 的 blanket delegation 提供同一组
+/// 方法，使消费端可以只按 `UserGroupReadRepository` 编程，无需改动任何
+/// 数据适配器。试点结论见 `docs/adr/data-repository-capability-traits.md`。
+#[async_trait]
+pub trait UserGroupReadRepository: Send + Sync {
+    async fn list_user_groups(&self) -> Result<Vec<StoredUserGroup>, crate::DataLayerError>;
+
+    async fn find_user_group_by_id(
+        &self,
+        group_id: &str,
+    ) -> Result<Option<StoredUserGroup>, crate::DataLayerError>;
+
+    async fn list_user_groups_by_ids(
+        &self,
+        group_ids: &[String],
+    ) -> Result<Vec<StoredUserGroup>, crate::DataLayerError>;
+
+    async fn list_user_group_members(
+        &self,
+        group_id: &str,
+    ) -> Result<Vec<StoredUserGroupMember>, crate::DataLayerError>;
+
+    async fn list_user_groups_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<StoredUserGroup>, crate::DataLayerError>;
+
+    async fn list_user_group_memberships_by_user_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredUserGroupMembership>, crate::DataLayerError>;
+}
+
+#[async_trait]
+impl<T: UserReadRepository + ?Sized> UserGroupReadRepository for T {
+    async fn list_user_groups(&self) -> Result<Vec<StoredUserGroup>, crate::DataLayerError> {
+        UserReadRepository::list_user_groups(self).await
+    }
+
+    async fn find_user_group_by_id(
+        &self,
+        group_id: &str,
+    ) -> Result<Option<StoredUserGroup>, crate::DataLayerError> {
+        UserReadRepository::find_user_group_by_id(self, group_id).await
+    }
+
+    async fn list_user_groups_by_ids(
+        &self,
+        group_ids: &[String],
+    ) -> Result<Vec<StoredUserGroup>, crate::DataLayerError> {
+        UserReadRepository::list_user_groups_by_ids(self, group_ids).await
+    }
+
+    async fn list_user_group_members(
+        &self,
+        group_id: &str,
+    ) -> Result<Vec<StoredUserGroupMember>, crate::DataLayerError> {
+        UserReadRepository::list_user_group_members(self, group_id).await
+    }
+
+    async fn list_user_groups_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<StoredUserGroup>, crate::DataLayerError> {
+        UserReadRepository::list_user_groups_for_user(self, user_id).await
+    }
+
+    async fn list_user_group_memberships_by_user_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredUserGroupMembership>, crate::DataLayerError> {
+        UserReadRepository::list_user_group_memberships_by_user_ids(self, user_ids).await
+    }
+}
+
+/// 细粒度能力 trait 试点（#222 受控试点）：用户组写入面。
+#[async_trait]
+pub trait UserGroupWriteRepository: Send + Sync {
+    async fn create_user_group(
+        &self,
+        record: UpsertUserGroupRecord,
+    ) -> Result<Option<StoredUserGroup>, crate::DataLayerError>;
+
+    async fn update_user_group(
+        &self,
+        group_id: &str,
+        record: UpsertUserGroupRecord,
+    ) -> Result<Option<StoredUserGroup>, crate::DataLayerError>;
+
+    async fn restore_user_group_if_matches(
+        &self,
+        expected: &StoredUserGroup,
+        restored: &StoredUserGroup,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = (expected, restored);
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic user group restore is not available".to_string(),
+        ))
+    }
+
+    async fn delete_user_group(&self, group_id: &str) -> Result<bool, crate::DataLayerError>;
+
+    async fn replace_user_group_members(
+        &self,
+        group_id: &str,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredUserGroupMember>, crate::DataLayerError>;
+
+    /// Returns `None` without writing when this adapter cannot atomically commit
+    /// membership replacement and the durable audit intent in the same database.
+    async fn replace_user_group_members_with_audit(
+        &self,
+        group_id: &str,
+        user_ids: &[String],
+        audit: &crate::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<Vec<StoredUserGroupMember>>, crate::DataLayerError> {
+        let _ = (group_id, user_ids, audit);
+        Ok(None)
+    }
+
+    async fn replace_user_groups_for_user(
+        &self,
+        user_id: &str,
+        group_ids: &[String],
+    ) -> Result<Vec<StoredUserGroup>, crate::DataLayerError>;
+
+    /// Restore a user's group memberships only when the current set still
+    /// equals the post-import set. The compare and replacement are atomic.
+    async fn restore_user_groups_if_matches(
+        &self,
+        user_id: &str,
+        expected_group_ids: &[String],
+        restored_group_ids: &[String],
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = (user_id, expected_group_ids, restored_group_ids);
+        Err(crate::DataLayerError::InvalidInput(
+            "atomic user group restore is not available".to_string(),
+        ))
+    }
+
+    async fn add_user_to_group(
+        &self,
+        group_id: &str,
+        user_id: &str,
+    ) -> Result<bool, crate::DataLayerError>;
+}
+
+#[async_trait]
+impl<T: UserReadRepository + ?Sized> UserGroupWriteRepository for T {
+    async fn create_user_group(
+        &self,
+        record: UpsertUserGroupRecord,
+    ) -> Result<Option<StoredUserGroup>, crate::DataLayerError> {
+        UserReadRepository::create_user_group(self, record).await
+    }
+
+    async fn update_user_group(
+        &self,
+        group_id: &str,
+        record: UpsertUserGroupRecord,
+    ) -> Result<Option<StoredUserGroup>, crate::DataLayerError> {
+        UserReadRepository::update_user_group(self, group_id, record).await
+    }
+
+    async fn restore_user_group_if_matches(
+        &self,
+        expected: &StoredUserGroup,
+        restored: &StoredUserGroup,
+    ) -> Result<bool, crate::DataLayerError> {
+        UserReadRepository::restore_user_group_if_matches(self, expected, restored).await
+    }
+
+    async fn delete_user_group(&self, group_id: &str) -> Result<bool, crate::DataLayerError> {
+        UserReadRepository::delete_user_group(self, group_id).await
+    }
+
+    async fn replace_user_group_members(
+        &self,
+        group_id: &str,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredUserGroupMember>, crate::DataLayerError> {
+        UserReadRepository::replace_user_group_members(self, group_id, user_ids).await
+    }
+
+    async fn replace_user_group_members_with_audit(
+        &self,
+        group_id: &str,
+        user_ids: &[String],
+        audit: &crate::repository::audit::CreateAdminAuditLog,
+    ) -> Result<Option<Vec<StoredUserGroupMember>>, crate::DataLayerError> {
+        UserReadRepository::replace_user_group_members_with_audit(self, group_id, user_ids, audit)
+            .await
+    }
+
+    async fn replace_user_groups_for_user(
+        &self,
+        user_id: &str,
+        group_ids: &[String],
+    ) -> Result<Vec<StoredUserGroup>, crate::DataLayerError> {
+        UserReadRepository::replace_user_groups_for_user(self, user_id, group_ids).await
+    }
+
+    async fn restore_user_groups_if_matches(
+        &self,
+        user_id: &str,
+        expected_group_ids: &[String],
+        restored_group_ids: &[String],
+    ) -> Result<bool, crate::DataLayerError> {
+        UserReadRepository::restore_user_groups_if_matches(
+            self,
+            user_id,
+            expected_group_ids,
+            restored_group_ids,
+        )
+        .await
+    }
+
+    async fn add_user_to_group(
+        &self,
+        group_id: &str,
+        user_id: &str,
+    ) -> Result<bool, crate::DataLayerError> {
+        UserReadRepository::add_user_to_group(self, group_id, user_id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};
