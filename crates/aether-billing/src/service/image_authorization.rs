@@ -1,5 +1,6 @@
 //! Bounded image quotes. Callers must reserve funds before using a quote to admit
-//! paid work; the legacy gateway estimate deliberately continues to reject it.
+//! paid work; the legacy gateway estimate reuses the same resolution rules for
+//! balance pre-checks and stays fail-closed for unproven shapes or prices.
 
 use serde::{Deserialize, Serialize};
 
@@ -906,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_zero_image_price_is_valid_and_legacy_paid_admission_stays_closed() {
+    fn explicit_zero_image_price_quotes_and_estimates_zero_cost() {
         let service = BillingService::new();
         let mut pricing = pricing(json!({"image_output_price_default": 0.0}));
         pricing.default_price_per_request = Some(0.0);
@@ -915,13 +916,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(quote.upper_bound_units(), 0);
+        // The legacy estimate prices proven image shapes; a missing count or
+        // unpriced dimension stays fail-closed instead of admitting the work.
+        let mut estimate = crate::BillingAuthorizationEstimateInput::new("image", 0);
         assert!(service
-            .estimate_authorization_cost_upper_bound(
-                &pricing,
-                &crate::BillingAuthorizationEstimateInput::new("image", 0)
-            )
+            .estimate_authorization_cost_upper_bound(&pricing, &estimate)
             .unwrap()
             .is_none());
+        estimate.image_count = Some(3);
+        estimate.image_size = Some("1024x1024".into());
+        estimate.image_quality = Some("medium".into());
+        assert_eq!(
+            service
+                .estimate_authorization_cost_upper_bound(&pricing, &estimate)
+                .unwrap(),
+            Some(0.0)
+        );
         assert_eq!(ceil_cost_units(0.000_000_001), Some(1));
         assert_eq!(settled_cost_units(0.000_000_001), Some(0));
         assert_eq!(ceil_cost_units(i64::MAX as f64 / COST_UNITS_PER_USD), None);
