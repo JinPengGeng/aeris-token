@@ -52,6 +52,10 @@ pub(crate) enum FrontdoorDailyUsageOutcome {
     NotApplicable,
     Allowed,
     Rejected(FrontdoorDailyUsageRejection),
+    /// The shared runtime state backing the quota check was unavailable and
+    /// the limiter is configured consistency-first, so the request is denied
+    /// instead of being allowed fail-open.
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +65,7 @@ pub(crate) struct DailyUsageLimitedResponse;
 pub(crate) struct FrontdoorDailyUsageLimiter {
     system_default_cache: Arc<ExpiringMap<String, f64>>,
     runtime_failures: Arc<AtomicU64>,
+    fail_open: bool,
     #[cfg(test)]
     system_default_override: Arc<std::sync::Mutex<Option<f64>>>,
 }
@@ -76,6 +81,7 @@ impl FrontdoorDailyUsageLimiter {
         Self {
             system_default_cache: Arc::new(ExpiringMap::default()),
             runtime_failures: Arc::new(AtomicU64::new(0)),
+            fail_open: true,
             #[cfg(test)]
             system_default_override: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -83,6 +89,17 @@ impl FrontdoorDailyUsageLimiter {
 
     pub(crate) fn clear_system_default_cache(&self) {
         self.system_default_cache.clear();
+    }
+
+    pub(crate) fn fail_open(&self) -> bool {
+        self.fail_open
+    }
+
+    /// Consistency-first mode: a runtime failure while checking quota denies
+    /// the request instead of allowing it fail-open.
+    pub(crate) fn with_fail_open(mut self, fail_open: bool) -> Self {
+        self.fail_open = fail_open;
+        self
     }
 
     pub(crate) fn runtime_failure_count(&self) -> u64 {
@@ -107,6 +124,18 @@ impl FrontdoorDailyUsageLimiter {
                 aether_runtime::record_billing_fail_open_daily_quota();
                 let failure_count = self.runtime_failures.fetch_add(1, Ordering::Relaxed) + 1;
                 let auth = decision.auth_context.as_ref();
+                if !self.fail_open {
+                    warn!(
+                        event_name = "frontdoor_daily_usage_check_failed",
+                        log_type = "ops",
+                        error = ?err,
+                        runtime_failures_total = failure_count,
+                        user_id = auth.map(|auth| auth.user_id.as_str()).unwrap_or("-"),
+                        api_key_id = auth.map(|auth| auth.api_key_id.as_str()).unwrap_or("-"),
+                        "daily usage limit check failed; denying request (consistency-first)"
+                    );
+                    return FrontdoorDailyUsageOutcome::Unavailable;
+                }
                 warn!(
                     event_name = "frontdoor_daily_usage_check_failed",
                     log_type = "ops",
@@ -654,6 +683,20 @@ mod tests {
         assert_eq!(
             limiter.check(&state, &decision).await,
             FrontdoorDailyUsageOutcome::Allowed
+        );
+        assert_eq!(limiter.runtime_failure_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn consistency_first_denies_when_usage_repository_is_missing() {
+        let state = AppState::new().expect("state should build");
+        let limiter = FrontdoorDailyUsageLimiter::new().with_fail_open(false);
+        assert!(!limiter.fail_open());
+        let decision = sample_decision(Some(1.0), None);
+
+        assert_eq!(
+            limiter.check(&state, &decision).await,
+            FrontdoorDailyUsageOutcome::Unavailable
         );
         assert_eq!(limiter.runtime_failure_count(), 1);
     }

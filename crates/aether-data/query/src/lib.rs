@@ -437,12 +437,38 @@ fn push_ci_contains_predicate<'args, DB>(
 {
     match dialect {
         SqlDialect::Postgres => {
+            // User input is embedded in the bound pattern, so `%`/`_` (and the
+            // escape character itself) must be escaped to keep the user's
+            // literal text from widening the match.
+            //
+            // Note on non-ASCII case folding: `ILIKE` folds case according to
+            // the database collation, while the in-memory search paths use
+            // `to_ascii_lowercase`, which only folds ASCII.  For non-ASCII
+            // search terms (e.g. Chinese is unaffected, but accented Latin
+            // letters are) results can therefore differ between the SQL
+            // backends and the memory backends.  That inconsistency is a known
+            // limitation; this helper at least guarantees the wildcard
+            // semantics are identical everywhere.
             builder
                 .push(column_sql)
                 .push(" ILIKE ")
-                .push_bind(format!("%{trimmed}%"));
+                .push_bind(format!("%{}%", escape_like_pattern(trimmed)))
+                .push(" ESCAPE '\\'");
         }
     }
+}
+
+/// Escapes the LIKE/ILIKE wildcard characters (`%`, `_`) and the escape
+/// character (`\`) in user-supplied text so it is matched literally.
+pub fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 pub fn push_limit<'args, DB>(builder: &mut QueryBuilder<'args, DB>, limit: i64)
@@ -538,6 +564,32 @@ mod tests {
     }
 
     #[test]
+    fn ci_contains_escapes_like_wildcards() {
+        let mut builder = QueryBuilder::<Postgres>::new("SELECT * FROM items");
+        let mut where_clause = WhereClause::new();
+        push_ci_contains(
+            &mut builder,
+            &mut where_clause,
+            SqlDialect::Postgres,
+            "task_key",
+            "100%_done\\x",
+        );
+        let query = builder.build();
+        assert!(query.sql().contains("task_key ILIKE $1 ESCAPE '\\'"));
+        // The bound pattern itself is covered by
+        // `escape_like_pattern_handles_cjk_and_emoji`.
+    }
+
+    #[test]
+    fn escape_like_pattern_handles_cjk_and_emoji() {
+        assert_eq!(escape_like_pattern("中文%搜索_x"), "中文\\%搜索\\_x");
+        assert_eq!(escape_like_pattern("🚀_100%"), "🚀\\_100\\%");
+        assert_eq!(escape_like_pattern("plain"), "plain");
+        assert_eq!(escape_like_pattern(""), "");
+        assert_eq!(escape_like_pattern("\\\\"), "\\\\\\\\");
+    }
+
+    #[test]
     fn ci_contains_any_groups_or_predicates() {
         let mut builder = QueryBuilder::<Postgres>::new("SELECT * FROM items");
         let mut where_clause = WhereClause::new();
@@ -549,9 +601,9 @@ mod tests {
             "Avatar",
         );
         let query = builder.build();
-        assert!(query
-            .sql()
-            .contains(" WHERE (file_name ILIKE $1 OR COALESCE(display_name, '') ILIKE $2)"));
+        assert!(query.sql().contains(
+            " WHERE (file_name ILIKE $1 ESCAPE '\\' OR COALESCE(display_name, '') ILIKE $2 ESCAPE '\\')"
+        ));
     }
 
     #[test]
@@ -621,7 +673,7 @@ mod tests {
         let query = builder.build();
         assert_eq!(
             query.sql(),
-            "SELECT id, name FROM items WHERE kind = $1 AND (name ILIKE $2 OR description ILIKE $3) ORDER BY name ASC LIMIT $4 OFFSET $5"
+            "SELECT id, name FROM items WHERE kind = $1 AND (name ILIKE $2 ESCAPE '\\' OR description ILIKE $3 ESCAPE '\\') ORDER BY name ASC LIMIT $4 OFFSET $5"
         );
     }
 }

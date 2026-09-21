@@ -2222,6 +2222,37 @@ async fn execution_plan_balance_capacity_response(
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
+    if let crate::daily_usage_limit::FrontdoorDailyUsageOutcome::Unavailable = daily_usage_outcome {
+        let auth = decision.auth_context.as_ref();
+        warn!(
+            event_name = "frontdoor_daily_usage_unavailable_rejected",
+            log_type = "ops",
+            trace_id,
+            user_id = auth.map(|auth| auth.user_id.as_str()).unwrap_or("-"),
+            api_key_id = auth.map(|auth| auth.api_key_id.as_str()).unwrap_or("-"),
+            "gateway rejected candidate: daily usage quota backend unavailable (consistency-first)"
+        );
+        mark_unused_local_candidate(state, plan, report_context).await;
+        let rejection = crate::daily_usage_limit::FrontdoorDailyUsageRejection {
+            scope: "runtime_unavailable",
+            limit_usd: 0.0,
+            used_usd: 0.0,
+            remaining_usd: 0.0,
+            retry_after: 60,
+            reset_at_unix_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() + 60)
+                .unwrap_or(0),
+            timezone: "UTC".to_string(),
+        };
+        let mut response = crate::api::response::build_local_daily_usage_limited_response(
+            trace_id,
+            Some(decision),
+            &rejection,
+        )?;
+        attach_redaction_execution_candidate(&mut response, plan.candidate_id.as_deref());
+        return Ok(Some(response));
+    }
     if let crate::daily_usage_limit::FrontdoorDailyUsageOutcome::Rejected(rejection) =
         daily_usage_outcome
     {

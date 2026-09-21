@@ -61,13 +61,9 @@ impl BillingService {
         if pricing.is_free_tier() {
             return Ok(Some(0.0));
         }
-        // Image pricing still lacks a bounded authorization input. Keep paid
-        // images fail-closed until request dimensions and a conservative
-        // upper-bound contract are wired through this API.
-        if normalize_task_type(&estimate.task_type) == "image" {
-            return Ok(None);
-        }
-        if estimate.max_output_tokens.is_none()
+        let image_estimate = normalize_task_type(&estimate.task_type) == "image";
+        if !image_estimate
+            && estimate.max_output_tokens.is_none()
             && pricing_resolutions.iter().any(|resolution| {
                 resolution
                     .tiered_pricing
@@ -80,7 +76,7 @@ impl BillingService {
 
         let input_tokens = estimate.input_tokens.max(0);
         let output_tokens = estimate.max_output_tokens.unwrap_or(0).max(0);
-        let base_input = BillingUsageInput {
+        let mut base_input = BillingUsageInput {
             task_type: estimate.task_type.clone(),
             api_format: estimate.api_format.clone(),
             requested_processing_tier: estimate.requested_processing_tier.clone(),
@@ -92,6 +88,27 @@ impl BillingService {
                 .or(pricing.provider_api_key_cache_ttl_minutes),
             ..BillingUsageInput::new(estimate.task_type.clone())
         };
+        if image_estimate {
+            let Some(image_count) = estimate
+                .image_count
+                .filter(|count| (1..=10).contains(count))
+            else {
+                // A paid image without a proven billable count stays fail-closed.
+                return Ok(None);
+            };
+            base_input.image_count = image_count;
+            base_input.request_count = image_count;
+            base_input.image_size = estimate
+                .image_size
+                .as_deref()
+                .map(normalize_image_output_size)
+                .filter(|value| !value.is_empty());
+            base_input.image_quality = estimate
+                .image_quality
+                .as_deref()
+                .map(normalize_image_output_quality)
+                .filter(|value| !value.is_empty());
+        }
         let mut scenarios = vec![base_input.clone()];
         if input_tokens > 0
             && pricing_resolutions
@@ -116,7 +133,7 @@ impl BillingService {
                 scenarios.push(cache_creation_1h);
             }
 
-            let mut cache_read = base_input;
+            let mut cache_read = base_input.clone();
             cache_read.cache_read_tokens = input_tokens;
             scenarios.push(cache_read);
         }
@@ -124,6 +141,44 @@ impl BillingService {
         let mut upper_bound = 0.0_f64;
         'pricing_catalogs: for pricing_resolution in pricing_resolutions {
             let is_requested_catalog = pricing_resolution.bills_requested_processing_tier();
+            if image_estimate {
+                let image_state =
+                    image_output_pricing_state(pricing_resolution.tiered_pricing.as_ref());
+                if image_state.enabled {
+                    // An unproven output shape may land in any dimension-priced
+                    // bucket, so a default price cannot bound it. Explicit
+                    // dimensions resolve through the same matrix/range/default
+                    // rules settlement uses; anything unmatched is unknown cost.
+                    let size_proven = base_input
+                        .image_size
+                        .as_deref()
+                        .is_some_and(|size| parse_image_size_pixels(size).is_some());
+                    if !size_proven && (image_state.matrix_enabled || image_state.range_enabled) {
+                        return Ok(None);
+                    }
+                    let resolved = resolve_image_output_price_resolution(
+                        pricing_resolution.tiered_pricing.as_ref(),
+                        &base_input,
+                    );
+                    if resolved.pricing_mode == "none"
+                        || !resolved.price_per_image.is_finite()
+                        || resolved.price_per_image < 0.0
+                    {
+                        return Ok(None);
+                    }
+                }
+                // Image token counts come from provider usage evidence, never
+                // from the request body, so a catalog with positive token rates
+                // cannot be bounded by the request shape alone. The frozen
+                // per-attempt quote path owns token-priced image work.
+                if pricing_resolution
+                    .tiered_pricing
+                    .as_ref()
+                    .is_some_and(pricing_catalog_has_positive_token_rate)
+                {
+                    return Ok(None);
+                }
+            }
             for scenario in &scenarios {
                 let total_input_context = normalize_total_input_context_for_cache_hit_rate(
                     scenario.api_format.as_deref(),
@@ -331,6 +386,30 @@ fn pricing_has_positive_output_rate(pricing: &Value) -> bool {
         .flatten()
         .filter_map(|tier| tier.get("output_price_per_1m").and_then(Value::as_f64))
         .any(|price| price.is_finite() && price > 0.0)
+}
+
+/// Image token counts are only known from provider usage evidence. A catalog
+/// with any positive token rate cannot bound an image operation from the
+/// request shape, so authorization must stay fail-closed for it.
+fn pricing_catalog_has_positive_token_rate(pricing: &Value) -> bool {
+    const TOKEN_RATE_KEYS: [&str; 4] = [
+        "input_price_per_1m",
+        "output_price_per_1m",
+        "cache_creation_price_per_1m",
+        "cache_read_price_per_1m",
+    ];
+    pricing
+        .get("tiers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|tier| {
+            TOKEN_RATE_KEYS.iter().any(|key| {
+                tier.get(key)
+                    .and_then(Value::as_f64)
+                    .is_some_and(|price| price.is_finite() && price > 0.0)
+            })
+        })
 }
 
 fn billing_computation_is_bounded(computation: &BillingComputation) -> bool {
@@ -2397,6 +2476,173 @@ mod tests {
                 .resolved_variables
                 .get("cache_read_price_per_1m"),
             Some(&json!(0.25))
+        );
+    }
+
+    fn image_estimate(
+        count: Option<i64>,
+        size: Option<&str>,
+        quality: Option<&str>,
+    ) -> BillingAuthorizationEstimateInput {
+        let mut estimate = BillingAuthorizationEstimateInput::new("image", 0);
+        estimate.api_format = Some("openai:image".to_string());
+        estimate.image_count = count;
+        estimate.image_size = size.map(ToOwned::to_owned);
+        estimate.image_quality = quality.map(ToOwned::to_owned);
+        estimate
+    }
+
+    fn image_pricing(catalog: serde_json::Value) -> BillingModelPricingSnapshot {
+        BillingModelPricingSnapshot {
+            default_price_per_request: None,
+            default_tiered_pricing: Some(catalog),
+            model_tiered_pricing: None,
+            ..pricing()
+        }
+    }
+
+    #[test]
+    fn image_authorization_estimate_prices_count_and_fixed_dimensions() {
+        let service = BillingService::new();
+        let pricing = image_pricing(json!({"image_output_price_default": 0.04}));
+        // 3 images at USD 0.04, exactly like the settlement path below.
+        let estimate = service
+            .estimate_authorization_cost_upper_bound(
+                &pricing,
+                &image_estimate(Some(3), Some("1024x1024"), Some("high")),
+            )
+            .expect("image estimate should calculate");
+        assert_eq!(estimate, Some(0.12));
+        let settled = service
+            .calculate(
+                &pricing,
+                &BillingUsageInput {
+                    image_count: 3,
+                    request_count: 3,
+                    image_size: Some("1024x1024".to_string()),
+                    image_quality: Some("high".to_string()),
+                    api_format: Some("openai:image".to_string()),
+                    ..BillingUsageInput::new("image")
+                },
+            )
+            .expect("image settlement should calculate");
+        assert_eq!(settled.actual_total_cost, 0.12);
+    }
+
+    #[test]
+    fn image_authorization_estimate_uses_matrix_range_and_default_like_settlement() {
+        let service = BillingService::new();
+        let pricing = image_pricing(json!({
+            "image_output_prices": {"1024x1024": {"medium": 0.02}},
+            "image_output_price_ranges": [{"up_to_pixels": 2_000_000, "prices": {"medium": 0.07}}],
+            "image_output_price_default": 0.11
+        }));
+        for (size, expected) in [
+            ("1024x1024", 0.04),
+            ("1536x1024", 0.14),
+            ("2048x2048", 0.22),
+        ] {
+            let estimate = service
+                .estimate_authorization_cost_upper_bound(
+                    &pricing,
+                    &image_estimate(Some(2), Some(size), Some("medium")),
+                )
+                .expect("image estimate should calculate");
+            assert_eq!(estimate, Some(expected), "size {size}");
+        }
+    }
+
+    #[test]
+    fn image_authorization_estimate_fails_closed_without_proven_shape_or_price() {
+        let service = BillingService::new();
+        let default_pricing = image_pricing(json!({"image_output_price_default": 0.04}));
+        // Missing count, unsupported count and invalid counts stay closed.
+        for count in [None, Some(0), Some(11), Some(-1), Some(i64::MAX)] {
+            assert_eq!(
+                service
+                    .estimate_authorization_cost_upper_bound(
+                        &default_pricing,
+                        &image_estimate(count, Some("1024x1024"), Some("high")),
+                    )
+                    .expect("image estimate should resolve"),
+                None,
+                "count {count:?}"
+            );
+        }
+        // A dimension-keyed catalog cannot bound an unproven output shape, and
+        // a catalog without any matching price is unknown cost, never free.
+        let matrix_pricing = image_pricing(json!({
+            "image_output_prices": {"1024x1024": {"medium": 0.02}, "2048x2048": {"high": 0.08}}
+        }));
+        for (size, quality) in [
+            (None, Some("medium")),
+            (Some("auto"), Some("medium")),
+            (Some("not-a-size"), Some("medium")),
+            (Some("1024x1024"), Some("high")),
+        ] {
+            assert_eq!(
+                service
+                    .estimate_authorization_cost_upper_bound(
+                        &matrix_pricing,
+                        &image_estimate(Some(1), size, quality),
+                    )
+                    .expect("image estimate should resolve"),
+                None,
+                "size {size:?} quality {quality:?}"
+            );
+        }
+        // A default-only catalog accepts requests that omit dimensions because
+        // every output dimension resolves to the same explicit default price.
+        let default_only = image_pricing(json!({"image_output_price_default": 0.03}));
+        assert_eq!(
+            service
+                .estimate_authorization_cost_upper_bound(
+                    &default_only,
+                    &image_estimate(Some(2), None, None),
+                )
+                .expect("image estimate should resolve"),
+            Some(0.06)
+        );
+    }
+
+    #[test]
+    fn image_authorization_estimate_keeps_token_priced_models_fail_closed() {
+        let service = BillingService::new();
+        // Token-priced image models bill tokens only proven by provider usage
+        // evidence, so the request shape never bounds them. Only the frozen
+        // per-attempt quote path may authorize that work.
+        let token_pricing = image_pricing(json!({
+            "image_output_price_default": 0.0,
+            "tiers": [{"up_to": null, "input_price_per_1m": 1.0, "output_price_per_1m": 2.0}]
+        }));
+        let mut estimate = image_estimate(Some(1), Some("1024x1024"), Some("medium"));
+        assert_eq!(
+            service
+                .estimate_authorization_cost_upper_bound(&token_pricing, &estimate)
+                .expect("image estimate should resolve"),
+            None
+        );
+        estimate.max_output_tokens = Some(500);
+        assert_eq!(
+            service
+                .estimate_authorization_cost_upper_bound(&token_pricing, &estimate)
+                .expect("image estimate should resolve"),
+            None,
+            "output tokens alone never prove the input side of a token-priced image"
+        );
+        // Explicit zero token rates stay explicitly priced at the image rate.
+        let zero_token_pricing = image_pricing(json!({
+            "image_output_price_default": 0.05,
+            "tiers": [{"up_to": null, "input_price_per_1m": 0.0, "output_price_per_1m": 0.0}]
+        }));
+        assert_eq!(
+            service
+                .estimate_authorization_cost_upper_bound(
+                    &zero_token_pricing,
+                    &image_estimate(Some(2), Some("1024x1024"), Some("medium")),
+                )
+                .expect("image estimate should resolve"),
+            Some(0.10)
         );
     }
 }

@@ -312,6 +312,26 @@ fn referral_retry_allowed(status: &str) -> bool {
     status == "failed"
 }
 
+/// Bound for the automatic in-line retry of the two-step referral write
+/// (reward row insert, then wallet credit in a separate transaction).  A
+/// crash or transient error between the two steps must converge without an
+/// operator, but the retry must stay bounded so a permanently failing reward
+/// cannot stall the payment callback.
+const REFERRAL_CREDIT_MAX_ATTEMPTS: usize = 3;
+const REFERRAL_CREDIT_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Only transient transport/timeout-class errors are retried.  Input and
+/// data-shape errors fail fast: retrying them cannot change the outcome.
+fn referral_credit_error_retryable(error: &DataLayerError) -> bool {
+    matches!(
+        error,
+        DataLayerError::Postgres(_)
+            | DataLayerError::Sql(_)
+            | DataLayerError::Redis(_)
+            | DataLayerError::TimedOut(_)
+    )
+}
+
 fn referral_void_allowed(status: &str) -> bool {
     matches!(status, "pending" | "failed")
 }
@@ -2173,14 +2193,65 @@ WHERE id = $1 AND status = 'applying'
         let mut credited = Vec::new();
         for key in idempotency_keys {
             if let Some(target) = self.referral_credit_target_by_key(key).await? {
-                self.credit_referral_reward(target, operator_id, note)
-                    .await?;
+                if let Err(error) = self
+                    .credit_referral_reward_with_retry(&target, operator_id, note)
+                    .await
+                {
+                    // The reward row stays in its durable pending/failed state
+                    // and remains visible to the bounded admin retry queue, so
+                    // this is the dead-letter hand-off point: log loudly for
+                    // alerting and surface the failure to the caller.
+                    tracing::error!(
+                        reward_id = %target.id,
+                        idempotency_key = %key,
+                        error = %error,
+                        "referral reward credit failed after bounded retries; left for operator retry"
+                    );
+                    return Err(error);
+                }
                 if let Some(updated) = self.find_referral_reward_by_idempotency_key(key).await? {
                     credited.push(updated);
                 }
             }
         }
         Ok(credited)
+    }
+
+    /// Retries a single reward credit for transient errors.  The claim step
+    /// inside `credit_referral_reward` only moves pending/failed rows to
+    /// `applying`, and its transaction rolls back on error, so a replay is
+    /// idempotent — a crash between the reward insert and the wallet credit
+    /// converges here instead of waiting for a manual retry.
+    async fn credit_referral_reward_with_retry(
+        &self,
+        target: &ReferralCreditTarget,
+        operator_id: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<(), DataLayerError> {
+        for attempt in 1..=REFERRAL_CREDIT_MAX_ATTEMPTS {
+            match self
+                .credit_referral_reward(target.clone(), operator_id, note)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if attempt == REFERRAL_CREDIT_MAX_ATTEMPTS
+                        || !referral_credit_error_retryable(&error)
+                    {
+                        return Err(error);
+                    }
+                    tracing::warn!(
+                        reward_id = %target.id,
+                        attempt,
+                        max_attempts = REFERRAL_CREDIT_MAX_ATTEMPTS,
+                        error = %error,
+                        "referral reward credit attempt failed; retrying"
+                    );
+                    tokio::time::sleep(REFERRAL_CREDIT_RETRY_BASE_DELAY * attempt as u32).await;
+                }
+            }
+        }
+        unreachable!("loop always returns")
     }
 
     async fn referral_credit_target_by_key(
@@ -2733,6 +2804,31 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn referral_credit_retry_only_for_transient_errors() {
+        for error in [
+            DataLayerError::Postgres("connection reset".to_string()),
+            DataLayerError::Sql("deadlock".to_string()),
+            DataLayerError::Redis("timeout".to_string()),
+            DataLayerError::TimedOut("pool".to_string()),
+        ] {
+            assert!(
+                referral_credit_error_retryable(&error),
+                "{error} should be retryable"
+            );
+        }
+        for error in [
+            DataLayerError::InvalidInput("bad amount".to_string()),
+            DataLayerError::InvalidConfiguration("bad dsn".to_string()),
+            DataLayerError::UnexpectedValue("corrupt row".to_string()),
+        ] {
+            assert!(
+                !referral_credit_error_retryable(&error),
+                "{error} must fail fast"
+            );
+        }
+    }
 
     #[test]
     fn referral_retry_only_allows_failed_rewards() {

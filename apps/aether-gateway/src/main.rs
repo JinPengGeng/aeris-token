@@ -125,8 +125,9 @@ use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
 use aether_gateway::{
     attach_static_frontend, build_router_with_state,
     prewarm_direct_h2c_sender_cache_from_env_for_startup, set_gateway_frontdoor_app_port, AppState,
-    FrontdoorCorsConfig, FrontdoorUserRpmConfig, GatewayDataConfig, UsageRuntimeConfig,
-    VideoTaskTruthSourceMode,
+    AuthContextCacheConfig, FrontdoorCorsConfig, FrontdoorUserRpmConfig, GatewayDataConfig,
+    UsageRuntimeConfig, VideoTaskTruthSourceMode, DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+    DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS, DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS,
 };
 use aether_gateway_frontdoor::{http_connection_limit, HttpConnectionBudget};
 use aether_runtime::{
@@ -1347,6 +1348,13 @@ struct GatewayRateLimitArgs {
     /// Keep the secure fail-closed behavior as the production default.
     #[arg(long, env = "RATE_LIMIT_FAIL_OPEN", default_value_t = false)]
     fail_open: bool,
+
+    /// Consistency-first mode: when shared runtime state (Redis) is
+    /// unavailable, reject requests instead of degrading to per-node
+    /// behavior. Disables the RPM local fallback and makes the daily usage
+    /// quota check fail closed. Default keeps existing semantics.
+    #[arg(long, env = "AETHER_CONSISTENCY_FIRST", default_value_t = false)]
+    consistency_first: bool,
 }
 
 impl GatewayRateLimitArgs {
@@ -1661,6 +1669,29 @@ struct Args {
 
     #[arg(long, env = "AETHER_GATEWAY_VIDEO_TASK_STORE_PATH")]
     video_task_store_path: Option<String>,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES",
+        default_value_t = DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    auth_context_cache_max_entries: usize,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS",
+        default_value_t = DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS,
+        value_parser = clap::value_parser!(u64).range(1..=10)
+    )]
+    auth_context_cache_refresh_interval_secs: u64,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS",
+        default_value_t = DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS
+    )]
+    auth_context_negative_cache_ttl_secs: u64,
 
     #[arg(long, env = "AETHER_GATEWAY_MAX_IN_FLIGHT_REQUESTS")]
     max_in_flight_requests: Option<usize>,
@@ -2370,6 +2401,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?,
     );
     let rate_limit_config = if matches!(args.deployment_topology, DeploymentTopologyArg::MultiNode)
+        || args.rate_limit.consistency_first
     {
         args.rate_limit.config().with_local_fallback(false)
     } else {
@@ -2418,6 +2450,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         frontdoor_rpm_key_ttl_seconds = args.rate_limit.key_ttl_seconds,
         frontdoor_rpm_fail_open = args.rate_limit.fail_open,
         frontdoor_rpm_allow_local_fallback = rate_limit_config.allow_local_fallback(),
+        consistency_first = args.rate_limit.consistency_first,
+        frontdoor_daily_usage_fail_open = !args.rate_limit.consistency_first,
         video_task_poller_interval_ms = args.video_task_poller_interval_ms,
         video_task_poller_batch_size = args.video_task_poller_batch_size,
         video_task_store_path = args.video_task_store_path.as_deref().unwrap_or("-"),
@@ -2481,6 +2515,15 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut state = AppState::new()?
+        .with_auth_context_cache_config(AuthContextCacheConfig {
+            max_entries: args.auth_context_cache_max_entries,
+            refresh_interval: std::time::Duration::from_secs(
+                args.auth_context_cache_refresh_interval_secs,
+            ),
+            negative_cache_ttl: std::time::Duration::from_secs(
+                args.auth_context_negative_cache_ttl_secs,
+            ),
+        })
         .with_runtime_state(runtime_state)
         .with_data_config_and_background_isolation(data_config, isolate_background_database)?
         .with_usage_runtime_config(usage_config)?
@@ -2489,6 +2532,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         state = state.with_frontdoor_cors_config(cors_config);
     }
     state = state.with_frontdoor_user_rpm_config(rate_limit_config);
+    if args.rate_limit.consistency_first {
+        state = state.with_frontdoor_daily_usage_fail_open(false);
+    }
     if matches!(
         args.video_task_truth_source_mode,
         VideoTaskTruthSourceArg::RustAuthoritative
@@ -3713,12 +3759,13 @@ mod tests {
         GatewayDataArgs, GatewayFrontdoorArgs, GatewayLogDestinationArg, GatewayLogFormatArg,
         GatewayLogRotationArg, GatewayLoggingArgs, GatewayRateLimitArgs, GatewayUsageArgs,
         NodeRoleArg, RuntimeBackendArg, VideoTaskTruthSourceArg,
-        DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, DEFAULT_GATEWAY_HTTP_HEADER_MAX_BYTES,
-        DEFAULT_GATEWAY_HTTP_HEADER_READ_TIMEOUT_MS, DEFAULT_GATEWAY_HTTP_MAX_HEADERS,
-        DEFAULT_GATEWAY_LISTENER_SHARDS, DEFAULT_GATEWAY_LISTEN_BACKLOG,
-        MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, MAX_GATEWAY_LISTENER_SHARDS,
-        MAX_GATEWAY_LISTEN_BACKLOG, MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
-        MIN_GATEWAY_LISTEN_BACKLOG,
+        DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES, DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS,
+        DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS, DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
+        DEFAULT_GATEWAY_HTTP_HEADER_MAX_BYTES, DEFAULT_GATEWAY_HTTP_HEADER_READ_TIMEOUT_MS,
+        DEFAULT_GATEWAY_HTTP_MAX_HEADERS, DEFAULT_GATEWAY_LISTENER_SHARDS,
+        DEFAULT_GATEWAY_LISTEN_BACKLOG, MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
+        MAX_GATEWAY_LISTENER_SHARDS, MAX_GATEWAY_LISTEN_BACKLOG,
+        MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, MIN_GATEWAY_LISTEN_BACKLOG,
     };
     use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
     use aether_gateway::AppState;
@@ -3758,6 +3805,10 @@ mod tests {
             video_task_poller_interval_ms: 5_000,
             video_task_poller_batch_size: 32,
             video_task_store_path: None,
+            auth_context_cache_max_entries: DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+            auth_context_cache_refresh_interval_secs:
+                DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS,
+            auth_context_negative_cache_ttl_secs: DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS,
             max_in_flight_requests: None,
             max_http_connections: None,
             max_websocket_connections: None,
@@ -3827,6 +3878,7 @@ mod tests {
                 bucket_seconds: 60,
                 key_ttl_seconds: 120,
                 fail_open: false,
+                consistency_first: false,
             },
             logging: GatewayLoggingArgs {
                 log_format: GatewayLogFormatArg::Pretty,

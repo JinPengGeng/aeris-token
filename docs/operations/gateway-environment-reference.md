@@ -23,8 +23,12 @@ are not a general way to enable boolean options.
 | Variable | Scope | Declared default | Rust type | Source |
 | --- | --- | --- | --- | --- |
 | `AETHER_BACKUP_KEYRING_FILE` | standalone aether-backup-restore CLI | `unset` | `Option<PathBuf>` | [bin/aether-backup-restore.rs](../../apps/aether-gateway/src/bin/aether-backup-restore.rs) |
+| `AETHER_CONSISTENCY_FIRST` | gateway root/server; not inherited by subcommands | `false` | `bool` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_DATABASE_DRIVER` | gateway global; inherited by data subcommands | `unset` | `Option<DatabaseDriverArg>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_DATABASE_URL` | gateway global; inherited by data subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES` | gateway root/server; not inherited by subcommands | `DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES` | `usize` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `AETHER_GATEWAY_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS` | gateway root/server; not inherited by subcommands | `DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `AETHER_GATEWAY_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS` | gateway root/server; not inherited by subcommands | `DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_AUTO_PREPARE_DATABASE` | gateway root/server; not inherited by subcommands | `unset` | `Option<bool>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_DATABASE_MODE` | gateway root/server; not inherited by subcommands | `unset` | `Option<DatabaseModeArg>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_DATA_ENCRYPTION_KEY` | gateway global; inherited by data subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
@@ -118,8 +122,12 @@ These declarations preserve value parsers and missing-value handling for review.
 They contain names and source defaults, not current environment values.
 
 - `AETHER_BACKUP_KEYRING_FILE`: `long, env = "AETHER_BACKUP_KEYRING_FILE"`
+- `AETHER_CONSISTENCY_FIRST`: `long, env = "AETHER_CONSISTENCY_FIRST", default_value_t = false`
 - `AETHER_DATABASE_DRIVER`: `long, env = "AETHER_DATABASE_DRIVER", global = true`
 - `AETHER_DATABASE_URL`: `long, env = "AETHER_DATABASE_URL", global = true`
+- `AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES`: `long, env = "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES", default_value_t = DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)`
+- `AETHER_GATEWAY_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS`: `long, env = "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS", default_value_t = DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS, value_parser = clap::value_parser!(u64).range(1..=10)`
+- `AETHER_GATEWAY_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS`: `long, env = "AETHER_GATEWAY_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS", default_value_t = DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS`
 - `AETHER_GATEWAY_AUTO_PREPARE_DATABASE`: `long, env = "AETHER_GATEWAY_AUTO_PREPARE_DATABASE", hide = true, num_args = 0..=1, default_missing_value = "true"`
 - `AETHER_GATEWAY_DATABASE_MODE`: `long, env = "AETHER_GATEWAY_DATABASE_MODE", value_enum`
 - `AETHER_GATEWAY_DATA_ENCRYPTION_KEY`: `long, env = "AETHER_GATEWAY_DATA_ENCRYPTION_KEY", global = true`
@@ -230,9 +238,6 @@ from variable names. Request candidate persistence is a mode (`full`, `terminal`
 | `AETHER_CODEX_WS_PROBE_URL` | [bin/aether-codex-ws-probe.rs](../../apps/aether-gateway/src/bin/aether-codex-ws-probe.rs) |
 | `AETHER_GATEWAY_ADMIN_POOL_RUNTIME_WINDOW_METRIC_KEY_LIMIT` | [handlers/admin/provider/pool/runtime/reads.rs](../../apps/aether-gateway/src/handlers/admin/provider/pool/runtime/reads.rs) |
 | `AETHER_GATEWAY_AUTH_CAPACITY_CACHE_TTL_MS` | [state/app.rs](../../apps/aether-gateway/src/state/app.rs) |
-| `AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES` | [control/auth/resolution.rs](../../apps/aether-gateway/src/control/auth/resolution.rs) |
-| `AETHER_GATEWAY_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS` | [control/auth/resolution.rs](../../apps/aether-gateway/src/control/auth/resolution.rs) |
-| `AETHER_GATEWAY_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS` | [control/auth/resolution.rs](../../apps/aether-gateway/src/control/auth/resolution.rs) |
 | `AETHER_GATEWAY_AUTH_SNAPSHOT_LOAD_GATE_LIMIT` | [state/app.rs](../../apps/aether-gateway/src/state/app.rs) |
 | `AETHER_GATEWAY_BACKGROUND_DB_MAX_CONNECTIONS` | [data/config.rs](../../apps/aether-gateway/src/data/config.rs) |
 | `AETHER_GATEWAY_CANDIDATE_PAGE_CACHE_STALE_TTL_MS` | [cache/candidate_page.rs](../../apps/aether-gateway/src/cache/candidate_page.rs) |
