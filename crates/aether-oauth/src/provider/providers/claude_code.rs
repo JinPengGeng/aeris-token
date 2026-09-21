@@ -65,7 +65,7 @@ impl Default for ClaudeCodeProviderOAuthAdapter {
 }
 
 impl ClaudeCodeProviderOAuthAdapter {
-/// Method: with endpoint overrides.
+    /// Method: with endpoint overrides.
     pub fn with_endpoint_overrides(
         mut self,
         web_base_url: impl Into<String>,

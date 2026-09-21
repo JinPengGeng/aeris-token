@@ -449,15 +449,11 @@ mod tests {
             "writer should flush both body and control frames"
         );
         let first = match &sent[0] {
-            Message::Binary(data) => {
-                Frame::decode(data.clone()).expect("frame should decode")
-            }
+            Message::Binary(data) => Frame::decode(data.clone()).expect("frame should decode"),
             other => panic!("unexpected first message: {other:?}"),
         };
         let second = match &sent[1] {
-            Message::Binary(data) => {
-                Frame::decode(data.clone()).expect("frame should decode")
-            }
+            Message::Binary(data) => Frame::decode(data.clone()).expect("frame should decode"),
             other => panic!("unexpected second message: {other:?}"),
         };
         assert_eq!(first.msg_type, MsgType::StreamError);

@@ -8,19 +8,19 @@ use crate::pricing::BillingPricingResolution;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Data type: virtual billing rule.
 pub struct VirtualBillingRule {
-/// Field: id.
+    /// Field: id.
     pub id: String,
-/// Field: name.
+    /// Field: name.
     pub name: String,
-/// Field: task type.
+    /// Field: task type.
     pub task_type: String,
-/// Field: expression.
+    /// Field: expression.
     pub expression: String,
-/// Field: variables.
+    /// Field: variables.
     pub variables: BTreeMap<String, Value>,
-/// Field: dimension mappings.
+    /// Field: dimension mappings.
     pub dimension_mappings: BTreeMap<String, Value>,
-/// Field: scope.
+    /// Field: scope.
     pub scope: String,
 }
 
@@ -28,7 +28,7 @@ pub struct VirtualBillingRule {
 pub struct DefaultBillingRuleGenerator;
 
 impl DefaultBillingRuleGenerator {
-/// Constructor / associated function: generate for pricing.
+    /// Constructor / associated function: generate for pricing.
     pub fn generate_for_pricing(
         global_model_name: &str,
         pricing: &BillingPricingResolution,

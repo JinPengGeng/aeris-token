@@ -94,7 +94,10 @@ mod tests {
         use std::error::Error as _;
 
         let error = DataLayerError::from(sqlx::Error::PoolTimedOut);
-        assert!(error.source().is_some(), "Sqlx variant must expose a source");
+        assert!(
+            error.source().is_some(),
+            "Sqlx variant must expose a source"
+        );
         let source = std::error::Error::source(&error).expect("source should be present");
         assert!(source.downcast_ref::<sqlx::Error>().is_some());
     }

@@ -4,33 +4,33 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "snake_case")]
 /// Enumeration: billing unit.
 pub enum BillingUnit {
-/// Variant: per1 mtokens.
+    /// Variant: per1 mtokens.
     Per1MTokens,
-/// Variant: per1 mtokens hour.
+    /// Variant: per1 mtokens hour.
     Per1MTokensHour,
-/// Variant: per request.
+    /// Variant: per request.
     PerRequest,
-/// Variant: fixed.
+    /// Variant: fixed.
     Fixed,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Data type: billing dimension.
 pub struct BillingDimension {
-/// Field: name.
+    /// Field: name.
     pub name: String,
-/// Field: usage field.
+    /// Field: usage field.
     pub usage_field: String,
-/// Field: price field.
+    /// Field: price field.
     pub price_field: String,
-/// Field: unit.
+    /// Field: unit.
     pub unit: BillingUnit,
-/// Field: default price.
+    /// Field: default price.
     pub default_price: f64,
 }
 
 impl BillingDimension {
-/// Method: calculate.
+    /// Method: calculate.
     pub fn calculate(&self, usage_value: f64, price: f64) -> f64 {
         if usage_value <= 0.0 || price <= 0.0 {
             return 0.0;
@@ -48,13 +48,13 @@ impl BillingDimension {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 /// Data type: cost breakdown.
 pub struct CostBreakdown {
-/// Field: costs.
+    /// Field: costs.
     pub costs: BTreeMap<String, f64>,
-/// Field: total cost.
+    /// Field: total cost.
     pub total_cost: f64,
-/// Field: tier index.
+    /// Field: tier index.
     pub tier_index: Option<i64>,
-/// Field: effective prices.
+    /// Field: effective prices.
     pub effective_prices: BTreeMap<String, f64>,
 }
 

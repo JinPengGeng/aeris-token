@@ -15,9 +15,9 @@ const TOKENS_PER_MILLION: u128 = 1_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderCostInputPriceMode {
-/// Variant: exclusive of cache.
+    /// Variant: exclusive of cache.
     ExclusiveOfCache,
-/// Variant: inclusive of cache.
+    /// Variant: inclusive of cache.
     InclusiveOfCache,
 }
 
@@ -25,13 +25,13 @@ pub enum ProviderCostInputPriceMode {
 /// pricing. Each quantity can be paired with only its matching price dimension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCostTokenQuantities {
-/// Field: input.
+    /// Field: input.
     pub input: u64,
-/// Field: output.
+    /// Field: output.
     pub output: u64,
-/// Field: cache write.
+    /// Field: cache write.
     pub cache_write: u64,
-/// Field: cache read.
+    /// Field: cache read.
     pub cache_read: u64,
 }
 
@@ -100,39 +100,39 @@ pub fn provider_cost_token_quantities_from_standardized_usage(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Data type: provider cost estimate input.
 pub struct ProviderCostEstimateInput {
-/// Field: price.
+    /// Field: price.
     pub price: Option<ProviderCostPrice>,
-/// Field: quantity.
+    /// Field: quantity.
     pub quantity: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Data type: provider cost estimate component.
 pub struct ProviderCostEstimateComponent {
-/// Field: dimension.
+    /// Field: dimension.
     pub dimension: ProviderCostDimension,
-/// Field: quantity.
+    /// Field: quantity.
     pub quantity: u64,
-/// Field: unit.
+    /// Field: unit.
     pub unit: ProviderCostUnit,
-/// Field: price import id.
+    /// Field: price import id.
     pub price_import_id: String,
-/// Field: price version.
+    /// Field: price version.
     pub price_version: String,
-/// Field: price source reference.
+    /// Field: price source reference.
     pub price_source_reference: String,
-/// Field: amount units.
+    /// Field: amount units.
     pub amount_units: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Data type: provider cost request estimate.
 pub struct ProviderCostRequestEstimate {
-/// Field: currency.
+    /// Field: currency.
     pub currency: String,
-/// Field: amount units.
+    /// Field: amount units.
     pub amount_units: u64,
-/// Field: components.
+    /// Field: components.
     pub components: Vec<ProviderCostEstimateComponent>,
 }
 
@@ -140,32 +140,32 @@ pub struct ProviderCostRequestEstimate {
 /// Enumeration: provider cost estimate error.
 pub enum ProviderCostEstimateError {
     #[error(transparent)]
-/// Variant: invalid price.
+    /// Variant: invalid price.
     InvalidPrice(#[from] ProviderCostPriceError),
     #[error("provider cost unit {unit:?} does not match dimension {dimension:?}")]
-/// Variant: unit dimension mismatch.
+    /// Variant: unit dimension mismatch.
     UnitDimensionMismatch {
-/// Field: unit.
+        /// Field: unit.
         unit: ProviderCostUnit,
-/// Field: dimension.
+        /// Field: dimension.
         dimension: ProviderCostDimension,
     },
     #[error("provider cost unit {0:?} is not supported for automatic estimates")]
-/// Variant: unsupported unit.
+    /// Variant: unsupported unit.
     UnsupportedUnit(ProviderCostUnit),
     #[error("provider cost estimate components use different currencies")]
-/// Variant: mixed currencies.
+    /// Variant: mixed currencies.
     MixedCurrencies,
     #[error(
         "provider cost estimate components use different supplier, provider, or model identities"
     )]
-/// Variant: mixed price identity.
+    /// Variant: mixed price identity.
     MixedPriceIdentity,
     #[error("provider cost estimate repeats dimension {0:?}")]
-/// Variant: duplicate dimension.
+    /// Variant: duplicate dimension.
     DuplicateDimension(ProviderCostDimension),
     #[error("provider cost estimate arithmetic overflowed")]
-/// Variant: arithmetic overflow.
+    /// Variant: arithmetic overflow.
     ArithmeticOverflow,
 }
 
@@ -308,20 +308,20 @@ pub fn estimate_provider_request_cost(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Data type: provider cost snapshot.
 pub struct ProviderCostSnapshot {
-/// Field: certainty.
+    /// Field: certainty.
     pub certainty: CostCertainty,
-/// Field: amount units.
+    /// Field: amount units.
     pub amount_units: Option<u64>,
-/// Field: currency.
+    /// Field: currency.
     pub currency: Option<String>,
-/// Field: price version.
+    /// Field: price version.
     pub price_version: Option<String>,
-/// Field: source reference.
+    /// Field: source reference.
     pub source_reference: Option<String>,
 }
 
 impl ProviderCostSnapshot {
-/// Constructor / associated function: estimated.
+    /// Constructor / associated function: estimated.
     pub fn estimated(price: &ProviderCostPrice, amount_units: u64) -> Self {
         Self {
             certainty: CostCertainty::Estimated,
@@ -332,7 +332,7 @@ impl ProviderCostSnapshot {
         }
     }
 
-/// Constructor / associated function: known.
+    /// Constructor / associated function: known.
     pub fn known(currency: String, amount_units: u64, source_reference: String) -> Self {
         Self {
             certainty: CostCertainty::Known,
@@ -343,7 +343,7 @@ impl ProviderCostSnapshot {
         }
     }
 
-/// Constructor / associated function: unknown.
+    /// Constructor / associated function: unknown.
     pub fn unknown() -> Self {
         Self {
             certainty: CostCertainty::Unknown,
@@ -359,16 +359,16 @@ impl ProviderCostSnapshot {
 /// Enumeration: provider cost price error.
 pub enum ProviderCostPriceError {
     #[error("provider cost price has an empty required field: {0}")]
-/// Variant: empty field.
+    /// Variant: empty field.
     EmptyField(&'static str),
     #[error("provider cost price has an invalid effective window")]
-/// Variant: invalid effective window.
+    /// Variant: invalid effective window.
     InvalidEffectiveWindow,
     #[error("provider cost price versions overlap")]
-/// Variant: overlapping versions.
+    /// Variant: overlapping versions.
     OverlappingVersions,
     #[error("no effective provider cost price exists")]
-/// Variant: no effective price.
+    /// Variant: no effective price.
     NoEffectivePrice,
 }
 

@@ -8,32 +8,32 @@ use crate::precision::quantize_cost;
 #[serde(rename_all = "snake_case")]
 /// Enumeration: formula evaluation status.
 pub enum FormulaEvaluationStatus {
-/// Variant: complete.
+    /// Variant: complete.
     Complete,
-/// Variant: incomplete.
+    /// Variant: incomplete.
     Incomplete,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Data type: formula evaluation result.
 pub struct FormulaEvaluationResult {
-/// Field: status.
+    /// Field: status.
     pub status: FormulaEvaluationStatus,
-/// Field: cost.
+    /// Field: cost.
     pub cost: f64,
-/// Field: resolved dimensions.
+    /// Field: resolved dimensions.
     pub resolved_dimensions: BTreeMap<String, serde_json::Value>,
-/// Field: resolved variables.
+    /// Field: resolved variables.
     pub resolved_variables: BTreeMap<String, serde_json::Value>,
-/// Field: cost breakdown.
+    /// Field: cost breakdown.
     pub cost_breakdown: BTreeMap<String, f64>,
-/// Field: tier index.
+    /// Field: tier index.
     pub tier_index: Option<i64>,
-/// Field: tier info.
+    /// Field: tier info.
     pub tier_info: Option<serde_json::Value>,
-/// Field: missing required.
+    /// Field: missing required.
     pub missing_required: Vec<String>,
-/// Field: error.
+    /// Field: error.
     pub error: Option<String>,
 }
 
@@ -41,7 +41,7 @@ pub struct FormulaEvaluationResult {
 /// Enumeration: unsafe expression error.
 pub enum UnsafeExpressionError {
     #[error("unsupported expression syntax: {0}")]
-/// Variant: unsupported.
+    /// Variant: unsupported.
     Unsupported(String),
 }
 
@@ -49,7 +49,7 @@ pub enum UnsafeExpressionError {
 /// Enumeration: expression evaluation error.
 pub enum ExpressionEvaluationError {
     #[error("expression evaluation failed: {0}")]
-/// Variant: failed.
+    /// Variant: failed.
     Failed(String),
 }
 
@@ -57,7 +57,7 @@ pub enum ExpressionEvaluationError {
 #[error("missing required dimensions: {missing_required:?}")]
 /// Data type: billing incomplete error.
 pub struct BillingIncompleteError {
-/// Field: missing required.
+    /// Field: missing required.
     pub missing_required: Vec<String>,
 }
 
@@ -86,12 +86,12 @@ impl Default for FormulaEngine {
 }
 
 impl FormulaEngine {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new() -> Self {
         Self
     }
 
-/// Method: evaluate.
+    /// Method: evaluate.
     pub fn evaluate(
         &self,
         expression: &str,

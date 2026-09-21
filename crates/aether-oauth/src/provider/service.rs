@@ -14,12 +14,12 @@ pub struct ProviderOAuthService {
 }
 
 impl ProviderOAuthService {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new() -> Self {
         Self::default()
     }
 
-/// Constructor / associated function: with builtin adapters.
+    /// Constructor / associated function: with builtin adapters.
     pub fn with_builtin_adapters() -> Self {
         use super::providers::{
             AntigravityProviderOAuthAdapter, ClaudeCodeProviderOAuthAdapter,
@@ -42,13 +42,13 @@ impl ProviderOAuthService {
         service
     }
 
-/// Method: with adapter.
+    /// Method: with adapter.
     pub fn with_adapter(mut self, adapter: Arc<dyn ProviderOAuthAdapter>) -> Self {
         self.registry.insert(adapter.provider_type(), adapter);
         self
     }
 
-/// Method: adapter.
+    /// Method: adapter.
     pub fn adapter(
         &self,
         provider_type: &str,
@@ -58,7 +58,7 @@ impl ProviderOAuthService {
             .ok_or_else(|| OAuthError::UnsupportedProvider(provider_type.to_string()))
     }
 
-/// Method: build authorize url.
+    /// Method: build authorize url.
     pub fn build_authorize_url(
         &self,
         ctx: &ProviderOAuthTransportContext,
@@ -69,7 +69,7 @@ impl ProviderOAuthService {
             .build_authorize_url(ctx, state, code_challenge)
     }
 
-/// Method: exchange code.
+    /// Method: exchange code.
     pub async fn exchange_code(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -83,7 +83,7 @@ impl ProviderOAuthService {
             .await
     }
 
-/// Method: import credentials.
+    /// Method: import credentials.
     pub async fn import_credentials(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -95,7 +95,7 @@ impl ProviderOAuthService {
             .await
     }
 
-/// Method: authorize with cookie.
+    /// Method: authorize with cookie.
     pub async fn authorize_with_cookie(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -107,7 +107,7 @@ impl ProviderOAuthService {
             .await
     }
 
-/// Method: refresh.
+    /// Method: refresh.
     pub async fn refresh(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -119,7 +119,7 @@ impl ProviderOAuthService {
             .await
     }
 
-/// Method: resolve request auth.
+    /// Method: resolve request auth.
     pub fn resolve_request_auth(
         &self,
         account: &super::ProviderOAuthAccount,
@@ -128,7 +128,7 @@ impl ProviderOAuthService {
             .resolve_request_auth(account)
     }
 
-/// Method: probe account state.
+    /// Method: probe account state.
     pub async fn probe_account_state(
         &self,
         executor: &dyn OAuthHttpExecutor,

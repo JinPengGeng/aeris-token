@@ -28,14 +28,14 @@ pub struct BillingService {
 }
 
 impl BillingService {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new() -> Self {
         Self {
             engine: FormulaEngine::new(),
         }
     }
 
-/// Method: calculate.
+    /// Method: calculate.
     pub fn calculate(
         &self,
         pricing: &BillingModelPricingSnapshot,
@@ -50,7 +50,7 @@ impl BillingService {
         self.calculate_with_resolution(pricing, input, pricing_resolution)
     }
 
-/// Method: estimate authorization cost upper bound.
+    /// Method: estimate authorization cost upper bound.
     pub fn estimate_authorization_cost_upper_bound(
         &self,
         pricing: &BillingModelPricingSnapshot,

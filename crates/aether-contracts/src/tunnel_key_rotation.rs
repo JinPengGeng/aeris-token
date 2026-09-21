@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, fmt};
 #[derive(Clone, PartialEq, Eq)]
 /// Data type: tunnel signing key.
 pub struct TunnelSigningKey {
-/// Field: key id.
+    /// Field: key id.
     pub key_id: String,
     key: String,
     /// Inclusive start of validity, in unix seconds.
@@ -30,7 +30,7 @@ impl fmt::Debug for TunnelSigningKey {
 }
 
 impl TunnelSigningKey {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new(
         key_id: impl Into<String>,
         key: impl Into<String>,
@@ -45,12 +45,12 @@ impl TunnelSigningKey {
         }
     }
 
-/// Method: key material.
+    /// Method: key material.
     pub fn key_material(&self) -> &str {
         &self.key
     }
 
-/// Method: valid at.
+    /// Method: valid at.
     pub fn valid_at(&self, now: u64) -> bool {
         now >= self.not_before && self.expires_at.is_none_or(|end| now < end)
     }
@@ -64,7 +64,7 @@ pub struct TunnelSigningKeySet {
 }
 
 impl TunnelSigningKeySet {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new(
         keys: impl IntoIterator<Item = TunnelSigningKey>,
         active_signing_key_id: impl Into<String>,
@@ -89,7 +89,7 @@ impl TunnelSigningKeySet {
         Ok(set)
     }
 
-/// Method: signing key.
+    /// Method: signing key.
     pub fn signing_key(&self, now: u64) -> Option<&TunnelSigningKey> {
         self.active_signing_key_id
             .as_ref()
@@ -97,7 +97,7 @@ impl TunnelSigningKeySet {
             .filter(|key| key.valid_at(now))
     }
 
-/// Method: verification key.
+    /// Method: verification key.
     pub fn verification_key(&self, key_id: &str, now: u64) -> Option<&TunnelSigningKey> {
         self.keys.get(key_id).filter(|key| key.valid_at(now))
     }
@@ -111,7 +111,7 @@ impl TunnelSigningKeySet {
         Ok(())
     }
 
-/// Method: revoke.
+    /// Method: revoke.
     pub fn revoke(&mut self, key_id: &str) -> bool {
         self.keys.remove(key_id).is_some()
     }

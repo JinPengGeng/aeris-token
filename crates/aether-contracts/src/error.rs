@@ -4,25 +4,25 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 /// Enumeration: execution error kind.
 pub enum ExecutionErrorKind {
-/// Variant: connect timeout.
+    /// Variant: connect timeout.
     ConnectTimeout,
-/// Variant: first byte timeout.
+    /// Variant: first byte timeout.
     FirstByteTimeout,
-/// Variant: read timeout.
+    /// Variant: read timeout.
     ReadTimeout,
-/// Variant: upstream4xx.
+    /// Variant: upstream4xx.
     Upstream4xx,
-/// Variant: upstream5xx.
+    /// Variant: upstream5xx.
     Upstream5xx,
-/// Variant: tls error.
+    /// Variant: tls error.
     TlsError,
-/// Variant: proxy error.
+    /// Variant: proxy error.
     ProxyError,
-/// Variant: protocol error.
+    /// Variant: protocol error.
     ProtocolError,
-/// Variant: cancelled.
+    /// Variant: cancelled.
     Cancelled,
-/// Variant: internal.
+    /// Variant: internal.
     Internal,
 }
 
@@ -30,38 +30,38 @@ pub enum ExecutionErrorKind {
 #[serde(rename_all = "snake_case")]
 /// Enumeration: execution phase.
 pub enum ExecutionPhase {
-/// Variant: connect.
+    /// Variant: connect.
     Connect,
-/// Variant: handshake.
+    /// Variant: handshake.
     Handshake,
-/// Variant: write.
+    /// Variant: write.
     Write,
-/// Variant: first byte.
+    /// Variant: first byte.
     FirstByte,
-/// Variant: stream read.
+    /// Variant: stream read.
     StreamRead,
-/// Variant: decode.
+    /// Variant: decode.
     Decode,
-/// Variant: finalize.
+    /// Variant: finalize.
     Finalize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Data type: execution error.
 pub struct ExecutionError {
-/// Field: kind.
+    /// Field: kind.
     pub kind: ExecutionErrorKind,
-/// Field: phase.
+    /// Field: phase.
     pub phase: ExecutionPhase,
-/// Field: message.
+    /// Field: message.
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: upstream status.
+    /// Field: upstream status.
     pub upstream_status: Option<u16>,
     #[serde(default)]
-/// Field: retryable.
+    /// Field: retryable.
     pub retryable: bool,
     #[serde(default)]
-/// Field: failover recommended.
+    /// Field: failover recommended.
     pub failover_recommended: bool,
 }

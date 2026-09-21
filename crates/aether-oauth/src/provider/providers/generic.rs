@@ -61,29 +61,29 @@ pub fn derive_codex_identity_fingerprint(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Data type: generic provider oauth template.
 pub struct GenericProviderOAuthTemplate {
-/// Field: provider type.
+    /// Field: provider type.
     pub provider_type: &'static str,
-/// Field: display name.
+    /// Field: display name.
     pub display_name: &'static str,
-/// Field: authorize url.
+    /// Field: authorize url.
     pub authorize_url: &'static str,
-/// Field: token url.
+    /// Field: token url.
     pub token_url: &'static str,
-/// Field: client id.
+    /// Field: client id.
     pub client_id: &'static str,
-/// Field: client id env.
+    /// Field: client id env.
     pub client_id_env: Option<&'static str>,
-/// Field: client secret env.
+    /// Field: client secret env.
     pub client_secret_env: Option<&'static str>,
-/// Field: scopes.
+    /// Field: scopes.
     pub scopes: &'static [&'static str],
-/// Field: redirect uri.
+    /// Field: redirect uri.
     pub redirect_uri: &'static str,
-/// Field: use pkce.
+    /// Field: use pkce.
     pub use_pkce: bool,
-/// Field: uses json payload.
+    /// Field: uses json payload.
     pub uses_json_payload: bool,
-/// Field: include scope in token request.
+    /// Field: include scope in token request.
     pub include_scope_in_token_request: bool,
 }
 
@@ -214,7 +214,7 @@ impl std::fmt::Debug for GenericProviderOAuthAdapter {
 }
 
 impl GenericProviderOAuthAdapter {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new(template: GenericProviderOAuthTemplate) -> Self {
         Self {
             template,
@@ -224,18 +224,18 @@ impl GenericProviderOAuthAdapter {
         }
     }
 
-/// Constructor / associated function: for provider type.
+    /// Constructor / associated function: for provider type.
     pub fn for_provider_type(provider_type: &str) -> Option<Self> {
         template_for_provider_type(provider_type).map(Self::new)
     }
 
-/// Method: with token url override.
+    /// Method: with token url override.
     pub fn with_token_url_override(mut self, token_url: impl Into<String>) -> Self {
         self.token_url_override = Some(token_url.into());
         self
     }
 
-/// Method: with token url for tests.
+    /// Method: with token url for tests.
     pub fn with_token_url_for_tests(self, token_url: impl Into<String>) -> Self {
         self.with_token_url_override(token_url)
     }

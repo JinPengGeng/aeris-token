@@ -32,12 +32,12 @@ impl<T: ?Sized> Default for OAuthAdapterRegistry<T> {
 }
 
 impl<T: ?Sized> OAuthAdapterRegistry<T> {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new() -> Self {
         Self::default()
     }
 
-/// Method: insert.
+    /// Method: insert.
     pub fn insert(&mut self, provider_type: &str, adapter: Arc<T>) {
         let key = provider_type.trim().to_ascii_lowercase();
         if !key.is_empty() {
@@ -45,14 +45,14 @@ impl<T: ?Sized> OAuthAdapterRegistry<T> {
         }
     }
 
-/// Method: get.
+    /// Method: get.
     pub fn get(&self, provider_type: &str) -> Option<Arc<T>> {
         self.adapters
             .get(provider_type.trim().to_ascii_lowercase().as_str())
             .cloned()
     }
 
-/// Method: provider types.
+    /// Method: provider types.
     pub fn provider_types(&self) -> impl Iterator<Item = &str> {
         self.adapters.keys().map(String::as_str)
     }

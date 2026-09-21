@@ -10,7 +10,7 @@ use async_trait::async_trait;
 #[derive(Debug, Clone, PartialEq)]
 /// Data type: provider oauth probe result.
 pub struct ProviderOAuthProbeResult {
-/// Field: state.
+    /// Field: state.
     pub state: ProviderOAuthAccountState,
 }
 

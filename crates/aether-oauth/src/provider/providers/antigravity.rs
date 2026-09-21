@@ -45,13 +45,13 @@ impl AntigravityProviderOAuthAdapter {
         self
     }
 
-/// Method: with token url override.
+    /// Method: with token url override.
     pub fn with_token_url_override(mut self, token_url: impl Into<String>) -> Self {
         self.inner = self.inner.with_token_url_override(token_url);
         self
     }
 
-/// Method: with user info url override.
+    /// Method: with user info url override.
     pub fn with_user_info_url_override(mut self, user_info_url: impl Into<String>) -> Self {
         self.user_info_url = user_info_url.into();
         self

@@ -15,28 +15,28 @@ pub struct IdentityOAuthService {
 #[derive(Debug, Clone, PartialEq)]
 /// Data type: oauth login outcome.
 pub struct OAuthLoginOutcome {
-/// Field: claims.
+    /// Field: claims.
     pub claims: IdentityClaims,
-/// Field: is new external identity.
+    /// Field: is new external identity.
     pub is_new_external_identity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 /// Data type: bound oauth identity.
 pub struct BoundOAuthIdentity {
-/// Field: claims.
+    /// Field: claims.
     pub claims: IdentityClaims,
-/// Field: replaced existing binding.
+    /// Field: replaced existing binding.
     pub replaced_existing_binding: bool,
 }
 
 impl IdentityOAuthService {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new() -> Self {
         Self::default()
     }
 
-/// Constructor / associated function: with builtin providers.
+    /// Constructor / associated function: with builtin providers.
     pub fn with_builtin_providers() -> Self {
         use super::providers::{CustomOidcIdentityOAuthProvider, LinuxDoIdentityOAuthProvider};
 
@@ -45,13 +45,13 @@ impl IdentityOAuthService {
             .with_provider(Arc::new(CustomOidcIdentityOAuthProvider))
     }
 
-/// Method: with provider.
+    /// Method: with provider.
     pub fn with_provider(mut self, provider: Arc<dyn IdentityOAuthProvider>) -> Self {
         self.registry.insert(provider.provider_type(), provider);
         self
     }
 
-/// Method: provider.
+    /// Method: provider.
     pub fn provider(
         &self,
         provider_type: &str,
@@ -66,7 +66,7 @@ impl IdentityOAuthService {
             .ok_or_else(|| OAuthError::UnsupportedProvider(provider_type.to_string()))
     }
 
-/// Method: start.
+    /// Method: start.
     pub fn start(
         &self,
         config: &IdentityOAuthProviderConfig,
@@ -76,7 +76,7 @@ impl IdentityOAuthService {
             .build_authorize_url(config, ctx)
     }
 
-/// Method: login.
+    /// Method: login.
     pub async fn login(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -87,7 +87,7 @@ impl IdentityOAuthService {
         login_with_oauth(provider.as_ref(), executor, config, ctx).await
     }
 
-/// Method: bind.
+    /// Method: bind.
     pub async fn bind(
         &self,
         executor: &dyn OAuthHttpExecutor,

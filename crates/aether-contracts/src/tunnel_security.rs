@@ -50,9 +50,9 @@ const NONCE_LEN: usize = 12;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Enumeration: tunnel security role.
 pub enum TunnelSecurityRole {
-/// Variant: client.
+    /// Variant: client.
     Client,
-/// Variant: server.
+    /// Variant: server.
     Server,
 }
 
@@ -60,28 +60,28 @@ pub enum TunnelSecurityRole {
 /// Enumeration: tunnel security error.
 pub enum TunnelSecurityError {
     #[error("tunnel_encryption_key must be base64-encoded 32 bytes")]
-/// Variant: invalid key.
+    /// Variant: invalid key.
     InvalidKey,
     #[error("tunnel security session id must not be empty")]
-/// Variant: invalid session.
+    /// Variant: invalid session.
     InvalidSession,
     #[error("secure tunnel frame is missing encrypted flag")]
-/// Variant: missing encrypted flag.
+    /// Variant: missing encrypted flag.
     MissingEncryptedFlag,
     #[error("secure tunnel frame payload is too short")]
-/// Variant: payload too short.
+    /// Variant: payload too short.
     PayloadTooShort,
     #[error("secure tunnel frame sequence is not the expected next value")]
-/// Variant: unexpected sequence.
+    /// Variant: unexpected sequence.
     UnexpectedSequence,
     #[error("secure tunnel frame sequence space is exhausted")]
-/// Variant: sequence exhausted.
+    /// Variant: sequence exhausted.
     SequenceExhausted,
     #[error("secure tunnel frame encryption failed")]
-/// Variant: encrypt.
+    /// Variant: encrypt.
     Encrypt,
     #[error("secure tunnel frame decryption failed")]
-/// Variant: decrypt.
+    /// Variant: decrypt.
     Decrypt,
 }
 
@@ -96,7 +96,7 @@ pub struct SecureFrameCodec {
 }
 
 impl SecureFrameCodec {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new(
         key: &str,
         session_id: &str,
@@ -137,7 +137,7 @@ impl SecureFrameCodec {
         })
     }
 
-/// Method: encrypt frame.
+    /// Method: encrypt frame.
     pub fn encrypt_frame(&self, frame: Frame) -> Result<Bytes, TunnelSecurityError> {
         let sequence = self
             .next_sequence
@@ -172,7 +172,7 @@ impl SecureFrameCodec {
         .encode())
     }
 
-/// Method: decrypt frame.
+    /// Method: decrypt frame.
     pub fn decrypt_frame(&self, frame: Frame) -> Result<Frame, TunnelSecurityError> {
         if frame.flags & FLAG_ENCRYPTED == 0 {
             return Err(TunnelSecurityError::MissingEncryptedFlag);

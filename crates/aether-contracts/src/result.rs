@@ -9,11 +9,11 @@ use crate::ExecutionError;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Data type: execution response observation.
 pub struct ExecutionResponseObservation {
-/// Field: request started at unix ms.
+    /// Field: request started at unix ms.
     pub request_started_at_unix_ms: u64,
-/// Field: response headers observed at unix ms.
+    /// Field: response headers observed at unix ms.
     pub response_headers_observed_at_unix_ms: u64,
-/// Field: request order id.
+    /// Field: request order id.
     pub request_order_id: String,
 }
 
@@ -21,13 +21,13 @@ pub struct ExecutionResponseObservation {
 /// Data type: execution telemetry.
 pub struct ExecutionTelemetry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: ttfb ms.
+    /// Field: ttfb ms.
     pub ttfb_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: elapsed ms.
+    /// Field: elapsed ms.
     pub elapsed_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: upstream bytes.
+    /// Field: upstream bytes.
     pub upstream_bytes: Option<u64>,
 }
 
@@ -35,10 +35,10 @@ pub struct ExecutionTelemetry {
 /// Data type: response body.
 pub struct ResponseBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: json body.
+    /// Field: json body.
     pub json_body: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: body bytes b64.
+    /// Field: body bytes b64.
     pub body_bytes_b64: Option<String>,
 }
 
@@ -65,27 +65,27 @@ impl fmt::Debug for ResponseBody {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 /// Data type: execution result.
 pub struct ExecutionResult {
-/// Field: request id.
+    /// Field: request id.
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: candidate id.
+    /// Field: candidate id.
     pub candidate_id: Option<String>,
-/// Field: status code.
+    /// Field: status code.
     pub status_code: u16,
     #[serde(default)]
-/// Field: headers.
+    /// Field: headers.
     pub headers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: response observation.
+    /// Field: response observation.
     pub response_observation: Option<ExecutionResponseObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: body.
+    /// Field: body.
     pub body: Option<ResponseBody>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: telemetry.
+    /// Field: telemetry.
     pub telemetry: Option<ExecutionTelemetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: error.
+    /// Field: error.
     pub error: Option<ExecutionError>,
 }
 

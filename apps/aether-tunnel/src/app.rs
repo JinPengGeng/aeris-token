@@ -1285,7 +1285,9 @@ mod tests {
         let router = Router::new()
             .route("/api/admin/proxy-nodes/register", post(fake_register))
             .with_state(register_hits);
-        spawn_router_on_port(port, router).await.map(|(_addr, handle)| handle)
+        spawn_router_on_port(port, router)
+            .await
+            .map(|(_addr, handle)| handle)
     }
 
     async fn spawn_router_on_port(

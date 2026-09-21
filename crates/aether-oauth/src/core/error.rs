@@ -5,30 +5,30 @@ const OAUTH_ERROR_BODY_EXCERPT_CHARS: usize = 500;
 
 /// Enumeration: oauth error.
 pub enum OAuthError {
-/// Variant: unsupported provider.
+    /// Variant: unsupported provider.
     UnsupportedProvider(String),
-/// Variant: invalid request.
+    /// Variant: invalid request.
     InvalidRequest(String),
-/// Variant: invalid state.
+    /// Variant: invalid state.
     InvalidState,
     // `body_excerpt` remains available to trusted callers for status
     // classification, but must not be rendered by the generic Error/Debug
     // paths: OAuth servers sometimes echo access tokens, authorization codes,
     // assertions, or client credentials in an error response.
-/// Variant: http status.
+    /// Variant: http status.
     HttpStatus {
-/// Field: status code.
+        /// Field: status code.
         status_code: u16,
-/// Field: body excerpt.
+        /// Field: body excerpt.
         body_excerpt: String,
     },
-/// Variant: invalid response.
+    /// Variant: invalid response.
     InvalidResponse(String),
-/// Variant: transport.
+    /// Variant: transport.
     Transport(String),
-/// Variant: storage.
+    /// Variant: storage.
     Storage(String),
-/// Variant: encryption unavailable.
+    /// Variant: encryption unavailable.
     EncryptionUnavailable,
 }
 
@@ -305,17 +305,17 @@ fn unstructured_body_may_contain_secret(value: &str) -> bool {
 }
 
 impl OAuthError {
-/// Constructor / associated function: invalid request.
+    /// Constructor / associated function: invalid request.
     pub fn invalid_request(detail: impl Into<String>) -> Self {
         Self::InvalidRequest(detail.into())
     }
 
-/// Constructor / associated function: invalid response.
+    /// Constructor / associated function: invalid response.
     pub fn invalid_response(detail: impl Into<String>) -> Self {
         Self::InvalidResponse(detail.into())
     }
 
-/// Constructor / associated function: transport.
+    /// Constructor / associated function: transport.
     pub fn transport(detail: impl Into<String>) -> Self {
         Self::Transport(detail.into())
     }

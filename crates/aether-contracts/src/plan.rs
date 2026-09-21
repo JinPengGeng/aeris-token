@@ -25,9 +25,9 @@ pub const MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_MS: u64 =
 /// Enumeration: execution response body mode.
 pub enum ExecutionResponseBodyMode {
     #[default]
-/// Variant: structured json.
+    /// Variant: structured json.
     StructuredJson,
-/// Variant: preserve bytes.
+    /// Variant: preserve bytes.
     PreserveBytes,
 }
 
@@ -40,7 +40,7 @@ impl ExecutionResponseBodyMode {
         }
     }
 
-/// Constructor / associated function: from header value.
+    /// Constructor / associated function: from header value.
     pub fn from_header_value(value: Option<&str>) -> Self {
         match value.map(str::trim) {
             Some(value) if value.eq_ignore_ascii_case(Self::PreserveBytes.as_str()) => {
@@ -56,22 +56,22 @@ impl ExecutionResponseBodyMode {
 /// Data type: execution timeouts.
 pub struct ExecutionTimeouts {
     #[serde(skip_serializing_if = "Option::is_none")]
-/// Field: connect ms.
+    /// Field: connect ms.
     pub connect_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-/// Field: read ms.
+    /// Field: read ms.
     pub read_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-/// Field: first byte ms.
+    /// Field: first byte ms.
     pub first_byte_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-/// Field: write ms.
+    /// Field: write ms.
     pub write_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-/// Field: pool ms.
+    /// Field: pool ms.
     pub pool_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-/// Field: total ms.
+    /// Field: total ms.
     pub total_ms: Option<u64>,
 }
 
@@ -79,13 +79,13 @@ pub struct ExecutionTimeouts {
 /// Data type: request body.
 pub struct RequestBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: json body.
+    /// Field: json body.
     pub json_body: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: body bytes b64.
+    /// Field: body bytes b64.
     pub body_bytes_b64: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: body ref.
+    /// Field: body ref.
     pub body_ref: Option<String>,
 }
 
@@ -111,7 +111,7 @@ impl fmt::Debug for RequestBody {
 }
 
 impl RequestBody {
-/// Constructor / associated function: from json.
+    /// Constructor / associated function: from json.
     pub fn from_json(json_body: Value) -> Self {
         Self {
             json_body: Some(json_body),
@@ -125,22 +125,22 @@ impl RequestBody {
 /// Data type: proxy snapshot.
 pub struct ProxySnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: enabled.
+    /// Field: enabled.
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: mode.
+    /// Field: mode.
     pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: node id.
+    /// Field: node id.
     pub node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: label.
+    /// Field: label.
     pub label: Option<String>,
     #[serde(default, alias = "proxy_url", skip_serializing_if = "Option::is_none")]
-/// Field: url.
+    /// Field: url.
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: extra.
+    /// Field: extra.
     pub extra: Option<Value>,
 }
 
@@ -181,19 +181,19 @@ pub const TRANSPORT_POOL_SCOPE_KEY: &str = "key";
 #[serde(default)]
 /// Data type: resolved transport profile.
 pub struct ResolvedTransportProfile {
-/// Field: profile id.
+    /// Field: profile id.
     pub profile_id: String,
-/// Field: backend.
+    /// Field: backend.
     pub backend: String,
-/// Field: http mode.
+    /// Field: http mode.
     pub http_mode: String,
-/// Field: pool scope.
+    /// Field: pool scope.
     pub pool_scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: header fingerprint.
+    /// Field: header fingerprint.
     pub header_fingerprint: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-/// Field: extra.
+    /// Field: extra.
     pub extra: Option<Value>,
 }
 
@@ -227,54 +227,54 @@ impl fmt::Debug for ResolvedTransportProfile {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 /// Data type: execution plan.
 pub struct ExecutionPlan {
-/// Field: request id.
+    /// Field: request id.
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: candidate id.
+    /// Field: candidate id.
     pub candidate_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: provider name.
+    /// Field: provider name.
     pub provider_name: Option<String>,
-/// Field: provider id.
+    /// Field: provider id.
     pub provider_id: String,
-/// Field: endpoint id.
+    /// Field: endpoint id.
     pub endpoint_id: String,
-/// Field: key id.
+    /// Field: key id.
     pub key_id: String,
-/// Field: method.
+    /// Field: method.
     pub method: String,
     #[serde(alias = "upstream_url")]
-/// Field: url.
+    /// Field: url.
     pub url: String,
     #[serde(default)]
-/// Field: headers.
+    /// Field: headers.
     pub headers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: content type.
+    /// Field: content type.
     pub content_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: content encoding.
+    /// Field: content encoding.
     pub content_encoding: Option<String>,
-/// Field: body.
+    /// Field: body.
     pub body: RequestBody,
     /// Whether the upstream API uses a streaming response protocol.
     #[serde(default)]
     pub stream: bool,
-/// Field: client api format.
+    /// Field: client api format.
     pub client_api_format: String,
-/// Field: provider api format.
+    /// Field: provider api format.
     pub provider_api_format: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: model name.
+    /// Field: model name.
     pub model_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: proxy.
+    /// Field: proxy.
     pub proxy: Option<ProxySnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: transport profile.
+    /// Field: transport profile.
     pub transport_profile: Option<ResolvedTransportProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: timeouts.
+    /// Field: timeouts.
     pub timeouts: Option<ExecutionTimeouts>,
 }
 

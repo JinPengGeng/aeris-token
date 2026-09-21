@@ -7,18 +7,18 @@ pub const BILLING_SNAPSHOT_SCHEMA_VERSION: &str = "2.0";
 #[serde(rename_all = "snake_case")]
 /// Enumeration: billing snapshot status.
 pub enum BillingSnapshotStatus {
-/// Variant: complete.
+    /// Variant: complete.
     Complete,
-/// Variant: incomplete.
+    /// Variant: incomplete.
     Incomplete,
-/// Variant: no rule.
+    /// Variant: no rule.
     NoRule,
-/// Variant: legacy.
+    /// Variant: legacy.
     Legacy,
 }
 
 impl BillingSnapshotStatus {
-/// Method: as str.
+    /// Method: as str.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Complete => "complete",
@@ -38,35 +38,35 @@ impl std::fmt::Display for BillingSnapshotStatus {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Data type: billing snapshot.
 pub struct BillingSnapshot {
-/// Field: schema version.
+    /// Field: schema version.
     pub schema_version: String,
-/// Field: rule id.
+    /// Field: rule id.
     pub rule_id: Option<String>,
-/// Field: rule name.
+    /// Field: rule name.
     pub rule_name: Option<String>,
-/// Field: scope.
+    /// Field: scope.
     pub scope: Option<String>,
-/// Field: expression.
+    /// Field: expression.
     pub expression: Option<String>,
-/// Field: resolved dimensions.
+    /// Field: resolved dimensions.
     pub resolved_dimensions: BTreeMap<String, serde_json::Value>,
-/// Field: resolved variables.
+    /// Field: resolved variables.
     pub resolved_variables: BTreeMap<String, serde_json::Value>,
-/// Field: cost breakdown.
+    /// Field: cost breakdown.
     pub cost_breakdown: BTreeMap<String, f64>,
-/// Field: total cost.
+    /// Field: total cost.
     pub total_cost: f64,
-/// Field: tier index.
+    /// Field: tier index.
     pub tier_index: Option<i64>,
-/// Field: tier info.
+    /// Field: tier info.
     pub tier_info: Option<serde_json::Value>,
-/// Field: missing required.
+    /// Field: missing required.
     pub missing_required: Vec<String>,
-/// Field: status.
+    /// Field: status.
     pub status: BillingSnapshotStatus,
-/// Field: calculated at.
+    /// Field: calculated at.
     pub calculated_at: String,
-/// Field: engine version.
+    /// Field: engine version.
     pub engine_version: String,
 }
 
@@ -93,12 +93,12 @@ impl Default for BillingSnapshot {
 }
 
 impl BillingSnapshot {
-/// Method: dimensions used.
+    /// Method: dimensions used.
     pub fn dimensions_used(&self) -> &BTreeMap<String, serde_json::Value> {
         &self.resolved_dimensions
     }
 
-/// Method: cost.
+    /// Method: cost.
     pub fn cost(&self) -> f64 {
         self.total_cost
     }
@@ -107,11 +107,11 @@ impl BillingSnapshot {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Data type: cost result.
 pub struct CostResult {
-/// Field: cost.
+    /// Field: cost.
     pub cost: f64,
-/// Field: status.
+    /// Field: status.
     pub status: BillingSnapshotStatus,
-/// Field: snapshot.
+    /// Field: snapshot.
     pub snapshot: BillingSnapshot,
 }
 

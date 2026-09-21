@@ -50,12 +50,12 @@ pub struct TunnelRelayPayloadDigest {
 }
 
 impl TunnelRelayPayloadDigest {
-/// Method: body len.
+    /// Method: body len.
     pub fn body_len(self) -> u64 {
         self.body_len
     }
 
-/// Method: encode header value.
+    /// Method: encode header value.
     pub fn encode_header_value(self) -> String {
         let mut encoded = [0_u8; 72];
         encoded[..32].copy_from_slice(&self.metadata_sha256);
@@ -64,7 +64,7 @@ impl TunnelRelayPayloadDigest {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(encoded)
     }
 
-/// Constructor / associated function: decode header value.
+    /// Constructor / associated function: decode header value.
     pub fn decode_header_value(value: &str) -> Option<Self> {
         let value = value.trim();
         if value.len() > 96 {
@@ -81,17 +81,17 @@ impl TunnelRelayPayloadDigest {
         })
     }
 
-/// Method: matches metadata.
+    /// Method: matches metadata.
     pub fn matches_metadata(self, metadata_envelope: &[u8]) -> bool {
         self.metadata_sha256 == <[u8; 32]>::from(Sha256::digest(metadata_envelope))
     }
 
-/// Method: matches body.
+    /// Method: matches body.
     pub fn matches_body(self, body: &[u8]) -> bool {
         self.matches_body_hash(body.len() as u64, Sha256::digest(body).into())
     }
 
-/// Method: matches body hash.
+    /// Method: matches body hash.
     pub fn matches_body_hash(self, body_len: u64, body_sha256: [u8; 32]) -> bool {
         self.body_len == body_len && self.body_sha256 == body_sha256
     }
@@ -227,11 +227,11 @@ fn update_tunnel_relay_auth_field(mac: &mut Hmac<Sha256>, value: &[u8]) {
 
 /// Module: flags.
 pub mod flags {
-/// Constant: end stream.
+    /// Constant: end stream.
     pub const END_STREAM: u8 = 0x01;
-/// Constant: gzip compressed.
+    /// Constant: gzip compressed.
     pub const GZIP_COMPRESSED: u8 = 0x02;
-/// Constant: encrypted.
+    /// Constant: encrypted.
     pub const ENCRYPTED: u8 = crate::tunnel_security::FLAG_ENCRYPTED;
 }
 
@@ -239,44 +239,44 @@ pub mod flags {
 #[repr(u8)]
 /// Enumeration: msg type.
 pub enum MsgType {
-/// Variant: request headers = 0x01.
+    /// Variant: request headers = 0x01.
     RequestHeaders = 0x01,
-/// Variant: request body = 0x02.
+    /// Variant: request body = 0x02.
     RequestBody = 0x02,
-/// Variant: response headers = 0x03.
+    /// Variant: response headers = 0x03.
     ResponseHeaders = 0x03,
-/// Variant: response body = 0x04.
+    /// Variant: response body = 0x04.
     ResponseBody = 0x04,
-/// Variant: stream end = 0x05.
+    /// Variant: stream end = 0x05.
     StreamEnd = 0x05,
-/// Variant: stream error = 0x06.
+    /// Variant: stream error = 0x06.
     StreamError = 0x06,
-/// Variant: ping = 0x10.
+    /// Variant: ping = 0x10.
     Ping = 0x10,
-/// Variant: pong = 0x11.
+    /// Variant: pong = 0x11.
     Pong = 0x11,
-/// Variant: go away = 0x12.
+    /// Variant: go away = 0x12.
     GoAway = 0x12,
-/// Variant: heartbeat data = 0x13.
+    /// Variant: heartbeat data = 0x13.
     HeartbeatData = 0x13,
-/// Variant: heartbeat ack = 0x14.
+    /// Variant: heartbeat ack = 0x14.
     HeartbeatAck = 0x14,
-/// Variant: hello = 0x15.
+    /// Variant: hello = 0x15.
     Hello = 0x15,
-/// Variant: settings = 0x16.
+    /// Variant: settings = 0x16.
     Settings = 0x16,
-/// Variant: window update = 0x17.
+    /// Variant: window update = 0x17.
     WindowUpdate = 0x17,
-/// Variant: reset stream = 0x18.
+    /// Variant: reset stream = 0x18.
     ResetStream = 0x18,
-/// Variant: connection close = 0x19.
+    /// Variant: connection close = 0x19.
     ConnectionClose = 0x19,
-/// Variant: load report = 0x1a.
+    /// Variant: load report = 0x1a.
     LoadReport = 0x1a,
 }
 
 impl MsgType {
-/// Constructor / associated function: from u8.
+    /// Constructor / associated function: from u8.
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
             REQUEST_HEADERS => Some(Self::RequestHeaders),
@@ -345,19 +345,19 @@ pub const FLAG_ENCRYPTED: u8 = flags::ENCRYPTED;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Data type: frame header.
 pub struct FrameHeader {
-/// Field: stream id.
+    /// Field: stream id.
     pub stream_id: u32,
-/// Field: msg type.
+    /// Field: msg type.
     pub msg_type: u8,
-/// Field: flags.
+    /// Field: flags.
     pub flags: u8,
-/// Field: payload len.
+    /// Field: payload len.
     pub payload_len: u32,
 }
 
 impl FrameHeader {
     #[inline]
-/// Constructor / associated function: parse.
+    /// Constructor / associated function: parse.
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < HEADER_SIZE {
             return None;
@@ -374,13 +374,13 @@ impl FrameHeader {
 #[derive(Clone)]
 /// Data type: frame.
 pub struct Frame {
-/// Field: stream id.
+    /// Field: stream id.
     pub stream_id: u32,
-/// Field: msg type.
+    /// Field: msg type.
     pub msg_type: MsgType,
-/// Field: flags.
+    /// Field: flags.
     pub flags: u8,
-/// Field: payload.
+    /// Field: payload.
     pub payload: Bytes,
 }
 
@@ -397,7 +397,7 @@ impl fmt::Debug for Frame {
 }
 
 impl Frame {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new(stream_id: u32, msg_type: MsgType, flags: u8, payload: impl Into<Bytes>) -> Self {
         Self {
             stream_id,
@@ -407,22 +407,22 @@ impl Frame {
         }
     }
 
-/// Constructor / associated function: control.
+    /// Constructor / associated function: control.
     pub fn control(msg_type: MsgType, payload: impl Into<Bytes>) -> Self {
         Self::new(0, msg_type, 0, payload)
     }
 
-/// Method: is end stream.
+    /// Method: is end stream.
     pub fn is_end_stream(&self) -> bool {
         self.flags & flags::END_STREAM != 0
     }
 
-/// Method: is gzip.
+    /// Method: is gzip.
     pub fn is_gzip(&self) -> bool {
         self.flags & flags::GZIP_COMPRESSED != 0
     }
 
-/// Method: encode.
+    /// Method: encode.
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(HEADER_SIZE + self.payload.len());
         buf.put_u32(self.stream_id);
@@ -433,7 +433,7 @@ impl Frame {
         buf.freeze()
     }
 
-/// Constructor / associated function: decode.
+    /// Constructor / associated function: decode.
     pub fn decode(mut data: Bytes) -> Result<Self, ProtocolError> {
         if data.len() < HEADER_SIZE {
             return Err(ProtocolError::TooShort {
@@ -501,7 +501,7 @@ pub enum ProtocolError {
         actual: usize,
     },
     #[error("unknown message type: 0x{0:02x}")]
-/// Variant: unknown msg type.
+    /// Variant: unknown msg type.
     UnknownMsgType(u8),
 }
 
@@ -509,40 +509,40 @@ pub enum ProtocolError {
 /// Data type: request meta.
 pub struct RequestMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: provider id.
+    /// Field: provider id.
     pub provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: endpoint id.
+    /// Field: endpoint id.
     pub endpoint_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: key id.
+    /// Field: key id.
     pub key_id: Option<String>,
-/// Field: method.
+    /// Field: method.
     pub method: String,
-/// Field: url.
+    /// Field: url.
     pub url: String,
-/// Field: headers.
+    /// Field: headers.
     pub headers: std::collections::HashMap<String, String>,
     #[serde(default, skip_serializing_if = "is_false")]
-/// Field: stream.
+    /// Field: stream.
     pub stream: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: request timeout ms.
+    /// Field: request timeout ms.
     pub request_timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: stream first byte timeout ms.
+    /// Field: stream first byte timeout ms.
     pub stream_first_byte_timeout_ms: Option<u64>,
     #[serde(default = "default_timeout", deserialize_with = "deserialize_timeout")]
-/// Field: timeout.
+    /// Field: timeout.
     pub timeout: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: follow redirects.
+    /// Field: follow redirects.
     pub follow_redirects: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
-/// Field: http1 only.
+    /// Field: http1 only.
     pub http1_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: transport profile.
+    /// Field: transport profile.
     pub transport_profile: Option<crate::ResolvedTransportProfile>,
 }
 
@@ -573,9 +573,9 @@ impl fmt::Debug for RequestMeta {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Data type: resolved tunnel request timeouts.
 pub struct ResolvedTunnelRequestTimeouts {
-/// Field: first byte ms.
+    /// Field: first byte ms.
     pub first_byte_ms: u64,
-/// Field: response body ms.
+    /// Field: response body ms.
     pub response_body_ms: Option<u64>,
 }
 
@@ -673,9 +673,9 @@ where
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 /// Data type: response meta.
 pub struct ResponseMeta {
-/// Field: status.
+    /// Field: status.
     pub status: u16,
-/// Field: headers.
+    /// Field: headers.
     pub headers: Vec<(String, String)>,
 }
 
@@ -699,7 +699,7 @@ impl fmt::Debug for ResponseMeta {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Data type: hello payload.
 pub struct HelloPayload {
-/// Field: protocol version.
+    /// Field: protocol version.
     pub protocol_version: u8,
     /// Legacy informational metadata. It is not used for capability negotiation:
     /// protocol_version and SETTINGS determine enabled behavior. Keep accepting it
@@ -707,26 +707,26 @@ pub struct HelloPayload {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: session id.
+    /// Field: session id.
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-/// Field: replica id.
+    /// Field: replica id.
     pub replica_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Data type: settings payload.
 pub struct SettingsPayload {
-/// Field: initial stream window bytes.
+    /// Field: initial stream window bytes.
     pub initial_stream_window_bytes: u32,
-/// Field: min window update bytes.
+    /// Field: min window update bytes.
     pub min_window_update_bytes: u32,
-/// Field: drain deadline ms.
+    /// Field: drain deadline ms.
     pub drain_deadline_ms: u64,
 }
 
 impl SettingsPayload {
-/// Method: is valid.
+    /// Method: is valid.
     pub fn is_valid(&self) -> bool {
         self.initial_stream_window_bytes > 0
             && u64::from(self.initial_stream_window_bytes)
@@ -736,7 +736,7 @@ impl SettingsPayload {
             && self.drain_deadline_ms > 0
     }
 
-/// Method: negotiate.
+    /// Method: negotiate.
     pub fn negotiate(&self, initial_window_bytes: u32, drain_deadline_ms: u64) -> Self {
         let window = self
             .initial_stream_window_bytes
@@ -792,45 +792,45 @@ mod settings_tests {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Data type: window update payload.
 pub struct WindowUpdatePayload {
-/// Field: delta bytes.
+    /// Field: delta bytes.
     pub delta_bytes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Data type: reset stream payload.
 pub struct ResetStreamPayload {
-/// Field: reason.
+    /// Field: reason.
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Data type: go away payload.
 pub struct GoAwayPayload {
-/// Field: last accepted stream id.
+    /// Field: last accepted stream id.
     pub last_accepted_stream_id: u32,
-/// Field: drain deadline ms.
+    /// Field: drain deadline ms.
     pub drain_deadline_ms: u64,
-/// Field: reason.
+    /// Field: reason.
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Data type: connection close payload.
 pub struct ConnectionClosePayload {
-/// Field: reason.
+    /// Field: reason.
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Data type: load report payload.
 pub struct LoadReportPayload {
-/// Field: active streams.
+    /// Field: active streams.
     pub active_streams: u32,
-/// Field: queue depth.
+    /// Field: queue depth.
     pub queue_depth: u32,
-/// Field: queue capacity.
+    /// Field: queue capacity.
     pub queue_capacity: u32,
-/// Field: health score.
+    /// Field: health score.
     pub health_score: u8,
 }
 

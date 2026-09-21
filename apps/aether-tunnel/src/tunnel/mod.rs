@@ -518,8 +518,7 @@ mod tests {
                     )
                 }),
             );
-        let (upstream_addr, upstream_handle) =
-            spawn_router_on_port(0, upstream).await.unwrap();
+        let (upstream_addr, upstream_handle) = spawn_router_on_port(0, upstream).await.unwrap();
         let upstream_port = upstream_addr.port();
         let upstream_task = super::task::SessionTask::new(upstream_handle);
         let gateway_port = reserve_local_port().unwrap();

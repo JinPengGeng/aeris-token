@@ -10,16 +10,16 @@ use serde_json::Value;
 #[serde(rename_all = "snake_case")]
 /// Enumeration: billing pricing source.
 pub enum BillingPricingSource {
-/// Variant: provider override.
+    /// Variant: provider override.
     ProviderOverride,
-/// Variant: global default.
+    /// Variant: global default.
     GlobalDefault,
-/// Variant: mixed.
+    /// Variant: mixed.
     Mixed,
 }
 
 impl BillingPricingSource {
-/// Method: as str.
+    /// Method: as str.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ProviderOverride => "provider_override",
@@ -47,31 +47,31 @@ impl BillingPricingConfigurationError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Data type: billing pricing resolution.
 pub struct BillingPricingResolution {
-/// Field: requested processing tier.
+    /// Field: requested processing tier.
     pub requested_processing_tier: Option<String>,
-/// Field: actual processing tier.
+    /// Field: actual processing tier.
     pub actual_processing_tier: Option<String>,
-/// Field: billing processing tier.
+    /// Field: billing processing tier.
     pub billing_processing_tier: Option<String>,
-/// Field: tiered pricing.
+    /// Field: tiered pricing.
     pub tiered_pricing: Option<Value>,
-/// Field: tiered pricing source.
+    /// Field: tiered pricing source.
     pub tiered_pricing_source: Option<BillingPricingSource>,
-/// Field: processing tier price multiplier.
+    /// Field: processing tier price multiplier.
     pub processing_tier_price_multiplier: Option<f64>,
-/// Field: price per request.
+    /// Field: price per request.
     pub price_per_request: Option<f64>,
-/// Field: price per request source.
+    /// Field: price per request source.
     pub price_per_request_source: Option<BillingPricingSource>,
 }
 
 impl BillingPricingResolution {
-/// Method: requires actual processing tier.
+    /// Method: requires actual processing tier.
     pub fn requires_actual_processing_tier(&self) -> bool {
         self.billing_processing_tier.is_none()
     }
 
-/// Method: pricing source.
+    /// Method: pricing source.
     pub fn pricing_source(&self) -> &'static str {
         match (self.tiered_pricing_source, self.price_per_request_source) {
             (Some(tiered), Some(request)) if tiered != request => "mixed",
@@ -80,14 +80,14 @@ impl BillingPricingResolution {
         }
     }
 
-/// Method: bills standard processing tier.
+    /// Method: bills standard processing tier.
     pub fn bills_standard_processing_tier(&self) -> bool {
         self.billing_processing_tier
             .as_deref()
             .is_some_and(processing_tier_is_standard)
     }
 
-/// Method: bills requested processing tier.
+    /// Method: bills requested processing tier.
     pub fn bills_requested_processing_tier(&self) -> bool {
         let requested = self
             .requested_processing_tier
@@ -101,40 +101,40 @@ impl BillingPricingResolution {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Data type: billing model pricing snapshot.
 pub struct BillingModelPricingSnapshot {
-/// Field: provider id.
+    /// Field: provider id.
     pub provider_id: String,
-/// Field: provider billing type.
+    /// Field: provider billing type.
     pub provider_billing_type: Option<String>,
-/// Field: provider api key id.
+    /// Field: provider api key id.
     pub provider_api_key_id: Option<String>,
-/// Field: provider api key rate multipliers.
+    /// Field: provider api key rate multipliers.
     pub provider_api_key_rate_multipliers: Option<Value>,
-/// Field: provider api key cache ttl minutes.
+    /// Field: provider api key cache ttl minutes.
     pub provider_api_key_cache_ttl_minutes: Option<i64>,
-/// Field: global model id.
+    /// Field: global model id.
     pub global_model_id: String,
-/// Field: global model name.
+    /// Field: global model name.
     pub global_model_name: String,
-/// Field: global model config.
+    /// Field: global model config.
     pub global_model_config: Option<Value>,
-/// Field: default price per request.
+    /// Field: default price per request.
     pub default_price_per_request: Option<f64>,
-/// Field: default tiered pricing.
+    /// Field: default tiered pricing.
     pub default_tiered_pricing: Option<Value>,
-/// Field: model id.
+    /// Field: model id.
     pub model_id: Option<String>,
-/// Field: model provider model name.
+    /// Field: model provider model name.
     pub model_provider_model_name: Option<String>,
-/// Field: model config.
+    /// Field: model config.
     pub model_config: Option<Value>,
-/// Field: model price per request.
+    /// Field: model price per request.
     pub model_price_per_request: Option<f64>,
-/// Field: model tiered pricing.
+    /// Field: model tiered pricing.
     pub model_tiered_pricing: Option<Value>,
 }
 
 impl BillingModelPricingSnapshot {
-/// Method: resolve pricing.
+    /// Method: resolve pricing.
     pub fn resolve_pricing(
         &self,
         requested_processing_tier: Option<&str>,
@@ -172,7 +172,7 @@ impl BillingModelPricingSnapshot {
         }
     }
 
-/// Method: resolve pricing checked.
+    /// Method: resolve pricing checked.
     pub fn resolve_pricing_checked(
         &self,
         requested_processing_tier: Option<&str>,
@@ -213,7 +213,7 @@ impl BillingModelPricingSnapshot {
         })
     }
 
-/// Method: resolve authorization pricing candidates.
+    /// Method: resolve authorization pricing candidates.
     pub fn resolve_authorization_pricing_candidates(
         &self,
         requested_processing_tier: Option<&str>,
@@ -238,7 +238,7 @@ impl BillingModelPricingSnapshot {
         Ok(Some(vec![requested_resolution]))
     }
 
-/// Method: validate authorization pricing configuration.
+    /// Method: validate authorization pricing configuration.
     pub fn validate_authorization_pricing_configuration(
         &self,
         requested_processing_tier: Option<&str>,
@@ -471,7 +471,7 @@ impl BillingModelPricingSnapshot {
             })
     }
 
-/// Method: is free tier.
+    /// Method: is free tier.
     pub fn is_free_tier(&self) -> bool {
         self.provider_billing_type
             .as_deref()
@@ -479,7 +479,7 @@ impl BillingModelPricingSnapshot {
             .unwrap_or(false)
     }
 
-/// Method: rate multiplier for api format.
+    /// Method: rate multiplier for api format.
     pub fn rate_multiplier_for_api_format(&self, api_format: Option<&str>) -> f64 {
         let Some(api_format) = api_format.map(str::trim).filter(|value| !value.is_empty()) else {
             return 1.0;
@@ -1566,57 +1566,57 @@ mod tests {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Data type: billing usage input.
 pub struct BillingUsageInput {
-/// Field: task type.
+    /// Field: task type.
     pub task_type: String,
-/// Field: api format.
+    /// Field: api format.
     pub api_format: Option<String>,
     #[serde(default)]
-/// Field: requested processing tier.
+    /// Field: requested processing tier.
     pub requested_processing_tier: Option<String>,
     #[serde(default)]
-/// Field: actual processing tier.
+    /// Field: actual processing tier.
     pub actual_processing_tier: Option<String>,
-/// Field: request count.
+    /// Field: request count.
     pub request_count: i64,
-/// Field: input tokens.
+    /// Field: input tokens.
     pub input_tokens: i64,
-/// Field: output tokens.
+    /// Field: output tokens.
     pub output_tokens: i64,
-/// Field: cache creation tokens.
+    /// Field: cache creation tokens.
     pub cache_creation_tokens: i64,
-/// Field: cache creation ephemeral 5m tokens.
+    /// Field: cache creation ephemeral 5m tokens.
     pub cache_creation_ephemeral_5m_tokens: i64,
-/// Field: cache creation ephemeral 1h tokens.
+    /// Field: cache creation ephemeral 1h tokens.
     pub cache_creation_ephemeral_1h_tokens: i64,
-/// Field: cache read tokens.
+    /// Field: cache read tokens.
     pub cache_read_tokens: i64,
-/// Field: image count.
+    /// Field: image count.
     pub image_count: i64,
-/// Field: image size.
+    /// Field: image size.
     pub image_size: Option<String>,
-/// Field: image quality.
+    /// Field: image quality.
     pub image_quality: Option<String>,
-/// Field: image output format.
+    /// Field: image output format.
     pub image_output_format: Option<String>,
-/// Field: cache ttl minutes.
+    /// Field: cache ttl minutes.
     pub cache_ttl_minutes: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Data type: billing authorization estimate input.
 pub struct BillingAuthorizationEstimateInput {
-/// Field: task type.
+    /// Field: task type.
     pub task_type: String,
-/// Field: api format.
+    /// Field: api format.
     pub api_format: Option<String>,
-/// Field: requested processing tier.
+    /// Field: requested processing tier.
     pub requested_processing_tier: Option<String>,
     #[serde(default)]
-/// Field: cache ttl minutes.
+    /// Field: cache ttl minutes.
     pub cache_ttl_minutes: Option<i64>,
-/// Field: input tokens.
+    /// Field: input tokens.
     pub input_tokens: i64,
-/// Field: max output tokens.
+    /// Field: max output tokens.
     pub max_output_tokens: Option<i64>,
     /// Paid image requests must prove their billable shape. A missing count or
     /// unproven output dimensions keep the estimate fail-closed instead of
@@ -1624,15 +1624,15 @@ pub struct BillingAuthorizationEstimateInput {
     #[serde(default)]
     pub image_count: Option<i64>,
     #[serde(default)]
-/// Field: image size.
+    /// Field: image size.
     pub image_size: Option<String>,
     #[serde(default)]
-/// Field: image quality.
+    /// Field: image quality.
     pub image_quality: Option<String>,
 }
 
 impl BillingAuthorizationEstimateInput {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new(task_type: impl Into<String>, input_tokens: i64) -> Self {
         Self {
             task_type: task_type.into(),
@@ -1649,7 +1649,7 @@ impl BillingAuthorizationEstimateInput {
 }
 
 impl BillingUsageInput {
-/// Constructor / associated function: new.
+    /// Constructor / associated function: new.
     pub fn new(task_type: impl Into<String>) -> Self {
         Self {
             task_type: task_type.into(),
@@ -1675,15 +1675,15 @@ impl BillingUsageInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Data type: billing computation.
 pub struct BillingComputation {
-/// Field: cost result.
+    /// Field: cost result.
     pub cost_result: crate::CostResult,
-/// Field: actual total cost.
+    /// Field: actual total cost.
     pub actual_total_cost: f64,
-/// Field: rate multiplier.
+    /// Field: rate multiplier.
     pub rate_multiplier: f64,
-/// Field: is free tier.
+    /// Field: is free tier.
     pub is_free_tier: bool,
-/// Field: pricing resolution.
+    /// Field: pricing resolution.
     pub pricing_resolution: BillingPricingResolution,
 }
 

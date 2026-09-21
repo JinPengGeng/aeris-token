@@ -19,7 +19,7 @@ const SETTLEMENT_SNAPSHOT_SCHEMA_VERSION: &str = "3.0";
 /// Trait: billing model context lookup.
 #[async_trait]
 pub trait BillingModelContextLookup: Send + Sync {
-/// Looks up billing model context by model id; the default returns `None`.
+    /// Looks up billing model context by model id; the default returns `None`.
     async fn find_billing_model_context_by_model_id(
         &self,
         provider_id: &str,

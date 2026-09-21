@@ -39,11 +39,11 @@ const DEFAULT_DEVICE_POLL_INTERVAL_SECS: u64 = 5;
 #[derive(Debug, Clone, PartialEq)]
 /// Enumeration: xai device poll outcome.
 pub enum XaiDevicePollOutcome {
-/// Variant: pending.
+    /// Variant: pending.
     Pending,
-/// Variant: slow down.
+    /// Variant: slow down.
     SlowDown,
-/// Variant: authorized.
+    /// Variant: authorized.
     Authorized(Box<ProviderOAuthTokenSet>),
 }
 
@@ -78,7 +78,7 @@ impl Default for XaiProviderOAuthAdapter {
 }
 
 impl XaiProviderOAuthAdapter {
-/// Method: with endpoint overrides.
+    /// Method: with endpoint overrides.
     pub fn with_endpoint_overrides(
         mut self,
         device_url: impl Into<String>,
@@ -95,7 +95,7 @@ impl XaiProviderOAuthAdapter {
             .unwrap_or_else(|| XAI_DEVICE_CODE_URL.to_string())
     }
 
-/// Method: start device flow.
+    /// Method: start device flow.
     pub async fn start_device_flow(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -130,7 +130,7 @@ impl XaiProviderOAuthAdapter {
         parse_device_authorization(&payload)
     }
 
-/// Method: poll device token.
+    /// Method: poll device token.
     pub async fn poll_device_token(
         &self,
         executor: &dyn OAuthHttpExecutor,

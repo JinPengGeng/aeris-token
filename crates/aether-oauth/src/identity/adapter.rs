@@ -7,29 +7,29 @@ use std::collections::BTreeMap;
 #[derive(Clone, PartialEq)]
 /// Data type: identity oauth provider config.
 pub struct IdentityOAuthProviderConfig {
-/// Field: provider type.
+    /// Field: provider type.
     pub provider_type: String,
-/// Field: display name.
+    /// Field: display name.
     pub display_name: String,
-/// Field: authorization url.
+    /// Field: authorization url.
     pub authorization_url: String,
-/// Field: token url.
+    /// Field: token url.
     pub token_url: String,
-/// Field: userinfo url.
+    /// Field: userinfo url.
     pub userinfo_url: Option<String>,
-/// Field: client id.
+    /// Field: client id.
     pub client_id: String,
-/// Field: client secret.
+    /// Field: client secret.
     pub client_secret: Option<String>,
-/// Field: scopes.
+    /// Field: scopes.
     pub scopes: Vec<String>,
-/// Field: redirect uri.
+    /// Field: redirect uri.
     pub redirect_uri: String,
-/// Field: frontend callback url.
+    /// Field: frontend callback url.
     pub frontend_callback_url: String,
-/// Field: attribute mapping.
+    /// Field: attribute mapping.
     pub attribute_mapping: Option<Value>,
-/// Field: extra config.
+    /// Field: extra config.
     pub extra_config: Option<Value>,
 }
 
@@ -68,11 +68,11 @@ impl std::fmt::Debug for IdentityOAuthProviderConfig {
 #[derive(Clone, PartialEq)]
 /// Data type: identity oauth start context.
 pub struct IdentityOAuthStartContext {
-/// Field: state.
+    /// Field: state.
     pub state: String,
-/// Field: code challenge.
+    /// Field: code challenge.
     pub code_challenge: Option<String>,
-/// Field: network.
+    /// Field: network.
     pub network: OAuthNetworkContext,
 }
 
@@ -93,13 +93,13 @@ impl std::fmt::Debug for IdentityOAuthStartContext {
 #[derive(Clone, PartialEq)]
 /// Data type: identity oauth exchange context.
 pub struct IdentityOAuthExchangeContext {
-/// Field: code.
+    /// Field: code.
     pub code: String,
-/// Field: state.
+    /// Field: state.
     pub state: String,
-/// Field: pkce verifier.
+    /// Field: pkce verifier.
     pub pkce_verifier: Option<String>,
-/// Field: network.
+    /// Field: network.
     pub network: OAuthNetworkContext,
 }
 
@@ -121,21 +121,21 @@ impl std::fmt::Debug for IdentityOAuthExchangeContext {
 #[derive(Clone, PartialEq)]
 /// Data type: external identity.
 pub struct ExternalIdentity {
-/// Field: provider type.
+    /// Field: provider type.
     pub provider_type: String,
-/// Field: subject.
+    /// Field: subject.
     pub subject: String,
-/// Field: email.
+    /// Field: email.
     pub email: Option<String>,
-/// Field: email verified.
+    /// Field: email verified.
     pub email_verified: bool,
-/// Field: username.
+    /// Field: username.
     pub username: Option<String>,
-/// Field: display name.
+    /// Field: display name.
     pub display_name: Option<String>,
-/// Field: avatar url.
+    /// Field: avatar url.
     pub avatar_url: Option<String>,
-/// Field: raw.
+    /// Field: raw.
     pub raw: Value,
 }
 
@@ -158,19 +158,19 @@ impl std::fmt::Debug for ExternalIdentity {
 #[derive(Clone, PartialEq)]
 /// Data type: identity claims.
 pub struct IdentityClaims {
-/// Field: provider type.
+    /// Field: provider type.
     pub provider_type: String,
-/// Field: subject.
+    /// Field: subject.
     pub subject: String,
-/// Field: email.
+    /// Field: email.
     pub email: Option<String>,
-/// Field: email verified.
+    /// Field: email verified.
     pub email_verified: bool,
-/// Field: username.
+    /// Field: username.
     pub username: Option<String>,
-/// Field: display name.
+    /// Field: display name.
     pub display_name: Option<String>,
-/// Field: raw.
+    /// Field: raw.
     pub raw: Value,
 }
 
@@ -192,17 +192,17 @@ impl std::fmt::Debug for IdentityClaims {
 #[async_trait]
 /// Trait: identity oauth provider.
 pub trait IdentityOAuthProvider: Send + Sync {
-/// Method: fn provider type.
+    /// Method: fn provider type.
     fn provider_type(&self) -> &'static str;
 
-/// Method: fn build authorize url.
+    /// Method: fn build authorize url.
     fn build_authorize_url(
         &self,
         config: &IdentityOAuthProviderConfig,
         ctx: &IdentityOAuthStartContext,
     ) -> Result<OAuthAuthorizeResponse, OAuthError>;
 
-/// Method: async fn exchange code.
+    /// Method: async fn exchange code.
     async fn exchange_code(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -210,7 +210,7 @@ pub trait IdentityOAuthProvider: Send + Sync {
         ctx: &IdentityOAuthExchangeContext,
     ) -> Result<OAuthTokenSet, OAuthError>;
 
-/// Method: async fn fetch identity.
+    /// Method: async fn fetch identity.
     async fn fetch_identity(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -219,7 +219,7 @@ pub trait IdentityOAuthProvider: Send + Sync {
         network: OAuthNetworkContext,
     ) -> Result<ExternalIdentity, OAuthError>;
 
-/// Method: fn map identity.
+    /// Method: fn map identity.
     fn map_identity(
         &self,
         config: &IdentityOAuthProviderConfig,
