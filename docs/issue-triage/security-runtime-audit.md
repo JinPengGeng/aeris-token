@@ -112,7 +112,7 @@
 | lease 基础类型/supervisor 观测 | 部分已具备，P2 | `aether-task/core/src/lease.rs:1-33` 提供过期和 fencing 校验；`aether-task/runtime/src/lib.rs:141-178` 提供 supervisor metrics。 | 单元测试覆盖过期、fencing、metrics。 | 与上条拆分，避免把已有能力误判为完整生命周期管理。 |
 | metrics 锁中毒归零、log cleanup 裸任务 | 当前成立，P2 | TaskSupervisor metrics snapshot 锁失败回 default；`aether-runtime/base/src/tracing.rs` cleanup task 仍由 tracing 初始化独立 spawn。 | metrics 正常路径测试，无 poisoned/drop lifecycle 测试。 | 保留上次快照/暴露错误，统一 task ownership。 |
 | memory/Redis stream trim 语义 | 当前成立，P2 | memory backend 裁剪会同步移除 group PEL，Redis `XADD MAXLEN` 不保证同语义。 | 两后端各自测试，缺共享契约套件。 | 建立 backend parity 测试并文档化差异。 |
-| `DistributedConcurrencyGate` 命名 | 设计债，P2 | runtime/base 导出的同名类型实际是进程内 semaphore，当前无生产调用方。 | 单元测试仅验证本地语义。 | 删除或改名，避免未来误用。 |
+| `DistributedConcurrencyGate` 命名 | 已移除 | 删除无生产调用方的本地 semaphore 包装及其导出，避免误认为跨节点门禁。 | 全仓引用核验；真实共享准入继续使用 runtime-state Redis semaphore。 | 本地门禁使用现有 `ConcurrencyGate`。 |
 | `created_at_unix_ms` 实存秒、kv ttl=None | 设计/命名，P2 | 当前链路单位自洽；kv 的 None 调用方为固定键覆盖，无无界增长证据。 | 现有任务/kv 测试。 | 渐进重命名并明确 None 契约。 |
 
 ## #212 测试与依赖

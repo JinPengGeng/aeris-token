@@ -135,7 +135,10 @@ pub(crate) use self::state::{
     GatewayUserPreferenceView, GatewayUserSessionView, LocalExecutionRuntimeMissDiagnostic,
     LocalMutationOutcome, LocalProviderDeleteTaskState,
 };
-pub use self::state::{AppState, FrontdoorCorsConfig};
+pub use self::state::{
+    AppState, AuthContextCacheConfig, FrontdoorCorsConfig, DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+    DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS, DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS,
+};
 pub use self::tunnel::{
     build_tunnel_runtime_router_with_state, tunnel_protocol, TunnelConnConfig,
     TunnelControlPlaneClient, TunnelRuntimeState,

@@ -1,4 +1,4 @@
-use std::{sync::OnceLock, time::Duration};
+use std::time::Duration;
 
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
@@ -31,14 +31,6 @@ use crate::local_auth_token::{
 };
 
 const AUTH_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(60);
-const AUTH_CONTEXT_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
-const AUTH_CONTEXT_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(10);
-const AUTH_CONTEXT_CACHE_MAX_ENTRIES: usize = 10_000;
-const AUTH_CONTEXT_CACHE_MAX_ENTRIES_ENV: &str = "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES";
-const AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS_ENV: &str =
-    "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS";
-const AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS_ENV: &str =
-    "AETHER_GATEWAY_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS";
 const AUTH_CONTEXT_NEGATIVE_CACHE_KEY_PREFIX: &str = "negative:";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -893,7 +885,7 @@ fn put_cached_auth_context(
     generation: Option<AuthContextCacheGeneration>,
 ) {
     let (cache_key, ttl) = if is_negative_auth_context(&auth_context) {
-        let ttl = auth_context_negative_cache_ttl();
+        let ttl = auth_context_negative_cache_ttl(state);
         if ttl.is_zero() {
             return;
         }
@@ -909,7 +901,7 @@ fn put_cached_auth_context(
             cache_key,
             auth_context,
             ttl,
-            auth_context_cache_max_entries(),
+            state.auth_context_cache_config.max_entries,
             &generation,
         );
     } else {
@@ -917,20 +909,9 @@ fn put_cached_auth_context(
             cache_key,
             auth_context,
             ttl,
-            auth_context_cache_max_entries(),
+            state.auth_context_cache_config.max_entries,
         );
     }
-}
-
-fn auth_context_cache_max_entries() -> usize {
-    static MAX_ENTRIES: OnceLock<usize> = OnceLock::new();
-    *MAX_ENTRIES.get_or_init(|| {
-        std::env::var(AUTH_CONTEXT_CACHE_MAX_ENTRIES_ENV)
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(AUTH_CONTEXT_CACHE_MAX_ENTRIES)
-    })
 }
 
 fn auth_context_cache_refresh_interval(state: &AppState) -> Duration {
@@ -939,33 +920,15 @@ fn auth_context_cache_refresh_interval(state: &AppState) -> Duration {
         return interval;
     }
 
-    static REFRESH_INTERVAL: OnceLock<Duration> = OnceLock::new();
-    *REFRESH_INTERVAL.get_or_init(|| {
-        std::env::var(AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS_ENV)
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .map(Duration::from_secs)
-            .unwrap_or(AUTH_CONTEXT_CACHE_REFRESH_INTERVAL)
-            // Operators may tighten the window, but cannot expand the maximum
-            // authorization staleness beyond the secure default.
-            .min(AUTH_CONTEXT_CACHE_REFRESH_INTERVAL)
-    })
+    state.auth_context_cache_config.refresh_interval
 }
 
 fn auth_context_cache_refresh_due(state: &AppState, age: Duration) -> bool {
     age >= auth_context_cache_refresh_interval(state)
 }
 
-fn auth_context_negative_cache_ttl() -> Duration {
-    static NEGATIVE_TTL: OnceLock<Duration> = OnceLock::new();
-    *NEGATIVE_TTL.get_or_init(|| {
-        std::env::var(AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS_ENV)
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(AUTH_CONTEXT_NEGATIVE_CACHE_TTL)
-    })
+fn auth_context_negative_cache_ttl(state: &AppState) -> Duration {
+    state.auth_context_cache_config.negative_cache_ttl
 }
 
 fn negative_auth_context_cache_key(cache_key: &str) -> String {
@@ -1537,7 +1500,7 @@ fn get_cached_auth_context_with_age(
     state: &AppState,
     cache_key: &str,
 ) -> Option<(GatewayControlAuthContext, Duration)> {
-    let negative_ttl = auth_context_negative_cache_ttl();
+    let negative_ttl = auth_context_negative_cache_ttl(state);
     if !negative_ttl.is_zero() {
         if let Some(auth_context) = state
             .auth_context_cache
