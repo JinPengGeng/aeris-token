@@ -145,7 +145,7 @@ heartbeat ACK 触发的远程自动升级默认关闭，因为服务身份通常
 
 `aether_url`、`management_token`、`node_name` 为必填信息。Aether ↔ tunnel 通道安全模式支持 `off` / `non_tls_required`；在 `[[servers]]` 中省略该字段且 `http://` 提供 key 时会自动按 `non_tls_required` 生效。secure tunnel 使用的长期 PSK 是 base64 编码的 32 字节密钥，每个 `[[servers]]` 节点独立配置。
 
-默认拦截 private/reserved 目标地址；仅在明确需要访问内网服务时启用 `allow_private_targets`，通过后仍受 `allowed_ports` 限制。
+默认拦截 private/reserved 目标地址（含 IPv6 NAT64/6to4/Teredo 等可内嵌 IPv4 的过渡形态）；仅在明确需要访问内网服务时启用 `allow_private_targets`，通过后仍受 `allowed_ports` 限制。注意：隧道目标是 Gateway 侧 provider `base_url` 的放大出口——若管理员误把 `base_url` 配到隧道节点所在内网或云 metadata 地址（如 169.254.169.254），开启 `allow_private_targets` 会把隧道变成 SSRF 放大器；开启前应先复核所有 provider `base_url`，并优先用网络层出口白名单兜底。信任边界与失陷影响见 [隧道信任模型](../../docs/architecture/tunnel-trust-model.md)。
 
 #### Tunnel 连接
 

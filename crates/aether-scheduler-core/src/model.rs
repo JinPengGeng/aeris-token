@@ -1,5 +1,6 @@
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{LazyLock, RwLock};
 
 use aether_data_contracts::repository::candidate_selection::{
     provider_model_mapping_api_format_covers, StoredMinimalCandidateSelectionRow,
@@ -414,19 +415,48 @@ fn capabilities_support_required_capability(
     false
 }
 
+const MODEL_MAPPING_REGEX_CACHE_CAPACITY: usize = 512;
+
+/// Compiled-pattern cache for [`matches_model_mapping`]. Candidate selection
+/// evaluates every mapping pattern against every requested model name, so
+/// compiling `^(?:pattern)$` on each call sits on the request hot path.
+/// Pattern sets are small and stable in practice; when the cache fills up we
+/// clear it instead of evicting individual entries, which keeps the
+/// implementation trivial and still bounds memory.
+static MODEL_MAPPING_REGEX_CACHE: LazyLock<RwLock<HashMap<String, Option<regex::Regex>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn cached_model_mapping_regex(pattern: &str) -> Option<regex::Regex> {
+    let cache = MODEL_MAPPING_REGEX_CACHE
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(compiled) = cache.get(pattern) {
+        return compiled.clone();
+    }
+    drop(cache);
+
+    let regex_pattern = format!("^(?:{pattern})$");
+    let compiled = RegexBuilder::new(&regex_pattern)
+        .case_insensitive(true)
+        .build()
+        .ok();
+
+    let mut cache = MODEL_MAPPING_REGEX_CACHE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() >= MODEL_MAPPING_REGEX_CACHE_CAPACITY {
+        cache.clear();
+    }
+    cache.insert(pattern.to_string(), compiled.clone());
+    compiled
+}
+
 pub fn matches_model_mapping(pattern: &str, model_name: &str) -> bool {
     if pattern.eq_ignore_ascii_case(model_name) {
         return true;
     }
 
-    let regex_pattern = format!("^(?:{pattern})$");
-    let Ok(compiled) = RegexBuilder::new(&regex_pattern)
-        .case_insensitive(true)
-        .build()
-    else {
-        return false;
-    };
-    compiled.is_match(model_name)
+    cached_model_mapping_regex(pattern).is_some_and(|compiled| compiled.is_match(model_name))
 }
 
 pub fn extract_global_priority_for_format(
@@ -583,6 +613,30 @@ mod tests {
     #[test]
     fn invalid_model_mapping_pattern_returns_false() {
         assert!(!matches_model_mapping("([a-z", "gpt-4o"));
+    }
+
+    #[test]
+    fn invalid_model_mapping_pattern_stays_invalid_across_cache_hits() {
+        assert!(!matches_model_mapping("([a-z", "gpt-4o"));
+        // The second lookup is served from the compiled-pattern cache and must
+        // keep returning false instead of recompiling the invalid pattern.
+        assert!(!matches_model_mapping("([a-z", "gpt-4o"));
+    }
+
+    #[test]
+    fn model_mapping_cache_survives_capacity_clear_and_keeps_matching() {
+        // Fill the cache beyond its capacity with distinct valid patterns so
+        // the clear-on-full path runs, then confirm matching still behaves.
+        for index in 0..(super::MODEL_MAPPING_REGEX_CACHE_CAPACITY + 8) {
+            let pattern = format!("model-{index}(?:-v\\d+)?");
+            assert!(matches_model_mapping(
+                &pattern,
+                &format!("MODEL-{index}-V2")
+            ));
+        }
+        assert!(matches_model_mapping("gpt-4o", "GPT-4O"));
+        assert!(matches_model_mapping("gpt-5(?:\\.\\d+)?", "GPT-5.1"));
+        assert!(!matches_model_mapping("gpt-4o", "gpt-4o-mini"));
     }
 
     #[test]

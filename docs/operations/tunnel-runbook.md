@@ -10,6 +10,8 @@ Tunnel 本地启动即可完成的验收。
   安装器读取的 `AETHER_TUNNEL_CONFIG`、`AETHER_TUNNEL_RELEASE_REPO`、
   `AETHER_TUNNEL_RELEASE_TAG` 和 `AETHER_TUNNEL_INSTALL_DIR` 在表格中单独列出。
 - [Tunnel README](../../apps/aether-tunnel/README.md) 是安装和配置示例入口。
+- [隧道信任模型](../architecture/tunnel-trust-model.md) 记录 Gateway↔隧道的信任边界、
+  升级签名锚点和单组件失陷的影响半径。
 - [发布运行时策略](../issue-triage/issue-256-runtime-install-policy.md) 记录发布仓库
   的切换条件；[发布密钥轮换手册](issue-205-release-key-rotation.md) 记录签名信任集合
   和轮换/恢复边界。

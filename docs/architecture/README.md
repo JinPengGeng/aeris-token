@@ -38,6 +38,7 @@ HTTP/WS ingress
 
 - ingress 的 liveness/readiness 不等于业务依赖可用；健康合同见 [ADR-0046](adr-0046-readiness-health-contract.md)。
 - 路由只选择候选和传输策略；余额、配额及最终 usage 结算由数据/usage 层负责，不能用路由成功替代账务成功。
+- 经隧道转发的出口流量遵循 [隧道信任模型](tunnel-trust-model.md)：Gateway 管理面与隧道 agent 之间是单向绝对信任，升级链路由编译进二进制的 ed25519 信任集合锚定。
 - Redis stream 是 usage 事件的传递层，不是完整账本；重试、DLQ 和保留策略见 [`docs/adr/usage-runtime-retry-dlq.md`](../adr/usage-runtime-retry-dlq.md)。
 - PostgreSQL 写入失败、部分提交和恢复边界应按 [备份恢复演练](../operations/backup-restore-drill.md) 的证据要求验收；本页不宣称生产灾备已完成。
 - Emergency chain 与普通候选路由隔离。ADR-0044 的管理员 v1 通过独立
