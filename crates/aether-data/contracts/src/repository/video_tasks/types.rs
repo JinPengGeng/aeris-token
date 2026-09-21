@@ -612,6 +612,19 @@ pub trait VideoTaskWriteRepository: Send + Sync {
         claim_until_unix_secs: u64,
         limit: usize,
     ) -> Result<Vec<VideoTaskClaim>, crate::DataLayerError>;
+
+    /// Delete terminal (`Completed`/`Failed`/`Deleted`) tasks whose
+    /// `completed_at` (falling back to `updated_at`) is older than the cutoff.
+    /// Bounded by `limit` rows per call; rerunning is idempotent. Backends
+    /// without a native implementation keep the default no-op.
+    async fn cleanup_terminal_before(
+        &self,
+        completed_before_unix_secs: u64,
+        limit: usize,
+    ) -> Result<u64, crate::DataLayerError> {
+        let _ = (completed_before_unix_secs, limit);
+        Ok(0)
+    }
 }
 
 pub trait VideoTaskRepository:

@@ -3,6 +3,7 @@ mod compression;
 mod daily_cost;
 mod metadata_policy;
 mod policy;
+mod sensitive_headers;
 mod types;
 
 #[doc(hidden)]
@@ -14,6 +15,7 @@ pub use compression::{read_decompressed_usage_json, MAX_DECOMPRESSED_USAGE_JSON_
 pub use daily_cost::*;
 pub use metadata_policy::*;
 pub use policy::*;
+pub use sensitive_headers::*;
 pub use types::{
     canonical_usage_body_ref_for, extract_provider_actual_service_tier_from_response,
     extract_provider_cache_ttl_minutes_from_metadata, extract_provider_reasoning_effort_from_body,

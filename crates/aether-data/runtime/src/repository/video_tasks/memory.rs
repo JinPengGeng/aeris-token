@@ -434,6 +434,48 @@ impl VideoTaskWriteRepository for InMemoryVideoTaskRepository {
         Ok(Some(Self::store_locked(&mut index, task.into_stored())))
     }
 
+    async fn cleanup_terminal_before(
+        &self,
+        completed_before_unix_secs: u64,
+        limit: usize,
+    ) -> Result<u64, DataLayerError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let mut index = self.index.write().expect("video task repository lock");
+        let expired_ids: Vec<String> = index
+            .by_id
+            .values()
+            .filter(|task| {
+                !task.status.is_active()
+                    && task
+                        .completed_at_unix_secs
+                        .unwrap_or(task.updated_at_unix_secs)
+                        < completed_before_unix_secs
+            })
+            .take(limit)
+            .map(|task| task.id.clone())
+            .collect();
+        let deleted = u64::try_from(expired_ids.len()).unwrap_or(u64::MAX);
+        for id in &expired_ids {
+            if let Some(previous) = index.by_id.remove(id) {
+                if let Some(short_id) = previous.short_id {
+                    index.short_to_id.remove(&short_id);
+                }
+                index.request_to_id.remove(&previous.request_id);
+                if let (Some(user_id), Some(external_task_id)) =
+                    (previous.user_id, previous.external_task_id)
+                {
+                    index
+                        .user_external_to_id
+                        .remove(&(user_id, external_task_id));
+                }
+            }
+            index.fencing_tokens.remove(id);
+        }
+        Ok(deleted)
+    }
+
     async fn claim_due(
         &self,
         now_unix_secs: u64,
@@ -561,6 +603,62 @@ mod tests {
             video_url: None,
             request_metadata: None,
         }
+    }
+
+    #[tokio::test]
+    async fn cleanup_terminal_before_is_bounded_and_idempotent() {
+        let repo = InMemoryVideoTaskRepository::default();
+        repo.upsert(sample_task("old-done", VideoTaskStatus::Completed, 100))
+            .await
+            .expect("upsert should succeed");
+        repo.upsert(sample_task("old-failed", VideoTaskStatus::Failed, 200))
+            .await
+            .expect("upsert should succeed");
+        repo.upsert(sample_task("recent-done", VideoTaskStatus::Completed, 900))
+            .await
+            .expect("upsert should succeed");
+        repo.upsert(sample_task("active", VideoTaskStatus::Processing, 100))
+            .await
+            .expect("upsert should succeed");
+
+        // Cutoff 500: only terminal tasks at/under 200 qualify; limit 1 bounds the batch.
+        let deleted = repo
+            .cleanup_terminal_before(500, 1)
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(deleted, 1);
+        let deleted = repo
+            .cleanup_terminal_before(500, 100)
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(deleted, 1);
+        // Idempotent: a third pass deletes nothing.
+        let deleted = repo
+            .cleanup_terminal_before(500, 100)
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(deleted, 0);
+
+        assert!(repo
+            .find(VideoTaskLookupKey::Id("recent-done"))
+            .await
+            .expect("find should succeed")
+            .is_some());
+        assert!(repo
+            .find(VideoTaskLookupKey::Id("active"))
+            .await
+            .expect("find should succeed")
+            .is_some());
+        assert!(repo
+            .find(VideoTaskLookupKey::Id("old-done"))
+            .await
+            .expect("find should succeed")
+            .is_none());
+        assert!(repo
+            .find(VideoTaskLookupKey::Id("old-failed"))
+            .await
+            .expect("find should succeed")
+            .is_none());
     }
 
     #[tokio::test]

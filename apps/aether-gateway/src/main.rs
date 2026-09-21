@@ -1052,6 +1052,13 @@ struct GatewayUsageArgs {
 
     #[arg(
         long,
+        env = "AETHER_GATEWAY_USAGE_QUEUE_DLQ_RETENTION_SECS",
+        default_value_t = 14 * 24 * 60 * 60
+    )]
+    queue_dlq_retention_secs: u64,
+
+    #[arg(
+        long,
         env = "AETHER_GATEWAY_USAGE_QUEUE_PAYLOAD_MAX_BYTES",
         default_value_t = 1024 * 1024
     )]
@@ -1270,6 +1277,7 @@ impl GatewayUsageArgs {
             consumer_group: self.queue_group.trim().to_string(),
             dlq_stream_key: self.queue_dlq_stream_key.trim().to_string(),
             dlq_stream_maxlen: self.queue_dlq_maxlen,
+            dlq_retention_secs: self.queue_dlq_retention_secs.max(1),
             stream_maxlen: self.queue_stream_maxlen.max(1),
             queue_payload_max_bytes: self.queue_payload_max_bytes,
             consumer_batch_size: self.queue_batch_size.max(1),
@@ -1340,6 +1348,13 @@ struct GatewayRateLimitArgs {
     /// Keep the secure fail-closed behavior as the production default.
     #[arg(long, env = "RATE_LIMIT_FAIL_OPEN", default_value_t = false)]
     fail_open: bool,
+
+    /// Consistency-first mode: when shared runtime state (Redis) is
+    /// unavailable, reject requests instead of degrading to per-node
+    /// behavior. Disables the RPM local fallback and makes the daily usage
+    /// quota check fail closed. Default keeps existing semantics.
+    #[arg(long, env = "AETHER_CONSISTENCY_FIRST", default_value_t = false)]
+    consistency_first: bool,
 }
 
 impl GatewayRateLimitArgs {
@@ -2386,6 +2401,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?,
     );
     let rate_limit_config = if matches!(args.deployment_topology, DeploymentTopologyArg::MultiNode)
+        || args.rate_limit.consistency_first
     {
         args.rate_limit.config().with_local_fallback(false)
     } else {
@@ -2434,6 +2450,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         frontdoor_rpm_key_ttl_seconds = args.rate_limit.key_ttl_seconds,
         frontdoor_rpm_fail_open = args.rate_limit.fail_open,
         frontdoor_rpm_allow_local_fallback = rate_limit_config.allow_local_fallback(),
+        consistency_first = args.rate_limit.consistency_first,
+        frontdoor_daily_usage_fail_open = !args.rate_limit.consistency_first,
         video_task_poller_interval_ms = args.video_task_poller_interval_ms,
         video_task_poller_batch_size = args.video_task_poller_batch_size,
         video_task_store_path = args.video_task_store_path.as_deref().unwrap_or("-"),
@@ -2514,6 +2532,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         state = state.with_frontdoor_cors_config(cors_config);
     }
     state = state.with_frontdoor_user_rpm_config(rate_limit_config);
+    if args.rate_limit.consistency_first {
+        state = state.with_frontdoor_daily_usage_fail_open(false);
+    }
     if matches!(
         args.video_task_truth_source_mode,
         VideoTaskTruthSourceArg::RustAuthoritative
@@ -3831,6 +3852,7 @@ mod tests {
                 queue_dlq_stream_key: "usage:events:dlq".to_string(),
                 queue_stream_maxlen: 200_000,
                 queue_dlq_maxlen: 50_000,
+                queue_dlq_retention_secs: 14 * 24 * 60 * 60,
                 queue_payload_max_bytes: 1024 * 1024,
                 queue_batch_size: 128,
                 queue_block_ms: 500,
@@ -3856,6 +3878,7 @@ mod tests {
                 bucket_seconds: 60,
                 key_ttl_seconds: 120,
                 fail_open: false,
+                consistency_first: false,
             },
             logging: GatewayLoggingArgs {
                 log_format: GatewayLogFormatArg::Pretty,

@@ -66,3 +66,26 @@ fail-open/recovery 语义处理，不得当作财务账本。
 错误、usage queue pending/lag/DLQ 与 outbox pending。仓库无法在 CI 中证明真实三
 节点、真实负载均衡或故障恢复；`verify_multi_node_assets.sh` 只验证 env 契约和
 compose 解析，不能替代上述隔离环境证据。
+
+## Redis 故障降级与一致性优先开关
+
+多节点拓扑启动时已自动禁用 RPM 限速的进程内 local fallback（避免限额 ×N），
+但日用量限额在共享状态故障时仍 fail-open（放行并计数告警）。对一致性敏感的
+部署可在每个节点设置 `AETHER_CONSISTENCY_FIRST=true`（CLI
+`--consistency-first`）：
+
+- RPM 限速在任何拓扑下都不再退化到进程内计数；Redis 不可用时按
+  `RATE_LIMIT_FAIL_OPEN`（默认 false，即拒绝）处理。
+- 日用量限额检查失败时拒绝请求（HTTP 429 + `Retry-After`，
+  `X-Daily-Usage-Scope: runtime_unavailable`）。
+
+默认（开关关闭）行为不变。语义细节见 [Redis 一致性优先 ADR](../adr/redis-consistency-first.md)。
+
+## 容量验收基线
+
+多节点发布前的压测验收使用 `tools/pressure/` 的 S1–S5/TPS 分档契约（入口文档
+[tools/pressure/README.md](../../tools/pressure/README.md)）。CI 中的
+`Pressure Baseline Dry-Run` workflow（`.github/workflows/pressure-baseline.yml`）
+只做 60 请求/10 并发的工具链 dry-run，不是容量门槛；真正的 S1（1000 并发）与
+TPS（1000 rps 下限）必须在隔离压测环境按 checker 硬阈值执行并把报告附到
+对应 Issue/PR。

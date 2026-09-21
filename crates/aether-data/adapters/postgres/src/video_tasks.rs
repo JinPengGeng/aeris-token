@@ -920,6 +920,38 @@ impl SqlxVideoTaskRepository {
         row.as_ref().map(map_video_task_row).transpose()
     }
 
+    /// Delete terminal tasks (`completed`/`failed`/`cancelled`/`expired`/
+    /// `deleted`) whose completion (or last update) predates the cutoff.
+    /// Bounded by `limit`; reruns delete nothing once the window is drained.
+    pub async fn cleanup_terminal_before(
+        &self,
+        completed_before_unix_secs: u64,
+        limit: usize,
+    ) -> Result<u64, DataLayerError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| DataLayerError::UnexpectedValue(format!("invalid limit: {limit}")))?;
+        let before = i64::try_from(completed_before_unix_secs).map_err(|_| {
+            DataLayerError::UnexpectedValue(format!(
+                "invalid completed_before_unix_secs: {completed_before_unix_secs}"
+            ))
+        })?;
+        let sql = "DELETE FROM video_tasks WHERE ctid IN (\
+            SELECT ctid FROM video_tasks \
+            WHERE status IN ('completed','failed','cancelled','expired','deleted') \
+              AND COALESCE(completed_at, updated_at) < $1 \
+            LIMIT $2)";
+        let result = sqlx::query(sql)
+            .bind(before)
+            .bind(limit)
+            .execute(self.pool())
+            .await
+            .map_err(crate::error::postgres_error)?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn claim_due(
         &self,
         now_unix_secs: u64,
@@ -1061,6 +1093,14 @@ impl VideoTaskWriteRepository for SqlxVideoTaskRepository {
         limit: usize,
     ) -> Result<Vec<VideoTaskClaim>, DataLayerError> {
         Self::claim_due(self, now_unix_secs, claim_until_unix_secs, limit).await
+    }
+
+    async fn cleanup_terminal_before(
+        &self,
+        completed_before_unix_secs: u64,
+        limit: usize,
+    ) -> Result<u64, DataLayerError> {
+        Self::cleanup_terminal_before(self, completed_before_unix_secs, limit).await
     }
 }
 

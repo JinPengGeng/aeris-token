@@ -25,6 +25,7 @@ LEFT JOIN usage_settlement_snapshots
 CROSS JOIN tmp_rebuild_cost_savings_context AS context
 WHERE usage.created_at < context.current_day_utc;
 
+-- destructive-sql: allow rebuild cost savings aggregates from usage facts before repopulating
 TRUNCATE TABLE
     stats_daily_cost_savings,
     stats_daily_cost_savings_provider,

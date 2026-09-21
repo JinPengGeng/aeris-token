@@ -55,6 +55,7 @@ use super::super::{provider_transport, usage};
 
 use crate::maintenance::spawn_account_self_check_worker;
 use crate::maintenance::spawn_audit_cleanup_worker;
+use crate::maintenance::spawn_data_lifecycle_cleanup_worker;
 use crate::maintenance::spawn_db_maintenance_worker;
 use crate::maintenance::spawn_fixed_provider_reconciliation_task;
 use crate::maintenance::spawn_gemini_file_mapping_cleanup_worker;
@@ -152,6 +153,12 @@ fn system_config_key_affects_chat_pii_redaction(key: &str) -> bool {
 
 fn system_config_key_affects_provider_transport_snapshot(key: &str) -> bool {
     key.trim() == "enable_format_conversion"
+}
+
+fn sync_sensitive_headers_config_from_system_value(key: &str, value: Option<&serde_json::Value>) {
+    if key.trim() == aether_data_contracts::repository::usage::SENSITIVE_HEADERS_SYSTEM_CONFIG_KEY {
+        aether_data_contracts::repository::usage::apply_sensitive_headers_config(value);
+    }
 }
 
 impl AppState {
@@ -750,6 +757,13 @@ impl AppState {
         self
     }
 
+    pub fn with_frontdoor_daily_usage_fail_open(mut self, fail_open: bool) -> Self {
+        Arc::make_mut(&mut self.frontdoor_limiters).daily_usage = Arc::new(
+            crate::daily_usage_limit::FrontdoorDailyUsageLimiter::new().with_fail_open(fail_open),
+        );
+        self
+    }
+
     pub fn has_data_backends(&self) -> bool {
         self.data.has_backends()
     }
@@ -837,6 +851,7 @@ impl AppState {
                 SYSTEM_CONFIG_CACHE_MAX_STALENESS,
             )
             .await?;
+        sync_sensitive_headers_config_from_system_value(key, value.as_ref());
         Ok(value)
     }
 
@@ -1005,6 +1020,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         self.system_config_cache
             .insert(key.to_string(), None, SYSTEM_CONFIG_CACHE_MAX_STALENESS);
+        sync_sensitive_headers_config_from_system_value(key, None);
         if deleted && system_config_key_affects_scheduler(key) {
             self.invalidate_scheduler_affinity_cache();
         }
@@ -1093,6 +1109,7 @@ impl AppState {
     }
 
     fn remember_system_config_write(&self, key: &str, value: Option<serde_json::Value>) {
+        sync_sensitive_headers_config_from_system_value(key, value.as_ref());
         self.system_config_cache
             .insert(key.to_string(), value, SYSTEM_CONFIG_CACHE_MAX_STALENESS);
         if system_config_key_affects_scheduler(key) {
@@ -2462,6 +2479,10 @@ impl AppState {
             spawn_usage_cleanup_worker(background_state.clone()),
         );
         supervise_worker(
+            crate::task_runtime::TASK_KEY_DATA_LIFECYCLE_CLEANUP,
+            spawn_data_lifecycle_cleanup_worker(background_state.clone()),
+        );
+        supervise_worker(
             crate::task_runtime::TASK_KEY_POOL_MONITOR,
             spawn_pool_monitor_worker(background_state.clone()),
         );
@@ -3654,6 +3675,12 @@ fn usage_runtime_metric_samples(
             "Maximum number of entries retained in the usage dead-letter stream.",
             MetricKind::Gauge,
             snapshot.dlq_stream_maxlen as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_pruned_total",
+            "Dead-letter entries dropped after exceeding the retention window; lossy by design and surfaced for alerting.",
+            MetricKind::Counter,
+            snapshot.dlq_pruned_total,
         ),
         MetricSample::new(
             "usage_runtime_queue_payload_downgraded_total",

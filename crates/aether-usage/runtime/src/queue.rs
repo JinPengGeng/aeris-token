@@ -14,12 +14,17 @@ use crate::queue_read_budget::{shared_queue_read_budget, QueueReadBudget, QueueR
 
 static PAYLOAD_DOWNGRADED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static PAYLOAD_REJECTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static DLQ_PRUNED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn payload_encoding_totals() -> (u64, u64) {
     (
         PAYLOAD_DOWNGRADED_TOTAL.load(Ordering::Relaxed),
         PAYLOAD_REJECTED_TOTAL.load(Ordering::Relaxed),
     )
+}
+
+pub(crate) fn dlq_pruned_total() -> u64 {
+    DLQ_PRUNED_TOTAL.load(Ordering::Relaxed)
 }
 
 pub(crate) fn is_permanent_enqueue_error(error: &DataLayerError) -> bool {
@@ -339,6 +344,61 @@ impl UsageQueue {
             self.config.dlq_stream_maxlen,
         ))
     }
+
+    /// Delete dead-letter entries older than the configured retention window.
+    /// Stream IDs are millisecond timestamps, so entries are scanned in ID
+    /// order and the pass stops as soon as a retained entry is reached.
+    /// Returns the number of entries pruned; safe to rerun (idempotent).
+    ///
+    /// IDs whose leading component is below a floor are treated as synthetic
+    /// (sequence-based) test or in-memory backend IDs and are never pruned, so
+    /// non-Redis backends keep append-order semantics unchanged.
+    pub async fn prune_dead_letter_expired(
+        &self,
+        now_unix_ms: u64,
+    ) -> Result<usize, DataLayerError> {
+        /// Milliseconds for 1970-04-26; real Redis stream IDs are wall-clock
+        /// timestamps far above this, sequence-based synthetic IDs stay below.
+        const TIMESTAMP_FLOOR_MS: u64 = 10_000_000_000;
+        let retention_ms = self.config.dlq_retention_secs.saturating_mul(1_000);
+        if retention_ms == 0 || retention_ms >= now_unix_ms {
+            return Ok(0);
+        }
+        let cutoff_ms = now_unix_ms - retention_ms;
+        let mut cursor = "0-0".to_string();
+        let mut pruned = 0usize;
+        let entry_ms = |id: &str| id.split('-').next().and_then(|ms| ms.parse::<u64>().ok());
+        let is_expired =
+            |id: &str| entry_ms(id).is_some_and(|ms| ms >= TIMESTAMP_FLOOR_MS && ms < cutoff_ms);
+        loop {
+            let page = self
+                .runner
+                .read_stream_page(&self.dlq_stream, &cursor, 256)
+                .await?;
+            let expired: Vec<String> = page
+                .entries
+                .iter()
+                .take_while(|entry| is_expired(&entry.id))
+                .map(|entry| entry.id.clone())
+                .collect();
+            if !expired.is_empty() {
+                self.runner.delete(&self.dlq_stream, &expired).await?;
+                pruned = pruned.saturating_add(expired.len());
+            }
+            let reached_retained_entry = page.entries.iter().any(|entry| !is_expired(&entry.id));
+            if !page.has_more || reached_retained_entry {
+                break;
+            }
+            let Some(last) = page.entries.last() else {
+                break;
+            };
+            cursor = last.id.clone();
+        }
+        if pruned > 0 {
+            DLQ_PRUNED_TOTAL.fetch_add(pruned as u64, Ordering::Relaxed);
+        }
+        Ok(pruned)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,8 +430,8 @@ mod tests {
     use crate::UsageRuntimeConfig;
     use aether_data_contracts::DataLayerError;
     use aether_runtime_state::{
-        MemoryRuntimeStateConfig, RuntimeQueueEntry, RuntimeQueueReclaimConfig, RuntimeQueueStats,
-        RuntimeQueueStore, RuntimeQueueTransferOutcome, RuntimeState,
+        MemoryRuntimeStateConfig, RuntimeQueueEntry, RuntimeQueuePage, RuntimeQueueReclaimConfig,
+        RuntimeQueueStats, RuntimeQueueStore, RuntimeQueueTransferOutcome, RuntimeState,
     };
     use async_trait::async_trait;
     use std::collections::BTreeMap;
@@ -757,5 +817,146 @@ mod tests {
         let cloned = first.clone();
         assert!(Arc::ptr_eq(&first.read_budget, &second.read_budget));
         assert!(Arc::ptr_eq(&first.read_budget, &cloned.read_budget));
+    }
+
+    struct PagedDlqStore {
+        entries: std::sync::Mutex<Vec<RuntimeQueueEntry>>,
+        deleted: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl RuntimeQueueStore for PagedDlqStore {
+        async fn ensure_consumer_group(
+            &self,
+            _stream: &str,
+            _group: &str,
+            _start_id: &str,
+        ) -> Result<(), DataLayerError> {
+            Ok(())
+        }
+
+        async fn append_fields_with_maxlen(
+            &self,
+            _stream: &str,
+            _fields: &BTreeMap<String, String>,
+            _maxlen: Option<usize>,
+        ) -> Result<String, DataLayerError> {
+            unreachable!("prune test only scans and deletes")
+        }
+
+        async fn read_stream_page(
+            &self,
+            _stream: &str,
+            start_id: &str,
+            count: usize,
+        ) -> Result<RuntimeQueuePage, DataLayerError> {
+            let entries = self.entries.lock().unwrap();
+            let page: Vec<RuntimeQueueEntry> = entries
+                .iter()
+                .filter(|entry| entry.id.as_str() > start_id)
+                .take(count)
+                .cloned()
+                .collect();
+            let has_more = page.len() == count
+                && entries.iter().any(|entry| {
+                    page.last()
+                        .is_some_and(|last| entry.id.as_str() > last.id.as_str())
+                });
+            Ok(RuntimeQueuePage {
+                next_start_id: page
+                    .last()
+                    .map(|entry| entry.id.clone())
+                    .unwrap_or_else(|| start_id.to_string()),
+                entries: page,
+                has_more,
+            })
+        }
+
+        async fn read_group(
+            &self,
+            _stream: &str,
+            _group: &str,
+            _consumer: &str,
+            _count: usize,
+            _block_ms: Option<u64>,
+        ) -> Result<Vec<RuntimeQueueEntry>, DataLayerError> {
+            unreachable!("prune test only scans and deletes")
+        }
+
+        async fn claim_stale(
+            &self,
+            _stream: &str,
+            _group: &str,
+            _consumer: &str,
+            _start_id: &str,
+            _config: RuntimeQueueReclaimConfig,
+        ) -> Result<Vec<RuntimeQueueEntry>, DataLayerError> {
+            unreachable!("prune test only scans and deletes")
+        }
+
+        async fn ack(
+            &self,
+            _stream: &str,
+            _group: &str,
+            _ids: &[String],
+        ) -> Result<usize, DataLayerError> {
+            unreachable!("prune test only scans and deletes")
+        }
+
+        async fn delete(&self, _stream: &str, ids: &[String]) -> Result<usize, DataLayerError> {
+            let mut entries = self.entries.lock().unwrap();
+            entries.retain(|entry| !ids.contains(&entry.id));
+            let mut deleted = self.deleted.lock().unwrap();
+            deleted.extend(ids.iter().cloned());
+            Ok(ids.len())
+        }
+
+        async fn stats(
+            &self,
+            _stream: &str,
+            _group: Option<&str>,
+        ) -> Result<RuntimeQueueStats, DataLayerError> {
+            unreachable!("prune test only scans and deletes")
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_dead_letter_expired_drops_only_entries_older_than_retention() {
+        let entry = |id: &str| RuntimeQueueEntry {
+            id: id.to_string(),
+            fields: BTreeMap::from([("payload".to_string(), "{}".to_string())]),
+        };
+        // 20 days old, 10 days old, and 1 hour old relative to `now`.
+        let now_ms = 1_800_000_000_000_u64;
+        let store = Arc::new(PagedDlqStore {
+            entries: std::sync::Mutex::new(vec![
+                entry("1798272000000-0"),
+                entry("1799136000000-0"),
+                entry("1799996400000-0"),
+            ]),
+            deleted: std::sync::Mutex::new(Vec::new()),
+        });
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            dlq_retention_secs: 14 * 24 * 60 * 60,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue = UsageQueue::new(store.clone(), config).unwrap();
+
+        let pruned = queue.prune_dead_letter_expired(now_ms).await.unwrap();
+        assert_eq!(pruned, 1);
+        assert_eq!(
+            store.deleted.lock().unwrap().as_slice(),
+            ["1798272000000-0"]
+        );
+
+        // Rerunning is idempotent: only the remaining expired window re-scans to zero.
+        let pruned = queue.prune_dead_letter_expired(now_ms).await.unwrap();
+        assert_eq!(pruned, 0);
+
+        // An early `now` (everything newer than the cutoff) keeps every entry.
+        let pruned = queue.prune_dead_letter_expired(now_ms / 2).await.unwrap();
+        assert_eq!(pruned, 0);
+        assert_eq!(store.deleted.lock().unwrap().len(), 1);
     }
 }

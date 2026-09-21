@@ -13,12 +13,14 @@ use super::{
     duration_until_next_stats_hourly_aggregation_run, maintenance_timezone, parse_hhmm_time,
     perform_oauth_token_refresh_once, perform_provider_quota_alert_once,
     perform_remote_quota_sync_once, provider_checkin_schedule, remote_quota_sync_worker_interval,
-    run_audit_cleanup_once, run_db_maintenance_once, run_gemini_file_mapping_cleanup_once,
-    run_pending_cleanup_once, run_pool_monitor_once, run_provider_checkin_once,
-    run_proxy_node_metrics_cleanup_once, run_proxy_node_stale_cleanup_once,
-    run_proxy_upgrade_rollout_once, run_request_candidate_cleanup_once, run_stats_aggregation_once,
+    run_audit_cleanup_once, run_data_lifecycle_cleanup_once, run_db_maintenance_once,
+    run_gemini_file_mapping_cleanup_once, run_pending_cleanup_once, run_pool_monitor_once,
+    run_provider_checkin_once, run_proxy_node_metrics_cleanup_once,
+    run_proxy_node_stale_cleanup_once, run_proxy_upgrade_rollout_once,
+    run_request_candidate_cleanup_once, run_stats_aggregation_once,
     run_stats_hourly_aggregation_once, run_usage_cleanup_once, run_usage_counter_flush_once,
     run_wallet_daily_usage_aggregation_once, AUDIT_LOG_CLEANUP_INTERVAL,
+    DATA_LIFECYCLE_CLEANUP_HOUR, DATA_LIFECYCLE_CLEANUP_MINUTE,
     GEMINI_FILE_MAPPING_CLEANUP_INTERVAL, OAUTH_TOKEN_REFRESH_INTERVAL, PENDING_CLEANUP_INTERVAL,
     POOL_MONITOR_INTERVAL, PROVIDER_CHECKIN_DEFAULT_TIME, PROVIDER_QUOTA_ALERT_INTERVAL,
     PROXY_NODE_METRICS_CLEANUP_HOUR, PROXY_NODE_METRICS_CLEANUP_MINUTE,
@@ -729,6 +731,47 @@ pub(crate) fn spawn_proxy_node_metrics_cleanup_worker(
                 }
                 if let Err(err) = run_proxy_node_metrics_cleanup_once(&data).await {
                     log_maintenance_worker_failure("proxy_node_metrics_cleanup", "tick", &err);
+                }
+            }
+        },
+    ))
+}
+
+pub(crate) fn spawn_data_lifecycle_cleanup_worker(
+    app: AppState,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !app.data.has_stats_daily_aggregation_backend() && !app.data.has_video_task_writer() {
+        return None;
+    }
+
+    let timezone = maintenance_timezone();
+    Some(crate::task_runtime::spawn_singleton_worker(
+        app,
+        crate::task_runtime::TASK_KEY_DATA_LIFECYCLE_CLEANUP,
+        move |app| async move {
+            let data = app.data;
+            let mut deferred_since = None;
+            loop {
+                tokio::time::sleep(duration_until_next_daily_run(
+                    Utc::now(),
+                    timezone,
+                    DATA_LIFECYCLE_CLEANUP_HOUR,
+                    DATA_LIFECYCLE_CLEANUP_MINUTE,
+                ))
+                .await;
+                loop {
+                    if should_defer_for_database_pressure(
+                        &data,
+                        "data_lifecycle_cleanup",
+                        &mut deferred_since,
+                    ) {
+                        tokio::time::sleep(MAINTENANCE_PRESSURE_RETRY_INTERVAL).await;
+                        continue;
+                    }
+                    break;
+                }
+                if let Err(err) = run_data_lifecycle_cleanup_once(&data).await {
+                    log_maintenance_worker_failure("data_lifecycle_cleanup", "tick", &err);
                 }
             }
         },

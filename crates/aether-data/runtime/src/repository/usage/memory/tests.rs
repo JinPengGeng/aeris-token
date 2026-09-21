@@ -3161,3 +3161,51 @@ async fn summarize_usage_provider_performance_computes_tps_and_top_provider_time
     assert_eq!(without_timeline.providers, summary.providers);
     assert!(without_timeline.timeline.is_empty());
 }
+
+#[tokio::test]
+async fn list_insufficient_quota_writeoffs_reports_only_writeoffs_in_window() {
+    use aether_data_contracts::repository::usage::{
+        InsufficientQuotaWriteoffQuery, StoredInsufficientQuotaWriteoff,
+    };
+
+    let mut writeoff = sample_usage("req-writeoff", 100);
+    writeoff.billing_status = "insufficient_quota".to_string();
+    writeoff.finalized_at_unix_secs = Some(150);
+    writeoff.total_cost_usd = 1.25;
+    let mut settled = sample_usage("req-settled", 100);
+    settled.billing_status = "settled".to_string();
+    settled.finalized_at_unix_secs = Some(160);
+    let mut outside = sample_usage("req-outside", 100);
+    outside.billing_status = "insufficient_quota".to_string();
+    outside.finalized_at_unix_secs = Some(999);
+    let repository = InMemoryUsageReadRepository::seed(vec![writeoff, settled, outside]);
+
+    let rows = repository
+        .list_insufficient_quota_writeoffs(&InsufficientQuotaWriteoffQuery {
+            finalized_from_unix_secs: 100,
+            finalized_until_unix_secs: 200,
+            limit: 100,
+        })
+        .await
+        .expect("writeoff report should read");
+
+    assert_eq!(rows.len(), 1);
+    let StoredInsufficientQuotaWriteoff {
+        request_id,
+        total_cost_usd,
+        finalized_at_unix_secs,
+        ..
+    } = &rows[0];
+    assert_eq!(request_id, "req-writeoff");
+    assert_eq!(total_cost_usd, &1.25);
+    assert_eq!(finalized_at_unix_secs, &Some(150));
+
+    assert!(repository
+        .list_insufficient_quota_writeoffs(&InsufficientQuotaWriteoffQuery {
+            finalized_from_unix_secs: 200,
+            finalized_until_unix_secs: 100,
+            limit: 100,
+        })
+        .await
+        .is_err());
+}

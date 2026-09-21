@@ -6,7 +6,8 @@ use crate::maintenance::{
     DatabaseMaintenanceSummary, DatabasePoolSummary, DatabasePostgresActivityGroup,
     DatabasePostgresObservabilitySnapshot, StatsDailyAggregationInput,
     StatsDailyAggregationSummary, StatsHourlyAggregationInput, StatsHourlyAggregationSummary,
-    WalletDailyUsageAggregationInput, WalletDailyUsageAggregationResult,
+    StatsRetentionCleanupSummary, WalletDailyUsageAggregationInput,
+    WalletDailyUsageAggregationResult,
 };
 use crate::repository::audit::CreateAdminAuditLog;
 use crate::repository::system::{
@@ -200,6 +201,26 @@ impl DataBackends {
         match self.sql_backend() {
             Some(backend) => backend.aggregate_stats_daily(input).await,
             None => Ok(None),
+        }
+    }
+
+    pub async fn cleanup_stats_aggregates(
+        &self,
+        hourly_before_unix_secs: u64,
+        daily_before_unix_secs: u64,
+        batch_limit: usize,
+    ) -> Result<StatsRetentionCleanupSummary, DataLayerError> {
+        match self.sql_backend() {
+            Some(backend) => {
+                backend
+                    .cleanup_stats_aggregates(
+                        hourly_before_unix_secs,
+                        daily_before_unix_secs,
+                        batch_limit,
+                    )
+                    .await
+            }
+            None => Ok(StatsRetentionCleanupSummary::default()),
         }
     }
 
@@ -467,6 +488,28 @@ impl<'a> SqlBackendRef<'a> {
         match self {
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => postgres.aggregate_stats_daily(input).await,
+            #[cfg(not(feature = "postgres"))]
+            Self::Disabled(_) => unreachable!("a SQL backend cannot exist without a driver"),
+        }
+    }
+
+    async fn cleanup_stats_aggregates(
+        self,
+        hourly_before_unix_secs: u64,
+        daily_before_unix_secs: u64,
+        batch_limit: usize,
+    ) -> Result<StatsRetentionCleanupSummary, DataLayerError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                postgres
+                    .cleanup_stats_aggregates(
+                        hourly_before_unix_secs,
+                        daily_before_unix_secs,
+                        batch_limit,
+                    )
+                    .await
+            }
             #[cfg(not(feature = "postgres"))]
             Self::Disabled(_) => unreachable!("a SQL backend cannot exist without a driver"),
         }

@@ -16,6 +16,8 @@ mod audit_cleanup;
 mod cleanup_runs;
 #[path = "runtime/config.rs"]
 mod config;
+#[path = "runtime/data_lifecycle_cleanup.rs"]
+mod data_lifecycle_cleanup;
 #[path = "runtime/db_maintenance.rs"]
 mod db_maintenance;
 #[path = "runtime/fixed_provider_reconciliation.rs"]
@@ -81,6 +83,7 @@ pub(crate) use cleanup_runs::{
     start_admin_system_purge_task, AdminCleanupRunRecord, AdminCleanupTaskKind, USAGE_CLEANUP_KIND,
 };
 use config::*;
+use data_lifecycle_cleanup::*;
 use db_maintenance::*;
 pub(crate) use fixed_provider_reconciliation::{
     perform_fixed_provider_reconciliation_once, spawn_fixed_provider_reconciliation_task,
@@ -158,6 +161,8 @@ const PENDING_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const PROXY_NODE_STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const PROXY_NODE_METRICS_CLEANUP_HOUR: u32 = 2;
 const PROXY_NODE_METRICS_CLEANUP_MINUTE: u32 = 10;
+const DATA_LIFECYCLE_CLEANUP_HOUR: u32 = 3;
+const DATA_LIFECYCLE_CLEANUP_MINUTE: u32 = 40;
 const PROXY_UPGRADE_ROLLOUT_INTERVAL: Duration = Duration::from_secs(15);
 const PROXY_NODE_STALE_MIN_GRACE_SECS: u64 = 15;
 const PROXY_NODE_STALE_MISSED_HEARTBEATS: u64 = 3;

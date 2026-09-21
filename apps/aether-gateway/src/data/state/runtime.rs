@@ -515,6 +515,41 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn cleanup_stats_aggregates(
+        &self,
+        hourly_before_unix_secs: u64,
+        daily_before_unix_secs: u64,
+        batch_limit: usize,
+    ) -> Result<aether_data::StatsRetentionCleanupSummary, DataLayerError> {
+        match &self.backends {
+            Some(backends) => {
+                backends
+                    .cleanup_stats_aggregates(
+                        hourly_before_unix_secs,
+                        daily_before_unix_secs,
+                        batch_limit,
+                    )
+                    .await
+            }
+            None => Ok(aether_data::StatsRetentionCleanupSummary::default()),
+        }
+    }
+
+    pub(crate) async fn cleanup_terminal_video_tasks(
+        &self,
+        completed_before_unix_secs: u64,
+        limit: usize,
+    ) -> Result<u64, DataLayerError> {
+        match &self.video_task_writer {
+            Some(repository) => {
+                repository
+                    .cleanup_terminal_before(completed_before_unix_secs, limit)
+                    .await
+            }
+            None => Ok(0),
+        }
+    }
+
     pub(crate) async fn list_announcements(
         &self,
         query: &AnnouncementListQuery,
@@ -1937,6 +1972,21 @@ impl GatewayDataState {
             Some(repository) => repository.read_daily_actual_cost_units(query).await,
             None => Err(DataLayerError::InvalidConfiguration(
                 "daily usage limits require a usage reader".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) async fn list_insufficient_quota_writeoffs(
+        &self,
+        query: &aether_data_contracts::repository::usage::InsufficientQuotaWriteoffQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredInsufficientQuotaWriteoff>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.list_insufficient_quota_writeoffs(query).await,
+            None => Err(DataLayerError::InvalidConfiguration(
+                "insufficient quota writeoff reports require a usage reader".to_string(),
             )),
         }
     }

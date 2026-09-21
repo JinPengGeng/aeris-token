@@ -23,6 +23,7 @@ are not a general way to enable boolean options.
 | Variable | Scope | Declared default | Rust type | Source |
 | --- | --- | --- | --- | --- |
 | `AETHER_BACKUP_KEYRING_FILE` | standalone aether-backup-restore CLI | `unset` | `Option<PathBuf>` | [bin/aether-backup-restore.rs](../../apps/aether-gateway/src/bin/aether-backup-restore.rs) |
+| `AETHER_CONSISTENCY_FIRST` | gateway root/server; not inherited by subcommands | `false` | `bool` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_DATABASE_DRIVER` | gateway global; inherited by data subcommands | `unset` | `Option<DatabaseDriverArg>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_DATABASE_URL` | gateway global; inherited by data subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES` | gateway root/server; not inherited by subcommands | `DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES` | `usize` | [main.rs](../../apps/aether-gateway/src/main.rs) |
@@ -72,6 +73,7 @@ are not a general way to enable boolean options.
 | `AETHER_GATEWAY_USAGE_QUEUE_BATCH_SIZE` | gateway root/server; not inherited by subcommands | `128` | `usize` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_QUEUE_BLOCK_MS` | gateway root/server; not inherited by subcommands | `500` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_QUEUE_DLQ_MAXLEN` | gateway root/server; not inherited by subcommands | `50_000` | `usize` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `AETHER_GATEWAY_USAGE_QUEUE_DLQ_RETENTION_SECS` | gateway root/server; not inherited by subcommands | `14 * 24 * 60 * 60` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_QUEUE_DLQ_STREAM_KEY` | gateway root/server; not inherited by subcommands | `"usage:events:dlq"` | `String` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_QUEUE_GROUP` | gateway root/server; not inherited by subcommands | `"usage_consumers"` | `String` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_QUEUE_LIFECYCLE_EVENTS` | gateway root/server; not inherited by subcommands | `true` | `bool` | [main.rs](../../apps/aether-gateway/src/main.rs) |
@@ -120,6 +122,7 @@ These declarations preserve value parsers and missing-value handling for review.
 They contain names and source defaults, not current environment values.
 
 - `AETHER_BACKUP_KEYRING_FILE`: `long, env = "AETHER_BACKUP_KEYRING_FILE"`
+- `AETHER_CONSISTENCY_FIRST`: `long, env = "AETHER_CONSISTENCY_FIRST", default_value_t = false`
 - `AETHER_DATABASE_DRIVER`: `long, env = "AETHER_DATABASE_DRIVER", global = true`
 - `AETHER_DATABASE_URL`: `long, env = "AETHER_DATABASE_URL", global = true`
 - `AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES`: `long, env = "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES", default_value_t = DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)`
@@ -169,6 +172,7 @@ They contain names and source defaults, not current environment values.
 - `AETHER_GATEWAY_USAGE_QUEUE_BATCH_SIZE`: `long, env = "AETHER_GATEWAY_USAGE_QUEUE_BATCH_SIZE", default_value_t = 128`
 - `AETHER_GATEWAY_USAGE_QUEUE_BLOCK_MS`: `long, env = "AETHER_GATEWAY_USAGE_QUEUE_BLOCK_MS", default_value_t = 500`
 - `AETHER_GATEWAY_USAGE_QUEUE_DLQ_MAXLEN`: `long, env = "AETHER_GATEWAY_USAGE_QUEUE_DLQ_MAXLEN", default_value_t = 50_000`
+- `AETHER_GATEWAY_USAGE_QUEUE_DLQ_RETENTION_SECS`: `long, env = "AETHER_GATEWAY_USAGE_QUEUE_DLQ_RETENTION_SECS", default_value_t = 14 * 24 * 60 * 60`
 - `AETHER_GATEWAY_USAGE_QUEUE_DLQ_STREAM_KEY`: `long, env = "AETHER_GATEWAY_USAGE_QUEUE_DLQ_STREAM_KEY", default_value = "usage:events:dlq"`
 - `AETHER_GATEWAY_USAGE_QUEUE_GROUP`: `long, env = "AETHER_GATEWAY_USAGE_QUEUE_GROUP", default_value = "usage_consumers"`
 - `AETHER_GATEWAY_USAGE_QUEUE_LIFECYCLE_EVENTS`: `long, env = "AETHER_GATEWAY_USAGE_QUEUE_LIFECYCLE_EVENTS", default_value_t = true`

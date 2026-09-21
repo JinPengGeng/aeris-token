@@ -14,7 +14,7 @@ use futures_util::FutureExt;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tokio::task::{JoinError, JoinHandle};
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::config::S3BackupConfig;
 use super::executor::{run_backup_with_store, BackupRunResult};
@@ -143,14 +143,14 @@ pub(crate) async fn start_s3_backup_task(
     trigger: &str,
     created_by: Option<&str>,
 ) -> Result<S3BackupTaskStart, S3BackupTaskError> {
-    start_s3_backup_task_with_slot(app, trigger, created_by, None).await
+    start_s3_backup_task_with_slot(app, trigger, created_by, None, 1).await
 }
 
 pub(crate) async fn start_s3_backup_task_for_schedule(
     app: AppState,
     scheduled_slot: String,
 ) -> Result<S3BackupTaskStart, S3BackupTaskError> {
-    start_s3_backup_task_with_slot(app, "scheduled", None, Some(scheduled_slot)).await
+    start_s3_backup_task_with_slot(app, "scheduled", None, Some(scheduled_slot), 1).await
 }
 
 async fn start_s3_backup_task_with_slot(
@@ -158,6 +158,7 @@ async fn start_s3_backup_task_with_slot(
     trigger: &str,
     created_by: Option<&str>,
     scheduled_slot: Option<String>,
+    attempt: u32,
 ) -> Result<S3BackupTaskStart, S3BackupTaskError> {
     let config = load_s3_backup_config_for_run(&app).await?;
     ensure_background_task_storage(&app)?;
@@ -188,7 +189,7 @@ async fn start_s3_backup_task_with_slot(
         kind: BackgroundTaskKind::Scheduled,
         trigger: trigger.to_string(),
         status: BackgroundTaskStatus::Queued,
-        attempt: 1,
+        attempt,
         max_attempts,
         owner_instance: Some(app.tunnel.local_instance_id().to_string()),
         progress_percent: 0,
@@ -286,6 +287,67 @@ fn spawn_s3_backup_worker(
         }
 
         release_s3_backup_task_lock(&app, lock).await;
+
+        // A failed run is re-queued while attempts remain; this closes the
+        // "framework without retry semantics" gap for the critical backup path.
+        maybe_retry_failed_s3_backup_run(&app, &run_id).await;
+    });
+}
+
+const S3_BACKUP_RETRY_BACKOFF_SECS: u64 = 30;
+
+async fn maybe_retry_failed_s3_backup_run(app: &AppState, run_id: &str) {
+    let Some(definition) = task_definition(TASK_KEY_SYSTEM_S3_BACKUP) else {
+        return;
+    };
+    if definition.retry_policy.max_attempts <= 1 {
+        return;
+    }
+    let Ok(Some(run)) = app.find_background_task_run(run_id).await else {
+        return;
+    };
+    if run.status != BackgroundTaskStatus::Failed
+        || run.attempt >= run.max_attempts
+        || run.cancel_requested
+    {
+        return;
+    }
+    let attempt = run.attempt.saturating_add(1);
+    let backoff_secs = S3_BACKUP_RETRY_BACKOFF_SECS.saturating_mul(u64::from(attempt));
+    info!(
+        event_name = "s3_backup_task_retry_scheduled",
+        log_type = "ops",
+        previous_run_id = %run_id,
+        attempt,
+        max_attempts = run.max_attempts,
+        backoff_secs,
+        "S3 backup task failed; scheduling bounded retry"
+    );
+    let app = app.clone();
+    let run_id = run_id.to_string();
+    spawn_fire_and_forget("task-runtime-system-s3-backup-retry", async move {
+        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+        match start_s3_backup_task_with_slot(app, "retry", Some("system"), None, attempt).await {
+            Ok(start) => {
+                info!(
+                    event_name = "s3_backup_task_retry_queued",
+                    log_type = "ops",
+                    previous_run_id = %run_id,
+                    retry_run_id = %start.id,
+                    attempt,
+                    "S3 backup retry run queued"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    event_name = "s3_backup_task_retry_failed",
+                    log_type = "ops",
+                    previous_run_id = %run_id,
+                    error = %error,
+                    "S3 backup retry could not be queued"
+                );
+            }
+        }
     });
 }
 

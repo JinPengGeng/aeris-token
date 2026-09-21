@@ -458,6 +458,7 @@ impl UsageQueueWorker {
             if reclaim_due {
                 reclaim_due = false;
                 self.reclaim_stale_entries(&mut reclaim_cursor).await;
+                self.prune_dead_letter_expired().await;
             }
         }
     }
@@ -466,6 +467,35 @@ impl UsageQueueWorker {
         match self.control.as_ref() {
             Some(control) => control.wait_for_shutdown().await,
             None => std::future::pending().await,
+        }
+    }
+
+    async fn prune_dead_letter_expired(&self) {
+        let now_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        match self.queue.prune_dead_letter_expired(now_unix_ms).await {
+            Ok(0) => {}
+            Ok(pruned) => {
+                warn!(
+                    event_name = "usage_dlq_retention_pruned",
+                    log_type = "ops",
+                    worker_consumer = %self.consumer,
+                    pruned = pruned,
+                    retention_secs = self.config.dlq_retention_secs,
+                    "usage dead-letter entries exceeded the retention window and were dropped"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    event_name = "usage_dlq_retention_prune_failed",
+                    log_type = "ops",
+                    worker_consumer = %self.consumer,
+                    error = %err,
+                    "usage worker failed to prune expired dead-letter entries"
+                );
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 -- LDAP configuration is a database-wide singleton. Preserve the row selected by the legacy
 -- reader (the smallest id), remove historical duplicates, and let the database arbitrate
 -- concurrent first creation.
+-- destructive-sql: allow delete surplus ldap configs before enforcing the singleton constraint
 DELETE FROM public.ldap_configs
 WHERE id <> (SELECT MIN(id) FROM public.ldap_configs);
 

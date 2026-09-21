@@ -496,6 +496,20 @@ pub(super) fn classify_admin_basic_family_route(
     } else if method == http::Method::GET
         && matches!(
             normalized_path,
+            "/api/admin/billing/insufficient-quota-writeoffs"
+                | "/api/admin/billing/insufficient-quota-writeoffs/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            "list_insufficient_quota_writeoffs",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
             "/api/admin/billing/collectors" | "/api/admin/billing/collectors/"
         )
     {

@@ -17,6 +17,10 @@ pub struct UsageRuntimeConfig {
     /// Maximum number of entries retained in the dead-letter stream.
     /// A bounded DLQ protects Redis memory while preserving the newest failures.
     pub dlq_stream_maxlen: usize,
+    /// Age limit, in seconds, for dead-letter entries. Entries older than this
+    /// are pruned by the usage worker so the DLQ cannot grow stale forever
+    /// even when it stays under `dlq_stream_maxlen`.
+    pub dlq_retention_secs: u64,
     pub stream_maxlen: usize,
     pub queue_payload_max_bytes: usize,
     pub consumer_batch_size: usize,
@@ -51,6 +55,7 @@ impl Default for UsageRuntimeConfig {
             consumer_group: "usage_consumers".to_string(),
             dlq_stream_key: "usage:events:dlq".to_string(),
             dlq_stream_maxlen: 50_000,
+            dlq_retention_secs: 14 * 24 * 60 * 60,
             stream_maxlen: 200_000,
             queue_payload_max_bytes: 1024 * 1024,
             consumer_batch_size: 128,
@@ -104,6 +109,11 @@ impl UsageRuntimeConfig {
         if self.dlq_stream_maxlen == 0 {
             return Err(DataLayerError::InvalidConfiguration(
                 "usage runtime dlq_stream_maxlen must be positive".to_string(),
+            ));
+        }
+        if self.dlq_retention_secs == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime dlq_retention_secs must be positive".to_string(),
             ));
         }
         if self.worker_count == 0 {
