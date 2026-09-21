@@ -2,6 +2,7 @@
 -- ownership relationship was enforced. Preserve those migration checksums and
 -- add the cascade in a follow-up that also upgrades databases which ran that
 -- branch. Rows whose user was already deleted cannot be retained safely.
+-- destructive-sql: allow delete orphaned cost reservations before adding the user foreign key
 DELETE FROM public.usage_cost_reservations AS reservation
 WHERE NOT EXISTS (
     SELECT 1
@@ -9,6 +10,7 @@ WHERE NOT EXISTS (
     WHERE app_user.id = reservation.subject_id
 );
 
+-- destructive-sql: allow delete orphaned request admissions before adding the user foreign key
 DELETE FROM public.usage_request_admissions AS admission
 WHERE NOT EXISTS (
     SELECT 1

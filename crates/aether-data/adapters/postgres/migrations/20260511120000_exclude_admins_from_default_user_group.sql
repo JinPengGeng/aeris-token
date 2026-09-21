@@ -1,3 +1,4 @@
+-- destructive-sql: allow remove default-group memberships for admin accounts during migration
 DELETE FROM public.user_group_members AS member
 USING public.users AS users
 WHERE member.user_id = users.id

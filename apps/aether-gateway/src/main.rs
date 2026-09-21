@@ -1052,6 +1052,13 @@ struct GatewayUsageArgs {
 
     #[arg(
         long,
+        env = "AETHER_GATEWAY_USAGE_QUEUE_DLQ_RETENTION_SECS",
+        default_value_t = 14 * 24 * 60 * 60
+    )]
+    queue_dlq_retention_secs: u64,
+
+    #[arg(
+        long,
         env = "AETHER_GATEWAY_USAGE_QUEUE_PAYLOAD_MAX_BYTES",
         default_value_t = 1024 * 1024
     )]
@@ -1270,6 +1277,7 @@ impl GatewayUsageArgs {
             consumer_group: self.queue_group.trim().to_string(),
             dlq_stream_key: self.queue_dlq_stream_key.trim().to_string(),
             dlq_stream_maxlen: self.queue_dlq_maxlen,
+            dlq_retention_secs: self.queue_dlq_retention_secs.max(1),
             stream_maxlen: self.queue_stream_maxlen.max(1),
             queue_payload_max_bytes: self.queue_payload_max_bytes,
             consumer_batch_size: self.queue_batch_size.max(1),
@@ -3844,6 +3852,7 @@ mod tests {
                 queue_dlq_stream_key: "usage:events:dlq".to_string(),
                 queue_stream_maxlen: 200_000,
                 queue_dlq_maxlen: 50_000,
+                queue_dlq_retention_secs: 14 * 24 * 60 * 60,
                 queue_payload_max_bytes: 1024 * 1024,
                 queue_batch_size: 128,
                 queue_block_ms: 500,

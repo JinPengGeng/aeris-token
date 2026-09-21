@@ -65,3 +65,12 @@ RPO 是备份 `exported_at` 到故障点的时间差；生产目标由部署者�
 另有 12 项恢复 CLI 单元测试通过（包括新增显式 apply 参数组合和嵌套部分导入错误拒绝）；同步当前主干后，5 项环境参考测试及 12 项 Rust CI 选择/聚合合同测试通过，确认测试环境变量未混入运维参考，新增恢复步骤保留既有 required gate。
 
 演练开发时发现测试服务器未附带正式 `ConnectInfo`，HTTP 登录返回 500；改用已有 `tests::start_server`。随后真实 HTTP 分支触发 libtest 默认线程栈不足；采用 CI 已有的 16 MiB 设置后完整用例通过。两次失败均未输出演练成功，保留隔离库，没有修改认证或生产计费行为来迁就测试。
+
+## 数据生命周期补充（2026-09-21）
+
+恢复演练前请先确认各表保留期与清理窗口，避免"恢复回来的行当天又被清理任务删掉"：
+
+- 表级保留期、清理任务与配置键见 `docs/operations/data-lifecycle-matrix.md`。
+- 恢复 stats 聚合表后无需重放历史：小时/日聚合可从 usage 事实幂等重跑（catch-up burst）。
+- `stats_summary`/`stats_user_summary` 为累计快照，不在保留清理范围内，恢复时必须包含。
+- Redis 侧（usage 主 stream / DLQ）不走 SQL 备份：DLQ 入口用 admin redrive API 重放，主 stream 由 consumer group reclaim 恢复。

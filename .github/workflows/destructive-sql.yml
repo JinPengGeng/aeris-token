@@ -1,0 +1,29 @@
+name: Destructive SQL Lint
+
+# Fails when migration/bootstrap/backfill SQL under crates/aether-data
+# contains DROP/TRUNCATE/unbounded DELETE statements without an explicit
+# `-- destructive-sql: allow <reason>` exemption comment. Keeps the
+# expand-only migration discipline enforceable instead of conventional.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/aether-data/**.sql'
+      - '.github/workflows/scripts/destructive-sql-lint.sh'
+      - '.github/workflows/destructive-sql.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: destructive-sql
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Scan for unexempted destructive SQL
+        run: bash .github/workflows/scripts/destructive-sql-lint.sh
