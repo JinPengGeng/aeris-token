@@ -18,8 +18,11 @@ const COST_UNITS_PER_USD: f64 = 100_000_000.0;
 const MAX_OUTPUT_VARIANTS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Data type: billing image output dimensions.
 pub struct BillingImageOutputDimensions {
+    /// Field: size.
     pub size: String,
+    /// Field: quality.
     pub quality: String,
 }
 
@@ -39,26 +42,39 @@ impl BillingImageOutputDimensions {
 /// returned images. A request's text length is not proof of an image token bound.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BillingImageTokenBounds {
+    /// Field: max total input tokens.
     pub max_total_input_tokens: i64,
+    /// Field: max output tokens.
     pub max_output_tokens: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Data type: billing image authorization input.
 pub struct BillingImageAuthorizationInput {
+    /// Field: image count.
     pub image_count: u32,
     /// The limit from the final provider projection, never a client assertion.
     pub max_image_count: u32,
+    /// Field: operation.
     pub operation: String,
+    /// Field: size.
     pub size: Option<String>,
+    /// Field: quality.
     pub quality: Option<String>,
+    /// Field: output format.
     pub output_format: Option<String>,
+    /// Field: partial images.
     pub partial_images: u8,
     /// The exhaustive set allowed by the final provider/model projection. For
     /// auto/default dimensions, callers unable to prove this set cannot quote.
     pub possible_outputs: Vec<BillingImageOutputDimensions>,
+    /// Field: api format.
     pub api_format: Option<String>,
+    /// Field: requested processing tier.
     pub requested_processing_tier: Option<String>,
+    /// Field: api key multiplier.
     pub api_key_multiplier: f64,
+    /// Field: token bounds.
     pub token_bounds: Option<BillingImageTokenBounds>,
 }
 
@@ -73,20 +89,27 @@ pub struct BillingImageAuthorizationQuote {
 }
 
 impl BillingImageAuthorizationQuote {
+    /// Method: upper bound units.
     pub fn upper_bound_units(&self) -> i64 {
         self.upper_bound_units
     }
 
+    /// Method: input.
     pub fn input(&self) -> &BillingImageAuthorizationInput {
         &self.input
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Data type: billing image quoted calculation.
 pub struct BillingImageQuotedCalculation {
+    /// Field: computation.
     pub computation: BillingComputation,
+    /// Field: calculated units.
     pub calculated_units: i64,
+    /// Field: collectible units.
     pub collectible_units: i64,
+    /// Field: excess units.
     pub excess_units: i64,
     /// Preserve actual cost and collect no more than the authorized ceiling.
     pub requires_reconciliation: bool,

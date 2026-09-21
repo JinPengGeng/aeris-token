@@ -1,28 +1,42 @@
 use aether_contracts::ProxySnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Enumeration: oauth network policy.
 pub enum OAuthNetworkPolicy {
+    /// Variant: direct only.
     DirectOnly,
+    /// Variant: direct or system proxy.
     DirectOrSystemProxy,
+    /// Variant: provider operation proxy.
     ProviderOperationProxy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Enumeration: network requirement.
 pub enum NetworkRequirement {
+    /// Variant: optional.
     Optional,
+    /// Variant: required proxy node.
     RequiredProxyNode,
+    /// Variant: required configured proxy.
     RequiredConfiguredProxy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Data type: oauth timeouts.
 pub struct OAuthTimeouts {
+    /// Field: connect ms.
     pub connect_ms: u64,
+    /// Field: read ms.
     pub read_ms: u64,
+    /// Field: write ms.
     pub write_ms: u64,
+    /// Field: total ms.
     pub total_ms: u64,
 }
 
 impl OAuthTimeouts {
+    /// Constant: direct default.
     pub const DIRECT_DEFAULT: Self = Self {
         connect_ms: 30_000,
         read_ms: 30_000,
@@ -30,6 +44,7 @@ impl OAuthTimeouts {
         total_ms: 30_000,
     };
 
+    /// Constant: proxy default.
     pub const PROXY_DEFAULT: Self = Self {
         connect_ms: 60_000,
         read_ms: 60_000,
@@ -39,10 +54,15 @@ impl OAuthTimeouts {
 }
 
 #[derive(Clone, PartialEq)]
+/// Data type: oauth network context.
 pub struct OAuthNetworkContext {
+    /// Field: policy.
     pub policy: OAuthNetworkPolicy,
+    /// Field: requirement.
     pub requirement: NetworkRequirement,
+    /// Field: proxy.
     pub proxy: Option<ProxySnapshot>,
+    /// Field: timeouts.
     pub timeouts: OAuthTimeouts,
 }
 
@@ -59,6 +79,7 @@ impl std::fmt::Debug for OAuthNetworkContext {
 }
 
 impl OAuthNetworkContext {
+    /// Constructor / associated function: direct identity.
     pub fn direct_identity() -> Self {
         Self {
             policy: OAuthNetworkPolicy::DirectOrSystemProxy,
@@ -68,6 +89,7 @@ impl OAuthNetworkContext {
         }
     }
 
+    /// Constructor / associated function: provider operation.
     pub fn provider_operation(proxy: Option<ProxySnapshot>) -> Self {
         let timeouts = if proxy.is_some() {
             OAuthTimeouts::PROXY_DEFAULT

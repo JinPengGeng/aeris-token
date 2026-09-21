@@ -21,6 +21,7 @@ mod provider_costs;
 mod routes;
 mod rules;
 mod wallets;
+mod writeoffs;
 
 pub(in crate::handlers::admin) use self::payments::admin_payment_gateway_response_projection;
 pub(super) use self::payments::maybe_build_local_admin_payments_response;

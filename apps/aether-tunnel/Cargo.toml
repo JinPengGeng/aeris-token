@@ -17,33 +17,33 @@ semver.workspace = true
 hyper = { version = "1", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 http-body-util = "0.1"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
-futures-util = "0.3"
-base64 = "0.22"
+futures-util.workspace = true
+base64.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
-tracing = "0.1"
-serde = { version = "1", features = ["derive"] }
+tracing.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-thiserror = "2"
-bytes = "1"
-sha2 = "0.10"
+thiserror.workspace = true
+bytes.workspace = true
+sha2.workspace = true
 hex = "0.4"
 anyhow = "1"
 arc-swap = "1"
 toml = "0.8"
-rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+rustls.workspace = true
 ratatui = "0.30.2"
 crossterm = "0.28"
 ed25519-dalek.workspace = true
-url = "2"
+url.workspace = true
 sysinfo = "0.32"
 libc = "0.2"
-flate2 = "1"
-tar = "0.4"
-socket2 = { version = "0.5", features = ["all"] }
+flate2.workspace = true
+tar.workspace = true
+socket2 = { workspace = true, features = ["all"] }
 tower-service = "0.3"
-webpki-roots = "0.26"
+webpki-roots.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

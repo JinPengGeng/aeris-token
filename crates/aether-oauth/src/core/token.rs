@@ -2,12 +2,19 @@ use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, PartialEq)]
+/// Data type: oauth token set.
 pub struct OAuthTokenSet {
+    /// Field: access token.
     pub access_token: String,
+    /// Field: refresh token.
     pub refresh_token: Option<String>,
+    /// Field: token type.
     pub token_type: Option<String>,
+    /// Field: scope.
     pub scope: Option<String>,
+    /// Field: expires at unix secs.
     pub expires_at_unix_secs: Option<u64>,
+    /// Field: raw payload.
     pub raw_payload: Option<Value>,
 }
 
@@ -32,6 +39,7 @@ impl std::fmt::Debug for OAuthTokenSet {
 }
 
 impl OAuthTokenSet {
+    /// Constructor / associated function: from token payload.
     pub fn from_token_payload(payload: Value) -> Option<Self> {
         let access_token = non_empty_string(payload.get("access_token"))
             .or_else(|| non_empty_string(payload.get("accessToken")))?;
@@ -67,16 +75,19 @@ impl OAuthTokenSet {
         })
     }
 
+    /// Method: bearer header value.
     pub fn bearer_header_value(&self) -> String {
         format!("Bearer {}", self.access_token.trim())
     }
 
+    /// Method: requires refresh.
     pub fn requires_refresh(&self, skew_secs: u64) -> bool {
         self.expires_at_unix_secs
             .map(|expires_at| current_unix_secs() >= expires_at.saturating_sub(skew_secs))
             .unwrap_or(false)
     }
 
+    /// Method: rotated refresh token.
     pub fn rotated_refresh_token<'a>(&'a self, existing: Option<&'a str>) -> Option<&'a str> {
         self.refresh_token
             .as_deref()
@@ -86,6 +97,7 @@ impl OAuthTokenSet {
     }
 }
 
+/// Function: current unix secs.
 pub fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

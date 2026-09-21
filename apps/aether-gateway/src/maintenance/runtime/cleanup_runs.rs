@@ -45,7 +45,8 @@ pub(super) fn cleanup_data_layer_error_category(error: &DataLayerError) -> &'sta
         DataLayerError::InvalidInput(_) => CLEANUP_ERROR_INVALID_INPUT,
         DataLayerError::Postgres(_) => CLEANUP_ERROR_POSTGRES,
         DataLayerError::Redis(_) => CLEANUP_ERROR_REDIS,
-        DataLayerError::Sql(_) => CLEANUP_ERROR_SQL,
+        DataLayerError::Sql(message) => CLEANUP_ERROR_SQL,
+        DataLayerError::Sqlx(_) => CLEANUP_ERROR_SQL,
         DataLayerError::TimedOut(_) => CLEANUP_ERROR_TIMED_OUT,
         DataLayerError::UnexpectedValue(_) => CLEANUP_ERROR_UNEXPECTED_VALUE,
     }

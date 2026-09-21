@@ -1,4 +1,4 @@
-use super::{maybe_build_local_admin_billing_response, payments, wallets};
+use super::{maybe_build_local_admin_billing_response, payments, wallets, writeoffs};
 use crate::handlers::admin::request::{AdminRouteRequest, AdminRouteResult};
 
 pub(crate) async fn maybe_build_local_admin_billing_routes_response(
@@ -20,6 +20,16 @@ pub(crate) async fn maybe_build_local_admin_billing_routes_response(
         request.request_body(),
     )
     .await?
+    {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) =
+        writeoffs::maybe_build_local_admin_insufficient_quota_writeoffs_response(
+            &request.state(),
+            &request.request_context(),
+        )
+        .await?
     {
         return Ok(Some(response));
     }

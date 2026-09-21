@@ -4,6 +4,7 @@ use super::generic::{
 use crate::provider::ProviderOAuthAdapter;
 
 #[derive(Debug, Clone)]
+/// Data type: codex provider oauth adapter.
 pub struct CodexProviderOAuthAdapter {
     inner: GenericProviderOAuthAdapter,
 }

@@ -6,42 +6,62 @@ use crate::precision::quantize_cost;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Enumeration: formula evaluation status.
 pub enum FormulaEvaluationStatus {
+    /// Variant: complete.
     Complete,
+    /// Variant: incomplete.
     Incomplete,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Data type: formula evaluation result.
 pub struct FormulaEvaluationResult {
+    /// Field: status.
     pub status: FormulaEvaluationStatus,
+    /// Field: cost.
     pub cost: f64,
+    /// Field: resolved dimensions.
     pub resolved_dimensions: BTreeMap<String, serde_json::Value>,
+    /// Field: resolved variables.
     pub resolved_variables: BTreeMap<String, serde_json::Value>,
+    /// Field: cost breakdown.
     pub cost_breakdown: BTreeMap<String, f64>,
+    /// Field: tier index.
     pub tier_index: Option<i64>,
+    /// Field: tier info.
     pub tier_info: Option<serde_json::Value>,
+    /// Field: missing required.
     pub missing_required: Vec<String>,
+    /// Field: error.
     pub error: Option<String>,
 }
 
 #[derive(Debug, Error)]
+/// Enumeration: unsafe expression error.
 pub enum UnsafeExpressionError {
     #[error("unsupported expression syntax: {0}")]
+    /// Variant: unsupported.
     Unsupported(String),
 }
 
 #[derive(Debug, Error)]
+/// Enumeration: expression evaluation error.
 pub enum ExpressionEvaluationError {
     #[error("expression evaluation failed: {0}")]
+    /// Variant: failed.
     Failed(String),
 }
 
 #[derive(Debug, Error)]
 #[error("missing required dimensions: {missing_required:?}")]
+/// Data type: billing incomplete error.
 pub struct BillingIncompleteError {
+    /// Field: missing required.
     pub missing_required: Vec<String>,
 }
 
+/// Data type: formula engine.
 pub struct FormulaEngine;
 
 type TierMetadata = Option<(i64, serde_json::Value)>;
@@ -54,6 +74,7 @@ type MappingResolution = Result<(serde_json::Value, bool, TierMetadata), Express
 /// declaration so a newly supported function cannot be rejected at write time.
 pub const FORMULA_ALLOWED_FUNCTIONS: &[&str] = &["min", "max", "abs", "round", "int", "float"];
 
+/// Function: is formula function allowed.
 pub fn is_formula_function_allowed(name: &str) -> bool {
     FORMULA_ALLOWED_FUNCTIONS.contains(&name)
 }
@@ -65,10 +86,12 @@ impl Default for FormulaEngine {
 }
 
 impl FormulaEngine {
+    /// Constructor / associated function: new.
     pub fn new() -> Self {
         Self
     }
 
+    /// Method: evaluate.
     pub fn evaluate(
         &self,
         expression: &str,
@@ -213,6 +236,7 @@ impl FormulaEngine {
     }
 }
 
+/// Function: extract variable names.
 pub fn extract_variable_names(expression: &str) -> Result<BTreeSet<String>, UnsafeExpressionError> {
     let tokens = tokenize(expression)?;
     let mut names = BTreeSet::new();
