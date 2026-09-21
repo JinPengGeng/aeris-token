@@ -64,6 +64,8 @@ services:
   app:
     image: ${APP_IMAGE:-ghcr.io/jinpenggeng/aeris-token:latest}
     container_name: aether-app
+    # Match the gateway's SIGTERM drain window (see docker-compose.yml).
+    stop_grace_period: ${AETHER_APP_STOP_GRACE_PERIOD:-90s}
     cpus: ${AETHER_APP_CPU_LIMIT:-2.0}
     mem_limit: ${AETHER_APP_MEMORY_LIMIT:-2g}
     pids_limit: ${AETHER_APP_PIDS_LIMIT:-512}
