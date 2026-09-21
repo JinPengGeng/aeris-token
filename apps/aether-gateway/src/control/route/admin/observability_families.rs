@@ -186,6 +186,19 @@ pub(super) fn classify_admin_observability_family_route(
     } else if method == http::Method::GET
         && matches!(
             normalized_path,
+            "/api/admin/quota/status" | "/api/admin/quota/status/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "api_keys_manage",
+            "quota_status",
+            "admin:api_keys",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
             "/api/admin/api-keys" | "/api/admin/api-keys/"
         )
     {
@@ -814,5 +827,33 @@ pub(super) fn classify_admin_observability_family_route(
         ))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_status_route_classifies_as_read_only_api_keys_admin_route() {
+        for path in ["/api/admin/quota/status", "/api/admin/quota/status/"] {
+            let route = classify_admin_basic_observability_route_kind_test(path);
+            assert_eq!(route.route_family, "api_keys_manage");
+            assert_eq!(route.route_kind, "quota_status");
+            assert_eq!(route.auth_endpoint_signature, "admin:api_keys");
+            assert!(!route.execution_runtime_candidate);
+        }
+    }
+
+    fn classify_admin_basic_observability_route_kind_test(
+        path: &str,
+    ) -> super::super::ClassifiedRoute {
+        let normalized_path_no_trailing = path.trim_end_matches('/');
+        classify_admin_observability_family_route(
+            &http::Method::GET,
+            path,
+            normalized_path_no_trailing,
+        )
+        .expect("quota status route should classify")
     }
 }

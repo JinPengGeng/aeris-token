@@ -764,6 +764,17 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn read_daily_actual_cost_units_for_key(
+        &self,
+        query: &aether_data_contracts::repository::usage::DailyActualCostQuery,
+    ) -> Result<aether_data_contracts::repository::usage::DailyActualCostCounts, GatewayError> {
+        self.app
+            .data
+            .read_daily_actual_cost_units(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn count_auth_api_key_export_standalone_records(
         &self,
         is_active: Option<bool>,
