@@ -24,10 +24,7 @@ impl ProviderPoolAdapter for AntigravityProviderPoolAdapter {
     }
 
     fn capabilities(&self) -> ProviderPoolCapabilities {
-        ProviderPoolCapabilities {
-            quota_refresh: true,
-            ..ProviderPoolCapabilities::default()
-        }
+        ProviderPoolCapabilities::for_builtin_provider(self.provider_type())
     }
 
     fn quota_exhausted(&self, input: &ProviderPoolMemberInput<'_>) -> bool {

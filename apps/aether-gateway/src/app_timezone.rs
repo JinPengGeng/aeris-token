@@ -6,26 +6,32 @@ use tracing::warn;
 
 pub(crate) const DEFAULT_APP_TIMEZONE: &str = "Asia/Shanghai";
 
-static APP_TIMEZONE: LazyLock<Tz> = LazyLock::new(|| {
-    let configured = std::env::var("APP_TIMEZONE")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_APP_TIMEZONE.to_string());
-    configured.parse().unwrap_or_else(|_| {
-        warn!(
-            timezone = %configured,
-            fallback = DEFAULT_APP_TIMEZONE,
-            "gateway APP_TIMEZONE invalid; falling back"
-        );
-        DEFAULT_APP_TIMEZONE
-            .parse()
-            .expect("default application timezone should parse")
-    })
-});
+static APP_TIMEZONE: LazyLock<Tz> = LazyLock::new(configured_app_timezone);
 
 pub(crate) fn app_timezone() -> Tz {
     *APP_TIMEZONE
+}
+
+pub(crate) fn configured_app_timezone() -> Tz {
+    resolve_app_timezone(std::env::var("APP_TIMEZONE").ok().as_deref())
+}
+
+fn resolve_app_timezone(configured: Option<&str>) -> Tz {
+    let configured = configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_APP_TIMEZONE);
+    match configured.parse() {
+        Ok(timezone) => timezone,
+        Err(_) => {
+            warn!(
+                timezone = %configured,
+                fallback = DEFAULT_APP_TIMEZONE,
+                "gateway APP_TIMEZONE invalid; falling back"
+            );
+            chrono_tz::Asia::Shanghai
+        }
+    }
 }
 
 pub(crate) fn local_day_window(
@@ -81,6 +87,19 @@ mod tests {
         );
         assert_eq!(start.to_rfc3339(), "2026-08-02T16:00:00+00:00");
         assert_eq!(end.to_rfc3339(), "2026-08-03T16:00:00+00:00");
+    }
+
+    #[test]
+    fn configured_timezone_trims_and_preserves_a_valid_name() {
+        let timezone = resolve_app_timezone(Some(" America/New_York "));
+        assert_eq!(timezone, chrono_tz::America::New_York);
+    }
+
+    #[test]
+    fn missing_or_invalid_timezone_uses_the_application_default() {
+        let default: Tz = DEFAULT_APP_TIMEZONE.parse().unwrap();
+        assert_eq!(resolve_app_timezone(None), default);
+        assert_eq!(resolve_app_timezone(Some("not-a-timezone")), default);
     }
 
     #[test]

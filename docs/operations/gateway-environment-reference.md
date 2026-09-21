@@ -335,7 +335,7 @@ from variable names. Request candidate persistence is a mode (`full`, `terminal`
 | `AETHER_WINDSURF_FORCE_GPT_NATIVE_DIALECT` | [execution_runtime/windsurf.rs](../../apps/aether-gateway/src/execution_runtime/windsurf.rs) |
 | `AETHER_WINDSURF_NATIVE_TOOL_BRIDGE` | [execution_runtime/windsurf.rs](../../apps/aether-gateway/src/execution_runtime/windsurf.rs) |
 | `AETHER_WINDSURF_NATIVE_TOOL_BRIDGE_OFF` | [execution_runtime/windsurf.rs](../../apps/aether-gateway/src/execution_runtime/windsurf.rs) |
-| `APP_TIMEZONE` | [app_timezone.rs](../../apps/aether-gateway/src/app_timezone.rs), [backup/schedule.rs](../../apps/aether-gateway/src/backup/schedule.rs), [maintenance/runtime/schedule.rs](../../apps/aether-gateway/src/maintenance/runtime/schedule.rs), [plan_usage_policy.rs](../../apps/aether-gateway/src/plan_usage_policy.rs) |
+| `APP_TIMEZONE` | [app_timezone.rs](../../apps/aether-gateway/src/app_timezone.rs), [backup/schedule.rs](../../apps/aether-gateway/src/backup/schedule.rs) |
 | `AUTH_REFRESH_COOKIE_NAME` | [handlers/public/support/auth_helpers.rs](../../apps/aether-gateway/src/handlers/public/support/auth_helpers.rs) |
 | `AUTH_REFRESH_COOKIE_SAMESITE` | [handlers/public/support/auth_helpers.rs](../../apps/aether-gateway/src/handlers/public/support/auth_helpers.rs) |
 | `AUTH_REFRESH_COOKIE_SECURE` | [handlers/public/support/auth_cookie_policy.rs](../../apps/aether-gateway/src/handlers/public/support/auth_cookie_policy.rs), [handlers/public/support/auth_helpers.rs](../../apps/aether-gateway/src/handlers/public/support/auth_helpers.rs) |

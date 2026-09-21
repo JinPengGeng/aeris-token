@@ -17,6 +17,7 @@ pub const RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     enable_format_conversion_by_default: true,
     allow_auth_channel_mismatch_by_default: true,
     oauth_is_bearer_like: true,
+    supports_quota_refresh: true,
     supports_model_fetch: true,
     supports_local_openai_chat_transport: false,
     supports_local_same_format_transport: false,

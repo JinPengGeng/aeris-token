@@ -1,7 +1,4 @@
 use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Timelike, Utc};
-use chrono_tz::Tz;
-
-const BACKUP_SCHEDULE_DEFAULT_TIMEZONE: &str = "Asia/Shanghai";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackupScheduleUnit {
@@ -57,7 +54,7 @@ impl Default for BackupSchedule {
 
 impl BackupSchedule {
     pub(crate) fn due_slot(&self, now_utc: DateTime<Utc>) -> Option<String> {
-        let timezone = backup_schedule_timezone();
+        let timezone = crate::app_timezone::configured_app_timezone();
         let local_now = now_utc.with_timezone(&timezone);
         let interval = self.interval.max(1);
         if local_now.minute() != self.minute {
@@ -101,17 +98,6 @@ impl BackupSchedule {
             slot.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         ))
     }
-}
-
-pub(crate) fn backup_schedule_timezone() -> Tz {
-    std::env::var("APP_TIMEZONE")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .as_deref()
-        .unwrap_or(BACKUP_SCHEDULE_DEFAULT_TIMEZONE)
-        .parse()
-        .unwrap_or(chrono_tz::Asia::Shanghai)
 }
 
 fn local_epoch_day(date: NaiveDate) -> i64 {

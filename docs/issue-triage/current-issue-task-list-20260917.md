@@ -2,39 +2,40 @@
 
 ## Current delivery batch
 
-This checkpoint supersedes the historical counts and local-only status below.
-GitHub Issue #443 and delivery PR #473 hold the current integration result.
-Main includes #463 (exact cookie parsing), #464 (Tunnel diagnostics), #468
-(notification deployment runbook), and #469 (release image configuration).
+PR #473 merged as `aec006e7061605233e21bce877ed14d3c658d183` after all four
+required checks passed. The merged tree matches the checked head. Superseded
+PRs #462, #465, #466, #467, #470, #471 and #472 are closed with their source
+branches preserved. Issue #214 is closed with the seven original findings
+resolved and its shared key admission contract clarified by the existing Redis
+concurrency regression. The local primary checkout includes this delivery.
 
-PR #473 combines #462, #465, #466, #467, #470, #471, and #472: public error
-redaction, strict release checksums, multiplier validation, production encryption
-key validation, signed release tags, and synchronous target admission. Original
-PR branches are preserved and their automatic merges are paused while the combined
-change passes the unchanged required checks. This avoids repeating a full Rust
-and database run for every newly merged base. Close superseded PRs only after
-verifying the corresponding changes merged through #473.
+The next batch continues the remaining development:
 
-The batch also permits the supported zero-cost multiplier in the provider UI,
-removes the duplicate PostgreSQL feature-check alias, and keeps narrative API
-guides out of full Rust compilation while retaining all compiled documentation
-fixtures and required gates. The first combined CI found one target-admission
-fixture failure; its gate initialization is fixed and the exact regression now
-passes locally. The new head still requires the complete hosted checks.
+- #218: use one APP_TIMEZONE parser and default for daily usage, backup and
+  maintenance schedules; preserve explicit per-plan timezone validation.
+- #222: declare builtin quota-refresh support in the existing provider runtime
+  policy; pool adapters and Gateway consumers use that declaration, while
+  custom adapters retain their own capabilities and execution handlers.
+- #241: retire the unused HELLO capability list under the accepted protocol-v3
+  bundle contract, retaining old payload deserialization. The administrator
+  API v1 alias and lifecycle document already merged through #456 and #473.
+- #225: update the ADR index to reflect the implemented administrator emergency
+  chain. The broader public/tenant scheduler design remains explicitly deferred.
+  Close the documentation issue once this correction merges.
 
-The original issues still contain development work. #222 retains trait/provider
-registration architecture work. #241's administrator API lifecycle contract and
-#225's missing Messages/Videos behavior documents and historical PoC notice are
-implemented in this batch. Runtime configuration readers and their semantic documentation also
-remain a separate development scope. Compose CPU, memory, and PID limits already
-merged through #455; do not schedule that implementation again.
+Provider pool tests, the timezone/backup module tests and focused HELLO checks
+validate these changes locally; final integration uses the required hosted
+checks. They do not establish completion of all parent issues. #222 still has
+trait/provider architecture scope, and #218 retains other runtime configuration
+readers. Compose CPU, memory and PID limits already merged through #455.
 
-Recharge-triggered debt collection is implemented. Local supplier acceptance uses
-the synthetic data authorized by the user. Actual deployment, historical records,
-and unsupported paid-path contracts retain their own acceptance boundaries.
-Do not describe all open issues as either undeveloped code or production-only work.
+Recharge-triggered debt collection is implemented. Local supplier acceptance
+uses the synthetic data authorized by the user. Actual deployment, historical
+records, and unsupported paid-path contracts retain their own acceptance
+boundaries. GitHub Issue #443 is the current delivery checkpoint; counts and
+pending states below are historical.
 
-## Current delivery status
+## Historical delivery status
 
 PR #447 contains the gateway implementation and its CI repair batch: audit
 inventory 146, scoped history, fresh catalog fixtures, English public errors

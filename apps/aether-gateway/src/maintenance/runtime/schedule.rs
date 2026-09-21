@@ -10,8 +10,8 @@ use crate::data::GatewayDataState;
 use super::{
     system_config_string, WalletDailyUsageAggregationTarget, DB_MAINTENANCE_HOUR,
     DB_MAINTENANCE_MINUTE, DB_MAINTENANCE_WEEKDAY, DB_MAINTENANCE_WEEKLY_INTERVAL,
-    MAINTENANCE_DEFAULT_TIMEZONE, PROVIDER_CHECKIN_DEFAULT_TIME, STATS_DAILY_AGGREGATION_HOUR,
-    STATS_DAILY_AGGREGATION_MINUTE, STATS_HOURLY_AGGREGATION_MINUTE,
+    PROVIDER_CHECKIN_DEFAULT_TIME, STATS_DAILY_AGGREGATION_HOUR, STATS_DAILY_AGGREGATION_MINUTE,
+    STATS_HOURLY_AGGREGATION_MINUTE,
 };
 
 pub(super) async fn provider_checkin_schedule(
@@ -31,21 +31,7 @@ pub(super) async fn provider_checkin_schedule(
 }
 
 pub(super) fn maintenance_timezone() -> Tz {
-    let configured = std::env::var("APP_TIMEZONE")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| MAINTENANCE_DEFAULT_TIMEZONE.to_string());
-    configured.parse().unwrap_or_else(|_| {
-        warn!(
-            timezone = %configured,
-            fallback = MAINTENANCE_DEFAULT_TIMEZONE,
-            "gateway maintenance timezone invalid; falling back"
-        );
-        MAINTENANCE_DEFAULT_TIMEZONE
-            .parse()
-            .expect("default maintenance timezone should parse")
-    })
+    crate::app_timezone::configured_app_timezone()
 }
 
 pub(super) fn duration_until_next_db_maintenance_run(

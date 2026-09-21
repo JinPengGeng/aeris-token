@@ -41,7 +41,11 @@ security session；v3 再由 `read_proxy_settings` 校验控制帧、顺序及�
 hub 的后续 HELLO 分支仍会调用 `update_protocol_version` 并 clamp 至 `1..=3`；
 它不是一轮完整的重新握手，本文不承诺所有运行期版本切换组合已获得互操作验收。
 当前 agent 的 [连接代码](../../apps/aether-tunnel/src/tunnel/client.rs) 宣告协议 3，
-发送 HELLO 与 SETTINGS；capabilities 列表描述功能，并非独立、任意组合的功能协商协议。
+发送 HELLO 与 SETTINGS。`HelloPayload.capabilities` 是遗留的信息性元数据，不参与协商；
+v3 的功能由 `protocol_version` 和合法 `SETTINGS` 共同决定。当前 agent 发送空列表，
+并由序列化规则省略该字段；接收端仍接受旧 agent 发送的能力列表，以保持反序列化兼容。
+`LOAD_REPORT` 只有在 agent 实际发送且 Gateway 实际接收后才形成远端健康度观测；旧列表中
+出现 `load-report`，或协议中存在该帧类型，都不表示该 agent 已支持或正在发送该报告。
 
 ## 取舍、兼容与回滚
 

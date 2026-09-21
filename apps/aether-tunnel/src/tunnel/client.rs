@@ -369,12 +369,7 @@ async fn send_protocol_v3_hello(
         super::protocol::MsgType::Hello,
         serde_json::to_vec(&HelloPayload {
             protocol_version: CURRENT_TUNNEL_PROTOCOL_VERSION,
-            capabilities: vec![
-                "flow-control".to_string(),
-                "reset-stream".to_string(),
-                "graceful-drain".to_string(),
-                "load-report".to_string(),
-            ],
+            capabilities: Vec::new(),
             session_id: Some(security_session.to_string()),
             replica_id: None,
         })

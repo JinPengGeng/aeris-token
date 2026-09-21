@@ -117,6 +117,7 @@ pub struct ProviderRuntimePolicy {
     pub enable_format_conversion_by_default: bool,
     pub allow_auth_channel_mismatch_by_default: bool,
     pub oauth_is_bearer_like: bool,
+    pub supports_quota_refresh: bool,
     pub supports_model_fetch: bool,
     pub supports_local_openai_chat_transport: bool,
     pub supports_local_same_format_transport: bool,
@@ -131,6 +132,7 @@ impl ProviderRuntimePolicy {
             enable_format_conversion_by_default: false,
             allow_auth_channel_mismatch_by_default: false,
             oauth_is_bearer_like: false,
+            supports_quota_refresh: false,
             supports_model_fetch: true,
             supports_local_openai_chat_transport: true,
             supports_local_same_format_transport: true,
@@ -213,6 +215,7 @@ const CODEX_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     fixed_provider: true,
     api_format_inheritance: ProviderApiFormatInheritance::OAuth,
     enable_format_conversion_by_default: true,
+    supports_quota_refresh: true,
     supports_model_fetch: false,
     supports_local_openai_chat_transport: false,
     ..STANDARD_RUNTIME_POLICY
@@ -222,6 +225,7 @@ const CHATGPT_WEB_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy 
     api_format_inheritance: ProviderApiFormatInheritance::OAuthOrBearer,
     enable_format_conversion_by_default: true,
     oauth_is_bearer_like: true,
+    supports_quota_refresh: true,
     supports_model_fetch: false,
     supports_local_openai_chat_transport: false,
     supports_local_same_format_transport: false,
@@ -231,6 +235,7 @@ const GEMINI_CLI_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     fixed_provider: true,
     api_format_inheritance: ProviderApiFormatInheritance::OAuth,
     oauth_is_bearer_like: true,
+    supports_quota_refresh: true,
     supports_local_openai_chat_transport: false,
     ..STANDARD_RUNTIME_POLICY
 };
@@ -249,6 +254,7 @@ const ANTIGRAVITY_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy 
     api_format_inheritance: ProviderApiFormatInheritance::OAuth,
     enable_format_conversion_by_default: true,
     oauth_is_bearer_like: true,
+    supports_quota_refresh: true,
     supports_model_fetch: false,
     supports_local_openai_chat_transport: false,
     supports_local_same_format_transport: false,
@@ -258,6 +264,7 @@ const GROK_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     fixed_provider: true,
     api_format_inheritance: ProviderApiFormatInheritance::OAuth,
     enable_format_conversion_by_default: true,
+    supports_quota_refresh: true,
     supports_model_fetch: false,
     supports_local_openai_chat_transport: false,
     supports_local_same_format_transport: false,
@@ -269,6 +276,7 @@ const WINDSURF_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     api_format_inheritance: ProviderApiFormatInheritance::OAuthOrBearer,
     enable_format_conversion_by_default: true,
     oauth_is_bearer_like: true,
+    supports_quota_refresh: true,
     supports_model_fetch: false,
     supports_local_openai_chat_transport: false,
     supports_local_same_format_transport: false,
@@ -280,6 +288,7 @@ const XAI_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     api_format_inheritance: ProviderApiFormatInheritance::OAuthOrBearer,
     enable_format_conversion_by_default: true,
     oauth_is_bearer_like: true,
+    supports_quota_refresh: true,
     supports_model_fetch: false,
     supports_local_openai_chat_transport: false,
     supports_local_same_format_transport: true,
@@ -562,6 +571,10 @@ pub fn provider_type_supports_model_fetch(provider_type: &str) -> bool {
     provider_runtime_policy(provider_type).supports_model_fetch
 }
 
+pub fn provider_type_supports_quota_refresh(provider_type: &str) -> bool {
+    provider_runtime_policy(provider_type).supports_quota_refresh
+}
+
 pub fn provider_type_supports_local_openai_chat_transport(provider_type: &str) -> bool {
     provider_runtime_policy(provider_type).supports_local_openai_chat_transport
 }
@@ -688,8 +701,8 @@ mod tests {
         fixed_provider_template, provider_runtime_policy, provider_type_admin_oauth_template,
         provider_type_allows_auth_channel_mismatch_by_default, provider_type_oauth_is_bearer_like,
         provider_type_supports_local_embedding_transport,
-        provider_type_supports_local_same_format_transport, FixedProviderEndpointConfigValue,
-        ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES,
+        provider_type_supports_local_same_format_transport, provider_type_supports_quota_refresh,
+        FixedProviderEndpointConfigValue, ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES,
     };
 
     #[test]
@@ -996,6 +1009,34 @@ mod tests {
         assert!(gemini_cli.supports_model_fetch);
         assert!(!gemini_cli.supports_local_openai_chat_transport);
         assert!(gemini_cli.supports_local_same_format_transport);
+    }
+
+    #[test]
+    fn quota_refresh_support_is_registered_with_provider_runtime_policy() {
+        for provider_type in [
+            "antigravity",
+            "chatgpt_web",
+            "codex",
+            "gemini_cli",
+            "grok",
+            "kiro",
+            "windsurf",
+            "xai",
+        ] {
+            assert!(
+                provider_type_supports_quota_refresh(provider_type),
+                "{provider_type} should support quota probing and refresh"
+            );
+        }
+
+        for provider_type in ["claude_code", "vertex_ai", "custom", "unknown"] {
+            assert!(
+                !provider_type_supports_quota_refresh(provider_type),
+                "{provider_type} should preserve unsupported quota refresh behavior"
+            );
+        }
+
+        assert!(provider_type_supports_quota_refresh(" CoDeX "));
     }
 
     #[test]

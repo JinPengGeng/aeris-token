@@ -21,10 +21,7 @@ impl ProviderPoolAdapter for GeminiCliProviderPoolAdapter {
     }
 
     fn capabilities(&self) -> ProviderPoolCapabilities {
-        ProviderPoolCapabilities {
-            quota_refresh: true,
-            ..ProviderPoolCapabilities::default()
-        }
+        ProviderPoolCapabilities::for_builtin_provider(self.provider_type())
     }
 
     fn quota_refresh_endpoint(

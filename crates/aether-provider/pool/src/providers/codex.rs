@@ -36,7 +36,7 @@ impl ProviderPoolAdapter for CodexProviderPoolAdapter {
         ProviderPoolCapabilities {
             plan_tier: true,
             quota_reset: true,
-            quota_refresh: true,
+            ..ProviderPoolCapabilities::for_builtin_provider(self.provider_type())
         }
     }
 

@@ -1,13 +1,13 @@
 # ADR-0044: Emergency chain domain boundary
 
-Status: Accepted (Issue #44 administrator operations v1; scheduler scaffold deferred)
+Status: Accepted (Issue #44 administrator operations v1 implemented; public/tenant scheduler extension deferred)
 
-This decision records two deliberately separate implementations: the sealed
-scheduler-domain scaffold, and a narrow synchronous administrator model-test
-route backed by a persisted one-shot grant. The administrator route does not
-claim to integrate the scheduler scaffold's opaque permit or unavailable
-ledger authority. That scaffold is retained as a possible design for a broader
-scheduler feature, not as an Issue #44 acceptance requirement.
+This decision records two deliberately separate boundaries: the sealed
+scheduler-domain scaffold, and the implemented narrow synchronous administrator
+model-test route backed by a persisted one-shot grant. The administrator route
+does not claim to integrate the scheduler scaffold's opaque permit or
+unavailable ledger authority. That scaffold is retained as a possible design
+for a broader scheduler feature, not as an Issue #44 acceptance requirement.
 
 ## Context
 
@@ -130,6 +130,20 @@ owner-bound revocation plus one-shot consumption provide rollback and replay
 protection. The separate route never participates in normal scheduler ordering
 or fallback.
 
+The current Gateway implementation is in
+`apps/aether-gateway/src/handlers/admin/provider/query/models/model_test.rs`;
+route classification is covered by
+`apps/aether-gateway/src/control/tests/admin_provider_query.rs`. The PostgreSQL
+live-test inventory requires both
+`emergency_chain::tests::live_emergency_chain_consume_is_single_use_and_checks_time_and_revocation`
+and
+`tests::control::admin::emergency_chain::live_admin_emergency_chain_uses_declared_order_and_stops_after_success`.
+The recorded Issue #44 delivery in
+`docs/issue-triage/resumed-development-20260920.md` includes the fresh
+PostgreSQL and HTTP/PG acceptance evidence. These verify the implemented
+administrator v1 boundary; they do not promote the deferred public/tenant
+scheduler design to implemented status.
+
 The opaque permit, authoritative attempt ledger, and versioned CAS send boundary
 below are deferred scheduler hardening for a separately approved public or
 tenant routing feature. They are not prerequisites for accepting or closing
@@ -142,10 +156,12 @@ instant for one gate evaluation. Every predicate is evaluated against that same
 value. Validity is the half-open range `[issued_at, expires_at)`, and a
 revocation is effective when `revoked_at <= gate_at`.
 
-The implemented gate only reserves an in-memory permit. It deliberately exposes
-no domain send or completion path: a `FnOnce` closure call cannot prove that a
-physical upstream write happened, and returning `Ok` or `Err` cannot be treated
-as an authoritative attempt outcome.
+The scheduler-domain gate only reserves an in-memory permit. It deliberately
+exposes no domain send or completion path: a `FnOnce` closure call cannot prove
+that a physical upstream write happened, and returning `Ok` or `Err` cannot be
+treated as an authoritative attempt outcome. This limitation applies to the
+deferred scheduler extension, not to the separately implemented administrator
+v1 route described above.
 
 If a future design integrates emergency routing into public or tenant
 scheduling, or requires cross-instance proof of exactly one physical send, it

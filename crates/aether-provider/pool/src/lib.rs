@@ -53,6 +53,23 @@ mod tests {
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use aether_pool_core::PoolSchedulingPreset;
     use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct CustomQuotaRefreshAdapter;
+
+    impl ProviderPoolAdapter for CustomQuotaRefreshAdapter {
+        fn provider_type(&self) -> &'static str {
+            "custom_quota"
+        }
+
+        fn capabilities(&self) -> ProviderPoolCapabilities {
+            ProviderPoolCapabilities {
+                quota_refresh: true,
+                ..ProviderPoolCapabilities::default()
+            }
+        }
+    }
 
     fn sample_key(upstream_metadata: Option<Value>) -> StoredProviderCatalogKey {
         let mut key = StoredProviderCatalogKey::new(
@@ -98,18 +115,19 @@ mod tests {
     fn builtin_service_owns_quota_refresh_support_and_endpoint_selection() {
         let service = ProviderPoolService::with_builtin_adapters();
 
+        let registered_provider_types = service
+            .provider_types()
+            .filter(|provider_type| {
+                aether_provider_transport::provider_types::provider_type_supports_quota_refresh(
+                    provider_type,
+                )
+            })
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
         assert_eq!(
             service.provider_types_for_capability(ProviderPoolCapability::QuotaRefresh),
-            [
-                "antigravity",
-                "chatgpt_web",
-                "codex",
-                "gemini_cli",
-                "grok",
-                "kiro",
-                "windsurf",
-                "xai"
-            ]
+            registered_provider_types
         );
         assert!(service.supports_quota_refresh("codex"));
         assert!(service.supports_quota_refresh("antigravity"));
@@ -124,6 +142,22 @@ mod tests {
         assert_eq!(
             service.quota_refresh_unsupported_message("vertex_ai"),
             "Vertex AI 暂不支持自动刷新额度：额度属于 Google Cloud 项目/区域配额"
+        );
+    }
+
+    #[test]
+    fn custom_adapter_can_override_quota_refresh_support() {
+        let service = ProviderPoolService::new().with_adapter(Arc::new(CustomQuotaRefreshAdapter));
+
+        assert!(
+            !aether_provider_transport::provider_types::provider_type_supports_quota_refresh(
+                "custom_quota"
+            )
+        );
+        assert!(service.supports_quota_refresh("custom_quota"));
+        assert_eq!(
+            service.provider_types_for_capability(ProviderPoolCapability::QuotaRefresh),
+            ["custom_quota"]
         );
     }
 

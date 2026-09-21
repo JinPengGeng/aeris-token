@@ -7,7 +7,7 @@ ADR 的状态只描述已经落地的范围；延期的接线、部署或生产�
 
 | 文档 | 状态 | 已落地范围 | 仍延期的范围 |
 | --- | --- | --- | --- |
-| [ADR-0044：Emergency chain domain boundary](adr-0044-emergency-chain-domain.md) | Accepted（仅领域 scaffold） | grant 的类型、作用域、目标顺序、TTL 与撤销约束 | Gateway wiring、持久化、审计和生产调度接线 |
+| [ADR-0044：Emergency chain domain boundary](adr-0044-emergency-chain-domain.md) | Accepted（Issue #44 administrator operations v1 已实现） | Gateway 管理员固定顺序 model-test 路由、五分钟 owner-bound grant、PostgreSQL issue/read/revoke/consume、事务耦合审计和逐目标强读 | 公共/租户调度的 opaque permit、权威 attempt ledger 与 CAS send boundary |
 | [ADR-0045：Signed provenance for tunnel release upgrades](adr-0045-signed-tunnel-release-provenance.md) | Accepted（核心验签已实现） | 发布清单签名与离线验证、手工/heartbeat 升级门禁 | 完整发布矩阵和生产轮换演练 |
 | [ADR-0046：Bounded gateway readiness and health contract](adr-0046-readiness-health-contract.md) | Accepted | `/health`、`/ready` 的边界、依赖探测与超时合同 | 生产部署容量与告警验收 |
 | [ADR-0050：Tunnel signing key rotation overlap](adr-0050-tunnel-signing-key-rotation.md) | Accepted（部分实现） | key ID、有效期、重叠窗口和撤销语义 | 持久化与 wire integration |
@@ -40,7 +40,9 @@ HTTP/WS ingress
 - 路由只选择候选和传输策略；余额、配额及最终 usage 结算由数据/usage 层负责，不能用路由成功替代账务成功。
 - Redis stream 是 usage 事件的传递层，不是完整账本；重试、DLQ 和保留策略见 [`docs/adr/usage-runtime-retry-dlq.md`](../adr/usage-runtime-retry-dlq.md)。
 - PostgreSQL 写入失败、部分提交和恢复边界应按 [备份恢复演练](../operations/backup-restore-drill.md) 的证据要求验收；本页不宣称生产灾备已完成。
-- Emergency chain 与普通候选路由隔离；ADR-0044 的 scaffold 未改变默认请求路径。
+- Emergency chain 与普通候选路由隔离。ADR-0044 的管理员 v1 通过独立
+  `admin:provider_query` 路由执行，不改变默认请求路径；公共/租户调度的 permit/ledger/CAS
+  设计仍未接线。
 
 ## 维护要求
 
