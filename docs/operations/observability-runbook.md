@@ -32,6 +32,31 @@ event is queued or in the usage DLQ. Do not retry a settlement by hand unless
 the adapter's idempotency key is present. Roll back the release only when the
 failure began with that release and the dependency is healthy.
 
+## Usage deferred drop
+
+```promql
+increase(aether_gateway_usage_runtime_terminal_enqueue_deferred_dropped_total[10m])
+increase(aether_gateway_usage_runtime_lifecycle_enqueue_deferred_dropped_total[10m])
+```
+
+The SLO for both counters is zero dropped events. This is the loss budget,
+not a zero-RPO guarantee for Redis persistence; AOF policy and backup recovery
+retain their separate durability limits. Any nonzero observed increase fires
+a `critical` alert without an additional hold period; delivery follows the
+configured scrape, evaluation and Alertmanager intervals. The operations on-call owns incident coordination and
+coordinates the accounting reconciliation; retain `job`, `instance`, `cluster`
+and deployment labels with the alert fingerprint.
+
+First restore Redis/runtime availability and confirm the gateway is healthy.
+Before restarting or redriving anything, preserve the incident time range,
+counter values, restricted receipt and request-id references, and relevant
+gateway/Redis logs. Define the pending reconciliation range from the first
+observed increment through restored health, then compare that range against the
+authoritative persisted usage and settlement records. These counters cannot
+recover a missing event payload. Do not automatically create usage records,
+settlements, invoices, or other billing entries from the alert; any correction
+requires the established accounting reconciliation process and its evidence.
+
 ## Insufficient quota
 
 ```promql

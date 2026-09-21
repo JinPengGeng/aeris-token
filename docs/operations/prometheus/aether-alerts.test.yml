@@ -94,6 +94,43 @@ tests:
           - labels: 'ALERTS{alertname="AetherProviderServerErrors",alertstate="firing",provider="openai",severity="warning"}'
             value: 1
 
+  - name: deferred usage drops page immediately per affected gateway and clear when the increase window expires
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_usage_runtime_terminal_enqueue_deferred_dropped_total{job="gateway-a",instance="gateway-a:8080",cluster="production"}'
+        values: '0 1+0x11'
+      - series: 'aether_gateway_usage_runtime_lifecycle_enqueue_deferred_dropped_total{job="gateway-b",instance="gateway-b:8080",cluster="production"}'
+        values: '0 1+0x11'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname=~"AetherUsage(Terminal|Lifecycle)DeferredDrop",alertstate="firing"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AetherUsageTerminalDeferredDrop",alertstate="firing",job="gateway-a",instance="gateway-a:8080",cluster="production",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="AetherUsageLifecycleDeferredDrop",alertstate="firing",job="gateway-b",instance="gateway-b:8080",cluster="production",severity="critical"}'
+            value: 1
+      - expr: 'ALERTS{alertname=~"AetherUsage(Terminal|Lifecycle)DeferredDrop"}'
+        eval_time: 12m
+        exp_samples: []
+
+  - name: historical deferred-drop counters and a reset do not create new incidents
+    interval: 1m
+    input_series:
+      - series: 'aether_gateway_usage_runtime_terminal_enqueue_deferred_dropped_total{job="gateway",instance="terminal"}'
+        values: '4+0x3 0+0x26'
+      - series: 'aether_gateway_usage_runtime_lifecycle_enqueue_deferred_dropped_total{job="gateway",instance="lifecycle"}'
+        values: '4+0x3 0+0x26'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname=~"AetherUsage(Terminal|Lifecycle)DeferredDrop"}'
+        eval_time: 3m
+        exp_samples: []
+      - expr: 'ALERTS{alertname=~"AetherUsage(Terminal|Lifecycle)DeferredDrop"}'
+        eval_time: 4m
+        exp_samples: []
+      - expr: 'ALERTS{alertname=~"AetherUsage(Terminal|Lifecycle)DeferredDrop"}'
+        eval_time: 30m
+        exp_samples: []
+
   - name: steady counters and empty queues never fire
     interval: 1m
     input_series:
@@ -106,6 +143,10 @@ tests:
       - series: 'aether_gateway_billing_insufficient_quota_total{component="billing",operation="insufficient_quota"}'
         values: '3+0x30'
       - series: 'aether_gateway_billing_fail_open_total{component="gateway",operation="rpm"}'
+        values: '3+0x30'
+      - series: 'aether_gateway_usage_runtime_terminal_enqueue_deferred_dropped_total{job="gateway",instance="steady-terminal"}'
+        values: '3+0x30'
+      - series: 'aether_gateway_usage_runtime_lifecycle_enqueue_deferred_dropped_total{job="gateway",instance="steady-lifecycle"}'
         values: '3+0x30'
       - series: 'aether_gateway_usage_queue_dlq_length'
         values: '0+0x30'
