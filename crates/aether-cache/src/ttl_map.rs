@@ -98,10 +98,10 @@ where
         ttl: Duration,
         max_entries: usize,
     ) -> bool {
-        if ttl.is_zero() {
-            return true;
-        }
-
+        // No ttl.is_zero() early return here: `insert` would insert the entry
+        // in that case, so this method must as well to keep both write paths
+        // consistent.  A zero ttl only means "every entry is immediately stale
+        // on the next access".
         let Ok(mut state) = self.state.write() else {
             return false;
         };
@@ -235,6 +235,14 @@ where
     }
 }
 
+/// Boundary rule: an entry is expired only when its age is strictly greater
+/// than the ttl.  An entry whose age is exactly `ttl` is still fresh — this
+/// keeps `prune_expired`, `get_with_age`, and `insert_if_absent_fresh`
+/// consistent at the boundary.
+fn is_expired(inserted_at: Instant, now: Instant, ttl: Duration) -> bool {
+    now.saturating_duration_since(inserted_at) > ttl
+}
+
 fn prune_expired<K, V>(state: &mut ExpiringMapState<K, V>, ttl: Duration, now: Instant)
 where
     K: Eq + Hash,
@@ -248,7 +256,7 @@ where
     while state
         .insertion_order
         .front()
-        .is_some_and(|entry| now.saturating_duration_since(entry.inserted_at) > ttl)
+        .is_some_and(|entry| is_expired(entry.inserted_at, now, ttl))
     {
         let Some(expired) = state.insertion_order.pop_front() else {
             break;
@@ -344,8 +352,52 @@ fn take_next_generation<K, V>(state: &mut ExpiringMapState<K, V>) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::thread::sleep;
+    use std::time::{Duration, Instant};
 
-    use super::ExpiringMap;
+    use super::{is_expired, ExpiringMap};
+
+    #[test]
+    fn expiry_boundary_is_strictly_greater_than_ttl() {
+        let inserted_at = Instant::now();
+        let ttl = Duration::from_secs(60);
+
+        // Exactly at the ttl boundary the entry is still fresh.
+        assert!(!is_expired(inserted_at, inserted_at + ttl, ttl));
+        // One nanosecond past the boundary it is expired.
+        assert!(is_expired(
+            inserted_at,
+            inserted_at + ttl + Duration::from_nanos(1),
+            ttl
+        ));
+        // A zero ttl expires everything immediately (except the impossible
+        // exact-same-instant read, which saturates to a fresh zero age).
+        assert!(is_expired(
+            inserted_at,
+            inserted_at + Duration::from_nanos(1),
+            Duration::ZERO
+        ));
+        // Clock going backwards (now < inserted_at) must never expire.
+        assert!(!is_expired(
+            inserted_at,
+            inserted_at - Duration::from_secs(1),
+            ttl
+        ));
+    }
+
+    #[test]
+    fn insert_if_absent_fresh_with_zero_ttl_matches_insert_semantics() {
+        let cache = ExpiringMap::new();
+
+        assert!(cache.insert_if_absent_fresh("zero".to_string(), 7_u32, Duration::ZERO, 16));
+        // A zero ttl prunes every entry before the absent check, exactly like
+        // `insert`, so the second write also succeeds and replaces the value.
+        assert!(cache.insert_if_absent_fresh("zero".to_string(), 8_u32, Duration::ZERO, 16));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(
+            cache.get_fresh(&"zero".to_string(), Duration::from_secs(60)),
+            Some(8)
+        );
+    }
 
     #[test]
     fn evicts_expired_entries_on_read() {

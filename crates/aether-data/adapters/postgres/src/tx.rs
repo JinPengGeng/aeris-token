@@ -106,7 +106,13 @@ impl PostgresTransactionRunner {
                 Ok(value)
             }
             Err(err) => {
-                let _ = tx.rollback().await;
+                if let Err(rollback_err) = tx.rollback().await {
+                    tracing::warn!(
+                        error = %rollback_err,
+                        original_error = %err,
+                        "postgres transaction rollback failed after handler error"
+                    );
+                }
                 Err(err)
             }
         }
