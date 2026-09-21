@@ -155,6 +155,10 @@ ENV LANG=C.UTF-8 \
 
 EXPOSE 8084
 
+# Align docker stop with the gateway's SIGTERM-driven graceful shutdown
+# (wait_for_shutdown_signal drains in-flight requests before exit).
+STOPSIGNAL SIGTERM
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD ["/usr/local/bin/aether-gateway", "--healthcheck"]
 

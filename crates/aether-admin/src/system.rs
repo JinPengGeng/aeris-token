@@ -3957,6 +3957,72 @@ mod tests {
     }
 
     #[test]
+    fn admin_proxy_node_payload_handles_non_ascii_password_without_panicking() {
+        // Regression for the removed byte-slicing mask: multi-byte proxy
+        // passwords must not panic payload building and must never leak.
+        let node = StoredProxyNode::new(
+            "node-unicode".to_string(),
+            "edge-unicode".to_string(),
+            "127.0.0.1".to_string(),
+            0,
+            true,
+            "online".to_string(),
+            30,
+            0,
+            0,
+            0,
+            0,
+            0,
+            false,
+            false,
+            0,
+        )
+        .expect("proxy node should build")
+        .with_manual_proxy_fields(
+            Some("http://proxy.example:8080".to_string()),
+            Some("用户名".to_string()),
+            Some("pässwörd秘密123".to_string()),
+        );
+
+        let payload = build_admin_proxy_node_payload(&node);
+
+        assert_eq!(payload["has_proxy_password"], json!(true));
+        assert!(payload.get("proxy_password").is_none());
+        let serialized = serde_json::to_string(&payload).expect("payload should serialize");
+        assert!(
+            !serialized.contains("pässwörd秘密123"),
+            "non-ASCII password must not leak into admin payloads: {serialized}"
+        );
+        assert_eq!(payload["proxy_username"], json!("用户名"));
+
+        let empty_password_node = StoredProxyNode::new(
+            "node-unicode-empty".to_string(),
+            "edge-unicode-empty".to_string(),
+            "127.0.0.1".to_string(),
+            0,
+            true,
+            "online".to_string(),
+            30,
+            0,
+            0,
+            0,
+            0,
+            0,
+            false,
+            false,
+            0,
+        )
+        .expect("proxy node should build")
+        .with_manual_proxy_fields(
+            Some("http://proxy.example:8080".to_string()),
+            None,
+            Some(String::new()),
+        );
+        let empty_payload = build_admin_proxy_node_payload(&empty_password_node);
+        assert_eq!(empty_payload["has_proxy_password"], json!(false));
+    }
+
+    #[test]
     fn api_formats_payload_exposes_realtime_and_codex_live_separately() {
         let payload = build_admin_api_formats_payload();
         let formats = payload["formats"]

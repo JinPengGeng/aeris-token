@@ -20,12 +20,21 @@ const METRIC_TARGET_LIMIT_ENV: &str = "AETHER_GATEWAY_UPSTREAM_TARGET_GATE_METRI
 const TARGET_QUEUE_BUDGET_MS_ENV: &str = "AETHER_GATEWAY_UPSTREAM_TARGET_GATE_QUEUE_BUDGET_MS";
 const DEFAULT_TARGET_QUEUE_BUDGET_MS: u64 = 1;
 const MAX_TARGET_QUEUE_BUDGET_MS: u64 = 5_000;
+/// Idle gates (no in-flight permits, no selection activity) older than this are
+/// dropped so the gate map cannot grow without bound when provider/target
+/// configurations churn. Cumulative counters for a swept target reset the next
+/// time it is selected again.
+const GATE_IDLE_TTL_ENV: &str = "AETHER_GATEWAY_UPSTREAM_TARGET_GATE_IDLE_TTL_MS";
+const DEFAULT_GATE_IDLE_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug)]
 pub(crate) struct UpstreamTargetAdmission {
     limit: Option<usize>,
     queue_budget: Duration,
     gates: DashMap<String, Arc<UpstreamTargetGate>>,
+    epoch: Instant,
+    gate_idle_ttl: Duration,
+    swept_total: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -40,6 +49,7 @@ struct UpstreamTargetGate {
     preselect_total: AtomicU64,
     selected_total: AtomicU64,
     saturated_total: AtomicU64,
+    last_active_ms: AtomicU64,
 }
 
 impl UpstreamTargetGate {
@@ -50,7 +60,13 @@ impl UpstreamTargetGate {
             preselect_total: AtomicU64::new(0),
             selected_total: AtomicU64::new(0),
             saturated_total: AtomicU64::new(0),
+            last_active_ms: AtomicU64::new(0),
         }
+    }
+
+    fn touch(&self, epoch: &Instant) {
+        let now_ms = u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_active_ms.store(now_ms, Ordering::Relaxed);
     }
 
     fn raw_seen(&self) {
@@ -86,10 +102,21 @@ pub(crate) struct UpstreamTargetAdmissionSnapshot {
 
 impl UpstreamTargetAdmission {
     pub(crate) fn new(limit: Option<usize>, queue_budget: Duration) -> Self {
+        Self::with_gate_idle_ttl(limit, queue_budget, gate_idle_ttl_from_env())
+    }
+
+    fn with_gate_idle_ttl(
+        limit: Option<usize>,
+        queue_budget: Duration,
+        gate_idle_ttl: Duration,
+    ) -> Self {
         Self {
             limit,
             queue_budget: target_queue_budget(queue_budget),
             gates: DashMap::new(),
+            epoch: Instant::now(),
+            gate_idle_ttl,
+            swept_total: AtomicU64::new(0),
         }
     }
 
@@ -108,6 +135,7 @@ impl UpstreamTargetAdmission {
             .or_insert_with(|| Arc::new(UpstreamTargetGate::new(limit)))
             .clone();
         gate.selected();
+        gate.touch(&self.epoch);
         let started_at = Instant::now();
         let permit = match timeout(self.queue_budget, gate.gate.acquire()).await {
             Ok(Ok(permit)) => permit,
@@ -151,6 +179,7 @@ impl UpstreamTargetAdmission {
             .or_insert_with(|| Arc::new(UpstreamTargetGate::new(limit)))
             .clone();
         gate.selected();
+        gate.touch(&self.epoch);
         match gate.gate.try_acquire() {
             Ok(permit) => Ok(Some(UpstreamTargetAdmissionPermit { _permit: permit })),
             Err(ConcurrencyError::Saturated { .. }) => {
@@ -186,6 +215,7 @@ impl UpstreamTargetAdmission {
             .entry(target.to_string())
             .or_insert_with(|| Arc::new(UpstreamTargetGate::new(limit)));
         gate.preselected();
+        gate.touch(&self.epoch);
     }
 
     pub(crate) fn record_raw_seen_for_target_key(&self, target: &str) {
@@ -197,6 +227,7 @@ impl UpstreamTargetAdmission {
             .entry(target.to_string())
             .or_insert_with(|| Arc::new(UpstreamTargetGate::new(limit)));
         gate.raw_seen();
+        gate.touch(&self.epoch);
     }
 
     pub(crate) fn limit(&self) -> Option<usize> {
@@ -204,12 +235,19 @@ impl UpstreamTargetAdmission {
     }
 
     pub(crate) fn metric_samples(&self) -> Vec<MetricSample> {
+        self.sweep_idle_gates();
         let mut samples = vec![MetricSample::new(
             "upstream_target_gate_active_targets",
             "Number of upstream targets currently tracked by the gateway upstream target admission gates.",
             MetricKind::Gauge,
             self.gates.len() as u64,
         )];
+        samples.push(MetricSample::new(
+            "upstream_target_gate_swept_total",
+            "Number of idle upstream target admission gates removed by the idle sweep.",
+            MetricKind::Counter,
+            self.swept_total.load(Ordering::Relaxed),
+        ));
 
         let Some(limit) = self.limit else {
             return samples;
@@ -332,6 +370,45 @@ impl UpstreamTargetAdmission {
 
         samples
     }
+
+    /// Drop gates that have been idle (no in-flight permits and no selection
+    /// activity) for longer than the configured TTL. Runs on the metrics
+    /// collection path, which the gateway scrapes periodically.
+    fn sweep_idle_gates(&self) {
+        if self.gate_idle_ttl.is_zero() || self.gates.is_empty() {
+            return;
+        }
+        let now_ms = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let ttl_ms = u64::try_from(self.gate_idle_ttl.as_millis()).unwrap_or(u64::MAX);
+        let mut swept = 0u64;
+        self.gates.retain(|_target, gate| {
+            let idle_for = now_ms.saturating_sub(gate.last_active_ms.load(Ordering::Relaxed));
+            let keep = gate.gate.snapshot().in_flight > 0 || idle_for <= ttl_ms;
+            if !keep {
+                swept = swept.saturating_add(1);
+            }
+            keep
+        });
+        if swept > 0 {
+            self.swept_total.fetch_add(swept, Ordering::Relaxed);
+            tracing::debug!(
+                event_name = "gateway_upstream_target_gate_sweep",
+                log_type = "ops",
+                swept,
+                remaining = self.gates.len(),
+                gate_idle_ttl_ms = ttl_ms,
+                "swept idle upstream target admission gates"
+            );
+        }
+    }
+}
+
+fn gate_idle_ttl_from_env() -> Duration {
+    std::env::var(GATE_IDLE_TTL_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_GATE_IDLE_TTL)
 }
 
 fn snapshot_for_gate(target: String, gate: &UpstreamTargetGate) -> UpstreamTargetAdmissionSnapshot {
@@ -779,5 +856,88 @@ mod tests {
         assert_eq!(snapshot.raw_seen_total, 1);
         assert_eq!(snapshot.preselect_total, 0);
         assert_eq!(snapshot.selected_total, 0);
+    }
+
+    #[test]
+    fn idle_target_gate_is_swept_after_ttl() {
+        let admission = UpstreamTargetAdmission::with_gate_idle_ttl(
+            Some(10),
+            Duration::from_millis(1),
+            Duration::from_millis(20),
+        );
+        let idle_target = "http://idle.example.invalid:443|proxy=-";
+        let active_target = "http://active.example.invalid:443|proxy=-";
+
+        admission.record_preselect_for_target_key(idle_target);
+        admission.record_preselect_for_target_key(active_target);
+        assert!(admission.snapshot_for_target_key(idle_target).is_some());
+
+        std::thread::sleep(Duration::from_millis(50));
+        admission.metric_samples();
+
+        assert!(
+            admission.snapshot_for_target_key(idle_target).is_none(),
+            "idle gate older than the TTL should be swept"
+        );
+        assert!(
+            admission.snapshot_for_target_key(active_target).is_none(),
+            "second idle gate should also be swept"
+        );
+        assert_eq!(admission.swept_total.load(Ordering::Relaxed), 2);
+        let samples = admission.metric_samples();
+        let swept = samples
+            .iter()
+            .find(|sample| sample.name == "upstream_target_gate_swept_total")
+            .expect("swept counter should be exported");
+        assert_eq!(swept.value, 2);
+        let active = samples
+            .iter()
+            .find(|sample| sample.name == "upstream_target_gate_active_targets")
+            .expect("active gauge should be exported");
+        assert_eq!(active.value, 0);
+    }
+
+    #[tokio::test]
+    async fn gate_with_in_flight_permit_is_not_swept() {
+        let admission = UpstreamTargetAdmission::with_gate_idle_ttl(
+            Some(10),
+            Duration::from_millis(1),
+            Duration::from_millis(20),
+        );
+        let target = "http://127.0.0.1:18183/v1/chat/completions";
+        let plan = test_plan(target);
+        let _permit = admission
+            .acquire(&plan, "sweep-held")
+            .await
+            .expect("acquire should succeed")
+            .expect("gate enabled");
+
+        std::thread::sleep(Duration::from_millis(50));
+        admission.metric_samples();
+
+        assert!(
+            admission.snapshot_for_plan(&plan).is_some(),
+            "gate with in-flight permit must survive the sweep"
+        );
+        assert_eq!(admission.swept_total.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn recently_active_gate_is_not_swept() {
+        let admission = UpstreamTargetAdmission::with_gate_idle_ttl(
+            Some(10),
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+        );
+        let target = "http://recent.example.invalid:443|proxy=-";
+
+        admission.record_preselect_for_target_key(target);
+        admission.metric_samples();
+
+        assert!(
+            admission.snapshot_for_target_key(target).is_some(),
+            "gate with recent activity must survive the sweep"
+        );
+        assert_eq!(admission.swept_total.load(Ordering::Relaxed), 0);
     }
 }
