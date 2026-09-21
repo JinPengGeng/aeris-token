@@ -16,6 +16,7 @@ mod provider_query;
 mod provider_strategy;
 mod providers;
 mod proxy_nodes;
+mod quota_status;
 mod security;
 mod stats;
 mod system;

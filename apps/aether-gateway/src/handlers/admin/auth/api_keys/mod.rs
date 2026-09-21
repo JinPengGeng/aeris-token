@@ -19,6 +19,7 @@ use serde_json::json;
 
 mod install_routes;
 mod mutation_routes;
+mod quota_status;
 mod read_routes;
 mod routes;
 mod shared;

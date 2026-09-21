@@ -3,6 +3,7 @@ use super::mutation_routes::{
     build_admin_create_api_key_response, build_admin_delete_api_key_response,
     build_admin_toggle_api_key_response, build_admin_update_api_key_response,
 };
+use super::quota_status::maybe_build_local_admin_quota_status_response;
 use super::read_routes::{build_admin_api_key_detail_response, build_admin_list_api_keys_response};
 use super::shared::build_admin_api_keys_data_unavailable_response;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -19,6 +20,12 @@ pub(super) async fn maybe_build_local_admin_api_keys_routes_response(
     let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
+
+    if let Some(response) =
+        maybe_build_local_admin_quota_status_response(state, request_context).await?
+    {
+        return Ok(Some(response));
+    }
 
     if decision.route_family.as_deref() != Some("api_keys_manage") {
         return Ok(None);

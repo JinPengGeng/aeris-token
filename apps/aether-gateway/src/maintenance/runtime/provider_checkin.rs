@@ -7,9 +7,16 @@ use futures_util::stream::{self, StreamExt};
 use tracing::{debug, warn};
 
 use crate::admin_api::{admin_provider_ops_local_action_response, AdminAppState};
+use crate::important_notification::{
+    important_notification_dispatch_ready_for_item, send_important_notification_for_item,
+    ImportantNotification, PROVIDER_POOL_ABNORMAL_ITEM_KEY,
+};
 use crate::{AppState, GatewayError};
 
 use super::{system_config_bool, PROVIDER_CHECKIN_CONCURRENCY};
+
+const PROVIDER_POOL_ABNORMAL_STATE_PREFIX: &str = "provider_ops:pool_abnormal:";
+const PROVIDER_POOL_ABNORMAL_REPEAT_COOLDOWN_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProviderCheckinRunSummary {
@@ -67,6 +74,10 @@ pub(crate) async fn perform_provider_checkin_once(
         .iter()
         .map(|provider| provider.id.clone())
         .collect::<Vec<_>>();
+    let provider_names = providers
+        .iter()
+        .map(|provider| (provider.id.clone(), provider.name.clone()))
+        .collect::<HashMap<_, _>>();
     let mut endpoints_by_provider = HashMap::<String, Vec<StoredProviderCatalogEndpoint>>::new();
     for endpoint in state
         .list_provider_catalog_endpoints_by_provider_ids(&provider_ids)
@@ -104,6 +115,23 @@ pub(crate) async fn perform_provider_checkin_once(
                     message = %outcome.message,
                     "gateway provider checkin failed"
                 );
+                if let Err(err) = maybe_notify_provider_pool_abnormal(
+                    state,
+                    &outcome.provider_id,
+                    provider_names
+                        .get(&outcome.provider_id)
+                        .map(String::as_str)
+                        .unwrap_or(&outcome.provider_id),
+                    &outcome.message,
+                )
+                .await
+                {
+                    warn!(
+                        error = %crate::error::redact_error_debug(&err),
+                        provider_id = %outcome.provider_id,
+                        "provider pool abnormal notification failed"
+                    );
+                }
             }
             ProviderCheckinStatus::Skipped => {
                 summary.skipped += 1;
@@ -209,4 +237,81 @@ fn provider_checkin_outcome_from_payload(
         status,
         message,
     }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct ProviderPoolAbnormalRuntimeState {
+    #[serde(default)]
+    last_notified_at: Option<u64>,
+}
+
+/// Dispatches the administrator-facing `provider_pool_abnormal` notification
+/// when a provider checkin keeps failing. A per-provider cooldown bounds
+/// repeats while a provider stays unhealthy.
+async fn maybe_notify_provider_pool_abnormal(
+    state: &AppState,
+    provider_id: &str,
+    provider_name: &str,
+    message: &str,
+) -> Result<(), GatewayError> {
+    if !important_notification_dispatch_ready_for_item(state, PROVIDER_POOL_ABNORMAL_ITEM_KEY)
+        .await?
+    {
+        return Ok(());
+    }
+    let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+    let state_key = format!("{PROVIDER_POOL_ABNORMAL_STATE_PREFIX}{provider_id}");
+    let previous = state
+        .runtime_kv_get(&state_key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<ProviderPoolAbnormalRuntimeState>(&raw).ok());
+    if previous
+        .and_then(|state| state.last_notified_at)
+        .is_some_and(|notified_at| {
+            now_unix_secs.saturating_sub(notified_at) < PROVIDER_POOL_ABNORMAL_REPEAT_COOLDOWN_SECS
+        })
+    {
+        return Ok(());
+    }
+
+    let report = send_important_notification_for_item(
+        state,
+        PROVIDER_POOL_ABNORMAL_ITEM_KEY,
+        ImportantNotification {
+            title: format!("号池异常：{provider_name}"),
+            markdown_body: format!(
+                "号池 `{provider_name}` 出现异常，请检查服务状态。\n\n检测详情：{message}"
+            ),
+            text_body: format!(
+                "号池 {provider_name} 出现异常，请检查服务状态。检测详情：{message}"
+            ),
+        },
+        &[
+            ("provider_name", provider_name.to_string()),
+            ("provider_id", provider_id.to_string()),
+            ("message", message.to_string()),
+        ],
+    )
+    .await?;
+    if !report.success {
+        return Ok(());
+    }
+    if let Ok(serialized) = serde_json::to_string(&ProviderPoolAbnormalRuntimeState {
+        last_notified_at: Some(now_unix_secs),
+    }) {
+        if let Err(err) = state
+            .runtime_state()
+            .kv_set(&state_key, serialized, None)
+            .await
+        {
+            warn!(
+                error = %err,
+                provider_id,
+                "failed to write provider pool abnormal runtime state"
+            );
+        }
+    }
+    Ok(())
 }
