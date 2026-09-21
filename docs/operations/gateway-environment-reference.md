@@ -69,7 +69,7 @@ are not a general way to enable boolean options.
 | `AETHER_GATEWAY_USAGE_QUEUE_BATCH_SIZE` | gateway root/server; not inherited by subcommands | `128` | `usize` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_QUEUE_BLOCK_MS` | gateway root/server; not inherited by subcommands | `500` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_QUEUE_DLQ_MAXLEN` | gateway root/server; not inherited by subcommands | `50_000` | `usize` | [main.rs](../../apps/aether-gateway/src/main.rs) |
-| `AETHER_GATEWAY_USAGE_QUEUE_DLQ_RETENTION_SECS` | gateway root/server; not inherited by subcommands | `1209600` (14 天) | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `AETHER_GATEWAY_USAGE_QUEUE_DLQ_RETENTION_SECS` | gateway root/server; not inherited by subcommands | `14 * 24 * 60 * 60` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_QUEUE_DLQ_STREAM_KEY` | gateway root/server; not inherited by subcommands | `"usage:events:dlq"` | `String` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_QUEUE_GROUP` | gateway root/server; not inherited by subcommands | `"usage_consumers"` | `String` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_QUEUE_LIFECYCLE_EVENTS` | gateway root/server; not inherited by subcommands | `true` | `bool` | [main.rs](../../apps/aether-gateway/src/main.rs) |

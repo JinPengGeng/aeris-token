@@ -3801,6 +3801,7 @@ mod tests {
                 queue_dlq_stream_key: "usage:events:dlq".to_string(),
                 queue_stream_maxlen: 200_000,
                 queue_dlq_maxlen: 50_000,
+                queue_dlq_retention_secs: 14 * 24 * 60 * 60,
                 queue_payload_max_bytes: 1024 * 1024,
                 queue_batch_size: 128,
                 queue_block_ms: 500,
