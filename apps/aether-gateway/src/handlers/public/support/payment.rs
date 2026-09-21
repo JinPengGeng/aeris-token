@@ -15,7 +15,7 @@ mod payment_repository;
 #[path = "payment/route.rs"]
 mod payment_route;
 #[path = "payment/shared.rs"]
-mod payment_shared;
+pub(crate) mod payment_shared;
 #[path = "payment/stripe.rs"]
 mod payment_stripe;
 #[cfg(test)]

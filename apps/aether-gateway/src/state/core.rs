@@ -28,7 +28,9 @@ use dashmap::DashMap;
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 use tracing::warn;
 
-use super::app::{AuthContextCacheConfig, FrontdoorLimiters, METRIC_SNAPSHOT_TTL};
+use super::app::{
+    AdminSecurityCacheConfig, AuthContextCacheConfig, FrontdoorLimiters, METRIC_SNAPSHOT_TTL,
+};
 use super::{
     AppState, FrontdoorCorsConfig, FrontdoorRuntimeGuardConfig, LocalExecutionRuntimeMissDiagnostic,
 };
@@ -153,6 +155,17 @@ fn system_config_key_affects_chat_pii_redaction(key: &str) -> bool {
 
 fn system_config_key_affects_provider_transport_snapshot(key: &str) -> bool {
     key.trim() == "enable_format_conversion"
+}
+
+fn warn_if_internal_gateway_auth_misconfigured(
+    config: &crate::internal_gateway_auth::InternalGatewayAuthConfig,
+) {
+    if config.status() == "misconfigured" {
+        warn!(
+            environment_variable = crate::internal_gateway_auth::INTERNAL_GATEWAY_AUTH_SECRET_ENV,
+            "internal gateway control plane is fail-closed because its authentication secret is invalid"
+        );
+    }
 }
 
 fn sync_sensitive_headers_config_from_system_value(key: &str, value: Option<&serde_json::Value>) {
@@ -303,6 +316,30 @@ impl AppState {
         self
     }
 
+    pub fn with_admin_security_cache_config(mut self, config: AdminSecurityCacheConfig) -> Self {
+        self.admin_security_cache_config = config;
+        self.admin_security_blacklist_cache.clear();
+        self.admin_security_whitelist_cache.clear();
+        self
+    }
+
+    pub fn with_public_base_url(mut self, public_base_url: Option<String>) -> Self {
+        self.public_base_url = public_base_url
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        self
+    }
+
+    /// 用启动期 clap 解析值覆盖内部网关控制面认证配置。
+    pub fn with_internal_gateway_auth(
+        mut self,
+        config: crate::internal_gateway_auth::InternalGatewayAuthConfig,
+    ) -> Self {
+        warn_if_internal_gateway_auth_misconfigured(&config);
+        self.internal_gateway_auth = Arc::new(config);
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn with_execution_runtime_override_base_url(
         mut self,
@@ -348,12 +385,7 @@ impl AppState {
         let frontdoor_runtime_guards = Arc::new(FrontdoorRuntimeGuardConfig::from_env());
         let internal_gateway_auth =
             Arc::new(crate::internal_gateway_auth::InternalGatewayAuthConfig::for_process());
-        if internal_gateway_auth.status() == "misconfigured" {
-            warn!(
-                environment_variable = crate::internal_gateway_auth::INTERNAL_GATEWAY_AUTH_SECRET_ENV,
-                "internal gateway control plane is fail-closed because its authentication secret is invalid"
-            );
-        }
+        warn_if_internal_gateway_auth_misconfigured(internal_gateway_auth.as_ref());
         Ok(Self {
             readiness: Arc::new(crate::readiness::Readiness::default()),
             #[cfg(test)]
@@ -400,6 +432,8 @@ impl AppState {
             owner_forward_client,
             auth_context_cache: Arc::new(AuthContextCache::default()),
             auth_context_cache_config: AuthContextCacheConfig::default(),
+            admin_security_cache_config: AdminSecurityCacheConfig::default(),
+            public_base_url: None,
             auth_snapshot_cache: Arc::new(AuthSnapshotCache::default()),
             admin_security_blacklist_cache: Arc::new(ValueCache::default()),
             admin_security_whitelist_cache: Arc::new(ValueCache::default()),

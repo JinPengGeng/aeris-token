@@ -1718,8 +1718,10 @@ pub(super) async fn handle_wallet_create_recharge(
                 return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false)
             }
         };
-        let Some(callback_base_url) = epay_callback_base_url(config.callback_base_url.as_deref())
-        else {
+        let Some(callback_base_url) = epay_callback_base_url(
+            config.callback_base_url.as_deref(),
+            state.public_base_url.as_deref(),
+        ) else {
             return build_auth_error_response(
                 http::StatusCode::BAD_REQUEST,
                 "epay callback_base_url is required",
@@ -2310,9 +2312,10 @@ pub(super) async fn handle_wallet_create_recharge(
                 }
             }
         } else {
-            let Some(callback_base_url) =
-                epay_callback_base_url(record.callback_base_url.as_deref())
-            else {
+            let Some(callback_base_url) = epay_callback_base_url(
+                record.callback_base_url.as_deref(),
+                state.public_base_url.as_deref(),
+            ) else {
                 best_effort_fail_wallet_recharge_checkout(
                     state,
                     &order_record,

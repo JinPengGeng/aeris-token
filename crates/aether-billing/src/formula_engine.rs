@@ -497,14 +497,9 @@ fn ensure_finite(value: f64) -> Result<f64, UnsafeExpressionError> {
 }
 
 fn quantize_finite_cost(value: f64) -> Result<f64, ExpressionEvaluationError> {
-    let quantized = quantize_cost(value);
-    if quantized.is_finite() {
-        Ok(quantized)
-    } else {
-        Err(ExpressionEvaluationError::Failed(
-            "non-finite cost after quantization".to_string(),
-        ))
-    }
+    quantize_cost(value).map_err(|_| {
+        ExpressionEvaluationError::Failed("non-finite cost after quantization".to_string())
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -979,6 +974,55 @@ mod tests {
                 "unexpected error for {expression}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_power_overflow_and_nan_power_results() {
+        let engine = FormulaEngine::new();
+
+        for expression in ["2 ** 2000", "10 ** 400", "max ** 2"] {
+            let variables = BTreeMap::from([("max".to_string(), serde_json::json!(f64::MAX))]);
+            let error = engine
+                .evaluate(expression, Some(&variables), None, None, false)
+                .expect_err("a power overflow must fail evaluation");
+            assert!(
+                error.to_string().contains("non-finite expression result"),
+                "unexpected error for {expression}: {error}"
+            );
+        }
+
+        // A negative base with a fractional exponent produces NaN, not a cost.
+        let nan_error = engine
+            .evaluate("(-1) ** 0.5", None, None, None, false)
+            .expect_err("a NaN power result must fail evaluation");
+        assert!(nan_error
+            .to_string()
+            .contains("non-finite expression result"));
+    }
+
+    #[test]
+    fn non_finite_costs_fail_closed_at_the_quantize_layer() {
+        // NaN/±inf cannot be expressed in serde_json inputs, so the quantize
+        // layer is the last line of defense before billing storage.
+        let engine = FormulaEngine::new();
+        let variables = BTreeMap::from([("huge".to_string(), serde_json::json!(f64::MAX / 1e5))]);
+
+        let error = engine
+            .evaluate("huge", Some(&variables), None, None, false)
+            .expect_err("an overflowing quantization must fail closed");
+        assert!(error
+            .to_string()
+            .contains("non-finite cost after quantization"));
+    }
+
+    #[test]
+    fn evaluates_deeply_nested_finite_expressions() {
+        let expression = "((((((1 + 2) * 3) - 4) / 5) ** 2) + min(max(abs(-1), 0), 1))";
+        let result = FormulaEngine::new()
+            .evaluate(expression, None, None, None, false)
+            .expect("nested finite expression should evaluate");
+        assert_eq!(result.status, FormulaEvaluationStatus::Complete);
+        assert_eq!(result.cost, 2.0);
     }
 
     #[test]

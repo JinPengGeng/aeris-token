@@ -8,7 +8,6 @@ use axum::extract::ws::{Message as AxumWsMessage, WebSocket};
 use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
 use tracing::{info, warn};
-use wreq::ws::message::Message as WreqWsMessage;
 
 use crate::control::{
     execution_plan_balance_capacity_rejection, refresh_execution_runtime_auth_context_with_snapshot,
@@ -24,8 +23,8 @@ use crate::handlers::proxy::websocket::session::{
 use crate::handlers::proxy::websocket::transport::{
     client_message_to_upstream, close_client_socket, close_upstream_socket,
     connect_upstream_websocket, send_client_message, upstream_message_to_client,
-    websocket_relay_frame_queue, UpstreamWebSocketErrorCodes, WebSocketRelayPumpControl,
-    WebSocketRelayQueueError, WebSocketWriteError,
+    websocket_relay_frame_queue, UpstreamWebSocket, UpstreamWebSocketErrorCodes, UpstreamWsMessage,
+    WebSocketRelayPumpControl, WebSocketRelayQueueError, WebSocketWriteError,
 };
 use crate::{AppState, GatewayError};
 
@@ -56,7 +55,7 @@ const REALTIME_UPSTREAM_ERRORS: UpstreamWebSocketErrorCodes = UpstreamWebSocketE
 };
 
 pub(super) struct PreparedRealtimeWebSocket {
-    upstream: wreq::ws::WebSocket,
+    upstream: UpstreamWebSocket,
     admission: ResponsesWebSocketTurnAdmission,
     candidate: PlannedRealtimeCandidate,
 }
@@ -277,7 +276,7 @@ pub(super) async fn run_realtime_websocket(
 
 async fn relay_realtime(
     client_socket: &mut WebSocket,
-    upstream: &mut wreq::ws::WebSocket,
+    upstream: &mut UpstreamWebSocket,
     state: &AppState,
     context: &WebSocketRequestContext,
     candidate: &PlannedRealtimeCandidate,
@@ -412,7 +411,7 @@ async fn relay_realtime(
                             stats.upstream_bytes =
                                 stats.upstream_bytes.saturating_add(bytes as u64);
                         }
-                        if let WreqWsMessage::Text(text) = &provider {
+                        if let UpstreamWsMessage::Text(text) = &provider {
                             usage
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -741,13 +740,13 @@ fn client_frame_metadata(message: &AxumWsMessage) -> (usize, bool) {
     }
 }
 
-fn upstream_frame_metadata(message: &WreqWsMessage) -> (usize, bool) {
+fn upstream_frame_metadata(message: &UpstreamWsMessage) -> (usize, bool) {
     match message {
-        WreqWsMessage::Text(text) => (text.len(), false),
-        WreqWsMessage::Binary(data) | WreqWsMessage::Ping(data) | WreqWsMessage::Pong(data) => {
-            (data.len(), false)
-        }
-        WreqWsMessage::Close(frame) => (
+        UpstreamWsMessage::Text(text) => (text.len(), false),
+        UpstreamWsMessage::Binary(data)
+        | UpstreamWsMessage::Ping(data)
+        | UpstreamWsMessage::Pong(data) => (data.len(), false),
+        UpstreamWsMessage::Close(frame) => (
             frame
                 .as_ref()
                 .map_or(0, |frame| 2usize.saturating_add(frame.reason.len())),
@@ -778,7 +777,8 @@ mod tests {
         upstream_frame_metadata, RelayStats,
     };
     use axum::extract::ws::Message as AxumWsMessage;
-    use wreq::ws::message::Message as WreqWsMessage;
+
+    use crate::handlers::proxy::websocket::transport::UpstreamWsMessage;
 
     #[test]
     fn opaque_frame_accounting_does_not_coalesce_audio_or_json_messages() {
@@ -791,7 +791,7 @@ mod tests {
             (3, false)
         );
         assert_eq!(
-            upstream_frame_metadata(&WreqWsMessage::Text("delta".into())),
+            upstream_frame_metadata(&UpstreamWsMessage::Text("delta".into())),
             (5, false)
         );
     }

@@ -2,7 +2,6 @@
 
 use serde_json::Value;
 use uuid::Uuid;
-use wreq::ws::message::Message as WreqWsMessage;
 
 use super::adapter::{
     resolve_responses_websocket_adapter, ResponsesWebSocketDrainDirective,

@@ -5,7 +5,6 @@ use axum::extract::ws::{Message as AxumWsMessage, WebSocket};
 use futures_util::SinkExt;
 use serde_json::Value;
 use uuid::Uuid;
-use wreq::ws::message::Message as WreqWsMessage;
 
 use super::adapter::{resolve_responses_websocket_adapter, ResponsesWebSocketDrainDirective};
 use super::control::{resolve_responses_websocket_turn_control, ResponsesWebSocketTurnControl};
@@ -49,7 +48,7 @@ use crate::handlers::proxy::websocket::session::{CLOSE_INTERNAL_ERROR, WEBSOCKET
 use crate::handlers::proxy::websocket::transport::{
     close_client_socket, close_upstream_socket, send_client_message, send_gateway_error,
     send_gateway_error_with_status, send_gateway_error_with_stream_id,
-    send_responses_websocket_error_with_param,
+    send_responses_websocket_error_with_param, UpstreamWsMessage,
 };
 use crate::plan_usage_policy::PlanUsagePolicySnapshot;
 use crate::privacy::RedactionSession;
@@ -805,7 +804,7 @@ async fn forward_pinned_continuation(
     match send_responses_websocket_upstream_message(
         &decision,
         upstream,
-        WreqWsMessage::text(outbound),
+        UpstreamWsMessage::text(outbound),
         logical.attempt_budget_mut(),
         plan_usage_permit.as_ref(),
         |request_state| {
@@ -1076,7 +1075,7 @@ async fn forward_replanned_response_create(
         match send_responses_websocket_upstream_message(
             &decision,
             upstream,
-            WreqWsMessage::text(outbound),
+            UpstreamWsMessage::text(outbound),
             logical.attempt_budget_mut(),
             plan_usage_permit.as_ref(),
             |request_state| {

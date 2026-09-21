@@ -123,7 +123,8 @@ fn ceil_cost_units(usd: f64) -> Option<i64> {
 }
 
 fn settled_cost_units(usd: f64) -> Option<i64> {
-    let units = (crate::quantize_cost(usd) * COST_UNITS_PER_USD).round();
+    let quantized = crate::quantize_cost(usd).ok()?;
+    let units = (quantized * COST_UNITS_PER_USD).round();
     (usd.is_finite() && usd >= 0.0 && units.is_finite() && units < i64::MAX as f64)
         .then_some(units as i64)
 }

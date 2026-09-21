@@ -50,6 +50,7 @@ are not a general way to enable boolean options.
 | `AETHER_GATEWAY_DISTRIBUTED_REQUEST_REDIS_URL` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_DISTRIBUTED_REQUEST_RENEW_INTERVAL_MS` | gateway root/server; not inherited by subcommands | `10_000` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_DISTRIBUTED_WEBSOCKET_CONNECTION_LIMIT` | gateway root/server; not inherited by subcommands | `unset` | `Option<usize>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `AETHER_GATEWAY_ERROR_DETAIL_LOGGING` | gateway root/server; not inherited by subcommands | `false` | `bool` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_HEALTHCHECK_TIMEOUT_MS` | gateway root/server; not inherited by subcommands | `3_000` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS` | gateway root/server; not inherited by subcommands | `DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS` | `u32` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_HTTP_HEADER_MAX_BYTES` | gateway root/server; not inherited by subcommands | `DEFAULT_GATEWAY_HTTP_HEADER_MAX_BYTES` | `usize` | [main.rs](../../apps/aether-gateway/src/main.rs) |
@@ -63,7 +64,9 @@ are not a general way to enable boolean options.
 | `AETHER_GATEWAY_MAX_WEBSOCKET_CONNECTIONS` | gateway root/server; not inherited by subcommands | `unset` | `Option<usize>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_NODE_ROLE` | gateway root/server; not inherited by subcommands | `"all"` | `NodeRoleArg` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_READINESS_WITHDRAWAL_DELAY_MS` | gateway root/server; not inherited by subcommands | `2_000` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `AETHER_GATEWAY_SECURITY_CACHE_TTL_MS` | gateway root/server; not inherited by subcommands | `DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_STATIC_DIR` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `AETHER_GATEWAY_TRUSTED_INGRESS_CIDRS` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_BUFFER_CAPACITY` | gateway root/server; not inherited by subcommands | `131_072` | `usize` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_INITIAL_BACKOFF_MS` | gateway root/server; not inherited by subcommands | `3_000` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_MAX_BACKOFF_MS` | gateway root/server; not inherited by subcommands | `10_000` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
@@ -98,20 +101,24 @@ are not a general way to enable boolean options.
 | `AETHER_GATEWAY_VIDEO_TASK_POLLER_INTERVAL_MS` | gateway root/server; not inherited by subcommands | `5000` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_VIDEO_TASK_STORE_PATH` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_VIDEO_TASK_TRUTH_SOURCE_MODE` | gateway root/server; not inherited by subcommands | `"python-sync-report"` | `VideoTaskTruthSourceArg` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `AETHER_INTERNAL_GATEWAY_AUTH_SECRET` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_LOG_DESTINATION` | gateway root/server; not inherited by subcommands | `"stdout"` | `GatewayLogDestinationArg` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_LOG_DIR` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_LOG_FORMAT` | gateway root/server; not inherited by subcommands | `"pretty"` | `GatewayLogFormatArg` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_LOG_MAX_FILES` | gateway root/server; not inherited by subcommands | `30` | `usize` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_LOG_RETENTION_DAYS` | gateway root/server; not inherited by subcommands | `7` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_LOG_ROTATION` | gateway root/server; not inherited by subcommands | `"daily"` | `GatewayLogRotationArg` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `AETHER_PUBLIC_BASE_URL` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_RUNTIME_BACKEND` | gateway root/server; not inherited by subcommands | `unset` | `Option<RuntimeBackendArg>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_RUNTIME_COMMAND_TIMEOUT_MS` | gateway root/server; not inherited by subcommands | `2_000` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_RUNTIME_REDIS_KEY_PREFIX` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_RUNTIME_REDIS_URL` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `AETHER_TRUSTED_PROXY_CIDRS` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `APP_PORT` | gateway root/server; not inherited by subcommands | `8084` | `u16` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `CORS_ALLOW_CREDENTIALS` | gateway root/server; not inherited by subcommands | `true` | `bool` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `CORS_ORIGINS` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `ENVIRONMENT` | gateway root/server; not inherited by subcommands | `"production"` | `String` | [main.rs](../../apps/aether-gateway/src/main.rs) |
+| `PAYMENT_CALLBACK_SECRET` | gateway root/server; not inherited by subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `RATE_LIMIT_FAIL_OPEN` | gateway root/server; not inherited by subcommands | `false` | `bool` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `RPM_BUCKET_SECONDS` | gateway root/server; not inherited by subcommands | `60` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `RPM_KEY_TTL_SECONDS` | gateway root/server; not inherited by subcommands | `120` | `u64` | [main.rs](../../apps/aether-gateway/src/main.rs) |
@@ -149,6 +156,7 @@ They contain names and source defaults, not current environment values.
 - `AETHER_GATEWAY_DISTRIBUTED_REQUEST_REDIS_URL`: `long, env = "AETHER_GATEWAY_DISTRIBUTED_REQUEST_REDIS_URL"`
 - `AETHER_GATEWAY_DISTRIBUTED_REQUEST_RENEW_INTERVAL_MS`: `long, env = "AETHER_GATEWAY_DISTRIBUTED_REQUEST_RENEW_INTERVAL_MS", default_value_t = 10_000`
 - `AETHER_GATEWAY_DISTRIBUTED_WEBSOCKET_CONNECTION_LIMIT`: `long, env = "AETHER_GATEWAY_DISTRIBUTED_WEBSOCKET_CONNECTION_LIMIT"`
+- `AETHER_GATEWAY_ERROR_DETAIL_LOGGING`: `long, env = "AETHER_GATEWAY_ERROR_DETAIL_LOGGING", default_value_t = false`
 - `AETHER_GATEWAY_HEALTHCHECK_TIMEOUT_MS`: `long, hide = true, env = "AETHER_GATEWAY_HEALTHCHECK_TIMEOUT_MS", default_value_t = 3_000`
 - `AETHER_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS`: `long, env = "AETHER_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS", default_value_t = DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS`
 - `AETHER_GATEWAY_HTTP_HEADER_MAX_BYTES`: `long, env = "AETHER_GATEWAY_HTTP_HEADER_MAX_BYTES", default_value_t = DEFAULT_GATEWAY_HTTP_HEADER_MAX_BYTES`
@@ -162,7 +170,9 @@ They contain names and source defaults, not current environment values.
 - `AETHER_GATEWAY_MAX_WEBSOCKET_CONNECTIONS`: `long, env = "AETHER_GATEWAY_MAX_WEBSOCKET_CONNECTIONS"`
 - `AETHER_GATEWAY_NODE_ROLE`: `long, env = "AETHER_GATEWAY_NODE_ROLE", value_enum, default_value = "all"`
 - `AETHER_GATEWAY_READINESS_WITHDRAWAL_DELAY_MS`: `long, env = "AETHER_GATEWAY_READINESS_WITHDRAWAL_DELAY_MS", default_value_t = 2_000, value_parser = clap::value_parser!(u64).range(0..=60_000)`
+- `AETHER_GATEWAY_SECURITY_CACHE_TTL_MS`: `long, env = "AETHER_GATEWAY_SECURITY_CACHE_TTL_MS", default_value_t = DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS, value_parser = clap::value_parser!(u64).range(1..=30_000)`
 - `AETHER_GATEWAY_STATIC_DIR`: `long, env = "AETHER_GATEWAY_STATIC_DIR"`
+- `AETHER_GATEWAY_TRUSTED_INGRESS_CIDRS`: `long, env = "AETHER_GATEWAY_TRUSTED_INGRESS_CIDRS", value_parser = aether_gateway::parse_trusted_cidrs_value`
 - `AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_BUFFER_CAPACITY`: `long, env = "AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_BUFFER_CAPACITY", default_value_t = 131_072`
 - `AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_INITIAL_BACKOFF_MS`: `long, env = "AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_INITIAL_BACKOFF_MS", default_value_t = 3_000`
 - `AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_MAX_BACKOFF_MS`: `long, env = "AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_MAX_BACKOFF_MS", default_value_t = 10_000`
@@ -197,20 +207,24 @@ They contain names and source defaults, not current environment values.
 - `AETHER_GATEWAY_VIDEO_TASK_POLLER_INTERVAL_MS`: `long, env = "AETHER_GATEWAY_VIDEO_TASK_POLLER_INTERVAL_MS", default_value_t = 5000`
 - `AETHER_GATEWAY_VIDEO_TASK_STORE_PATH`: `long, env = "AETHER_GATEWAY_VIDEO_TASK_STORE_PATH"`
 - `AETHER_GATEWAY_VIDEO_TASK_TRUTH_SOURCE_MODE`: `long, env = "AETHER_GATEWAY_VIDEO_TASK_TRUTH_SOURCE_MODE", value_enum, default_value = "python-sync-report"`
+- `AETHER_INTERNAL_GATEWAY_AUTH_SECRET`: `long, env = "AETHER_INTERNAL_GATEWAY_AUTH_SECRET"`
 - `AETHER_LOG_DESTINATION`: `long, env = "AETHER_LOG_DESTINATION", value_enum, default_value = "stdout"`
 - `AETHER_LOG_DIR`: `long, env = "AETHER_LOG_DIR"`
 - `AETHER_LOG_FORMAT`: `long, env = "AETHER_LOG_FORMAT", value_enum, default_value = "pretty"`
 - `AETHER_LOG_MAX_FILES`: `long, env = "AETHER_LOG_MAX_FILES", default_value_t = 30`
 - `AETHER_LOG_RETENTION_DAYS`: `long, env = "AETHER_LOG_RETENTION_DAYS", default_value_t = 7`
 - `AETHER_LOG_ROTATION`: `long, env = "AETHER_LOG_ROTATION", value_enum, default_value = "daily"`
+- `AETHER_PUBLIC_BASE_URL`: `long, env = "AETHER_PUBLIC_BASE_URL"`
 - `AETHER_RUNTIME_BACKEND`: `long, env = "AETHER_RUNTIME_BACKEND", value_enum`
 - `AETHER_RUNTIME_COMMAND_TIMEOUT_MS`: `long, env = "AETHER_RUNTIME_COMMAND_TIMEOUT_MS", default_value_t = 2_000`
 - `AETHER_RUNTIME_REDIS_KEY_PREFIX`: `long, env = "AETHER_RUNTIME_REDIS_KEY_PREFIX"`
 - `AETHER_RUNTIME_REDIS_URL`: `long, env = "AETHER_RUNTIME_REDIS_URL"`
+- `AETHER_TRUSTED_PROXY_CIDRS`: `long, env = "AETHER_TRUSTED_PROXY_CIDRS", value_parser = aether_gateway::parse_trusted_cidrs_value`
 - `APP_PORT`: `long, env = "APP_PORT", default_value_t = 8084`
 - `CORS_ALLOW_CREDENTIALS`: `long, env = "CORS_ALLOW_CREDENTIALS", default_value_t = true`
 - `CORS_ORIGINS`: `long, env = "CORS_ORIGINS"`
 - `ENVIRONMENT`: `long, env = "ENVIRONMENT", default_value = "production"`
+- `PAYMENT_CALLBACK_SECRET`: `long, env = "PAYMENT_CALLBACK_SECRET"`
 - `RATE_LIMIT_FAIL_OPEN`: `long, env = "RATE_LIMIT_FAIL_OPEN", default_value_t = false`
 - `RPM_BUCKET_SECONDS`: `long, env = "RPM_BUCKET_SECONDS", default_value_t = 60`
 - `RPM_KEY_TTL_SECONDS`: `long, env = "RPM_KEY_TTL_SECONDS", default_value_t = 120`
@@ -265,7 +279,6 @@ from variable names. Request candidate persistence is a mode (`full`, `terminal`
 | `AETHER_GATEWAY_DIRECT_REQWEST_PREWARM_SYNC_CLIENTS` | [execution_runtime/transport.rs](../../apps/aether-gateway/src/execution_runtime/transport.rs) |
 | `AETHER_GATEWAY_DIRECT_REQWEST_STREAM_HTTP_MODE` | [execution_runtime/transport.rs](../../apps/aether-gateway/src/execution_runtime/transport.rs) |
 | `AETHER_GATEWAY_DIRECT_REQWEST_SYNC_WARM_CLIENTS` | [execution_runtime/transport.rs](../../apps/aether-gateway/src/execution_runtime/transport.rs) |
-| `AETHER_GATEWAY_ERROR_DETAIL_LOGGING` | [error.rs](../../apps/aether-gateway/src/error.rs) |
 | `AETHER_GATEWAY_EXTERNAL_MODELS_URL` | [handlers/admin/model/external_cache.rs](../../apps/aether-gateway/src/handlers/admin/model/external_cache.rs) |
 | `AETHER_GATEWAY_INSTANCE_ID` | [main.rs](../../apps/aether-gateway/src/main.rs), [tunnel/mod.rs](../../apps/aether-gateway/src/tunnel/mod.rs) |
 | `AETHER_GATEWAY_INTERNAL_GATE_QUEUE_BUDGET_MS` | [state/app.rs](../../apps/aether-gateway/src/state/app.rs) |
@@ -290,13 +303,11 @@ from variable names. Request candidate persistence is a mode (`full`, `terminal`
 | `AETHER_GATEWAY_REQUEST_CANDIDATE_QUEUE_WORKERS` | [request_candidate_queue.rs](../../apps/aether-gateway/src/request_candidate_queue.rs) |
 | `AETHER_GATEWAY_REQUEST_CANDIDATE_SEED_WRITE_TIMEOUT_MS` | [request_candidate_runtime.rs](../../apps/aether-gateway/src/request_candidate_runtime.rs) |
 | `AETHER_GATEWAY_REQUEST_CANDIDATE_WRITE_MODE` | [request_candidate_queue.rs](../../apps/aether-gateway/src/request_candidate_queue.rs) |
-| `AETHER_GATEWAY_SECURITY_CACHE_TTL_MS` | [state/runtime/security.rs](../../apps/aether-gateway/src/state/runtime/security.rs) |
 | `AETHER_GATEWAY_STAGE_METRICS_ENABLED` | [stage_metrics.rs](../../apps/aether-gateway/src/stage_metrics.rs) |
 | `AETHER_GATEWAY_STAGE_TRACE_MODE` | [stage_metrics.rs](../../apps/aether-gateway/src/stage_metrics.rs) |
 | `AETHER_GATEWAY_STAGE_TRACE_SAMPLE_RATE` | [stage_metrics.rs](../../apps/aether-gateway/src/stage_metrics.rs) |
 | `AETHER_GATEWAY_STAGE_TRACE_SLOW_MS` | [stage_metrics.rs](../../apps/aether-gateway/src/stage_metrics.rs) |
 | `AETHER_GATEWAY_STREAM_CAPTURE_MEMORY_BUDGET_BYTES` | [execution_runtime/stream/capture_budget.rs](../../apps/aether-gateway/src/execution_runtime/stream/capture_budget.rs) |
-| `AETHER_GATEWAY_TRUSTED_INGRESS_CIDRS` | [headers.rs](../../apps/aether-gateway/src/headers.rs) |
 | `AETHER_GATEWAY_UPSTREAM_EXECUTION_GATE_HOLD_STREAM_RESPONSE` | [executor/candidate_loop.rs](../../apps/aether-gateway/src/executor/candidate_loop.rs) |
 | `AETHER_GATEWAY_UPSTREAM_EXECUTION_GATE_LIMIT` | [state/app.rs](../../apps/aether-gateway/src/state/app.rs) |
 | `AETHER_GATEWAY_UPSTREAM_EXECUTION_GATE_STREAM_HOLD_MODE` | [executor/candidate_loop.rs](../../apps/aether-gateway/src/executor/candidate_loop.rs) |
@@ -313,16 +324,13 @@ from variable names. Request candidate persistence is a mode (`full`, `terminal`
 | `AETHER_GATEWAY_USAGE_COUNTER_FLUSH_BATCH_SIZE` | [maintenance/runtime/usage_counter_flush.rs](../../apps/aether-gateway/src/maintenance/runtime/usage_counter_flush.rs) |
 | `AETHER_GATEWAY_USAGE_COUNTER_FLUSH_CATCH_UP_BURST_LIMIT` | [maintenance/runtime/usage_counter_flush.rs](../../apps/aether-gateway/src/maintenance/runtime/usage_counter_flush.rs) |
 | `AETHER_GATEWAY_USAGE_COUNTER_FLUSH_INTERVAL_MS` | [maintenance/runtime/usage_counter_flush.rs](../../apps/aether-gateway/src/maintenance/runtime/usage_counter_flush.rs) |
-| `AETHER_INTERNAL_GATEWAY_AUTH_SECRET` | [internal_gateway_auth.rs](../../apps/aether-gateway/src/internal_gateway_auth.rs) |
 | `AETHER_MAX_INTERNAL_BUFFERED_BODY_MB` | [headers.rs](../../apps/aether-gateway/src/headers.rs) |
 | `AETHER_MAX_REDACTED_SYNC_RESPONSE_BODY_MB` | [headers.rs](../../apps/aether-gateway/src/headers.rs) |
 | `AETHER_MAX_REQUEST_BODY_MB` | [headers.rs](../../apps/aether-gateway/src/headers.rs) |
 | `AETHER_OPENAI_WS_PROBE_API_KEY` | [bin/aether-openai-responses-ws-probe.rs](../../apps/aether-gateway/src/bin/aether-openai-responses-ws-probe.rs) |
 | `AETHER_OPENAI_WS_PROBE_MODEL` | [bin/aether-openai-responses-ws-probe.rs](../../apps/aether-gateway/src/bin/aether-openai-responses-ws-probe.rs) |
 | `AETHER_OPENAI_WS_PROBE_URL` | [bin/aether-openai-responses-ws-probe.rs](../../apps/aether-gateway/src/bin/aether-openai-responses-ws-probe.rs) |
-| `AETHER_PUBLIC_BASE_URL` | [handlers/public/support/auth_cookie_policy.rs](../../apps/aether-gateway/src/handlers/public/support/auth_cookie_policy.rs), [handlers/public/support/install.rs](../../apps/aether-gateway/src/handlers/public/support/install.rs), [handlers/public/support/payment/epay.rs](../../apps/aether-gateway/src/handlers/public/support/payment/epay.rs) |
 | `AETHER_TEST_REDIS_URL` | [orchestration/half_open_probe.rs](../../apps/aether-gateway/src/orchestration/half_open_probe.rs), [scheduler/send_admission.rs](../../apps/aether-gateway/src/scheduler/send_admission.rs) |
-| `AETHER_TRUSTED_PROXY_CIDRS` | [headers.rs](../../apps/aether-gateway/src/headers.rs) |
 | `AETHER_TUNNEL_ATTACHMENT_TTL_SECS` | [tunnel/mod.rs](../../apps/aether-gateway/src/tunnel/mod.rs) |
 | `AETHER_TUNNEL_BASE_URL` | [execution_runtime/transport.rs](../../apps/aether-gateway/src/execution_runtime/transport.rs) |
 | `AETHER_TUNNEL_DRAIN_DEADLINE_MS` | [tunnel/embedded/hub.rs](../../apps/aether-gateway/src/tunnel/embedded/hub.rs) |
@@ -361,13 +369,12 @@ from variable names. Request candidate persistence is a mode (`full`, `terminal`
 | `MODEL_FETCH_STARTUP_ENABLED` | [model_fetch/tests.rs](../../apps/aether-gateway/src/model_fetch/tests.rs) |
 | `NOTIFICATION_EMAIL_AVAILABLE` | [handlers/admin/system/shared/modules.rs](../../apps/aether-gateway/src/handlers/admin/system/shared/modules.rs) |
 | `OAUTH_AVAILABLE` | [oauth/identity_repo.rs](../../apps/aether-gateway/src/oauth/identity_repo.rs) |
-| `PAYMENT_CALLBACK_SECRET` | [handlers/public/support/payment/shared.rs](../../apps/aether-gateway/src/handlers/public/support/payment/shared.rs) |
 | `POOL_QUOTA_PROBE_GLOBAL_CONCURRENCY` | [maintenance/runtime/pool_quota_probe.rs](../../apps/aether-gateway/src/maintenance/runtime/pool_quota_probe.rs) |
 | `POOL_QUOTA_PROBE_MAX_KEYS_PER_PROVIDER` | [maintenance/runtime/pool_quota_probe.rs](../../apps/aether-gateway/src/maintenance/runtime/pool_quota_probe.rs) |
 | `POOL_QUOTA_PROBE_SCAN_INTERVAL_SECONDS` | [maintenance/runtime/pool_quota_probe.rs](../../apps/aether-gateway/src/maintenance/runtime/pool_quota_probe.rs) |
 | `POOL_SCORE_REBUILD_INTERVAL_SECONDS` | [maintenance/runtime/pool_score_rebuild.rs](../../apps/aether-gateway/src/maintenance/runtime/pool_score_rebuild.rs) |
 | `POOL_SCORE_REBUILD_MAX_UPSERTS_PER_TICK` | [maintenance/runtime/pool_score_rebuild.rs](../../apps/aether-gateway/src/maintenance/runtime/pool_score_rebuild.rs) |
-| `PUBLIC_BASE_URL` | [handlers/public/support/auth_cookie_policy.rs](../../apps/aether-gateway/src/handlers/public/support/auth_cookie_policy.rs), [handlers/public/support/install.rs](../../apps/aether-gateway/src/handlers/public/support/install.rs), [handlers/public/support/payment/epay.rs](../../apps/aether-gateway/src/handlers/public/support/payment/epay.rs) |
+| `PUBLIC_BASE_URL` | [handlers/public/support/auth_cookie_policy.rs](../../apps/aether-gateway/src/handlers/public/support/auth_cookie_policy.rs), [handlers/public/support/install.rs](../../apps/aether-gateway/src/handlers/public/support/install.rs), [handlers/public/support/payment/epay.rs](../../apps/aether-gateway/src/handlers/public/support/payment/epay.rs), [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `REDIS_URL` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `USERPROFILE` | [execution_runtime/windsurf.rs](../../apps/aether-gateway/src/execution_runtime/windsurf.rs) |
 | `VERIFICATION_CODE_EXPIRE_MINUTES` | [handlers/public/support/auth_helpers.rs](../../apps/aether-gateway/src/handlers/public/support/auth_helpers.rs) |

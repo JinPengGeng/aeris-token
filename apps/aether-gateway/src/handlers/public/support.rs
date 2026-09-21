@@ -66,7 +66,7 @@ mod support_monitoring;
 #[path = "support/oauth.rs"]
 mod support_oauth;
 #[path = "support/payment.rs"]
-mod support_payment;
+pub(crate) mod support_payment;
 #[path = "support/test_connection.rs"]
 mod support_test_connection;
 #[path = "support/user_me.rs"]

@@ -136,7 +136,8 @@ impl GatewayDataState {
                         usage: RequestAttemptBilledUsage {
                             requires_reconciliation: priced.requires_reconciliation,
                             total_cost_units: request_funds_authorized_units(
-                                aether_billing::quantize_cost(priced.computation.cost_result.cost),
+                                aether_billing::quantize_cost(priced.computation.cost_result.cost)
+                                    .map_err(|_| invalid("attempt cost is not finite"))?,
                             )?,
                             actual_cost_units: u64::try_from(priced.calculated_units)
                                 .map_err(|_| invalid("negative calculated attempt cost"))?,

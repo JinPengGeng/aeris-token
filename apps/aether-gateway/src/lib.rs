@@ -53,6 +53,7 @@ mod image_capabilities;
 mod important_notification;
 mod internal_gateway_auth;
 mod latency_histograms;
+pub use self::internal_gateway_auth::InternalGatewayAuthConfig;
 mod local_auth_token;
 mod log_ids;
 mod maintenance;
@@ -108,6 +109,7 @@ pub use self::backup::{
     DEFAULT_BACKUP_MAX_ENCRYPTED_BYTES, DEFAULT_BACKUP_MAX_JSON_BYTES,
 };
 pub use self::data::GatewayDataConfig;
+pub use self::error::init_gateway_error_detail_logging;
 pub(crate) use self::error::GatewayError;
 pub(crate) use self::execution_runtime::{
     append_execution_contract_fields_to_value, append_local_failover_policy_to_value,
@@ -121,6 +123,12 @@ pub use self::execution_runtime::{
 };
 pub(crate) use self::fallback_metrics::{GatewayFallbackMetricKind, GatewayFallbackReason};
 pub use self::frontdoor_loop_guard::set_gateway_frontdoor_app_port;
+pub use self::handlers::public::support::support_payment::payment_shared::{
+    init_payment_callback_secret, payment_callback_secret_is_strong_public_api,
+};
+pub use self::headers::{
+    init_trusted_cidrs_config, parse_trusted_cidrs_value, TrustedCidrsStartupConfig,
+};
 pub use self::local_auth_token::validate_local_auth_jwt_secret;
 pub use self::middleware::strip_cf_headers_middleware;
 pub use self::rate_limit::FrontdoorUserRpmConfig;
@@ -134,7 +142,8 @@ pub(crate) use self::state::{
     LocalMutationOutcome, LocalProviderDeleteTaskState,
 };
 pub use self::state::{
-    AppState, AuthContextCacheConfig, FrontdoorCorsConfig, DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+    AdminSecurityCacheConfig, AppState, AuthContextCacheConfig, FrontdoorCorsConfig,
+    DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS, DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
     DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS, DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS,
 };
 pub use self::tunnel::{
