@@ -13,6 +13,7 @@ use super::redaction::ResponsesWebSocketRedactionRestorer;
 use super::request::ResponsesLiteStaticConfig;
 use super::turn_state::ResponsesTurnState;
 use crate::ai_serving::{AiExecutionDecision, ResponsesWebSocketBodyNormalization};
+use crate::handlers::proxy::websocket::transport::UpstreamWebSocket;
 
 const EXHAUSTED_KEY_EXCLUSION_FALLBACK_SECONDS: u64 = 300;
 const MAX_CONNECTION_LOCAL_CONTINUATION_RESPONSE_IDS: usize = 1_024;
@@ -94,7 +95,7 @@ impl ContinuationResponseIds {
 
 /// All mutable state associated with the physical upstream connection.
 pub(super) struct BoundResponsesConnection {
-    pub(super) upstream: Option<wreq::ws::WebSocket>,
+    pub(super) upstream: Option<UpstreamWebSocket>,
     pub(super) adapter: &'static dyn ResponsesWebSocketProtocolAdapter,
     pub(super) client_model: String,
     pub(super) provider_model: String,

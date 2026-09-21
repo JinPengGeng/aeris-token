@@ -10,7 +10,6 @@ use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tracing::{info, warn};
-use wreq::ws::message::Message as WreqWsMessage;
 
 use crate::control::{
     execution_plan_balance_capacity_rejection, refresh_execution_runtime_auth_context_with_snapshot,
@@ -26,8 +25,9 @@ use crate::handlers::proxy::websocket::session::{
 use crate::handlers::proxy::websocket::transport::{
     client_message_to_upstream, close_client_socket, close_upstream_socket,
     connect_upstream_websocket, send_client_message, send_upstream_message,
-    upstream_message_to_client, websocket_relay_frame_queue, UpstreamWebSocketErrorCodes,
-    WebSocketRelayPumpControl, WebSocketRelayQueueError, WebSocketWriteError,
+    upstream_message_to_client, websocket_relay_frame_queue, UpstreamWebSocket,
+    UpstreamWebSocketErrorCodes, UpstreamWsMessage, WebSocketRelayPumpControl,
+    WebSocketRelayQueueError, WebSocketWriteError,
 };
 use crate::{AppState, GatewayError, LocalExecutionRuntimeMissDiagnostic};
 
@@ -166,7 +166,7 @@ pub(super) enum PreparedLiveWebSocket {
 }
 
 pub(super) struct PreparedLiveRelay {
-    upstream: wreq::ws::WebSocket,
+    upstream: UpstreamWebSocket,
     admission: ResponsesWebSocketTurnAdmission,
     audit: LiveSessionAudit,
     pool_lease: LivePoolLeaseGuard,
@@ -1016,7 +1016,7 @@ async fn run_direct(
     let initial =
         rewrite_live_session_model(initial.as_str(), provider_model.as_str()).unwrap_or(initial);
     let initial_bytes = initial.len() as u64;
-    if send_upstream_message(&mut upstream, WreqWsMessage::Text(initial.into()))
+    if send_upstream_message(&mut upstream, UpstreamWsMessage::Text(initial))
         .await
         .is_err()
     {
@@ -1413,7 +1413,7 @@ struct RelayStats {
 
 async fn relay_live(
     client_socket: &mut WebSocket,
-    upstream: &mut wreq::ws::WebSocket,
+    upstream: &mut UpstreamWebSocket,
     state: &AppState,
     context: &WebSocketRequestContext,
     mode: &'static str,
@@ -1935,13 +1935,13 @@ fn client_frame_metadata(message: &AxumWsMessage) -> (usize, bool, bool) {
     }
 }
 
-fn upstream_frame_metadata(message: &WreqWsMessage) -> (usize, bool) {
+fn upstream_frame_metadata(message: &UpstreamWsMessage) -> (usize, bool) {
     match message {
-        WreqWsMessage::Text(text) => (text.len(), false),
-        WreqWsMessage::Binary(data) | WreqWsMessage::Ping(data) | WreqWsMessage::Pong(data) => {
-            (data.len(), false)
-        }
-        WreqWsMessage::Close(frame) => (
+        UpstreamWsMessage::Text(text) => (text.len(), false),
+        UpstreamWsMessage::Binary(data)
+        | UpstreamWsMessage::Ping(data)
+        | UpstreamWsMessage::Pong(data) => (data.len(), false),
+        UpstreamWsMessage::Close(frame) => (
             frame
                 .as_ref()
                 .map_or(0, |frame| 2usize.saturating_add(frame.reason.len())),

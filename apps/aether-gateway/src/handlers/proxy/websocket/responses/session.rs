@@ -1360,7 +1360,7 @@ mod tests {
     };
     use crate::handlers::proxy::websocket::session::wait_for_optional_deadline;
     use crate::handlers::proxy::websocket::transport::{
-        websocket_handshake_headers, websocket_timeouts, websocket_upstream_url,
+        websocket_handshake_headers, websocket_timeouts, websocket_upstream_url, UpstreamWsMessage,
     };
     use crate::privacy::{RedactionSession, RedactionSessionConfig};
     use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -2199,7 +2199,7 @@ mod tests {
                 .upstream
                 .as_mut()
                 .expect("bound upstream should be present")
-                .recv(),
+                .next(),
         )
         .await
         .expect("mock should send a response event")
@@ -2213,7 +2213,7 @@ mod tests {
         assert_eq!(observed.event["model"], "provider-model");
         assert!(observed.event.get("stream").is_none());
         assert!(observed.event.get("background").is_none());
-        assert!(matches!(response, wreq::ws::message::Message::Text(_)));
+        assert!(matches!(response, UpstreamWsMessage::Text(_)));
     }
 
     async fn spawn_mock_server() -> (

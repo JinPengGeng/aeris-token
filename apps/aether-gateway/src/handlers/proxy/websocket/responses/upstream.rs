@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use aether_scheduler_core::{AttemptBudget, AttemptBudgetError};
 use serde_json::Value;
-use wreq::ws::message::Message as WreqWsMessage;
 
 use super::adapter::ResponsesWebSocketProtocolAdapter;
 use super::binding::{UpstreamBindingIdentity, UpstreamBindingIdentityError};
@@ -20,8 +19,9 @@ use crate::ai_serving::{AiExecutionDecision, ResponsesWebSocketBodyNormalization
 use crate::handlers::proxy::websocket::session::RESPONSES_WEBSOCKET_SESSION_LIMITS;
 use crate::handlers::proxy::websocket::transport::{
     close_upstream_socket, connect_upstream_websocket, feed_upstream_message,
-    flush_upstream_messages, WebSocketWriteError,
+    flush_upstream_messages, UpstreamWebSocket, UpstreamWsMessage, WebSocketWriteError,
 };
+use futures_util::StreamExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ResponsesWebSocketUpstreamSendError {
@@ -131,7 +131,7 @@ where
     send_responses_websocket_upstream_message(
         decision,
         &mut upstream.socket,
-        WreqWsMessage::text(first_event),
+        UpstreamWsMessage::text(first_event),
         attempt_budget,
         plan_usage_permit,
         record_upstream_request_state,
@@ -210,8 +210,8 @@ where
 
 pub(super) async fn send_responses_websocket_upstream_message<F>(
     decision: &AiExecutionDecision,
-    upstream: &mut wreq::ws::WebSocket,
-    message: WreqWsMessage,
+    upstream: &mut UpstreamWebSocket,
+    message: UpstreamWsMessage,
     attempt_budget: &mut AttemptBudget,
     plan_usage_permit: Option<&aether_runtime::AdmissionPermit>,
     record_upstream_request_state: F,
@@ -302,10 +302,10 @@ where
 }
 
 pub(super) async fn receive_optional_upstream(
-    upstream: &mut Option<wreq::ws::WebSocket>,
-) -> Option<Result<WreqWsMessage, ()>> {
+    upstream: &mut Option<UpstreamWebSocket>,
+) -> Option<Result<UpstreamWsMessage, ()>> {
     match upstream.as_mut() {
-        Some(upstream) => upstream.recv().await.map(|message| message.map_err(|_| ())),
+        Some(upstream) => upstream.next().await.map(|message| message.map_err(|_| ())),
         None => std::future::pending().await,
     }
 }

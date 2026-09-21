@@ -19,6 +19,8 @@ use http_body_util::BodyExt;
 use regex::{Captures, Regex};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
+// 唯一保留 wreq 的理由 = TLS 浏览器指纹仿真：grok.com 的上游链路强制 browser_wreq
+// profile(见 docs/adr/wreq-exit-strategy.md),该 WS 升级必须复用同一指纹客户端。
 use wreq::ws::message::Message as WreqWsMessage;
 
 use crate::ai_serving::api::{

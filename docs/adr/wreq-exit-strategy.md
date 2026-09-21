@@ -62,3 +62,29 @@ wreq 拉入 `boring-sys2 5.0.0-alpha.13`（alpha 版 BoringSSL 绑定，构建�
 - 改动面：`apps/aether-gateway/src/handlers/proxy/websocket/transport.rs` 上游连接建立与消息收发（`wreq::ws::WebSocket` → `tokio_tungstenite::WebSocketStream`），`websocket/responses/*` 的会话模块适配消息类型（`wreq::ws::Message` → `tungstenite::Message`），`execution_runtime/transport.rs` 中 browser 客户端构建仅保留指纹路径。
 - 估计：300–500 行改动 + 全量 WS 代理回归（integration tests 已覆盖 `frontdoor/ai.rs` 等路径）。
 - 收益：预发布依赖暴露面从"指纹+全部 WS 代理"降至"仅指纹仿真"；tokio-tungstenite 0.28 已在仓内统一，无新增依赖。
+
+## 实施记录（批次 Q，2026-09-21，Closes #493）
+
+### 已迁移（非指纹链路 → tokio-tungstenite 0.28）
+
+- `apps/aether-gateway/src/handlers/proxy/websocket/transport.rs`：非 browser profile 的上游 WS 代理连接建立整体迁回 tokio-tungstenite。直连保留原 DNS 固定与私网/保留地址拒绝语义；HTTP 代理 `ws://` 用 absolute-form 转发（与原 wreq 客户端一致）、`wss://` 走 CONNECT；SOCKS 代理发送域名（远端 DNS，与归一化后的 `socks5h` 一致）。消息层引入传输中立的 `UpstreamWsMessage` / `UpstreamWebSocket`（Sink/Stream 双实现），消息类型映射、ping/pong、关闭帧、写超时与背压语义不变。
+- `handlers/proxy/websocket/{responses,realtime,live}/**` 会话模块全部改用 `UpstreamWsMessage`/`UpstreamWebSocket`，不再 import `wreq::ws`。
+
+### 保留 wreq 的链路（唯一保留理由 = TLS 指纹仿真）
+
+- `execution_runtime/transport.rs::build_browser_wreq_client`：browser profile HTTP 链路（含 38 个指纹模板）。
+- `handlers/proxy/websocket/transport.rs::connect_browser_upstream_websocket`：browser profile 的 WS 升级必须复用同一指纹客户端（wreq TLS 栈）。
+- `execution_runtime/grok.rs`：grok.com 上游强制 browser_wreq profile，其 Imagine WS 复用指纹客户端。
+- `bin/support/responses_ws_probe.rs`：探测工具，暂留 wreq（见"剩余触发条件"）。
+
+### 依赖状态
+
+- wreq 精确锁定 `=6.0.0-rc.28` 不变；`ws` feature 因 browser profile WS 升级仍需保留，未收窄。
+- tokio-tungstenite 0.28 全仓单版本（workspace 根引用，`aether-gateway` 改为 `workspace = true`）；新增 `tokio-rustls 0.26` workspace 条目用于非指纹链路的 rustls 直连/CONNECT TLS。
+
+### 剩余触发条件（承接上文，不变）
+
+- 作者发布稳定大版本（非 yank ≥ 4 周）→ 评估整体退出。
+- rc.28 安全公告/依赖冲突 → 先保指纹链路可用性预案。
+- 指纹模板失效 → 升级 wreq/wreq-util 优先。
+- 探测工具（responses_ws_probe）与集成测试中的 wreq 下游客户端可在后续批次顺手迁到 tokio-tungstenite，进一步缩小测试面依赖；不影响生产爆炸半径结论。
