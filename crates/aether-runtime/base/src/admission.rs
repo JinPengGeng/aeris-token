@@ -417,8 +417,10 @@ mod tests {
         );
         let mut body = wrapped.into_body().into_data_stream();
 
-        tx.send(Ok(axum::body::Bytes::from_static(b"data: {\"chunk\":1}\n\n")))
-            .expect("chunk should be accepted");
+        tx.send(Ok(axum::body::Bytes::from_static(
+            b"data: {\"chunk\":1}\n\n",
+        )))
+        .expect("chunk should be accepted");
         let first = tokio::time::timeout(std::time::Duration::from_millis(100), body.next())
             .await
             .expect("first chunk should arrive")
@@ -427,8 +429,10 @@ mod tests {
         assert_eq!(first.as_ref(), b"data: {\"chunk\":1}\n\n");
 
         healthy.store(false, Ordering::Release);
-        tx.send(Ok(axum::body::Bytes::from_static(b"data: {\"chunk\":2}\n\n")))
-            .expect("chunk should be accepted");
+        tx.send(Ok(axum::body::Bytes::from_static(
+            b"data: {\"chunk\":2}\n\n",
+        )))
+        .expect("chunk should be accepted");
         let mut tail = first.to_vec();
         while let Some(item) =
             tokio::time::timeout(std::time::Duration::from_millis(100), body.next())
@@ -440,7 +444,10 @@ mod tests {
         }
         let text = String::from_utf8(tail).expect("SSE body should be utf-8");
         assert!(text.contains("data: {\"chunk\":1}"));
-        assert!(!text.contains("chunk\":2"), "late data must be dropped: {text}");
+        assert!(
+            !text.contains("chunk\":2"),
+            "late data must be dropped: {text}"
+        );
         assert!(
             text.contains("event: error") && text.contains("admission_lease_expired"),
             "SSE body should end with an explicit error event: {text}"
