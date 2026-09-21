@@ -2239,10 +2239,10 @@ async fn execution_plan_balance_capacity_response(
             used_usd: 0.0,
             remaining_usd: 0.0,
             retry_after: 60,
-            reset_at_unix_secs: (std::time::SystemTime::now()
+            reset_at_unix_secs: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() + 60)
-                .unwrap_or(0)) as u64,
+                .unwrap_or(0),
             timezone: "UTC".to_string(),
         };
         let mut response = crate::api::response::build_local_daily_usage_limited_response(
