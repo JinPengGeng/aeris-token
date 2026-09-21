@@ -34,7 +34,8 @@ pub(crate) use self::app::{
     FrontdoorRuntimeGuardConfig, REQUEST_BODY_BUFFER_PERMIT_BYTES,
 };
 pub use self::app::{
-    AppState, AuthContextCacheConfig, DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+    AdminSecurityCacheConfig, AppState, AuthContextCacheConfig,
+    DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS, DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
     DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS, DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS,
 };
 pub(crate) use self::cache::{

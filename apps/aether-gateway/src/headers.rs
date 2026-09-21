@@ -4,7 +4,7 @@ use std::{
     fmt,
     io::Read,
     net::{IpAddr, SocketAddr},
-    sync::LazyLock,
+    sync::{LazyLock, OnceLock},
 };
 
 use crate::constants::*;
@@ -69,24 +69,67 @@ fn body_limit_bytes(value: Option<&str>, default_bytes: u64) -> u64 {
 }
 
 static TRUSTED_PROXY_CIDRS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    std::env::var(TRUSTED_PROXY_CIDRS_ENV)
-        .unwrap_or_else(|_| "127.0.0.0/8,::1/128".to_string())
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && valid_ip_or_cidr(value))
-        .map(ToOwned::to_owned)
-        .collect()
+    trusted_cidrs_from_config(
+        TRUSTED_PROXY_CIDRS_ENV,
+        startup_trusted_cidrs_config().proxy_cidrs.as_deref(),
+    )
 });
 
 static TRUSTED_INGRESS_CIDRS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    std::env::var(TRUSTED_INGRESS_CIDRS_ENV)
-        .unwrap_or_else(|_| "127.0.0.0/8,::1/128".to_string())
+    trusted_cidrs_from_config(
+        TRUSTED_INGRESS_CIDRS_ENV,
+        startup_trusted_cidrs_config().ingress_cidrs.as_deref(),
+    )
+});
+
+/// 启动期由 clap 解析的信任 CIDR 配置快照。
+#[derive(Debug, Clone, Default)]
+pub struct TrustedCidrsStartupConfig {
+    pub proxy_cidrs: Option<String>,
+    pub ingress_cidrs: Option<String>,
+}
+
+static TRUSTED_CIDRS_STARTUP_CONFIG: OnceLock<TrustedCidrsStartupConfig> = OnceLock::new();
+
+/// 注入启动期解析后的信任 CIDR 配置（仅首次调用生效）。
+pub fn init_trusted_cidrs_config(config: TrustedCidrsStartupConfig) {
+    let _ = TRUSTED_CIDRS_STARTUP_CONFIG.set(config);
+}
+
+/// 启动 fail-fast 用的 clap 值解析器:拒绝任何无法解析为 IP/CIDR 的条目。
+pub fn parse_trusted_cidrs_value(value: &str) -> Result<String, String> {
+    let invalid = value
         .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty() && !valid_ip_or_cidr(entry))
+        .collect::<Vec<_>>();
+    if invalid.is_empty() {
+        Ok(value.to_string())
+    } else {
+        Err(format!("包含无效的 IP/CIDR 条目: {}", invalid.join(", ")))
+    }
+}
+
+fn startup_trusted_cidrs_config() -> &'static TrustedCidrsStartupConfig {
+    TRUSTED_CIDRS_STARTUP_CONFIG.get_or_init(TrustedCidrsStartupConfig::default)
+}
+
+fn trusted_cidrs_from_config(env_name: &str, configured: Option<&str>) -> Vec<String> {
+    // 启动期 clap 配置优先;未注入时回退读取环境变量以保持既有进程内测试路径可用。
+    let raw = configured
+        .map(ToOwned::to_owned)
+        .or_else(|| std::env::var(env_name).ok())
+        .unwrap_or_else(|| "127.0.0.0/8,::1/128".to_string());
+    parse_trusted_cidrs(&raw)
+}
+
+fn parse_trusted_cidrs(raw: &str) -> Vec<String> {
+    raw.split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty() && valid_ip_or_cidr(value))
         .map(ToOwned::to_owned)
         .collect()
-});
+}
 
 pub(crate) fn max_request_body_bytes() -> u64 {
     *MAX_REQUEST_BODY_BYTES

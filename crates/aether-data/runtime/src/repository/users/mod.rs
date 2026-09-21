@@ -9,8 +9,8 @@ pub use aether_data_contracts::repository::users::{
     StoredUserExportRow, StoredUserGroup, StoredUserGroupMember, StoredUserGroupMembership,
     StoredUserOAuthLinkSummary, StoredUserPreferenceRecord, StoredUserSessionRecord,
     StoredUserSummary, UpsertUserGroupRecord, UserExportListQuery, UserExportSortBy,
-    UserExportSortOrder, UserExportSummary, UserReadRepository, LAST_ACTIVE_ADMIN_DELETE_DENIED,
-    LAST_ACTIVE_ADMIN_UPDATE_DENIED,
+    UserExportSortOrder, UserExportSummary, UserGroupReadRepository, UserGroupWriteRepository,
+    UserReadRepository, LAST_ACTIVE_ADMIN_DELETE_DENIED, LAST_ACTIVE_ADMIN_UPDATE_DENIED,
 };
 #[cfg(feature = "postgres")]
 pub use aether_data_postgres::SqlxUserReadRepository;

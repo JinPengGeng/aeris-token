@@ -405,7 +405,8 @@ fn apply_billing_computation(
         .unwrap_or(1.0);
     let combined_rate_multiplier = provider_rate_multiplier * api_key_billing_multiplier;
     let actual_total_cost =
-        crate::quantize_cost(computation.cost_before_final_rounding(api_key_billing_multiplier));
+        crate::quantize_cost(computation.cost_before_final_rounding(api_key_billing_multiplier))
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
     event.data.total_cost_usd = Some(computation.cost_result.cost);
     event.data.actual_total_cost_usd = Some(actual_total_cost);
     merge_billing_snapshot_metadata(

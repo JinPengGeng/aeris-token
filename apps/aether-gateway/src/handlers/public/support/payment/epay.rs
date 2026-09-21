@@ -170,14 +170,22 @@ fn epay_submit_url(endpoint_url: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
-pub(crate) fn epay_callback_base_url(configured: Option<&str>) -> Option<String> {
+pub(crate) fn epay_callback_base_url(
+    configured: Option<&str>,
+    startup_public_base_url: Option<&str>,
+) -> Option<String> {
     if let Some(configured) = configured {
         return crate::handlers::shared::normalize_payment_callback_base_url(configured).ok();
     }
 
-    std::env::var("AETHER_PUBLIC_BASE_URL")
-        .ok()
-        .or_else(|| std::env::var("PUBLIC_BASE_URL").ok())
+    startup_public_base_url
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            // 未注入启动配置时保持既有进程内测试路径可用。
+            std::env::var("AETHER_PUBLIC_BASE_URL")
+                .ok()
+                .or_else(|| std::env::var("PUBLIC_BASE_URL").ok())
+        })
         .and_then(|value| crate::handlers::shared::normalize_payment_callback_base_url(&value).ok())
 }
 
@@ -712,12 +720,15 @@ mod tests {
     #[test]
     fn epay_callback_base_requires_explicit_https_configuration() {
         assert_eq!(
-            epay_callback_base_url(Some("https://aether.example/")),
+            epay_callback_base_url(Some("https://aether.example/"), None),
             Some("https://aether.example".to_string())
         );
-        assert_eq!(epay_callback_base_url(Some("http://aether.example")), None);
         assert_eq!(
-            epay_callback_base_url(Some("https://user:secret@aether.example")),
+            epay_callback_base_url(Some("http://aether.example"), None),
+            None
+        );
+        assert_eq!(
+            epay_callback_base_url(Some("https://user:secret@aether.example"), None),
             None
         );
     }

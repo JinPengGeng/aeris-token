@@ -25,7 +25,7 @@ pub use formula_engine::{
 };
 pub use models::{BillingDimension, BillingUnit, CostBreakdown};
 pub use precision::{
-    quantize_cost, quantize_display, quantize_value, BILLING_DISPLAY_PRECISION,
+    quantize_cost, quantize_display, quantize_value, PrecisionError, BILLING_DISPLAY_PRECISION,
     BILLING_STORAGE_PRECISION,
 };
 pub use pricing::{

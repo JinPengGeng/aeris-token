@@ -1,30 +1,17 @@
 use crate::state::AdminSecurityBlacklistEntry;
 use crate::{AppState, GatewayError};
 use std::net::IpAddr;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 const ADMIN_SECURITY_BLACKLIST_PREFIX: &str = "ip:blacklist:";
 const ADMIN_SECURITY_WHITELIST_KEY: &str = "ip:whitelist";
-const ADMIN_SECURITY_CACHE_TTL_MS_ENV: &str = "AETHER_GATEWAY_SECURITY_CACHE_TTL_MS";
-const DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS: u64 = 1_000;
-const MAX_ADMIN_SECURITY_CACHE_TTL_MS: u64 = 30_000;
 const ADMIN_SECURITY_WHITELIST_CACHE_KEY: &str = "rules";
 
-static ADMIN_SECURITY_CACHE_TTL: LazyLock<Duration> = LazyLock::new(|| {
-    let ttl_ms = std::env::var(ADMIN_SECURITY_CACHE_TTL_MS_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS)
-        .min(MAX_ADMIN_SECURITY_CACHE_TTL_MS);
-    Duration::from_millis(ttl_ms)
-});
-
-fn admin_security_cache_ttl() -> Duration {
-    *ADMIN_SECURITY_CACHE_TTL
-}
-
 impl AppState {
+    fn admin_security_cache_ttl(&self) -> Duration {
+        self.admin_security_cache_config.cache_ttl
+    }
+
     pub(crate) async fn admin_security_ip_blacklisted(
         &self,
         ip_address: IpAddr,
@@ -33,7 +20,7 @@ impl AppState {
         let runtime_key = format!("{ADMIN_SECURITY_BLACKLIST_PREFIX}{cache_key}");
         Ok(self
             .admin_security_blacklist_cache
-            .get_or_load_once(cache_key, admin_security_cache_ttl(), || async {
+            .get_or_load_once(cache_key, self.admin_security_cache_ttl(), || async {
                 self.runtime_state
                     .kv_exists(&runtime_key)
                     .await
@@ -52,7 +39,7 @@ impl AppState {
             .admin_security_whitelist_cache
             .get_or_load_once(
                 ADMIN_SECURITY_WHITELIST_CACHE_KEY.to_string(),
-                admin_security_cache_ttl(),
+                self.admin_security_cache_ttl(),
                 || async {
                     self.runtime_state
                         .set_members(ADMIN_SECURITY_WHITELIST_KEY)
@@ -87,7 +74,7 @@ impl AppState {
             self.admin_security_blacklist_cache.insert(
                 ip_address.to_string(),
                 Some(true),
-                admin_security_cache_ttl(),
+                self.admin_security_cache_ttl(),
             );
         }
         Ok(true)
@@ -107,7 +94,7 @@ impl AppState {
             self.admin_security_blacklist_cache.insert(
                 ip_address.to_string(),
                 Some(false),
-                admin_security_cache_ttl(),
+                self.admin_security_cache_ttl(),
             );
         }
         Ok(removed)

@@ -32,6 +32,7 @@ fn auth_user_wallet_matches(wallet: &StoredWalletSnapshot, user_id: &str) -> boo
 use aether_data::repository::users::ResolveOAuthLinkedUserOutcome;
 use aether_data::repository::users::{
     BindUserOAuthLinkOutcome, BindUserOAuthLinkSessionExpectation, DeleteUserOAuthLinkOutcome,
+    UserGroupReadRepository, UserGroupWriteRepository,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -114,7 +115,7 @@ impl GatewayDataState {
         &self,
     ) -> Result<Vec<aether_data::repository::users::StoredUserGroup>, DataLayerError> {
         match &self.user_reader {
-            Some(repository) => repository.list_user_groups().await,
+            Some(repository) => UserGroupReadRepository::list_user_groups(&**repository).await,
             None => Ok(Vec::new()),
         }
     }
@@ -124,7 +125,9 @@ impl GatewayDataState {
         group_id: &str,
     ) -> Result<Option<aether_data::repository::users::StoredUserGroup>, DataLayerError> {
         match &self.user_reader {
-            Some(repository) => repository.find_user_group_by_id(group_id).await,
+            Some(repository) => {
+                UserGroupReadRepository::find_user_group_by_id(&**repository, group_id).await
+            }
             None => Ok(None),
         }
     }
@@ -134,7 +137,9 @@ impl GatewayDataState {
         group_ids: &[String],
     ) -> Result<Vec<aether_data::repository::users::StoredUserGroup>, DataLayerError> {
         match &self.user_reader {
-            Some(repository) => repository.list_user_groups_by_ids(group_ids).await,
+            Some(repository) => {
+                UserGroupReadRepository::list_user_groups_by_ids(&**repository, group_ids).await
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -144,7 +149,9 @@ impl GatewayDataState {
         record: aether_data::repository::users::UpsertUserGroupRecord,
     ) -> Result<Option<aether_data::repository::users::StoredUserGroup>, DataLayerError> {
         match &self.user_reader {
-            Some(repository) => repository.create_user_group(record).await,
+            Some(repository) => {
+                UserGroupWriteRepository::create_user_group(&**repository, record).await
+            }
             None => Ok(None),
         }
     }
@@ -155,7 +162,9 @@ impl GatewayDataState {
         record: aether_data::repository::users::UpsertUserGroupRecord,
     ) -> Result<Option<aether_data::repository::users::StoredUserGroup>, DataLayerError> {
         match &self.user_reader {
-            Some(repository) => repository.update_user_group(group_id, record).await,
+            Some(repository) => {
+                UserGroupWriteRepository::update_user_group(&**repository, group_id, record).await
+            }
             None => Ok(None),
         }
     }
@@ -177,7 +186,9 @@ impl GatewayDataState {
 
     pub(crate) async fn delete_user_group(&self, group_id: &str) -> Result<bool, DataLayerError> {
         match &self.user_reader {
-            Some(repository) => repository.delete_user_group(group_id).await,
+            Some(repository) => {
+                UserGroupWriteRepository::delete_user_group(&**repository, group_id).await
+            }
             None => Ok(false),
         }
     }
@@ -187,7 +198,9 @@ impl GatewayDataState {
         group_id: &str,
     ) -> Result<Vec<aether_data::repository::users::StoredUserGroupMember>, DataLayerError> {
         match &self.user_reader {
-            Some(repository) => repository.list_user_group_members(group_id).await,
+            Some(repository) => {
+                UserGroupReadRepository::list_user_group_members(&**repository, group_id).await
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -229,7 +242,9 @@ impl GatewayDataState {
         user_id: &str,
     ) -> Result<Vec<aether_data::repository::users::StoredUserGroup>, DataLayerError> {
         match &self.user_reader {
-            Some(repository) => repository.list_user_groups_for_user(user_id).await,
+            Some(repository) => {
+                UserGroupReadRepository::list_user_groups_for_user(&**repository, user_id).await
+            }
             None => Ok(Vec::new()),
         }
     }
@@ -286,7 +301,9 @@ impl GatewayDataState {
         user_id: &str,
     ) -> Result<bool, DataLayerError> {
         match &self.user_reader {
-            Some(repository) => repository.add_user_to_group(group_id, user_id).await,
+            Some(repository) => {
+                UserGroupWriteRepository::add_user_to_group(&**repository, group_id, user_id).await
+            }
             None => Ok(false),
         }
     }
@@ -2831,7 +2848,8 @@ impl GatewayDataState {
         let Some(repository) = self.user_reader.as_ref() else {
             return Ok(Vec::new());
         };
-        let mut groups = repository.list_user_groups_for_user(user_id).await?;
+        let mut groups =
+            UserGroupReadRepository::list_user_groups_for_user(&**repository, user_id).await?;
         let dynamic_group_ids = self.active_membership_group_ids_for_user(user_id).await?;
         if !dynamic_group_ids.is_empty() {
             groups.extend(
@@ -3881,8 +3899,9 @@ mod tests {
         let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
             sample_auth_user("admin-1", "admin"),
         ]));
-        let group = user_repository
-            .create_user_group(UpsertUserGroupRecord {
+        let group = UserGroupWriteRepository::create_user_group(
+            user_repository.as_ref(),
+            UpsertUserGroupRecord {
                 name: "Restricted".to_string(),
                 description: None,
                 priority: 10,
@@ -3896,12 +3915,12 @@ mod tests {
                 rate_limit_mode: "custom".to_string(),
                 daily_usage_limit_usd: None,
                 daily_usage_limit_mode: "inherit".to_string(),
-            })
-            .await
-            .expect("group should create")
-            .expect("group should exist");
-        user_repository
-            .add_user_to_group(&group.id, "admin-1")
+            },
+        )
+        .await
+        .expect("group should create")
+        .expect("group should exist");
+        UserGroupWriteRepository::add_user_to_group(user_repository.as_ref(), &group.id, "admin-1")
             .await
             .expect("group membership should create");
 
@@ -4000,8 +4019,9 @@ mod tests {
         let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
             user.clone()
         ]));
-        let group = user_repository
-            .create_user_group(UpsertUserGroupRecord {
+        let group = UserGroupWriteRepository::create_user_group(
+            user_repository.as_ref(),
+            UpsertUserGroupRecord {
                 name: "Group Policy".to_string(),
                 description: None,
                 priority: 10,
@@ -4015,12 +4035,12 @@ mod tests {
                 rate_limit_mode: "custom".to_string(),
                 daily_usage_limit_usd: None,
                 daily_usage_limit_mode: "inherit".to_string(),
-            })
-            .await
-            .expect("group should create")
-            .expect("group should exist");
-        user_repository
-            .add_user_to_group(&group.id, "user-1")
+            },
+        )
+        .await
+        .expect("group should create")
+        .expect("group should exist");
+        UserGroupWriteRepository::add_user_to_group(user_repository.as_ref(), &group.id, "user-1")
             .await
             .expect("group membership should create");
 
@@ -4075,8 +4095,9 @@ mod tests {
         let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
             sample_auth_user("user-search", "user"),
         ]));
-        let group = user_repository
-            .create_user_group(UpsertUserGroupRecord {
+        let group = UserGroupWriteRepository::create_user_group(
+            user_repository.as_ref(),
+            UpsertUserGroupRecord {
                 name: "Responses".to_string(),
                 description: None,
                 priority: 10,
@@ -4090,14 +4111,18 @@ mod tests {
                 rate_limit_mode: "system".to_string(),
                 daily_usage_limit_usd: None,
                 daily_usage_limit_mode: "inherit".to_string(),
-            })
-            .await
-            .expect("group should create")
-            .expect("group should exist");
-        user_repository
-            .add_user_to_group(&group.id, "user-search")
-            .await
-            .expect("group membership should create");
+            },
+        )
+        .await
+        .expect("group should create")
+        .expect("group should exist");
+        UserGroupWriteRepository::add_user_to_group(
+            user_repository.as_ref(),
+            &group.id,
+            "user-search",
+        )
+        .await
+        .expect("group membership should create");
 
         let state = GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository)
             .with_user_reader(user_repository);
