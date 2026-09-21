@@ -125,8 +125,9 @@ use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
 use aether_gateway::{
     attach_static_frontend, build_router_with_state,
     prewarm_direct_h2c_sender_cache_from_env_for_startup, set_gateway_frontdoor_app_port, AppState,
-    FrontdoorCorsConfig, FrontdoorUserRpmConfig, GatewayDataConfig, UsageRuntimeConfig,
-    VideoTaskTruthSourceMode,
+    AuthContextCacheConfig, FrontdoorCorsConfig, FrontdoorUserRpmConfig, GatewayDataConfig,
+    UsageRuntimeConfig, VideoTaskTruthSourceMode, DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+    DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS, DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS,
 };
 use aether_gateway_frontdoor::{http_connection_limit, HttpConnectionBudget};
 use aether_runtime::{
@@ -1654,6 +1655,29 @@ struct Args {
     #[arg(long, env = "AETHER_GATEWAY_VIDEO_TASK_STORE_PATH")]
     video_task_store_path: Option<String>,
 
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES",
+        default_value_t = DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    auth_context_cache_max_entries: usize,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS",
+        default_value_t = DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS,
+        value_parser = clap::value_parser!(u64).range(1..=10)
+    )]
+    auth_context_cache_refresh_interval_secs: u64,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS",
+        default_value_t = DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS
+    )]
+    auth_context_negative_cache_ttl_secs: u64,
+
     #[arg(long, env = "AETHER_GATEWAY_MAX_IN_FLIGHT_REQUESTS")]
     max_in_flight_requests: Option<usize>,
 
@@ -2473,6 +2497,15 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut state = AppState::new()?
+        .with_auth_context_cache_config(AuthContextCacheConfig {
+            max_entries: args.auth_context_cache_max_entries,
+            refresh_interval: std::time::Duration::from_secs(
+                args.auth_context_cache_refresh_interval_secs,
+            ),
+            negative_cache_ttl: std::time::Duration::from_secs(
+                args.auth_context_negative_cache_ttl_secs,
+            ),
+        })
         .with_runtime_state(runtime_state)
         .with_data_config_and_background_isolation(data_config, isolate_background_database)?
         .with_usage_runtime_config(usage_config)?
@@ -3705,12 +3738,13 @@ mod tests {
         GatewayDataArgs, GatewayFrontdoorArgs, GatewayLogDestinationArg, GatewayLogFormatArg,
         GatewayLogRotationArg, GatewayLoggingArgs, GatewayRateLimitArgs, GatewayUsageArgs,
         NodeRoleArg, RuntimeBackendArg, VideoTaskTruthSourceArg,
-        DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, DEFAULT_GATEWAY_HTTP_HEADER_MAX_BYTES,
-        DEFAULT_GATEWAY_HTTP_HEADER_READ_TIMEOUT_MS, DEFAULT_GATEWAY_HTTP_MAX_HEADERS,
-        DEFAULT_GATEWAY_LISTENER_SHARDS, DEFAULT_GATEWAY_LISTEN_BACKLOG,
-        MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, MAX_GATEWAY_LISTENER_SHARDS,
-        MAX_GATEWAY_LISTEN_BACKLOG, MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
-        MIN_GATEWAY_LISTEN_BACKLOG,
+        DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES, DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS,
+        DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS, DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
+        DEFAULT_GATEWAY_HTTP_HEADER_MAX_BYTES, DEFAULT_GATEWAY_HTTP_HEADER_READ_TIMEOUT_MS,
+        DEFAULT_GATEWAY_HTTP_MAX_HEADERS, DEFAULT_GATEWAY_LISTENER_SHARDS,
+        DEFAULT_GATEWAY_LISTEN_BACKLOG, MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
+        MAX_GATEWAY_LISTENER_SHARDS, MAX_GATEWAY_LISTEN_BACKLOG,
+        MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, MIN_GATEWAY_LISTEN_BACKLOG,
     };
     use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
     use aether_gateway::AppState;
@@ -3750,6 +3784,10 @@ mod tests {
             video_task_poller_interval_ms: 5_000,
             video_task_poller_batch_size: 32,
             video_task_store_path: None,
+            auth_context_cache_max_entries: DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+            auth_context_cache_refresh_interval_secs:
+                DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS,
+            auth_context_negative_cache_ttl_secs: DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS,
             max_in_flight_requests: None,
             max_http_connections: None,
             max_websocket_connections: None,
