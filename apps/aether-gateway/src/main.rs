@@ -1340,6 +1340,13 @@ struct GatewayRateLimitArgs {
     /// Keep the secure fail-closed behavior as the production default.
     #[arg(long, env = "RATE_LIMIT_FAIL_OPEN", default_value_t = false)]
     fail_open: bool,
+
+    /// Consistency-first mode: when shared runtime state (Redis) is
+    /// unavailable, reject requests instead of degrading to per-node
+    /// behavior. Disables the RPM local fallback and makes the daily usage
+    /// quota check fail closed. Default keeps existing semantics.
+    #[arg(long, env = "AETHER_CONSISTENCY_FIRST", default_value_t = false)]
+    consistency_first: bool,
 }
 
 impl GatewayRateLimitArgs {
@@ -2386,6 +2393,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?,
     );
     let rate_limit_config = if matches!(args.deployment_topology, DeploymentTopologyArg::MultiNode)
+        || args.rate_limit.consistency_first
     {
         args.rate_limit.config().with_local_fallback(false)
     } else {
@@ -2434,6 +2442,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         frontdoor_rpm_key_ttl_seconds = args.rate_limit.key_ttl_seconds,
         frontdoor_rpm_fail_open = args.rate_limit.fail_open,
         frontdoor_rpm_allow_local_fallback = rate_limit_config.allow_local_fallback(),
+        consistency_first = args.rate_limit.consistency_first,
+        frontdoor_daily_usage_fail_open = !args.rate_limit.consistency_first,
         video_task_poller_interval_ms = args.video_task_poller_interval_ms,
         video_task_poller_batch_size = args.video_task_poller_batch_size,
         video_task_store_path = args.video_task_store_path.as_deref().unwrap_or("-"),
@@ -2514,6 +2524,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         state = state.with_frontdoor_cors_config(cors_config);
     }
     state = state.with_frontdoor_user_rpm_config(rate_limit_config);
+    if args.rate_limit.consistency_first {
+        state = state.with_frontdoor_daily_usage_fail_open(false);
+    }
     if matches!(
         args.video_task_truth_source_mode,
         VideoTaskTruthSourceArg::RustAuthoritative
@@ -3856,6 +3869,7 @@ mod tests {
                 bucket_seconds: 60,
                 key_ttl_seconds: 120,
                 fail_open: false,
+                consistency_first: false,
             },
             logging: GatewayLoggingArgs {
                 log_format: GatewayLogFormatArg::Pretty,
