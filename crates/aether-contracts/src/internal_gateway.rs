@@ -2,14 +2,18 @@ use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use sha2::{Digest as _, Sha256};
 
+/// Constant: internal gateway auth timestamp header.
 pub const INTERNAL_GATEWAY_AUTH_TIMESTAMP_HEADER: &str = "x-aether-internal-gateway-timestamp";
+/// Constant: internal gateway auth nonce header.
 pub const INTERNAL_GATEWAY_AUTH_NONCE_HEADER: &str = "x-aether-internal-gateway-nonce";
+/// Constant: internal gateway auth signature header.
 pub const INTERNAL_GATEWAY_AUTH_SIGNATURE_HEADER: &str = "x-aether-internal-gateway-signature";
 
 const INTERNAL_GATEWAY_AUTH_CONTEXT: &[u8] = b"aether-internal-gateway-auth-v1";
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Function: sign internal gateway request.
 pub fn sign_internal_gateway_request(
     secret: &[u8],
     method: &str,
@@ -30,6 +34,7 @@ pub fn sign_internal_gateway_request(
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
 }
 
+/// Function: verify internal gateway request signature.
 pub fn verify_internal_gateway_request_signature(
     secret: &[u8],
     method: &str,

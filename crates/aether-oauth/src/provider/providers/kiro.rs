@@ -10,29 +10,49 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+/// Constant: kiro provider type.
 pub const KIRO_PROVIDER_TYPE: &str = "kiro";
+/// Constant: default region.
 pub const DEFAULT_REGION: &str = "us-east-1";
+/// Constant: default kiro version.
 pub const DEFAULT_KIRO_VERSION: &str = "0.3.210";
+/// Constant: default node version.
 pub const DEFAULT_NODE_VERSION: &str = "22.21.1";
+/// Constant: default system version.
 pub const DEFAULT_SYSTEM_VERSION: &str = "other#unknown";
 const IDC_AMZ_USER_AGENT: &str =
     "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE";
 
 #[derive(Clone, PartialEq, Eq)]
+/// Data type: kiro auth config.
 pub struct KiroAuthConfig {
+/// Field: auth method.
     pub auth_method: Option<String>,
+/// Field: refresh token.
     pub refresh_token: Option<String>,
+/// Field: expires at.
     pub expires_at: Option<u64>,
+/// Field: profile arn.
     pub profile_arn: Option<String>,
+/// Field: region.
     pub region: Option<String>,
+/// Field: auth region.
     pub auth_region: Option<String>,
+/// Field: api region.
     pub api_region: Option<String>,
+/// Field: client id.
     pub client_id: Option<String>,
+/// Field: client secret.
     pub client_secret: Option<String>,
+/// Field: machine id.
     pub machine_id: Option<String>,
+/// Field: kiro version.
     pub kiro_version: Option<String>,
+/// Field: system version.
     pub system_version: Option<String>,
+/// Field: node version.
     pub node_version: Option<String>,
+/// Field: access token.
     pub access_token: Option<String>,
 }
 
@@ -106,6 +126,7 @@ pub fn normalize_kiro_region(value: &str) -> &str {
 }
 
 impl KiroAuthConfig {
+/// Constructor / associated function: from json value.
     pub fn from_json_value(value: &Value) -> Option<Self> {
         let object = value.as_object()?;
         Some(Self {
@@ -131,11 +152,13 @@ impl KiroAuthConfig {
         })
     }
 
+/// Constructor / associated function: from raw json.
     pub fn from_raw_json(raw: Option<&str>) -> Option<Self> {
         let parsed: Value = serde_json::from_str(raw?.trim()).ok()?;
         Self::from_json_value(&parsed)
     }
 
+/// Method: to json value.
     pub fn to_json_value(&self) -> Value {
         let mut object = serde_json::Map::new();
         insert_string(&mut object, "auth_method", self.auth_method.as_deref());
@@ -161,6 +184,7 @@ impl KiroAuthConfig {
         Value::Object(object)
     }
 
+/// Method: effective auth region.
     pub fn effective_auth_region(&self) -> &str {
         for candidate in [self.auth_region.as_deref(), self.region.as_deref()] {
             let Some(candidate) = candidate else {
@@ -174,6 +198,7 @@ impl KiroAuthConfig {
         DEFAULT_REGION
     }
 
+/// Method: effective api region.
     pub fn effective_api_region(&self) -> &str {
         self.api_region
             .as_deref()
@@ -181,6 +206,7 @@ impl KiroAuthConfig {
             .unwrap_or(DEFAULT_REGION)
     }
 
+/// Method: effective kiro version.
     pub fn effective_kiro_version(&self) -> &str {
         self.kiro_version
             .as_deref()
@@ -189,6 +215,7 @@ impl KiroAuthConfig {
             .unwrap_or(DEFAULT_KIRO_VERSION)
     }
 
+/// Method: effective system version.
     pub fn effective_system_version(&self) -> &str {
         self.system_version
             .as_deref()
@@ -197,6 +224,7 @@ impl KiroAuthConfig {
             .unwrap_or(DEFAULT_SYSTEM_VERSION)
     }
 
+/// Method: effective node version.
     pub fn effective_node_version(&self) -> &str {
         self.node_version
             .as_deref()
@@ -205,6 +233,7 @@ impl KiroAuthConfig {
             .unwrap_or(DEFAULT_NODE_VERSION)
     }
 
+/// Method: cached access token.
     pub fn cached_access_token(&self) -> Option<&str> {
         self.access_token
             .as_deref()
@@ -212,6 +241,7 @@ impl KiroAuthConfig {
             .filter(|value| !value.is_empty())
     }
 
+/// Method: cached access token requires refresh.
     pub fn cached_access_token_requires_refresh(&self, skew_seconds: u64) -> bool {
         let Some(expires_at) = self.expires_at else {
             return self.can_refresh_access_token();
@@ -220,6 +250,7 @@ impl KiroAuthConfig {
         now >= expires_at.saturating_sub(skew_seconds)
     }
 
+/// Method: is idc auth.
     pub fn is_idc_auth(&self) -> bool {
         let explicit_method = self
             .auth_method
@@ -242,6 +273,7 @@ impl KiroAuthConfig {
                 .is_some()
     }
 
+/// Method: uses external idp token type.
     pub fn uses_external_idp_token_type(&self) -> bool {
         self.auth_method
             .as_deref()
@@ -250,6 +282,7 @@ impl KiroAuthConfig {
             == Some("external_idp")
     }
 
+/// Method: profile arn for payload.
     pub fn profile_arn_for_payload(&self) -> Option<&str> {
         if self.is_idc_auth() {
             return None;
@@ -260,6 +293,7 @@ impl KiroAuthConfig {
             .filter(|value| !value.is_empty())
     }
 
+/// Method: profile arn for mcp.
     pub fn profile_arn_for_mcp(&self) -> Option<&str> {
         self.profile_arn
             .as_deref()
@@ -267,6 +301,7 @@ impl KiroAuthConfig {
             .filter(|value| !value.is_empty())
     }
 
+/// Method: can refresh access token.
     pub fn can_refresh_access_token(&self) -> bool {
         let refresh_token = self
             .refresh_token
@@ -295,12 +330,14 @@ impl KiroAuthConfig {
 }
 
 #[derive(Debug, Clone, Default)]
+/// Data type: kiro provider oauth adapter.
 pub struct KiroProviderOAuthAdapter {
     social_refresh_base_url: Option<String>,
     idc_refresh_base_url: Option<String>,
 }
 
 impl KiroProviderOAuthAdapter {
+/// Method: with refresh base urls.
     pub fn with_refresh_base_urls(
         mut self,
         social_refresh_base_url: Option<String>,
@@ -311,6 +348,7 @@ impl KiroProviderOAuthAdapter {
         self
     }
 
+/// Method: refresh auth config.
     pub async fn refresh_auth_config(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -580,6 +618,7 @@ impl ProviderOAuthAdapter for KiroProviderOAuthAdapter {
     }
 }
 
+/// Function: generate kiro machine id.
 pub fn generate_kiro_machine_id(
     auth_config: &KiroAuthConfig,
     fallback_secret: Option<&str>,
@@ -648,6 +687,7 @@ fn resolve_expires_at(payload: &Value) -> u64 {
     current_unix_secs().saturating_add(expires_in)
 }
 
+/// Function: normalize kiro machine id.
 pub fn normalize_kiro_machine_id(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.len() == 64 && raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {

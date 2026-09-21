@@ -1117,12 +1117,11 @@ mod tests {
                 state: Arc::clone(&state),
                 server_contexts,
             });
-        let port = reserve_local_port().expect("diagnostics port should reserve");
-        let handle = spawn_router_on_port(port, router)
+        let (addr, handle) = spawn_router_on_port(0, router)
             .await
             .expect("diagnostics test server should start");
         let client = reqwest::Client::new();
-        let base_url = format!("http://127.0.0.1:{port}");
+        let base_url = format!("http://{addr}");
 
         let health: serde_json::Value = client
             .get(format!("{base_url}/health"))
@@ -1286,22 +1285,28 @@ mod tests {
         let router = Router::new()
             .route("/api/admin/proxy-nodes/register", post(fake_register))
             .with_state(register_hits);
-        spawn_router_on_port(port, router).await
+        spawn_router_on_port(port, router).await.map(|(_addr, handle)| handle)
     }
 
     async fn spawn_router_on_port(
         port: u16,
         app: Router,
-    ) -> Result<tokio::task::JoinHandle<()>, std::io::Error> {
+    ) -> Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>), std::io::Error> {
+        // Bind first, then read the address back: reserving a port and
+        // rebinding later leaves a window where another test can grab it.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-        Ok(tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .await
-            .expect("gateway test server should run");
-        }))
+        let addr = listener.local_addr()?;
+        Ok((
+            addr,
+            tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .expect("gateway test server should run");
+            }),
+        ))
     }
 
     fn reserve_local_port() -> Result<u16, std::io::Error> {

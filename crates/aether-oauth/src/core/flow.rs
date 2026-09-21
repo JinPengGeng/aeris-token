@@ -1,15 +1,25 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, PartialEq, Eq)]
+/// Data type: oauth provider metadata.
 pub struct OAuthProviderMetadata {
+/// Field: provider type.
     pub provider_type: String,
+/// Field: display name.
     pub display_name: String,
+/// Field: authorize url.
     pub authorize_url: String,
+/// Field: token url.
     pub token_url: String,
+/// Field: client id.
     pub client_id: String,
+/// Field: client secret.
     pub client_secret: Option<String>,
+/// Field: scopes.
     pub scopes: Vec<String>,
+/// Field: redirect uri.
     pub redirect_uri: String,
+/// Field: use pkce.
     pub use_pkce: bool,
 }
 
@@ -34,10 +44,15 @@ impl std::fmt::Debug for OAuthProviderMetadata {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+/// Data type: oauth authorize request.
 pub struct OAuthAuthorizeRequest {
+/// Field: state.
     pub state: String,
+/// Field: code challenge.
     pub code_challenge: Option<String>,
+/// Field: prompt.
     pub prompt: Option<String>,
+/// Field: login hint.
     pub login_hint: Option<String>,
 }
 
@@ -57,10 +72,14 @@ impl std::fmt::Debug for OAuthAuthorizeRequest {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize)]
+/// Data type: oauth authorize response.
 pub struct OAuthAuthorizeResponse {
+/// Field: authorize url.
     pub authorize_url: String,
+/// Field: state.
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+/// Field: code challenge.
     pub code_challenge: Option<String>,
 }
 
@@ -79,9 +98,13 @@ impl std::fmt::Debug for OAuthAuthorizeResponse {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+/// Data type: oauth callback.
 pub struct OAuthCallback {
+/// Field: code.
     pub code: String,
+/// Field: state.
     pub state: String,
+/// Field: scope.
     pub scope: Option<String>,
 }
 
@@ -97,12 +120,19 @@ impl std::fmt::Debug for OAuthCallback {
 }
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+/// Data type: oauth device authorization.
 pub struct OAuthDeviceAuthorization {
+/// Field: device code.
     pub device_code: String,
+/// Field: user code.
     pub user_code: String,
+/// Field: verification uri.
     pub verification_uri: String,
+/// Field: verification uri complete.
     pub verification_uri_complete: String,
+/// Field: expires in.
     pub expires_in: u64,
+/// Field: interval.
     pub interval: u64,
 }
 

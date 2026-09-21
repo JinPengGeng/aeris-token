@@ -20,13 +20,18 @@ use super::claude_code::{
     CLAUDE_CODE_PROVIDER_TYPE, CLAUDE_CODE_REDIRECT_URI, CLAUDE_CODE_TOKEN_URL,
 };
 
+/// Constant: gemini cli oauth client id env.
 pub const GEMINI_CLI_OAUTH_CLIENT_ID_ENV: &str = "AETHER_GEMINI_CLI_OAUTH_CLIENT_ID";
+/// Constant: gemini cli oauth client secret env.
 pub const GEMINI_CLI_OAUTH_CLIENT_SECRET_ENV: &str = "AETHER_GEMINI_CLI_OAUTH_CLIENT_SECRET";
+/// Constant: antigravity oauth client id env.
 pub const ANTIGRAVITY_OAUTH_CLIENT_ID_ENV: &str = "AETHER_ANTIGRAVITY_OAUTH_CLIENT_ID";
+/// Constant: antigravity oauth client secret env.
 pub const ANTIGRAVITY_OAUTH_CLIENT_SECRET_ENV: &str = "AETHER_ANTIGRAVITY_OAUTH_CLIENT_SECRET";
 const CODEX_IDENTITY_FINGERPRINT_FIELD: &str = "codex_identity_fingerprint";
 const CODEX_IDENTITY_FINGERPRINT_VERSION: &str = "codex-persisted-fingerprint:v1";
 
+/// Function: derive codex identity fingerprint.
 pub fn derive_codex_identity_fingerprint(
     account_id: Option<&str>,
     account_user_id: Option<&str>,
@@ -54,21 +59,35 @@ pub fn derive_codex_identity_fingerprint(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Data type: generic provider oauth template.
 pub struct GenericProviderOAuthTemplate {
+/// Field: provider type.
     pub provider_type: &'static str,
+/// Field: display name.
     pub display_name: &'static str,
+/// Field: authorize url.
     pub authorize_url: &'static str,
+/// Field: token url.
     pub token_url: &'static str,
+/// Field: client id.
     pub client_id: &'static str,
+/// Field: client id env.
     pub client_id_env: Option<&'static str>,
+/// Field: client secret env.
     pub client_secret_env: Option<&'static str>,
+/// Field: scopes.
     pub scopes: &'static [&'static str],
+/// Field: redirect uri.
     pub redirect_uri: &'static str,
+/// Field: use pkce.
     pub use_pkce: bool,
+/// Field: uses json payload.
     pub uses_json_payload: bool,
+/// Field: include scope in token request.
     pub include_scope_in_token_request: bool,
 }
 
+/// Constant: generic provider oauth templates.
 pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
     GenericProviderOAuthTemplate {
         provider_type: CLAUDE_CODE_PROVIDER_TYPE,
@@ -174,6 +193,7 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
 ];
 
 #[derive(Clone)]
+/// Data type: generic provider oauth adapter.
 pub struct GenericProviderOAuthAdapter {
     template: GenericProviderOAuthTemplate,
     token_url_override: Option<String>,
@@ -194,6 +214,7 @@ impl std::fmt::Debug for GenericProviderOAuthAdapter {
 }
 
 impl GenericProviderOAuthAdapter {
+/// Constructor / associated function: new.
     pub fn new(template: GenericProviderOAuthTemplate) -> Self {
         Self {
             template,
@@ -203,15 +224,18 @@ impl GenericProviderOAuthAdapter {
         }
     }
 
+/// Constructor / associated function: for provider type.
     pub fn for_provider_type(provider_type: &str) -> Option<Self> {
         template_for_provider_type(provider_type).map(Self::new)
     }
 
+/// Method: with token url override.
     pub fn with_token_url_override(mut self, token_url: impl Into<String>) -> Self {
         self.token_url_override = Some(token_url.into());
         self
     }
 
+/// Method: with token url for tests.
     pub fn with_token_url_for_tests(self, token_url: impl Into<String>) -> Self {
         self.with_token_url_override(token_url)
     }

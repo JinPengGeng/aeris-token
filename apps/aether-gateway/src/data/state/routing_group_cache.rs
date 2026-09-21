@@ -382,6 +382,7 @@ impl From<&DataLayerError> for SharedDataLayerError {
             DataLayerError::Postgres(message) => Self::Postgres(message.clone()),
             DataLayerError::Redis(message) => Self::Redis(message.clone()),
             DataLayerError::Sql(message) => Self::Sql(message.clone()),
+            DataLayerError::Sqlx(error) => Self::Postgres(error.to_string()),
             DataLayerError::TimedOut(message) => Self::TimedOut(message.clone()),
             DataLayerError::UnexpectedValue(message) => Self::UnexpectedValue(message.clone()),
         }

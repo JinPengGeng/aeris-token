@@ -182,7 +182,7 @@ where
                     }
                 }
                 _ = ping_ticker.tick(), if high_open || normal_open => {
-                    if let Err(e) = send_message(&mut sink, Message::Ping(vec![])).await {
+                    if let Err(e) = send_message(&mut sink, Message::Ping(bytes::Bytes::new())).await {
                         error!(error = %e, "failed to send WebSocket ping");
                         if let Some(metrics) = tunnel_metrics.as_deref() {
                             metrics.record_error("ws_ping_error", &e.to_string());
@@ -258,7 +258,7 @@ where
         None => frame.encode(),
     };
     let wire_len = data.len().max(HEADER_SIZE);
-    if let Err(e) = send_message(sink, Message::Binary(data.into())).await {
+    if let Err(e) = send_message(sink, Message::Binary(data)).await {
         error!(
             stream_id = stream_id,
             msg_type = ?msg_type,
@@ -323,7 +323,7 @@ mod tests {
             panic!("expected body")
         };
         assert_eq!(
-            Frame::decode(body.clone().into()).unwrap().payload,
+            Frame::decode(body.clone()).unwrap().payload,
             b"late".as_slice()
         );
     }
@@ -450,13 +450,13 @@ mod tests {
         );
         let first = match &sent[0] {
             Message::Binary(data) => {
-                Frame::decode(data.clone().into()).expect("frame should decode")
+                Frame::decode(data.clone()).expect("frame should decode")
             }
             other => panic!("unexpected first message: {other:?}"),
         };
         let second = match &sent[1] {
             Message::Binary(data) => {
-                Frame::decode(data.clone().into()).expect("frame should decode")
+                Frame::decode(data.clone()).expect("frame should decode")
             }
             other => panic!("unexpected second message: {other:?}"),
         };

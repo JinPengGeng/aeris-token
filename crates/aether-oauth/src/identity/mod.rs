@@ -1,4 +1,5 @@
 mod adapter;
+/// Module: providers.
 pub mod providers;
 mod service;
 

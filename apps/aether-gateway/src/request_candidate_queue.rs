@@ -1491,6 +1491,34 @@ fn request_candidate_write_error_disposition(
         DataLayerError::Redis(_) | DataLayerError::TimedOut(_) => {
             RequestCandidateWriteErrorDisposition::Retry
         }
+        DataLayerError::Sqlx(error) => {
+            let sqlstate = error
+                .as_database_error()
+                .and_then(|database_error| database_error.code())
+                .map(|code| code.into_owned());
+            match sqlstate {
+                Some(code) if code.starts_with("23") => {
+                    RequestCandidateWriteErrorDisposition::IsolateRecord
+                }
+                Some(code)
+                    if code.starts_with("21")
+                        || code.starts_with("22")
+                        || code.starts_with("44") =>
+                {
+                    RequestCandidateWriteErrorDisposition::IsolateRecord
+                }
+                Some(code)
+                    if code.starts_with("0A")
+                        || code.starts_with("28")
+                        || code.starts_with("3D")
+                        || code.starts_with("3F")
+                        || code.starts_with("42") =>
+                {
+                    RequestCandidateWriteErrorDisposition::DropBatch
+                }
+                _ => RequestCandidateWriteErrorDisposition::Retry,
+            }
+        }
     }
 }
 
@@ -1542,6 +1570,7 @@ fn request_candidate_write_error_kind(
         DataLayerError::Sql(_) => "sql",
         DataLayerError::Redis(_) => "redis",
         DataLayerError::TimedOut(_) => "timed_out",
+        DataLayerError::Sqlx(_) => "sql",
     }
 }
 

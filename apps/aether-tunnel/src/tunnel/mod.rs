@@ -490,7 +490,7 @@ mod tests {
             state
         };
         let router = build_router_with_state(state.clone());
-        let handle = spawn_router_on_port(port, router).await?;
+        let (_addr, handle) = spawn_router_on_port(port, router).await?;
         Ok((state, handle))
     }
 
@@ -501,7 +501,6 @@ mod tests {
         use futures_util::StreamExt;
 
         ensure_rustls_provider();
-        let upstream_port = reserve_local_port().unwrap();
         let upstream = Router::new()
             .route(
                 "/large",
@@ -519,9 +518,10 @@ mod tests {
                     )
                 }),
             );
-        let upstream_task = super::task::SessionTask::new(
-            spawn_router_on_port(upstream_port, upstream).await.unwrap(),
-        );
+        let (upstream_addr, upstream_handle) =
+            spawn_router_on_port(0, upstream).await.unwrap();
+        let upstream_port = upstream_addr.port();
+        let upstream_task = super::task::SessionTask::new(upstream_handle);
         let gateway_port = reserve_local_port().unwrap();
         let gateway_url = format!("http://127.0.0.1:{gateway_port}");
         let (_, gateway_task) = start_gateway_on_port(gateway_port).await.unwrap();
@@ -638,16 +638,22 @@ mod tests {
     async fn spawn_router_on_port(
         port: u16,
         app: Router,
-    ) -> Result<tokio::task::JoinHandle<()>, std::io::Error> {
+    ) -> Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>), std::io::Error> {
+        // Bind first, then read the address back: reserving a port and
+        // rebinding later leaves a window where another test can grab it.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-        Ok(tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .await
-            .expect("gateway test server should run");
-        }))
+        let addr = listener.local_addr()?;
+        Ok((
+            addr,
+            tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .expect("gateway test server should run");
+            }),
+        ))
     }
 
     fn reserve_local_port() -> Result<u16, std::io::Error> {

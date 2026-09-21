@@ -10,18 +10,31 @@ use crate::tunnel::{Frame, MsgType, HEADER_SIZE};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Constant: tunnel security header.
 pub const TUNNEL_SECURITY_HEADER: &str = "x-aether-tunnel-security";
+/// Constant: tunnel security session header.
 pub const TUNNEL_SECURITY_SESSION_HEADER: &str = "x-aether-tunnel-security-session";
+/// Constant: tunnel security proof timestamp header.
 pub const TUNNEL_SECURITY_PROOF_TIMESTAMP_HEADER: &str = "x-aether-tunnel-security-proof-timestamp";
+/// Constant: tunnel security proof nonce header.
 pub const TUNNEL_SECURITY_PROOF_NONCE_HEADER: &str = "x-aether-tunnel-security-proof-nonce";
+/// Constant: tunnel security proof signature header.
 pub const TUNNEL_SECURITY_PROOF_SIGNATURE_HEADER: &str = "x-aether-tunnel-security-proof-signature";
+/// Constant: tunnel generation header.
 pub const TUNNEL_GENERATION_HEADER: &str = "x-aether-tunnel-generation";
+/// Constant: tunnel control plane node id header.
 pub const TUNNEL_CONTROL_PLANE_NODE_ID_HEADER: &str = "x-aether-tunnel-control-plane-node-id";
+/// Constant: tunnel control plane generation header.
 pub const TUNNEL_CONTROL_PLANE_GENERATION_HEADER: &str = "x-aether-tunnel-control-plane-generation";
+/// Constant: tunnel control plane timestamp header.
 pub const TUNNEL_CONTROL_PLANE_TIMESTAMP_HEADER: &str = "x-aether-tunnel-control-plane-timestamp";
+/// Constant: tunnel control plane nonce header.
 pub const TUNNEL_CONTROL_PLANE_NONCE_HEADER: &str = "x-aether-tunnel-control-plane-nonce";
+/// Constant: tunnel control plane signature header.
 pub const TUNNEL_CONTROL_PLANE_SIGNATURE_HEADER: &str = "x-aether-tunnel-control-plane-signature";
+/// Constant: tunnel security non tls required.
 pub const TUNNEL_SECURITY_NON_TLS_REQUIRED: &str = "non_tls_required";
+/// Constant: flag encrypted.
 pub const FLAG_ENCRYPTED: u8 = 0x04;
 
 const CONTEXT: &[u8] = b"aether-tunnel-secure-v1";
@@ -35,31 +48,44 @@ const SEQUENCE_LEN: usize = 8;
 const NONCE_LEN: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Enumeration: tunnel security role.
 pub enum TunnelSecurityRole {
+/// Variant: client.
     Client,
+/// Variant: server.
     Server,
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Enumeration: tunnel security error.
 pub enum TunnelSecurityError {
     #[error("tunnel_encryption_key must be base64-encoded 32 bytes")]
+/// Variant: invalid key.
     InvalidKey,
     #[error("tunnel security session id must not be empty")]
+/// Variant: invalid session.
     InvalidSession,
     #[error("secure tunnel frame is missing encrypted flag")]
+/// Variant: missing encrypted flag.
     MissingEncryptedFlag,
     #[error("secure tunnel frame payload is too short")]
+/// Variant: payload too short.
     PayloadTooShort,
     #[error("secure tunnel frame sequence is not the expected next value")]
+/// Variant: unexpected sequence.
     UnexpectedSequence,
     #[error("secure tunnel frame sequence space is exhausted")]
+/// Variant: sequence exhausted.
     SequenceExhausted,
     #[error("secure tunnel frame encryption failed")]
+/// Variant: encrypt.
     Encrypt,
     #[error("secure tunnel frame decryption failed")]
+/// Variant: decrypt.
     Decrypt,
 }
 
+/// Data type: secure frame codec.
 pub struct SecureFrameCodec {
     seal: Aes256Gcm,
     open: Aes256Gcm,
@@ -70,6 +96,7 @@ pub struct SecureFrameCodec {
 }
 
 impl SecureFrameCodec {
+/// Constructor / associated function: new.
     pub fn new(
         key: &str,
         session_id: &str,
@@ -110,6 +137,7 @@ impl SecureFrameCodec {
         })
     }
 
+/// Method: encrypt frame.
     pub fn encrypt_frame(&self, frame: Frame) -> Result<Bytes, TunnelSecurityError> {
         let sequence = self
             .next_sequence
@@ -144,6 +172,7 @@ impl SecureFrameCodec {
         .encode())
     }
 
+/// Method: decrypt frame.
     pub fn decrypt_frame(&self, frame: Frame) -> Result<Frame, TunnelSecurityError> {
         if frame.flags & FLAG_ENCRYPTED == 0 {
             return Err(TunnelSecurityError::MissingEncryptedFlag);
@@ -193,6 +222,7 @@ impl SecureFrameCodec {
     }
 }
 
+/// Function: decode psk.
 pub fn decode_psk(key: &str) -> Result<[u8; 32], TunnelSecurityError> {
     let key = key.trim();
     if key.len() > 44 {
@@ -206,6 +236,7 @@ pub fn decode_psk(key: &str) -> Result<[u8; 32], TunnelSecurityError> {
         .map_err(|_| TunnelSecurityError::InvalidKey)
 }
 
+/// Function: sign tunnel security handshake.
 pub fn sign_tunnel_security_handshake(
     key: &str,
     node_id: &str,
@@ -230,6 +261,7 @@ pub fn sign_tunnel_security_handshake(
 // These arguments are the versioned handshake transcript. Keep them explicit
 // and ordered so existing clients and servers compute the same MAC.
 #[allow(clippy::too_many_arguments)]
+/// Function: sign tunnel security handshake for generation.
 pub fn sign_tunnel_security_handshake_for_generation(
     key: &str,
     node_id: &str,
@@ -259,6 +291,7 @@ pub fn sign_tunnel_security_handshake_for_generation(
 // The verifier preserves the legacy public signature while delegating to the
 // generation-aware transcript implementation.
 #[allow(clippy::too_many_arguments)]
+/// Function: verify tunnel security handshake.
 pub fn verify_tunnel_security_handshake(
     key: &str,
     node_id: &str,
@@ -285,6 +318,7 @@ pub fn verify_tunnel_security_handshake(
 // This mirrors the signing API exactly; the argument order is part of the
 // authenticated handshake format.
 #[allow(clippy::too_many_arguments)]
+/// Function: verify tunnel security handshake for generation.
 pub fn verify_tunnel_security_handshake_for_generation(
     key: &str,
     node_id: &str,
@@ -321,6 +355,7 @@ pub fn verify_tunnel_security_handshake_for_generation(
     mac.verify_slice(&signature).is_ok()
 }
 
+/// Function: sign tunnel control plane request.
 pub fn sign_tunnel_control_plane_request(
     key: &str,
     method: &str,
@@ -345,6 +380,7 @@ pub fn sign_tunnel_control_plane_request(
 // Control-plane authentication signs these fields in this fixed order. Keep
 // the public API stable instead of introducing a reordered parameter object.
 #[allow(clippy::too_many_arguments)]
+/// Function: sign tunnel control plane request for generation.
 pub fn sign_tunnel_control_plane_request_for_generation(
     key: &str,
     method: &str,
@@ -374,6 +410,7 @@ pub fn sign_tunnel_control_plane_request_for_generation(
 // Preserve the legacy verifier signature; it must feed the same transcript as
 // the corresponding signing function.
 #[allow(clippy::too_many_arguments)]
+/// Function: verify tunnel control plane request.
 pub fn verify_tunnel_control_plane_request(
     key: &str,
     method: &str,
@@ -400,6 +437,7 @@ pub fn verify_tunnel_control_plane_request(
 // The generation-aware verifier intentionally mirrors the signer field order,
 // which is part of the control-plane wire contract.
 #[allow(clippy::too_many_arguments)]
+/// Function: verify tunnel control plane request for generation.
 pub fn verify_tunnel_control_plane_request_for_generation(
     key: &str,
     method: &str,

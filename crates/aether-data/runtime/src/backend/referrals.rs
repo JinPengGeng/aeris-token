@@ -1369,7 +1369,7 @@ LIMIT $5 OFFSET $6
             let items = rows
                 .iter()
                 .map(|row| relationship_from_row!(row))
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, DataLayerError>>()?;
             return Ok((items, total.max(0) as u64));
         }
         Ok((Vec::new(), 0))
@@ -1506,7 +1506,7 @@ LIMIT $4 OFFSET $5
             let items = rows
                 .iter()
                 .map(|row| reward_from_row!(row))
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, DataLayerError>>()?;
             return Ok((items, total.max(0) as u64));
         }
         Ok((Vec::new(), 0))

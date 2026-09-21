@@ -18,12 +18,19 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use url::Url;
 
+/// Constant: claude code provider type.
 pub const CLAUDE_CODE_PROVIDER_TYPE: &str = "claude_code";
+/// Constant: claude code client id.
 pub const CLAUDE_CODE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+/// Constant: claude code web base url.
 pub const CLAUDE_CODE_WEB_BASE_URL: &str = "https://claude.ai";
+/// Constant: claude code authorize url.
 pub const CLAUDE_CODE_AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
+/// Constant: claude code token url.
 pub const CLAUDE_CODE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+/// Constant: claude code redirect uri.
 pub const CLAUDE_CODE_REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
+/// Constant: claude code oauth scopes.
 pub const CLAUDE_CODE_OAUTH_SCOPES: &[&str] = &[
     "org:create_api_key",
     "user:profile",
@@ -32,12 +39,14 @@ pub const CLAUDE_CODE_OAUTH_SCOPES: &[&str] = &[
     "user:mcp_servers",
     "user:file_upload",
 ];
+/// Constant: claude code cookie scope.
 pub const CLAUDE_CODE_COOKIE_SCOPE: &str =
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
 const CLAUDE_CODE_BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
 #[derive(Debug, Clone)]
+/// Data type: claude code provider oauth adapter.
 pub struct ClaudeCodeProviderOAuthAdapter {
     inner: GenericProviderOAuthAdapter,
     web_base_url: String,
@@ -56,6 +65,7 @@ impl Default for ClaudeCodeProviderOAuthAdapter {
 }
 
 impl ClaudeCodeProviderOAuthAdapter {
+/// Method: with endpoint overrides.
     pub fn with_endpoint_overrides(
         mut self,
         web_base_url: impl Into<String>,

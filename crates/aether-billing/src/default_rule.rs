@@ -6,19 +6,29 @@ use serde_json::{json, Value};
 use crate::pricing::BillingPricingResolution;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Data type: virtual billing rule.
 pub struct VirtualBillingRule {
+/// Field: id.
     pub id: String,
+/// Field: name.
     pub name: String,
+/// Field: task type.
     pub task_type: String,
+/// Field: expression.
     pub expression: String,
+/// Field: variables.
     pub variables: BTreeMap<String, Value>,
+/// Field: dimension mappings.
     pub dimension_mappings: BTreeMap<String, Value>,
+/// Field: scope.
     pub scope: String,
 }
 
+/// Data type: default billing rule generator.
 pub struct DefaultBillingRuleGenerator;
 
 impl DefaultBillingRuleGenerator {
+/// Constructor / associated function: generate for pricing.
     pub fn generate_for_pricing(
         global_model_name: &str,
         pricing: &BillingPricingResolution,
@@ -244,6 +254,7 @@ impl DefaultBillingRuleGenerator {
     }
 }
 
+/// Function: normalize task type.
 pub fn normalize_task_type(task_type: &str) -> &str {
     if task_type.trim().eq_ignore_ascii_case("cli") {
         "chat"

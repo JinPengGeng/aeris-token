@@ -2,23 +2,36 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Constant: usage server now unix ms header.
 pub const USAGE_SERVER_NOW_UNIX_MS_HEADER: &str = "x-aether-server-now-unix-ms";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+/// Data type: standardized usage.
 pub struct StandardizedUsage {
+/// Field: input tokens.
     pub input_tokens: i64,
+/// Field: output tokens.
     pub output_tokens: i64,
+/// Field: cache creation tokens.
     pub cache_creation_tokens: i64,
+/// Field: cache creation ephemeral 5m tokens.
     pub cache_creation_ephemeral_5m_tokens: i64,
+/// Field: cache creation ephemeral 1h tokens.
     pub cache_creation_ephemeral_1h_tokens: i64,
+/// Field: cache read tokens.
     pub cache_read_tokens: i64,
+/// Field: reasoning tokens.
     pub reasoning_tokens: i64,
+/// Field: cache storage token hours.
     pub cache_storage_token_hours: f64,
+/// Field: request count.
     pub request_count: i64,
+/// Field: dimensions.
     pub dimensions: BTreeMap<String, serde_json::Value>,
 }
 
 impl StandardizedUsage {
+/// Constructor / associated function: new.
     pub fn new() -> Self {
         Self {
             request_count: 1,
@@ -26,6 +39,7 @@ impl StandardizedUsage {
         }
     }
 
+/// Method: get.
     pub fn get(&self, field_name: &str) -> Option<serde_json::Value> {
         match field_name {
             "input_tokens" => Some(serde_json::json!(self.input_tokens)),
@@ -46,6 +60,7 @@ impl StandardizedUsage {
         }
     }
 
+/// Method: set.
     pub fn set(&mut self, field_name: &str, value: impl Into<serde_json::Value>) {
         let value = value.into();
         match field_name {
@@ -74,6 +89,7 @@ impl StandardizedUsage {
         }
     }
 
+/// Method: normalize cache creation breakdown.
     pub fn normalize_cache_creation_breakdown(mut self) -> Self {
         if self.cache_creation_tokens <= 0 {
             let derived = self
@@ -86,6 +102,7 @@ impl StandardizedUsage {
         self
     }
 
+/// Method: signal score.
     pub fn signal_score(&self) -> usize {
         [
             self.input_tokens,
@@ -102,14 +119,17 @@ impl StandardizedUsage {
             + self.dimensions.len()
     }
 
+/// Method: has token signal.
     pub fn has_token_signal(&self) -> bool {
         self.signal_score() > 0
     }
 
+/// Method: is more complete than.
     pub fn is_more_complete_than(&self, other: &Self) -> bool {
         self.signal_score() > other.signal_score()
     }
 
+/// Constructor / associated function: choose more complete.
     pub fn choose_more_complete(primary: Option<Self>, candidate: Option<Self>) -> Option<Self> {
         match (primary, candidate) {
             (Some(primary), Some(candidate)) if candidate.is_more_complete_than(&primary) => {
@@ -123,22 +143,31 @@ impl StandardizedUsage {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+/// Data type: execution stream terminal summary.
 pub struct ExecutionStreamTerminalSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: standardized usage.
     pub standardized_usage: Option<StandardizedUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: finish reason.
     pub finish_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: response id.
     pub response_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: model.
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: provider actual service tier.
     pub provider_actual_service_tier: Option<String>,
     #[serde(default)]
+/// Field: observed finish.
     pub observed_finish: bool,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
+/// Field: unknown event count.
     pub unknown_event_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: parser error.
     pub parser_error: Option<String>,
 }
 

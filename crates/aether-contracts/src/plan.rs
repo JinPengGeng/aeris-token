@@ -4,24 +4,35 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Constant: execution request follow redirects header.
 pub const EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER: &str = "x-aether-execution-follow-redirects";
+/// Constant: execution request http1 only header.
 pub const EXECUTION_REQUEST_HTTP1_ONLY_HEADER: &str = "x-aether-execution-http1-only";
+/// Constant: execution response body mode header.
 pub const EXECUTION_RESPONSE_BODY_MODE_HEADER: &str = "x-aether-execution-response-body-mode";
+/// Constant: max execution request timeout secs.
 pub const MAX_EXECUTION_REQUEST_TIMEOUT_SECS: u64 = 1_200;
+/// Constant: max execution request timeout ms.
 pub const MAX_EXECUTION_REQUEST_TIMEOUT_MS: u64 = MAX_EXECUTION_REQUEST_TIMEOUT_SECS * 1_000;
+/// Constant: max execution stream first byte timeout secs.
 pub const MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_SECS: u64 = 300;
+/// Constant: max execution stream first byte timeout ms.
 pub const MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_MS: u64 =
     MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_SECS * 1_000;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Enumeration: execution response body mode.
 pub enum ExecutionResponseBodyMode {
     #[default]
+/// Variant: structured json.
     StructuredJson,
+/// Variant: preserve bytes.
     PreserveBytes,
 }
 
 impl ExecutionResponseBodyMode {
+    /// Returns the stable string representation used in header values.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::StructuredJson => "structured_json",
@@ -29,6 +40,7 @@ impl ExecutionResponseBodyMode {
         }
     }
 
+/// Constructor / associated function: from header value.
     pub fn from_header_value(value: Option<&str>) -> Self {
         match value.map(str::trim) {
             Some(value) if value.eq_ignore_ascii_case(Self::PreserveBytes.as_str()) => {
@@ -41,28 +53,39 @@ impl ExecutionResponseBodyMode {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+/// Data type: execution timeouts.
 pub struct ExecutionTimeouts {
     #[serde(skip_serializing_if = "Option::is_none")]
+/// Field: connect ms.
     pub connect_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+/// Field: read ms.
     pub read_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+/// Field: first byte ms.
     pub first_byte_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+/// Field: write ms.
     pub write_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+/// Field: pool ms.
     pub pool_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+/// Field: total ms.
     pub total_ms: Option<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
+/// Data type: request body.
 pub struct RequestBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: json body.
     pub json_body: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: body bytes b64.
     pub body_bytes_b64: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: body ref.
     pub body_ref: Option<String>,
 }
 
@@ -88,6 +111,7 @@ impl fmt::Debug for RequestBody {
 }
 
 impl RequestBody {
+/// Constructor / associated function: from json.
     pub fn from_json(json_body: Value) -> Self {
         Self {
             json_body: Some(json_body),
@@ -98,18 +122,25 @@ impl RequestBody {
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+/// Data type: proxy snapshot.
 pub struct ProxySnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: enabled.
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: mode.
     pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: node id.
     pub node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: label.
     pub label: Option<String>,
     #[serde(default, alias = "proxy_url", skip_serializing_if = "Option::is_none")]
+/// Field: url.
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: extra.
     pub extra: Option<Value>,
 }
 
@@ -131,24 +162,38 @@ impl fmt::Debug for ProxySnapshot {
 /// a node incarnation recreated under the same stable id.
 pub const PROXY_NODE_TUNNEL_GENERATION_EXTRA_KEY: &str = "proxy_node_tunnel_generation";
 
+/// Constant: transport backend reqwest rustls.
 pub const TRANSPORT_BACKEND_REQWEST_RUSTLS: &str = "reqwest_rustls";
+/// Constant: transport backend hyper rustls.
 pub const TRANSPORT_BACKEND_HYPER_RUSTLS: &str = "hyper_rustls";
+/// Constant: transport backend browser wreq.
 pub const TRANSPORT_BACKEND_BROWSER_WREQ: &str = "browser_wreq";
+/// Constant: transport http mode auto.
 pub const TRANSPORT_HTTP_MODE_AUTO: &str = "auto";
+/// Constant: transport http mode http1 only.
 pub const TRANSPORT_HTTP_MODE_HTTP1_ONLY: &str = "http1_only";
+/// Constant: transport http mode h2 c prior knowledge.
 pub const TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE: &str = "h2c_prior_knowledge";
+/// Constant: transport pool scope key.
 pub const TRANSPORT_POOL_SCOPE_KEY: &str = "key";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
+/// Data type: resolved transport profile.
 pub struct ResolvedTransportProfile {
+/// Field: profile id.
     pub profile_id: String,
+/// Field: backend.
     pub backend: String,
+/// Field: http mode.
     pub http_mode: String,
+/// Field: pool scope.
     pub pool_scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: header fingerprint.
     pub header_fingerprint: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+/// Field: extra.
     pub extra: Option<Value>,
 }
 
@@ -180,37 +225,56 @@ impl fmt::Debug for ResolvedTransportProfile {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
+/// Data type: execution plan.
 pub struct ExecutionPlan {
+/// Field: request id.
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: candidate id.
     pub candidate_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: provider name.
     pub provider_name: Option<String>,
+/// Field: provider id.
     pub provider_id: String,
+/// Field: endpoint id.
     pub endpoint_id: String,
+/// Field: key id.
     pub key_id: String,
+/// Field: method.
     pub method: String,
     #[serde(alias = "upstream_url")]
+/// Field: url.
     pub url: String,
     #[serde(default)]
+/// Field: headers.
     pub headers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: content type.
     pub content_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: content encoding.
     pub content_encoding: Option<String>,
+/// Field: body.
     pub body: RequestBody,
     /// Whether the upstream API uses a streaming response protocol.
     #[serde(default)]
     pub stream: bool,
+/// Field: client api format.
     pub client_api_format: String,
+/// Field: provider api format.
     pub provider_api_format: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: model name.
     pub model_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: proxy.
     pub proxy: Option<ProxySnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: transport profile.
     pub transport_profile: Option<ResolvedTransportProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+/// Field: timeouts.
     pub timeouts: Option<ExecutionTimeouts>,
 }
 

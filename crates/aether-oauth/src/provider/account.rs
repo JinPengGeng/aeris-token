@@ -4,17 +4,26 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Data type: provider oauth capabilities.
 pub struct ProviderOAuthCapabilities {
+/// Field: supports authorization code.
     pub supports_authorization_code: bool,
+/// Field: supports cookie authorization.
     pub supports_cookie_authorization: bool,
+/// Field: supports refresh token import.
     pub supports_refresh_token_import: bool,
+/// Field: supports batch import.
     pub supports_batch_import: bool,
+/// Field: supports device flow.
     pub supports_device_flow: bool,
+/// Field: supports account probe.
     pub supports_account_probe: bool,
+/// Field: rotates refresh token.
     pub rotates_refresh_token: bool,
 }
 
 impl ProviderOAuthCapabilities {
+/// Constant: generic auth code.
     pub const GENERIC_AUTH_CODE: Self = Self {
         supports_authorization_code: true,
         supports_cookie_authorization: false,
@@ -27,7 +36,9 @@ impl ProviderOAuthCapabilities {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+/// Data type: provider oauth cookie authorization input.
 pub struct ProviderOAuthCookieAuthorizationInput {
+/// Field: session key.
     pub session_key: String,
 }
 
@@ -41,17 +52,29 @@ impl std::fmt::Debug for ProviderOAuthCookieAuthorizationInput {
 }
 
 #[derive(Clone, PartialEq)]
+/// Data type: provider oauth transport context.
 pub struct ProviderOAuthTransportContext {
+/// Field: provider id.
     pub provider_id: String,
+/// Field: provider type.
     pub provider_type: String,
+/// Field: endpoint id.
     pub endpoint_id: Option<String>,
+/// Field: key id.
     pub key_id: Option<String>,
+/// Field: auth type.
     pub auth_type: Option<String>,
+/// Field: decrypted api key.
     pub decrypted_api_key: Option<String>,
+/// Field: decrypted auth config.
     pub decrypted_auth_config: Option<String>,
+/// Field: provider config.
     pub provider_config: Option<Value>,
+/// Field: endpoint config.
     pub endpoint_config: Option<Value>,
+/// Field: key config.
     pub key_config: Option<Value>,
+/// Field: network.
     pub network: OAuthNetworkContext,
 }
 
@@ -90,8 +113,11 @@ impl std::fmt::Debug for ProviderOAuthTransportContext {
 }
 
 #[derive(Clone, PartialEq)]
+/// Data type: provider oauth token set.
 pub struct ProviderOAuthTokenSet {
+/// Field: token set.
     pub token_set: OAuthTokenSet,
+/// Field: auth config.
     pub auth_config: Value,
 }
 
@@ -106,11 +132,17 @@ impl std::fmt::Debug for ProviderOAuthTokenSet {
 }
 
 #[derive(Clone, PartialEq)]
+/// Data type: provider oauth account.
 pub struct ProviderOAuthAccount {
+/// Field: provider type.
     pub provider_type: String,
+/// Field: access token.
     pub access_token: String,
+/// Field: auth config.
     pub auth_config: Value,
+/// Field: expires at unix secs.
     pub expires_at_unix_secs: Option<u64>,
+/// Field: identity.
     pub identity: BTreeMap<String, Value>,
 }
 
@@ -128,6 +160,7 @@ impl std::fmt::Debug for ProviderOAuthAccount {
 }
 
 impl ProviderOAuthAccount {
+/// Method: request bearer auth.
     pub fn request_bearer_auth(&self) -> ProviderOAuthRequestAuth {
         ProviderOAuthRequestAuth::Header {
             name: "authorization".to_string(),
@@ -137,15 +170,24 @@ impl ProviderOAuthAccount {
 }
 
 #[derive(Clone, PartialEq)]
+/// Enumeration: provider oauth request auth.
 pub enum ProviderOAuthRequestAuth {
+/// Variant: header.
     Header {
+/// Field: name.
         name: String,
+/// Field: value.
         value: String,
     },
+/// Variant: kiro.
     Kiro {
+/// Field: name.
         name: String,
+/// Field: value.
         value: String,
+/// Field: auth config.
         auth_config: Value,
+/// Field: machine id.
         machine_id: String,
     },
 }
@@ -172,11 +214,17 @@ impl std::fmt::Debug for ProviderOAuthRequestAuth {
 }
 
 #[derive(Clone, PartialEq)]
+/// Data type: provider oauth import input.
 pub struct ProviderOAuthImportInput {
+/// Field: provider type.
     pub provider_type: String,
+/// Field: name.
     pub name: Option<String>,
+/// Field: refresh token.
     pub refresh_token: Option<String>,
+/// Field: raw credentials.
     pub raw_credentials: Option<Value>,
+/// Field: network.
     pub network: OAuthNetworkContext,
 }
 
@@ -200,11 +248,17 @@ impl std::fmt::Debug for ProviderOAuthImportInput {
 }
 
 #[derive(Clone, PartialEq)]
+/// Data type: provider oauth account state.
 pub struct ProviderOAuthAccountState {
+/// Field: is valid.
     pub is_valid: bool,
+/// Field: email.
     pub email: Option<String>,
+/// Field: quota.
     pub quota: Option<Value>,
+/// Field: invalid reason.
     pub invalid_reason: Option<String>,
+/// Field: raw.
     pub raw: Option<Value>,
 }
 

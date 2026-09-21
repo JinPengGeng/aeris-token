@@ -7,27 +7,36 @@ use crate::network::OAuthHttpExecutor;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
+/// Data type: identity oauth service.
 pub struct IdentityOAuthService {
     registry: OAuthAdapterRegistry<dyn IdentityOAuthProvider>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Data type: oauth login outcome.
 pub struct OAuthLoginOutcome {
+/// Field: claims.
     pub claims: IdentityClaims,
+/// Field: is new external identity.
     pub is_new_external_identity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Data type: bound oauth identity.
 pub struct BoundOAuthIdentity {
+/// Field: claims.
     pub claims: IdentityClaims,
+/// Field: replaced existing binding.
     pub replaced_existing_binding: bool,
 }
 
 impl IdentityOAuthService {
+/// Constructor / associated function: new.
     pub fn new() -> Self {
         Self::default()
     }
 
+/// Constructor / associated function: with builtin providers.
     pub fn with_builtin_providers() -> Self {
         use super::providers::{CustomOidcIdentityOAuthProvider, LinuxDoIdentityOAuthProvider};
 
@@ -36,11 +45,13 @@ impl IdentityOAuthService {
             .with_provider(Arc::new(CustomOidcIdentityOAuthProvider))
     }
 
+/// Method: with provider.
     pub fn with_provider(mut self, provider: Arc<dyn IdentityOAuthProvider>) -> Self {
         self.registry.insert(provider.provider_type(), provider);
         self
     }
 
+/// Method: provider.
     pub fn provider(
         &self,
         provider_type: &str,
@@ -55,6 +66,7 @@ impl IdentityOAuthService {
             .ok_or_else(|| OAuthError::UnsupportedProvider(provider_type.to_string()))
     }
 
+/// Method: start.
     pub fn start(
         &self,
         config: &IdentityOAuthProviderConfig,
@@ -64,6 +76,7 @@ impl IdentityOAuthService {
             .build_authorize_url(config, ctx)
     }
 
+/// Method: login.
     pub async fn login(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -74,6 +87,7 @@ impl IdentityOAuthService {
         login_with_oauth(provider.as_ref(), executor, config, ctx).await
     }
 
+/// Method: bind.
     pub async fn bind(
         &self,
         executor: &dyn OAuthHttpExecutor,
@@ -93,6 +107,7 @@ fn is_custom_oidc_provider_type(provider_type: &str) -> bool {
         || normalized.starts_with("oidc_")
 }
 
+/// Function: start identity oauth.
 pub fn start_identity_oauth(
     provider: &dyn IdentityOAuthProvider,
     config: &IdentityOAuthProviderConfig,
@@ -101,6 +116,7 @@ pub fn start_identity_oauth(
     provider.build_authorize_url(config, ctx)
 }
 
+/// Function: login with oauth.
 pub async fn login_with_oauth(
     provider: &dyn IdentityOAuthProvider,
     executor: &dyn OAuthHttpExecutor,
@@ -118,6 +134,7 @@ pub async fn login_with_oauth(
     })
 }
 
+/// Function: bind oauth identity.
 pub async fn bind_oauth_identity(
     provider: &dyn IdentityOAuthProvider,
     executor: &dyn OAuthHttpExecutor,

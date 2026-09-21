@@ -9,15 +9,25 @@ use super::OAuthNetworkContext;
 const OAUTH_HTTP_RESPONSE_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, PartialEq)]
+/// Data type: oauth http request.
 pub struct OAuthHttpRequest {
+/// Field: request id.
     pub request_id: String,
+/// Field: method.
     pub method: reqwest::Method,
+/// Field: url.
     pub url: String,
+/// Field: headers.
     pub headers: BTreeMap<String, String>,
+/// Field: content type.
     pub content_type: Option<String>,
+/// Field: json body.
     pub json_body: Option<Value>,
+/// Field: body bytes.
     pub body_bytes: Option<Vec<u8>>,
+/// Field: network.
     pub network: OAuthNetworkContext,
+/// Field: transport profile.
     pub transport_profile: Option<ResolvedTransportProfile>,
 }
 
@@ -46,9 +56,13 @@ impl std::fmt::Debug for OAuthHttpRequest {
 }
 
 #[derive(Clone, PartialEq)]
+/// Data type: oauth http response.
 pub struct OAuthHttpResponse {
+/// Field: status code.
     pub status_code: u16,
+/// Field: body text.
     pub body_text: String,
+/// Field: json body.
     pub json_body: Option<Value>,
 }
 
@@ -64,16 +78,20 @@ impl std::fmt::Debug for OAuthHttpResponse {
 }
 
 #[async_trait]
+/// Trait: oauth http executor.
 pub trait OAuthHttpExecutor: Send + Sync {
+/// Method: async fn execute.
     async fn execute(&self, request: OAuthHttpRequest) -> Result<OAuthHttpResponse, OAuthError>;
 }
 
 #[derive(Debug, Clone)]
+/// Data type: reqwest oauth http executor.
 pub struct ReqwestOAuthHttpExecutor {
     client: reqwest::Client,
 }
 
 impl ReqwestOAuthHttpExecutor {
+/// Constructor / associated function: new.
     pub fn new(client: reqwest::Client) -> Self {
         Self { client }
     }

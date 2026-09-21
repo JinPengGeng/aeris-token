@@ -16,8 +16,10 @@ use crate::{
 
 const SETTLEMENT_SNAPSHOT_SCHEMA_VERSION: &str = "3.0";
 
+/// Trait: billing model context lookup.
 #[async_trait]
 pub trait BillingModelContextLookup: Send + Sync {
+/// Looks up billing model context by model id; the default returns `None`.
     async fn find_billing_model_context_by_model_id(
         &self,
         provider_id: &str,
@@ -28,6 +30,7 @@ pub trait BillingModelContextLookup: Send + Sync {
         Ok(None)
     }
 
+    /// Looks up billing model context by global model name.
     async fn find_billing_model_context(
         &self,
         provider_id: &str,
@@ -36,6 +39,7 @@ pub trait BillingModelContextLookup: Send + Sync {
     ) -> Result<Option<StoredBillingModelContext>, DataLayerError>;
 }
 
+/// Function: enrich usage event with billing.
 pub async fn enrich_usage_event_with_billing(
     data: &dyn BillingModelContextLookup,
     event: &mut UsageEvent,
