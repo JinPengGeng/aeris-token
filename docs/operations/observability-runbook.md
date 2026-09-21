@@ -180,3 +180,32 @@ incident reference and an expiry. Remove the silence after two consecutive
 evaluation windows show zero new failures and the backlog/health checks are
 normal. A zero counter after restart is not proof of recovery; use dependency
 health and logs as corroborating evidence.
+
+## On-call alert index and escalation
+
+Every rule in `docs/operations/prometheus/aether-alerts.yml` maps to one entry
+below. Severity comes from the rule's `severity` label. Escalation is to the
+operations on-call; the on-call owns incident coordination and engages the
+accounting reconciliation or release owner as listed.
+
+| Alert | Severity | Meaning | First action | Escalate when |
+| --- | --- | --- | --- | --- |
+| AetherBillingEnrichmentFailures | warning | Billing enrichment failed; settlement may be persisted at 0 | Inspect usage worker logs; check queue/DLQ | Any persisted 0-amount settlement or repeat after dependency restore |
+| AetherBillingSettlementFailures | warning | Terminal settlement failed | Verify idempotency key before any retry | Manual retry needed, or failure started with a release |
+| AetherBillingVideoTaskSettlementFailures | warning | Video task settlement failed | Same as settlement failures | Same as settlement failures |
+| AetherBillingInsufficientQuota | warning | Settlement persisted as `insufficient_quota` | Inspect account policy and persisted record | Recovery/collection decision needed (separate finance policy) |
+| AetherUsageDeadLetterBacklog | warning | Usage DLQ non-empty | Preserve DLQ; fix dependency/schema | Redrive does not shrink length or poison messages recur |
+| AetherUsageDeadLetterCapacityWarning | warning | DLQ above 80% retention for 5m | Plan bounded redrive | Boundary alert fires for the same series |
+| AetherUsageDeadLetterRetentionBoundary | critical | DLQ at/above retention threshold | Stop-loss: restore consumers before data ages out | Immediately; this is the loss boundary |
+| AetherUsageTerminalDeferredDrop | critical | Terminal deferred enqueue dropped | Treat as usage event loss budget spend | Any nonzero increase; coordinate accounting reconciliation |
+| AetherUsageLifecycleDeferredDrop | critical | Lifecycle deferred enqueue dropped | Same as terminal deferred drop | Same as terminal deferred drop |
+| AetherBillingGuardFailOpen | critical | Quota/RPM guard allowed traffic during runtime outage | Restore Redis/runtime first | Fail-open persists past one evaluation window |
+| AetherProviderServerErrors | warning | Terminal gateway 5xx by provider type | Check provider health/keys/status before rerouting | Failover decision or provider outage |
+| AetherAdminAuditPersistenceFailures | warning | Admin audit write failed/timeout | Follow `admin-audit-persistence.md#incident-response` | Committed state unverifiable or writer restore needed |
+
+Alert-to-section cross-reference: enrichment/settlement rows → "Billing
+enrichment or settlement"; insufficient quota → "Insufficient quota"; DLQ rows
+→ "Usage DLQ"; deferred drop rows → "Usage deferred drop"; fail-open →
+"Fail-open"; provider 5xx → "Provider 5xx". The admin audit row defers to its
+dedicated runbook because a failed audit write may already be committed and
+has its own replay/preservation procedure.
