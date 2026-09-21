@@ -119,13 +119,29 @@ where
                 }
             })
         })?;
-    let mut upstream = connect_upstream_websocket(
+    let connect_started_at = std::time::Instant::now();
+    let mut upstream = match connect_upstream_websocket(
         decision,
         RESPONSES_WEBSOCKET_SESSION_LIMITS,
         adapter.upstream_errors(),
     )
     .await
-    .map_err(ResponsesWebSocketUpstreamBindError::Transport)?;
+    {
+        Ok(upstream) => {
+            crate::latency_histograms::record_ws_connect_seconds(
+                connect_started_at.elapsed().as_secs_f64(),
+                true,
+            );
+            upstream
+        }
+        Err(error) => {
+            crate::latency_histograms::record_ws_connect_seconds(
+                connect_started_at.elapsed().as_secs_f64(),
+                false,
+            );
+            return Err(ResponsesWebSocketUpstreamBindError::Transport(error));
+        }
+    };
     let first_event = planned_response_create_event(decision, &normalization, initial_event)
         .map_err(ResponsesWebSocketUpstreamBindError::Transport)?;
     send_responses_websocket_upstream_message(

@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aether_gateway_frontdoor::telemetry::{normalize_provider_type, normalize_route_class};
-use aether_runtime::{MetricKind, MetricLabel, MetricSample};
+use aether_runtime::{
+    LogHistogram, MetricKind, MetricLabel, MetricSample, DEFAULT_LATENCY_BUCKETS_SECONDS,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Key {
@@ -19,10 +21,21 @@ struct Key {
     outcome: &'static str,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct RequestMetrics {
     counters: Mutex<BTreeMap<Key, u64>>,
     duration_ms: Mutex<u64>,
+    duration_histogram: LogHistogram,
+}
+
+impl Default for RequestMetrics {
+    fn default() -> Self {
+        Self {
+            counters: Mutex::new(BTreeMap::new()),
+            duration_ms: Mutex::new(0),
+            duration_histogram: LogHistogram::new(&DEFAULT_LATENCY_BUCKETS_SECONDS),
+        }
+    }
 }
 
 impl RequestMetrics {
@@ -51,6 +64,9 @@ impl RequestMetrics {
             .lock()
             .expect("request duration lock poisoned");
         *total = total.saturating_add(duration_ms);
+        drop(total);
+        self.duration_histogram
+            .observe_seconds(duration_ms as f64 / 1_000.0);
     }
 
     pub(crate) fn metric_samples(&self) -> Vec<MetricSample> {
@@ -100,6 +116,12 @@ impl RequestMetrics {
             MetricKind::Counter,
             duration_ms,
         ));
+        samples.push(MetricSample::histogram(
+            "request_duration_seconds",
+            "Terminal gateway request duration distribution in seconds (sparse log buckets).",
+            self.duration_histogram.snapshot(),
+            Vec::new(),
+        ));
         samples
     }
 }
@@ -133,5 +155,12 @@ mod tests {
         assert!(samples
             .iter()
             .any(|sample| sample.name == "request_duration_ms_sum" && sample.value == 16));
+        let histogram = samples
+            .iter()
+            .find(|sample| sample.name == "request_duration_seconds")
+            .and_then(|sample| sample.histogram.as_ref())
+            .expect("request duration histogram should be exported");
+        assert_eq!(histogram.count, 2);
+        assert_eq!(histogram.sum, 0.016);
     }
 }

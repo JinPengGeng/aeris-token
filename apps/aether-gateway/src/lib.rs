@@ -52,6 +52,7 @@ mod hooks;
 mod image_capabilities;
 mod important_notification;
 mod internal_gateway_auth;
+mod latency_histograms;
 mod local_auth_token;
 mod log_ids;
 mod maintenance;

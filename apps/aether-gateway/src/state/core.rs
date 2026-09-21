@@ -1994,6 +1994,7 @@ impl AppState {
         samples.extend(self.tunnel.metric_samples());
         samples.extend(self.fallback_metrics.metric_samples());
         samples.extend(crate::request_metrics::global_request_metrics().metric_samples());
+        samples.extend(crate::latency_histograms::latency_histogram_metric_samples());
         samples.extend(self.process_resource_monitor.metric_samples());
         samples.extend(crate::allocator_metrics::gateway_allocator_metric_samples());
         samples

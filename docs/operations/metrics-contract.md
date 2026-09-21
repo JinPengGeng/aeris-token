@@ -45,3 +45,10 @@ The shared Prometheus text renderer declares HELP/TYPE once per metric family
 and retains every labeled sample. The real billing exporter output is checked
 with Prometheus `promtool`; the alert fixture tests pending, firing, counter
 reset and recovery behavior. See the runbook for commands and evidence limits.
+
+Latency-distribution histograms for the five SLIs selected in
+`docs/adr/metrics-histogram-evaluation.md` (request duration, upstream first
+token, WS connect, settlement duration, queue dwell) are documented in
+[metrics-histograms.md](metrics-histograms.md); they render as standard
+`_bucket{le=}` / `_sum` / `_count` families with the fixed labels listed
+there.
