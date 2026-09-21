@@ -301,6 +301,8 @@ pub struct Config {
 
     /// Allow private/reserved upstream IP targets. Disabled by default; enable
     /// explicitly only for deployments that require access to private services.
+    /// A misconfigured provider base_url pointing at intranet or cloud
+    /// metadata (169.254.169.254) turns this into an SSRF amplifier.
     #[arg(
         long,
         env = "AETHER_TUNNEL_ALLOW_PRIVATE_TARGETS",

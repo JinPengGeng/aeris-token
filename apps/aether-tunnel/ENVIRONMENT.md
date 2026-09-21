@@ -48,7 +48,7 @@ Rust CI 的 `Test (Workspace Rest)` 会运行同一校验；环境变量名、CL
 | `AETHER_TUNNEL_AETHER_TCP_NODELAY` | `--aether-tcp-nodelay` | `true` | 布尔值 | Aether API TCP_NODELAY 可选值：`true`, `false`。 |
 | `AETHER_TUNNEL_AETHER_URL` | `--aether-url` | 必填 | URL | Aether server URL (e.g. https://aether.example.com) |
 | `AETHER_TUNNEL_ALLOWED_PORTS` | `--allowed-ports` | `80,443,8080,8443` | 端口号（逗号分隔） | Allowed destination ports (default: 80,443,8080,8443) |
-| `AETHER_TUNNEL_ALLOW_PRIVATE_TARGETS` | `--allow-private-targets` | `false` | 布尔值 | Allow private/reserved upstream IP targets. Disabled by default; enable explicitly only for deployments that require access to private services 可选值：`true`, `false`。 |
+| `AETHER_TUNNEL_ALLOW_PRIVATE_TARGETS` | `--allow-private-targets` | `false` | 布尔值 | Allow private/reserved upstream IP targets. Disabled by default; enable explicitly only for deployments that require access to private services. A misconfigured provider base_url pointing at intranet or cloud metadata (169.254.169.254) turns this into an SSRF amplifier 可选值：`true`, `false`。 |
 | `AETHER_TUNNEL_CONNECTIONS` | `--tunnel-connections` | 未设置 | 连接数 | Minimum number of parallel WebSocket tunnel connections per server. If omitted, a device-aware redundant value is auto-detected at startup |
 | `AETHER_TUNNEL_CONNECTIONS_MAX` | `--tunnel-connections-max` | 未设置 | 连接数 | Maximum number of WebSocket tunnel connections per server. When larger than `tunnel_connections`, the tunnel may autoscale up to this limit |
 | `AETHER_TUNNEL_CONNECT_TIMEOUT_MS` | `--tunnel-connect-timeout-ms` | `3000` | 毫秒 | WebSocket tunnel TCP connect timeout in milliseconds |

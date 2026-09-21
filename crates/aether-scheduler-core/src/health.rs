@@ -411,6 +411,8 @@ fn provider_key_adaptive_learning_confidence(
             now_unix_secs.saturating_sub(last_429_at_unix_secs) as f64 / 60.0
                 * CONFIDENCE_DECAY_PER_MINUTE
         }
+        // No recent 429 evidence: decay the learned limit entirely instead of
+        // trusting seeded or migrated data (fail-open, see #205 item 6).
         None => 1.0,
     };
 
@@ -1217,6 +1219,114 @@ mod tests {
         );
 
         assert_eq!(effective_provider_key_rpm_limit(&key, 100), Some(80));
+    }
+
+    #[test]
+    fn learned_provider_key_rpm_limit_without_last_429_is_not_enforced() {
+        // Manual seeding or historical migrations can leave a key with a
+        // learned limit but no last_429 timestamp. The confidence model maps
+        // that combination to zero confidence ("no recent evidence, do not
+        // trust"), so the learned limit stays inert instead of silently
+        // enforcing stale data.
+        let without_history = provider_catalog_key("key-a").with_rate_limit_fields(
+            None,
+            None,
+            Some(80),
+            Some(0),
+            Some(0),
+            None,
+            None,
+            Some(5),
+            Some(1),
+        );
+        assert_eq!(
+            effective_provider_key_rpm_limit(&without_history, 100),
+            None
+        );
+
+        // Even a high-confidence adjustment history does not help without a
+        // fresh 429 timestamp: time decay is total when last_429 is absent.
+        let with_history = provider_catalog_key("key-a").with_rate_limit_fields(
+            None,
+            None,
+            Some(80),
+            Some(0),
+            Some(0),
+            None,
+            Some(serde_json::json!([
+                {
+                    "timestamp": "2026-04-19T00:00:00Z",
+                    "old_limit": 0,
+                    "new_limit": 80,
+                    "reason": "rpm_429",
+                    "confidence": 0.8
+                },
+            ])),
+            Some(5),
+            Some(1),
+        );
+        assert_eq!(effective_provider_key_rpm_limit(&with_history, 100), None);
+
+        // Sanity check the contrast arm: the same history plus a fresh 429
+        // timestamp restores confidence and enforcement.
+        let with_recent_429 = provider_catalog_key("key-a").with_rate_limit_fields(
+            None,
+            None,
+            Some(80),
+            Some(0),
+            Some(0),
+            Some(99),
+            Some(serde_json::json!([
+                {
+                    "timestamp": "2026-04-19T00:00:00Z",
+                    "old_limit": 0,
+                    "new_limit": 80,
+                    "reason": "rpm_429",
+                    "confidence": 0.8
+                },
+            ])),
+            Some(5),
+            Some(1),
+        );
+        assert_eq!(
+            effective_provider_key_rpm_limit(&with_recent_429, 100),
+            Some(80)
+        );
+    }
+
+    #[test]
+    fn learned_provider_key_rpm_limit_decays_below_threshold_over_time() {
+        let key = provider_catalog_key("key-a").with_rate_limit_fields(
+            None,
+            None,
+            Some(80),
+            Some(0),
+            Some(0),
+            Some(99),
+            Some(serde_json::json!([
+                {
+                    "timestamp": "2026-04-19T00:00:00Z",
+                    "old_limit": 0,
+                    "new_limit": 80,
+                    "reason": "rpm_429",
+                    "confidence": 0.8
+                },
+            ])),
+            Some(5),
+            Some(1),
+        );
+
+        // Confidence 0.8 crosses the 0.6 enforcement threshold once the 429
+        // evidence is older than 40 minutes.
+        let within_window = 99.0 + (0.8 - 0.6) / 0.005 * 60.0;
+        assert_eq!(
+            effective_provider_key_rpm_limit(&key, within_window as u64),
+            Some(80)
+        );
+        assert_eq!(
+            effective_provider_key_rpm_limit(&key, within_window as u64 + 61),
+            None
+        );
     }
 
     #[test]
