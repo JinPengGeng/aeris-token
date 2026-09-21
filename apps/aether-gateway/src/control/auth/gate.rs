@@ -372,6 +372,33 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
     let max_output_tokens = max_output_tokens_from_request(body_json)
         .map(|value| value.saturating_mul(output_choice_count_upper_bound(&api_format, body_json)))
         .and_then(|value| i64::try_from(value).ok());
+    // Paid image plans carry a frozen per-attempt quote through the funded
+    // admission path before this estimate; mapping the request shape here keeps
+    // the legacy upper bound honest for balance pre-checks and zero-cost proofs.
+    // Unprovable image fields fail closed with no estimate.
+    let image_fields = match image_authorization_estimate_fields(task_type, body_json) {
+        Some(fields) => Some(fields),
+        None if task_type == "image" => {
+            validate_execution_plan_pricing_for_unavailable_estimate(
+                state,
+                plan,
+                model_id,
+                global_model_name,
+                requested_processing_tier.as_deref(),
+            )
+            .await?;
+            return Ok(None);
+        }
+        None => None,
+    };
+    let (input_tokens, max_output_tokens) = if image_fields.is_some() {
+        // Image token counts come from provider usage evidence, not the request
+        // body; per-image catalogs cannot bill them and token-priced image
+        // catalogs stay fail-closed without a proven token bound.
+        (0, None)
+    } else {
+        (input_tokens, max_output_tokens)
+    };
     let cache_ttl_minutes =
         aether_data_contracts::repository::usage::resolve_provider_cache_ttl_minutes(
             Some(&api_format),
@@ -391,6 +418,7 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
         max_output_tokens,
         requested_processing_tier.as_deref(),
         cache_ttl_minutes,
+        image_fields.as_ref(),
     );
     let ttl = state.frontdoor_runtime_guards.auth_capacity_cache_ttl;
     if ttl.is_zero() {
@@ -406,6 +434,7 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
             max_output_tokens,
             requested_processing_tier.as_deref(),
             cache_ttl_minutes,
+            image_fields.as_ref(),
         )
         .await;
     }
@@ -424,6 +453,7 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
                 max_output_tokens,
                 requested_processing_tier.as_deref(),
                 cache_ttl_minutes,
+                image_fields.as_ref(),
             )
             .await
         })
@@ -442,6 +472,7 @@ async fn calculate_execution_plan_cost_upper_bound(
     max_output_tokens: Option<i64>,
     requested_processing_tier: Option<&str>,
     cache_ttl_minutes: Option<i64>,
+    image_fields: Option<&ImageAuthorizationEstimateFields>,
 ) -> Result<Option<f64>, GatewayError> {
     let context =
         load_execution_plan_billing_context(state, plan, model_id, global_model_name).await?;
@@ -454,6 +485,11 @@ async fn calculate_execution_plan_cost_upper_bound(
     estimate.requested_processing_tier = requested_processing_tier.map(ToOwned::to_owned);
     estimate.cache_ttl_minutes = cache_ttl_minutes;
     estimate.max_output_tokens = max_output_tokens;
+    if let Some(image_fields) = image_fields {
+        estimate.image_count = Some(image_fields.image_count);
+        estimate.image_size = image_fields.image_size.clone();
+        estimate.image_quality = image_fields.image_quality.clone();
+    }
     aether_billing::BillingService::new()
         .estimate_authorization_cost_upper_bound(
             &aether_billing::BillingModelPricingSnapshot::from(context),
@@ -611,9 +647,10 @@ fn execution_plan_cost_upper_bound_cache_key(
     max_output_tokens: Option<i64>,
     requested_processing_tier: Option<&str>,
     cache_ttl_minutes: Option<i64>,
+    image_fields: Option<&ImageAuthorizationEstimateFields>,
 ) -> String {
     format!(
-        "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
+        "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
         plan.provider_id,
         plan.key_id,
         model_id.unwrap_or(""),
@@ -627,6 +664,15 @@ fn execution_plan_cost_upper_bound_cache_key(
         cache_ttl_minutes
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
+        image_fields.map_or_else(
+            || "none".to_string(),
+            |image| format!(
+                "{}:{}:{}",
+                image.image_count,
+                image.image_size.as_deref().unwrap_or("default"),
+                image.image_quality.as_deref().unwrap_or("default")
+            )
+        ),
     )
 }
 
@@ -655,7 +701,7 @@ fn authorization_task_type<'a>(
         .is_some()
         || api_format == "openai:image"
     {
-        return None;
+        return Some("image");
     }
     if api_format.ends_with(":embedding") {
         return Some("embedding");
@@ -675,6 +721,43 @@ fn report_context_string_field<'a>(
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ImageAuthorizationEstimateFields {
+    image_count: i64,
+    image_size: Option<String>,
+    image_quality: Option<String>,
+}
+
+/// Maps the OpenAI image request shape onto the billing estimate input. The
+/// count must be a supported positive integer; `size`/`quality` stay `None`
+/// when absent or `auto` so billing can only price them through an explicit
+/// catalog default. Anything unprovable fails closed (returns `None`), and
+/// non-image task types return `None` as well.
+fn image_authorization_estimate_fields(
+    task_type: &str,
+    body: &serde_json::Value,
+) -> Option<ImageAuthorizationEstimateFields> {
+    if task_type != "image" {
+        return None;
+    }
+    let count = body
+        .get("n")
+        .map_or(Some(1), serde_json::Value::as_u64)
+        .filter(|count| (1..=10).contains(count))?;
+    let dimension = |field: &str| {
+        body.get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))
+            .map(ToOwned::to_owned)
+    };
+    Some(ImageAuthorizationEstimateFields {
+        image_count: i64::try_from(count).ok()?,
+        image_size: dimension("size"),
+        image_quality: dimension("quality"),
+    })
 }
 
 fn max_output_tokens_from_request(value: &serde_json::Value) -> Option<u64> {
@@ -906,8 +989,9 @@ mod tests {
     use super::{
         available_balance_capacity_usd, execution_plan_balance_capacity_rejection,
         execution_plan_cost_is_proven_zero, execution_plan_cost_upper_bound_cache_key,
-        max_output_tokens_from_request, openai_request_input_is_self_contained,
-        output_choice_count_upper_bound, request_model_local_rejection, GatewayLocalAuthRejection,
+        image_authorization_estimate_fields, max_output_tokens_from_request,
+        openai_request_input_is_self_contained, output_choice_count_upper_bound,
+        request_model_local_rejection, GatewayLocalAuthRejection, ImageAuthorizationEstimateFields,
     };
     use crate::control::{GatewayControlAuthContext, GatewayControlDecision};
     use crate::data::GatewayDataState;
@@ -2069,6 +2153,266 @@ mod tests {
         assert_eq!(rejection, None);
     }
 
+    async fn image_estimate_usd(state: &AppState, body: serde_json::Value) -> Option<f64> {
+        let plan = execution_plan(body, "openai:image");
+        super::estimate_execution_plan_cost_upper_bound_usd(
+            state,
+            &plan,
+            Some(&billing_report_context()),
+        )
+        .await
+        .expect("image estimate should resolve")
+    }
+
+    #[tokio::test]
+    async fn image_estimate_prices_request_count_and_fixed_dimensions() {
+        let context = billing_context_with_pricing(
+            Some(json!({"image_output_price_default": 0.04})),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(30.0, false), context);
+
+        assert_eq!(
+            image_estimate_usd(
+                &state,
+                json!({
+                    "model": "gpt-image-1",
+                    "prompt": "a small red circle",
+                    "n": 3,
+                    "size": "1024x1024",
+                    "quality": "high"
+                }),
+            )
+            .await,
+            Some(0.12)
+        );
+        // Dimensions may arrive with different separator spellings.
+        assert_eq!(
+            image_estimate_usd(
+                &state,
+                json!({
+                    "model": "gpt-image-1",
+                    "prompt": "a small red circle",
+                    "n": 1,
+                    "size": "1024 × 1024",
+                    "quality": "HIGH"
+                }),
+            )
+            .await,
+            Some(0.04)
+        );
+    }
+
+    #[tokio::test]
+    async fn image_estimate_covers_max_count_size_and_quality() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "image_output_prices": {"2048x2048": {"high": 0.08}}
+            })),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(30.0, false), context);
+
+        assert_eq!(
+            image_estimate_usd(
+                &state,
+                json!({
+                    "model": "gpt-image-1",
+                    "prompt": "a large detailed scene",
+                    "n": 10,
+                    "size": "2048x2048",
+                    "quality": "high"
+                }),
+            )
+            .await,
+            Some(0.80)
+        );
+    }
+
+    #[tokio::test]
+    async fn image_estimate_defaults_count_and_accepts_default_only_catalogs() {
+        let context = billing_context_with_pricing(
+            Some(json!({"image_output_price_default": 0.03})),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(30.0, false), context);
+
+        // OpenAI defaults n to 1; a default-only catalog prices every output
+        // dimension at the same explicit rate.
+        assert_eq!(
+            image_estimate_usd(
+                &state,
+                json!({"model": "gpt-image-1", "prompt": "a small red circle"}),
+            )
+            .await,
+            Some(0.03)
+        );
+    }
+
+    #[tokio::test]
+    async fn image_estimate_fails_closed_for_unpriced_or_unproven_paid_requests() {
+        // Token-priced catalog without any image output price: the image
+        // operation has no provable bound, exactly like the zero-cost proof.
+        let token_only = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 1.0,
+                    "output_price_per_1m": 1.0
+                }]
+            })),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(30.0, false), token_only);
+        assert_eq!(
+            image_estimate_usd(
+                &state,
+                json!({
+                    "model": "gpt-image-1",
+                    "prompt": "a small red circle",
+                    "n": 3,
+                    "size": "1024x1024",
+                    "quality": "high"
+                }),
+            )
+            .await,
+            None,
+            "missing image price must stay fail-closed even with a positive balance"
+        );
+
+        // Dimension-keyed catalogs cannot bound auto or omitted output shapes.
+        let matrix = billing_context_with_pricing(
+            Some(json!({
+                "image_output_prices": {"1024x1024": {"medium": 0.02}, "2048x2048": {"high": 0.08}}
+            })),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(30.0, false), matrix);
+        for body in [
+            json!({"model": "gpt-image-1", "prompt": "auto size", "size": "auto", "quality": "medium"}),
+            json!({"model": "gpt-image-1", "prompt": "no size", "quality": "medium"}),
+            json!({"model": "gpt-image-1", "prompt": "unknown bucket", "size": "1024x1024", "quality": "high"}),
+        ] {
+            assert_eq!(
+                image_estimate_usd(&state, body).await,
+                None,
+                "unproven image shape must stay fail-closed"
+            );
+        }
+
+        // Unsupported counts are not billable shapes.
+        let priced = billing_context_with_pricing(
+            Some(json!({"image_output_price_default": 0.04})),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(30.0, false), priced);
+        for count in [json!(0), json!(11), json!("many")] {
+            assert_eq!(
+                image_estimate_usd(
+                    &state,
+                    json!({
+                        "model": "gpt-image-1",
+                        "prompt": "a small red circle",
+                        "n": count,
+                        "size": "1024x1024",
+                        "quality": "high"
+                    }),
+                )
+                .await,
+                None,
+                "count {count} must stay fail-closed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn free_tier_image_estimate_stays_proven_zero() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 100.0,
+                    "output_price_per_1m": 100.0
+                }]
+            })),
+            None,
+            None,
+            Some("free_tier"),
+        );
+        let state = state_with_quota_and_wallet(quota_availability(0.0, false), context);
+
+        assert_eq!(
+            image_estimate_usd(
+                &state,
+                json!({
+                    "model": "gpt-image-1",
+                    "prompt": "a small red circle",
+                    "n": 10,
+                    "size": "1024x1024",
+                    "quality": "high"
+                }),
+            )
+            .await,
+            Some(0.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn image_estimate_compares_against_balance_capacity() {
+        // Mirrors the capacity comparison the balance gate applies: a proven
+        // estimate within the available balance admits the plan, while an
+        // estimate above a zero/near-zero balance denies it. Paid image plans
+        // themselves always pass through the funded admission path first.
+        let context = billing_context_with_pricing(
+            Some(json!({"image_output_price_default": 0.04})),
+            None,
+            None,
+            None,
+        );
+        let decision = decision_with_allowed_models(vec!["gpt-image-1".to_string()]);
+        for (balance, expect_within_capacity) in [(30.0, true), (0.01, false)] {
+            let state =
+                state_with_quota_and_wallet(quota_availability(balance, false), context.clone());
+            let auth_context = decision
+                .auth_context
+                .as_ref()
+                .expect("decision should carry auth context");
+            let available = available_balance_capacity_usd(&state, auth_context)
+                .await
+                .expect("capacity should resolve")
+                .expect("finite wallet should expose capacity");
+            let estimate = image_estimate_usd(
+                &state,
+                json!({
+                    "model": "gpt-image-1",
+                    "prompt": "a small red circle",
+                    "n": 3,
+                    "size": "1024x1024",
+                    "quality": "high"
+                }),
+            )
+            .await
+            .expect("priced image estimate should be bounded");
+            assert_eq!(
+                estimate <= available + super::DAILY_QUOTA_EPSILON_USD,
+                expect_within_capacity,
+                "balance {balance} vs estimate {estimate}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn finalized_chat_output_fields_and_choice_count_bound_capacity() {
         let context = billing_context_with_pricing(
@@ -2331,6 +2675,7 @@ mod tests {
             Some(10),
             Some("priority"),
             None,
+            None,
         );
         let with_ttl = execution_plan_cost_upper_bound_cache_key(
             &plan,
@@ -2341,9 +2686,85 @@ mod tests {
             Some(10),
             Some("priority"),
             Some(30),
+            None,
         );
 
         assert_ne!(without_ttl, with_ttl);
+    }
+
+    #[test]
+    fn authorization_cache_key_includes_image_request_shape() {
+        let plan = execution_plan(
+            json!({
+                "model": "gpt-image-1",
+                "prompt": "a small red circle",
+                "n": 2,
+                "size": "1024x1024",
+                "quality": "high"
+            }),
+            "openai:image",
+        );
+        let base = ImageAuthorizationEstimateFields {
+            image_count: 2,
+            image_size: Some("1024x1024".to_string()),
+            image_quality: Some("high".to_string()),
+        };
+        let key = execution_plan_cost_upper_bound_cache_key(
+            &plan,
+            Some("model-1"),
+            Some("gpt-image-1"),
+            "openai:image",
+            10,
+            None,
+            None,
+            None,
+            Some(&base),
+        );
+        for variant in [
+            ImageAuthorizationEstimateFields {
+                image_count: 3,
+                ..base.clone()
+            },
+            ImageAuthorizationEstimateFields {
+                image_size: Some("1536x1024".to_string()),
+                ..base.clone()
+            },
+            ImageAuthorizationEstimateFields {
+                image_quality: Some("medium".to_string()),
+                ..base.clone()
+            },
+        ] {
+            assert_ne!(
+                key,
+                execution_plan_cost_upper_bound_cache_key(
+                    &plan,
+                    Some("model-1"),
+                    Some("gpt-image-1"),
+                    "openai:image",
+                    10,
+                    None,
+                    None,
+                    None,
+                    Some(&variant),
+                ),
+                "cache key must distinguish {variant:?}"
+            );
+        }
+        assert_eq!(
+            key,
+            execution_plan_cost_upper_bound_cache_key(
+                &plan,
+                Some("model-1"),
+                Some("gpt-image-1"),
+                "openai:image",
+                10,
+                None,
+                None,
+                None,
+                Some(&base),
+            ),
+            "identical image shapes must reuse the cached estimate"
+        );
     }
 
     #[test]

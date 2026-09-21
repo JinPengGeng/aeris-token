@@ -100,6 +100,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # The image is distroless (no curl/wget); the gateway binary ships a
+    # `--healthcheck` mode that probes http://127.0.0.1:$APP_PORT/health.
+    healthcheck:
+      test: [ "CMD", "/opt/aether/current/bin/aether-gateway", "--healthcheck" ]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
     ports:
       - "${APP_PORT:-8084}:${APP_PORT:-8084}"
     logging:

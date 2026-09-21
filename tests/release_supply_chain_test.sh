@@ -42,6 +42,37 @@ assert_line "${VSCODEX_DOCKERFILE}" \
 grep -Fq 'verify_release_checksum "${archive_file}" "${TMP_ROOT}/SHA256SUMS" "${asset}"' "${INSTALLER}" || fail_test "gateway installer does not verify SHA256SUMS"
 grep -Fq 'verify_checksum "$archive" "$TMP_DIR/SHA256SUMS.txt" "$asset"' "${TUNNEL_INSTALLER}" || fail_test "tunnel installer does not verify SHA256SUMS.txt"
 
+# Mirror channel controls: third-party mirrors are explicitly opt-in, warn
+# loudly, and the archive is still pinned to the official SHA256SUMS manifest
+# (never a mirror-hosted one). See select_release_download_urls in install.sh.
+grep -Fq 'SHA256SUMS is always fetched from the official' "${INSTALLER}" \
+    || fail_test "gateway installer lost the official-manifest mirror warning comment"
+grep -Fq 'GitHub release (never from the mirror)' "${INSTALLER}" \
+    || fail_test "gateway installer lost the official-manifest mirror warning comment"
+grep -Fq 'never trust a checksum manifest served by the mirror' "${INSTALLER}" \
+    || fail_test "gateway installer lost the mirror self-attestation warning comment"
+grep -Fq '校验失败将中止安装' "${INSTALLER}" \
+    || fail_test "gateway installer mirror prompt lost the mandatory checksum warning"
+
+official_url="https://github.com/JinPengGeng/aeris-token/releases/download/aeris-token-v0.0.0/aether-aeris-token-v0.0.0-linux-amd64.tar.gz"
+mirror_output="$(
+    bash -c 'source "$1"; RELEASE_ARCHIVE_URL="$2"; select_release_download_urls "$3"' \
+        bash "${REPO_ROOT}/install.sh" \
+        "https://mirror.example.test/aether-aeris-token-v0.0.0-linux-amd64.tar.gz" \
+        "${official_url}" 2>&1
+)"
+grep -Fq 'WARNING: using third-party download mirror' <<<"${mirror_output}" \
+    || fail_test "installer did not warn about the explicit third-party mirror"
+grep -Fq 'official GitHub Release SHA256SUMS' <<<"${mirror_output}" \
+    || fail_test "installer mirror warning omitted the mandatory checksum notice"
+
+default_output="$(
+    bash -c 'source "$1"; interactive_tty_available() { return 1; }; select_release_download_urls "$2"; printf "%s" "${RELEASE_ARCHIVE_URL}"' \
+        bash "${REPO_ROOT}/install.sh" "${official_url}" 2>/dev/null
+)"
+[[ "${default_output}" == "${official_url}" ]] \
+    || fail_test "installer did not fall back to the official release archive URL"
+
 if grep -Eq '^FROM[[:space:]]+[^[:space:]@]+(:[^[:space:]@]+)?([[:space:]]+AS[[:space:]]+[^[:space:]]+)?$' "${APP_DOCKERFILE}"; then
     fail_test "production Dockerfile contains an unpinned base image"
 fi
