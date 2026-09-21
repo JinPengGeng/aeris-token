@@ -24,6 +24,8 @@
 | [隧道版本兼容与协商](tunnel-version-compatibility.md) | Accepted | v1/v2/v3 的入口校验、v3 SETTINGS 和升级顺序 |
 | [Usage core/runtime 与重试、DLQ](usage-runtime-retry-dlq.md) | Accepted | 实际分层、入队重试、消费确认、死信恢复和保留边界 |
 | [Gateway 多实例缓存一致性](gateway-cache-consistency.md) | Accepted | 本地失效、跨实例有限 TTL 与关键授权强读的边界 |
+| [Redis 故障降级语义与“一致性优先”全局开关](redis-consistency-first.md) | Accepted | `AETHER_CONSISTENCY_FIRST` 开关；RPM local fallback 与日用量 fail-open 的收敛 |
+| [Issue #215 残余性能项（failover 体缓存 / gzip offload）](issue-215-residual-performance.md) | Accepted | 本轮不实现，记录决策依据与复核入口 |
 | [Provider API key 明文列清理](provider-api-key-plaintext-cleanup.md) | Accepted（分阶段，当前未删列） | 回填双写、读路径翻转与删列的收敛顺序 |
 
 以上描述性记录于 2026-09-13 对 fork `JinPengGeng/aeris-token` 的已合并提交
