@@ -8,6 +8,7 @@ use crate::network::{OAuthHttpExecutor, OAuthNetworkContext};
 use async_trait::async_trait;
 
 #[derive(Debug, Clone, Default)]
+/// Data type: linux do identity oauth provider.
 pub struct LinuxDoIdentityOAuthProvider {
     inner: CustomOidcIdentityOAuthProvider,
 }

@@ -82,6 +82,7 @@ struct CapacityCurvePointResult {
     duration_ms: u64,
     successful_requests: usize,
     rejected_requests: usize,
+    error_status_requests: usize,
     failed_requests: usize,
     status_counts: BTreeMap<u16, usize>,
     non_success_status_samples: serde_json::Value,
@@ -102,6 +103,7 @@ struct CapacityCurveSaturationPoint {
     reason: String,
     p95_ms: u64,
     rejected_requests: usize,
+    error_status_requests: usize,
     failed_requests: usize,
     high_watermark: u64,
 }
@@ -455,6 +457,16 @@ fn capacity_point(
         .filter(|(status, _)| **status >= 200 && **status < 300)
         .map(|(_, count)| *count)
         .sum::<usize>();
+    // Non-2xx, non-503 statuses (500/429/502 storms) carry a complete response
+    // body, so the probe does not count them as failed — but they are not
+    // useful capacity either. Surface them explicitly for saturation
+    // detection instead of letting a gateway fault pass as clean.
+    let error_status_requests = result
+        .status_counts
+        .iter()
+        .filter(|(status, _)| !(**status >= 200 && **status < 300) && **status != 503)
+        .map(|(_, count)| *count)
+        .sum::<usize>();
     let responses_received = result.status_counts.values().sum::<usize>();
     let failures_without_response = result.total_requests.saturating_sub(responses_received);
     let failures_after_response = result
@@ -474,6 +486,7 @@ fn capacity_point(
         duration_ms,
         successful_requests,
         rejected_requests,
+        error_status_requests,
         failed_requests: total_requests.saturating_sub(successful_requests + rejected_requests),
         status_counts: result.status_counts,
         non_success_status_samples: serde_json::to_value(result.non_success_status_samples)
@@ -494,7 +507,9 @@ fn detect_saturation_point(
     latency_budget_ms: u64,
 ) -> Option<CapacityCurveSaturationPoint> {
     points.iter().find_map(|point| {
-        let reason = if point.failed_requests > 0 {
+        let reason = if point.error_status_requests > 0 {
+            Some("error_statuses_observed")
+        } else if point.failed_requests > 0 {
             Some("failures_observed")
         } else if point.rejected_requests > 0 {
             Some("admission_rejections_observed")
@@ -509,6 +524,7 @@ fn detect_saturation_point(
             reason: reason.to_string(),
             p95_ms: point.p95_ms,
             rejected_requests: point.rejected_requests,
+            error_status_requests: point.error_status_requests,
             failed_requests: point.failed_requests,
             high_watermark: point.metrics.high_watermark,
         })
@@ -1011,7 +1027,7 @@ mod tests {
                 successful: 0,
                 rejected: 0,
                 failed: 3,
-                reason: Some("failures_observed"),
+                reason: Some("error_statuses_observed"),
             },
             Case {
                 name: "500",
@@ -1019,7 +1035,7 @@ mod tests {
                 successful: 0,
                 rejected: 0,
                 failed: 3,
-                reason: Some("failures_observed"),
+                reason: Some("error_statuses_observed"),
             },
             Case {
                 name: "502",
@@ -1027,7 +1043,7 @@ mod tests {
                 successful: 0,
                 rejected: 0,
                 failed: 3,
-                reason: Some("failures_observed"),
+                reason: Some("error_statuses_observed"),
             },
             Case {
                 name: "503",
@@ -1043,7 +1059,7 @@ mod tests {
                 successful: 2,
                 rejected: 0,
                 failed: 3,
-                reason: Some("failures_observed"),
+                reason: Some("error_statuses_observed"),
             },
             Case {
                 name: "mixed rejection",
@@ -1051,7 +1067,7 @@ mod tests {
                 successful: 1,
                 rejected: 1,
                 failed: 1,
-                reason: Some("failures_observed"),
+                reason: Some("error_statuses_observed"),
             },
             Case {
                 name: "healthy",

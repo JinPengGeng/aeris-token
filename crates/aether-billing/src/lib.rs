@@ -1,3 +1,7 @@
+//! Billing engine for Aether: pricing resolution, cost estimation, formula
+//! evaluation, and billing snapshot schema.
+#![warn(missing_docs)]
+
 mod default_rule;
 mod event_enrichment;
 mod formula_engine;

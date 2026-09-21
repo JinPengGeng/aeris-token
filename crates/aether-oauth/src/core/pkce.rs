@@ -4,10 +4,12 @@ use std::collections::BTreeMap;
 use url::{form_urlencoded, Url};
 use uuid::Uuid;
 
+/// Function: generate oauth nonce.
 pub fn generate_oauth_nonce() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
+/// Function: generate pkce verifier.
 pub fn generate_pkce_verifier() -> String {
     format!(
         "{}{}{}",
@@ -17,11 +19,13 @@ pub fn generate_pkce_verifier() -> String {
     )
 }
 
+/// Function: pkce s256.
 pub fn pkce_s256(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
 }
 
+/// Function: parse oauth callback params.
 pub fn parse_oauth_callback_params(callback_url: &str) -> BTreeMap<String, String> {
     let mut merged = BTreeMap::new();
     let Ok(url) = Url::parse(callback_url.trim()) else {

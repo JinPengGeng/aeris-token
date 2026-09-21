@@ -1,10 +1,17 @@
+//! Shared execution contracts (frames, plans, results, usage, tunnel security)
+//! exchanged between Aether gateway components.
+#![warn(missing_docs)]
+
 mod error;
 mod frame;
+/// Module: internal gateway.
 pub mod internal_gateway;
 mod plan;
 mod result;
+/// Module: tunnel.
 pub mod tunnel;
 pub mod tunnel_key_rotation;
+/// Module: tunnel security.
 pub mod tunnel_security;
 mod usage;
 

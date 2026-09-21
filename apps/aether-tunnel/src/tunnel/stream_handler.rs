@@ -3850,7 +3850,7 @@ mod tests {
                     let Message::Binary(bytes) = message else {
                         return false;
                     };
-                    let frame = TunnelFrame::decode(bytes.clone().into()).unwrap();
+                    let frame = TunnelFrame::decode(bytes.clone()).unwrap();
                     frame.stream_id == 41 && frame.msg_type == MsgType::ResponseHeaders
                 });
                 if received_headers {
@@ -4253,7 +4253,7 @@ mod tests {
             .iter()
             .filter_map(|message| match message {
                 Message::Binary(data) => {
-                    Some(TunnelFrame::decode(data.clone().into()).expect("frame should decode"))
+                    Some(TunnelFrame::decode(data.clone()).expect("frame should decode"))
                 }
                 Message::Ping(_) | Message::Pong(_) | Message::Close(_) => None,
                 other => panic!("unexpected writer message: {other:?}"),

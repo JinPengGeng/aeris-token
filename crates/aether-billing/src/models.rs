@@ -2,23 +2,35 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Enumeration: billing unit.
 pub enum BillingUnit {
+    /// Variant: per1 mtokens.
     Per1MTokens,
+    /// Variant: per1 mtokens hour.
     Per1MTokensHour,
+    /// Variant: per request.
     PerRequest,
+    /// Variant: fixed.
     Fixed,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Data type: billing dimension.
 pub struct BillingDimension {
+    /// Field: name.
     pub name: String,
+    /// Field: usage field.
     pub usage_field: String,
+    /// Field: price field.
     pub price_field: String,
+    /// Field: unit.
     pub unit: BillingUnit,
+    /// Field: default price.
     pub default_price: f64,
 }
 
 impl BillingDimension {
+    /// Method: calculate.
     pub fn calculate(&self, usage_value: f64, price: f64) -> f64 {
         if usage_value <= 0.0 || price <= 0.0 {
             return 0.0;
@@ -34,10 +46,15 @@ impl BillingDimension {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+/// Data type: cost breakdown.
 pub struct CostBreakdown {
+    /// Field: costs.
     pub costs: BTreeMap<String, f64>,
+    /// Field: total cost.
     pub total_cost: f64,
+    /// Field: tier index.
     pub tier_index: Option<i64>,
+    /// Field: effective prices.
     pub effective_prices: BTreeMap<String, f64>,
 }
 
