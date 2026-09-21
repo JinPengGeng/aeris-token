@@ -6,12 +6,12 @@ use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_data_contracts::repository::usage::{
     canonical_usage_body_ref_for, next_daily_cost_contribution, parse_usage_body_ref,
     sanitize_usage_request_metadata, usage_body_ref, DailyActualCostCounts, DailyActualCostQuery,
-    DailyCostContribution, StoredUsageAuditAggregation, StoredUsageAuditSummary,
-    StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
-    StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
-    StoredUsageDailyActualCostRollup, StoredUsageDashboardDailyBreakdownRow,
-    StoredUsageDashboardProviderCount, StoredUsageDashboardSummary,
-    StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
+    DailyCostContribution, InsufficientQuotaWriteoffQuery, StoredInsufficientQuotaWriteoff,
+    StoredUsageAuditAggregation, StoredUsageAuditSummary, StoredUsageBreakdownSummaryRow,
+    StoredUsageCacheAffinityHitSummary, StoredUsageCacheAffinityIntervalRow,
+    StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary, StoredUsageDailyActualCostRollup,
+    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
+    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
     StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
     StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
     StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
@@ -1447,6 +1447,48 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
         if let Some(limit) = query.limit {
             items.truncate(limit);
         }
+        Ok(items)
+    }
+
+    async fn list_insufficient_quota_writeoffs(
+        &self,
+        query: &InsufficientQuotaWriteoffQuery,
+    ) -> Result<Vec<StoredInsufficientQuotaWriteoff>, DataLayerError> {
+        query.validate()?;
+        let items: Vec<_> = self
+            .by_request_id
+            .read()
+            .expect("usage repository lock")
+            .values()
+            .filter(|item| item.billing_status == "insufficient_quota")
+            .filter(|item| {
+                item.finalized_at_unix_secs
+                    .or(Some(item.updated_at_unix_secs))
+                    .is_some_and(|at| {
+                        at >= query.finalized_from_unix_secs && at < query.finalized_until_unix_secs
+                    })
+            })
+            .map(|item| StoredInsufficientQuotaWriteoff {
+                request_id: item.request_id.clone(),
+                user_id: item.user_id.clone(),
+                api_key_id: item.api_key_id.clone(),
+                provider_id: item.provider_id.clone(),
+                model: item.model.clone(),
+                total_cost_usd: item.total_cost_usd,
+                actual_total_cost_usd: item.actual_total_cost_usd,
+                finalized_at_unix_secs: item
+                    .finalized_at_unix_secs
+                    .or(Some(item.updated_at_unix_secs)),
+            })
+            .collect();
+        let mut items = items;
+        items.sort_by_key(|item| {
+            (
+                item.finalized_at_unix_secs.unwrap_or(0),
+                item.request_id.clone(),
+            )
+        });
+        items.truncate(query.limit);
         Ok(items)
     }
 

@@ -154,6 +154,12 @@ fn system_config_key_affects_provider_transport_snapshot(key: &str) -> bool {
     key.trim() == "enable_format_conversion"
 }
 
+fn sync_sensitive_headers_config_from_system_value(key: &str, value: Option<&serde_json::Value>) {
+    if key.trim() == aether_data_contracts::repository::usage::SENSITIVE_HEADERS_SYSTEM_CONFIG_KEY {
+        aether_data_contracts::repository::usage::apply_sensitive_headers_config(value);
+    }
+}
+
 impl AppState {
     pub async fn prewarm_chat_pii_redaction_runtime_config(&self) -> Result<bool, String> {
         crate::privacy::read_chat_pii_redaction_runtime_config(self)
@@ -837,6 +843,7 @@ impl AppState {
                 SYSTEM_CONFIG_CACHE_MAX_STALENESS,
             )
             .await?;
+        sync_sensitive_headers_config_from_system_value(key, value.as_ref());
         Ok(value)
     }
 
@@ -1005,6 +1012,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         self.system_config_cache
             .insert(key.to_string(), None, SYSTEM_CONFIG_CACHE_MAX_STALENESS);
+        sync_sensitive_headers_config_from_system_value(key, None);
         if deleted && system_config_key_affects_scheduler(key) {
             self.invalidate_scheduler_affinity_cache();
         }
@@ -1093,6 +1101,7 @@ impl AppState {
     }
 
     fn remember_system_config_write(&self, key: &str, value: Option<serde_json::Value>) {
+        sync_sensitive_headers_config_from_system_value(key, value.as_ref());
         self.system_config_cache
             .insert(key.to_string(), value, SYSTEM_CONFIG_CACHE_MAX_STALENESS);
         if system_config_key_affects_scheduler(key) {

@@ -28,6 +28,44 @@ pub struct DailyActualCostCounts {
     pub key_units: u64,
 }
 
+pub const INSUFFICIENT_QUOTA_WRITEOFF_MAX_LIMIT: usize = 1000;
+
+/// Read-only daily writeoff report for usage finalized as `insufficient_quota`
+/// (delivered service recorded at no charge). The window is [start, end).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsufficientQuotaWriteoffQuery {
+    pub finalized_from_unix_secs: u64,
+    pub finalized_until_unix_secs: u64,
+    pub limit: usize,
+}
+
+impl InsufficientQuotaWriteoffQuery {
+    pub fn validate(&self) -> Result<(), DataLayerError> {
+        if self.finalized_from_unix_secs >= self.finalized_until_unix_secs
+            || self.finalized_until_unix_secs > i64::MAX as u64
+            || self.limit == 0
+            || self.limit > INSUFFICIENT_QUOTA_WRITEOFF_MAX_LIMIT
+        {
+            return Err(invalid(
+                "invalid insufficient quota writeoff window or limit",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredInsufficientQuotaWriteoff {
+    pub request_id: String,
+    pub user_id: Option<String>,
+    pub api_key_id: Option<String>,
+    pub provider_id: Option<String>,
+    pub model: String,
+    pub total_cost_usd: f64,
+    pub actual_total_cost_usd: f64,
+    pub finalized_at_unix_secs: Option<u64>,
+}
+
 /// Independent of audit retention. A deleted audit must not make its request ID reusable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DailyCostContribution {

@@ -1941,6 +1941,21 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_insufficient_quota_writeoffs(
+        &self,
+        query: &aether_data_contracts::repository::usage::InsufficientQuotaWriteoffQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredInsufficientQuotaWriteoff>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.list_insufficient_quota_writeoffs(query).await,
+            None => Err(DataLayerError::InvalidConfiguration(
+                "insufficient quota writeoff reports require a usage reader".to_string(),
+            )),
+        }
+    }
+
     pub(crate) async fn summarize_usage_cache_affinity_hit_summary(
         &self,
         query: &aether_data_contracts::repository::usage::UsageCacheAffinityHitSummaryQuery,
