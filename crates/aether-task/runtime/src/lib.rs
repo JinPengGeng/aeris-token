@@ -47,6 +47,8 @@ pub struct TaskSupervisorTaskSnapshot {
     pub singleton_lease_contention_total: u64,
     pub singleton_lease_lost_total: u64,
     pub singleton_lease_error_total: u64,
+    pub singleton_worker_exited_total: u64,
+    pub singleton_worker_panic_total: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -60,6 +62,8 @@ pub struct TaskSupervisorMetricsSnapshot {
     pub singleton_lease_contention_total: u64,
     pub singleton_lease_lost_total: u64,
     pub singleton_lease_error_total: u64,
+    pub singleton_worker_exited_total: u64,
+    pub singleton_worker_panic_total: u64,
     pub tasks: Vec<TaskSupervisorTaskSnapshot>,
 }
 
@@ -79,6 +83,8 @@ struct TaskSupervisorTaskCounters {
     singleton_lease_contention_total: u64,
     singleton_lease_lost_total: u64,
     singleton_lease_error_total: u64,
+    singleton_worker_exited_total: u64,
+    singleton_worker_panic_total: u64,
 }
 
 impl TaskSupervisorMetrics {
@@ -138,6 +144,20 @@ impl TaskSupervisorMetrics {
         });
     }
 
+    pub fn record_singleton_worker_exited(&self, task_name: &'static str) {
+        self.with_task_counters(task_name, |counters| {
+            counters.singleton_worker_exited_total =
+                counters.singleton_worker_exited_total.saturating_add(1);
+        });
+    }
+
+    pub fn record_singleton_worker_panic(&self, task_name: &'static str) {
+        self.with_task_counters(task_name, |counters| {
+            counters.singleton_worker_panic_total =
+                counters.singleton_worker_panic_total.saturating_add(1);
+        });
+    }
+
     pub fn snapshot(&self) -> TaskSupervisorMetricsSnapshot {
         let Ok(guard) = self.inner.lock() else {
             return TaskSupervisorMetricsSnapshot::default();
@@ -169,6 +189,12 @@ impl TaskSupervisorMetrics {
             snapshot.singleton_lease_error_total = snapshot
                 .singleton_lease_error_total
                 .saturating_add(counters.singleton_lease_error_total);
+            snapshot.singleton_worker_exited_total = snapshot
+                .singleton_worker_exited_total
+                .saturating_add(counters.singleton_worker_exited_total);
+            snapshot.singleton_worker_panic_total = snapshot
+                .singleton_worker_panic_total
+                .saturating_add(counters.singleton_worker_panic_total);
             snapshot.tasks.push(TaskSupervisorTaskSnapshot {
                 task_name,
                 active_tasks: counters.active_tasks,
@@ -180,6 +206,8 @@ impl TaskSupervisorMetrics {
                 singleton_lease_contention_total: counters.singleton_lease_contention_total,
                 singleton_lease_lost_total: counters.singleton_lease_lost_total,
                 singleton_lease_error_total: counters.singleton_lease_error_total,
+                singleton_worker_exited_total: counters.singleton_worker_exited_total,
+                singleton_worker_panic_total: counters.singleton_worker_panic_total,
             });
         }
         snapshot

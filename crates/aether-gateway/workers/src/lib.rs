@@ -138,15 +138,45 @@ where
                 lease: Some(lease),
             };
             let restart_after_release = {
-                let worker_future = worker(worker_context);
-                tokio::pin!(worker_future);
+                // Run the worker body on its own task so a panic surfaces as a
+                // JoinError here instead of unwinding through the supervisor.
+                // A panicked worker is counted, alerted, and restarted; a
+                // normal return is alerted (workers are expected to loop
+                // forever) and keeps the previous no-restart behavior.
+                let mut worker_join = Box::pin(tokio::spawn(worker(worker_context)));
                 let mut renew_timer = tokio::time::interval(config.renew_interval);
                 renew_timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
                 renew_timer.tick().await;
 
                 loop {
                     tokio::select! {
-                        _ = &mut worker_future => break false,
+                        join_result = &mut worker_join => {
+                            match join_result {
+                                Ok(()) => {
+                                    metrics.record_singleton_worker_exited(task_key);
+                                    warn!(
+                                        event_name = "singleton_worker_exited",
+                                        log_type = "ops",
+                                        task = task_key,
+                                        owner = %owner,
+                                        "singleton worker future returned; worker is no longer running"
+                                    );
+                                    break false;
+                                }
+                                Err(error) => {
+                                    metrics.record_singleton_worker_panic(task_key);
+                                    warn!(
+                                        event_name = "singleton_worker_panicked",
+                                        log_type = "ops",
+                                        task = task_key,
+                                        owner = %owner,
+                                        error = ?error,
+                                        "singleton worker panicked; restarting worker"
+                                    );
+                                    break true;
+                                }
+                            }
+                        }
                         _ = renew_timer.tick() => {
                             let Some(lease) = lease_guard.lease.as_ref() else {
                                 break false;

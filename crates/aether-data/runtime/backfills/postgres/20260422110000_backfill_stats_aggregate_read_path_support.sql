@@ -130,6 +130,7 @@ WHERE usage_base.status = 'completed'
   AND usage_base.first_byte_time_ms IS NOT NULL
 GROUP BY usage_base.day_utc;
 
+-- destructive-sql: allow rebuild stats aggregates from usage facts before repopulating
 TRUNCATE TABLE
     stats_hourly_user_model,
     stats_hourly_provider,
@@ -1115,6 +1116,7 @@ SELECT
     ) AS is_aggregatable
 FROM derived;
 
+-- destructive-sql: allow rebuild stats aggregates from usage facts before repopulating
 TRUNCATE TABLE
     stats_user_daily_api_format,
     stats_user_daily_provider,
@@ -1327,6 +1329,7 @@ SELECT
     NOW() AS now_utc,
     (date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS current_day_utc;
 
+-- destructive-sql: allow rebuild stats_daily_model_provider from usage facts before repopulating
 TRUNCATE TABLE stats_daily_model_provider;
 
 INSERT INTO stats_daily_model_provider (
@@ -1405,6 +1408,7 @@ SELECT
     NOW() AS now_utc,
     (date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS current_day_utc;
 
+-- destructive-sql: allow rebuild stats_user_daily_model_provider from usage facts before repopulating
 TRUNCATE TABLE stats_user_daily_model_provider;
 
 INSERT INTO stats_user_daily_model_provider (
@@ -2101,6 +2105,7 @@ LEFT JOIN usage_settlement_snapshots
 CROSS JOIN tmp_stats_cost_savings_context AS context
 WHERE usage.created_at < context.current_day_utc;
 
+-- destructive-sql: allow rebuild remaining stats aggregates from usage facts before repopulating
 TRUNCATE TABLE
     stats_daily_cost_savings,
     stats_daily_cost_savings_provider,

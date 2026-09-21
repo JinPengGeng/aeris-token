@@ -5,6 +5,7 @@
 -- The metadata predicate also replaces task-only rows written by early builds of
 -- this fix that still claimed an instance owner. Delete children explicitly so
 -- cleanup remains complete after imports performed with FK checks disabled.
+-- destructive-sql: allow deduplicate legacy worker boot run rows before adding the unique index
 DELETE FROM background_task_events
 WHERE run_id IN (
     SELECT id
@@ -15,6 +16,7 @@ WHERE run_id IN (
       AND progress_message = 'worker booted'
 );
 
+-- destructive-sql: allow delete orphaned events of deduplicated worker boot runs
 DELETE FROM background_task_runs
 WHERE id LIKE 'boot:%'
   AND owner_instance IS NOT NULL
