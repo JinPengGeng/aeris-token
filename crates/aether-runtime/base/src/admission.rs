@@ -1,6 +1,6 @@
 use async_stream::stream;
 use axum::body::Body;
-use axum::http::Response;
+use axum::http::{header, HeaderMap, Response};
 use futures_util::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,6 +8,22 @@ use std::time::Duration;
 use crate::concurrency::ConcurrencyPermit;
 
 const ADMISSION_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Termination frame injected into SSE response bodies when the admission
+/// permit becomes unhealthy mid-stream. Without it the body would end cleanly
+/// and clients could not distinguish "upstream finished" from "gateway cut the
+/// stream because the distributed lease expired".
+const ADMISSION_UNHEALTHY_SSE_TERMINATION: &[u8] = b"event: error\n\
+data: {\"error\":{\"message\":\"upstream admission lease expired; stream terminated\",\"type\":\"server_error\",\"code\":\"admission_lease_expired\"}}\n\
+\n";
+
+fn response_is_sse(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+}
 
 pub trait AdmissionPermitHealth: Send + Sync {
     fn is_healthy(&self) -> bool;
@@ -157,6 +173,7 @@ fn hold_axum_response_permit_with_interval(
     }
 
     let (parts, body) = response.into_parts();
+    let emit_unhealthy_termination = response_is_sse(&parts.headers);
     let stream = stream! {
         let _permit = permit;
         let mut body_stream = body.into_data_stream();
@@ -165,18 +182,23 @@ fn hold_axum_response_permit_with_interval(
         health.tick().await;
         loop {
             if !_permit.is_healthy() {
+                if emit_unhealthy_termination {
+                    yield Ok(axum::body::Bytes::from_static(ADMISSION_UNHEALTHY_SSE_TERMINATION));
+                }
                 break;
             }
             tokio::select! {
                 item = body_stream.next() => match item {
                     Some(item) if _permit.is_healthy() => yield item,
-                    Some(_) | None => break,
-                },
-                _ = health.tick() => {
-                    if !_permit.is_healthy() {
+                    Some(_) => {
+                        if emit_unhealthy_termination {
+                            yield Ok(axum::body::Bytes::from_static(ADMISSION_UNHEALTHY_SSE_TERMINATION));
+                        }
                         break;
                     }
-                }
+                    None => break,
+                },
+                _ = health.tick() => {}
             }
         }
     };
@@ -192,7 +214,8 @@ mod tests {
     };
     use crate::ConcurrencyGate;
     use axum::body::{to_bytes, Body};
-    use axum::http::Response;
+    use axum::http::{header, Response};
+    use futures_util::StreamExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -322,5 +345,134 @@ mod tests {
         .expect("body collection should succeed");
         assert!(body.is_empty());
         assert_eq!(local_gate.snapshot().in_flight, 0);
+    }
+
+    fn sse_response(
+        stream: impl futures_util::Stream<Item = Result<axum::body::Bytes, std::convert::Infallible>>
+            + Send
+            + 'static,
+    ) -> Response<Body> {
+        Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+            .body(Body::from_stream(stream))
+            .expect("SSE response should build")
+    }
+
+    fn unhealthy_permit() -> (ConcurrencyGate, AdmissionPermit, Arc<AtomicBool>) {
+        let local_gate = ConcurrencyGate::new("local", 1);
+        let local = local_gate.try_acquire().expect("local permit");
+        let healthy = Arc::new(AtomicBool::new(true));
+        let permit =
+            AdmissionPermit::from_parts(Some(local), Some(TestPermitHealth(Arc::clone(&healthy))))
+                .expect("combined permit");
+        (local_gate, permit, healthy)
+    }
+
+    #[tokio::test]
+    async fn unhealthy_distributed_permit_injects_error_event_into_idle_sse_body() {
+        let (_gate, permit, healthy) = unhealthy_permit();
+        let response = sse_response(futures_util::stream::pending::<
+            Result<axum::body::Bytes, std::convert::Infallible>,
+        >());
+        let wrapped = hold_axum_response_permit_with_interval(
+            response,
+            permit,
+            std::time::Duration::from_millis(5),
+        );
+
+        healthy.store(false, Ordering::Release);
+        let body = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            to_bytes(wrapped.into_body(), usize::MAX),
+        )
+        .await
+        .expect("unhealthy permit should end an idle SSE body")
+        .expect("body collection should succeed");
+        let text = String::from_utf8(body.to_vec()).expect("SSE frame should be utf-8");
+        assert!(
+            text.contains("event: error"),
+            "client-visible termination should be an SSE error event: {text}"
+        );
+        assert!(
+            text.contains("admission_lease_expired"),
+            "termination should carry a stable machine-readable code: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unhealthy_distributed_permit_terminates_sse_body_after_partial_data() {
+        let (_gate, permit, healthy) = unhealthy_permit();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
+            Result<axum::body::Bytes, std::convert::Infallible>,
+        >();
+        let response = sse_response(async_stream::stream! {
+            while let Some(item) = rx.recv().await {
+                yield item;
+            }
+        });
+        let wrapped = hold_axum_response_permit_with_interval(
+            response,
+            permit,
+            std::time::Duration::from_millis(5),
+        );
+        let mut body = wrapped.into_body().into_data_stream();
+
+        tx.send(Ok(axum::body::Bytes::from_static(b"data: {\"chunk\":1}\n\n")))
+            .expect("chunk should be accepted");
+        let first = tokio::time::timeout(std::time::Duration::from_millis(100), body.next())
+            .await
+            .expect("first chunk should arrive")
+            .expect("stream should yield")
+            .expect("chunk should be valid");
+        assert_eq!(first.as_ref(), b"data: {\"chunk\":1}\n\n");
+
+        healthy.store(false, Ordering::Release);
+        tx.send(Ok(axum::body::Bytes::from_static(b"data: {\"chunk\":2}\n\n")))
+            .expect("chunk should be accepted");
+        let mut tail = first.to_vec();
+        while let Some(item) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), body.next())
+                .await
+                .expect("SSE body should terminate after the lease expires")
+        {
+            let chunk = item.expect("termination frame should be valid");
+            tail.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8(tail).expect("SSE body should be utf-8");
+        assert!(text.contains("data: {\"chunk\":1}"));
+        assert!(!text.contains("chunk\":2"), "late data must be dropped: {text}");
+        assert!(
+            text.contains("event: error") && text.contains("admission_lease_expired"),
+            "SSE body should end with an explicit error event: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unhealthy_distributed_permit_ends_non_sse_body_without_injected_frames() {
+        let (_gate, permit, healthy) = unhealthy_permit();
+        let response = Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from_stream(futures_util::stream::pending::<
+                Result<axum::body::Bytes, std::convert::Infallible>,
+            >()))
+            .expect("JSON response should build");
+        let wrapped = hold_axum_response_permit_with_interval(
+            response,
+            permit,
+            std::time::Duration::from_millis(5),
+        );
+
+        healthy.store(false, Ordering::Release);
+        let body = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            to_bytes(wrapped.into_body(), usize::MAX),
+        )
+        .await
+        .expect("unhealthy permit should end a non-SSE body")
+        .expect("body collection should succeed");
+        assert!(
+            body.is_empty(),
+            "non-SSE bodies must keep clean termination semantics: {body:?}"
+        );
     }
 }

@@ -42,6 +42,11 @@ ENV RUST_LOG=aether_gateway=info \
 
 EXPOSE 8084
 
+# The gateway drains in-flight requests on SIGTERM (wait_for_shutdown_signal);
+# keep docker stop aligned with that graceful shutdown instead of the implicit
+# SIGKILL fallback.
+STOPSIGNAL SIGTERM
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD ["/opt/aether/current/bin/aether-gateway", "--healthcheck"]
 
