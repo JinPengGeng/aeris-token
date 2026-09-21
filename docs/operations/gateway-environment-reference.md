@@ -23,6 +23,7 @@ are not a general way to enable boolean options.
 | Variable | Scope | Declared default | Rust type | Source |
 | --- | --- | --- | --- | --- |
 | `AETHER_BACKUP_KEYRING_FILE` | standalone aether-backup-restore CLI | `unset` | `Option<PathBuf>` | [bin/aether-backup-restore.rs](../../apps/aether-gateway/src/bin/aether-backup-restore.rs) |
+| `AETHER_CONSISTENCY_FIRST` | gateway root/server; not inherited by subcommands | `false` | `bool` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_DATABASE_DRIVER` | gateway global; inherited by data subcommands | `unset` | `Option<DatabaseDriverArg>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_DATABASE_URL` | gateway global; inherited by data subcommands | `unset` | `Option<String>` | [main.rs](../../apps/aether-gateway/src/main.rs) |
 | `AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES` | gateway root/server; not inherited by subcommands | `DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES` | `usize` | [main.rs](../../apps/aether-gateway/src/main.rs) |
@@ -120,6 +121,7 @@ These declarations preserve value parsers and missing-value handling for review.
 They contain names and source defaults, not current environment values.
 
 - `AETHER_BACKUP_KEYRING_FILE`: `long, env = "AETHER_BACKUP_KEYRING_FILE"`
+- `AETHER_CONSISTENCY_FIRST`: `long, env = "AETHER_CONSISTENCY_FIRST", default_value_t = false`
 - `AETHER_DATABASE_DRIVER`: `long, env = "AETHER_DATABASE_DRIVER", global = true`
 - `AETHER_DATABASE_URL`: `long, env = "AETHER_DATABASE_URL", global = true`
 - `AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES`: `long, env = "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES", default_value_t = DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)`

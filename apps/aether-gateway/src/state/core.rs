@@ -751,8 +751,9 @@ impl AppState {
     }
 
     pub fn with_frontdoor_daily_usage_fail_open(mut self, fail_open: bool) -> Self {
-        Arc::make_mut(&mut self.frontdoor_limiters).daily_usage =
-            Arc::new(crate::daily_usage_limit::FrontdoorDailyUsageLimiter::new().with_fail_open(fail_open));
+        Arc::make_mut(&mut self.frontdoor_limiters).daily_usage = Arc::new(
+            crate::daily_usage_limit::FrontdoorDailyUsageLimiter::new().with_fail_open(fail_open),
+        );
         self
     }
 
