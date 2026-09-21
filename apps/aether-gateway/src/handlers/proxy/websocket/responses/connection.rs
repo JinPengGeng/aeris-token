@@ -5,7 +5,6 @@ use std::time::Duration;
 use axum::extract::ws::{Message as AxumWsMessage, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
-use wreq::ws::message::Message as WreqWsMessage;
 
 use super::adapter::ResponsesWebSocketRelayDirective;
 use super::client::{adapter_drain_ready, forward_client_message, RelayDisposition};
@@ -39,7 +38,7 @@ use crate::handlers::proxy::websocket::session::{
 };
 use crate::handlers::proxy::websocket::transport::{
     close_client_socket, send_client_message, send_gateway_error_with_status,
-    send_responses_websocket_error, upstream_message_to_client,
+    send_responses_websocket_error, upstream_message_to_client, UpstreamWsMessage,
 };
 use crate::AppState;
 
@@ -241,7 +240,7 @@ pub(super) async fn relay_bound_connection(
                     break;
                 };
                 let parsed_upstream_frame = match &upstream_message {
-                    WreqWsMessage::Text(text) => {
+                    UpstreamWsMessage::Text(text) => {
                         ParsedResponsesWebSocketFrame::parse(text.as_str()).ok()
                     }
                     _ => None,
@@ -298,7 +297,7 @@ pub(super) async fn relay_bound_connection(
                 let parsed_upstream_event = parsed_upstream_frame
                     .as_ref()
                     .map(ParsedResponsesWebSocketFrame::event);
-                if let WreqWsMessage::Text(text) = &upstream_message {
+                if let UpstreamWsMessage::Text(text) = &upstream_message {
                     debug!(
                         event_name = "responses_websocket_upstream_event",
                         log_type = "event",
@@ -317,9 +316,9 @@ pub(super) async fn relay_bound_connection(
                         "gateway received Responses WebSocket event"
                     );
                 }
-                if matches!(&upstream_message, WreqWsMessage::Binary(_)) {
+                if matches!(&upstream_message, UpstreamWsMessage::Binary(_)) {
                     mark_active_response_retry_unsafe(bound, "upstream_binary_frame");
-                } else if matches!(&upstream_message, WreqWsMessage::Text(_))
+                } else if matches!(&upstream_message, UpstreamWsMessage::Text(_))
                     && parsed_upstream_event.is_none()
                 {
                     mark_active_response_retry_unsafe(bound, "invalid_upstream_event");
@@ -366,7 +365,7 @@ pub(super) async fn relay_bound_connection(
                     }
                 }
                 let observation = match &upstream_message {
-                    WreqWsMessage::Text(text) => {
+                    UpstreamWsMessage::Text(text) => {
                         let adapter = bound.adapter;
                         match parsed_upstream_frame.as_ref() {
                             Some(frame) => bound
@@ -438,7 +437,7 @@ pub(super) async fn relay_bound_connection(
                         }
                     }
                 }
-                if matches!(&upstream_message, WreqWsMessage::Text(_))
+                if matches!(&upstream_message, UpstreamWsMessage::Text(_))
                     && parsed_upstream_frame.is_none()
                 {
                     let policy = fatal_relay_policy(FatalRelaySignal::InvalidUpstreamText);
@@ -467,7 +466,7 @@ pub(super) async fn relay_bound_connection(
                     .await;
                     break;
                 }
-                let is_close = matches!(upstream_message, WreqWsMessage::Close(_));
+                let is_close = matches!(upstream_message, UpstreamWsMessage::Close(_));
                 let drain_for_adapter = adapter_drain_ready(
                     bound.pending_adapter_drain,
                     bound.turn_state.response_in_flight(),

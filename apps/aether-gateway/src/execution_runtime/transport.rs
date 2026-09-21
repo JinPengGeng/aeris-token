@@ -4693,6 +4693,13 @@ pub(crate) fn direct_reqwest_client_cache_metric_samples() -> Vec<MetricSample> 
     samples
 }
 
+/// Builds a wreq client with a browser TLS/HTTP2 fingerprint profile.
+///
+/// This is the ONLY remaining reason the workspace keeps the yanked-line-risk
+/// wreq rc dependency: TLS browser fingerprint impersonation has no mature
+/// rustls alternative (see `docs/adr/wreq-exit-strategy.md`).  Non-fingerprint
+/// upstreams (plain HTTP and WebSocket relays) must use reqwest /
+/// tokio-tungstenite instead of this client.
 pub(crate) fn build_browser_wreq_client(
     timeouts: Option<&aether_contracts::ExecutionTimeouts>,
     proxy: Option<&ProxySnapshot>,

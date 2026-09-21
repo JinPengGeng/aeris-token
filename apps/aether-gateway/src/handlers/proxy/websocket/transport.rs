@@ -5,6 +5,9 @@
 //! HTTP-to-WebSocket transport conversion and provider transport profile.
 
 use std::collections::BTreeMap;
+use std::io;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use aether_contracts::ProxySnapshot;
@@ -14,8 +17,13 @@ use axum::http::header::{
     PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use axum::http::{HeaderMap, HeaderName};
-use futures_util::{SinkExt, TryFutureExt};
+use base64::Engine as _;
+use bytes::Bytes;
+use futures_util::stream::{Stream, StreamExt};
+use futures_util::{Sink, SinkExt, TryFutureExt};
 use serde_json::json;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -46,8 +54,202 @@ pub(crate) struct UpstreamWebSocketErrorCodes {
 }
 
 pub(crate) struct UpstreamWebSocketConnection {
-    pub(crate) socket: wreq::ws::WebSocket,
+    pub(crate) socket: UpstreamWebSocket,
     pub(crate) response_headers: BTreeMap<String, String>,
+}
+
+/// Type-erased IO used by the non-fingerprint upstream WebSocket.  TLS (both
+/// direct and proxied) is layered inside before the stream is boxed, so one
+/// concrete `WebSocketStream` type covers direct, HTTP-proxied, and
+/// SOCKS-proxied connections.
+pub(crate) trait UpstreamIo: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> UpstreamIo for T {}
+
+pub(crate) type BoxedUpstreamIo = Box<dyn UpstreamIo>;
+
+/// Upstream WebSocket transport.
+///
+/// Non-browser-profile relays use `tokio-tungstenite` (single 0.28 line
+/// across the workspace).  The `Browser` variant is the only remaining user
+/// of `wreq::ws`, and the sole reason `wreq` is kept at all: TLS browser
+/// fingerprint impersonation (see `docs/adr/wreq-exit-strategy.md`).
+pub(crate) enum UpstreamWebSocket {
+    Plain(tokio_tungstenite::WebSocketStream<BoxedUpstreamIo>),
+    Browser(wreq::ws::WebSocket),
+}
+
+/// Why an upstream frame could not be written or read.  Callers collapse this
+/// to their own error codes; it only exists to unify the wreq and tungstenite
+/// error types behind one sink/stream.
+#[derive(Debug)]
+pub(crate) struct UpstreamWebSocketError;
+
+impl futures_util::Stream for UpstreamWebSocket {
+    type Item = Result<UpstreamWsMessage, UpstreamWebSocketError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.get_mut() {
+            UpstreamWebSocket::Plain(socket) => Pin::new(socket).poll_next(cx).map(|item| {
+                item.map(|message| message.map(Into::into).map_err(|_| UpstreamWebSocketError))
+            }),
+            UpstreamWebSocket::Browser(socket) => Pin::new(socket).poll_next(cx).map(|item| {
+                item.map(|message| message.map(Into::into).map_err(|_| UpstreamWebSocketError))
+            }),
+        }
+    }
+}
+
+impl futures_util::Sink<UpstreamWsMessage> for UpstreamWebSocket {
+    type Error = UpstreamWebSocketError;
+
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        match self.get_mut() {
+            UpstreamWebSocket::Plain(socket) => Pin::new(socket)
+                .poll_ready(cx)
+                .map_err(|_| UpstreamWebSocketError),
+            UpstreamWebSocket::Browser(socket) => Pin::new(socket)
+                .poll_ready(cx)
+                .map_err(|_| UpstreamWebSocketError),
+        }
+    }
+
+    fn start_send(self: Pin<&mut Self>, message: UpstreamWsMessage) -> Result<(), Self::Error> {
+        match self.get_mut() {
+            UpstreamWebSocket::Plain(socket) => Pin::new(socket)
+                .start_send(message.into_tungstenite())
+                .map_err(|_| UpstreamWebSocketError),
+            UpstreamWebSocket::Browser(socket) => Pin::new(socket)
+                .start_send(message.into_wreq())
+                .map_err(|_| UpstreamWebSocketError),
+        }
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        match self.get_mut() {
+            UpstreamWebSocket::Plain(socket) => Pin::new(socket)
+                .poll_flush(cx)
+                .map_err(|_| UpstreamWebSocketError),
+            UpstreamWebSocket::Browser(socket) => Pin::new(socket)
+                .poll_flush(cx)
+                .map_err(|_| UpstreamWebSocketError),
+        }
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        match self.get_mut() {
+            UpstreamWebSocket::Plain(socket) => Pin::new(socket)
+                .poll_close(cx)
+                .map_err(|_| UpstreamWebSocketError),
+            UpstreamWebSocket::Browser(socket) => Pin::new(socket)
+                .poll_close(cx)
+                .map_err(|_| UpstreamWebSocketError),
+        }
+    }
+}
+
+/// A transport-neutral upstream WebSocket frame.  Sessions only ever see this
+/// type; the per-client encoding (wreq vs tungstenite) stays at the sink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UpstreamWsMessage {
+    Text(String),
+    Binary(Bytes),
+    Ping(Bytes),
+    Pong(Bytes),
+    Close(Option<UpstreamWsCloseFrame>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UpstreamWsCloseFrame {
+    pub(crate) code: u16,
+    pub(crate) reason: String,
+}
+
+impl UpstreamWsMessage {
+    pub(crate) fn text(string: impl Into<String>) -> Self {
+        UpstreamWsMessage::Text(string.into())
+    }
+}
+
+impl From<WreqWsMessage> for UpstreamWsMessage {
+    fn from(message: WreqWsMessage) -> Self {
+        match message {
+            WreqWsMessage::Text(text) => UpstreamWsMessage::Text(text.to_string()),
+            WreqWsMessage::Binary(data) => UpstreamWsMessage::Binary(data),
+            WreqWsMessage::Ping(data) => UpstreamWsMessage::Ping(data),
+            WreqWsMessage::Pong(data) => UpstreamWsMessage::Pong(data),
+            WreqWsMessage::Close(frame) => {
+                UpstreamWsMessage::Close(frame.map(|frame| UpstreamWsCloseFrame {
+                    code: frame.code.into(),
+                    reason: frame.reason.to_string(),
+                }))
+            }
+        }
+    }
+}
+
+impl UpstreamWsMessage {
+    fn into_wreq(self) -> WreqWsMessage {
+        match self {
+            UpstreamWsMessage::Text(text) => WreqWsMessage::Text(text.into()),
+            UpstreamWsMessage::Binary(data) => WreqWsMessage::Binary(data),
+            UpstreamWsMessage::Ping(data) => WreqWsMessage::Ping(data),
+            UpstreamWsMessage::Pong(data) => WreqWsMessage::Pong(data),
+            UpstreamWsMessage::Close(frame) => {
+                WreqWsMessage::Close(frame.map(|frame| WreqCloseFrame {
+                    code: frame.code.into(),
+                    reason: frame.reason.into(),
+                }))
+            }
+        }
+    }
+
+    fn into_tungstenite(self) -> tokio_tungstenite::tungstenite::Message {
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+        match self {
+            UpstreamWsMessage::Text(text) => TungsteniteMessage::text(text),
+            UpstreamWsMessage::Binary(data) => TungsteniteMessage::Binary(data),
+            UpstreamWsMessage::Ping(data) => TungsteniteMessage::Ping(data),
+            UpstreamWsMessage::Pong(data) => TungsteniteMessage::Pong(data),
+            UpstreamWsMessage::Close(frame) => TungsteniteMessage::Close(frame.map(|frame| {
+                tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: frame.code.into(),
+                    reason: frame.reason.into(),
+                }
+            })),
+        }
+    }
+}
+
+impl From<tokio_tungstenite::tungstenite::Message> for UpstreamWsMessage {
+    fn from(message: tokio_tungstenite::tungstenite::Message) -> Self {
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+        match message {
+            TungsteniteMessage::Text(text) => UpstreamWsMessage::Text(text.to_string()),
+            TungsteniteMessage::Binary(data) => UpstreamWsMessage::Binary(data),
+            TungsteniteMessage::Ping(data) => UpstreamWsMessage::Ping(data),
+            TungsteniteMessage::Pong(data) => UpstreamWsMessage::Pong(data),
+            TungsteniteMessage::Close(frame) => {
+                UpstreamWsMessage::Close(frame.map(|frame| UpstreamWsCloseFrame {
+                    code: frame.code.into(),
+                    reason: frame.reason.to_string(),
+                }))
+            }
+            // Raw frames are never surfaced by the stream API.
+            TungsteniteMessage::Frame(_) => UpstreamWsMessage::Binary(Bytes::new()),
+        }
+    }
 }
 
 pub(crate) async fn connect_upstream_websocket(
@@ -66,7 +268,42 @@ pub(crate) async fn connect_upstream_websocket(
     )?;
     let headers =
         websocket_handshake_headers(&decision.provider_request_headers, errors.headers_invalid)?;
-    let client = build_websocket_client(decision, &upstream_url, errors).await?;
+    if decision.transport_profile.is_some() {
+        return connect_browser_upstream_websocket(
+            decision,
+            &upstream_url,
+            headers,
+            limits,
+            errors,
+        )
+        .await;
+    }
+    connect_plain_upstream_websocket(decision, &upstream_url, headers, limits, errors).await
+}
+
+/// Browser-profile (TLS fingerprint impersonation) upstream handshake.  This
+/// is the ONLY remaining `wreq::ws` consumer in the gateway: impersonation
+/// requires the wreq TLS stack, so the WS upgrade rides the same client.
+async fn connect_browser_upstream_websocket(
+    decision: &AiExecutionDecision,
+    upstream_url: &Url,
+    headers: HeaderMap,
+    limits: WebSocketSessionLimits,
+    errors: UpstreamWebSocketErrorCodes,
+) -> Result<UpstreamWebSocketConnection, &'static str> {
+    let timeouts = websocket_timeouts(decision);
+    let profile = decision
+        .transport_profile
+        .as_ref()
+        .ok_or(errors.client_build_failed)?;
+    let client = build_browser_wreq_client(
+        timeouts.as_ref(),
+        decision.proxy.as_ref(),
+        profile,
+        ExecutionTransportControls::default(),
+        false,
+    )
+    .map_err(|_| errors.client_build_failed)?;
     let response = client
         .websocket(upstream_url.as_str())
         .headers(headers)
@@ -84,9 +321,659 @@ pub(crate) async fn connect_upstream_websocket(
         .await
         .map_err(|_| errors.upgrade_failed)?;
     Ok(UpstreamWebSocketConnection {
+        socket: UpstreamWebSocket::Browser(socket),
+        response_headers,
+    })
+}
+
+/// Non-fingerprint upstream handshake on tokio-tungstenite.  Direct
+/// connections reuse the DNS pinning and private/reserved IP checks from the
+/// previous wreq client; proxied connections keep provider DNS remote (HTTP
+/// absolute-form for `ws://`, CONNECT for `wss://`, SOCKS5h domains).
+async fn connect_plain_upstream_websocket(
+    decision: &AiExecutionDecision,
+    upstream_url: &Url,
+    headers: HeaderMap,
+    limits: WebSocketSessionLimits,
+    errors: UpstreamWebSocketErrorCodes,
+) -> Result<UpstreamWebSocketConnection, &'static str> {
+    let connect_timeout = websocket_timeouts(decision)
+        .and_then(|timeouts| timeouts.connect_ms)
+        .map(Duration::from_millis);
+    let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_frame_size(Some(limits.max_frame_size))
+        .max_message_size(Some(limits.max_message_size));
+
+    let future = connect_plain_upstream(decision, upstream_url, &headers, ws_config, errors);
+    let (socket, response_headers) = match connect_timeout {
+        Some(timeout) => tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| errors.handshake_failed)??,
+        None => future.await?,
+    };
+    Ok(UpstreamWebSocketConnection {
         socket,
         response_headers,
     })
+}
+
+/// Establishes the full non-fingerprint upstream WebSocket: direct TCP with
+/// DNS pinning, or a proxy negotiation that keeps provider DNS remote, with
+/// TLS applied last for `wss://` targets, followed by the upgrade handshake.
+async fn connect_plain_upstream(
+    decision: &AiExecutionDecision,
+    upstream_url: &Url,
+    headers: &HeaderMap,
+    ws_config: tokio_tungstenite::tungstenite::protocol::WebSocketConfig,
+    errors: UpstreamWebSocketErrorCodes,
+) -> Result<(UpstreamWebSocket, BTreeMap<String, String>), &'static str> {
+    let proxy_url = resolve_websocket_proxy_url(decision.proxy.as_ref(), errors)?;
+    let host = upstream_url.host_str().ok_or(errors.upstream_url_invalid)?;
+    let port = upstream_url
+        .port_or_known_default()
+        .ok_or(errors.upstream_url_invalid)?;
+    let is_tls = upstream_url.scheme() == "wss";
+
+    let mut io: BoxedUpstreamIo = match proxy_url {
+        Some(proxy_url) => {
+            let proxy = ParsedUpstreamProxy::parse(&proxy_url).map_err(|_| errors.proxy_invalid)?;
+            let mut stream = connect_proxy_tcp(&proxy, errors).await?;
+            match proxy.scheme {
+                UpstreamProxyScheme::Http => {
+                    if is_tls {
+                        http_connect(
+                            &mut stream,
+                            &format!("{host}:{port}"),
+                            &proxy,
+                            errors.handshake_failed,
+                        )
+                        .await?;
+                    } else {
+                        // Plain `ws://` through an HTTP proxy uses absolute-form
+                        // forwarding (the request URI carries the full ws:// URL),
+                        // matching the previous wreq client behavior.
+                        let (socket, response_headers) = forward_websocket_over_http_proxy(
+                            Box::new(stream),
+                            upstream_url,
+                            headers,
+                            &proxy,
+                            ws_config,
+                            errors,
+                        )
+                        .await?;
+                        return Ok((UpstreamWebSocket::Plain(socket), response_headers));
+                    }
+                }
+                UpstreamProxyScheme::Socks5h => {
+                    socks5_connect(&mut stream, &proxy, host, port, errors.handshake_failed)
+                        .await?;
+                }
+            }
+            if proxy.tls {
+                Box::new(tls_wrap(Box::new(stream), &proxy.host, errors).await?)
+            } else {
+                Box::new(stream)
+            }
+        }
+        None => connect_direct_upstream_io(upstream_url, errors).await?,
+    };
+
+    if is_tls {
+        io = Box::new(tls_wrap(io, host, errors).await?);
+    }
+
+    let request =
+        build_tungstenite_request(upstream_url, headers).map_err(|_| errors.headers_invalid)?;
+    let (socket, response) =
+        tokio_tungstenite::client_async_with_config(request, io, Some(ws_config))
+            .await
+            .map_err(|error| match error {
+                // A completed HTTP response that is not a 101 Switching Protocols
+                // means the upstream refused the upgrade, distinct from a
+                // transport-level handshake failure.
+                tokio_tungstenite::tungstenite::Error::Http(response)
+                    if response.status().as_u16() != 101 =>
+                {
+                    errors.upgrade_rejected
+                }
+                _ => errors.handshake_failed,
+            })?;
+    let response_headers = websocket_response_headers(response.headers());
+    Ok((UpstreamWebSocket::Plain(socket), response_headers))
+}
+
+/// Builds the tungstenite client handshake request for `url` with the
+/// provider headers attached.
+fn build_tungstenite_request(
+    url: &Url,
+    headers: &HeaderMap,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, ()> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = url.as_str().into_client_request().map_err(|_| ())?;
+    request.headers_mut().extend(headers.clone());
+    Ok(request)
+}
+
+/// Resolves and pins a direct WebSocket target once, preserving the rebinding
+/// boundary established by the previous wreq client, and refuses
+/// private/reserved answers unless the target is loopback `ws://`.
+async fn connect_direct_upstream_io(
+    upstream_url: &Url,
+    errors: UpstreamWebSocketErrorCodes,
+) -> Result<BoxedUpstreamIo, &'static str> {
+    let host = upstream_url.host_str().ok_or(errors.upstream_url_invalid)?;
+    let port = upstream_url
+        .port_or_known_default()
+        .ok_or(errors.upstream_url_invalid)?;
+    let addresses = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        vec![std::net::SocketAddr::new(ip, port)]
+    } else {
+        aether_http::lookup_host_with_limits(host, port, aether_http::DEFAULT_DNS_LOOKUP_TIMEOUT)
+            .await
+            .map_err(|_| errors.upstream_url_invalid)?
+    };
+    let allows_loopback = host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+    let unsafe_answer = if allows_loopback {
+        addresses.iter().any(|address| !address.ip().is_loopback())
+    } else {
+        addresses
+            .iter()
+            .any(|address| aether_http::is_private_or_reserved_ip(address.ip()))
+    };
+    if addresses.is_empty() || unsafe_answer {
+        return Err(errors.upstream_url_invalid);
+    }
+    let mut last_error = io::Error::new(io::ErrorKind::AddrNotAvailable, "no address");
+    for address in addresses {
+        match TcpStream::connect(address).await {
+            Ok(stream) => return Ok(Box::new(stream)),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(match last_error.kind() {
+        io::ErrorKind::TimedOut => errors.handshake_failed,
+        _ => errors.upstream_url_invalid,
+    })
+}
+
+fn plain_upstream_tls_config() -> Arc<rustls::ClientConfig> {
+    static CONFIG: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
+    Arc::clone(CONFIG.get_or_init(|| {
+        let roots =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }))
+}
+
+/// Applies rustls (webpki roots, no client auth) over an established stream.
+async fn tls_wrap<S>(
+    stream: S,
+    host: &str,
+    errors: UpstreamWebSocketErrorCodes,
+) -> Result<tokio_rustls::client::TlsStream<S>, &'static str>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|_| errors.upstream_url_invalid)?;
+    tokio_rustls::TlsConnector::from(plain_upstream_tls_config())
+        .connect(server_name, stream)
+        .await
+        .map_err(|_| errors.handshake_failed)
+}
+
+/// Parsed upstream proxy origin (the proxy URL was already validated by
+/// `resolve_websocket_proxy_url`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpstreamProxyScheme {
+    Http,
+    /// Provider DNS stays remote: the SOCKS handshake carries the domain.
+    Socks5h,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedUpstreamProxy {
+    scheme: UpstreamProxyScheme,
+    /// TLS to the proxy itself (`https://` proxy URLs).
+    tls: bool,
+    host: String,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+}
+
+impl ParsedUpstreamProxy {
+    fn parse(raw: &str) -> Result<Self, ()> {
+        let parsed = Url::parse(raw).map_err(|_| ())?;
+        let (scheme, tls) = match parsed.scheme().to_ascii_lowercase().as_str() {
+            "http" => (UpstreamProxyScheme::Http, false),
+            "https" => (UpstreamProxyScheme::Http, true),
+            "socks5" | "socks5h" => (UpstreamProxyScheme::Socks5h, false),
+            _ => return Err(()),
+        };
+        let host = parsed.host_str().map(str::to_string).ok_or(())?;
+        let port = parsed.port().unwrap_or(if tls {
+            443
+        } else if scheme == UpstreamProxyScheme::Http {
+            80
+        } else {
+            1080
+        });
+        let username = (!parsed.username().is_empty()).then(|| parsed.username().to_string());
+        let password = parsed.password().map(str::to_string);
+        Ok(Self {
+            scheme,
+            tls,
+            host,
+            port,
+            username,
+            password,
+        })
+    }
+
+    fn basic_auth_header(&self) -> Option<String> {
+        let username = self.username.as_deref()?;
+        let mut credentials = String::with_capacity(
+            username.len() + self.password.as_ref().map(|value| value.len()).unwrap_or(0) + 1,
+        );
+        credentials.push_str(username);
+        credentials.push(':');
+        if let Some(password) = self.password.as_deref() {
+            credentials.push_str(password);
+        }
+        Some(format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(credentials)
+        ))
+    }
+}
+
+/// TCP connect to the proxy, with local DNS resolution of the proxy host.
+async fn connect_proxy_tcp(
+    proxy: &ParsedUpstreamProxy,
+    errors: UpstreamWebSocketErrorCodes,
+) -> Result<TcpStream, &'static str> {
+    let addresses = aether_http::lookup_host_with_limits(
+        &proxy.host,
+        proxy.port,
+        aether_http::DEFAULT_DNS_LOOKUP_TIMEOUT,
+    )
+    .await
+    .map_err(|_| errors.proxy_invalid)?;
+    let mut last_error = io::Error::new(io::ErrorKind::AddrNotAvailable, "no address");
+    for address in addresses {
+        match TcpStream::connect(address).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(match last_error.kind() {
+        io::ErrorKind::TimedOut => errors.handshake_failed,
+        _ => errors.proxy_invalid,
+    })
+}
+
+/// HTTP CONNECT tunneling for `wss://` through an HTTP(S) proxy.
+async fn http_connect(
+    stream: &mut TcpStream,
+    target_authority: &str,
+    proxy: &ParsedUpstreamProxy,
+    error_code: &'static str,
+) -> Result<(), &'static str> {
+    let mut request = format!(
+        "CONNECT {target_authority} HTTP/1.1\r\nHost: {target_authority}\r\nProxy-Connection: Keep-Alive\r\n"
+    );
+    if let Some(auth) = proxy.basic_auth_header() {
+        request.push_str("Proxy-Authorization: ");
+        request.push_str(&auth);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|_| error_code)?;
+    stream.flush().await.map_err(|_| error_code)?;
+
+    let mut response = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    loop {
+        if response.len() >= 16 * 1024 {
+            return Err(error_code);
+        }
+        let read = stream.read(&mut chunk).await.map_err(|_| error_code)?;
+        if read == 0 {
+            return Err(error_code);
+        }
+        response.extend_from_slice(&chunk[..read]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let status_line_end = response
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .ok_or(error_code)?;
+    let status_line = std::str::from_utf8(&response[..status_line_end]).map_err(|_| error_code)?;
+    let status = status_line.split_whitespace().nth(1).unwrap_or_default();
+    if status == "200" {
+        Ok(())
+    } else {
+        Err(error_code)
+    }
+}
+
+/// SOCKS5 connect with the provider hostname sent as a domain (remote DNS,
+/// matching the gateway's normalized `socks5h` proxy URLs).
+async fn socks5_connect(
+    stream: &mut TcpStream,
+    proxy: &ParsedUpstreamProxy,
+    target_host: &str,
+    target_port: u16,
+    error_code: &'static str,
+) -> Result<(), &'static str> {
+    let requires_auth = proxy.username.is_some();
+    if requires_auth {
+        stream
+            .write_all(&[0x05, 0x02, 0x00, 0x02])
+            .await
+            .map_err(|_| error_code)?;
+    } else {
+        stream
+            .write_all(&[0x05, 0x01, 0x00])
+            .await
+            .map_err(|_| error_code)?;
+    }
+
+    let mut method_response = [0u8; 2];
+    stream
+        .read_exact(&mut method_response)
+        .await
+        .map_err(|_| error_code)?;
+    if method_response[0] != 0x05 {
+        return Err(error_code);
+    }
+    match method_response[1] {
+        0x00 => {}
+        0x02 => socks5_authenticate(stream, proxy, error_code).await?,
+        _ => return Err(error_code),
+    }
+
+    let host = target_host.as_bytes();
+    if host.len() > u8::MAX as usize {
+        return Err(error_code);
+    }
+    let mut request = Vec::with_capacity(4 + 1 + host.len() + 2);
+    request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host.len() as u8]);
+    request.extend_from_slice(host);
+    request.extend_from_slice(&target_port.to_be_bytes());
+    stream.write_all(&request).await.map_err(|_| error_code)?;
+
+    let mut response = [0u8; 4];
+    stream
+        .read_exact(&mut response)
+        .await
+        .map_err(|_| error_code)?;
+    if response[0] != 0x05 || response[1] != 0x00 {
+        return Err(error_code);
+    }
+    match response[3] {
+        0x01 => {
+            let mut ignored = [0u8; 4 + 2];
+            stream
+                .read_exact(&mut ignored)
+                .await
+                .map_err(|_| error_code)?;
+        }
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len).await.map_err(|_| error_code)?;
+            let mut ignored = vec![0u8; len[0] as usize + 2];
+            stream
+                .read_exact(&mut ignored)
+                .await
+                .map_err(|_| error_code)?;
+        }
+        0x04 => {
+            let mut ignored = [0u8; 16 + 2];
+            stream
+                .read_exact(&mut ignored)
+                .await
+                .map_err(|_| error_code)?;
+        }
+        _ => return Err(error_code),
+    }
+    Ok(())
+}
+
+async fn socks5_authenticate(
+    stream: &mut TcpStream,
+    proxy: &ParsedUpstreamProxy,
+    error_code: &'static str,
+) -> Result<(), &'static str> {
+    let username = proxy.username.as_deref().unwrap_or_default().as_bytes();
+    let password = proxy.password.as_deref().unwrap_or_default().as_bytes();
+    if username.len() > u8::MAX as usize || password.len() > u8::MAX as usize {
+        return Err(error_code);
+    }
+    let mut request = Vec::with_capacity(3 + username.len() + password.len());
+    request.extend_from_slice(&[0x01, username.len() as u8]);
+    request.extend_from_slice(username);
+    request.push(password.len() as u8);
+    request.extend_from_slice(password);
+    stream.write_all(&request).await.map_err(|_| error_code)?;
+    let mut response = [0u8; 2];
+    stream
+        .read_exact(&mut response)
+        .await
+        .map_err(|_| error_code)?;
+    if response[1] != 0x00 {
+        return Err(error_code);
+    }
+    Ok(())
+}
+
+/// Absolute-form WebSocket forwarding for plain `ws://` through an HTTP
+/// proxy: the proxy receives `GET ws://host/path HTTP/1.1` and forwards it,
+/// exactly like the previous wreq client.  Returns an already-upgraded client
+/// WebSocket over the (possibly TLS-to-proxy) connection.
+async fn forward_websocket_over_http_proxy(
+    io: BoxedUpstreamIo,
+    upstream_url: &Url,
+    headers: &HeaderMap,
+    proxy: &ParsedUpstreamProxy,
+    ws_config: tokio_tungstenite::tungstenite::protocol::WebSocketConfig,
+    errors: UpstreamWebSocketErrorCodes,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<BoxedUpstreamIo>,
+        BTreeMap<String, String>,
+    ),
+    &'static str,
+> {
+    let key = tokio_tungstenite::tungstenite::handshake::client::generate_key();
+    let host = upstream_url.host_str().ok_or(errors.upstream_url_invalid)?;
+    let authority = match upstream_url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
+    let path = upstream_url
+        .path()
+        .trim_start_matches('/')
+        .trim_end_matches('/');
+    let mut request = format!(
+        "GET ws://{authority}/{path} HTTP/1.1\r\nHost: {authority}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+    );
+    for (name, value) in headers {
+        if name == HOST || name == CONNECTION || name == UPGRADE {
+            continue;
+        }
+        let value = value.to_str().map_err(|_| errors.headers_invalid)?;
+        request.push_str(name.as_str());
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    if let Some(auth) = proxy.basic_auth_header() {
+        request.push_str("Proxy-Authorization: ");
+        request.push_str(&auth);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+
+    let mut io = io;
+    io.write_all(request.as_bytes())
+        .await
+        .map_err(|_| errors.handshake_failed)?;
+
+    let mut response = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    loop {
+        if response.len() >= 64 * 1024 {
+            return Err(errors.handshake_failed);
+        }
+        let read = io
+            .read(&mut chunk)
+            .await
+            .map_err(|_| errors.handshake_failed)?;
+        if read == 0 {
+            return Err(errors.handshake_failed);
+        }
+        response.extend_from_slice(&chunk[..read]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+        .ok_or(errors.handshake_failed)?;
+    let head = String::from_utf8_lossy(&response[..header_end]);
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or_default();
+    if status != "101" {
+        return Err(errors.upgrade_rejected);
+    }
+    let response_headers = lines
+        .filter_map(|line| line.split_once(": "))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let retained = websocket_response_headers_owned(response_headers);
+
+    // The header reader may have consumed bytes of the first WebSocket frame
+    // along with the response block; replay the buffered remainder in front of
+    // the socket before adopting it as an upgraded client WebSocket.
+    let leftover = response.split_off(header_end);
+    let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+        Box::new(PrefixedIo::new(leftover, io)) as BoxedUpstreamIo,
+        tokio_tungstenite::tungstenite::protocol::Role::Client,
+        Some(ws_config),
+    )
+    .await;
+    Ok((socket, retained))
+}
+
+/// Replays bytes that were read past the end of the proxy's handshake
+/// response before delegating to the underlying stream.
+struct PrefixedIo {
+    buffered: std::io::Cursor<Vec<u8>>,
+    inner: BoxedUpstreamIo,
+}
+
+impl PrefixedIo {
+    fn new(buffered: Vec<u8>, inner: BoxedUpstreamIo) -> Self {
+        Self {
+            buffered: std::io::Cursor::new(buffered),
+            inner,
+        }
+    }
+}
+
+impl AsyncRead for PrefixedIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let position = self.buffered.position() as usize;
+        let buffered_len = self.buffered.get_ref().len();
+        if position < buffered_len {
+            let len = (buffered_len - position).min(buf.remaining());
+            let chunk = self.buffered.get_ref()[position..position + len].to_vec();
+            buf.put_slice(&chunk);
+            self.buffered.set_position((position + len) as u64);
+            return std::task::Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for PrefixedIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+fn websocket_response_headers_owned(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    headers
+        .into_iter()
+        .filter(|(name, _)| !websocket_response_header_name_is_credential_bearing(name))
+        .filter_map(|(name, value)| {
+            let normalized = name.to_ascii_lowercase();
+            if crate::headers::should_skip_response_header(&normalized) {
+                return None;
+            }
+            Some((normalized, value))
+        })
+        .collect()
+}
+
+fn websocket_response_header_name_is_credential_bearing(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization"
+            | "proxy-authorization"
+            | "www-authenticate"
+            | "proxy-authenticate"
+            | "authentication-info"
+            | "proxy-authentication-info"
+            | "cookie"
+            | "set-cookie"
+            | "set-cookie2"
+            | "x-api-key"
+            | "api-key"
+            | "x-goog-api-key"
+    )
 }
 
 fn guarded_websocket_upstream_url(
@@ -226,71 +1113,6 @@ pub(crate) fn websocket_handshake_headers(
         headers.remove(name);
     }
     Ok(headers)
-}
-
-async fn build_websocket_client(
-    decision: &AiExecutionDecision,
-    upstream_url: &Url,
-    errors: UpstreamWebSocketErrorCodes,
-) -> Result<wreq::Client, &'static str> {
-    let timeouts = websocket_timeouts(decision);
-    let proxy_url = resolve_websocket_proxy_url(decision.proxy.as_ref(), errors)?;
-    if let Some(profile) = decision.transport_profile.as_ref() {
-        return build_browser_wreq_client(
-            timeouts.as_ref(),
-            decision.proxy.as_ref(),
-            profile,
-            ExecutionTransportControls::default(),
-            false,
-        )
-        .map_err(|_| errors.client_build_failed);
-    }
-
-    let mut builder = wreq::Client::builder().no_proxy();
-    if let Some(connect_ms) = timeouts.as_ref().and_then(|timeouts| timeouts.connect_ms) {
-        builder = builder.connect_timeout(Duration::from_millis(connect_ms));
-    }
-    if let Some(proxy_url) = proxy_url {
-        let proxy = wreq::Proxy::all(proxy_url).map_err(|_| errors.proxy_invalid)?;
-        builder = builder.proxy(proxy);
-    } else {
-        // Resolve and pin direct WebSocket targets once, preserving the
-        // rebinding boundary established by the fork.  Proxied connections
-        // intentionally skip this branch so HTTP/SOCKS proxies receive the
-        // provider hostname and perform remote DNS resolution.
-        let host = upstream_url.host_str().ok_or(errors.upstream_url_invalid)?;
-        let port = upstream_url
-            .port_or_known_default()
-            .ok_or(errors.upstream_url_invalid)?;
-        let addresses = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            vec![std::net::SocketAddr::new(ip, port)]
-        } else {
-            aether_http::lookup_host_with_limits(
-                host,
-                port,
-                aether_http::DEFAULT_DNS_LOOKUP_TIMEOUT,
-            )
-            .await
-            .map_err(|_| errors.upstream_url_invalid)?
-        };
-        let allows_loopback = host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<std::net::IpAddr>()
-                .map(|ip| ip.is_loopback())
-                .unwrap_or(false);
-        let unsafe_answer = if allows_loopback {
-            addresses.iter().any(|address| !address.ip().is_loopback())
-        } else {
-            addresses
-                .iter()
-                .any(|address| aether_http::is_private_or_reserved_ip(address.ip()))
-        };
-        if addresses.is_empty() || unsafe_answer {
-            return Err(errors.upstream_url_invalid);
-        }
-        builder = builder.resolve_to_addrs(host.to_string(), addresses.iter().copied());
-    }
-    builder.build().map_err(|_| errors.client_build_failed)
 }
 
 fn resolve_websocket_proxy_url(
@@ -448,8 +1270,8 @@ pub(crate) async fn send_client_message(
 
 /// Sends one frame to the upstream under [`RELAY_WRITE_TIMEOUT`].
 pub(crate) async fn send_upstream_message(
-    upstream: &mut wreq::ws::WebSocket,
-    message: WreqWsMessage,
+    upstream: &mut UpstreamWebSocket,
+    message: UpstreamWsMessage,
 ) -> Result<(), WebSocketWriteError> {
     bounded_send(RELAY_WRITE_TIMEOUT, upstream.send(message).map_err(|_| ())).await
 }
@@ -458,15 +1280,15 @@ pub(crate) async fn send_upstream_message(
 /// `start_send` succeeded, so callers must conservatively treat the frame as
 /// possibly delivered even when a later flush fails or is cancelled.
 pub(crate) async fn feed_upstream_message(
-    upstream: &mut wreq::ws::WebSocket,
-    message: WreqWsMessage,
+    upstream: &mut UpstreamWebSocket,
+    message: UpstreamWsMessage,
 ) -> Result<(), WebSocketWriteError> {
     bounded_send(RELAY_WRITE_TIMEOUT, upstream.feed(message).map_err(|_| ())).await
 }
 
 /// Flushes frames previously queued with [`feed_upstream_message`].
 pub(crate) async fn flush_upstream_messages(
-    upstream: &mut wreq::ws::WebSocket,
+    upstream: &mut UpstreamWebSocket,
 ) -> Result<(), WebSocketWriteError> {
     bounded_send(RELAY_WRITE_TIMEOUT, upstream.flush().map_err(|_| ())).await
 }
@@ -494,35 +1316,44 @@ where
 /// Sends a WebSocket Close frame upstream without waiting on an unresponsive
 /// provider.  The socket is dropped by the caller either way.
 pub(crate) async fn close_upstream_socket(
-    upstream: &mut wreq::ws::WebSocket,
-    frame: Option<WreqCloseFrame>,
+    upstream: &mut UpstreamWebSocket,
+    frame: Option<UpstreamWsCloseFrame>,
 ) {
-    send_teardown_message(upstream.send(WreqWsMessage::Close(frame)).map_err(|_| ())).await;
+    send_teardown_message(
+        upstream
+            .send(UpstreamWsMessage::Close(frame))
+            .map_err(|_| ()),
+    )
+    .await;
 }
 
-pub(crate) fn upstream_message_to_client(message: WreqWsMessage) -> AxumWsMessage {
+pub(crate) fn upstream_message_to_client(message: UpstreamWsMessage) -> AxumWsMessage {
     match message {
-        WreqWsMessage::Text(text) => AxumWsMessage::Text(text.to_string().into()),
-        WreqWsMessage::Binary(data) => AxumWsMessage::Binary(data),
-        WreqWsMessage::Ping(data) => AxumWsMessage::Ping(data),
-        WreqWsMessage::Pong(data) => AxumWsMessage::Pong(data),
-        WreqWsMessage::Close(frame) => AxumWsMessage::Close(frame.map(|frame| AxumCloseFrame {
-            code: frame.code.into(),
-            reason: frame.reason.to_string().into(),
-        })),
+        UpstreamWsMessage::Text(text) => AxumWsMessage::Text(text.into()),
+        UpstreamWsMessage::Binary(data) => AxumWsMessage::Binary(data),
+        UpstreamWsMessage::Ping(data) => AxumWsMessage::Ping(data),
+        UpstreamWsMessage::Pong(data) => AxumWsMessage::Pong(data),
+        UpstreamWsMessage::Close(frame) => {
+            AxumWsMessage::Close(frame.map(|frame| AxumCloseFrame {
+                code: frame.code,
+                reason: frame.reason.into(),
+            }))
+        }
     }
 }
 
-pub(crate) fn client_message_to_upstream(message: AxumWsMessage) -> WreqWsMessage {
+pub(crate) fn client_message_to_upstream(message: AxumWsMessage) -> UpstreamWsMessage {
     match message {
-        AxumWsMessage::Text(text) => WreqWsMessage::Text(text.to_string().into()),
-        AxumWsMessage::Binary(data) => WreqWsMessage::Binary(data),
-        AxumWsMessage::Ping(data) => WreqWsMessage::Ping(data),
-        AxumWsMessage::Pong(data) => WreqWsMessage::Pong(data),
-        AxumWsMessage::Close(frame) => WreqWsMessage::Close(frame.map(|frame| WreqCloseFrame {
-            code: frame.code.into(),
-            reason: frame.reason.to_string().into(),
-        })),
+        AxumWsMessage::Text(text) => UpstreamWsMessage::Text(text.to_string()),
+        AxumWsMessage::Binary(data) => UpstreamWsMessage::Binary(data),
+        AxumWsMessage::Ping(data) => UpstreamWsMessage::Ping(data),
+        AxumWsMessage::Pong(data) => UpstreamWsMessage::Pong(data),
+        AxumWsMessage::Close(frame) => {
+            UpstreamWsMessage::Close(frame.map(|frame| UpstreamWsCloseFrame {
+                code: frame.code,
+                reason: frame.reason.to_string(),
+            }))
+        }
     }
 }
 
@@ -683,13 +1514,12 @@ pub(crate) async fn close_client_socket(client_socket: &mut WebSocket, code: u16
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_send, build_websocket_client, guarded_websocket_upstream_url,
-        resolve_websocket_proxy_url, responses_websocket_error_event,
-        responses_websocket_error_event_with_stream_id, websocket_handshake_headers,
-        websocket_relay_frame_queue, websocket_response_headers, websocket_upstream_url,
-        UpstreamWebSocketErrorCodes, WebSocketRelayPumpControl, WebSocketRelayQueueError,
-        WebSocketWriteError, RELAY_FRAME_QUEUE_CAPACITY, RELAY_WRITE_TIMEOUT,
-        TEARDOWN_WRITE_TIMEOUT,
+        bounded_send, guarded_websocket_upstream_url, resolve_websocket_proxy_url,
+        responses_websocket_error_event, responses_websocket_error_event_with_stream_id,
+        websocket_handshake_headers, websocket_relay_frame_queue, websocket_response_headers,
+        websocket_upstream_url, ParsedUpstreamProxy, UpstreamWebSocketErrorCodes,
+        WebSocketRelayPumpControl, WebSocketRelayQueueError, WebSocketWriteError,
+        RELAY_FRAME_QUEUE_CAPACITY, RELAY_WRITE_TIMEOUT, TEARDOWN_WRITE_TIMEOUT,
     };
     use crate::ai_serving::AiExecutionDecision;
     use crate::frontdoor_loop_guard::configured_gateway_frontdoor_base_url;
@@ -929,39 +1759,20 @@ mod tests {
             upgrade_rejected: "upgrade_rejected",
             upgrade_failed: "upgrade_failed",
         };
-        for profile in [
-            None,
-            Some(ResolvedTransportProfile {
-                profile_id: "chrome136".to_string(),
-                backend: aether_contracts::TRANSPORT_BACKEND_BROWSER_WREQ.to_string(),
-                ..Default::default()
-            }),
-        ] {
-            for proxy in [
-                Some(ProxySnapshot {
-                    enabled: Some(true),
-                    url: Some("http://proxy.invalid:8080".to_string()),
-                    ..Default::default()
-                }),
-                Some(ProxySnapshot {
-                    enabled: Some(true),
-                    url: Some("socks5h://proxy.invalid:1080".to_string()),
-                    ..Default::default()
-                }),
-            ] {
-                let mut decision: AiExecutionDecision = serde_json::from_value(serde_json::json!({
-                    "action": "proxy",
-                    "upstream_url": "wss://upstream.invalid/v1/responses"
-                }))
-                .expect("minimal provider decision should deserialize");
-                decision.transport_profile = profile.clone();
-                decision.proxy = proxy;
-
-                let upstream_url = Url::parse("wss://upstream.invalid/v1/responses").unwrap();
-                build_websocket_client(&decision, &upstream_url, errors)
-                    .await
-                    .expect("building a client must not resolve the provider or proxy hostname");
-            }
+        // Client construction must not resolve the provider or proxy hostnames:
+        // proxied transports keep provider DNS remote and proxy DNS happens at
+        // connect time inside the timeout budget.
+        for url in ["http://proxy.invalid:8080", "socks5h://proxy.invalid:1080"] {
+            let proxy = ProxySnapshot {
+                enabled: Some(true),
+                url: Some(url.to_string()),
+                ..ProxySnapshot::default()
+            };
+            let normalized =
+                resolve_websocket_proxy_url(Some(&proxy), errors).expect("proxy URL should parse");
+            let parsed = ParsedUpstreamProxy::parse(normalized.as_deref().unwrap())
+                .expect("normalized proxy URL should parse without DNS");
+            assert_eq!(parsed.host, "proxy.invalid");
         }
     }
 
