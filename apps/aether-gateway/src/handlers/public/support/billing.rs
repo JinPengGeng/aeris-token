@@ -929,8 +929,10 @@ pub(super) async fn handle_billing_plan_checkout(
                 )
             }
         };
-        let Some(callback_base_url) = epay_callback_base_url(config.callback_base_url.as_deref())
-        else {
+        let Some(callback_base_url) = epay_callback_base_url(
+            config.callback_base_url.as_deref(),
+            state.public_base_url.as_deref(),
+        ) else {
             return build_auth_error_response(
                 http::StatusCode::BAD_REQUEST,
                 "epay callback_base_url is required",
@@ -1166,7 +1168,10 @@ pub(super) async fn handle_billing_plan_checkout(
                 )
             }
         };
-        let Some(callback_base_url) = epay_callback_base_url(callback_base_url.as_deref()) else {
+        let Some(callback_base_url) = epay_callback_base_url(
+            callback_base_url.as_deref(),
+            state.public_base_url.as_deref(),
+        ) else {
             return build_auth_error_response(
                 http::StatusCode::BAD_REQUEST,
                 "支付网关 callback_base_url is required",
