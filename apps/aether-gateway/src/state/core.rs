@@ -28,7 +28,7 @@ use dashmap::DashMap;
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 use tracing::warn;
 
-use super::app::{FrontdoorLimiters, METRIC_SNAPSHOT_TTL};
+use super::app::{AuthContextCacheConfig, FrontdoorLimiters, METRIC_SNAPSHOT_TTL};
 use super::{
     AppState, FrontdoorCorsConfig, FrontdoorRuntimeGuardConfig, LocalExecutionRuntimeMissDiagnostic,
 };
@@ -290,6 +290,12 @@ impl AppState {
         Self::build(None)
     }
 
+    pub fn with_auth_context_cache_config(mut self, config: AuthContextCacheConfig) -> Self {
+        self.auth_context_cache_config = config;
+        self.auth_context_cache.clear();
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn with_execution_runtime_override_base_url(
         mut self,
@@ -386,6 +392,7 @@ impl AppState {
             client,
             owner_forward_client,
             auth_context_cache: Arc::new(AuthContextCache::default()),
+            auth_context_cache_config: AuthContextCacheConfig::default(),
             auth_snapshot_cache: Arc::new(AuthSnapshotCache::default()),
             admin_security_blacklist_cache: Arc::new(ValueCache::default()),
             admin_security_whitelist_cache: Arc::new(ValueCache::default()),

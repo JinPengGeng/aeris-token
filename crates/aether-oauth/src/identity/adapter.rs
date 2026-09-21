@@ -237,11 +237,35 @@ pub(crate) fn form_headers() -> BTreeMap<String, String> {
     ])
 }
 
+/// Requires an HTTPS endpoint URL, except for HTTP on localhost or loopback
+/// IPs used by local development identity providers. This mirrors the
+/// gateway-side OAuth endpoint policy so the crate also fails closed when a
+/// caller wires in a configuration that never went through the repository
+/// validation layer: token and userinfo requests carry the client secret,
+/// authorization code, and access token, so a plaintext HTTP endpoint would
+/// expose all of them.
+pub(crate) fn validate_identity_endpoint_url(field: &str, value: &str) -> Result<(), OAuthError> {
+    let parsed = url::Url::parse(value)
+        .map_err(|_| OAuthError::invalid_request(format!("{field} must be an absolute URL")))?;
+    let is_loopback = match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_loopback) {
+        return Err(OAuthError::invalid_request(format!(
+            "{field} must use https, except for localhost or loopback IPs"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        mapped_bool, ExternalIdentity, IdentityClaims, IdentityOAuthExchangeContext,
-        IdentityOAuthProviderConfig, IdentityOAuthStartContext,
+        mapped_bool, validate_identity_endpoint_url, ExternalIdentity, IdentityClaims,
+        IdentityOAuthExchangeContext, IdentityOAuthProviderConfig, IdentityOAuthStartContext,
     };
     use crate::network::OAuthNetworkContext;
     use serde_json::json;
@@ -308,6 +332,37 @@ mod tests {
             assert!(!debug.contains(secret), "debug leaked {secret}");
         }
         assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn identity_endpoint_url_requires_https_except_loopback() {
+        for value in [
+            "https://idp.example.test/token",
+            "https://accounts.idp.example.test/userinfo?schema=current",
+            "http://localhost:8080/token",
+            "http://localhost/token",
+            "http://127.0.0.1:9090/userinfo",
+            "http://[::1]:8080/token",
+        ] {
+            assert!(
+                validate_identity_endpoint_url("token_url", value).is_ok(),
+                "rejected {value}"
+            );
+        }
+
+        for value in [
+            "http://idp.example.test/token",
+            "http://192.168.1.10/token",
+            "http://[2001:db8::1]/token",
+            "ftp://idp.example.test/token",
+            "idp.example.test/token",
+            "",
+        ] {
+            assert!(
+                validate_identity_endpoint_url("token_url", value).is_err(),
+                "accepted {value}"
+            );
+        }
     }
 
     #[test]

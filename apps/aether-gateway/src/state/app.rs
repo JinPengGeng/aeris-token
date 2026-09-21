@@ -80,6 +80,27 @@ const MIN_AUTH_CAPACITY_CACHE_TTL_MS: u64 = 10;
 const MAX_AUTH_CAPACITY_CACHE_TTL_MS: u64 = 10_000;
 const AUTH_CAPACITY_CACHE_TTL_MS_ENV: &str = "AETHER_GATEWAY_AUTH_CAPACITY_CACHE_TTL_MS";
 
+pub const DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES: usize = 10_000;
+pub const DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS: u64 = 10;
+pub const DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS: u64 = 10;
+
+#[derive(Debug, Clone, Copy)]
+pub struct AuthContextCacheConfig {
+    pub max_entries: usize,
+    pub refresh_interval: Duration,
+    pub negative_cache_ttl: Duration,
+}
+
+impl Default for AuthContextCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_entries: DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+            refresh_interval: Duration::from_secs(DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS),
+            negative_cache_ttl: Duration::from_secs(DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS),
+        }
+    }
+}
+
 #[cfg(test)]
 type TestExecutionRuntimeSyncOverrideFn = dyn Fn(
         &aether_contracts::ExecutionPlan,
@@ -464,6 +485,7 @@ pub struct AppState {
     pub(crate) client: reqwest::Client,
     pub(crate) owner_forward_client: reqwest::Client,
     pub(crate) auth_context_cache: Arc<AuthContextCache>,
+    pub(crate) auth_context_cache_config: AuthContextCacheConfig,
     pub(crate) auth_snapshot_cache: Arc<AuthSnapshotCache>,
     pub(crate) admin_security_blacklist_cache: Arc<ValueCache<String, bool>>,
     pub(crate) admin_security_whitelist_cache: Arc<ValueCache<String, Vec<String>>>,

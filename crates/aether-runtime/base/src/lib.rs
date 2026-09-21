@@ -2,7 +2,6 @@ pub mod admission;
 mod bootstrap;
 pub mod concurrency;
 mod config;
-pub mod distributed;
 mod error;
 pub mod metrics;
 mod observability;
@@ -19,10 +18,6 @@ pub use admission::{
 pub use bootstrap::init_service_runtime;
 pub use concurrency::{ConcurrencyError, ConcurrencyGate, ConcurrencyPermit, ConcurrencySnapshot};
 pub use config::ServiceRuntimeConfig;
-pub use distributed::{
-    DistributedConcurrencyError, DistributedConcurrencyGate, DistributedConcurrencyPermit,
-    DistributedConcurrencySnapshot,
-};
 pub use error::RuntimeBootstrapError;
 pub use metrics::{
     prometheus_response, record_billing_enrichment_failure, record_billing_fail_open_daily_quota,
