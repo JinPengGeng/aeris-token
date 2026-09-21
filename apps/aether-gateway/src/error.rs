@@ -1,4 +1,4 @@
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use axum::body::Body;
 use axum::http::{Response, StatusCode};
@@ -16,19 +16,23 @@ use crate::constants::*;
 use crate::insert_header_if_missing;
 
 /// 开启后记录不截断但仍脱敏的内部错误详情，默认关闭。
-static GATEWAY_ERROR_DETAIL_LOGGING: LazyLock<bool> = LazyLock::new(|| {
-    parse_gateway_error_detail_logging(
-        std::env::var("AETHER_GATEWAY_ERROR_DETAIL_LOGGING")
-            .ok()
-            .as_deref(),
-    )
-});
+///
+/// 值在启动期由 clap 解析(`--gateway-error-detail-logging` /
+/// `AETHER_GATEWAY_ERROR_DETAIL_LOGGING`)后通过
+/// [`init_gateway_error_detail_logging`] 注入;未注入时保持默认关闭。
+static GATEWAY_ERROR_DETAIL_LOGGING: OnceLock<bool> = OnceLock::new();
 
+#[cfg(test)]
 fn parse_gateway_error_detail_logging(value: Option<&str>) -> bool {
     // 仅接受精确的小写 true/false；未设置或无效值默认关闭详情日志。
     value
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or(false)
+}
+
+/// 注入启动期解析后的错误详情日志开关（仅首次调用生效）。
+pub fn init_gateway_error_detail_logging(enabled: bool) {
+    let _ = GATEWAY_ERROR_DETAIL_LOGGING.set(enabled);
 }
 
 // 按 URL authority 的边界匹配 userinfo，避免跨过路径、查询串和片段中的 @。
@@ -54,7 +58,7 @@ static ERROR_CREDENTIAL_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 
 /// 检查是否启用了内部错误详情日志。
 pub(crate) fn gateway_error_detail_logging_enabled() -> bool {
-    *GATEWAY_ERROR_DETAIL_LOGGING
+    *GATEWAY_ERROR_DETAIL_LOGGING.get().unwrap_or(&false)
 }
 
 /// 日志摘要：移除 URL userinfo、常见凭据键值和 Bearer 内容，再限制为 256 字节。

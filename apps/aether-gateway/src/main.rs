@@ -124,9 +124,10 @@ use aether_data::lifecycle::export::{
 use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
 use aether_gateway::{
     attach_static_frontend, build_router_with_state,
-    prewarm_direct_h2c_sender_cache_from_env_for_startup, set_gateway_frontdoor_app_port, AppState,
-    AuthContextCacheConfig, FrontdoorCorsConfig, FrontdoorUserRpmConfig, GatewayDataConfig,
-    UsageRuntimeConfig, VideoTaskTruthSourceMode, DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+    prewarm_direct_h2c_sender_cache_from_env_for_startup, set_gateway_frontdoor_app_port,
+    AdminSecurityCacheConfig, AppState, AuthContextCacheConfig, FrontdoorCorsConfig,
+    FrontdoorUserRpmConfig, GatewayDataConfig, UsageRuntimeConfig, VideoTaskTruthSourceMode,
+    DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS, DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
     DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS, DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS,
 };
 use aether_gateway_frontdoor::{http_connection_limit, HttpConnectionBudget};
@@ -1693,6 +1694,50 @@ struct Args {
     )]
     auth_context_negative_cache_ttl_secs: u64,
 
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_SECURITY_CACHE_TTL_MS",
+        default_value_t = DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS,
+        value_parser = clap::value_parser!(u64).range(1..=30_000)
+    )]
+    admin_security_cache_ttl_ms: u64,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_ERROR_DETAIL_LOGGING",
+        default_value_t = false
+    )]
+    gateway_error_detail_logging: bool,
+
+    #[arg(
+        long,
+        env = "AETHER_TRUSTED_PROXY_CIDRS",
+        value_parser = aether_gateway::parse_trusted_cidrs_value
+    )]
+    trusted_proxy_cidrs: Option<String>,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_TRUSTED_INGRESS_CIDRS",
+        value_parser = aether_gateway::parse_trusted_cidrs_value
+    )]
+    trusted_ingress_cidrs: Option<String>,
+
+    #[arg(long, env = "PAYMENT_CALLBACK_SECRET")]
+    payment_callback_secret: Option<String>,
+
+    /// Public base URL used for payment callbacks when a gateway does not set
+    /// an explicit per-gateway `callback_base_url`. The legacy `PUBLIC_BASE_URL`
+    /// environment variable remains accepted as a startup-time fallback.
+    #[arg(long, env = "AETHER_PUBLIC_BASE_URL")]
+    public_base_url: Option<String>,
+
+    /// Shared secret protecting the internal gateway control plane. Falls back
+    /// to the legacy `AETHER_INTERNAL_GATEWAY_AUTH_SECRET` environment variable
+    /// resolution performed by `AppState::new` when unset.
+    #[arg(long, env = "AETHER_INTERNAL_GATEWAY_AUTH_SECRET")]
+    internal_gateway_auth_secret: Option<String>,
+
     #[arg(long, env = "AETHER_GATEWAY_MAX_IN_FLIGHT_REQUESTS")]
     max_in_flight_requests: Option<usize>,
 
@@ -2514,6 +2559,33 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         "aether-gateway startup configuration"
     );
 
+    aether_gateway::init_gateway_error_detail_logging(args.gateway_error_detail_logging);
+    aether_gateway::init_trusted_cidrs_config(aether_gateway::TrustedCidrsStartupConfig {
+        proxy_cidrs: args.trusted_proxy_cidrs.clone(),
+        ingress_cidrs: args.trusted_ingress_cidrs.clone(),
+    });
+    if let Some(secret) = args.payment_callback_secret.as_deref() {
+        if !aether_gateway::payment_callback_secret_is_strong_public_api(secret.trim()) {
+            return Err(
+                "PAYMENT_CALLBACK_SECRET 强度不足:至少 32 字节、无控制字符且不少于 8 种不同字节"
+                    .into(),
+            );
+        }
+    }
+    aether_gateway::init_payment_callback_secret(
+        args.payment_callback_secret
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+    );
+    let public_base_url = args
+        .public_base_url
+        .clone()
+        .or_else(|| std::env::var("PUBLIC_BASE_URL").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
     let mut state = AppState::new()?
         .with_auth_context_cache_config(AuthContextCacheConfig {
             max_entries: args.auth_context_cache_max_entries,
@@ -2524,6 +2596,15 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 args.auth_context_negative_cache_ttl_secs,
             ),
         })
+        .with_admin_security_cache_config(AdminSecurityCacheConfig {
+            cache_ttl: std::time::Duration::from_millis(args.admin_security_cache_ttl_ms),
+        })
+        .with_public_base_url(public_base_url)
+        .with_internal_gateway_auth(
+            aether_gateway::InternalGatewayAuthConfig::from_startup_value(
+                args.internal_gateway_auth_secret.clone(),
+            ),
+        )
         .with_runtime_state(runtime_state)
         .with_data_config_and_background_isolation(data_config, isolate_background_database)?
         .with_usage_runtime_config(usage_config)?
@@ -3759,7 +3840,8 @@ mod tests {
         GatewayDataArgs, GatewayFrontdoorArgs, GatewayLogDestinationArg, GatewayLogFormatArg,
         GatewayLogRotationArg, GatewayLoggingArgs, GatewayRateLimitArgs, GatewayUsageArgs,
         NodeRoleArg, RuntimeBackendArg, VideoTaskTruthSourceArg,
-        DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES, DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS,
+        DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS, DEFAULT_AUTH_CONTEXT_CACHE_MAX_ENTRIES,
+        DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS,
         DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS, DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
         DEFAULT_GATEWAY_HTTP_HEADER_MAX_BYTES, DEFAULT_GATEWAY_HTTP_HEADER_READ_TIMEOUT_MS,
         DEFAULT_GATEWAY_HTTP_MAX_HEADERS, DEFAULT_GATEWAY_LISTENER_SHARDS,
@@ -3809,6 +3891,13 @@ mod tests {
             auth_context_cache_refresh_interval_secs:
                 DEFAULT_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS,
             auth_context_negative_cache_ttl_secs: DEFAULT_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS,
+            admin_security_cache_ttl_ms: DEFAULT_ADMIN_SECURITY_CACHE_TTL_MS,
+            gateway_error_detail_logging: false,
+            trusted_proxy_cidrs: None,
+            trusted_ingress_cidrs: None,
+            payment_callback_secret: None,
+            public_base_url: None,
+            internal_gateway_auth_secret: None,
             max_in_flight_requests: None,
             max_http_connections: None,
             max_websocket_connections: None,

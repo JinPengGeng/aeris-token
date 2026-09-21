@@ -22,7 +22,7 @@ const INTERNAL_GATEWAY_AUTH_NONCE_TTL: Duration =
 const INTERNAL_GATEWAY_AUTH_NONCE_KEY_PREFIX: &str = "internal:gateway:auth:nonce:";
 
 #[derive(Clone)]
-pub(crate) struct InternalGatewayAuthConfig {
+pub struct InternalGatewayAuthConfig {
     mode: InternalGatewayAuthMode,
 }
 
@@ -47,6 +47,11 @@ impl fmt::Debug for InternalGatewayAuthConfig {
 }
 
 impl InternalGatewayAuthConfig {
+    /// 由启动期 clap 解析值构造;`None` 表示禁用内部网关控制面认证。
+    pub fn from_startup_value(value: Option<String>) -> Self {
+        Self::from_secret_value(value.as_deref())
+    }
+
     pub(crate) fn for_process() -> Self {
         #[cfg(test)]
         {
