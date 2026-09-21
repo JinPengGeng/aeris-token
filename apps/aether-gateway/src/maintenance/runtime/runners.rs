@@ -9,7 +9,7 @@ use crate::{AppState, GatewayError};
 
 use super::cleanup_runs::cleanup_data_layer_error_category;
 use super::{
-    advance_proxy_upgrade_rollout_once, cleanup_audit_logs_once,
+    advance_proxy_upgrade_rollout_once, cleanup_audit_logs_once, cleanup_data_lifecycle_once,
     cleanup_expired_gemini_file_mappings_once, cleanup_proxy_node_metrics_once,
     cleanup_request_candidates_once, cleanup_stale_pending_requests_once,
     cleanup_stale_proxy_nodes_once, collect_proxy_upgrade_rollout_probes, now_unix_secs,
@@ -106,6 +106,62 @@ pub(super) async fn run_proxy_node_metrics_cleanup_once(
             deleted_1m_rows = summary.deleted_1m_rows,
             deleted_1h_rows = summary.deleted_1h_rows,
             "gateway deleted expired proxy node metrics buckets"
+        );
+    }
+    Ok(())
+}
+
+pub(super) async fn run_data_lifecycle_cleanup_once(
+    data: &GatewayDataState,
+) -> Result<(), DataLayerError> {
+    let started_at_unix_secs = now_unix_secs();
+    let started_at = Instant::now();
+    let summary = match cleanup_data_lifecycle_once(data).await {
+        Ok(summary) => summary,
+        Err(err) => {
+            record_failed_cleanup_run(
+                data,
+                "data_lifecycle_cleanup",
+                "auto",
+                started_at_unix_secs,
+                started_at,
+                &err,
+            )
+            .await;
+            return Err(err);
+        }
+    };
+    record_completed_cleanup_run(
+        data,
+        "data_lifecycle_cleanup",
+        "auto",
+        started_at_unix_secs,
+        started_at,
+        json!({
+            "stats_hourly_rows_deleted": summary.stats.hourly_rows_deleted,
+            "stats_daily_rows_deleted": summary.stats.daily_rows_deleted,
+            "video_tasks_deleted": summary.video_tasks_deleted,
+        }),
+        format!(
+            "数据生命周期清理完成，删除 stats 小时桶 {} 行、stats 天桶 {} 行、终态视频任务 {} 行",
+            summary.stats.hourly_rows_deleted,
+            summary.stats.daily_rows_deleted,
+            summary.video_tasks_deleted,
+        ),
+    )
+    .await;
+    if summary.stats.hourly_rows_deleted > 0
+        || summary.stats.daily_rows_deleted > 0
+        || summary.video_tasks_deleted > 0
+    {
+        info!(
+            event_name = "data_lifecycle_cleanup_completed",
+            log_type = "ops",
+            worker = "data_lifecycle_cleanup",
+            stats_hourly_rows_deleted = summary.stats.hourly_rows_deleted,
+            stats_daily_rows_deleted = summary.stats.daily_rows_deleted,
+            video_tasks_deleted = summary.video_tasks_deleted,
+            "gateway deleted expired stats aggregates and terminal video tasks"
         );
     }
     Ok(())

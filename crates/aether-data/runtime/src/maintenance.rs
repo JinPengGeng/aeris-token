@@ -125,3 +125,12 @@ pub struct StatsHourlyAggregationSummary {
     pub model_rows: usize,
     pub provider_rows: usize,
 }
+
+/// Rows removed from time-bucketed `stats_*` aggregate tables by the retention
+/// cleanup. Summary/counter tables (e.g. `stats_summary`) are never deleted by
+/// this pass and are therefore not reported here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StatsRetentionCleanupSummary {
+    pub hourly_rows_deleted: u64,
+    pub daily_rows_deleted: u64,
+}
