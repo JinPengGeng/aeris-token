@@ -10448,6 +10448,69 @@ RETURNING
             })
             .await
     }
+
+    pub async fn list_insufficient_quota_writeoffs(
+        &self,
+        query: &aether_data_contracts::repository::usage::InsufficientQuotaWriteoffQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredInsufficientQuotaWriteoff>,
+        DataLayerError,
+    > {
+        use aether_data_contracts::repository::usage::StoredInsufficientQuotaWriteoff;
+        query.validate().map_err(|err| {
+            DataLayerError::InvalidInput(format!(
+                "invalid insufficient quota writeoff query: {err}"
+            ))
+        })?;
+        let rows = sqlx::query(
+            r#"
+SELECT
+  "usage".request_id,
+  "usage".user_id,
+  "usage".api_key_id,
+  "usage".provider_id,
+  "usage".model,
+  COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0)
+    AS actual_total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM usage_settlement_snapshots.finalized_at) AS BIGINT)
+    AS finalized_at_unix_secs
+FROM "usage"
+INNER JOIN usage_settlement_snapshots
+  ON usage_settlement_snapshots.request_id = "usage".request_id
+WHERE usage_settlement_snapshots.billing_status = 'insufficient_quota'
+  AND usage_settlement_snapshots.finalized_at >= to_timestamp($1)
+  AND usage_settlement_snapshots.finalized_at < to_timestamp($2)
+ORDER BY usage_settlement_snapshots.finalized_at ASC, "usage".request_id ASC
+LIMIT $3
+"#,
+        )
+        .bind(query.finalized_from_unix_secs as f64)
+        .bind(query.finalized_until_unix_secs as f64)
+        .bind(query.limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_postgres_err()?;
+        rows.into_iter()
+            .map(|row: sqlx::postgres::PgRow| {
+                let finalized_at_unix_secs: Option<i64> =
+                    row.try_get("finalized_at_unix_secs").map_postgres_err()?;
+                Ok(StoredInsufficientQuotaWriteoff {
+                    request_id: row.try_get("request_id").map_postgres_err()?,
+                    user_id: row.try_get("user_id").map_postgres_err()?,
+                    api_key_id: row.try_get("api_key_id").map_postgres_err()?,
+                    provider_id: row.try_get("provider_id").map_postgres_err()?,
+                    model: row.try_get("model").map_postgres_err()?,
+                    total_cost_usd: row.try_get("total_cost_usd").map_postgres_err()?,
+                    actual_total_cost_usd: row
+                        .try_get("actual_total_cost_usd")
+                        .map_postgres_err()?,
+                    finalized_at_unix_secs: finalized_at_unix_secs
+                        .and_then(|value| u64::try_from(value).ok()),
+                })
+            })
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -10496,6 +10559,16 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         query: &UsageAuditListQuery,
     ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
         Self::list_usage_audits(self, query).await
+    }
+
+    async fn list_insufficient_quota_writeoffs(
+        &self,
+        query: &aether_data_contracts::repository::usage::InsufficientQuotaWriteoffQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredInsufficientQuotaWriteoff>,
+        DataLayerError,
+    > {
+        Self::list_insufficient_quota_writeoffs(self, query).await
     }
 
     async fn count_usage_audits(&self, query: &UsageAuditListQuery) -> Result<u64, DataLayerError> {
