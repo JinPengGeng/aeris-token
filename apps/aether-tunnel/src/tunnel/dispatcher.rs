@@ -216,7 +216,7 @@ where
         let data = match msg {
             Message::Binary(data) => {
                 server.tunnel_metrics.record_ws_incoming_frame(data.len());
-                Bytes::from(data)
+                data
             }
             Message::Ping(_) => continue,
             Message::Pong(_) => continue,

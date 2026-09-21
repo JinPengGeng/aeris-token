@@ -7,9 +7,11 @@ use crate::provider::{ProviderOAuthAdapter, ProviderOAuthTokenSet, ProviderOAuth
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// Constant: antigravity user info url.
 pub const ANTIGRAVITY_USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 
 #[derive(Debug, Clone)]
+/// Data type: antigravity provider oauth adapter.
 pub struct AntigravityProviderOAuthAdapter {
     inner: GenericProviderOAuthAdapter,
     user_info_url: String,
@@ -43,11 +45,13 @@ impl AntigravityProviderOAuthAdapter {
         self
     }
 
+    /// Method: with token url override.
     pub fn with_token_url_override(mut self, token_url: impl Into<String>) -> Self {
         self.inner = self.inner.with_token_url_override(token_url);
         self
     }
 
+    /// Method: with user info url override.
     pub fn with_user_info_url_override(mut self, user_info_url: impl Into<String>) -> Self {
         self.user_info_url = user_info_url.into();
         self

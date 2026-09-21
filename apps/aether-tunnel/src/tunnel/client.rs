@@ -141,11 +141,9 @@ pub async fn connect_and_run(
     // Match Python-side _MAX_FRAME_SIZE (64 MiB) to prevent tungstenite's
     // default 16 MiB limit from rejecting large AI API payloads (multi-image
     // base64 requests can exceed 16 MiB).
-    let ws_config = WebSocketConfig {
-        max_frame_size: Some(64 << 20),
-        max_message_size: Some(64 << 20),
-        ..Default::default()
-    };
+    let ws_config = WebSocketConfig::default()
+        .max_frame_size(Some(64 << 20))
+        .max_message_size(Some(64 << 20));
     let handshake_timeout = connect_timeout;
     let (ws_stream, _response) = tokio::time::timeout(
         handshake_timeout,
@@ -546,7 +544,7 @@ fn configure_tcp_socket(stream: &TcpStream, state: &Arc<AppState>) {
     }
 
     if state.config.tunnel_tcp_nodelay {
-        if let Err(e) = sock_ref.set_nodelay(true) {
+        if let Err(e) = sock_ref.set_tcp_nodelay(true) {
             warn!(error = %e, "failed to set TCP_NODELAY on tunnel socket");
         }
     }

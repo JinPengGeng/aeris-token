@@ -1811,6 +1811,13 @@ pub trait UsageReadRepository: Send + Sync {
         query: &UsageAuditListQuery,
     ) -> Result<Vec<StoredRequestUsageAudit>, crate::DataLayerError>;
 
+    /// Read-only writeoff report: usage finalized as `insufficient_quota`
+    /// inside the given finalized-at window, oldest first.
+    async fn list_insufficient_quota_writeoffs(
+        &self,
+        query: &super::InsufficientQuotaWriteoffQuery,
+    ) -> Result<Vec<super::StoredInsufficientQuotaWriteoff>, crate::DataLayerError>;
+
     async fn count_usage_audits(
         &self,
         query: &UsageAuditListQuery,

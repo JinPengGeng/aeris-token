@@ -10,9 +10,13 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+/// Constant: windsurf provider type.
 pub const WINDSURF_PROVIDER_TYPE: &str = "windsurf";
+/// Constant: windsurf signin url.
 pub const WINDSURF_SIGNIN_URL: &str = "https://windsurf.com/windsurf/signin";
+/// Constant: windsurf client id.
 pub const WINDSURF_CLIENT_ID: &str = "3GUryQ7ldAeKEuD2obYnppsnmj58eP5u";
+/// Constant: windsurf show auth token redirect.
 pub const WINDSURF_SHOW_AUTH_TOKEN_REDIRECT: &str = "show-auth-token";
 const AUTH1_PASSWORD_LOGIN_URL: &str = "https://windsurf.com/_devin-auth/password/login";
 const WINDSURF_POST_AUTH_URL: &str =
@@ -24,6 +28,7 @@ const WINDSURF_REGISTER_USER_URL: &str =
 const WINDSURF_REGISTER_USER_LEGACY_URL: &str = "https://api.codeium.com/register_user/";
 
 #[derive(Debug, Clone, Default)]
+/// Data type: windsurf provider oauth adapter.
 pub struct WindsurfProviderOAuthAdapter;
 
 impl WindsurfProviderOAuthAdapter {

@@ -241,6 +241,19 @@ pub(crate) async fn settle_usage_with_reconciled_cost(
             .is_some_and(|settlement| settlement.billing_status == "insufficient_quota")
     {
         aether_runtime::record_billing_insufficient_quota();
+        tracing::warn!(
+            event_name = "insufficient_quota_writeoff",
+            log_type = "risk",
+            request_id = usage.request_id.as_str(),
+            user_id = usage.user_id.as_deref().unwrap_or("-"),
+            api_key_id = usage.api_key_id.as_deref().unwrap_or("-"),
+            provider_id = usage.provider_id.as_deref().unwrap_or("-"),
+            model = usage.model.as_str(),
+            total_cost_usd = usage.total_cost_usd,
+            actual_total_cost_usd = usage.actual_total_cost_usd,
+            finalized_at_unix_secs = finalized_at_unix_secs,
+            "completed usage settled as insufficient_quota; delivered service recorded at no charge"
+        );
     }
     if usage.status == "completed"
         && outcome

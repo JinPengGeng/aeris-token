@@ -1,6 +1,14 @@
+//! OAuth 2.0 / PKCE integration core for Aether: provider adapters, token
+//! flows, and the HTTP policy used to reach external identity providers.
+#![warn(missing_docs)]
+
+/// Module: core.
 pub mod core;
+/// Module: identity.
 pub mod identity;
+/// Module: network.
 pub mod network;
+/// Module: provider.
 pub mod provider;
 
 pub use core::{

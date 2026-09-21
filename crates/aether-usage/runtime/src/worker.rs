@@ -783,6 +783,7 @@ fn usage_event_record_error_is_permanent(err: &DataLayerError) -> bool {
             database_error_is_known_permanent(message)
         }
         DataLayerError::Redis(_) | DataLayerError::TimedOut(_) => false,
+        DataLayerError::Sqlx(_) => err.is_foreign_key_violation(),
     }
 }
 

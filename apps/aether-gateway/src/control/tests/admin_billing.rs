@@ -199,6 +199,27 @@ fn classifies_admin_billing_collector_routes_as_admin_proxy_route() {
 }
 
 #[test]
+fn classifies_admin_billing_insufficient_quota_writeoffs_route_as_admin_proxy_route() {
+    let headers = headers(&[]);
+
+    let list_uri: Uri = "/api/admin/billing/insufficient-quota-writeoffs?from=1&to=2"
+        .parse()
+        .expect("uri should parse");
+    let list = classify_control_route(&http::Method::GET, &list_uri, &headers)
+        .expect("route should classify");
+    assert_eq!(list.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(list.route_family.as_deref(), Some("billing_manage"));
+    assert_eq!(
+        list.route_kind.as_deref(),
+        Some("list_insufficient_quota_writeoffs")
+    );
+    assert_eq!(
+        list.auth_endpoint_signature.as_deref(),
+        Some("admin:billing")
+    );
+}
+
+#[test]
 fn classifies_admin_billing_plan_routes_as_admin_proxy_route() {
     let headers = headers(&[]);
 
