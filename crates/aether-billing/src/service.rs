@@ -350,6 +350,7 @@ impl BillingService {
             0.0
         } else {
             quantize_cost(total_cost * rate_multiplier)
+                .map_err(|err| ExpressionEvaluationError::Failed(err.to_string()))?
         };
 
         Ok(BillingComputation {
