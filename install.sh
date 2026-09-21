@@ -88,7 +88,9 @@ Options:
   --repo OWNER/REPO    GitHub repository to download from (default: fawney19/Aether)
   --source-ref REF     Source branch/tag used for compose templates (default: main)
   --archive PATH       Install from a local release tarball instead of downloading
-  --download-url URL   Download the release archive from this URL instead of GitHub
+  --download-url URL   Download the release archive from this explicit third-party
+                      mirror URL instead of GitHub; the archive is still verified
+                      against the official release SHA256SUMS and a mismatch aborts
   --env-file PATH      Use an existing aether-gateway.env file
   --install-root PATH  Install root for system service mode (default: /opt/aether)
                       Also makes the default Docker Compose directory PATH/compose
@@ -870,16 +872,34 @@ extract_validated_release_archive() {
         || die "release archive extraction failed"
 }
 
+# Third-party download mirrors are a strictly opt-in acceleration path: the
+# installer falls back to the official GitHub release URL unless the operator
+# explicitly overrides it (interactive choice 2, --download-url, or
+# AETHER_RELEASE_ARCHIVE_URL/AETHER_DOWNLOAD_URL). A mirror ultimately
+# supplies the gateway binary that runs as a system service with access to
+# every configured LLM API key, so a tampered archive is a full credential
+# compromise. The control that keeps an explicit mirror safe is the mandatory
+# checksum in download_or_unpack_bundle: SHA256SUMS is always fetched from the official
+# GitHub release (never from the mirror), and the downloaded archive must
+# match it exactly or the install aborts. Do not relax this for
+# custom URLs, and never trust a checksum manifest served by the mirror
+# itself — that would let the mirror attest its own tampered archive.
 select_release_download_urls() {
     local original_archive_url="$1"
 
-    if [[ -z "${RELEASE_ARCHIVE_URL}" && interactive_tty_available ]]; then
+    # The mirror prompt only runs on an interactive terminal; non-interactive
+    # installs (pipes, systemd, Docker) must fall through to the official URL.
+    if [[ -z "${RELEASE_ARCHIVE_URL}" ]] && interactive_tty_available; then
         if ui_is_zh; then
             cat >/dev/tty <<'EOF'
 
 是否使用下载加速源?
-  1) 否，使用原始 GitHub 地址
+  1) 否，使用原始 GitHub 地址（推荐）
   2) 是，手动填写新的下载 URL
+
+注意: 第三方镜像可能托管被篡改的安装包。无论选择哪个下载地址，
+安装程序都会从官方 GitHub Release 下载 SHA256SUMS 并强制校验压缩包，
+校验失败将中止安装。仅使用你信任的镜像源。
 
 请输入选项 [1]:
 EOF
@@ -887,8 +907,13 @@ EOF
             cat >/dev/tty <<'EOF'
 
 Use an accelerated download URL?
-  1) No, use the original GitHub URL
+  1) No, use the original GitHub URL (recommended)
   2) Yes, enter a replacement download URL
+
+Note: third-party mirrors may host tampered archives. Whatever download
+URL is chosen, the installer always fetches SHA256SUMS from the official
+GitHub Release and aborts unless the archive matches it exactly. Only
+continue with a mirror you trust.
 
 Enter choice [1]:
 EOF
@@ -939,11 +964,16 @@ EOF
     if [[ -z "${RELEASE_ARCHIVE_URL}" ]]; then
         RELEASE_ARCHIVE_URL="${original_archive_url}"
     elif [[ "${RELEASE_ARCHIVE_URL}" != "${original_archive_url}" ]]; then
+        # Explicit third-party mirror: warn loudly, then rely on the mandatory
+        # SHA256SUMS verification (fetched from the official release) in
+        # download_or_unpack_bundle — same bar as the official channel.
         if ui_is_zh; then
-            info "使用自定义压缩包下载 URL"
+            warn "使用第三方下载镜像: ${RELEASE_ARCHIVE_URL}"
+            warn "安装程序将对照官方 GitHub Release 的 SHA256SUMS 强制校验该压缩包，校验失败会中止安装"
             info "原始压缩包 URL: ${original_archive_url}"
         else
-            info "using custom archive download URL"
+            warn "using third-party download mirror: ${RELEASE_ARCHIVE_URL}"
+            warn "the archive is still verified against the official GitHub Release SHA256SUMS; a mismatch aborts the install"
             info "original archive URL: ${original_archive_url}"
         fi
     fi
@@ -1472,6 +1502,10 @@ download_or_unpack_bundle() {
             info "downloading ${asset} from custom URL"
         fi
         download_to "${RELEASE_ARCHIVE_URL}" "${archive_file}" progress
+        # The checksum manifest always comes from the official GitHub release,
+        # even when the archive itself was fetched from an explicit third-party
+        # mirror: the mirror must reproduce the official bytes, never attest
+        # its own copy. verify_release_checksum aborts the install on mismatch.
         download_to "${base_url}/SHA256SUMS" "${TMP_ROOT}/SHA256SUMS"
         verify_release_checksum "${archive_file}" "${TMP_ROOT}/SHA256SUMS" "${asset}"
         expected_root="${asset%.tar.gz}"

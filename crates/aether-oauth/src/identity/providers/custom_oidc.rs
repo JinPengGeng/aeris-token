@@ -1,4 +1,6 @@
-use super::super::adapter::{find_string, form_headers, mapped_bool, mapped_string};
+use super::super::adapter::{
+    find_string, form_headers, mapped_bool, mapped_string, validate_identity_endpoint_url,
+};
 use crate::core::{
     redacted_oauth_error_body_excerpt, OAuthAuthorizeResponse, OAuthError, OAuthTokenSet,
 };
@@ -73,6 +75,10 @@ impl IdentityOAuthProvider for CustomOidcIdentityOAuthProvider {
         config: &IdentityOAuthProviderConfig,
         ctx: &IdentityOAuthExchangeContext,
     ) -> Result<OAuthTokenSet, OAuthError> {
+        // Crate-level defense in depth: refuse to send the client secret and
+        // authorization code to a plaintext endpoint even if the caller's
+        // configuration layer skipped endpoint validation.
+        validate_identity_endpoint_url("token_url", config.token_url.trim())?;
         let body_bytes = {
             let mut form = form_urlencoded::Serializer::new(String::new());
             form.append_pair("grant_type", "authorization_code");
@@ -132,6 +138,9 @@ impl IdentityOAuthProvider for CustomOidcIdentityOAuthProvider {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| OAuthError::invalid_request("userinfo_url is required"))?;
+        // The userinfo request carries the freshly issued access token; the
+        // same HTTPS policy as token_url applies.
+        validate_identity_endpoint_url("userinfo_url", userinfo_url)?;
         let response = executor
             .execute(OAuthHttpRequest {
                 request_id: format!("identity-oauth:{}:userinfo", config.provider_type),
@@ -196,10 +205,11 @@ impl IdentityOAuthProvider for CustomOidcIdentityOAuthProvider {
 mod tests {
     use super::CustomOidcIdentityOAuthProvider;
     use crate::identity::{
-        ExternalIdentity, IdentityOAuthProvider, IdentityOAuthProviderConfig,
-        IdentityOAuthStartContext,
+        ExternalIdentity, IdentityOAuthExchangeContext, IdentityOAuthProvider,
+        IdentityOAuthProviderConfig, IdentityOAuthStartContext,
     };
     use crate::network::OAuthNetworkContext;
+    use async_trait::async_trait;
     use serde_json::json;
 
     fn config() -> IdentityOAuthProviderConfig {
@@ -224,6 +234,114 @@ mod tests {
             state: "server-state".to_string(),
             code_challenge: Some("server-challenge".to_string()),
             network: OAuthNetworkContext::direct_identity(),
+        }
+    }
+
+    fn exchange_context() -> IdentityOAuthExchangeContext {
+        IdentityOAuthExchangeContext {
+            code: "exchange-code".to_string(),
+            state: "server-state".to_string(),
+            pkce_verifier: Some("server-verifier".to_string()),
+            network: OAuthNetworkContext::direct_identity(),
+        }
+    }
+
+    struct UnreachableExecutor;
+
+    #[async_trait]
+    impl crate::network::OAuthHttpExecutor for UnreachableExecutor {
+        async fn execute(
+            &self,
+            _request: crate::network::OAuthHttpRequest,
+        ) -> Result<crate::network::OAuthHttpResponse, crate::core::OAuthError> {
+            Err(crate::core::OAuthError::transport(
+                "fixture executor is unreachable",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_oidc_exchange_code_rejects_plaintext_token_url() {
+        for token_url in [
+            "http://idp.example.test/token",
+            "http://192.168.1.10/token",
+            "ftp://idp.example.test/token",
+        ] {
+            let mut config = config();
+            config.token_url = token_url.to_string();
+
+            let error = CustomOidcIdentityOAuthProvider
+                .exchange_code(&UnreachableExecutor, &config, &exchange_context())
+                .await
+                .expect_err("plaintext token_url must be rejected");
+
+            assert!(
+                matches!(error, crate::core::OAuthError::InvalidRequest(_)),
+                "unexpected error for {token_url}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_oidc_exchange_code_allows_loopback_http_token_url() {
+        for token_url in ["http://localhost:8080/token", "http://127.0.0.1:9090/token"] {
+            let mut config = config();
+            config.token_url = token_url.to_string();
+
+            // Reaching the fixture executor (which only returns a transport
+            // error) proves the loopback URL passed validation.
+            let error = CustomOidcIdentityOAuthProvider
+                .exchange_code(&UnreachableExecutor, &config, &exchange_context())
+                .await
+                .expect_err("fixture executor always errors");
+
+            assert!(
+                matches!(error, crate::core::OAuthError::Transport(_)),
+                "loopback {token_url} must pass validation, got: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_oidc_fetch_identity_rejects_plaintext_userinfo_url() {
+        let tokens = crate::core::OAuthTokenSet {
+            access_token: "access-token".to_string(),
+            refresh_token: None,
+            token_type: None,
+            scope: None,
+            expires_at_unix_secs: None,
+            raw_payload: None,
+        };
+
+        for (userinfo_url, expect_transport) in [
+            ("http://idp.example.test/userinfo", false),
+            ("http://203.0.113.7/userinfo", false),
+            ("http://localhost:8080/userinfo", true),
+        ] {
+            let mut config = config();
+            config.userinfo_url = Some(userinfo_url.to_string());
+
+            let error = CustomOidcIdentityOAuthProvider
+                .fetch_identity(
+                    &UnreachableExecutor,
+                    &config,
+                    &tokens,
+                    OAuthNetworkContext::direct_identity(),
+                )
+                .await
+                .expect_err("fixture executor always errors");
+
+            if expect_transport {
+                assert!(
+                    matches!(error, crate::core::OAuthError::Transport(_)),
+                    "loopback {userinfo_url} must pass validation, got: {error}"
+                );
+            } else {
+                assert!(
+                    matches!(error, crate::core::OAuthError::InvalidRequest(_)),
+                    "unexpected error for {userinfo_url}: {error}"
+                );
+            }
         }
     }
 

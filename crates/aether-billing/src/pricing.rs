@@ -1553,6 +1553,15 @@ pub struct BillingAuthorizationEstimateInput {
     pub cache_ttl_minutes: Option<i64>,
     pub input_tokens: i64,
     pub max_output_tokens: Option<i64>,
+    /// Paid image requests must prove their billable shape. A missing count or
+    /// unproven output dimensions keep the estimate fail-closed instead of
+    /// authorizing an unbounded paid image operation.
+    #[serde(default)]
+    pub image_count: Option<i64>,
+    #[serde(default)]
+    pub image_size: Option<String>,
+    #[serde(default)]
+    pub image_quality: Option<String>,
 }
 
 impl BillingAuthorizationEstimateInput {
@@ -1564,6 +1573,9 @@ impl BillingAuthorizationEstimateInput {
             cache_ttl_minutes: None,
             input_tokens: input_tokens.max(0),
             max_output_tokens: None,
+            image_count: None,
+            image_size: None,
+            image_quality: None,
         }
     }
 }
