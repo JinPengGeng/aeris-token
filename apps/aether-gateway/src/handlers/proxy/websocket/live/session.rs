@@ -1016,7 +1016,7 @@ async fn run_direct(
     let initial =
         rewrite_live_session_model(initial.as_str(), provider_model.as_str()).unwrap_or(initial);
     let initial_bytes = initial.len() as u64;
-    if send_upstream_message(&mut upstream, UpstreamWsMessage::Text(initial.into()))
+    if send_upstream_message(&mut upstream, UpstreamWsMessage::Text(initial))
         .await
         .is_err()
     {
