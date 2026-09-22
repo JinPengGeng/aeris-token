@@ -74,7 +74,7 @@ use aether_data::driver::postgres::PostgresPoolConfig;
 use aether_data::{DataBackends, DataLayerConfig};
 use sqlx::{Connection, PgConnection};
 
-use crate::server::reserve_local_port;
+use crate::server::{reserve_local_port, PortReservation};
 
 #[derive(Debug)]
 pub struct ManagedPostgresServer {
@@ -91,7 +91,11 @@ pub struct ManagedPostgresServer {
 
 impl ManagedPostgresServer {
     pub async fn start() -> Result<Self, Box<dyn std::error::Error>> {
-        let port = reserve_local_port()?;
+        // Hold the port reservation across workdir creation and initdb (the
+        // slow steps) so a concurrent test cannot claim the port mid-setup;
+        // release immediately before the first postgres launch.
+        let reservation = PortReservation::bind()?;
+        let port = reservation.port();
         // pid+port is not unique: cargo test shares one PID, and ephemeral ports
         // are reused after the listener is dropped. Parallel e2e tests then hit
         // create_dir AlreadyExists.
@@ -160,11 +164,17 @@ impl ManagedPostgresServer {
             .into());
         }
 
+        let port = reservation.release();
+        server.port = port;
+        server.database_url = format!("postgres://aether@127.0.0.1:{port}/postgres");
+
         for attempt in 1..=MAX_BIND_ATTEMPTS {
             match server.launch_once().await {
                 Ok(()) => return Ok(server),
                 Err(error) if error.is_terminal_bind_collision() && attempt < MAX_BIND_ATTEMPTS => {
-                    server.port = reserve_local_port()?;
+                    // Reserve and release back-to-back right before the next
+                    // launch attempt: the only exposed window is the spawn.
+                    server.port = PortReservation::bind()?.release();
                     server.database_url =
                         format!("postgres://aether@127.0.0.1:{}/postgres", server.port);
                 }

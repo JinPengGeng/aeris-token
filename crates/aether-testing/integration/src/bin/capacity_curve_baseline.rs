@@ -918,88 +918,69 @@ where
     Ok(())
 }
 
+/// Command-line surface of `capacity_curve_baseline`. Flag names and value
+/// formats intentionally match the previous hand-written parser so existing
+/// scripts keep working (issue #212).
+#[derive(Debug, Clone, clap::Parser)]
+#[command(
+    name = "capacity_curve_baseline",
+    about = "Gateway-backed capacity curve baseline suite",
+    disable_help_flag = false
+)]
+struct CapacityCurveCli {
+    /// Comma-separated concurrency points, e.g. 8,16,32,64,128,256
+    #[arg(long, value_delimiter = ',', default_value = "8,16,32,64,128,256")]
+    points: Vec<usize>,
+    #[arg(long, default_value_t = 8)]
+    requests_per_point_multiplier: usize,
+    #[arg(long, default_value_t = 75)]
+    sync_delay_ms: u64,
+    #[arg(long, default_value_t = 25)]
+    stream_chunk_delay_ms: u64,
+    #[arg(long, default_value_t = 75)]
+    tunnel_hold_ms: u64,
+    #[arg(long, default_value_t = 10000)]
+    timeout_ms: u64,
+    #[arg(long, default_value_t = 4)]
+    saturation_latency_multiplier: u64,
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+impl CapacityCurveCli {
+    fn parse_from<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        use clap::Parser as _;
+        Self::try_parse_from(args)
+    }
+}
+
 fn parse_args(
     args: Vec<String>,
 ) -> Result<CapacityCurveBaselineConfig, Box<dyn std::error::Error>> {
-    let mut config = CapacityCurveBaselineConfig::default();
-    let mut iter = args.into_iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--points" => {
-                config.points = next_value(&mut iter, "--points")?
-                    .split(',')
-                    .filter(|value| !value.trim().is_empty())
-                    .map(|value| value.trim().parse::<usize>())
-                    .collect::<Result<Vec<_>, _>>()?;
-            }
-            "--requests-per-point-multiplier" => {
-                config.requests_per_point_multiplier =
-                    next_value(&mut iter, "--requests-per-point-multiplier")?.parse()?
-            }
-            "--sync-delay-ms" => {
-                config.sync_delay =
-                    Duration::from_millis(next_value(&mut iter, "--sync-delay-ms")?.parse()?)
-            }
-            "--stream-chunk-delay-ms" => {
-                config.stream_chunk_delay = Duration::from_millis(
-                    next_value(&mut iter, "--stream-chunk-delay-ms")?.parse()?,
-                )
-            }
-            "--tunnel-hold-ms" => {
-                config.tunnel_hold =
-                    Duration::from_millis(next_value(&mut iter, "--tunnel-hold-ms")?.parse()?)
-            }
-            "--timeout-ms" => {
-                config.timeout =
-                    Duration::from_millis(next_value(&mut iter, "--timeout-ms")?.parse()?)
-            }
-            "--saturation-latency-multiplier" => {
-                config.saturation_latency_multiplier =
-                    next_value(&mut iter, "--saturation-latency-multiplier")?.parse()?
-            }
-            "--output" => {
-                config.output_path = Some(PathBuf::from(next_value(&mut iter, "--output")?))
-            }
-            "--help" | "-h" => {
-                print_usage();
-                std::process::exit(0);
-            }
-            other => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("unknown argument: {other}"),
-                )
-                .into());
-            }
-        }
-    }
-    if config.points.is_empty() {
+    let cli = CapacityCurveCli::parse_from(
+        std::iter::once("capacity_curve_baseline".to_string()).chain(args),
+    )?;
+    if cli.points.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "capacity curve requires at least one point",
         )
         .into());
     }
-    Ok(config)
-}
-
-fn next_value(
-    iter: &mut impl Iterator<Item = String>,
-    flag: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    iter.next().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("missing value for {flag}"),
-        )
-        .into()
+    Ok(CapacityCurveBaselineConfig {
+        points: cli.points,
+        requests_per_point_multiplier: cli.requests_per_point_multiplier,
+        sync_delay: Duration::from_millis(cli.sync_delay_ms),
+        stream_chunk_delay: Duration::from_millis(cli.stream_chunk_delay_ms),
+        tunnel_hold: Duration::from_millis(cli.tunnel_hold_ms),
+        timeout: Duration::from_millis(cli.timeout_ms),
+        saturation_latency_multiplier: cli.saturation_latency_multiplier,
+        output_path: cli.output,
     })
-}
-
-fn print_usage() {
-    eprintln!(
-        "usage: cargo run -p aether-integration-tests --bin capacity_curve_baseline -- [--points 8,16,32,64,128,256] [--requests-per-point-multiplier 8] [--sync-delay-ms 75] [--stream-chunk-delay-ms 25] [--tunnel-hold-ms 75] [--timeout-ms 10000] [--saturation-latency-multiplier 4] [--output /tmp/capacity_curve_baseline.json]"
-    );
 }
 
 #[cfg(test)]
@@ -1007,6 +988,74 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    fn parse(argv: &[&str]) -> Result<CapacityCurveBaselineConfig, Box<dyn std::error::Error>> {
+        parse_args(argv.iter().map(|arg| arg.to_string()).collect())
+    }
+
+    #[test]
+    fn parse_defaults_match_previous_handwritten_defaults() {
+        let config = parse(&[]).unwrap();
+        let expected = CapacityCurveBaselineConfig::default();
+        assert_eq!(config.points, expected.points);
+        assert_eq!(
+            config.requests_per_point_multiplier,
+            expected.requests_per_point_multiplier
+        );
+        assert_eq!(config.sync_delay, expected.sync_delay);
+        assert_eq!(config.stream_chunk_delay, expected.stream_chunk_delay);
+        assert_eq!(config.tunnel_hold, expected.tunnel_hold);
+        assert_eq!(config.timeout, expected.timeout);
+        assert_eq!(
+            config.saturation_latency_multiplier,
+            expected.saturation_latency_multiplier
+        );
+        assert_eq!(config.output_path, expected.output_path);
+    }
+
+    #[test]
+    fn parse_accepts_all_scripted_flags() {
+        let config = parse(&[
+            "--points",
+            "4,8,16",
+            "--requests-per-point-multiplier",
+            "3",
+            "--sync-delay-ms",
+            "10",
+            "--stream-chunk-delay-ms",
+            "5",
+            "--tunnel-hold-ms",
+            "20",
+            "--timeout-ms",
+            "3000",
+            "--saturation-latency-multiplier",
+            "9",
+            "--output",
+            "/tmp/report.json",
+        ])
+        .unwrap();
+        assert_eq!(config.points, vec![4, 8, 16]);
+        assert_eq!(config.requests_per_point_multiplier, 3);
+        assert_eq!(config.sync_delay, Duration::from_millis(10));
+        assert_eq!(config.stream_chunk_delay, Duration::from_millis(5));
+        assert_eq!(config.tunnel_hold, Duration::from_millis(20));
+        assert_eq!(config.timeout, Duration::from_millis(3000));
+        assert_eq!(config.saturation_latency_multiplier, 9);
+        assert_eq!(config.output_path, Some(PathBuf::from("/tmp/report.json")));
+    }
+
+    #[test]
+    fn parse_rejects_empty_points() {
+        // Either clap rejects the empty value, or the post-parse guard does.
+        assert!(parse(&["--points", ""]).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_unknown_flags_and_bad_values() {
+        assert!(parse(&["--bogus"]).is_err());
+        assert!(parse(&["--points", "8,x"]).is_err());
+        assert!(parse(&["--timeout-ms", "abc"]).is_err());
+    }
 
     #[tokio::test]
     async fn non_2xx_complete_responses_are_capacity_failures() {

@@ -91,11 +91,14 @@ impl Drop for SpawnedServer {
     }
 }
 
+pub use aether_test_support::PortReservation;
+
+/// Probes a free loopback port and drops the probe listener. Prefer
+/// [`PortReservation`] (hold while preparing, release right before the
+/// rebind) or [`ReservedListener`] (hand the bound listener to the server)
+/// to avoid the probe/bind TOCTOU window this function inherently has.
 pub fn reserve_local_port() -> Result<u16, std::io::Error> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+    Ok(PortReservation::bind()?.release())
 }
 
 #[cfg(test)]
@@ -139,5 +142,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listener.local_addr().unwrap().port(), port);
+    }
+
+    #[test]
+    fn port_reservation_holds_against_concurrent_claims() {
+        let reservation = PortReservation::bind().unwrap();
+        let port = reservation.port();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(move || {
+                    assert_eq!(
+                        std::net::TcpListener::bind(("127.0.0.1", port))
+                            .unwrap_err()
+                            .kind(),
+                        std::io::ErrorKind::AddrInUse
+                    );
+                });
+            }
+        });
+        assert_eq!(reservation.release(), port);
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
+
+    #[test]
+    fn parallel_port_reservations_do_not_overlap() {
+        let ports: Vec<u16> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| scope.spawn(PortReservation::bind))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap().unwrap().port())
+                .collect()
+        });
+        let mut unique = ports.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ports.len());
     }
 }
