@@ -39,6 +39,16 @@ assert_line "${APP_DOCKERFILE}" \
 assert_line "${VSCODEX_DOCKERFILE}" \
     "FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32"
 
+# Local-build Dockerfiles pull their build stages (node/rust) through a
+# domestic mirror; those third-party base images must be digest-pinned too,
+# not just the production runtime images above. See #220.
+for local_dockerfile in "${REPO_ROOT}/Dockerfile.app.local" "${REPO_ROOT}/Dockerfile.app.release-local"; do
+    assert_line "${local_dockerfile}" \
+        "ARG NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:22-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9"
+    assert_line "${local_dockerfile}" \
+        "ARG RUST_BASE_IMAGE=docker.m.daocloud.io/library/rust:1.95.0-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0"
+done
+
 grep -Fq 'verify_release_checksum "${archive_file}" "${TMP_ROOT}/SHA256SUMS" "${asset}"' "${INSTALLER}" || fail_test "gateway installer does not verify SHA256SUMS"
 grep -Fq 'verify_checksum "$archive" "$TMP_DIR/SHA256SUMS.txt" "$asset"' "${TUNNEL_INSTALLER}" || fail_test "tunnel installer does not verify SHA256SUMS.txt"
 
