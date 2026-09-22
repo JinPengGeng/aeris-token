@@ -558,7 +558,7 @@ pub struct AppState {
     pub(crate) provider_transport_snapshot_cache_generation: Arc<AtomicU64>,
     pub(crate) provider_transport_snapshot_inflight:
         Arc<DashMap<ProviderTransportSnapshotCacheKey, Arc<ProviderTransportSnapshotFlight>>>,
-    pub(crate) provider_key_rpm_resets: Arc<StdMutex<HashMap<String, u64>>>,
+    pub(crate) provider_key_rpm_resets: Arc<DashMap<String, u64>>,
     pub(crate) local_execution_runtime_miss_diagnostics:
         Arc<DashMap<String, LocalExecutionRuntimeMissDiagnostic>>,
     pub(crate) admin_monitoring_error_stats_reset_at: Arc<StdMutex<Option<u64>>>,
