@@ -16,7 +16,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// the managed-server launch loops.
 #[derive(Debug)]
 pub struct PortReservation {
-    listener: std::net::TcpListener,
+    // Held purely for its Drop (port stays bound); never read.
+    _listener: std::net::TcpListener,
     port: u16,
 }
 
@@ -24,7 +25,10 @@ impl PortReservation {
     pub fn bind() -> Result<Self, std::io::Error> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        Ok(Self { listener, port })
+        Ok(Self {
+            _listener: listener,
+            port,
+        })
     }
 
     pub fn port(&self) -> u16 {
@@ -137,15 +141,6 @@ impl ManagedRedisServer {
         let reservation = PortReservation::bind()?;
         let workdir = Self::create_workdir()?;
         let port = reservation.release();
-        Self::launch_in_workdir(binary, readiness_timeout, port, workdir).await
-    }
-
-    async fn start_with_binary_on_port(
-        binary: String,
-        readiness_timeout: std::time::Duration,
-        port: u16,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let workdir = Self::create_workdir()?;
         Self::launch_in_workdir(binary, readiness_timeout, port, workdir).await
     }
 
