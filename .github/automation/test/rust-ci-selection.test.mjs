@@ -287,8 +287,8 @@ function runManagedReadinessFixture(scenario) {
     cargo() {
       printf '%s\\n' "$*" >> "$COMMAND_LOG"
       local expected=1
-      if [[ "$*" == *'aether-test-support'* ]]; then expected=5; fi
-      if [[ "$SCENARIO" == support-zero && "$expected" == 5 ]]; then expected=0; fi
+      if [[ "$*" == *'aether-test-support'* ]]; then expected=7; fi
+      if [[ "$SCENARIO" == support-zero && "$expected" == 7 ]]; then expected=0; fi
       if [[ "$expected" == 1 ]]; then
         case "$SCENARIO" in
           live-zero) expected=0 ;;

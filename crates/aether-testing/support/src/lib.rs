@@ -5,6 +5,46 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// Holds a loopback listener bound to an ephemeral port so the port stays
+/// reserved until [`PortReservation::release`] is called.
+///
+/// External server processes (redis, postgres) cannot take over a pre-bound
+/// listener, so callers hold the reservation across slow setup work (workdir
+/// creation, initdb) and release it immediately before spawning the child.
+/// That shrinks the classic "probe a free port, drop, rebind" TOCTOU window
+/// to the spawn call itself; collisions after release are still retried by
+/// the managed-server launch loops.
+#[derive(Debug)]
+pub struct PortReservation {
+    // Held purely for its Drop (port stays bound); never read.
+    _listener: std::net::TcpListener,
+    port: u16,
+}
+
+impl PortReservation {
+    pub fn bind() -> Result<Self, std::io::Error> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        Ok(Self {
+            _listener: listener,
+            port,
+        })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Consumes the reservation, returning the port. Call this as the last
+    /// step before the process that will re-bind the port is spawned.
+    pub fn release(self) -> u16 {
+        self.port
+    }
+}
+
+/// Single in-workspace implementation of a scratch redis-server lifecycle
+/// for tests. `aether-testkit` and `aether-loadtools` both re-export this
+/// type; do not add a second copy (issue #212).
 #[derive(Debug)]
 pub struct ManagedRedisServer {
     child: Option<Child>,
@@ -96,14 +136,25 @@ impl ManagedRedisServer {
         binary: String,
         readiness_timeout: std::time::Duration,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::start_with_binary_on_port(binary, readiness_timeout, reserve_local_port()?).await
+        // Hold the reservation across workdir setup so a concurrent test
+        // cannot claim the port while we prepare the launch.
+        let reservation = PortReservation::bind()?;
+        let workdir = Self::create_workdir()?;
+        let port = reservation.release();
+        Self::launch_in_workdir(binary, readiness_timeout, port, workdir).await
     }
 
+    #[cfg(test)]
     async fn start_with_binary_on_port(
         binary: String,
         readiness_timeout: std::time::Duration,
         port: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let workdir = Self::create_workdir()?;
+        Self::launch_in_workdir(binary, readiness_timeout, port, workdir).await
+    }
+
+    fn create_workdir() -> Result<PathBuf, std::io::Error> {
         // A bind retry can change ports, and concurrent starts may reserve the
         // same initial port. Directory ownership must not depend on that port.
         let seq = REDIS_WORKDIR_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -116,7 +167,15 @@ impl ManagedRedisServer {
             std::process::id()
         ));
         std::fs::create_dir(&workdir)?;
+        Ok(workdir)
+    }
 
+    async fn launch_in_workdir(
+        binary: String,
+        readiness_timeout: std::time::Duration,
+        port: u16,
+        workdir: PathBuf,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let redis_url = format!("redis://127.0.0.1:{port}/0");
         let mut server = Self {
             child: None,
@@ -131,7 +190,9 @@ impl ManagedRedisServer {
             match server.launch_once().await {
                 Ok(()) => return Ok(server),
                 Err(error) if error.is_terminal_bind_collision() && attempt < MAX_BIND_ATTEMPTS => {
-                    server.port = reserve_local_port()?;
+                    // Reserve and release back-to-back right before the next
+                    // launch attempt: the only exposed window is the spawn.
+                    server.port = PortReservation::bind()?.release();
                     server.redis_url = format!("redis://127.0.0.1:{}/0", server.port);
                 }
                 Err(error) => return Err(error.into()),
@@ -246,13 +307,6 @@ impl Drop for ManagedRedisServer {
     }
 }
 
-fn reserve_local_port() -> Result<u16, std::io::Error> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
-}
-
 async fn redis_process_id(addr: (&str, u16), deadline: tokio::time::Instant) -> Option<u32> {
     tokio::time::timeout_at(deadline, async move {
         let mut stream = tokio::net::TcpStream::connect(addr).await.ok()?;
@@ -327,6 +381,31 @@ fn parse_redis_info_process_id(response: &[u8]) -> Result<Option<u32>, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn port_reservation_blocks_rebind_until_released() {
+        let reservation = PortReservation::bind().unwrap();
+        let port = reservation.port();
+        let competing = std::net::TcpListener::bind(("127.0.0.1", port));
+        assert_eq!(competing.unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
+
+        let port_after_release = reservation.release();
+        assert_eq!(port_after_release, port);
+        let rebound = std::net::TcpListener::bind(("127.0.0.1", port));
+        assert!(rebound.is_ok());
+    }
+
+    #[test]
+    fn concurrent_port_reservations_are_distinct() {
+        let reservations: Vec<_> = (0..32).map(|_| PortReservation::bind().unwrap()).collect();
+        let mut ports: Vec<u16> = reservations
+            .iter()
+            .map(|reservation| reservation.port())
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        assert_eq!(ports.len(), 32, "reservations must not share ports");
+    }
 
     #[cfg(unix)]
     fn fake_launcher(mode: &str) -> (PathBuf, PathBuf, PathBuf) {

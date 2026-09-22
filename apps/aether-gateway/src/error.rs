@@ -368,26 +368,34 @@ impl IntoResponse for GatewayError {
             )
                 .into_response(),
             Self::Internal(message) => {
-                log_gateway_internal_error(&message, gateway_error_detail_logging_enabled());
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": {
-                            "message": "internal server error",
-                        }
-                    })),
-                )
-                    .into_response()
+                let trace_id = uuid::Uuid::new_v4().simple().to_string();
+                log_gateway_internal_error(
+                    &trace_id,
+                    &message,
+                    gateway_error_detail_logging_enabled(),
+                );
+                let body = Json(json!({
+                    "error": {
+                        "message": "internal server error",
+                        "trace_id": trace_id,
+                    },
+                    "trace_id": trace_id,
+                }));
+                let mut response = (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
+                let _ =
+                    insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, &trace_id);
+                response
             }
         }
     }
 }
 
-fn log_gateway_internal_error(message: &str, detail_logging: bool) {
+fn log_gateway_internal_error(trace_id: &str, message: &str, detail_logging: bool) {
     let error_fingerprint = gateway_error_fingerprint(message);
     if detail_logging {
         tracing::error!(
             event_name = "gateway_internal_error",
+            trace_id = %trace_id,
             error_fingerprint,
             error_length = message.len(),
             error_detail = %redact_error_str_unbounded(message),
@@ -396,6 +404,7 @@ fn log_gateway_internal_error(message: &str, detail_logging: bool) {
     } else {
         tracing::error!(
             event_name = "gateway_internal_error",
+            trace_id = %trace_id,
             error_fingerprint,
             error_length = message.len(),
             "internal gateway error hidden from client"
@@ -473,7 +482,7 @@ mod tests {
             .finish();
         // 使用线程局部日志捕获和显式开关，不修改进程环境以免干扰并发测试。
         tracing::subscriber::with_default(subscriber, || {
-            log_gateway_internal_error(message, detail_logging);
+            log_gateway_internal_error("trace-test", message, detail_logging);
         });
         let bytes = buffer.0.lock().expect("log buffer should lock");
         serde_json::from_slice(&bytes).expect("internal error log should be JSON")
@@ -493,7 +502,31 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_slice(&body).expect("internal error response should be JSON");
         assert_eq!(payload["error"]["message"], "internal server error");
+        let trace_id = payload["trace_id"]
+            .as_str()
+            .expect("internal error response should carry a trace_id");
+        assert_eq!(payload["error"]["trace_id"], trace_id);
+        assert!(!trace_id.is_empty());
         assert!(!String::from_utf8_lossy(&body).contains("internal-secret"));
+    }
+
+    #[tokio::test]
+    async fn internal_error_response_echoes_trace_id_header() {
+        let response = GatewayError::Internal("boom".to_string()).into_response();
+
+        let trace_id = response
+            .headers()
+            .get(TRACE_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .expect("internal error response should set the trace id header");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("internal error response body should read");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("internal error response should be JSON");
+        assert_eq!(payload["trace_id"], trace_id);
+        assert_eq!(payload["error"]["trace_id"], trace_id);
     }
 
     #[test]
@@ -859,6 +892,7 @@ mod tests {
         let fields = &log["fields"];
         assert_eq!(log["level"], "ERROR");
         assert_eq!(fields["event_name"], "gateway_internal_error");
+        assert_eq!(fields["trace_id"], "trace-test");
         assert_eq!(fields["error_length"], message.len());
         assert_eq!(
             fields["error_fingerprint"],

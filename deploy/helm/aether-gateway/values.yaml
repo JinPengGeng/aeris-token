@@ -1,0 +1,72 @@
+# Aether gateway 多节点部署的默认 values。
+# 生产使用请覆盖 image.repository/tag/digest、所有 secret 值与 ingress CIDR。
+# 进程内缓存漂移注意事项见 docs/operations/in-process-cache-drift.md；
+# 多节点 env 契约见 docs/operations/gateway-environment-reference.md。
+
+image:
+  repository: ghcr.io/jinpenggeng/aeris-token
+  tag: ""            # 留空时默认使用 Chart.appVersion；生产建议改 pin digest
+  digest: ""         # 例如 "sha256:..."；设置后优先于 tag
+  pullPolicy: IfNotPresent
+
+# frontdoor 副本数（承接入口流量）。增加副本前先按
+# docs/operations/multi-node-deployment.md 的公式重算 Postgres max_connections。
+frontdoor:
+  replicas: 2
+  resources:
+    limits:
+      cpu: "2"
+      memory: 2Gi
+    requests:
+      cpu: "1"
+      memory: 1Gi
+  # 亲和：副本尽量分散到不同节点
+  podAntiAffinity: true
+
+# background 节点单副本；扩到 >1 前先确认对应 TASK_KEY 是否允许多实例
+# （usage queue worker 按设计可多实例，其余单例任务走 Redis 租约选主）。
+background:
+  enabled: true
+  replicas: 1
+  resources:
+    limits:
+      cpu: "2"
+      memory: 2Gi
+    requests:
+      cpu: "1"
+      memory: 1Gi
+  # background 每副本 Postgres 连接池上限
+  maxConnections: 60
+
+service:
+  type: ClusterIP
+  port: 8084
+
+# 共享密钥与连接串。生产务必改用 externalSecrets/existingSecret，
+# 不要把真实凭据写进 values 文件。
+secrets:
+  jwtSecretKey: REPLACE_WITH_RANDOM_32_BYTE_JWT_SECRET
+  encryptionKey: REPLACE_WITH_RANDOM_32_BYTE_ENCRYPTION_KEY
+
+database:
+  url: postgresql://postgres:REPLACE_DB_PASSWORD@postgres.example.internal:5432/aether
+  minConnections: 12
+  maxConnections: 40          # frontdoor 每副本；background 用 background.maxConnections
+  requireSsl: false
+
+redis:
+  url: redis://:REPLACE_REDIS_PASSWORD@redis.example.internal:6379/0
+
+gateway:
+  deploymentTopology: multi-node
+  runtimeBackend: redis
+  databaseMode: verify-only
+  consistencyFirst: "true"
+  # 只包含实际 ingress/反代网段
+  trustedIngressCidrs: "10.20.0.0/16"
+  tunnelRelayBaseUrl: ""
+  logFormat: pretty
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

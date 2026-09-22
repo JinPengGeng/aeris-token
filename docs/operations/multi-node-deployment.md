@@ -4,6 +4,11 @@
 一个 `background` 节点运行后台任务。PostgreSQL、Redis 和 tunnel relay 均为外部
 服务；compose 不会在每台机器上悄悄启动独立数据库。
 
+隔离环境（单主机演练 / 压测前置验证）可用一体化编排
+`docker-compose.standalone.yml`（内置 Postgres、AOF Redis 与 nginx LB），
+资产说明见 [deploy/multi-node/README.md](../../deploy/multi-node/README.md)；
+生产请继续使用外部托管服务的本基线文件。
+
 ## 启动
 
 1. 复制 `deploy/multi-node/.env.node-*`，替换镜像 digest、数据库/Redis 凭据、
@@ -81,10 +86,20 @@ compose 解析，不能替代上述隔离环境证据。
 
 默认（开关关闭）行为不变。语义细节见 [Redis 一致性优先 ADR](../adr/redis-consistency-first.md)。
 
+## 进程内缓存漂移
+
+多副本下约 16 处进程内 TTL 缓存各自独立失效：写操作只清本实例缓存，其他
+实例按 TTL 窗口收敛（认证快照最长 30s、命中复核约 10s、系统配置最长 5 分钟
+旧值、IP 名单 1–30s）。安全敏感操作（禁用 key、封禁 IP）按
+[进程内缓存漂移](../operations/in-process-cache-drift.md)的最坏窗口评估残留
+风险；跨节点即时失效通道是后续实现项。
+
 ## 容量验收基线
 
 多节点发布前的压测验收使用 `tools/pressure/` 的 S1–S5/TPS 分档契约（入口文档
-[tools/pressure/README.md](../../tools/pressure/README.md)）。CI 中的
+[tools/pressure/README.md](../../tools/pressure/README.md)）；容量曲线回归工具
+`capacity_curve_baseline` 的跑法与基线数值记录位置见
+[压测容量基线](capacity-curve-baseline.md)。CI 中的
 `Pressure Baseline Dry-Run` workflow（`.github/workflows/pressure-baseline.yml`）
 只做 60 请求/10 并发的工具链 dry-run，不是容量门槛；真正的 S1（1000 并发）与
 TPS（1000 rps 下限）必须在隔离压测环境按 checker 硬阈值执行并把报告附到

@@ -16,6 +16,7 @@
 | [ADR-0045：Signed provenance for tunnel release upgrades](../architecture/adr-0045-signed-tunnel-release-provenance.md) | Accepted（核心验签已实现） | 发布清单签名/校验；完整发布矩阵和生产轮换演练延期 |
 | [ADR-0046：Bounded gateway readiness and health contract](../architecture/adr-0046-readiness-health-contract.md) | Accepted | readiness/health 合同；生产容量与告警验收延期 |
 | [ADR-0050：Tunnel signing key rotation overlap](../architecture/adr-0050-tunnel-signing-key-rotation.md) | Accepted（部分实现） | key ID、有效期、重叠和撤销语义；持久化与 wire integration 延期 |
+| [ADR-0052：鉴权/配置类进程内缓存的跨节点失效通道](../architecture/adr-0052-cache-invalidation-channel.md) | Proposed（Issue #509） | Redis pub/sub 失效广播契约；实现与多节点一致性测试延期 |
 | [架构与请求数据流索引](../architecture/README.md) | 维护入口 | 编号 ADR 状态、请求数据流和维护规则 |
 
 | 决策 | 状态 | 范围 |
@@ -25,6 +26,7 @@
 | [Usage core/runtime 与重试、DLQ](usage-runtime-retry-dlq.md) | Accepted | 实际分层、入队重试、消费确认、死信恢复和保留边界 |
 | [Gateway 多实例缓存一致性](gateway-cache-consistency.md) | Accepted | 本地失效、跨实例有限 TTL 与关键授权强读的边界 |
 | [Redis 故障降级语义与“一致性优先”全局开关](redis-consistency-first.md) | Accepted | `AETHER_CONSISTENCY_FIRST` 开关；RPM local fallback 与日用量 fail-open 的收敛 |
+| [Issue #205 残余风险接受记录](issue-205-residual-risk-acceptance.md) | Accepted（风险接受） | 隧道升级签名、systemd 降权、重定向 scheme、请求体上限、allow_private_targets、allowed_providers、send_admission 七项残余风险；含复审触发条件 |
 | [Issue #215 残余性能项（failover 体缓存 / gzip offload）](issue-215-residual-performance.md) | Accepted | 本轮不实现，记录决策依据与复核入口 |
 | [Provider API key 明文列清理](provider-api-key-plaintext-cleanup.md) | Accepted（分阶段，当前未删列） | 回填双写、读路径翻转与删列的收敛顺序 |
 
