@@ -479,6 +479,36 @@ impl BillingModelPricingSnapshot {
             .unwrap_or(false)
     }
 
+    /// Method: validate provider api key rate multipliers.
+    ///
+    /// Zero is an explicit free-cost rate accepted by provider key writes,
+    /// but negative, non-finite, or malformed multipliers are rejected so a
+    /// configuration error cannot silently zero out or inflate settlement.
+    pub fn validate_provider_api_key_rate_multipliers(
+        &self,
+    ) -> Result<(), BillingPricingConfigurationError> {
+        let Some(mapping) = self
+            .provider_api_key_rate_multipliers
+            .as_ref()
+            .and_then(Value::as_object)
+        else {
+            return Ok(());
+        };
+        for (api_format, value) in mapping {
+            let Some(multiplier) = value.as_f64() else {
+                return Err(BillingPricingConfigurationError::new(format!(
+                    "provider_api_key_rate_multipliers[{api_format}] must be a finite non-negative number"
+                )));
+            };
+            if !multiplier.is_finite() || multiplier < 0.0 {
+                return Err(BillingPricingConfigurationError::new(format!(
+                    "provider_api_key_rate_multipliers[{api_format}] must be a finite non-negative number"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Method: rate multiplier for api format.
     pub fn rate_multiplier_for_api_format(&self, api_format: Option<&str>) -> f64 {
         let Some(api_format) = api_format.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -875,6 +905,60 @@ mod tests {
             pricing.rate_multiplier_for_api_format(Some("openai:responses")),
             0.5
         );
+    }
+
+    #[test]
+    fn validate_provider_api_key_rate_multipliers_rejects_invalid_values() {
+        let mut pricing = snapshot(None, None);
+        pricing.provider_api_key_rate_multipliers = Some(json!({
+            "openai:chat": -0.5
+        }));
+        assert!(pricing
+            .validate_provider_api_key_rate_multipliers()
+            .is_err());
+
+        let mut pricing = snapshot(None, None);
+        pricing.provider_api_key_rate_multipliers = Some(json!({
+            "openai:chat": f64::NEG_INFINITY
+        }));
+        assert!(pricing
+            .validate_provider_api_key_rate_multipliers()
+            .is_err());
+
+        let mut pricing = snapshot(None, None);
+        pricing.provider_api_key_rate_multipliers = Some(json!({
+            "openai:chat": "not-a-number"
+        }));
+        assert!(pricing
+            .validate_provider_api_key_rate_multipliers()
+            .is_err());
+
+        let mut pricing = snapshot(None, None);
+        pricing.provider_api_key_rate_multipliers = Some(json!({
+            "openai:chat": {}
+        }));
+        assert!(pricing
+            .validate_provider_api_key_rate_multipliers()
+            .is_err());
+    }
+
+    #[test]
+    fn validate_provider_api_key_rate_multipliers_accepts_free_and_positive_rates() {
+        let mut pricing = snapshot(None, None);
+        assert!(pricing.validate_provider_api_key_rate_multipliers().is_ok());
+
+        pricing.provider_api_key_rate_multipliers = Some(json!({
+            "openai:chat": 0.0,
+            "openai:responses": 0.5,
+            "openai:image": 2.0
+        }));
+        assert!(pricing.validate_provider_api_key_rate_multipliers().is_ok());
+
+        // A non-object payload is malformed configuration as well, but the
+        // settlement-time lookup treats it as absent; validation stays
+        // consistent with that neutral fallback.
+        pricing.provider_api_key_rate_multipliers = Some(json!([1.0]));
+        assert!(pricing.validate_provider_api_key_rate_multipliers().is_ok());
     }
 
     #[test]
