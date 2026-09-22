@@ -183,35 +183,37 @@ impl SecureFrameCodec {
 
         let mut payload = frame.payload.clone();
         let sequence = payload.get_u64();
-        let expected_sequence = self.next_open_sequence.load(Ordering::Relaxed);
-        if sequence != expected_sequence {
-            return Err(TunnelSecurityError::UnexpectedSequence);
-        }
+        // Claim the sequence atomically before decrypting: a concurrent
+        // duplicate frame must fail here, not after performing a second GCM
+        // open under an already-used nonce.
+        self.next_open_sequence
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                if current == sequence {
+                    current.checked_add(1)
+                } else {
+                    None
+                }
+            })
+            .map_err(|_| TunnelSecurityError::UnexpectedSequence)?;
         let nonce_bytes = nonce_bytes(self.open_prefix, sequence);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let clear_flags = frame.flags & !FLAG_ENCRYPTED;
         let aad = frame_aad(frame.stream_id, frame.msg_type, clear_flags);
-        let plaintext = self
-            .open
-            .decrypt(
-                nonce,
-                Payload {
-                    msg: &payload,
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| TunnelSecurityError::Decrypt)?;
-        let next_sequence = expected_sequence
-            .checked_add(1)
-            .ok_or(TunnelSecurityError::SequenceExhausted)?;
-        self.next_open_sequence
-            .compare_exchange(
-                expected_sequence,
-                next_sequence,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .map_err(|_| TunnelSecurityError::UnexpectedSequence)?;
+        let plaintext = match self.open.decrypt(
+            nonce,
+            Payload {
+                msg: &payload,
+                aad: &aad,
+            },
+        ) {
+            Ok(plaintext) => plaintext,
+            Err(_) => {
+                // Preserve single-threaded semantics: a rejected frame does
+                // not consume the sequence number.
+                self.rewind_claimed_open_sequence(sequence);
+                return Err(TunnelSecurityError::Decrypt);
+            }
+        };
 
         Ok(Frame::new(
             frame.stream_id,
@@ -219,6 +221,17 @@ impl SecureFrameCodec {
             clear_flags,
             Bytes::from(plaintext),
         ))
+    }
+
+    /// Rewinds a sequence number claimed by `decrypt_frame` when the frame
+    /// turned out to be undecryptable, so a rejected frame does not desync the
+    /// expected sequence. No-op if another thread already advanced past it.
+    fn rewind_claimed_open_sequence(&self, claimed: u64) {
+        let _ =
+            self.next_open_sequence
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    (current == claimed.saturating_add(1)).then(|| current - 1)
+                });
     }
 }
 
@@ -624,6 +637,46 @@ mod tests {
             server.decrypt_frame(wire),
             Err(TunnelSecurityError::UnexpectedSequence)
         ));
+    }
+
+    #[test]
+    fn secure_frame_failed_decrypt_does_not_advance_sequence() {
+        let client = SecureFrameCodec::new(&test_key(), "session-1", TunnelSecurityRole::Client)
+            .expect("client codec");
+        let server = SecureFrameCodec::new(&test_key(), "session-1", TunnelSecurityRole::Server)
+            .expect("server codec");
+        let encrypted = client
+            .encrypt_frame(Frame::new(
+                1,
+                MsgType::RequestBody,
+                0,
+                Bytes::from_static(b"secret"),
+            ))
+            .expect("encrypt");
+        let wire = Frame::decode(encrypted).expect("wire frame");
+
+        let mut tampered_payload = bytes::BytesMut::from(&wire.payload[..]);
+        let last_byte = tampered_payload.len() - 1;
+        tampered_payload[last_byte] ^= 0x01;
+        let tampered = Frame::new(
+            wire.stream_id,
+            wire.msg_type,
+            wire.flags,
+            tampered_payload.freeze(),
+        );
+
+        assert!(matches!(
+            server.decrypt_frame(tampered),
+            Err(TunnelSecurityError::Decrypt)
+        ));
+        // The rejected frame must not have consumed the sequence number.
+        assert_eq!(
+            server
+                .decrypt_frame(wire)
+                .expect("decrypt original")
+                .payload,
+            Bytes::from_static(b"secret")
+        );
     }
 
     #[test]
