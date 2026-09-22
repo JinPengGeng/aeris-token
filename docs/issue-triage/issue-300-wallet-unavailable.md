@@ -25,3 +25,9 @@
 
 rustfmt、ShellCheck、`bash -n` 和 diff 检查均通过。本修正不把未知数据库错误
 归类为 WalletUnavailable，未知错误仍走原有恢复路径。
+
+## 相关决策/相关文档
+
+- 本决策属于 [#300](https://github.com/JinPengGeng/aeris-token/issues/300) 资金生命周期的组成部分，与 #206 恢复路径相关。
+- Gateway 侧 attempt 资金接线与验收边界见[钱包不可用后的 attempt 资金接线](issue-300-gateway-attempt-funds.md)。
+- 完整的 attempt 子记录资金生命周期决策见 [issue-300-gateway-lifecycle.md](issue-300-gateway-lifecycle.md)。
