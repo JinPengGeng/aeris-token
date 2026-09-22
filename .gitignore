@@ -13,7 +13,8 @@
 .plans
 .playwright-mcp/
 
-docs/architecture
+docs/architecture/*
+!docs/architecture/*.md
 !docs/architecture/architecture-dark.svg
 !docs/architecture/architecture-light.svg
 
