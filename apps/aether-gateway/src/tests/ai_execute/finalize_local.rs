@@ -1835,9 +1835,7 @@ async fn gateway_executes_openai_chat_antigravity_cross_format_sync_via_local_fi
                     },
                     "body": {
                         "body_bytes_b64": base64::engine::general_purpose::STANDARD.encode(
-                            concat!(
-                                "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello Antigravity Chat\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"modelVersion\":\"claude-sonnet-4-5\",\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3,\"totalTokenCount\":5}},\"responseId\":\"resp-antigravity-chat-sync-123\"}\n\n"
-                            )
+                            "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello Antigravity Chat\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"modelVersion\":\"claude-sonnet-4-5\",\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3,\"totalTokenCount\":5}},\"responseId\":\"resp-antigravity-chat-sync-123\"}\n\n"
                         )
                     },
                     "telemetry": {

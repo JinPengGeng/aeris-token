@@ -1449,14 +1449,13 @@ async fn gateway_rejects_users_write_management_token_for_administrator_account_
         .await
         .expect("created user lookup should succeed")
         .is_none());
-    assert_eq!(
-        inspection_state
+    assert!(
+        !inspection_state
             .find_user_auth_by_id("target-user")
             .await
             .expect("target user lookup should succeed")
             .expect("target user should still exist")
-            .is_active,
-        false
+            .is_active
     );
     let stored_target_admin = inspection_state
         .find_user_auth_by_id("target-admin")

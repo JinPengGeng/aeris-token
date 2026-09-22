@@ -723,7 +723,7 @@ async fn gateway_recovers_admin_key_health_locally_with_trusted_admin_principal(
         .into_iter()
         .next()
         .expect("key should exist");
-    assert_eq!(recovered_key.is_active, true);
+    assert!(recovered_key.is_active);
     assert_eq!(
         recovered_key.health_by_format,
         Some(json!({"openai:chat": {

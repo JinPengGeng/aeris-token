@@ -6887,13 +6887,10 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
                 .and_then(serde_json::Value::as_str),
             Some("已失效")
         );
-        assert_eq!(
-            oauth_snapshot
-                .get("reason")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|reason| !reason.trim().is_empty()),
-            true
-        );
+        assert!(oauth_snapshot
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|reason| !reason.trim().is_empty()));
         assert_eq!(
             oauth_snapshot
                 .get("requires_reauth")
@@ -10446,16 +10443,15 @@ async fn gateway_toggles_admin_management_token_locally_with_trusted_admin_princ
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["message"], "Token 已禁用");
-    assert_eq!(payload["data"]["is_active"], false);
-    assert_eq!(
-        repository
+    assert_eq!(payload["data"]["is_active"].as_bool(), Some(false));
+    assert!(
+        !repository
             .get_management_token_with_user("mt-admin-1")
             .await
             .expect("lookup should succeed")
             .expect("token should remain")
             .token
-            .is_active,
-        false
+            .is_active
     );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 

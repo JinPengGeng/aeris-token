@@ -2209,9 +2209,7 @@ async fn gateway_executes_antigravity_gemini_cli_sync_via_local_decision_gate_af
                     },
                     "body": {
                         "body_bytes_b64": base64::engine::general_purpose::STANDARD.encode(
-                            concat!(
-                                "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello Antigravity CLI\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"modelVersion\":\"claude-sonnet-4-5\",\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3,\"totalTokenCount\":5}},\"responseId\":\"resp_antigravity_cli_local_sync_123\"}\n\n"
-                            )
+                            "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello Antigravity CLI\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"modelVersion\":\"claude-sonnet-4-5\",\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3,\"totalTokenCount\":5}},\"responseId\":\"resp_antigravity_cli_local_sync_123\"}\n\n"
                         )
                     },
                     "telemetry": {

@@ -585,7 +585,7 @@ async fn gateway_records_usage_for_execution_runtime_stream_when_runtime_enabled
     assert_eq!(stored.total_tokens, 6);
     assert!(stored.first_byte_time_ms.is_some());
     assert!(stored.response_time_ms >= stored.first_byte_time_ms);
-    assert_eq!(stored.is_stream, true);
+    assert!(stored.is_stream);
 
     gateway_handle.abort();
     execution_runtime_handle.abort();
