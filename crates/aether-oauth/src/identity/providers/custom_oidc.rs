@@ -244,6 +244,7 @@ mod tests {
             state: "server-state".to_string(),
             pkce_verifier: Some("server-verifier".to_string()),
             network: OAuthNetworkContext::direct_identity(),
+            expected_state: Some("server-state".to_string()),
         }
     }
 

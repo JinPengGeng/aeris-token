@@ -453,6 +453,10 @@ async fn handle_oauth_callback(
         state: nonce.to_string(),
         pkce_verifier: stored.pkce_verifier.clone(),
         network,
+        // Crate-level defense in depth (issue #210): the consumed server-side
+        // nonce is also enforced inside aether-oauth so a future wiring change
+        // that skips the gateway-side GETDEL check still fails closed.
+        expected_state: Some(stored.nonce.clone()),
     };
     let executor = crate::oauth::GatewayOAuthHttpExecutor::from_app(state);
     let service = IdentityOAuthService::with_builtin_providers();

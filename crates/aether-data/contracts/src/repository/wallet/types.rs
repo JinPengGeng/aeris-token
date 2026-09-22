@@ -1163,8 +1163,10 @@ pub fn validate_payment_order_credit_amounts(
 /// Match the provider settlement amount against a payment order.
 ///
 /// `pay_amount` was nullable in the original payment-order schema.  New
-/// orders carry the provider amount and must compare it exactly (within the
-/// storage precision).  For a legacy row that has no provider amount, only a
+/// orders carry the provider amount and must match it within one exclusive
+/// cent of the settlement currency; callback amounts are often rebuilt
+/// through exchange-rate division, which carries binary floating-point error
+/// far above f64::EPSILON.  For a legacy row that has no provider amount, only a
 /// deterministic amount reconstructed from the order's own USD amount,
 /// currency, and exchange rate is accepted.  In particular, a callback's
 /// self-reported `amount_usd` is not sufficient for an official callback:
@@ -1178,7 +1180,16 @@ pub fn payment_callback_amount_matches_order(
     callback_amount_usd: f64,
     callback_pay_amount: Option<f64>,
 ) -> bool {
-    const EPSILON: f64 = 0.000001;
+    // One exclusive cent of tolerance in the settlement currency. Callback
+    // amounts are frequently rebuilt through exchange-rate division, which
+    // introduces binary floating-point error far above f64::EPSILON; a
+    // micrometric tolerance therefore misjudges legitimate payments. A full
+    // cent (exclusive) still rejects genuinely mismatched settlements.
+    const TOLERANCE: f64 = 0.01;
+
+    fn within_tolerance(lhs: f64, rhs: f64) -> bool {
+        (lhs - rhs).abs() < TOLERANCE
+    }
 
     fn valid_positive(value: f64) -> bool {
         value.is_finite() && value > 0.0
@@ -1198,7 +1209,7 @@ pub fn payment_callback_amount_matches_order(
 
     match (callback_pay_amount, order_pay_amount) {
         (Some(callback), Some(order)) => {
-            valid_positive(callback) && valid_positive(order) && (callback - order).abs() <= EPSILON
+            valid_positive(callback) && valid_positive(order) && within_tolerance(callback, order)
         }
         // A provider amount on the callback cannot be accepted against a
         // legacy row unless the expected settlement can be reconstructed from
@@ -1226,14 +1237,14 @@ pub fn payment_callback_amount_matches_order(
                 rate
             };
             let expected = rounded_major(order_amount_usd * exchange_rate);
-            expected.is_some_and(|expected| (callback - expected).abs() <= EPSILON)
+            expected.is_some_and(|expected| within_tolerance(callback, expected))
         }
         // Keep malformed provider amounts out of the compatibility path.
         (Some(_), None) => false,
         // Callbacks without a provider amount are legacy/non-official input.
         // Keep the old USD fallback, but never use it when the order had a
         // provider amount that the callback omitted.
-        (None, None) => (callback_amount_usd - order_amount_usd).abs() <= EPSILON,
+        (None, None) => within_tolerance(callback_amount_usd, order_amount_usd),
         (None, Some(_)) => false,
     }
 }
@@ -3695,6 +3706,66 @@ mod tests {
             None,
             10.0,
             Some(72.0),
+        ));
+    }
+
+    #[test]
+    fn callback_amount_tolerance_accepts_float_rebuild_but_rejects_a_full_cent() {
+        // Both sides carry a provider amount: one exclusive cent of tolerance
+        // in the settlement currency.
+        assert!(payment_callback_amount_matches_order(
+            10.0,
+            Some(72.0),
+            Some("CNY"),
+            Some(7.2),
+            10.0,
+            Some(72.009),
+        ));
+        assert!(!payment_callback_amount_matches_order(
+            10.0,
+            Some(72.0),
+            Some("CNY"),
+            Some(7.2),
+            10.0,
+            Some(72.01),
+        ));
+        // Amounts rebuilt through exchange-rate division carry binary
+        // floating-point error far above f64::EPSILON and must still match.
+        let rebuilt = 72.0f64 / 7.2 * 7.2;
+        assert!(payment_callback_amount_matches_order(
+            10.0,
+            Some(72.0),
+            Some("CNY"),
+            Some(7.2),
+            10.0,
+            Some(rebuilt),
+        ));
+        // Legacy rows without a provider amount compare reconstructed
+        // settlement amounts with the same tolerance.
+        assert!(payment_callback_amount_matches_order(
+            10.0,
+            None,
+            Some("CNY"),
+            Some(7.2),
+            10.0,
+            Some(72.009),
+        ));
+        assert!(!payment_callback_amount_matches_order(
+            10.0,
+            None,
+            Some("CNY"),
+            Some(7.2),
+            10.0,
+            Some(72.01),
+        ));
+        // USD fallback without provider amounts on either side. Note the
+        // exact one-cent boundary is binary-float representation dependent
+        // (10.01 - 10.0 < 0.01 in f64), so rejection is pinned at two cents.
+        assert!(payment_callback_amount_matches_order(
+            10.0, None, None, None, 10.009, None,
+        ));
+        assert!(!payment_callback_amount_matches_order(
+            10.0, None, None, None, 10.02, None,
         ));
     }
 
