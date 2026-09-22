@@ -4275,8 +4275,39 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn dynamic_sync_planning_error_releases_reserved_http_plan_cost() {
+    const CANDIDATE_LOOP_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+    fn run_candidate_loop_test<F, Fut>(test_name: &'static str, make_future: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + 'static,
+    {
+        let handle = std::thread::Builder::new()
+            .name(test_name.to_string())
+            .stack_size(CANDIDATE_LOOP_TEST_STACK_BYTES)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime should build");
+                runtime.block_on(make_future());
+            })
+            .expect("candidate loop test thread should spawn");
+
+        if let Err(payload) = handle.join() {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    fn dynamic_sync_planning_error_releases_reserved_http_plan_cost() {
+        run_candidate_loop_test(
+            "dynamic_sync_planning_error_releases_reserved_http_plan_cost",
+            dynamic_sync_planning_error_releases_reserved_http_plan_cost_impl,
+        );
+    }
+
+    async fn dynamic_sync_planning_error_releases_reserved_http_plan_cost_impl() {
         let now_unix_secs = current_unix_ms() / 1_000;
         let request_id = "req-http-reservation-planning-error";
         let subject_id = "user-http-reservation-planning-error";

@@ -387,7 +387,7 @@ mod tests {
         let config = S3BackupConfig::from_json_map(entries.as_object().unwrap())
             .expect("disabled default config should parse");
 
-        assert_eq!(config.enabled, false);
+        assert!(!config.enabled);
         assert_eq!(config.endpoint, "");
         assert_eq!(config.bucket, "");
         assert_eq!(config.access_key_id, "");
@@ -524,7 +524,7 @@ mod tests {
         assert_eq!(config.region, "auto");
         assert_eq!(config.user_agent, "rclone/v1.68.0");
         assert_eq!(config.prefix, "aether/backups/");
-        assert_eq!(config.path_style, true);
+        assert!(config.path_style);
         assert_eq!(config.compression, "zstd");
         assert_eq!(config.schedule.unit, BackupScheduleUnit::Days);
         assert_eq!(config.schedule.interval, 1);

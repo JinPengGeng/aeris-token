@@ -4262,12 +4262,9 @@ mod tests {
         );
 
         let request = grok_imagine_request_message("a red chair", "16:9", true);
-        assert_eq!(
-            request["item"]["content"][0]["requestId"]
-                .as_str()
-                .is_some(),
-            true
-        );
+        assert!(request["item"]["content"][0]["requestId"]
+            .as_str()
+            .is_some());
         assert_eq!(
             request["item"]["content"][0]["text"],
             serde_json::json!("a red chair")
@@ -5241,7 +5238,7 @@ mod tests {
 
         assert!(collected.images[0].starts_with("data:image/png;base64,"));
         let body = openai_image_body(&collected);
-        assert_eq!(body["data"][0]["b64_json"].as_str().is_some(), true);
+        assert!(body["data"][0]["b64_json"].as_str().is_some());
         assert!(body["data"][0].get("url").is_none());
     }
 

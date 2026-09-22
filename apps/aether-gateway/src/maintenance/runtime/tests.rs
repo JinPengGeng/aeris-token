@@ -215,7 +215,7 @@ async fn stale_proxy_node_cleanup_marks_timed_out_tunnel_offline() {
         .expect("lookup should succeed")
         .expect("node should exist");
     assert_eq!(node.status, "offline");
-    assert_eq!(node.tunnel_connected, false);
+    assert!(!node.tunnel_connected);
     assert_eq!(node.active_connections, 0);
 }
 

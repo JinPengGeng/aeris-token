@@ -3402,7 +3402,7 @@ mod tests {
             .expect("lookup should succeed")
             .expect("node should exist");
         assert_eq!(node.status, "online");
-        assert_eq!(node.tunnel_connected, true);
+        assert!(node.tunnel_connected);
         assert_eq!(node.heartbeat_interval, 45);
         assert_eq!(node.active_connections, 5);
         assert_eq!(node.total_requests, 9);
@@ -3703,7 +3703,7 @@ mod tests {
             .expect("lookup should succeed")
             .expect("node should exist");
         assert_eq!(node.status, "online");
-        assert_eq!(node.tunnel_connected, true);
+        assert!(node.tunnel_connected);
         assert_eq!(node.tunnel_connected_at_unix_secs, Some(1_800_000_123));
     }
 

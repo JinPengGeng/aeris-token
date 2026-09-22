@@ -1414,7 +1414,7 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
         created.request_timeout_secs,
         Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS as f64)
     );
-    assert_eq!(created.keep_priority_on_conversion, true);
+    assert!(created.keep_priority_on_conversion);
     assert_eq!(
         created
             .config

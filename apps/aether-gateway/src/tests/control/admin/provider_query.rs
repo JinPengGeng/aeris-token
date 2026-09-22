@@ -4602,7 +4602,7 @@ async fn gateway_handles_antigravity_endpoint_test_model_locally_impl() {
                 plan.url,
                 "https://antigravity.googleapis.com/v1internal:generateContent"
             );
-            assert_eq!(plan.stream, false);
+            assert!(!plan.stream);
             assert_eq!(
                 plan.body
                     .json_body
