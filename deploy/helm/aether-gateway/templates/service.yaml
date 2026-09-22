@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "aether-gateway.fullname" . }}-frontdoor
+  labels:
+    {{- include "aether-gateway.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "aether-gateway.labels" . | nindent 4 }}
+    aether.dev/node-role: frontdoor
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: 8084
