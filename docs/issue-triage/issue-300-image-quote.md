@@ -101,3 +101,9 @@ debit path, insufficient-quota recovery, request lifecycle integration and crash
 recovery are separate mandatory acceptance evidence. There is no database
 migration in this quote component. Roll back its consumers before reverting the
 quote schema; preserve any frozen quote referenced by an active reservation.
+
+## 后续集成
+
+- 资金预留/释放/结算的 attempt 资金生命周期见 [issue-300-funds.md](issue-300-funds.md) 与 [issue-300-attempt-funds.md](issue-300-attempt-funds.md)。
+- Gateway 侧资金接线、迁移复现与验收见 [issue-300-gateway-attempt-funds.md](issue-300-gateway-attempt-funds.md)。
+- 逐 attempt hard plan quota 见 [issue-300-attempt-quota.md](issue-300-attempt-quota.md)。

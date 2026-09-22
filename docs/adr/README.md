@@ -25,6 +25,7 @@
 | [Usage core/runtime 与重试、DLQ](usage-runtime-retry-dlq.md) | Accepted | 实际分层、入队重试、消费确认、死信恢复和保留边界 |
 | [Gateway 多实例缓存一致性](gateway-cache-consistency.md) | Accepted | 本地失效、跨实例有限 TTL 与关键授权强读的边界 |
 | [Redis 故障降级语义与“一致性优先”全局开关](redis-consistency-first.md) | Accepted | `AETHER_CONSISTENCY_FIRST` 开关；RPM local fallback 与日用量 fail-open 的收敛 |
+| [Issue #205 残余风险接受记录](issue-205-residual-risk-acceptance.md) | Accepted（风险接受） | 隧道升级签名、systemd 降权、重定向 scheme、请求体上限、allow_private_targets、allowed_providers、send_admission 七项残余风险；含复审触发条件 |
 | [Issue #215 残余性能项（failover 体缓存 / gzip offload）](issue-215-residual-performance.md) | Accepted | 本轮不实现，记录决策依据与复核入口 |
 | [Provider API key 明文列清理](provider-api-key-plaintext-cleanup.md) | Accepted（分阶段，当前未删列） | 回填双写、读路径翻转与删列的收敛顺序 |
 
