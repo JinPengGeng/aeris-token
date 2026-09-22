@@ -434,6 +434,7 @@ dependencies = [
  "aether-testkit",
  "async-stream",
  "axum",
+ "clap",
  "futures-util",
  "http",
  "reqwest 0.12.28",
