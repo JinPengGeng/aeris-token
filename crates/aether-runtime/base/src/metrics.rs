@@ -20,9 +20,13 @@ static BILLING_SETTLEMENT_DURATION: std::sync::LazyLock<LogHistogram> =
     std::sync::LazyLock::new(|| LogHistogram::new(&DEFAULT_LATENCY_BUCKETS_SECONDS));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// MetricKind.
 pub enum MetricKind {
+    /// Variant: Counter.
     Counter,
+    /// Variant: Gauge.
     Gauge,
+    /// Variant: Histogram.
     Histogram,
 }
 
@@ -38,9 +42,13 @@ pub const DEFAULT_LATENCY_BUCKETS_SECONDS: [f64; 10] =
 /// `render_prometheus_text` as `_bucket{le=}` / `_sum` / `_count`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetricHistogram {
+    /// Field: buckets.
     pub buckets: &'static [f64],
+    /// Field: counts.
     pub counts: Vec<u64>,
+    /// Field: sum.
     pub sum: f64,
+    /// Field: count.
     pub count: u64,
 }
 
@@ -55,6 +63,7 @@ pub struct LogHistogram {
 }
 
 impl LogHistogram {
+    /// Executes `new`.
     pub fn new(buckets: &'static [f64]) -> Self {
         assert!(
             buckets.windows(2).all(|pair| pair[0] < pair[1]),
@@ -67,6 +76,7 @@ impl LogHistogram {
         }
     }
 
+    /// Executes `observe_seconds`.
     pub fn observe_seconds(&self, value_seconds: f64) {
         let value_seconds = if value_seconds.is_nan() || value_seconds < 0.0 {
             0.0
@@ -91,6 +101,7 @@ impl LogHistogram {
             });
     }
 
+    /// Executes `snapshot`.
     pub fn snapshot(&self) -> MetricHistogram {
         MetricHistogram {
             buckets: self.buckets,
@@ -110,12 +121,16 @@ impl LogHistogram {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// MetricLabel.
 pub struct MetricLabel {
+    /// Field: key.
     pub key: &'static str,
+    /// Field: value.
     pub value: String,
 }
 
 impl MetricLabel {
+    /// Executes `new`.
     pub fn new(key: &'static str, value: impl Into<String>) -> Self {
         Self {
             key,
@@ -125,16 +140,24 @@ impl MetricLabel {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// MetricSample.
 pub struct MetricSample {
+    /// Field: name.
     pub name: &'static str,
+    /// Field: help.
     pub help: &'static str,
+    /// Field: kind.
     pub kind: MetricKind,
+    /// Field: value.
     pub value: u64,
+    /// Field: labels.
     pub labels: Vec<MetricLabel>,
+    /// Field: histogram.
     pub histogram: Option<MetricHistogram>,
 }
 
 impl MetricSample {
+    /// Executes `new`.
     pub fn new(name: &'static str, help: &'static str, kind: MetricKind, value: u64) -> Self {
         Self {
             name,
@@ -146,6 +169,7 @@ impl MetricSample {
         }
     }
 
+    /// Executes `histogram`.
     pub fn histogram(
         name: &'static str,
         help: &'static str,
@@ -162,20 +186,24 @@ impl MetricSample {
         }
     }
 
+    /// Executes `with_labels`.
     pub fn with_labels(mut self, labels: Vec<MetricLabel>) -> Self {
         self.labels = labels;
         self
     }
 }
 
+/// Executes `init_metrics`.
 pub fn init_metrics(config: ServiceRuntimeConfig) {
     let _ = METRICS_NAMESPACE.set(config.observability.metrics_namespace);
 }
 
+/// Executes `metrics_namespace`.
 pub fn metrics_namespace() -> Option<&'static str> {
     METRICS_NAMESPACE.get().copied()
 }
 
+/// Executes `render_prometheus_text`.
 pub fn render_prometheus_text(samples: &[MetricSample]) -> String {
     let mut body = String::new();
     let namespace = metrics_namespace();
@@ -304,6 +332,7 @@ fn format_histogram_float(value: f64) -> String {
     }
 }
 
+/// Executes `prometheus_response`.
 pub fn prometheus_response(samples: &[MetricSample]) -> Response<Body> {
     let mut response = Response::new(Body::from(render_prometheus_text(samples)));
     response.headers_mut().insert(
@@ -313,6 +342,7 @@ pub fn prometheus_response(samples: &[MetricSample]) -> Response<Body> {
     response
 }
 
+/// Executes `service_up_sample`.
 pub fn service_up_sample(service: &'static str) -> MetricSample {
     MetricSample::new(
         "service_up",
@@ -323,26 +353,32 @@ pub fn service_up_sample(service: &'static str) -> MetricSample {
     .with_labels(vec![MetricLabel::new("service", service)])
 }
 
+/// Executes `record_billing_enrichment_failure`.
 pub fn record_billing_enrichment_failure() {
     BILLING_ENRICHMENT_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Executes `record_billing_settlement_failure`.
 pub fn record_billing_settlement_failure() {
     BILLING_SETTLEMENT_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Executes `record_billing_insufficient_quota`.
 pub fn record_billing_insufficient_quota() {
     BILLING_INSUFFICIENT_QUOTA_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Executes `record_video_task_settlement_failure`.
 pub fn record_video_task_settlement_failure() {
     VIDEO_TASK_SETTLEMENT_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Executes `record_billing_fail_open_daily_quota`.
 pub fn record_billing_fail_open_daily_quota() {
     BILLING_FAIL_OPEN_DAILY_QUOTA_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Executes `record_billing_fail_open_rpm`.
 pub fn record_billing_fail_open_rpm() {
     BILLING_FAIL_OPEN_RPM_TOTAL.fetch_add(1, Ordering::Relaxed);
 }

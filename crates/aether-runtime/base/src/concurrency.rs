@@ -6,23 +6,41 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::metrics::{MetricKind, MetricLabel, MetricSample};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+/// ConcurrencyError.
 pub enum ConcurrencyError {
+    /// Variant: gate saturated at its configured limit.
     #[error("concurrency gate {gate} is saturated at {limit}")]
-    Saturated { gate: &'static str, limit: usize },
+    Saturated {
+        /// Field: gate name.
+        gate: &'static str,
+        /// Field: configured limit.
+        limit: usize,
+    },
+    /// Variant: gate closed.
     #[error("concurrency gate {gate} is closed")]
-    Closed { gate: &'static str },
+    Closed {
+        /// Field: gate name.
+        gate: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// ConcurrencySnapshot.
 pub struct ConcurrencySnapshot {
+    /// Field: limit.
     pub limit: usize,
+    /// Field: in_flight.
     pub in_flight: usize,
+    /// Field: available_permits.
     pub available_permits: usize,
+    /// Field: high_watermark.
     pub high_watermark: usize,
+    /// Field: rejected.
     pub rejected: u64,
 }
 
 impl ConcurrencySnapshot {
+    /// Executes `to_metric_samples`.
     pub fn to_metric_samples(&self, gate: &'static str) -> Vec<MetricSample> {
         let labels = vec![MetricLabel::new("gate", gate)];
         vec![
@@ -69,11 +87,13 @@ struct ConcurrencyState {
 }
 
 #[derive(Debug, Clone)]
+/// ConcurrencyGate.
 pub struct ConcurrencyGate {
     state: Arc<ConcurrencyState>,
 }
 
 impl ConcurrencyGate {
+    /// Executes `new`.
     pub fn new(gate: &'static str, limit: usize) -> Self {
         assert!(limit > 0, "concurrency gate limit must be positive");
         Self {
@@ -88,6 +108,7 @@ impl ConcurrencyGate {
         }
     }
 
+    /// Executes `acquire`.
     pub async fn acquire(&self) -> Result<ConcurrencyPermit, ConcurrencyError> {
         let permit = self
             .state
@@ -101,6 +122,7 @@ impl ConcurrencyGate {
         Ok(ConcurrencyPermit::new(self.state.clone(), permit))
     }
 
+    /// Executes `try_acquire`.
     pub fn try_acquire(&self) -> Result<ConcurrencyPermit, ConcurrencyError> {
         match self.state.semaphore.clone().try_acquire_owned() {
             Ok(permit) => Ok(ConcurrencyPermit::new(self.state.clone(), permit)),
@@ -117,6 +139,7 @@ impl ConcurrencyGate {
         }
     }
 
+    /// Executes `snapshot`.
     pub fn snapshot(&self) -> ConcurrencySnapshot {
         ConcurrencySnapshot {
             limit: self.state.limit,
@@ -129,6 +152,7 @@ impl ConcurrencyGate {
 }
 
 #[derive(Debug)]
+/// ConcurrencyPermit.
 pub struct ConcurrencyPermit {
     state: Arc<ConcurrencyState>,
     _permit: OwnedSemaphorePermit,

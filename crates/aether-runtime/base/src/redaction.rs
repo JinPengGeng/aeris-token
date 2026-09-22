@@ -3,11 +3,15 @@ use std::fmt::Write as _;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// TextPayloadSummary.
 pub struct TextPayloadSummary {
+    /// Field: bytes.
     pub bytes: usize,
+    /// Field: sha256.
     pub sha256: String,
 }
 
+/// Executes `summarize_text_payload`.
 pub fn summarize_text_payload(text: &str) -> TextPayloadSummary {
     let digest = Sha256::digest(text.as_bytes());
     let mut sha256 = String::with_capacity(digest.len() * 2);

@@ -6,16 +6,24 @@ use tokio::sync::mpsc;
 use crate::metrics::{MetricKind, MetricLabel, MetricSample};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// QueueSnapshot.
 pub struct QueueSnapshot {
+    /// Field: capacity.
     pub capacity: usize,
+    /// Field: depth.
     pub depth: usize,
+    /// Field: high_watermark.
     pub high_watermark: usize,
+    /// Field: enqueued_total.
     pub enqueued_total: u64,
+    /// Field: rejected_full_total.
     pub rejected_full_total: u64,
+    /// Field: rejected_closed_total.
     pub rejected_closed_total: u64,
 }
 
 impl QueueSnapshot {
+    /// Executes `to_metric_samples`.
     pub fn to_metric_samples(&self, queue: &'static str) -> Vec<MetricSample> {
         let labels = vec![MetricLabel::new("queue", queue)];
         vec![
@@ -69,23 +77,29 @@ struct QueueState {
 }
 
 #[derive(Debug)]
+/// QueueSendError.
 pub enum QueueSendError<T> {
+    /// Variant: Full.
     Full(T),
+    /// Variant: Closed.
     Closed(T),
 }
 
 #[derive(Debug, Clone)]
+/// BoundedQueueSender.
 pub struct BoundedQueueSender<T> {
     inner: mpsc::Sender<T>,
     state: Arc<QueueState>,
 }
 
 #[derive(Debug)]
+/// BoundedQueueReceiver.
 pub struct BoundedQueueReceiver<T> {
     inner: mpsc::Receiver<T>,
     state: Arc<QueueState>,
 }
 
+/// Executes `bounded_queue`.
 pub fn bounded_queue<T>(capacity: usize) -> (BoundedQueueSender<T>, BoundedQueueReceiver<T>) {
     assert!(capacity > 0, "bounded queue capacity must be positive");
     let (tx, rx) = mpsc::channel(capacity);
@@ -107,6 +121,7 @@ pub fn bounded_queue<T>(capacity: usize) -> (BoundedQueueSender<T>, BoundedQueue
 }
 
 impl<T> BoundedQueueSender<T> {
+    /// Executes `send`.
     pub async fn send(&self, value: T) -> Result<(), QueueSendError<T>> {
         let permit = match self.inner.reserve().await {
             Ok(permit) => permit,
@@ -122,6 +137,7 @@ impl<T> BoundedQueueSender<T> {
         Ok(())
     }
 
+    /// Executes `try_send`.
     pub fn try_send(&self, value: T) -> Result<(), QueueSendError<T>> {
         let permit = match self.inner.try_reserve() {
             Ok(permit) => permit,
@@ -143,6 +159,7 @@ impl<T> BoundedQueueSender<T> {
         Ok(())
     }
 
+    /// Executes `snapshot`.
     pub fn snapshot(&self) -> QueueSnapshot {
         QueueSnapshot {
             capacity: self.state.capacity,
@@ -154,6 +171,7 @@ impl<T> BoundedQueueSender<T> {
         }
     }
 
+    /// Executes `capacity`.
     pub fn capacity(&self) -> usize {
         self.state.capacity
     }
@@ -177,12 +195,14 @@ impl<T> BoundedQueueSender<T> {
 }
 
 impl<T> BoundedQueueReceiver<T> {
+    /// Executes `recv`.
     pub async fn recv(&mut self) -> Option<T> {
         let value = self.inner.recv().await?;
         self.state.depth.fetch_sub(1, Ordering::AcqRel);
         Some(value)
     }
 
+    /// Executes `try_recv`.
     pub fn try_recv(&mut self) -> Result<T, mpsc::error::TryRecvError> {
         let value = self.inner.try_recv()?;
         self.state.depth.fetch_sub(1, Ordering::AcqRel);

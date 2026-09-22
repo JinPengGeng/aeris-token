@@ -1,4 +1,5 @@
 #[cfg(unix)]
+/// Executes `wait_for_shutdown_signal`.
 pub async fn wait_for_shutdown_signal() -> Result<(), std::io::Error> {
     use tokio::signal::unix::{signal, SignalKind};
 

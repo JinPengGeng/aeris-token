@@ -1,13 +1,25 @@
+//! Shared runtime foundation for Aether components: admission control,
+//! concurrency limits, metrics, queues, graceful shutdown, task helpers, and
+//! bootstrap/config plumbing reused across gateway binaries.
+#![warn(missing_docs)]
+
+/// Module: admission.
 pub mod admission;
 mod bootstrap;
+/// Module: concurrency.
 pub mod concurrency;
 mod config;
 mod error;
+/// Module: metrics.
 pub mod metrics;
 mod observability;
+/// Module: queue.
 pub mod queue;
+/// Module: redaction.
 pub mod redaction;
+/// Module: shutdown.
 pub mod shutdown;
+/// Module: task.
 pub mod task;
 mod tracing;
 
