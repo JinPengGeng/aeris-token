@@ -144,6 +144,16 @@ impl ManagedRedisServer {
         Self::launch_in_workdir(binary, readiness_timeout, port, workdir).await
     }
 
+    #[cfg(test)]
+    async fn start_with_binary_on_port(
+        binary: String,
+        readiness_timeout: std::time::Duration,
+        port: u16,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let workdir = Self::create_workdir()?;
+        Self::launch_in_workdir(binary, readiness_timeout, port, workdir).await
+    }
+
     fn create_workdir() -> Result<PathBuf, std::io::Error> {
         // A bind retry can change ports, and concurrent starts may reserve the
         // same initial port. Directory ownership must not depend on that port.
