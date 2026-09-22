@@ -1199,11 +1199,12 @@ impl MemoryRuntimeBackend {
             },
         });
         if let Some(maxlen) = maxlen.filter(|value| *value > 0) {
+            // Match real Redis XADD MAXLEN ~ behavior: trimmed entries stay in every
+            // consumer-group PEL so at-least-once delivery is preserved.
             while stream_state.entries.len() > maxlen {
-                let Some(removed) = stream_state.entries.pop_front() else {
+                if stream_state.entries.pop_front().is_none() {
                     break;
-                };
-                remove_pending_from_all_groups(stream_state, &removed.entry.id);
+                }
             }
         }
         id
@@ -1304,11 +1305,12 @@ impl MemoryRuntimeBackend {
             },
         });
         if let Some(maxlen) = destination_maxlen.filter(|value| *value > 0) {
+            // Match real Redis XADD MAXLEN ~ behavior: trimmed entries stay in every
+            // consumer-group PEL so at-least-once delivery is preserved.
             while destination_state.entries.len() > maxlen {
-                let Some(removed) = destination_state.entries.pop_front() else {
+                if destination_state.entries.pop_front().is_none() {
                     break;
-                };
-                remove_pending_from_all_groups(destination_state, &removed.entry.id);
+                }
             }
         }
         let source_state = queues.get_mut(source).expect("validated source stream");
@@ -1531,8 +1533,9 @@ impl MemoryRuntimeBackend {
                 "runtime queue group {group} does not exist for stream {source}"
             ))
         })?;
-        // Memory trimming/deletion already removes PEL entries. Absence here cannot prove
-        // archival, and must not delete an unread entry or append another dead letter.
+        // Explicit deletion/ack removes PEL entries, while MAXLEN trimming keeps them (Redis
+        // XADD MAXLEN semantics). Absence here therefore cannot prove archival, and must not
+        // delete an unread entry or append another dead letter.
         if !group_state.pending.contains_key(entry_id) {
             return Ok(RuntimeQueueTransferOutcome::NotPending);
         }
@@ -1557,11 +1560,12 @@ impl MemoryRuntimeBackend {
             },
         });
         if let Some(maxlen) = destination_maxlen.filter(|value| *value > 0) {
+            // Match real Redis XADD MAXLEN ~ behavior: trimmed entries stay in every
+            // consumer-group PEL so at-least-once delivery is preserved.
             while destination_state.entries.len() > maxlen {
-                let Some(removed) = destination_state.entries.pop_front() else {
+                if destination_state.entries.pop_front().is_none() {
                     break;
-                };
-                remove_pending_from_all_groups(destination_state, &removed.entry.id);
+                }
             }
         }
 
@@ -2351,27 +2355,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_queue_transfer_retains_existing_trimmed_pending_semantics() {
+    async fn memory_queue_transfer_keeps_trimmed_pending_entries_reclaimable() {
         let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
         let entries = memory_queue_transfer_fixture(&backend, 1).await;
         backend
             .queue_append("transfer:source", memory_queue_test_fields(1), Some(1))
             .await;
-        // Memory retention already removed both the original entry and its PEL copy.
-        // NotPending does not claim that the retained caller copy was archived elsewhere.
-        assert_eq!(
-            backend
-                .queue_transfer_pending_to_stream(
-                    "transfer:source",
-                    "workers",
-                    &entries[0].id,
-                    "transfer:archive",
-                    &entries[0].fields,
-                )
-                .await
-                .expect("trimmed entry"),
-            RuntimeQueueTransferOutcome::NotPending
-        );
+        // MAXLEN trimming no longer drops the PEL copy (matching Redis XADD MAXLEN ~), so the
+        // trimmed entry is still pending and must remain transferable instead of NotPending.
+        let outcome = backend
+            .queue_transfer_pending_to_stream(
+                "transfer:source",
+                "workers",
+                &entries[0].id,
+                "transfer:archive",
+                &entries[0].fields,
+            )
+            .await
+            .expect("trimmed pending entry should still transfer");
+        assert!(matches!(
+            outcome,
+            RuntimeQueueTransferOutcome::Transferred { acked: 1, .. }
+        ));
         let stats = backend
             .queue_stats("transfer:source", Some("workers"))
             .await;
@@ -2381,7 +2386,7 @@ mod tests {
                 .queue_stats("transfer:archive", None)
                 .await
                 .stream_length,
-            0
+            1
         );
     }
 
@@ -2709,7 +2714,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_queue_read_retains_returned_fields_after_pending_trim() {
+    async fn memory_queue_maxlen_trim_keeps_trimmed_entries_in_the_pel() {
         let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
         let stream = "queue:pending-trim";
         backend
@@ -2748,8 +2753,9 @@ mod tests {
                     },
                 )
                 .await
-                .expect("trimmed entry is removed from the PEL"),
-            vec![expected[1].clone()]
+                .expect("trimmed entry stays reclaimable like Redis XADD MAXLEN"),
+            expected,
+            "MAXLEN trimming must not drop entries from the PEL"
         );
         assert_eq!(
             backend

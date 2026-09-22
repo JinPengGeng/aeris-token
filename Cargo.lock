@@ -415,6 +415,7 @@ dependencies = [
 name = "aether-http"
 version = "0.1.0"
 dependencies = [
+ "rand 0.9.3",
  "reqwest 0.12.28",
  "serde",
  "tokio",
