@@ -35,7 +35,14 @@ this audit does not infer that a row should be re-issued.
 
 `fixtures/referral-numeric-regression.sql` exercises representative
 `numeric(20,8)` values through the production cast shape in a transaction that
-rolls back. The Rust PostgreSQL integration test verifies that the raw NUMERIC
+rolls back. Because the columns are `numeric(20,8)`, absolute values must
+round to less than 10^12 (12 integer digits), so the 2^53 f64
+integer-exactness boundary can never occur in this schema; the realistic
+precision risk is 20-significant-digit values near the numeric ceiling,
+which the fixture pins (`999999999999.00000001` decodes to
+`999999999999.0` in f64). The fixture asserts that NUMERIC comparisons stay
+exact while the f64 decode visibly loses digits, which is why the audit
+never reconciles in f64. The Rust PostgreSQL integration test verifies that the raw NUMERIC
 column fails direct `sqlx` `f64` decoding while the explicit cast succeeds;
 the SQL output alone cannot establish driver decoding behavior. Converting to
 `f64` is an API compatibility fix and does not preserve every decimal digit
