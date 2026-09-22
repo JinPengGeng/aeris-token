@@ -227,11 +227,11 @@ impl SecureFrameCodec {
     /// turned out to be undecryptable, so a rejected frame does not desync the
     /// expected sequence. No-op if another thread already advanced past it.
     fn rewind_claimed_open_sequence(&self, claimed: u64) {
-        let _ = self
-            .next_open_sequence
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                (current == claimed.saturating_add(1)).then(|| current - 1)
-            });
+        let _ =
+            self.next_open_sequence
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    (current == claimed.saturating_add(1)).then(|| current - 1)
+                });
     }
 }
 
@@ -671,7 +671,10 @@ mod tests {
         ));
         // The rejected frame must not have consumed the sequence number.
         assert_eq!(
-            server.decrypt_frame(wire).expect("decrypt original").payload,
+            server
+                .decrypt_frame(wire)
+                .expect("decrypt original")
+                .payload,
             Bytes::from_static(b"secret")
         );
     }
