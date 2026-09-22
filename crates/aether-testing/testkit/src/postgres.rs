@@ -74,6 +74,8 @@ use aether_data::driver::postgres::PostgresPoolConfig;
 use aether_data::{DataBackends, DataLayerConfig};
 use sqlx::{Connection, PgConnection};
 
+use crate::server::reserve_local_port;
+
 #[derive(Debug)]
 pub struct ManagedPostgresServer {
     child: Option<Child>,
@@ -347,13 +349,6 @@ pub async fn prepare_aether_postgres_schema(
     }
 
     Ok(())
-}
-
-fn reserve_local_port() -> Result<u16, std::io::Error> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
 }
 
 #[cfg(test)]

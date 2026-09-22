@@ -455,6 +455,7 @@ dependencies = [
  "aether-runtime-state",
  "aether-test-support",
  "bytes",
+ "clap",
  "futures-util",
  "http",
  "libc",
