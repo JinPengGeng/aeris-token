@@ -233,7 +233,7 @@ describe('HorizontalRequestTimeline', () => {
     requestId.value = 'req-second'
     await flushPendingUpdates()
     expect(firstSignal.aborted).toBe(true)
-    expect(requestTraceApiMock.getRequestTrace).toHaveBeenLastCalledWith('req-second', expect.objectContaining({ attemptedOnly: false }))
+    expect(requestTraceApiMock.getRequestTrace).toHaveBeenLastCalledWith('req-second', expect.objectContaining({ attemptedOnly: true }))
     const secondSignal = requestTraceApiMock.getRequestTrace.mock.calls[1][1].signal as AbortSignal
     app.unmount()
     root.remove()
