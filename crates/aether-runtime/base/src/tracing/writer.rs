@@ -365,9 +365,11 @@ pub fn shutdown_logging(timeout: Duration) -> bool {
 }
 
 #[must_use = "keep the logging guard alive until service shutdown finishes"]
+/// LogShutdownGuard.
 pub struct LogShutdownGuard;
 
 impl LogShutdownGuard {
+    /// Executes `new`.
     pub fn new() -> Self {
         Self
     }
@@ -550,6 +552,7 @@ fn metric_samples(workers: &[LogWorker]) -> Vec<MetricSample> {
     samples
 }
 
+/// Executes `logging_metric_samples`.
 pub fn logging_metric_samples() -> Vec<MetricSample> {
     let mut samples = LOG_WORKERS
         .get()

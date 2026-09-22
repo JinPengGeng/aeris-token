@@ -35,11 +35,15 @@ fn log_cleanup_task_registry() -> &'static Mutex<HashSet<&'static str>> {
     LOG_CLEANUP_TASK_SERVICES.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Alias: LogReloader.
 pub type LogReloader = Box<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// LogFormat.
 pub enum LogFormat {
+    /// Variant: Pretty.
     Pretty,
+    /// Variant: Json.
     Json,
 }
 
@@ -505,6 +509,7 @@ pub(crate) fn init_tracing(config: ServiceRuntimeConfig) -> Result<(), RuntimeBo
         .map_err(RuntimeBootstrapError::Tracing)
 }
 
+/// Executes `init_reloadable_tracing`.
 pub fn init_reloadable_tracing(
     initial_filter: &str,
     format: LogFormat,
@@ -515,6 +520,7 @@ pub fn init_reloadable_tracing(
     )
 }
 
+/// Executes `init_reloadable_service_tracing`.
 pub fn init_reloadable_service_tracing(
     initial_filter: &str,
     config: ServiceRuntimeConfig,

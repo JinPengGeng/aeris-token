@@ -4224,7 +4224,7 @@ async fn execute_execution_runtime_stream_inner(
                 endpoint_id = %endpoint_id,
                 key_id = %key_id,
                 model_name = model_name.as_str(),
-                candidate_index = candidate_index.as_str(),
+                candidate_index,
                 error_category = "grok_execution_unavailable",
                 "gateway Grok stream execution unavailable"
             );
@@ -4312,7 +4312,7 @@ async fn execute_execution_runtime_stream_inner(
                 endpoint_id = %endpoint_id,
                 key_id = %key_id,
                 model_name = model_name.as_str(),
-                candidate_index = candidate_index.as_str(),
+                candidate_index,
                 error_category = "windsurf_execution_unavailable",
                 "gateway native Windsurf stream execution unavailable"
             );
@@ -4385,7 +4385,7 @@ async fn execute_execution_runtime_stream_inner(
                 endpoint_id = %endpoint_id,
                 key_id = %key_id,
                 model_name = model_name.as_str(),
-                candidate_index = candidate_index.as_str(),
+                candidate_index,
                 error_category = "kiro_web_search_unavailable",
                 "gateway Kiro web_search MCP execution unavailable"
             );
@@ -4458,7 +4458,7 @@ async fn execute_execution_runtime_stream_inner(
                 endpoint_id = %endpoint_id,
                 key_id = %key_id,
                 model_name = model_name.as_str(),
-                candidate_index = candidate_index.as_str(),
+                candidate_index,
                 error_category = "chatgpt_web_image_execution_unavailable",
                 "gateway ChatGPT-Web image stream execution unavailable"
             );
@@ -4533,7 +4533,7 @@ async fn execute_execution_runtime_stream_inner(
                     endpoint_id,
                     key_id,
                     model_name,
-                    candidate_index = candidate_index.as_str(),
+                    candidate_index,
                     error_category = "execution_runtime_unavailable",
                     "gateway in-process stream execution unavailable"
                 );
@@ -4678,7 +4678,7 @@ async fn execute_execution_runtime_stream_inner(
                         endpoint_id,
                         key_id,
                         model_name,
-                        candidate_index = candidate_index.as_str(),
+                        candidate_index,
                         error_category = "execution_runtime_unavailable",
                         "gateway in-process stream execution unavailable"
                     );
@@ -6150,6 +6150,404 @@ fn hold_send_admission_for_frame_stream(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn handle_non_success_stream_response<R>(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    lines: &mut FramedRead<R, LinesCodec>,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    plan_kind: &str,
+    report_kind: Option<&str>,
+    status_code: u16,
+    headers: &BTreeMap<String, String>,
+    report_context: Option<serde_json::Value>,
+    request_id: &str,
+    request_id_for_log: &str,
+    candidate_id: Option<&str>,
+    provider_name: &str,
+    model_name: &str,
+    candidate_index: &str,
+    retry_scope_out: &mut Option<&mut AiAttemptRetryScope>,
+    retry_fallback_out: &mut Option<&mut Option<Response<Body>>>,
+    candidate_started_unix_secs: u64,
+    stream_error_finalize_kind: Option<String>,
+) -> Result<Option<Response<Body>>, GatewayError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let provider_error_body = collect_error_body(&mut *lines).await?;
+    let private_error_body_json =
+        extract_provider_private_stream_error_body(report_context.as_ref(), &provider_error_body);
+    let provider_private_error_decoded = private_error_body_json.is_some();
+    let synthetic_body_json = (!provider_private_error_decoded
+        && should_synthesize_non_success_stream_error_body(status_code, &provider_error_body))
+    .then(|| build_synthetic_non_success_stream_error_body(status_code, headers));
+    let (provider_body_json, provider_body_base64) =
+        if let Some(error_body_json) = private_error_body_json {
+            (Some(error_body_json), None)
+        } else {
+            decode_stream_error_body(headers, &provider_error_body)
+        };
+    let client_status_code = stream_client_error_status_code_for_upstream_status(status_code);
+    let wrapped_binary_body_json = if provider_private_error_decoded {
+        None
+    } else {
+        wrap_non_json_binary_stream_error_for_client(plan_kind, headers, &provider_error_body)?
+    };
+    let (client_body_json, client_error_body, payload_client_body_json) =
+        if let Some(body_json) = synthetic_body_json.or(wrapped_binary_body_json) {
+            let body_bytes = serde_json::to_vec(&body_json)
+                .map_err(|err| GatewayError::Internal(err.to_string()))?;
+            (Some(body_json.clone()), body_bytes, Some(body_json))
+        } else if provider_private_error_decoded {
+            let body_json = provider_body_json.clone().ok_or_else(|| {
+                GatewayError::Internal(
+                    "decoded provider private stream error body is missing".to_string(),
+                )
+            })?;
+            let body_bytes = serde_json::to_vec(&body_json)
+                .map_err(|err| GatewayError::Internal(err.to_string()))?;
+            (Some(body_json), body_bytes, None)
+        } else {
+            (
+                provider_body_json.clone(),
+                provider_error_body.clone(),
+                provider_body_json.clone(),
+            )
+        };
+    let error_response_text =
+        local_failover_response_text(client_body_json.as_ref(), &client_error_body, None);
+    let failure_origin = if provider_private_error_decoded {
+        failure_origin_from_embedded_upstream_error(status_code, error_response_text.as_deref())
+    } else {
+        failure_origin_from_upstream_response(status_code, error_response_text.as_deref())
+    };
+    let failover_analysis = resolve_local_candidate_failover_analysis_stream_with_origin(
+        state,
+        plan,
+        report_context.as_ref(),
+        status_code,
+        error_response_text.as_deref(),
+        failure_origin,
+    )
+    .await;
+    apply_local_execution_effect_with_origin(
+        state,
+        LocalExecutionEffectContext {
+            plan,
+            report_context: report_context.as_ref(),
+        },
+        LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
+            status_code,
+            classification: failover_analysis.classification,
+        }),
+        failure_origin,
+    )
+    .await;
+    apply_local_execution_effect_with_origin(
+        state,
+        LocalExecutionEffectContext {
+            plan,
+            report_context: report_context.as_ref(),
+        },
+        LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
+            status_code,
+            classification: failover_analysis.classification,
+            headers: Some(headers),
+        }),
+        failure_origin,
+    )
+    .await;
+    apply_local_execution_effect_with_origin(
+        state,
+        LocalExecutionEffectContext {
+            plan,
+            report_context: report_context.as_ref(),
+        },
+        LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+            status_code,
+            classification: failover_analysis.classification,
+        }),
+        failure_origin,
+    )
+    .await;
+    apply_local_execution_effect(
+        state,
+        LocalExecutionEffectContext {
+            plan,
+            report_context: report_context.as_ref(),
+        },
+        LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+            status_code,
+            response_text: error_response_text.as_deref(),
+        }),
+    )
+    .await;
+    apply_local_execution_effect_with_origin(
+        state,
+        LocalExecutionEffectContext {
+            plan,
+            report_context: report_context.as_ref(),
+        },
+        LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
+            status_code,
+            classification: failover_analysis.classification,
+            headers,
+            error_body: error_response_text.as_deref(),
+        }),
+        failure_origin,
+    )
+    .await;
+    let failover_decision = failover_analysis.decision;
+    debug!(
+        event_name = "execution_runtime_stream_failover_decided",
+        log_type = "debug",
+        trace_id = %trace_id,
+        request_id = %request_id_for_log,
+        candidate_id = ?candidate_id,
+        plan_kind,
+        status_code,
+        provider_name,
+        endpoint_id = %plan.endpoint_id,
+        key_id = %plan.key_id,
+        model_name,
+        candidate_index,
+        failover_decision = failover_decision.as_str(),
+        "gateway resolved execution runtime stream failover decision"
+    );
+    if matches!(failover_decision, LocalFailoverDecision::RetryNextCandidate) {
+        let failure_disposition = classify_failure_disposition_with_origin(
+            &plan.provider_api_format,
+            failover_analysis.classification,
+            status_code,
+            failure_origin,
+        );
+        if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
+            *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
+        }
+        if failure_disposition.preserve_upstream_error {
+            if let Some(retry_fallback) = retry_fallback_out.as_deref_mut() {
+                let mut fallback_headers = headers.clone();
+                apply_endpoint_response_header_rules(
+                    state,
+                    plan,
+                    &mut fallback_headers,
+                    provider_body_json.as_ref(),
+                )
+                .await?;
+                *retry_fallback = Some(attach_control_metadata_headers(
+                    build_client_response_from_parts(
+                        status_code,
+                        &fallback_headers,
+                        Body::from(provider_error_body.clone()),
+                        trace_id,
+                        Some(decision),
+                    )?,
+                    Some(request_id),
+                    candidate_id,
+                )?);
+            }
+        }
+        let terminal_unix_secs = current_request_candidate_unix_ms();
+        let error_trace_report_context = with_stream_error_trace_context(
+            plan,
+            report_context.as_ref(),
+            status_code,
+            headers,
+            provider_body_json.as_ref(),
+            &provider_error_body,
+            error_response_text.as_deref(),
+            failover_analysis,
+            failure_origin,
+        );
+        record_local_request_candidate_status(
+            state,
+            plan,
+            error_trace_report_context
+                .as_ref()
+                .or(report_context.as_ref()),
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Failed,
+                status_code: Some(status_code),
+                error_type: Some("retryable_upstream_status".to_string()),
+                error_message: Some(format!(
+                    "execution runtime stream returned retryable status {status_code}"
+                )),
+                latency_ms: None,
+                started_at_unix_ms: Some(candidate_started_unix_secs),
+                finished_at_unix_ms: Some(terminal_unix_secs),
+            },
+        )
+        .await;
+        warn!(
+            event_name = "local_stream_candidate_retry_scheduled",
+            log_type = "event",
+            trace_id = %trace_id,
+            request_id = %request_id_for_log,
+            status_code,
+            provider_name = provider_name,
+            endpoint_id = %plan.endpoint_id,
+            key_id = %plan.key_id,
+            model_name,
+            candidate_index,
+            "gateway local stream decision retrying next candidate after retryable execution runtime status"
+        );
+        return Ok(None);
+    }
+
+    if !matches!(failover_decision, LocalFailoverDecision::StopLocalFailover)
+        && should_fallback_to_control_stream(
+            plan_kind,
+            status_code,
+            stream_error_finalize_kind.is_some(),
+        )
+    {
+        let terminal_unix_secs = current_request_candidate_unix_ms();
+        let error_trace_report_context = with_stream_error_trace_context(
+            plan,
+            report_context.as_ref(),
+            status_code,
+            headers,
+            provider_body_json.as_ref(),
+            &provider_error_body,
+            error_response_text.as_deref(),
+            failover_analysis,
+            failure_origin,
+        );
+        record_local_request_candidate_status(
+            state,
+            plan,
+            error_trace_report_context
+                .as_ref()
+                .or(report_context.as_ref()),
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Failed,
+                status_code: Some(status_code),
+                error_type: Some("control_fallback".to_string()),
+                error_message: Some(format!(
+                    "stream decision fell back to control after status {status_code}"
+                )),
+                latency_ms: None,
+                started_at_unix_ms: Some(candidate_started_unix_secs),
+                finished_at_unix_ms: Some(terminal_unix_secs),
+            },
+        )
+        .await;
+        return Ok(None);
+    }
+
+    let mut client_headers = if (300..400).contains(&status_code) {
+        let mut headers = synthetic_error_response_headers(headers.clone());
+        headers.insert(
+            "x-aether-upstream-status".to_string(),
+            status_code.to_string(),
+        );
+        headers
+    } else {
+        headers.clone()
+    };
+    if provider_private_error_decoded {
+        client_headers.remove("content-encoding");
+        client_headers.remove("content-length");
+        client_headers.insert("content-type".to_string(), "application/json".to_string());
+    }
+    apply_endpoint_response_header_rules(
+        state,
+        plan,
+        &mut client_headers,
+        client_body_json.as_ref(),
+    )
+    .await?;
+
+    let client_response_headers = client_headers.clone();
+    let error_trace_report_context = with_stream_error_trace_context(
+        plan,
+        report_context.as_ref(),
+        status_code,
+        headers,
+        provider_body_json.as_ref(),
+        &provider_error_body,
+        error_response_text.as_deref(),
+        failover_analysis,
+        failure_origin,
+    );
+    let payload = build_stream_error_sync_payload(
+        trace_id,
+        stream_error_finalize_kind
+            .as_deref()
+            .or(report_kind)
+            .unwrap_or_default()
+            .to_string(),
+        error_trace_report_context.or(report_context),
+        status_code,
+        headers.clone(),
+        provider_body_json,
+        provider_body_base64,
+        client_headers,
+        payload_client_body_json,
+        None,
+    );
+    record_sync_terminal_usage_with_handoff(state, plan, payload.report_context.as_ref(), &payload)
+        .await;
+    let terminal_unix_secs = current_request_candidate_unix_ms();
+    record_local_request_candidate_status(
+        state,
+        plan,
+        payload.report_context.as_ref(),
+        SchedulerRequestCandidateStatusUpdate {
+            status: RequestCandidateStatus::Failed,
+            status_code: Some(status_code),
+            error_type: Some("execution_runtime_stream_non_success_status".to_string()),
+            error_message: Some(format!(
+                "execution runtime stream returned non-success status {status_code}"
+            )),
+            latency_ms: None,
+            started_at_unix_ms: Some(candidate_started_unix_secs),
+            finished_at_unix_ms: Some(terminal_unix_secs),
+        },
+    )
+    .await;
+    if stream_error_finalize_kind.is_some() {
+        let response =
+            submit_local_core_error_or_sync_finalize(state, trace_id, decision, payload).await?;
+        return Ok(Some(attach_control_metadata_headers(
+            response,
+            Some(request_id),
+            candidate_id,
+        )?));
+    }
+    let response = if (300..400).contains(&status_code) {
+        build_client_response_from_parts_with_mutator(
+            client_status_code,
+            &client_response_headers,
+            Body::from(client_error_body),
+            trace_id,
+            Some(decision),
+            |headers| {
+                headers.insert(
+                    http::HeaderName::from_static("x-aether-upstream-status"),
+                    http::HeaderValue::from_str(&status_code.to_string())
+                        .map_err(|error| GatewayError::Internal(error.to_string()))?,
+                );
+                Ok(())
+            },
+        )?
+    } else {
+        build_client_response_from_parts(
+            client_status_code,
+            &client_response_headers,
+            Body::from(client_error_body),
+            trace_id,
+            Some(decision),
+        )?
+    };
+    Ok(Some(attach_control_metadata_headers(
+        response,
+        Some(request_id),
+        candidate_id,
+    )?))
+}
+
 async fn execute_stream_from_frame_stream_with_retry_scope(
     state: &AppState,
     plan: ExecutionPlan,
@@ -6286,7 +6684,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 endpoint_id = %plan.endpoint_id,
                 key_id = %plan.key_id,
                 model_name,
-                candidate_index = candidate_index.as_str(),
+                candidate_index,
                 "gateway local stream decision retrying next candidate after success failover rule match"
             );
             return Ok(None);
@@ -6297,385 +6695,29 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         resolve_core_stream_error_finalize_report_kind(plan_kind, status_code);
 
     if !(200..300).contains(&status_code) {
-        let provider_error_body = collect_error_body(&mut lines).await?;
-        let private_error_body_json = extract_provider_private_stream_error_body(
-            report_context.as_ref(),
-            &provider_error_body,
-        );
-        let provider_private_error_decoded = private_error_body_json.is_some();
-        let synthetic_body_json = (!provider_private_error_decoded
-            && should_synthesize_non_success_stream_error_body(status_code, &provider_error_body))
-        .then(|| build_synthetic_non_success_stream_error_body(status_code, &headers));
-        let (provider_body_json, provider_body_base64) =
-            if let Some(error_body_json) = private_error_body_json {
-                (Some(error_body_json), None)
-            } else {
-                decode_stream_error_body(&headers, &provider_error_body)
-            };
-        let client_status_code = stream_client_error_status_code_for_upstream_status(status_code);
-        let wrapped_binary_body_json = if provider_private_error_decoded {
-            None
-        } else {
-            wrap_non_json_binary_stream_error_for_client(plan_kind, &headers, &provider_error_body)?
-        };
-        let (client_body_json, client_error_body, payload_client_body_json) =
-            if let Some(body_json) = synthetic_body_json.or(wrapped_binary_body_json) {
-                let body_bytes = serde_json::to_vec(&body_json)
-                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
-                (Some(body_json.clone()), body_bytes, Some(body_json))
-            } else if provider_private_error_decoded {
-                let body_json = provider_body_json.clone().ok_or_else(|| {
-                    GatewayError::Internal(
-                        "decoded provider private stream error body is missing".to_string(),
-                    )
-                })?;
-                let body_bytes = serde_json::to_vec(&body_json)
-                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
-                (Some(body_json), body_bytes, None)
-            } else {
-                (
-                    provider_body_json.clone(),
-                    provider_error_body.clone(),
-                    provider_body_json.clone(),
-                )
-            };
-        let error_response_text =
-            local_failover_response_text(client_body_json.as_ref(), &client_error_body, None);
-        let failure_origin = if provider_private_error_decoded {
-            failure_origin_from_embedded_upstream_error(status_code, error_response_text.as_deref())
-        } else {
-            failure_origin_from_upstream_response(status_code, error_response_text.as_deref())
-        };
-        let failover_analysis = resolve_local_candidate_failover_analysis_stream_with_origin(
+        return handle_non_success_stream_response(
             state,
             &plan,
-            report_context.as_ref(),
-            status_code,
-            error_response_text.as_deref(),
-            failure_origin,
-        )
-        .await;
-        apply_local_execution_effect_with_origin(
-            state,
-            LocalExecutionEffectContext {
-                plan: &plan,
-                report_context: report_context.as_ref(),
-            },
-            LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
-                status_code,
-                classification: failover_analysis.classification,
-            }),
-            failure_origin,
-        )
-        .await;
-        apply_local_execution_effect_with_origin(
-            state,
-            LocalExecutionEffectContext {
-                plan: &plan,
-                report_context: report_context.as_ref(),
-            },
-            LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
-                status_code,
-                classification: failover_analysis.classification,
-                headers: Some(&headers),
-            }),
-            failure_origin,
-        )
-        .await;
-        apply_local_execution_effect_with_origin(
-            state,
-            LocalExecutionEffectContext {
-                plan: &plan,
-                report_context: report_context.as_ref(),
-            },
-            LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
-                status_code,
-                classification: failover_analysis.classification,
-            }),
-            failure_origin,
-        )
-        .await;
-        apply_local_execution_effect(
-            state,
-            LocalExecutionEffectContext {
-                plan: &plan,
-                report_context: report_context.as_ref(),
-            },
-            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
-                status_code,
-                response_text: error_response_text.as_deref(),
-            }),
-        )
-        .await;
-        apply_local_execution_effect_with_origin(
-            state,
-            LocalExecutionEffectContext {
-                plan: &plan,
-                report_context: report_context.as_ref(),
-            },
-            LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
-                status_code,
-                classification: failover_analysis.classification,
-                headers: &headers,
-                error_body: error_response_text.as_deref(),
-            }),
-            failure_origin,
-        )
-        .await;
-        let failover_decision = failover_analysis.decision;
-        debug!(
-            event_name = "execution_runtime_stream_failover_decided",
-            log_type = "debug",
-            trace_id = %trace_id,
-            request_id = %request_id_for_log,
-            candidate_id = ?candidate_id,
+            &mut lines,
+            trace_id,
+            decision,
             plan_kind,
-            status_code,
-            provider_name,
-            endpoint_id = %plan.endpoint_id,
-            key_id = %plan.key_id,
-            model_name,
-            candidate_index = candidate_index.as_str(),
-            failover_decision = failover_decision.as_str(),
-            "gateway resolved execution runtime stream failover decision"
-        );
-        if matches!(failover_decision, LocalFailoverDecision::RetryNextCandidate) {
-            let failure_disposition = classify_failure_disposition_with_origin(
-                &plan.provider_api_format,
-                failover_analysis.classification,
-                status_code,
-                failure_origin,
-            );
-            if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
-                *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
-            }
-            if failure_disposition.preserve_upstream_error {
-                if let Some(retry_fallback) = retry_fallback_out.as_deref_mut() {
-                    let mut fallback_headers = headers.clone();
-                    apply_endpoint_response_header_rules(
-                        state,
-                        &plan,
-                        &mut fallback_headers,
-                        provider_body_json.as_ref(),
-                    )
-                    .await?;
-                    *retry_fallback = Some(attach_control_metadata_headers(
-                        build_client_response_from_parts(
-                            status_code,
-                            &fallback_headers,
-                            Body::from(provider_error_body.clone()),
-                            trace_id,
-                            Some(decision),
-                        )?,
-                        Some(request_id),
-                        candidate_id,
-                    )?);
-                }
-            }
-            let terminal_unix_secs = current_request_candidate_unix_ms();
-            let error_trace_report_context = with_stream_error_trace_context(
-                &plan,
-                report_context.as_ref(),
-                status_code,
-                &headers,
-                provider_body_json.as_ref(),
-                &provider_error_body,
-                error_response_text.as_deref(),
-                failover_analysis,
-                failure_origin,
-            );
-            record_local_request_candidate_status(
-                state,
-                &plan,
-                error_trace_report_context
-                    .as_ref()
-                    .or(report_context.as_ref()),
-                SchedulerRequestCandidateStatusUpdate {
-                    status: RequestCandidateStatus::Failed,
-                    status_code: Some(status_code),
-                    error_type: Some("retryable_upstream_status".to_string()),
-                    error_message: Some(format!(
-                        "execution runtime stream returned retryable status {status_code}"
-                    )),
-                    latency_ms: None,
-                    started_at_unix_ms: Some(candidate_started_unix_secs),
-                    finished_at_unix_ms: Some(terminal_unix_secs),
-                },
-            )
-            .await;
-            warn!(
-                event_name = "local_stream_candidate_retry_scheduled",
-                log_type = "event",
-                trace_id = %trace_id,
-                request_id = %request_id_for_log,
-                status_code,
-                provider_name = provider_name,
-                endpoint_id = %plan.endpoint_id,
-                key_id = %plan.key_id,
-                model_name,
-                candidate_index = candidate_index.as_str(),
-                "gateway local stream decision retrying next candidate after retryable execution runtime status"
-            );
-            return Ok(None);
-        }
-
-        if !matches!(failover_decision, LocalFailoverDecision::StopLocalFailover)
-            && should_fallback_to_control_stream(
-                plan_kind,
-                status_code,
-                stream_error_finalize_kind.is_some(),
-            )
-        {
-            let terminal_unix_secs = current_request_candidate_unix_ms();
-            let error_trace_report_context = with_stream_error_trace_context(
-                &plan,
-                report_context.as_ref(),
-                status_code,
-                &headers,
-                provider_body_json.as_ref(),
-                &provider_error_body,
-                error_response_text.as_deref(),
-                failover_analysis,
-                failure_origin,
-            );
-            record_local_request_candidate_status(
-                state,
-                &plan,
-                error_trace_report_context
-                    .as_ref()
-                    .or(report_context.as_ref()),
-                SchedulerRequestCandidateStatusUpdate {
-                    status: RequestCandidateStatus::Failed,
-                    status_code: Some(status_code),
-                    error_type: Some("control_fallback".to_string()),
-                    error_message: Some(format!(
-                        "stream decision fell back to control after status {status_code}"
-                    )),
-                    latency_ms: None,
-                    started_at_unix_ms: Some(candidate_started_unix_secs),
-                    finished_at_unix_ms: Some(terminal_unix_secs),
-                },
-            )
-            .await;
-            return Ok(None);
-        }
-
-        let mut client_headers = if (300..400).contains(&status_code) {
-            let mut headers = synthetic_error_response_headers(headers.clone());
-            headers.insert(
-                "x-aether-upstream-status".to_string(),
-                status_code.to_string(),
-            );
-            headers
-        } else {
-            headers.clone()
-        };
-        if provider_private_error_decoded {
-            client_headers.remove("content-encoding");
-            client_headers.remove("content-length");
-            client_headers.insert("content-type".to_string(), "application/json".to_string());
-        }
-        apply_endpoint_response_header_rules(
-            state,
-            &plan,
-            &mut client_headers,
-            client_body_json.as_ref(),
-        )
-        .await?;
-
-        let client_response_headers = client_headers.clone();
-        let error_trace_report_context = with_stream_error_trace_context(
-            &plan,
-            report_context.as_ref(),
+            report_kind.as_deref(),
             status_code,
             &headers,
-            provider_body_json.as_ref(),
-            &provider_error_body,
-            error_response_text.as_deref(),
-            failover_analysis,
-            failure_origin,
-        );
-        let payload = build_stream_error_sync_payload(
-            trace_id,
-            stream_error_finalize_kind
-                .as_deref()
-                .or(report_kind.as_deref())
-                .unwrap_or_default()
-                .to_string(),
-            error_trace_report_context.or(report_context),
-            status_code,
-            headers.clone(),
-            provider_body_json,
-            provider_body_base64,
-            client_headers,
-            payload_client_body_json,
-            None,
-        );
-        record_sync_terminal_usage_with_handoff(
-            state,
-            &plan,
-            payload.report_context.as_ref(),
-            &payload,
-        )
-        .await;
-        let terminal_unix_secs = current_request_candidate_unix_ms();
-        record_local_request_candidate_status(
-            state,
-            &plan,
-            payload.report_context.as_ref(),
-            SchedulerRequestCandidateStatusUpdate {
-                status: RequestCandidateStatus::Failed,
-                status_code: Some(status_code),
-                error_type: Some("execution_runtime_stream_non_success_status".to_string()),
-                error_message: Some(format!(
-                    "execution runtime stream returned non-success status {status_code}"
-                )),
-                latency_ms: None,
-                started_at_unix_ms: Some(candidate_started_unix_secs),
-                finished_at_unix_ms: Some(terminal_unix_secs),
-            },
-        )
-        .await;
-        if stream_error_finalize_kind.is_some() {
-            let response =
-                submit_local_core_error_or_sync_finalize(state, trace_id, decision, payload)
-                    .await?;
-            return Ok(Some(attach_control_metadata_headers(
-                response,
-                Some(request_id),
-                candidate_id,
-            )?));
-        }
-        let response = if (300..400).contains(&status_code) {
-            build_client_response_from_parts_with_mutator(
-                client_status_code,
-                &client_response_headers,
-                Body::from(client_error_body),
-                trace_id,
-                Some(decision),
-                |headers| {
-                    headers.insert(
-                        http::HeaderName::from_static("x-aether-upstream-status"),
-                        http::HeaderValue::from_str(&status_code.to_string())
-                            .map_err(|error| GatewayError::Internal(error.to_string()))?,
-                    );
-                    Ok(())
-                },
-            )?
-        } else {
-            build_client_response_from_parts(
-                client_status_code,
-                &client_response_headers,
-                Body::from(client_error_body),
-                trace_id,
-                Some(decision),
-            )?
-        };
-        return Ok(Some(attach_control_metadata_headers(
-            response,
-            Some(request_id),
+            report_context,
+            request_id,
+            &request_id_for_log,
             candidate_id,
-        )?));
+            provider_name,
+            model_name,
+            candidate_index.as_str(),
+            &mut retry_scope_out,
+            &mut retry_fallback_out,
+            candidate_started_unix_secs,
+            stream_error_finalize_kind,
+        )
+        .await;
     }
 
     let normalized_stream_report_context =
@@ -6712,7 +6754,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             endpoint_id = %plan.endpoint_id,
             key_id = %plan.key_id,
             model_name,
-            candidate_index = candidate_index.as_str(),
+            candidate_index,
             upstream_content_type = upstream_content_type.unwrap_or("-"),
             "gateway normalized declared upstream stream response headers for the client"
         );
@@ -6802,7 +6844,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             endpoint_id = %plan.endpoint_id,
             key_id = %plan.key_id,
             model_name,
-            candidate_index = candidate_index.as_str(),
+            candidate_index,
             content_type = upstream_content_type.unwrap_or("-"),
             provider_api_format = plan.provider_api_format.as_str(),
             client_api_format = plan.client_api_format.as_str(),
@@ -6837,7 +6879,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         endpoint_id = %plan.endpoint_id,
                         key_id = %plan.key_id,
                         model_name,
-                        candidate_index = candidate_index.as_str(),
+                        candidate_index,
                         timeout_ms = stream_commit_policy
                             .max_precommit_wait()
                             .unwrap_or(REWRITTEN_STREAM_PREFETCH_TIMEOUT)
@@ -6892,7 +6934,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             endpoint_id = %plan.endpoint_id,
                             key_id = %plan.key_id,
                             model_name,
-                            candidate_index = candidate_index.as_str(),
+                            candidate_index,
                             timeout_ms = stream_commit_policy
                                 .max_precommit_wait()
                                 .unwrap_or(REWRITTEN_STREAM_PREFETCH_TIMEOUT)

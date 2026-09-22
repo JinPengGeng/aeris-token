@@ -25,9 +25,12 @@ fn response_is_sse(headers: &HeaderMap) -> bool {
         .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
+/// AdmissionPermitHealth.
 pub trait AdmissionPermitHealth: Send + Sync {
+    /// Executes `is_healthy`.
     fn is_healthy(&self) -> bool;
 
+    /// Executes `requires_health_poll`.
     fn requires_health_poll(&self) -> bool {
         true
     }
@@ -44,6 +47,7 @@ impl AdmissionPermitHealth for ConcurrencyPermit {
 }
 
 #[derive(Clone)]
+/// AdmissionPermit.
 pub struct AdmissionPermit {
     _permits: Vec<Arc<dyn AdmissionPermitHealth>>,
 }
@@ -57,6 +61,7 @@ impl std::fmt::Debug for AdmissionPermit {
 }
 
 impl AdmissionPermit {
+    /// Executes `from_parts`.
     pub fn from_parts<D: AdmissionPermitHealth + 'static>(
         local: Option<ConcurrencyPermit>,
         distributed: Option<D>,
@@ -71,6 +76,7 @@ impl AdmissionPermit {
         (!permits.is_empty()).then_some(Self { _permits: permits })
     }
 
+    /// Executes `combine`.
     pub fn combine(permits: impl IntoIterator<Item = AdmissionPermit>) -> Option<Self> {
         let permits = permits
             .into_iter()
@@ -79,6 +85,7 @@ impl AdmissionPermit {
         (!permits.is_empty()).then_some(Self { _permits: permits })
     }
 
+    /// Executes `is_healthy`.
     pub fn is_healthy(&self) -> bool {
         self._permits.iter().all(|permit| permit.is_healthy())
     }
@@ -98,6 +105,7 @@ impl From<ConcurrencyPermit> for AdmissionPermit {
     }
 }
 
+/// Executes `maybe_hold_axum_response_permit`.
 pub fn maybe_hold_axum_response_permit(
     response: Response<Body>,
     permit: Option<AdmissionPermit>,
@@ -108,6 +116,7 @@ pub fn maybe_hold_axum_response_permit(
     }
 }
 
+/// Executes `hold_admission_permit_until`.
 pub async fn hold_admission_permit_until<F>(permit: Option<AdmissionPermit>, future: F)
 where
     F: std::future::Future<Output = ()>,
