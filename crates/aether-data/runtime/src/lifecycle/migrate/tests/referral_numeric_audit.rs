@@ -146,6 +146,8 @@ FROM (VALUES
         "min_amount_ok",
         "max_amount_ok",
         "finite_decode_input",
+        "numeric_bounds_exact",
+        "decode_precision_loss_visible",
     ] {
         assert!(summary.get::<bool, _>(column), "{column}");
     }

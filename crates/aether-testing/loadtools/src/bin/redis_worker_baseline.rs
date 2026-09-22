@@ -6,28 +6,42 @@ use aether_runtime_state::{
     RedisClientConfig, RedisConsumerGroup, RedisConsumerName, RedisStreamName,
     RedisStreamReclaimConfig, RedisStreamRunner, RedisStreamRunnerConfig,
 };
+use clap::Parser;
 use serde::Serialize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Parser)]
+#[command(
+    name = "redis_worker_baseline",
+    about = "Redis stream worker baseline (append / read-group / reclaim / ack)"
+)]
 struct RedisWorkerBaselineConfig {
+    /// Total stream append calls.
+    #[arg(long, default_value_t = 1_000)]
     append_total: usize,
+    /// Concurrent appends.
+    #[arg(long, default_value_t = 20)]
     append_concurrency: usize,
+    /// Total reclaim calls.
+    #[arg(long, default_value_t = 128)]
     reclaim_total: usize,
-    reclaim_min_idle: Duration,
-    output_path: Option<PathBuf>,
+    /// Minimum idle time for reclaimable messages in milliseconds.
+    #[arg(long, default_value_t = 100)]
+    reclaim_min_idle_ms: u64,
+    /// Redis URL; spins up a managed redis-server when omitted.
+    #[arg(long)]
     redis_url: Option<String>,
+    /// Optional JSON report output path.
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
-impl Default for RedisWorkerBaselineConfig {
-    fn default() -> Self {
-        Self {
-            append_total: 1_000,
-            append_concurrency: 20,
-            reclaim_total: 128,
-            reclaim_min_idle: Duration::from_millis(100),
-            output_path: None,
-            redis_url: None,
-        }
+impl RedisWorkerBaselineConfig {
+    fn reclaim_min_idle(&self) -> Duration {
+        Duration::from_millis(self.reclaim_min_idle_ms)
+    }
+
+    fn output_path(&self) -> Option<&PathBuf> {
+        self.output.as_ref()
     }
 }
 
@@ -60,11 +74,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::main]
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_load_runtime_for("redis-worker-baseline");
-    let config = parse_args(std::env::args().skip(1).collect())?;
+    let config = RedisWorkerBaselineConfig::parse();
     let report = run_suite(&config).await?;
     let raw = serde_json::to_string_pretty(&report)?;
     println!("{raw}");
-    if let Some(path) = config.output_path.as_ref() {
+    if let Some(path) = config.output_path().as_ref() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -250,7 +264,7 @@ async fn benchmark_reclaim(
         pending_ids.extend(entries.into_iter().map(|entry| entry.id));
     }
 
-    tokio::time::sleep(config.reclaim_min_idle + Duration::from_millis(20)).await;
+    tokio::time::sleep(config.reclaim_min_idle() + Duration::from_millis(20)).await;
 
     let mut latencies = Vec::new();
     let mut failed = 0usize;
@@ -265,7 +279,7 @@ async fn benchmark_reclaim(
                 consumer_b,
                 &next_start_id,
                 RedisStreamReclaimConfig {
-                    min_idle_ms: config.reclaim_min_idle.as_millis() as u64,
+                    min_idle_ms: config.reclaim_min_idle().as_millis() as u64,
                     count: 64,
                 },
             )
@@ -379,62 +393,4 @@ fn percentile(latencies: &[u64], percentile: u8) -> u64 {
     let last_index = latencies.len() - 1;
     let rank = ((last_index as f64) * (percentile as f64 / 100.0)).round() as usize;
     latencies[rank.min(last_index)]
-}
-
-fn parse_args(args: Vec<String>) -> Result<RedisWorkerBaselineConfig, Box<dyn std::error::Error>> {
-    let mut config = RedisWorkerBaselineConfig::default();
-    let mut iter = args.into_iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--append-total" => {
-                config.append_total = next_value(&mut iter, "--append-total")?.parse()?
-            }
-            "--append-concurrency" => {
-                config.append_concurrency =
-                    next_value(&mut iter, "--append-concurrency")?.parse()?
-            }
-            "--reclaim-total" => {
-                config.reclaim_total = next_value(&mut iter, "--reclaim-total")?.parse()?
-            }
-            "--reclaim-min-idle-ms" => {
-                config.reclaim_min_idle =
-                    Duration::from_millis(next_value(&mut iter, "--reclaim-min-idle-ms")?.parse()?)
-            }
-            "--redis-url" => config.redis_url = Some(next_value(&mut iter, "--redis-url")?),
-            "--output" => {
-                config.output_path = Some(PathBuf::from(next_value(&mut iter, "--output")?))
-            }
-            "--help" | "-h" => {
-                print_usage();
-                std::process::exit(0);
-            }
-            other => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("unknown argument: {other}"),
-                )
-                .into());
-            }
-        }
-    }
-    Ok(config)
-}
-
-fn next_value(
-    iter: &mut impl Iterator<Item = String>,
-    flag: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    iter.next().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("missing value for {flag}"),
-        )
-        .into()
-    })
-}
-
-fn print_usage() {
-    eprintln!(
-        "usage: cargo run -p aether-loadtools --bin redis_worker_baseline -- [--append-total 1000] [--append-concurrency 20] [--reclaim-total 128] [--reclaim-min-idle-ms 100] [--redis-url redis://127.0.0.1:6379/0] [--output /tmp/redis_worker_baseline.json]"
-    );
 }

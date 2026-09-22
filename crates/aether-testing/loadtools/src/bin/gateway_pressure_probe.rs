@@ -10,6 +10,7 @@ use aether_loadtools::{
     HttpLoadProbeConfig, HttpLoadProbeOptions, HttpLoadProbeResponseMode, HttpLoadProbeResult,
     PrometheusSample,
 };
+use clap::Parser;
 use reqwest::Method;
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -69,6 +70,90 @@ struct Config {
     sample_interval: Duration,
     settle_after: Duration,
     output_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "gateway_pressure_probe",
+    about = "Gateway pressure probe with metrics sampling and settle-drain acceptance checks",
+    long_about = "usage: cargo run -p aether-loadtools --bin gateway_pressure_probe -- --url <URL> --metrics-url <URL> --requests <N> --concurrency <N> [options]"
+)]
+struct Cli {
+    /// Target URL.
+    #[arg(long)]
+    url: String,
+    /// Optional warmup URL probed before the measured run.
+    #[arg(long)]
+    warmup_url: Option<String>,
+    /// Gateway Prometheus metrics URL.
+    #[arg(long)]
+    metrics_url: String,
+    /// Total number of requests.
+    #[arg(long)]
+    requests: usize,
+    /// Concurrent in-flight requests.
+    #[arg(long)]
+    concurrency: usize,
+    /// Connections opened during warmup.
+    #[arg(long, default_value_t = 0)]
+    warmup_connections: usize,
+    /// Per-request timeout in milliseconds.
+    #[arg(long)]
+    timeout_ms: Option<u64>,
+    /// TCP connect timeout in milliseconds.
+    #[arg(long)]
+    connect_timeout_ms: Option<u64>,
+    /// Client shards partitioning the connection pool.
+    #[arg(long)]
+    client_shards: Option<usize>,
+    /// Max idle connections per host in the pool.
+    #[arg(long)]
+    pool_max_idle_per_host: Option<usize>,
+    /// Ramp-up duration before full concurrency in milliseconds.
+    #[arg(long, default_value_t = 0)]
+    start_ramp_ms: u64,
+    /// Hold applied to the first response body chunk in milliseconds.
+    #[arg(long, default_value_t = 0)]
+    first_body_hold_ms: u64,
+    /// Force HTTP/1.1 only.
+    #[arg(long)]
+    http1_only: bool,
+    /// Use HTTP/2 prior knowledge.
+    #[arg(long)]
+    http2_prior_knowledge: bool,
+    /// Metrics sampling interval in milliseconds.
+    #[arg(long, default_value_t = 500)]
+    sample_interval_ms: u64,
+    /// Settle window after the load phase in milliseconds.
+    #[arg(long, default_value_t = DEFAULT_SETTLE_AFTER.as_millis() as u64)]
+    settle_after_ms: u64,
+    /// HTTP method.
+    #[arg(long, default_value = "GET")]
+    method: Method,
+    /// Header in `Name: value` or `Name=value` form; repeatable.
+    #[arg(long = "header", short = 'H', value_parser = parse_header_pair)]
+    headers: Vec<(String, String)>,
+    /// Read the bearer API key from a file and send it as Authorization.
+    #[arg(long, value_parser = read_secret_file, conflicts_with = "api_key_list_file")]
+    api_key_file: Option<String>,
+    /// Read one bearer API key per line and rotate them across requests.
+    #[arg(long, value_parser = read_secret_list_file)]
+    api_key_list_file: Option<Vec<String>>,
+    /// Request body.
+    #[arg(long, conflicts_with = "body_file")]
+    body: Option<String>,
+    /// Read the request body from a file.
+    #[arg(long)]
+    body_file: Option<PathBuf>,
+    /// Response consumption mode.
+    #[arg(long, default_value = "headers", value_parser = parse_response_mode)]
+    response_mode: HttpLoadProbeResponseMode,
+    /// Fail the probe unless SSE streams end with [DONE].
+    #[arg(long)]
+    require_sse_done: bool,
+    /// Optional JSON report output path.
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2538,7 +2623,7 @@ async fn wait_for_settle_drain(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = parse_args(std::env::args().skip(1).collect())?;
+    let config = build_config(Cli::parse())?;
     let stop = Arc::new(AtomicBool::new(false));
     let summary = Arc::new(Mutex::new(GatewayPressureMetricsSummary::default()));
 
@@ -2661,128 +2746,34 @@ fn spawn_metrics_sampler(
     })
 }
 
+#[cfg(test)]
 fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
-    let mut target_url: Option<String> = None;
-    let mut warmup_url: Option<String> = None;
-    let mut metrics_url: Option<String> = None;
-    let mut total_requests: Option<usize> = None;
-    let mut concurrency: Option<usize> = None;
-    let mut warmup_connections: usize = 0;
-    let mut timeout_ms: Option<u64> = None;
-    let mut connect_timeout_ms: Option<u64> = None;
-    let mut client_shards: Option<usize> = None;
-    let mut pool_max_idle_per_host: Option<usize> = None;
-    let mut start_ramp_ms: u64 = 0;
-    let mut first_body_hold_ms: u64 = 0;
-    let mut sample_interval_ms: u64 = 500;
-    let mut settle_after_ms = DEFAULT_SETTLE_AFTER.as_millis() as u64;
-    let mut method = Method::GET;
-    let mut headers = BTreeMap::new();
-    let mut api_key_list: Option<Vec<String>> = None;
-    let mut body: Option<Vec<u8>> = None;
-    let mut response_mode = HttpLoadProbeResponseMode::HeadersOnly;
-    let mut require_sse_done = false;
-    let mut http1_only = false;
-    let mut http2_prior_knowledge = false;
-    let mut output_path = None;
+    let cli =
+        Cli::try_parse_from(std::iter::once("gateway_pressure_probe".to_string()).chain(args))?;
+    build_config(cli)
+}
 
-    let mut iter = args.into_iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--url" => target_url = Some(next_value(&mut iter, "--url")?),
-            "--warmup-url" => warmup_url = Some(next_value(&mut iter, "--warmup-url")?),
-            "--metrics-url" => metrics_url = Some(next_value(&mut iter, "--metrics-url")?),
-            "--requests" => total_requests = Some(next_value(&mut iter, "--requests")?.parse()?),
-            "--concurrency" => concurrency = Some(next_value(&mut iter, "--concurrency")?.parse()?),
-            "--warmup-connections" => {
-                warmup_connections = next_value(&mut iter, "--warmup-connections")?.parse()?
-            }
-            "--timeout-ms" => timeout_ms = Some(next_value(&mut iter, "--timeout-ms")?.parse()?),
-            "--connect-timeout-ms" => {
-                connect_timeout_ms = Some(next_value(&mut iter, "--connect-timeout-ms")?.parse()?)
-            }
-            "--client-shards" => {
-                client_shards = Some(next_value(&mut iter, "--client-shards")?.parse()?)
-            }
-            "--pool-max-idle-per-host" => {
-                pool_max_idle_per_host =
-                    Some(next_value(&mut iter, "--pool-max-idle-per-host")?.parse()?)
-            }
-            "--start-ramp-ms" => {
-                start_ramp_ms = next_value(&mut iter, "--start-ramp-ms")?.parse()?
-            }
-            "--first-body-hold-ms" => {
-                first_body_hold_ms = next_value(&mut iter, "--first-body-hold-ms")?.parse()?
-            }
-            "--http1-only" => http1_only = true,
-            "--http2-prior-knowledge" => http2_prior_knowledge = true,
-            "--sample-interval-ms" => {
-                sample_interval_ms = next_value(&mut iter, "--sample-interval-ms")?.parse()?
-            }
-            "--settle-after-ms" => {
-                settle_after_ms = next_value(&mut iter, "--settle-after-ms")?.parse()?
-            }
-            "--method" => {
-                method = Method::from_bytes(next_value(&mut iter, "--method")?.as_bytes())?
-            }
-            "--header" | "-H" => {
-                let (name, value) = parse_header_arg(&next_value(&mut iter, "--header")?)?;
-                headers.insert(name, value);
-            }
-            "--api-key-file" => {
-                let api_key = read_secret_file(&next_value(&mut iter, "--api-key-file")?)?;
-                headers.insert("Authorization".to_string(), format!("Bearer {api_key}"));
-            }
-            "--api-key-list-file" => {
-                api_key_list = Some(read_secret_list_file(&next_value(
-                    &mut iter,
-                    "--api-key-list-file",
-                )?)?);
-            }
-            "--body" => body = Some(next_value(&mut iter, "--body")?.into_bytes()),
-            "--body-file" => body = Some(std::fs::read(next_value(&mut iter, "--body-file")?)?),
-            "--response-mode" => {
-                response_mode = parse_response_mode(&next_value(&mut iter, "--response-mode")?)?
-            }
-            "--require-sse-done" => require_sse_done = true,
-            "--output" => output_path = Some(PathBuf::from(next_value(&mut iter, "--output")?)),
-            "--help" | "-h" => {
-                print_usage();
-                std::process::exit(0);
-            }
-            other => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("unknown argument: {other}"),
-                )
-                .into());
-            }
-        }
-    }
+fn build_config(cli: Cli) -> Result<Config, Box<dyn std::error::Error>> {
+    let body = match (cli.body, cli.body_file) {
+        (Some(body), None) => Some(body.into_bytes()),
+        (None, Some(path)) => Some(std::fs::read(path)?),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("clap conflict enforcement"),
+    };
+    let sample_interval_ms = cli.sample_interval_ms;
+    let settle_after_ms = cli.settle_after_ms;
 
     let mut load = HttpLoadProbeConfig {
-        url: target_url.ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing required --url")
-        })?,
-        total_requests: total_requests.ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "missing required --requests",
-            )
-        })?,
-        concurrency: concurrency.ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "missing required --concurrency",
-            )
-        })?,
-        method,
-        headers,
+        url: cli.url,
+        total_requests: cli.requests,
+        concurrency: cli.concurrency,
+        method: cli.method,
+        headers: cli.headers.into_iter().collect(),
         body,
-        response_mode,
+        response_mode: cli.response_mode,
         ..HttpLoadProbeConfig::default()
     };
-    if let Some(api_keys) = api_key_list {
+    if let Some(api_keys) = cli.api_key_list_file {
         load.header_sets = api_keys
             .into_iter()
             .map(|api_key| {
@@ -2792,20 +2783,24 @@ fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
             })
             .collect();
     }
-    load.warmup_url = warmup_url;
-    load.warmup_connections = warmup_connections;
-    if let Some(timeout_ms) = timeout_ms {
+    if let Some(api_key) = cli.api_key_file {
+        load.headers
+            .insert("Authorization".to_string(), format!("Bearer {api_key}"));
+    }
+    load.warmup_url = cli.warmup_url;
+    load.warmup_connections = cli.warmup_connections;
+    if let Some(timeout_ms) = cli.timeout_ms {
         load.timeout = Duration::from_millis(timeout_ms);
     }
-    load.connect_timeout = connect_timeout_ms.map(Duration::from_millis);
-    if let Some(client_shards) = client_shards {
+    load.connect_timeout = cli.connect_timeout_ms.map(Duration::from_millis);
+    if let Some(client_shards) = cli.client_shards {
         load.client_shards = client_shards;
     }
-    load.pool_max_idle_per_host = pool_max_idle_per_host;
-    load.start_ramp = Duration::from_millis(start_ramp_ms);
-    load.first_body_hold = Duration::from_millis(first_body_hold_ms);
-    load.http1_only = http1_only;
-    load.http2_prior_knowledge = http2_prior_knowledge;
+    load.pool_max_idle_per_host = cli.pool_max_idle_per_host;
+    load.start_ramp = Duration::from_millis(cli.start_ramp_ms);
+    load.first_body_hold = Duration::from_millis(cli.first_body_hold_ms);
+    load.http1_only = cli.http1_only;
+    load.http2_prior_knowledge = cli.http2_prior_knowledge;
     load.validate()
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
     if sample_interval_ms == 0 {
@@ -2834,100 +2829,11 @@ fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
     }
     Ok(Config {
         load,
-        require_sse_done,
-        metrics_url: metrics_url.ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "missing required --metrics-url",
-            )
-        })?,
+        require_sse_done: cli.require_sse_done,
+        metrics_url: cli.metrics_url,
         sample_interval: Duration::from_millis(sample_interval_ms),
         settle_after: Duration::from_millis(settle_after_ms),
-        output_path,
-    })
-}
-
-fn parse_header_arg(value: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let (name, value) = value
-        .split_once(':')
-        .or_else(|| value.split_once('='))
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "--header expects `Name: value` or `Name=value`",
-            )
-        })?;
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "--header name cannot be empty",
-        )
-        .into());
-    }
-    Ok((name.to_string(), value.trim().to_string()))
-}
-
-fn read_secret_file(path: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let secret = fs::read_to_string(path)?;
-    let secret = secret.trim();
-    if secret.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("{path} is empty"),
-        )
-        .into());
-    }
-    Ok(secret.to_string())
-}
-
-fn read_secret_list_file(path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(path)?;
-    let secrets = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    if secrets.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("{path} does not contain any API keys"),
-        )
-        .into());
-    }
-    Ok(secrets)
-}
-
-fn parse_response_mode(
-    value: &str,
-) -> Result<HttpLoadProbeResponseMode, Box<dyn std::error::Error>> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "headers" | "headers-only" | "header" => Ok(HttpLoadProbeResponseMode::HeadersOnly),
-        "first-body-byte" | "first-body" | "first-byte" | "first-chunk" => {
-            Ok(HttpLoadProbeResponseMode::FirstBodyByte)
-        }
-        "full" | "full-body" | "body" => Ok(HttpLoadProbeResponseMode::FullBody),
-        other => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "unsupported --response-mode {other}; expected headers, first-body-byte, or full"
-            ),
-        )
-        .into()),
-    }
-}
-
-fn next_value(
-    iter: &mut impl Iterator<Item = String>,
-    flag: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    iter.next().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("missing value for {flag}"),
-        )
-        .into()
+        output_path: cli.output,
     })
 }
 
@@ -3055,10 +2961,69 @@ fn metric_name_matches(actual: &str, expected: &str) -> bool {
         || actual.strip_prefix("aether_gateway_") == Some(expected)
 }
 
-fn print_usage() {
-    eprintln!(
-        "usage: cargo run -p aether-loadtools --bin gateway_pressure_probe -- --url <URL> --metrics-url <URL> --requests <N> --concurrency <N> [--warmup-url <URL>] [--warmup-connections N] [--method GET] [--timeout-ms 30000] [--connect-timeout-ms 10000] [--client-shards 1] [--pool-max-idle-per-host N] [--start-ramp-ms 0] [--first-body-hold-ms 0] [--http1-only | --http2-prior-knowledge] [--sample-interval-ms 500] [--settle-after-ms 10000] [-H 'Name: value'] [--api-key-file path | --api-key-list-file path] [--body JSON | --body-file path] [--response-mode headers|first-body-byte|full] [--require-sse-done] [--output /tmp/gateway_pressure.json]"
-    );
+fn parse_header_pair(value: &str) -> Result<(String, String), std::io::Error> {
+    let (name, value) = value
+        .split_once(':')
+        .or_else(|| value.split_once('='))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--header expects `Name: value` or `Name=value`",
+            )
+        })?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--header name cannot be empty",
+        ));
+    }
+    Ok((name.to_string(), value.trim().to_string()))
+}
+
+fn read_secret_file(path: &str) -> Result<String, std::io::Error> {
+    let secret = fs::read_to_string(path)?;
+    let secret = secret.trim();
+    if secret.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{path} is empty"),
+        ));
+    }
+    Ok(secret.to_string())
+}
+
+fn read_secret_list_file(path: &str) -> Result<Vec<String>, std::io::Error> {
+    let content = fs::read_to_string(path)?;
+    let secrets = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if secrets.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{path} does not contain any API keys"),
+        ));
+    }
+    Ok(secrets)
+}
+
+fn parse_response_mode(value: &str) -> Result<HttpLoadProbeResponseMode, std::io::Error> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "headers" | "headers-only" | "header" => Ok(HttpLoadProbeResponseMode::HeadersOnly),
+        "first-body-byte" | "first-body" | "first-byte" | "first-chunk" => {
+            Ok(HttpLoadProbeResponseMode::FirstBodyByte)
+        }
+        "full" | "full-body" | "body" => Ok(HttpLoadProbeResponseMode::FullBody),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "unsupported --response-mode {other}; expected headers, first-body-byte, or full"
+            ),
+        )),
+    }
 }
 
 #[cfg(test)]
