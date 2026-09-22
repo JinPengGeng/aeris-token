@@ -60,10 +60,12 @@ const LEGACY_ENCRYPTED_VIDEO_TASK_STORE_PREFIX: &str = "aether-video-tasks-v1\n"
 const VIDEO_TASK_STORE_PURPOSE: &str = "video-task-file-store";
 
 impl VideoTaskStore for InMemoryVideoTaskStore {
-    fn insert(&self, snapshot: LocalVideoTaskSnapshot) {
-        if let Ok(mut registry) = self.registry.lock() {
-            registry.insert(snapshot);
-        }
+    fn insert(&self, snapshot: LocalVideoTaskSnapshot) -> bool {
+        let Ok(mut registry) = self.registry.lock() else {
+            return false;
+        };
+        registry.insert(snapshot);
+        true
     }
 
     fn replace_local_snapshot(
@@ -115,10 +117,12 @@ impl VideoTaskStore for InMemoryVideoTaskStore {
         registry.list_active_snapshots(limit)
     }
 
-    fn apply_mutation(&self, mutation: LocalVideoTaskRegistryMutation) {
-        if let Ok(mut registry) = self.registry.lock() {
-            registry.apply_mutation(mutation);
-        }
+    fn apply_mutation(&self, mutation: LocalVideoTaskRegistryMutation) -> bool {
+        let Ok(mut registry) = self.registry.lock() else {
+            return false;
+        };
+        registry.apply_mutation(mutation);
+        true
     }
 
     fn project_openai(&self, task_id: &str, provider_body: &Map<String, Value>) -> bool {
@@ -245,13 +249,18 @@ impl FileVideoTaskStore {
 
     fn mutate_registry(&self, mutator: impl FnOnce(&mut VideoTaskRegistry) -> bool) -> bool {
         let Ok(mut registry) = self.registry.lock() else {
+            eprintln!("aether-video-tasks-core: video task store registry lock poisoned; mutation rejected");
             return false;
         };
         let mut updated_registry = registry.clone();
         if !mutator(&mut updated_registry) {
             return false;
         }
-        if self.persist_registry(&updated_registry).is_err() {
+        if let Err(error) = self.persist_registry(&updated_registry) {
+            eprintln!(
+                "aether-video-tasks-core: failed to persist video task store at {}: {error}; in-memory state left unchanged",
+                self.path.display()
+            );
             return false;
         }
         *registry = updated_registry;
@@ -391,11 +400,11 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 impl VideoTaskStore for FileVideoTaskStore {
-    fn insert(&self, snapshot: LocalVideoTaskSnapshot) {
-        let _ = self.mutate_registry(|registry| {
+    fn insert(&self, snapshot: LocalVideoTaskSnapshot) -> bool {
+        self.mutate_registry(|registry| {
             registry.insert(snapshot);
             true
-        });
+        })
     }
 
     fn replace_local_snapshot(
@@ -441,11 +450,11 @@ impl VideoTaskStore for FileVideoTaskStore {
         registry.list_active_snapshots(limit)
     }
 
-    fn apply_mutation(&self, mutation: LocalVideoTaskRegistryMutation) {
-        let _ = self.mutate_registry(|registry| {
+    fn apply_mutation(&self, mutation: LocalVideoTaskRegistryMutation) -> bool {
+        self.mutate_registry(|registry| {
             registry.apply_mutation(mutation);
             true
-        });
+        })
     }
 
     fn project_openai(&self, task_id: &str, provider_body: &Map<String, Value>) -> bool {
@@ -590,6 +599,39 @@ mod tests {
             .expect("rewritten store should be readable")
             .is_empty());
 
+        cleanup_store_path(&path);
+    }
+
+    #[test]
+    fn insert_reports_failure_and_leaves_memory_unchanged_when_persist_fails() {
+        let path = temp_store_path("persist-failure");
+        let store = FileVideoTaskStore::new(&path, DEVELOPMENT_ENCRYPTION_KEY).expect("store");
+        assert!(
+            store.insert(sensitive_gemini_snapshot()),
+            "initial insert should persist"
+        );
+        assert!(
+            store.clone_gemini("task-sensitive").is_some(),
+            "initial insert should be visible in memory"
+        );
+
+        // Block persistence by swapping the store file for a directory at the same path.
+        std::fs::remove_file(&path).expect("remove store file");
+        std::fs::create_dir(&path).expect("placeholder dir blocks persistence");
+        assert!(
+            !store.insert(sensitive_gemini_snapshot()),
+            "persist failure must be observable via a false return"
+        );
+        let retained = store
+            .clone_gemini("task-sensitive")
+            .expect("the previously persisted snapshot must remain in memory");
+        let record = retained.to_upsert_record();
+        assert_eq!(
+            record.status,
+            aether_data_contracts::repository::video_tasks::VideoTaskStatus::Failed,
+            "persist failure must roll back to the last durably persisted state"
+        );
+        std::fs::remove_dir(&path).expect("remove placeholder dir");
         cleanup_store_path(&path);
     }
 

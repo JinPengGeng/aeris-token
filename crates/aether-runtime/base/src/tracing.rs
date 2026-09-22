@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal, Write};
@@ -27,6 +28,12 @@ pub use writer::{logging_metric_samples, shutdown_logging, LogShutdownGuard};
 use writer::{register_log_workers, LogWorker, NonBlockingLogWriter};
 
 static TRACING_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+
+static LOG_CLEANUP_TASK_SERVICES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+
+fn log_cleanup_task_registry() -> &'static Mutex<HashSet<&'static str>> {
+    LOG_CLEANUP_TASK_SERVICES.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 pub type LogReloader = Box<dyn Fn(&str) + Send + Sync>;
 
@@ -611,10 +618,19 @@ pub fn init_reloadable_service_tracing(
     }
 
     Ok(Box::new(move |level: &str| {
-        if let Ok(new_filter) = EnvFilter::try_new(level) {
-            let _ = reload_handle.modify(|filter| *filter = new_filter);
+        match parse_reload_filter(level) {
+            Ok(new_filter) => {
+                if let Err(err) = reload_handle.modify(|filter| *filter = new_filter) {
+                    eprintln!("aether-runtime: failed to reload log filter {level:?}: {err}");
+                }
+            }
+            Err(err) => eprintln!("aether-runtime: ignoring invalid log filter {level:?}: {err}"),
         }
     }))
+}
+
+fn parse_reload_filter(level: &str) -> Result<EnvFilter, String> {
+    EnvFilter::try_new(level).map_err(|err| err.to_string())
 }
 
 struct RuntimeLogWriters {
@@ -897,9 +913,24 @@ where
     }
 }
 
-fn spawn_log_cleanup_task(service_name: &'static str, config: FileLoggingConfig) {
+/// Spawns the periodic log-retention cleanup task for a service.
+///
+/// Returns true only when this call spawned the task. Duplicate registrations for the same
+/// service are skipped (a `OnceLock`-guarded registry prevents stacked cleanup loops when
+/// tracing is initialized more than once), and a missing tokio runtime is reported instead of
+/// silently dropping the task.
+fn spawn_log_cleanup_task(service_name: &'static str, config: FileLoggingConfig) -> bool {
     if tokio::runtime::Handle::try_current().is_err() {
-        return;
+        eprintln!(
+            "aether-runtime: log cleanup task for service {service_name} was not spawned: no tokio runtime"
+        );
+        return false;
+    }
+    let mut registry = log_cleanup_task_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !registry.insert(service_name) {
+        return false;
     }
 
     tokio::spawn(async move {
@@ -922,6 +953,7 @@ fn spawn_log_cleanup_task(service_name: &'static str, config: FileLoggingConfig)
             }
         }
     });
+    true
 }
 
 fn emit_log_cleanup_warning(phase: &'static str, log_dir: &Path, error: &impl std::fmt::Display) {
@@ -1020,6 +1052,45 @@ mod tests {
     use std::time::{Duration, SystemTime};
     use tracing_subscriber::prelude::*;
     use uuid::Uuid;
+
+    #[test]
+    fn parse_reload_filter_rejects_invalid_filters_observably() {
+        assert!(super::parse_reload_filter("info").is_ok());
+        let err = super::parse_reload_filter("invalid[filter")
+            .expect_err("invalid filter must surface an error instead of being swallowed");
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn spawn_log_cleanup_task_requires_a_runtime() {
+        assert!(
+            !super::spawn_log_cleanup_task(
+                "runtime-test-no-runtime",
+                FileLoggingConfig::new(std::env::temp_dir(), LogRotation::Daily, 7, 0)
+            ),
+            "cleanup task must not be silently dropped outside a tokio runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_log_cleanup_task_is_guarded_against_duplicates() {
+        let config = || {
+            FileLoggingConfig::new(
+                std::env::temp_dir().join(format!("log-cleanup-{}", Uuid::new_v4())),
+                LogRotation::Daily,
+                7,
+                0,
+            )
+        };
+        assert!(
+            super::spawn_log_cleanup_task("runtime-test-guarded-cleanup", config()),
+            "first registration should spawn the cleanup task"
+        );
+        assert!(
+            !super::spawn_log_cleanup_task("runtime-test-guarded-cleanup", config()),
+            "duplicate registration must not stack another cleanup loop"
+        );
+    }
 
     #[derive(Clone, Default)]
     struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
