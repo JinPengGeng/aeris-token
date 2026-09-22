@@ -1,7 +1,9 @@
 # Issue 300 gateway lifecycle decision
 
 Status: accepted implementation scope; Gateway integration remains in progress.
-Refs #300 and #206. This is a decision record, not runtime delivery evidence.
+Refs [#300](https://github.com/JinPengGeng/aeris-token/issues/300) and #206. This is a decision record, not runtime delivery evidence.
+
+Sibling decisions and integration records: [funds lifecycle](issue-300-funds.md), [attempt funds implementation](issue-300-attempt-funds.md), [funds retention / unresolved-financial-record retention](issue-300-funds-retention.md), and [Gateway attempt-funds integration](issue-300-gateway-attempt-funds.md).
 
 PR #362 merged as `ab1dfa9686e6e4937fee89fdbc48a04b876e57ee` on 2026-09-13.
 The fork main baseline `3d66f7c30729347d4d8dc23f9802469784bf7714` contains its

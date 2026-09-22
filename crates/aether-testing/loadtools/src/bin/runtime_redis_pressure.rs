@@ -9,43 +9,60 @@ use aether_runtime_state::{
     DataLayerError, RedisClientConfig, RedisRuntimeDiagnostics, RuntimeQueueStore,
     RuntimeSemaphoreConfig, RuntimeState,
 };
+use clap::Parser;
 use futures_util::stream::{self, StreamExt};
 use serde::Serialize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, clap::Parser)]
+#[command(
+    name = "runtime_redis_pressure",
+    about = "Runtime Redis state backend pressure suite (kv / lock / semaphore / stream / blocking probe)"
+)]
 struct RuntimeRedisPressureConfig {
+    /// Total kv operations.
+    #[arg(long, default_value_t = 20_000)]
     kv_total: usize,
+    /// Concurrent kv operations.
+    #[arg(long, default_value_t = 200)]
     kv_concurrency: usize,
+    /// Total lock operations.
+    #[arg(long, default_value_t = 10_000)]
     lock_total: usize,
+    /// Concurrent lock operations.
+    #[arg(long, default_value_t = 100)]
     lock_concurrency: usize,
+    /// Total semaphore operations.
+    #[arg(long, default_value_t = 5_000)]
     semaphore_total: usize,
+    /// Concurrent semaphore operations.
+    #[arg(long, default_value_t = 100)]
     semaphore_concurrency: usize,
+    /// Total stream append operations.
+    #[arg(long, default_value_t = 10_000)]
     stream_total: usize,
+    /// Concurrent stream operations.
+    #[arg(long, default_value_t = 100)]
     stream_concurrency: usize,
+    /// Total blocking-probe operations.
+    #[arg(long, default_value_t = 1_000)]
     blocking_probe_total: usize,
+    /// Concurrent blocking-probe operations.
+    #[arg(long, default_value_t = 100)]
     blocking_probe_concurrency: usize,
+    /// Per-command timeout in milliseconds.
+    #[arg(long, default_value_t = 2_000)]
     command_timeout_ms: u64,
-    output_path: Option<PathBuf>,
+    /// Redis URL; spins up a managed redis-server when omitted.
+    #[arg(long)]
     redis_url: Option<String>,
+    /// Optional JSON report output path.
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
-impl Default for RuntimeRedisPressureConfig {
-    fn default() -> Self {
-        Self {
-            kv_total: 20_000,
-            kv_concurrency: 200,
-            lock_total: 10_000,
-            lock_concurrency: 100,
-            semaphore_total: 5_000,
-            semaphore_concurrency: 100,
-            stream_total: 10_000,
-            stream_concurrency: 100,
-            blocking_probe_total: 1_000,
-            blocking_probe_concurrency: 100,
-            command_timeout_ms: 2_000,
-            output_path: None,
-            redis_url: None,
-        }
+impl RuntimeRedisPressureConfig {
+    fn output_path(&self) -> Option<&PathBuf> {
+        self.output.as_ref()
     }
 }
 
@@ -129,11 +146,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::main]
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_load_runtime_for("runtime-redis-pressure");
-    let config = parse_args(std::env::args().skip(1).collect())?;
+    let config = RuntimeRedisPressureConfig::parse();
     let report = run_suite(&config).await?;
     let raw = serde_json::to_string_pretty(&report)?;
     println!("{raw}");
-    if let Some(path) = config.output_path.as_ref() {
+    if let Some(path) = config.output_path().as_ref() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -473,82 +490,4 @@ fn percentile(latencies: &[u64], percentile: u8) -> u64 {
     let last_index = latencies.len() - 1;
     let rank = ((last_index as f64) * (percentile as f64 / 100.0)).round() as usize;
     latencies[rank.min(last_index)]
-}
-
-fn parse_args(args: Vec<String>) -> Result<RuntimeRedisPressureConfig, Box<dyn std::error::Error>> {
-    let mut config = RuntimeRedisPressureConfig::default();
-    let mut iter = args.into_iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--kv-total" => config.kv_total = next_value(&mut iter, "--kv-total")?.parse()?,
-            "--kv-concurrency" => {
-                config.kv_concurrency = next_value(&mut iter, "--kv-concurrency")?.parse()?
-            }
-            "--lock-total" => config.lock_total = next_value(&mut iter, "--lock-total")?.parse()?,
-            "--lock-concurrency" => {
-                config.lock_concurrency = next_value(&mut iter, "--lock-concurrency")?.parse()?
-            }
-            "--semaphore-total" => {
-                config.semaphore_total = next_value(&mut iter, "--semaphore-total")?.parse()?
-            }
-            "--semaphore-concurrency" => {
-                config.semaphore_concurrency =
-                    next_value(&mut iter, "--semaphore-concurrency")?.parse()?
-            }
-            "--stream-total" => {
-                config.stream_total = next_value(&mut iter, "--stream-total")?.parse()?
-            }
-            "--stream-concurrency" => {
-                config.stream_concurrency =
-                    next_value(&mut iter, "--stream-concurrency")?.parse()?
-            }
-            "--blocking-probe-total" => {
-                config.blocking_probe_total =
-                    next_value(&mut iter, "--blocking-probe-total")?.parse()?
-            }
-            "--blocking-probe-concurrency" => {
-                config.blocking_probe_concurrency =
-                    next_value(&mut iter, "--blocking-probe-concurrency")?.parse()?
-            }
-            "--command-timeout-ms" => {
-                config.command_timeout_ms =
-                    next_value(&mut iter, "--command-timeout-ms")?.parse()?
-            }
-            "--redis-url" => config.redis_url = Some(next_value(&mut iter, "--redis-url")?),
-            "--output" => {
-                config.output_path = Some(PathBuf::from(next_value(&mut iter, "--output")?))
-            }
-            "--help" | "-h" => {
-                print_usage();
-                std::process::exit(0);
-            }
-            other => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("unknown argument: {other}"),
-                )
-                .into());
-            }
-        }
-    }
-    Ok(config)
-}
-
-fn next_value(
-    iter: &mut impl Iterator<Item = String>,
-    flag: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    iter.next().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("missing value for {flag}"),
-        )
-        .into()
-    })
-}
-
-fn print_usage() {
-    eprintln!(
-        "usage: cargo run -p aether-loadtools --bin runtime_redis_pressure -- [--kv-total 20000] [--kv-concurrency 200] [--lock-total 10000] [--lock-concurrency 100] [--semaphore-total 5000] [--semaphore-concurrency 100] [--stream-total 10000] [--stream-concurrency 100] [--blocking-probe-total 1000] [--blocking-probe-concurrency 100] [--command-timeout-ms 2000] [--redis-url redis://127.0.0.1:6379/0] [--output /tmp/runtime_redis_pressure.json]"
-    );
 }
