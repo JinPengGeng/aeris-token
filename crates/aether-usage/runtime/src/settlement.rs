@@ -151,12 +151,23 @@ pub(crate) async fn settle_usage_with_reconciled_cost(
     usage: &StoredRequestUsageAudit,
     reconciled: Option<ReconciledUsagePolicyCost>,
 ) -> Result<(), DataLayerError> {
+    settle_usage_with_reconciled_cost_impl(writer, usage, reconciled).await
+}
+
+async fn settle_usage_with_reconciled_cost_impl(
+    writer: &dyn UsageSettlementWriter,
+    usage: &StoredRequestUsageAudit,
+    reconciled: Option<ReconciledUsagePolicyCost>,
+) -> Result<(), DataLayerError> {
     if !writer.has_usage_settlement_writer() {
         return Ok(());
     }
     if !matches!(usage.status.as_str(), "completed" | "failed" | "cancelled") {
         return Ok(());
     }
+    // Only real settlement work below: the capability/status no-op returns
+    // above must not dilute the duration distribution with zero-cost hits.
+    let _duration_guard = SettlementDurationGuard::start();
 
     let finalized_at_unix_secs = usage
         .finalized_at_unix_secs
@@ -264,6 +275,24 @@ pub(crate) async fn settle_usage_with_reconciled_cost(
         writer.capture_provider_cost_for_usage(usage).await?;
     }
     Ok(())
+}
+
+struct SettlementDurationGuard(Option<std::time::Instant>);
+
+impl SettlementDurationGuard {
+    fn start() -> Self {
+        Self(Some(std::time::Instant::now()))
+    }
+}
+
+impl Drop for SettlementDurationGuard {
+    fn drop(&mut self) {
+        if let Some(started_at) = self.0.take() {
+            aether_runtime::record_billing_settlement_duration_seconds(
+                started_at.elapsed().as_secs_f64(),
+            );
+        }
+    }
 }
 
 fn completed_usage_has_final_billing_status(usage: &StoredRequestUsageAudit) -> bool {

@@ -2057,10 +2057,14 @@ impl DirectPassthroughFinalizer {
             &mut core.usage_stream_telemetry,
         );
         if captured_first_stream_event && core.provider_stream_bytes == 0 {
+            let first_token_ms = stream_elapsed_ms_at(core.stream_started_at, observed_at);
             observe_gateway_stage_trace_ms(
                 &mut core.stage_trace,
                 "stream_first_data",
-                stream_elapsed_ms_at(core.stream_started_at, observed_at),
+                first_token_ms,
+            );
+            crate::latency_histograms::record_upstream_first_token_seconds(
+                first_token_ms as f64 / 1_000.0,
             );
         }
 
