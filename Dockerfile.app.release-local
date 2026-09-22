@@ -3,8 +3,11 @@
 # 作用：用当前源码构建一个 release-layout 容器，专门测试管理后台在线更新流程。
 
 ARG RUST_VERSION=1.95.0
-ARG NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:22-slim
-ARG RUST_BASE_IMAGE=docker.m.daocloud.io/library/rust:${RUST_VERSION}-slim
+# Build-stage base images are pinned to the registry index digest so a moved
+# mutable tag cannot change what CI and local builds compile against. Keep the
+# tag for readability; the digest is authoritative. See #220.
+ARG NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:22-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9
+ARG RUST_BASE_IMAGE=docker.m.daocloud.io/library/rust:1.95.0-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0
 
 # ==================== 前端构建 ====================
 FROM ${NODE_BASE_IMAGE} AS frontend-builder
