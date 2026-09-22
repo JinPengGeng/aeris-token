@@ -1,3 +1,4 @@
+use aether_ai_formats::FormatId;
 use serde_json::{json, Map, Value};
 
 use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
@@ -17,6 +18,43 @@ pub fn decode_json_data_line(line: &[u8]) -> Option<Value> {
         return None;
     }
     serde_json::from_str(data_line).ok()
+}
+
+/// Byte-level prefilter for the terminal SSE observation path: a `data:` line
+/// that contains none of the terminal-signal keys cannot advance the terminal
+/// state machine (finish reason / usage / error / service tier), so it is
+/// skipped before paying for a full `Value` parse.
+///
+/// Keys are matched with surrounding quotes, so text embedded in JSON string
+/// values (where quotes arrive escaped) can only cause extra parses, never
+/// skipped ones. `openai:responses` deliberately opts out: its terminal
+/// observer inspects many `response.*` event types (tool identity, image
+/// dedup, unknown-event accounting), so there is no small safe key set.
+pub(crate) fn sse_line_may_affect_terminal_observation(
+    provider_api_format: FormatId,
+    line: &[u8],
+) -> bool {
+    const SIGNAL_KEYS: &[&[u8]] = &[
+        b"\"usage\"",
+        b"\"finish_reason\"",
+        b"\"stop_reason\"",
+        b"\"finishReason\"",
+        b"\"usageMetadata\"",
+        b"\"error\"",
+        b"\"service_tier\"",
+        // Gemini tool-call streams must keep parsing so observed_tool_calls
+        // feeds the finish_reason "tool_calls" mapping at the terminal chunk.
+        b"\"functionCall\"",
+        b"\"functionResponse\"",
+    ];
+    let prefiltered = matches!(
+        provider_api_format,
+        FormatId::OpenAiChat | FormatId::ClaudeMessages | FormatId::GeminiGenerateContent
+    );
+    !prefiltered
+        || SIGNAL_KEYS
+            .iter()
+            .any(|key| memchr::memmem::find(line, key).is_some())
 }
 
 pub fn unsupported_stream_event_message(payload: &Value) -> String {

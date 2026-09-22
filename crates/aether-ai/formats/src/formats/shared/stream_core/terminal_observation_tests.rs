@@ -280,3 +280,193 @@ fn gemini_content_tools_and_errors_preserve_summaries() {
         );
     }
 }
+
+#[test]
+fn prefilter_skip_path_matches_parse_path_for_keyword_free_lines() {
+    use super::super::common::sse_line_may_affect_terminal_observation;
+
+    // Unit-level: keyword-free content lines skip, terminal lines pass.
+    let chat = aether_ai_formats::FormatId::OpenAiChat;
+    let chat_content =
+        br#"data: {"id":"c","model":"m","choices":[{"index":0,"delta":{"content":"hello"}}]}"#;
+    assert!(!sse_line_may_affect_terminal_observation(
+        chat,
+        chat_content
+    ));
+    assert!(sse_line_may_affect_terminal_observation(
+        chat,
+        br#"data: {"choices":[],"usage":{"prompt_tokens":1}}"#
+    ));
+    assert!(sse_line_may_affect_terminal_observation(
+        chat,
+        br#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#
+    ));
+    let claude = aether_ai_formats::FormatId::ClaudeMessages;
+    let claude_content = br#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#;
+    assert!(!sse_line_may_affect_terminal_observation(
+        claude,
+        claude_content
+    ));
+    assert!(sse_line_may_affect_terminal_observation(
+        claude,
+        br#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#
+    ));
+    let gemini = aether_ai_formats::FormatId::GeminiGenerateContent;
+    let gemini_content = br#"data: {"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}"#;
+    assert!(!sse_line_may_affect_terminal_observation(
+        gemini,
+        gemini_content
+    ));
+    assert!(sse_line_may_affect_terminal_observation(
+        gemini,
+        br#"data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"totalTokenCount":1}}"#
+    ));
+    // openai:responses opts out of prefiltering (many event types matter).
+    assert!(sse_line_may_affect_terminal_observation(
+        aether_ai_formats::FormatId::OpenAiResponses,
+        gemini_content
+    ));
+
+    // End-to-end: content text that merely mentions signal words (forcing the
+    // full-parse path on every line) must produce the identical terminal
+    // summary as plain content lines (taking the skip path).
+    let run = |ctx: &Value, events: &[Value]| {
+        let mut observer = StreamingStandardTerminalObserver::default();
+        for event in events {
+            observer
+                .push_line(ctx, format!("data: {event}\n").into_bytes())
+                .unwrap();
+        }
+        observer.finish(ctx).unwrap()
+    };
+
+    let chat_terminal = [
+        json!({"choices":[{"delta":{},"finish_reason":"stop"}]}),
+        json!({"id":"chatcmpl-1","model":"m","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}),
+    ];
+    let chat_plain = run(
+        &context("openai:chat"),
+        &[
+            json!({"id":"chatcmpl-1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}),
+            json!({"id":"chatcmpl-1","model":"m","choices":[{"index":0,"delta":{"content":" world"}}]}),
+            chat_terminal[0].clone(),
+            chat_terminal[1].clone(),
+        ],
+    );
+    let chat_laden = run(
+        &context("openai:chat"),
+        &[
+            json!({"id":"chatcmpl-1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"the usage of finish_reason and error handling"}}]}),
+            json!({"id":"chatcmpl-1","model":"m","choices":[{"index":0,"delta":{"content":" stop_reason finishReason usageMetadata service_tier incomplete failed "}}]}),
+            chat_terminal[0].clone(),
+            chat_terminal[1].clone(),
+        ],
+    );
+    assert_eq!(chat_plain, chat_laden);
+    let chat_summary = chat_plain.unwrap();
+    assert_eq!(chat_summary.finish_reason.as_deref(), Some("stop"));
+    assert_eq!(
+        chat_summary
+            .standardized_usage
+            .as_ref()
+            .unwrap()
+            .output_tokens,
+        2
+    );
+
+    let claude_terminal = json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}});
+    let claude_plain = run(
+        &context("claude:messages"),
+        &[
+            json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude","usage":{"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}),
+            claude_terminal.clone(),
+            json!({"type":"message_stop"}),
+        ],
+    );
+    let claude_laden = run(
+        &context("claude:messages"),
+        &[
+            json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude","usage":{"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"usage error finish_reason keywords"}}),
+            claude_terminal.clone(),
+            json!({"type":"message_stop"}),
+        ],
+    );
+    assert_eq!(claude_plain, claude_laden);
+    assert_eq!(claude_plain.unwrap().finish_reason.as_deref(), Some("stop"));
+
+    let gemini_terminal = json!({"responseId":"g-1","modelVersion":"gem","candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}});
+    let gemini_plain = run(
+        &context("gemini:generate_content"),
+        &[
+            json!({"responseId":"g-1","modelVersion":"gem","candidates":[{"content":{"parts":[{"text":"hello"}]}}]}),
+            gemini_terminal.clone(),
+        ],
+    );
+    let gemini_laden = run(
+        &context("gemini:generate_content"),
+        &[
+            json!({"responseId":"g-1","modelVersion":"gem","candidates":[{"content":{"parts":[{"text":"usage error finish_reason stop_reason usageMetadata"}]}}]}),
+            gemini_terminal.clone(),
+        ],
+    );
+    assert_eq!(gemini_plain, gemini_laden);
+    assert_eq!(gemini_plain.unwrap().finish_reason.as_deref(), Some("stop"));
+
+    let responses_terminal = completed(vec![]);
+    let responses_plain = run(
+        &context("openai:responses"),
+        &[
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"hello"}),
+            responses_terminal.clone(),
+        ],
+    );
+    let responses_laden = run(
+        &context("openai:responses"),
+        &[
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"usage error finish_reason text"}),
+            responses_terminal.clone(),
+        ],
+    );
+    assert_eq!(responses_plain, responses_laden);
+    assert_eq!(
+        responses_plain.unwrap().finish_reason.as_deref(),
+        Some("stop")
+    );
+}
+
+#[test]
+fn prefilter_preserves_finish_fallback_for_truncated_streams() {
+    // A stream that ends without any terminal chunk relies on provider.finish()
+    // emitting the fallback Finish frame, which requires `started == true`.
+    // The first content lines must therefore parse even without signal keys.
+    let ctx = context("openai:chat");
+    let mut observer = StreamingStandardTerminalObserver::default();
+    for index in 0..4 {
+        let event = json!({"id":"chatcmpl-trunc","model":"m","choices":[{"index":0,"delta":{"content":format!("chunk-{index}")}}]});
+        observer
+            .push_line(&ctx, format!("data: {event}\n").into_bytes())
+            .unwrap();
+    }
+    let summary = observer.finish(&ctx).unwrap().expect("truncated stream");
+    assert_eq!(summary.response_id.as_deref(), Some("chatcmpl-trunc"));
+
+    // Gemini tool-call streams: functionCall chunks carry no signal keys, but
+    // skipping them would lose the "tool_calls" finish_reason mapping.
+    let ctx = context("gemini:generate_content");
+    let mut observer = StreamingStandardTerminalObserver::default();
+    for event in [
+        json!({"responseId":"g-tools","modelVersion":"gem","candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"x":1}}}]}}]}),
+        json!({"responseId":"g-tools","modelVersion":"gem","candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"x":2}}}]}}]}),
+        json!({"responseId":"g-tools","modelVersion":"gem","candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetadata":{"totalTokenCount":3}}),
+    ] {
+        observer
+            .push_line(&ctx, format!("data: {event}\n").into_bytes())
+            .unwrap();
+    }
+    let summary = observer.finish(&ctx).unwrap().expect("gemini tool stream");
+    assert_eq!(summary.finish_reason.as_deref(), Some("tool_calls"));
+}

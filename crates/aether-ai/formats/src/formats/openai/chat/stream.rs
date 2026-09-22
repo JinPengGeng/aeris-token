@@ -98,6 +98,10 @@ impl OpenAIChatProviderState {
         }
     }
 
+    pub(crate) fn has_started(&self) -> bool {
+        self.started
+    }
+
     pub(crate) fn actual_service_tier(&self) -> Option<&str> {
         self.actual_service_tier.as_deref()
     }
@@ -440,6 +444,10 @@ impl OpenAIResponsesProviderState {
             terminal_only: true,
             ..Self::default()
         }
+    }
+
+    pub(crate) fn has_started(&self) -> bool {
+        self.started
     }
 
     pub(crate) fn actual_service_tier(&self) -> Option<&str> {

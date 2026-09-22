@@ -16,6 +16,7 @@
 | [ADR-0045：Signed provenance for tunnel release upgrades](../architecture/adr-0045-signed-tunnel-release-provenance.md) | Accepted（核心验签已实现） | 发布清单签名/校验；完整发布矩阵和生产轮换演练延期 |
 | [ADR-0046：Bounded gateway readiness and health contract](../architecture/adr-0046-readiness-health-contract.md) | Accepted | readiness/health 合同；生产容量与告警验收延期 |
 | [ADR-0050：Tunnel signing key rotation overlap](../architecture/adr-0050-tunnel-signing-key-rotation.md) | Accepted（部分实现） | key ID、有效期、重叠和撤销语义；持久化与 wire integration 延期 |
+| [ADR-0052：鉴权/配置类进程内缓存的跨节点失效通道](../architecture/adr-0052-cache-invalidation-channel.md) | Proposed（Issue #509） | Redis pub/sub 失效广播契约；实现与多节点一致性测试延期 |
 | [架构与请求数据流索引](../architecture/README.md) | 维护入口 | 编号 ADR 状态、请求数据流和维护规则 |
 
 | 决策 | 状态 | 范围 |

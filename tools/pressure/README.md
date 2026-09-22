@@ -43,3 +43,4 @@ upstream、probe、checker、报告产出）端到端可用并上传报告 artif
 - 多节点部署与 DB 池预算拆分：`../../docs/operations/multi-node-deployment.md`
 - Redis 故障降级语义与一致性优先开关：`../../docs/adr/redis-consistency-first.md`
 - 多节点验收流程决策：`../../docs/issue-triage/issue-224-multi-node-decision.md`
+- 容量曲线回归（capacity_curve_baseline）跑法与基线记录位置：`../../docs/operations/capacity-curve-baseline.md`

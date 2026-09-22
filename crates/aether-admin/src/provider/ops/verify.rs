@@ -41,15 +41,29 @@ pub fn parse_verify_payload(
     }
 }
 
+/// Extracts the value of `key` from a cookie header/body.
+///
+/// Fails closed: when the input is a cookie jar (contains `name=value` pairs) but `key` is
+/// absent, an empty string is returned instead of falling back to the raw input, so a wrong
+/// credential is never forwarded upstream as a cookie value. Only a bare token without any
+/// `=` is passed through for legacy providers.
 pub fn admin_provider_ops_extract_cookie_value(cookie_input: &str, key: &str) -> String {
+    let mut saw_cookie_pair = false;
     for part in cookie_input.split(';') {
         let trimmed = part.trim();
         let Some((name, value)) = trimmed.split_once('=') else {
             continue;
         };
+        if name.trim().is_empty() {
+            continue;
+        }
+        saw_cookie_pair = true;
         if name.trim() == key {
             return value.trim().to_string();
         }
+    }
+    if saw_cookie_pair {
+        return String::new();
     }
     cookie_input.trim().to_string()
 }
@@ -109,7 +123,11 @@ fn admin_provider_ops_cubence_cookie_header(cookie_input: &str) -> String {
 
     if cookies.is_empty() {
         let token = admin_provider_ops_extract_cookie_value(trimmed, "token");
-        return format!("token={token}");
+        return if token.is_empty() {
+            String::new()
+        } else {
+            format!("token={token}")
+        };
     }
 
     cookies.join("; ")
@@ -118,6 +136,9 @@ fn admin_provider_ops_cubence_cookie_header(cookie_input: &str) -> String {
 fn admin_provider_ops_session_cookie_header(cookie_input: &str) -> String {
     let trimmed = admin_provider_ops_strip_cookie_header_prefix(cookie_input);
     let session = admin_provider_ops_extract_cookie_value(trimmed, "session");
+    if session.is_empty() {
+        return String::new();
+    }
     format!("session={session}")
 }
 
@@ -462,11 +483,10 @@ pub fn admin_provider_ops_verify_headers(
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
             {
-                insert_header(
-                    &mut headers,
-                    "Cookie",
-                    &admin_provider_ops_session_cookie_header(session_cookie),
-                )?;
+                let cookie_header = admin_provider_ops_session_cookie_header(session_cookie);
+                if !cookie_header.is_empty() {
+                    insert_header(&mut headers, "Cookie", &cookie_header)?;
+                }
             }
         }
         "done_hub" => {
@@ -476,11 +496,10 @@ pub fn admin_provider_ops_verify_headers(
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
             {
-                insert_header(
-                    &mut headers,
-                    "Cookie",
-                    &admin_provider_ops_session_cookie_header(session_cookie),
-                )?;
+                let cookie_header = admin_provider_ops_session_cookie_header(session_cookie);
+                if !cookie_header.is_empty() {
+                    insert_header(&mut headers, "Cookie", &cookie_header)?;
+                }
             }
         }
         "anyrouter" => {
@@ -503,7 +522,9 @@ pub fn admin_provider_ops_verify_headers(
                     admin_provider_ops_strip_cookie_header_prefix(session_cookie),
                     "session",
                 );
-                cookies.push(format!("session={session}"));
+                if !session.is_empty() {
+                    cookies.push(format!("session={session}"));
+                }
                 if let Some(user_id) =
                     admin_provider_ops_anyrouter_parse_session_user_id(session_cookie)
                 {
@@ -908,10 +929,10 @@ mod tests {
         admin_provider_ops_anyrouter_parse_session_user_id,
         admin_provider_ops_anyrouter_verify_payload, admin_provider_ops_cubence_verify_payload,
         admin_provider_ops_extract_cookie_value, admin_provider_ops_frontend_updated_credentials,
-        admin_provider_ops_generic_verify_payload, admin_provider_ops_sub2api_verify_payload,
-        admin_provider_ops_usage_api_verify_payload, admin_provider_ops_verify_headers,
-        parse_verify_payload, ADMIN_PROVIDER_OPS_ANYROUTER_SESSION_PART_MAX_BYTES,
-        ADMIN_PROVIDER_OPS_USER_AGENT,
+        admin_provider_ops_generic_verify_payload, admin_provider_ops_session_cookie_header,
+        admin_provider_ops_sub2api_verify_payload, admin_provider_ops_usage_api_verify_payload,
+        admin_provider_ops_verify_headers, parse_verify_payload,
+        ADMIN_PROVIDER_OPS_ANYROUTER_SESSION_PART_MAX_BYTES, ADMIN_PROVIDER_OPS_USER_AGENT,
     };
     use http::StatusCode;
     use reqwest::header::COOKIE;
@@ -952,12 +973,72 @@ mod tests {
             "right"
         );
         assert_eq!(
-            admin_provider_ops_extract_cookie_value("bare-token==", "key"),
-            "bare-token=="
+            admin_provider_ops_extract_cookie_value("bare-token", "key"),
+            "bare-token"
         );
         assert_eq!(
             admin_provider_ops_extract_cookie_value("monkey=wrong", "key"),
-            "monkey=wrong"
+            "",
+            "a cookie jar without the requested key must fail closed"
+        );
+    }
+
+    #[test]
+    fn extract_cookie_value_never_forwards_a_wrong_cookie_jar() {
+        for input in [
+            "monkey=wrong",
+            "token=abc; other=def",
+            "Cookie: monkey=wrong",
+            "bare-token==",
+        ] {
+            assert!(
+                admin_provider_ops_extract_cookie_value(input, "session").is_empty(),
+                "wrong credential {input:?} must not be forwarded as a cookie value"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_headers_never_sends_wrong_session_cookie_upstream() {
+        for architecture in ["nekocode", "done_hub"] {
+            let credentials = json!({"session_cookie": "monkey=wrong"});
+            let headers = admin_provider_ops_verify_headers(
+                architecture,
+                &Map::new(),
+                credentials.as_object().expect("object credentials"),
+            )
+            .expect("headers should build");
+            assert!(
+                headers.get("cookie").is_none(),
+                "{architecture} must not send a Cookie header for a wrong session credential"
+            );
+        }
+        let credentials = json!({"session_cookie": "monkey=wrong"});
+        let headers = admin_provider_ops_verify_headers(
+            "anyrouter",
+            &Map::new(),
+            credentials.as_object().expect("object credentials"),
+        )
+        .expect("headers should build");
+        let cookie = headers
+            .get("cookie")
+            .map(|value| value.to_str().expect("cookie header should be ascii"));
+        assert!(
+            cookie.is_none() || !cookie.expect("checked above").contains("monkey=wrong"),
+            "anyrouter must not forward the wrong session credential upstream"
+        );
+    }
+
+    #[test]
+    fn session_cookie_header_is_empty_when_session_key_is_missing() {
+        assert_eq!(
+            admin_provider_ops_session_cookie_header("session=abc; other=def"),
+            "session=abc"
+        );
+        assert_eq!(admin_provider_ops_session_cookie_header("monkey=wrong"), "");
+        assert_eq!(
+            admin_provider_ops_session_cookie_header("Cookie: session=abc"),
+            "session=abc"
         );
     }
 

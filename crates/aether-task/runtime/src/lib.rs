@@ -64,6 +64,9 @@ pub struct TaskSupervisorMetricsSnapshot {
     pub singleton_lease_error_total: u64,
     pub singleton_worker_exited_total: u64,
     pub singleton_worker_panic_total: u64,
+    /// True when the metrics lock was poisoned and the counters below could not be read.
+    /// Distinguishes a lock failure from a genuinely idle supervisor (all-zero counters).
+    pub metrics_lock_poisoned: bool,
     pub tasks: Vec<TaskSupervisorTaskSnapshot>,
 }
 
@@ -160,7 +163,10 @@ impl TaskSupervisorMetrics {
 
     pub fn snapshot(&self) -> TaskSupervisorMetricsSnapshot {
         let Ok(guard) = self.inner.lock() else {
-            return TaskSupervisorMetricsSnapshot::default();
+            return TaskSupervisorMetricsSnapshot {
+                metrics_lock_poisoned: true,
+                ..TaskSupervisorMetricsSnapshot::default()
+            };
         };
         let mut snapshot = TaskSupervisorMetricsSnapshot::default();
         for (task_name, counters) in guard.iter() {
@@ -218,8 +224,12 @@ impl TaskSupervisorMetrics {
         task_name: &'static str,
         update: impl FnOnce(&mut TaskSupervisorTaskCounters),
     ) {
-        if let Ok(mut guard) = self.inner.lock() {
-            update(guard.entry(task_name).or_default());
+        match self.inner.lock() {
+            Ok(mut guard) => update(guard.entry(task_name).or_default()),
+            Err(_) => warn!(
+                task_name,
+                "task supervisor metrics lock poisoned; counter update dropped"
+            ),
         }
     }
 }
@@ -427,6 +437,29 @@ mod tests {
             ticks.fetch_add(1, Ordering::Relaxed);
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
+    }
+
+    #[test]
+    fn supervisor_metrics_snapshot_reports_lock_poisoning() {
+        let metrics = TaskSupervisorMetrics::default();
+        assert!(
+            !metrics.snapshot().metrics_lock_poisoned,
+            "healthy lock must not be reported as poisoned"
+        );
+
+        let inner = Arc::clone(&metrics.inner);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = inner.lock().expect("lock should be uncontended");
+            panic!("intentional panic to poison the metrics lock");
+        }));
+
+        let snapshot = metrics.snapshot();
+        assert!(
+            snapshot.metrics_lock_poisoned,
+            "poisoned lock must be distinguishable from an idle supervisor"
+        );
+        assert_eq!(snapshot.active_tasks, 0);
+        assert!(snapshot.tasks.is_empty());
     }
 
     #[tokio::test]

@@ -101,6 +101,15 @@ pub struct IdentityOAuthExchangeContext {
     pub pkce_verifier: Option<String>,
     /// Field: network.
     pub network: OAuthNetworkContext,
+    /// Field: expected state.
+    ///
+    /// Optional crate-level defense in depth (issue #210): when set, the
+    /// service layer refuses to exchange the authorization code unless it
+    /// equals [`IdentityOAuthExchangeContext::state`]. Callers that keep the
+    /// server-side state/nonce outside the crate (for example in a
+    /// single-use store) should pass it here so a wiring mistake fails
+    /// closed even if the caller-side check is ever skipped.
+    pub expected_state: Option<String>,
 }
 
 impl std::fmt::Debug for IdentityOAuthExchangeContext {
@@ -109,6 +118,10 @@ impl std::fmt::Debug for IdentityOAuthExchangeContext {
             .debug_struct("IdentityOAuthExchangeContext")
             .field("code", &"[REDACTED]")
             .field("state", &"[REDACTED]")
+            .field(
+                "expected_state",
+                &self.expected_state.as_ref().map(|_| "[REDACTED]"),
+            )
             .field(
                 "pkce_verifier",
                 &self.pkce_verifier.as_ref().map(|_| "[REDACTED]"),
@@ -282,6 +295,26 @@ pub(crate) fn form_headers() -> BTreeMap<String, String> {
     ])
 }
 
+/// Crate-level state defense in depth for the OAuth exchange (issue #210).
+///
+/// When the caller supplies the server-side expected state, the exchange must
+/// carry the identical value; any mismatch (including an empty callback
+/// state) fails closed before the authorization code is sent to the token
+/// endpoint. Callers that leave [`IdentityOAuthExchangeContext::expected_state`]
+/// as `None` keep the previous pass-through behavior and remain responsible
+/// for validating state themselves.
+pub(crate) fn validate_exchange_state(
+    ctx: &IdentityOAuthExchangeContext,
+) -> Result<(), OAuthError> {
+    let Some(expected_state) = ctx.expected_state.as_deref() else {
+        return Ok(());
+    };
+    if expected_state.is_empty() || expected_state != ctx.state {
+        return Err(OAuthError::invalid_request("oauth state mismatch"));
+    }
+    Ok(())
+}
+
 /// Requires an HTTPS endpoint URL, except for HTTP on localhost or loopback
 /// IPs used by local development identity providers. This mirrors the
 /// gateway-side OAuth endpoint policy so the crate also fails closed when a
@@ -309,8 +342,9 @@ pub(crate) fn validate_identity_endpoint_url(field: &str, value: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        mapped_bool, validate_identity_endpoint_url, ExternalIdentity, IdentityClaims,
-        IdentityOAuthExchangeContext, IdentityOAuthProviderConfig, IdentityOAuthStartContext,
+        mapped_bool, validate_exchange_state, validate_identity_endpoint_url, ExternalIdentity,
+        IdentityClaims, IdentityOAuthExchangeContext, IdentityOAuthProviderConfig,
+        IdentityOAuthStartContext,
     };
     use crate::network::OAuthNetworkContext;
     use serde_json::json;
@@ -341,6 +375,7 @@ mod tests {
             state: "identity-exchange-state-canary".to_string(),
             pkce_verifier: Some("identity-verifier-canary".to_string()),
             network: OAuthNetworkContext::direct_identity(),
+            expected_state: Some("identity-expected-state-canary".to_string()),
         };
         let external = ExternalIdentity {
             provider_type: "custom".to_string(),
@@ -370,6 +405,7 @@ mod tests {
             "identity-challenge-canary",
             "identity-code-canary",
             "identity-exchange-state-canary",
+            "identity-expected-state-canary",
             "identity-verifier-canary",
             "identity-raw-canary",
             "identity-claims-canary",
@@ -407,6 +443,44 @@ mod tests {
                 validate_identity_endpoint_url("token_url", value).is_err(),
                 "accepted {value}"
             );
+        }
+    }
+
+    #[test]
+    fn exchange_state_enforcement_fails_closed_on_mismatch() {
+        let base = IdentityOAuthExchangeContext {
+            code: "code".to_string(),
+            state: "server-state".to_string(),
+            pkce_verifier: None,
+            network: OAuthNetworkContext::direct_identity(),
+            expected_state: Some("server-state".to_string()),
+        };
+        assert!(validate_exchange_state(&base).is_ok());
+
+        for (state, expected_state) in [
+            ("attacker-state", Some("server-state".to_string())),
+            ("", Some("server-state".to_string())),
+            ("server-state", Some(String::new())),
+            ("server-state", None),
+            ("", None),
+        ] {
+            let ctx = IdentityOAuthExchangeContext {
+                state: state.to_string(),
+                expected_state,
+                ..base.clone()
+            };
+            if ctx.expected_state.is_none() {
+                assert!(validate_exchange_state(&ctx).is_ok());
+            } else {
+                assert!(
+                    matches!(
+                        validate_exchange_state(&ctx),
+                        Err(crate::core::OAuthError::InvalidRequest(_))
+                    ),
+                    "state={state:?} expected={:?} must fail closed",
+                    ctx.expected_state
+                );
+            }
         }
     }
 

@@ -74,8 +74,9 @@ impl VideoTaskService {
         )
     }
 
-    pub fn record_snapshot(&self, snapshot: LocalVideoTaskSnapshot) {
-        self.store.insert(snapshot);
+    /// Returns true when the snapshot was durably recorded; false means it was rejected.
+    pub fn record_snapshot(&self, snapshot: LocalVideoTaskSnapshot) -> bool {
+        self.store.insert(snapshot)
     }
 
     pub fn replace_local_snapshot(
@@ -98,19 +99,20 @@ impl VideoTaskService {
         let Some(snapshot) = LocalVideoTaskSnapshot::from_stored_task(task) else {
             return false;
         };
-        self.store.insert(snapshot);
-        true
+        self.store.insert(snapshot)
     }
 
-    pub fn apply_finalize_mutation(&self, request_path: &str, report_kind: &str) {
+    /// Returns true when a mutation was resolved and durably applied; false when there was
+    /// nothing to apply or the store rejected the mutation.
+    pub fn apply_finalize_mutation(&self, request_path: &str, report_kind: &str) -> bool {
         let Some(mutation) = resolve_local_video_registry_mutation(
             self.truth_source_mode,
             request_path,
             report_kind,
         ) else {
-            return;
+            return false;
         };
-        self.store.apply_mutation(mutation);
+        self.store.apply_mutation(mutation)
     }
 
     pub fn read_response(

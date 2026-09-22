@@ -17,6 +17,7 @@ aether-runtime.workspace = true
 aether-runtime-state.workspace = true
 aether-testkit = { workspace = true, features = ["gateway", "postgres"] }
 axum.workspace = true
+clap = { version = "4", features = ["derive"] }
 futures-util.workspace = true
 http.workspace = true
 reqwest.workspace = true

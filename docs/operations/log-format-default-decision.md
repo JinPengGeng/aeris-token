@@ -1,8 +1,14 @@
 # 决策记录：AETHER_LOG_FORMAT 默认值
 
-状态：Accepted（2026-09-21，批次 F / Refs #217）
-范围：仅决策文档。本记录**不改变**任何运行时默认行为；`AETHER_LOG_FORMAT` 仍默认为
-`pretty`，JSON 仍需显式设置。
+状态：Amended（2026-09-22，批次 #217 监控栈交付）。compose 资产默认已切换为
+`json`（仅 `docker-compose.yml` 的 `${AETHER_LOG_FORMAT:-json}`）；网关 CLI 默认值
+仍为 `pretty`，JSON 仍可通过 CLI/环境变量显式开启。本记录其余部分保留原始决策
+背景。
+
+修订依据：`docker-compose.yml` 属于仓库随带的部署资产而非运行时默认值，切换其
+占位默认值不满足"破坏性运行时行为变更"的否决条件（条件 3 针对 compose 资产的
+同步要求由本批次满足：compose 与 `request-red-telemetry.md` 已同步）。历史部署
+若依赖 pretty，设置 `AETHER_LOG_FORMAT=pretty` 即可无损回滚。
 
 ## 背景
 
