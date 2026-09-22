@@ -1,0 +1,59 @@
+{{- if .Values.background.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aether-gateway.fullname" . }}-background
+  labels:
+    {{- include "aether-gateway.labels" . | nindent 4 }}
+    aether.dev/node-role: background
+spec:
+  replicas: {{ .Values.background.replicas }}
+  selector:
+    matchLabels:
+      {{- include "aether-gateway.labels" . | nindent 6 }}
+      aether.dev/node-role: background
+  template:
+    metadata:
+      labels:
+        {{- include "aether-gateway.labels" . | nindent 8 }}
+        aether.dev/node-role: background
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: gateway
+          image: {{ include "aether-gateway.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8084
+          env:
+            {{- include "aether-gateway.env" . | nindent 12 }}
+            - name: AETHER_GATEWAY_DATA_POSTGRES_MAX_CONNECTIONS
+              value: {{ .Values.background.maxConnections | quote }}
+            - name: AETHER_GATEWAY_NODE_ROLE
+              value: "background"
+            - name: AETHER_GATEWAY_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            {{- toYaml .Values.background.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8084 }
+            periodSeconds: 5
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

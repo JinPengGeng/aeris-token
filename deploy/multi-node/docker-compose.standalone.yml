@@ -1,0 +1,161 @@
+# Aether 多节点独立部署配置 - 单主机可复核的三节点拓扑
+#
+# 与 docker-compose.yml（外部 Postgres/Redis/relay 的生产基线）不同，本文件把
+# Postgres、Redis（AOF 持久化）与 nginx 负载均衡器一并纳入编排，用于隔离环境的
+# 多节点功能验证与压测前置演练。生产环境请使用外部托管 Postgres/Redis，并参考
+# docs/operations/multi-node-deployment.md 的 DB 池预算拆分公式。
+#
+# 使用方法:
+#   cp .env.standalone.example .env.standalone   # 替换所有 REPLACE_* 占位
+#   docker compose --env-file .env.standalone \
+#     -f deploy/multi-node/docker-compose.standalone.yml up -d
+
+name: aether-multi-node-standalone
+
+x-gateway: &gateway
+  image: ${APP_IMAGE:?set APP_IMAGE via --env-file}
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp:rw,nosuid,nodev,noexec,mode=1777]
+  expose: ["8084"]
+  stop_grace_period: ${AETHER_APP_STOP_GRACE_PERIOD:-90s}
+  cpus: ${AETHER_APP_CPU_LIMIT:-2.0}
+  mem_limit: ${AETHER_APP_MEMORY_LIMIT:-2g}
+  pids_limit: ${AETHER_APP_PIDS_LIMIT:-512}
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "100m"
+      max-file: "10"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+x-gateway-env: &gateway-env
+  AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY: multi-node
+  AETHER_DATABASE_DRIVER: postgres
+  AETHER_DATABASE_URL: postgresql://postgres:${DB_PASSWORD:?set DB_PASSWORD in .env.standalone}@postgres:5432/aether
+  AETHER_GATEWAY_DATA_POSTGRES_MIN_CONNECTIONS: ${AETHER_GATEWAY_DATA_POSTGRES_MIN_CONNECTIONS:-12}
+  AETHER_GATEWAY_DATA_POSTGRES_MAX_CONNECTIONS: ${AETHER_GATEWAY_DATA_POSTGRES_MAX_CONNECTIONS:-40}
+  AETHER_GATEWAY_DATA_POSTGRES_REQUIRE_SSL: ${AETHER_GATEWAY_DATA_POSTGRES_REQUIRE_SSL:-false}
+  AETHER_GATEWAY_DATA_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.standalone}@redis:6379/0
+  AETHER_RUNTIME_BACKEND: redis
+  AETHER_GATEWAY_DATABASE_MODE: ${AETHER_GATEWAY_DATABASE_MODE:-verify-only}
+  AETHER_CONSISTENCY_FIRST: ${AETHER_CONSISTENCY_FIRST:-true}
+  AETHER_GATEWAY_TRUSTED_INGRESS_CIDRS: ${AETHER_GATEWAY_TRUSTED_INGRESS_CIDRS:?set to the nginx/LB CIDR only}
+  AETHER_TUNNEL_RELAY_BASE_URL: ${AETHER_TUNNEL_RELAY_BASE_URL:-}
+  AETHER_LOG_DESTINATION: stdout
+  AETHER_LOG_FORMAT: ${AETHER_LOG_FORMAT:-pretty}
+  ENVIRONMENT: ${ENVIRONMENT:-production}
+  APP_PORT: 8084
+  TZ: Asia/Shanghai
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY in .env.standalone}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env.standalone}
+
+services:
+  postgres:
+    # OCI index digest for the official multi-architecture postgres:15.19 image.
+    image: postgres:15.19@sha256:5f72c7b5bd616308ccfd2e74d6be16fb06364e5eecbb815fe9dc6ab9761d2111
+    shm_size: ${POSTGRES_SHM_SIZE:-512mb}
+    cpus: ${POSTGRES_CPU_LIMIT:-2.0}
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-3g}
+    pids_limit: ${POSTGRES_PIDS_LIMIT:-512}
+    environment:
+      POSTGRES_DB: aether
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env.standalone}
+      TZ: Asia/Shanghai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    command: >
+      postgres
+      -c idle_in_transaction_session_timeout=30000
+      -c tcp_keepalives_idle=30
+      -c tcp_keepalives_interval=10
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c pg_stat_statements.max=10000
+      -c max_connections=${POSTGRES_MAX_CONNECTIONS:-200}
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-1GB}
+      -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-3GB}
+      -c work_mem=${POSTGRES_WORK_MEM:-16MB}
+      -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    # OCI index digest for the official multi-architecture redis:7.4.11-alpine image.
+    image: redis:7.4.11-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    cpus: ${REDIS_CPU_LIMIT:-1.0}
+    mem_limit: ${REDIS_MEMORY_LIMIT:-512m}
+    pids_limit: ${REDIS_PIDS_LIMIT:-256}
+    # 多节点下 Redis 是唯一的跨节点协调层：开启 AOF 每秒刷盘，避免重启丢失
+    # 限额计数、分布式锁与 usage 队列（外部生产基线由托管实例保证持久化）。
+    command: >
+      redis-server --appendonly yes --appendfsync everysec
+      --dir /data --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.standalone}
+      --maxclients ${REDIS_MAXCLIENTS:-10000}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  frontdoor-1:
+    <<: *gateway
+    environment:
+      <<: *gateway-env
+      AETHER_GATEWAY_NODE_ROLE: frontdoor
+      AETHER_GATEWAY_INSTANCE_ID: frontdoor-1
+
+  frontdoor-2:
+    <<: *gateway
+    environment:
+      <<: *gateway-env
+      AETHER_GATEWAY_NODE_ROLE: frontdoor
+      AETHER_GATEWAY_INSTANCE_ID: frontdoor-2
+
+  background:
+    <<: *gateway
+    environment:
+      <<: *gateway-env
+      AETHER_GATEWAY_NODE_ROLE: background
+      AETHER_GATEWAY_INSTANCE_ID: background-1
+      # background 不承接入口流量，池预算让给后台任务。
+      AETHER_GATEWAY_DATA_POSTGRES_MAX_CONNECTIONS: ${AETHER_BACKGROUND_POSTGRES_MAX_CONNECTIONS:-60}
+
+  lb:
+    # nginx:1.27-alpine（多架构）；与根 compose 的 LB 一样不在仓库内 pin digest，
+    # 生产部署时用内部镜像仓的 digest 替换。
+    image: nginx:1.27-alpine
+    container_name: aether-lb
+    cpus: ${LB_CPU_LIMIT:-0.5}
+    mem_limit: ${LB_MEMORY_LIMIT:-128m}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/var/cache/nginx:rw,nosuid,nodev,noexec,mode=1777]
+    volumes:
+      - ./nginx/lb.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${LB_PORT:-8080}:8080"
+    depends_on:
+      - frontdoor-1
+      - frontdoor-2
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
