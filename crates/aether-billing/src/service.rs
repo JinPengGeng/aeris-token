@@ -228,6 +228,9 @@ impl BillingService {
         input: &BillingUsageInput,
         pricing_resolution: BillingPricingResolution,
     ) -> Result<BillingComputation, ExpressionEvaluationError> {
+        pricing
+            .validate_provider_api_key_rate_multipliers()
+            .map_err(|err| ExpressionEvaluationError::Failed(err.to_string()))?;
         if pricing_resolution.requires_actual_processing_tier() {
             return Ok(no_rule_computation(
                 pricing,
@@ -1123,6 +1126,41 @@ mod tests {
         assert!(result.cost_result.cost > 0.0);
         assert!(result.actual_total_cost > 0.0);
         assert_eq!(result.rate_multiplier, 0.5);
+    }
+
+    #[test]
+    fn calculate_rejects_invalid_provider_rate_multiplier() {
+        let mut pricing = pricing();
+        pricing.provider_api_key_rate_multipliers = Some(json!({"openai:chat": -0.5}));
+
+        let error = BillingService::new()
+            .calculate(
+                &pricing,
+                &BillingUsageInput {
+                    task_type: "chat".to_string(),
+                    api_format: Some("openai:chat".to_string()),
+                    requested_processing_tier: None,
+                    actual_processing_tier: None,
+                    request_count: 1,
+                    input_tokens: 1_000,
+                    output_tokens: 500,
+                    cache_creation_tokens: 0,
+                    cache_creation_ephemeral_5m_tokens: 0,
+                    cache_creation_ephemeral_1h_tokens: 0,
+                    cache_read_tokens: 0,
+                    image_count: 0,
+                    image_size: None,
+                    image_quality: None,
+                    image_output_format: None,
+                    cache_ttl_minutes: None,
+                },
+            )
+            .expect_err("a negative rate multiplier must fail closed");
+
+        assert!(
+            error.to_string().contains("finite non-negative"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

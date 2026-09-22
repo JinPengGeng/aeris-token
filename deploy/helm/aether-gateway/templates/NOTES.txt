@@ -1,0 +1,10 @@
+Aether gateway 已部署：
+
+- frontdoor: {{ .Values.frontdoor.replicas }} 副本，Service {{ include "aether-gateway.fullname" . }}-frontdoor:{{ .Values.service.port }}
+- background: {{ .Values.background.enabled | ternary .Values.background.replicas 0 }} 副本（不接入入口流量）
+
+后续：
+1. 在你的 Ingress / 负载均衡上指向 frontdoor Service；就绪检查 /readyz，存活 /health。
+2. 确认 AETHER_GATEWAY_TRUSTED_INGRESS_CIDRS 只包含实际反代网段。
+3. 按 docs/operations/multi-node-deployment.md 核对 Postgres max_connections >= 池预算总和 + 20。
+4. 进程内缓存漂移窗口见 docs/operations/in-process-cache-drift.md。

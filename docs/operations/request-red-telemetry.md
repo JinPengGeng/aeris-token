@@ -75,15 +75,17 @@ human-readable message.
 
 ## Pretty/JSON compatibility and migration
 
-Pretty remains the default to preserve local development and existing
-deployments.  Select structured output explicitly:
+JSON is now the default in `docker-compose.yml`
+(`${AETHER_LOG_FORMAT:-json}`, switched per #217) so log collectors can parse
+one JSON object per line out of the box. The gateway CLI default remains
+`pretty`; select either explicitly:
 
 ```sh
-AETHER_LOG_FORMAT=json docker compose up app
+AETHER_LOG_FORMAT=pretty docker compose up app   # opt back in to pretty
+AETHER_LOG_FORMAT=json docker compose up app     # explicit json (same as default)
 ```
 
-The compose files already expose `AETHER_LOG_FORMAT` and retain
-`${AETHER_LOG_FORMAT:-pretty}`.  A collector migration should:
+The compose files expose `AETHER_LOG_FORMAT`. A collector migration should:
 
 1. deploy a canary with `AETHER_LOG_FORMAT=json` and parse one JSON object per
    line;
