@@ -22,8 +22,9 @@ pub use error::RuntimeBootstrapError;
 pub use metrics::{
     prometheus_response, record_billing_enrichment_failure, record_billing_fail_open_daily_quota,
     record_billing_fail_open_rpm, record_billing_insufficient_quota,
-    record_billing_settlement_failure, record_video_task_settlement_failure, service_up_sample,
-    MetricKind, MetricLabel, MetricSample,
+    record_billing_settlement_duration_seconds, record_billing_settlement_failure,
+    record_video_task_settlement_failure, service_up_sample, LogHistogram, MetricHistogram,
+    MetricKind, MetricLabel, MetricSample, DEFAULT_LATENCY_BUCKETS_SECONDS,
 };
 pub use observability::{
     FileLoggingConfig, LogDestination, LogRotation, ServiceObservabilityConfig,

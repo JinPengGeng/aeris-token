@@ -8,7 +8,7 @@ use std::time::Duration;
 use aether_data_contracts::repository::candidates::{
     RequestCandidateStatus, RequestCandidateWriteRepository, UpsertRequestCandidateRecord,
 };
-use aether_runtime::{MetricKind, MetricSample};
+use aether_runtime::{LogHistogram, MetricKind, MetricSample, DEFAULT_LATENCY_BUCKETS_SECONDS};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::{interval, Instant, MissedTickBehavior};
 use tracing::{debug, warn};
@@ -115,7 +115,7 @@ impl RequestCandidateQueueConfig {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct RequestCandidateQueueMetrics {
     queued_current: AtomicUsize,
     pending_current: AtomicUsize,
@@ -147,6 +147,46 @@ struct RequestCandidateQueueMetrics {
     compacted_total: AtomicU64,
     sync_fallback_total: AtomicU64,
     retry_states: Mutex<HashMap<(usize, RequestCandidateQueueLane), RequestCandidateRetryState>>,
+    /// Enqueue-to-flush dwell distribution for the normal persistence lane.
+    normal_dwell_seconds: LogHistogram,
+}
+
+impl Default for RequestCandidateQueueMetrics {
+    fn default() -> Self {
+        Self {
+            queued_current: AtomicUsize::new(0),
+            pending_current: AtomicUsize::new(0),
+            priority_queued_current: AtomicUsize::new(0),
+            priority_max_queued: AtomicUsize::new(0),
+            priority_pending_current: AtomicUsize::new(0),
+            active_queued_current: AtomicUsize::new(0),
+            active_max_queued: AtomicUsize::new(0),
+            active_pending_current: AtomicUsize::new(0),
+            terminal_queued_current: AtomicUsize::new(0),
+            terminal_max_queued: AtomicUsize::new(0),
+            terminal_pending_current: AtomicUsize::new(0),
+            terminal_barrier_pending: AtomicUsize::new(0),
+            terminal_barrier_max_pending: AtomicUsize::new(0),
+            enqueued_total: AtomicU64::new(0),
+            priority_enqueued_total: AtomicU64::new(0),
+            priority_async_overflow_total: AtomicU64::new(0),
+            dropped_total: AtomicU64::new(0),
+            flushed_total: AtomicU64::new(0),
+            priority_flushed_total: AtomicU64::new(0),
+            flush_failed_total: AtomicU64::new(0),
+            permanent_dropped_total: AtomicU64::new(0),
+            flush_batches_total: AtomicU64::new(0),
+            flush_sql_ops_total: AtomicU64::new(0),
+            flush_sql_records_total: AtomicU64::new(0),
+            db_write_in_flight: AtomicUsize::new(0),
+            db_write_max_in_flight: AtomicUsize::new(0),
+            db_write_wait_total: AtomicU64::new(0),
+            compacted_total: AtomicU64::new(0),
+            sync_fallback_total: AtomicU64::new(0),
+            retry_states: Mutex::new(HashMap::new()),
+            normal_dwell_seconds: LogHistogram::new(&DEFAULT_LATENCY_BUCKETS_SECONDS),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -194,6 +234,14 @@ struct RequestCandidateTerminalQueueRecord {
     barrier: Arc<RequestCandidateTerminalBarrier>,
 }
 
+/// Normal-lane channel item carrying the enqueue timestamp so the flush side
+/// can export an enqueue-to-flush dwell distribution.
+#[derive(Debug)]
+struct NormalQueueItem {
+    record: UpsertRequestCandidateRecord,
+    enqueued_at: Instant,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestCandidateLifecycleLane {
     Active,
@@ -208,7 +256,7 @@ enum RequestCandidatePriorityEnqueueError {
 
 #[derive(Clone)]
 pub(crate) struct RequestCandidateQueueRuntime {
-    senders: Vec<mpsc::Sender<UpsertRequestCandidateRecord>>,
+    senders: Vec<mpsc::Sender<NormalQueueItem>>,
     active_senders: Vec<mpsc::Sender<RequestCandidateActiveQueueMessage>>,
     terminal_senders: Vec<mpsc::Sender<RequestCandidateTerminalQueueRecord>>,
     normal_admission: Arc<Semaphore>,
@@ -314,26 +362,30 @@ impl RequestCandidateQueueRuntime {
         };
         self.metrics.queued_current.fetch_add(1, Ordering::AcqRel);
         self.metrics.pending_current.fetch_add(1, Ordering::AcqRel);
-        match sender.try_send(record) {
+        match sender.try_send(NormalQueueItem {
+            record,
+            enqueued_at: Instant::now(),
+        }) {
             Ok(()) => {
                 admission.forget();
                 self.metrics.enqueued_total.fetch_add(1, Ordering::AcqRel);
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Full(record)) => {
+            Err(mpsc::error::TrySendError::Full(item)) => {
                 drop(admission);
                 decrement_atomic_usize(&self.metrics.queued_current);
                 decrement_atomic_usize(&self.metrics.pending_current);
-                self.handle_normal_queue_full(worker_index, record).await
+                self.handle_normal_queue_full(worker_index, item.record)
+                    .await
             }
-            Err(mpsc::error::TrySendError::Closed(record)) => {
+            Err(mpsc::error::TrySendError::Closed(item)) => {
                 drop(admission);
                 decrement_atomic_usize(&self.metrics.queued_current);
                 decrement_atomic_usize(&self.metrics.pending_current);
                 self.metrics
                     .sync_fallback_total
                     .fetch_add(1, Ordering::AcqRel);
-                self.repository.upsert(record).await.map(|_| ())
+                self.repository.upsert(item.record).await.map(|_| ())
             }
         }
     }
@@ -882,12 +934,18 @@ impl RequestCandidateQueueRuntime {
                 MetricKind::Counter,
                 self.metrics.sync_fallback_total.load(Ordering::Acquire),
             ),
+            MetricSample::histogram(
+                "request_candidate_queue_dwell_seconds",
+                "Enqueue-to-flush dwell duration of normal-lane request candidate records in seconds.",
+                self.metrics.normal_dwell_seconds.snapshot(),
+                Vec::new(),
+            ),
         ]
     }
 
     fn spawn_workers(
         self: &Arc<Self>,
-        receivers: Vec<mpsc::Receiver<UpsertRequestCandidateRecord>>,
+        receivers: Vec<mpsc::Receiver<NormalQueueItem>>,
         active_receivers: Vec<mpsc::Receiver<RequestCandidateActiveQueueMessage>>,
         terminal_receivers: Vec<mpsc::Receiver<RequestCandidateTerminalQueueRecord>>,
     ) {
@@ -1065,7 +1123,7 @@ fn release_terminal_barriers(
 }
 
 fn collect_ready_normal_batch(
-    receiver: &mut mpsc::Receiver<UpsertRequestCandidateRecord>,
+    receiver: &mut mpsc::Receiver<NormalQueueItem>,
     batch: &mut Vec<UpsertRequestCandidateRecord>,
     batch_size: usize,
     metrics: &RequestCandidateQueueMetrics,
@@ -1073,9 +1131,12 @@ fn collect_ready_normal_batch(
 ) {
     while *receiver_open && batch.len() < batch_size.max(1) {
         match receiver.try_recv() {
-            Ok(record) => {
+            Ok(item) => {
                 decrement_atomic_usize(&metrics.queued_current);
-                batch.push(record);
+                metrics
+                    .normal_dwell_seconds
+                    .observe_seconds(item.enqueued_at.elapsed().as_secs_f64());
+                batch.push(item.record);
             }
             Err(mpsc::error::TryRecvError::Empty) => break,
             Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -1091,7 +1152,7 @@ async fn run_worker(
     metrics: Arc<RequestCandidateQueueMetrics>,
     db_write_gate: Option<Arc<RequestCandidateDbWriteGate>>,
     worker_index: usize,
-    mut receiver: mpsc::Receiver<UpsertRequestCandidateRecord>,
+    mut receiver: mpsc::Receiver<NormalQueueItem>,
     mut active_receiver: mpsc::Receiver<RequestCandidateActiveQueueMessage>,
     mut terminal_receiver: mpsc::Receiver<RequestCandidateTerminalQueueRecord>,
     normal_admission: Arc<Semaphore>,
@@ -1371,10 +1432,13 @@ async fn run_worker(
             }
             received = receiver.recv(), if receiver_open => {
                 match received {
-                    Some(record) => {
+                    Some(item) => {
                         consecutive_priority_flushes = 0;
                         decrement_atomic_usize(&metrics.queued_current);
-                        batch.push(record);
+                        metrics
+                            .normal_dwell_seconds
+                            .observe_seconds(item.enqueued_at.elapsed().as_secs_f64());
+                        batch.push(item.record);
                         if batch.len() >= config.batch_size {
                             flush_batch(
                                 &repository,
@@ -2545,11 +2609,12 @@ mod tests {
         collect_active_micro_batch, compact_records_for_flush, flush_batch,
         parse_request_candidate_background_runtime_threads, request_candidate_retry_delay,
         request_candidate_retry_is_ready, request_candidate_write_error_disposition, run_worker,
-        spawn_on_request_candidate_background_runtime, RequestCandidateActiveQueueMessage,
-        RequestCandidateQueueConfig, RequestCandidateQueueLane, RequestCandidateQueueMetrics,
-        RequestCandidateQueueRuntime, RequestCandidateTerminalBarrier,
-        RequestCandidateTerminalQueueRecord, RequestCandidateWriteErrorDisposition,
-        MAX_CONSECUTIVE_ACTIVE_FLUSHES, MAX_CONSECUTIVE_PRIORITY_FLUSHES,
+        spawn_on_request_candidate_background_runtime, NormalQueueItem,
+        RequestCandidateActiveQueueMessage, RequestCandidateQueueConfig, RequestCandidateQueueLane,
+        RequestCandidateQueueMetrics, RequestCandidateQueueRuntime,
+        RequestCandidateTerminalBarrier, RequestCandidateTerminalQueueRecord,
+        RequestCandidateWriteErrorDisposition, MAX_CONSECUTIVE_ACTIVE_FLUSHES,
+        MAX_CONSECUTIVE_PRIORITY_FLUSHES,
     };
     use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
     use aether_data::DataLayerError;
@@ -2561,6 +2626,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::Semaphore;
+    use tokio::time::Instant;
 
     #[derive(Default)]
     struct DelayedPendingRequestCandidateRepository {
@@ -3309,12 +3375,10 @@ mod tests {
         let (terminal_sender, terminal_receiver) = tokio::sync::mpsc::channel(16);
 
         normal_sender
-            .send(record(
-                "normal-fairness",
-                0,
-                0,
-                RequestCandidateStatus::Available,
-            ))
+            .send(NormalQueueItem {
+                record: record("normal-fairness", 0, 0, RequestCandidateStatus::Available),
+                enqueued_at: Instant::now(),
+            })
             .await
             .expect("normal receiver open");
         for index in 0..(MAX_CONSECUTIVE_PRIORITY_FLUSHES * 2) {
@@ -3617,12 +3681,15 @@ mod tests {
             .await
             .expect("terminal receiver open");
         normal_sender
-            .send(record(
-                "normal-wakeup-sentinel",
-                0,
-                0,
-                RequestCandidateStatus::Available,
-            ))
+            .send(NormalQueueItem {
+                record: record(
+                    "normal-wakeup-sentinel",
+                    0,
+                    0,
+                    RequestCandidateStatus::Available,
+                ),
+                enqueued_at: Instant::now(),
+            })
             .await
             .expect("normal receiver open");
 
