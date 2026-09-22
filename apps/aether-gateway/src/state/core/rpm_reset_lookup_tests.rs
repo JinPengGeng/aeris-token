@@ -22,7 +22,7 @@ fn provider_rpm_reset_preserves_inclusive_window_and_timestamp_boundaries() {
 }
 
 #[test]
-fn provider_rpm_reset_keeps_keys_isolated_and_writes_clean_idle_expiration() {
+fn provider_rpm_reset_keeps_keys_isolated_and_amortizes_idle_expiration() {
     let state = AppState::new().expect("state should build");
     state.mark_provider_key_rpm_reset("expired", 100);
     state.mark_provider_key_rpm_reset("idle", 100);
@@ -30,19 +30,31 @@ fn provider_rpm_reset_keeps_keys_isolated_and_writes_clean_idle_expiration() {
     assert_eq!(state.provider_key_rpm_reset_at("missing", 161), None);
     assert_eq!(state.provider_key_rpm_reset_at("expired", 161), None);
     assert_eq!(state.provider_key_rpm_reset_at("fresh", 161), Some(130));
-    // Idle expired markers may remain physically stored until a write; reads
-    // never insert keys or sweep unrelated entries.
-    assert!(state
-        .provider_key_rpm_resets
-        .lock()
-        .unwrap()
-        .contains_key("idle"));
+    // Hot-path writes stay O(1): below the sweep high-water mark, expired
+    // markers of idle keys remain physically stored. Reads lazy-expire per
+    // key and never sweep unrelated entries.
+    assert!(state.provider_key_rpm_resets.contains_key("idle"));
     state.mark_provider_key_rpm_reset("fresh", 161);
-    assert_eq!(state.provider_key_rpm_resets.lock().unwrap().len(), 1);
+    assert!(state.provider_key_rpm_resets.contains_key("idle"));
     assert_eq!(state.provider_key_rpm_reset_at("fresh", 161), Some(161));
     // Preserve last-write-wins even if the caller's wall clock moves back.
     state.mark_provider_key_rpm_reset("fresh", 155);
     assert_eq!(state.provider_key_rpm_reset_at("fresh", 161), Some(155));
+}
+
+#[test]
+fn provider_rpm_reset_sweep_reclaims_expired_markers_past_high_water_mark() {
+    let state = AppState::new().expect("state should build");
+    // Fill past the sweep high-water mark; every marker is expired at now=161.
+    for key in 0..AppState::PROVIDER_KEY_RPM_RESET_SWEEP_MIN_LEN {
+        state.mark_provider_key_rpm_reset(&format!("idle-{key}"), 100);
+    }
+    assert_eq!(state.provider_key_rpm_resets.len(), 1024);
+    state.mark_provider_key_rpm_reset("active", 161);
+    // The write past the high-water mark pays one amortized O(n) sweep.
+    assert_eq!(state.provider_key_rpm_resets.len(), 1);
+    assert_eq!(state.provider_key_rpm_reset_at("active", 161), Some(161));
+    assert_eq!(state.provider_key_rpm_reset_at("idle-0", 161), None);
 }
 
 #[test]
@@ -87,10 +99,11 @@ fn provider_rpm_reset_expiring_read_cannot_remove_a_concurrent_refresh() {
 // Exact lookup body from main before #414, retained only for manual A/B
 // measurement. No timing threshold is part of CI acceptance.
 fn legacy_lookup(state: &AppState, key_id: &str, now: u64) -> Option<u64> {
-    let mut resets = state
+    let mut resets: std::collections::HashMap<String, u64> = state
         .provider_key_rpm_resets
-        .lock()
-        .expect("provider key rpm reset cache should lock");
+        .iter()
+        .map(|entry| (entry.key().clone(), *entry.value()))
+        .collect();
     let min_kept = now.saturating_sub(PROVIDER_KEY_RPM_WINDOW_SECS);
     resets.retain(|_, reset_at| *reset_at >= min_kept);
     resets.get(key_id).copied()
@@ -149,14 +162,17 @@ fn provider_rpm_reset_lookup_microbenchmark() {
     ] {
         let state = AppState::new().expect("benchmark state should build");
         let capacity = {
-            let mut resets = state.provider_key_rpm_resets.lock().unwrap();
             for key in 0..count {
-                resets.insert(format!("key-{key}"), 100);
+                state
+                    .provider_key_rpm_resets
+                    .insert(format!("key-{key}"), 100);
             }
             if keep_one {
-                resets.retain(|key, _| key == "key-0");
+                state
+                    .provider_key_rpm_resets
+                    .retain(|key, _| key.as_str() == "key-0");
             }
-            resets.capacity()
+            state.provider_key_rpm_resets.len()
         };
         let active = if keep_one { 1 } else { count.max(1) };
         let batches = if count > 64 { 8 } else { 128 };

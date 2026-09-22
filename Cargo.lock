@@ -84,6 +84,7 @@ dependencies = [
  "aether-contracts",
  "base64",
  "http",
+ "memchr",
  "regex",
  "serde",
  "serde_json",

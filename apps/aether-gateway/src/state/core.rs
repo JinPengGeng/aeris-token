@@ -175,6 +175,12 @@ fn sync_sensitive_headers_config_from_system_value(key: &str, value: Option<&ser
 }
 
 impl AppState {
+    /// High-water mark for amortized expired-marker sweeps on
+    /// `provider_key_rpm_resets`. Below this many entries, hot-path inserts
+    /// stay O(1) and reads lazy-expire per key; past it, one write pays the
+    /// O(n) sweep so memory stays bounded.
+    const PROVIDER_KEY_RPM_RESET_SWEEP_MIN_LEN: usize = 1024;
+
     pub async fn prewarm_chat_pii_redaction_runtime_config(&self) -> Result<bool, String> {
         crate::privacy::read_chat_pii_redaction_runtime_config(self)
             .await
@@ -492,7 +498,7 @@ impl AppState {
             provider_transport_snapshot_cache: Arc::new(DashMap::new()),
             provider_transport_snapshot_cache_generation: Arc::new(AtomicU64::new(0)),
             provider_transport_snapshot_inflight: Arc::new(DashMap::new()),
-            provider_key_rpm_resets: Arc::new(StdMutex::new(HashMap::new())),
+            provider_key_rpm_resets: Arc::new(DashMap::new()),
             local_execution_runtime_miss_diagnostics: Arc::new(DashMap::new()),
             admin_monitoring_error_stats_reset_at: Arc::new(StdMutex::new(None)),
             provider_delete_tasks: Arc::new(StdMutex::new(HashMap::new())),
@@ -829,13 +835,16 @@ impl AppState {
     }
 
     pub(crate) fn mark_provider_key_rpm_reset(&self, key_id: &str, now_unix_secs: u64) {
-        let mut resets = self
-            .provider_key_rpm_resets
-            .lock()
-            .expect("provider key rpm reset cache should lock");
-        let min_kept = now_unix_secs.saturating_sub(PROVIDER_KEY_RPM_WINDOW_SECS);
-        resets.retain(|_, reset_at| *reset_at >= min_kept);
-        resets.insert(key_id.to_string(), now_unix_secs);
+        self.provider_key_rpm_resets
+            .insert(key_id.to_string(), now_unix_secs);
+        if self.provider_key_rpm_resets.len() >= Self::PROVIDER_KEY_RPM_RESET_SWEEP_MIN_LEN {
+            // Amortized administrative sweep: hot-path inserts stay O(1), and
+            // expired markers from idle keys are physically reclaimed once the
+            // map grows past the high-water mark, keeping memory bounded.
+            let min_kept = now_unix_secs.saturating_sub(PROVIDER_KEY_RPM_WINDOW_SECS);
+            self.provider_key_rpm_resets
+                .retain(|_, reset_at| *reset_at >= min_kept);
+        }
     }
 
     pub(crate) fn provider_key_rpm_reset_at(
@@ -843,19 +852,20 @@ impl AppState {
         key_id: &str,
         now_unix_secs: u64,
     ) -> Option<u64> {
-        let mut resets = self
-            .provider_key_rpm_resets
-            .lock()
-            .expect("provider key rpm reset cache should lock");
         let min_kept = now_unix_secs.saturating_sub(PROVIDER_KEY_RPM_WINDOW_SECS);
-        let reset_at = resets.get(key_id).copied()?;
-        if reset_at < min_kept {
-            // Candidate lookup must not scan unrelated keys. Administrative
-            // writes still sweep all expired markers, including idle keys.
-            resets.remove(key_id);
-            None
-        } else {
-            Some(reset_at)
+        match self.provider_key_rpm_resets.entry(key_id.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                let reset_at = *entry.get();
+                if reset_at < min_kept {
+                    // Expiring reads must not remove a concurrent refresh; the
+                    // entry API holds the shard lock across check + remove.
+                    entry.remove();
+                    None
+                } else {
+                    Some(reset_at)
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(_) => None,
         }
     }
 
