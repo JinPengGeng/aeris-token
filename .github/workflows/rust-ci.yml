@@ -425,7 +425,7 @@ jobs:
           }
           # A separate Cargo invocation prevents workspace feature unification
           # from hiding missing tokio features in this dependency-light crate.
-          run_checked support-standalone 5 cargo test --locked -p aether-test-support --lib -- --nocapture --test-threads=1 --color never
+          run_checked support-standalone 7 cargo test --locked -p aether-test-support --lib -- --nocapture --test-threads=1 --color never
           for target in \
             postgres::tests::live_managed_postgres_restarts_cleanly_with_open_connections \
             postgres::tests::live_failed_postgres_stop_can_be_retried_without_losing_ownership; do
