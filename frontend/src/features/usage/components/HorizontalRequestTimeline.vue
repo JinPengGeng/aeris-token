@@ -2261,10 +2261,11 @@ const loadTrace = async (silent = false) => {
     error.value = null
 
     try {
-      // 始终拉取全部候选：被跳过的候选是"为什么没用某个提供商"的关键证据，
-      // 是否显示由前端开关控制，避免再发一次请求。
+      // fork 侧 forensics 语义:attemptedOnly 由调用方(如 RequestDetailDrawer 的
+      // "全部候选"开关)控制;被跳过候选的展示由该开关与 skipReason 逻辑承担,
+      // 与上游"始终拉取全部候选"的意图一致,但保留按调用方策略惰性加载。
       const result = await requestTraceApi.getRequestTrace(requestId, {
-        attemptedOnly: false,
+        attemptedOnly: props.attemptedOnly !== false,
         signal: controller.signal,
       })
       if (controller.signal.aborted || traceController !== controller) return
