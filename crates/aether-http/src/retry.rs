@@ -17,7 +17,7 @@ pub fn jittered_delay_for_retry(config: HttpRetryConfig, retry_index: u32) -> Du
     if jitter_cap == 0 {
         return base;
     }
-    let jitter_ms = rand::thread_rng().gen_range(0..=jitter_cap);
+    let jitter_ms = rand::rng().random_range(0..=jitter_cap);
     std::cmp::min(base + Duration::from_millis(jitter_ms), max_delay)
 }
 
