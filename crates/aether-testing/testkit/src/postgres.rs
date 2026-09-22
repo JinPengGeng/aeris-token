@@ -74,9 +74,9 @@ use aether_data::driver::postgres::PostgresPoolConfig;
 use aether_data::{DataBackends, DataLayerConfig};
 use sqlx::{Connection, PgConnection};
 
-use crate::server::PortReservation;
 #[cfg(test)]
 use crate::server::reserve_local_port;
+use crate::server::PortReservation;
 
 #[derive(Debug)]
 pub struct ManagedPostgresServer {
