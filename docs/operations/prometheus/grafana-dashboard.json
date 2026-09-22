@@ -1,0 +1,357 @@
+{
+  "uid": "aether-gateway-minimal",
+  "title": "Aether Gateway — Minimal Observability",
+  "description": "Minimal dashboard for the Aether gateway: billing/settlement counters, request RED metrics, usage DLQ, and billing fail-open. Pairs with docs/operations/prometheus/prometheus.yml and aether-alerts.yml (Ref #217). All series use the aether_gateway_ metrics namespace.",
+  "tags": ["aether", "gateway", "observability"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Billing / Settlement (money-path health)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Enrichment failures (1h)",
+      "description": "Terminal usage events whose billing enrichment failed. Non-zero means potential zero-yuan settlement. Alert: AetherBillingEnrichmentFailures.",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(aether_gateway_billing_enrichment_failures_total[1h]))",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Settlement failures (1h)",
+      "description": "Usage and video-task settlement failures. Alert: AetherBillingSettlementFailures.",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(aether_gateway_billing_settlement_failures_total[1h])) + sum(increase(aether_gateway_billing_video_task_settlement_failures_total[1h]))",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Insufficient-quota settlements (1h)",
+      "description": "Completed settlements persisted without a wallet debit. Alert: AetherBillingInsufficientQuota.",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(aether_gateway_billing_insufficient_quota_total[1h]))",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Billing fail-open rate by operation",
+      "description": "Billing protection checks that allowed traffic while their backend was unavailable (daily_quota / rpm). Any sustained non-zero value means billing guards are blind. Alert: AetherBillingGuardFailOpen.",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation) (rate(aether_gateway_billing_fail_open_total[5m]))",
+          "legendFormat": "{{operation}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "Request RED (route_class / status_class / provider)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Request rate by route_class",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route_class) (rate(aether_gateway_request_total[5m]))",
+          "legendFormat": "{{route_class}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "5xx error rate by provider",
+      "description": "Sustained per-provider 5xx errors fire AetherProviderServerErrors.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider) (rate(aether_gateway_request_errors_total{status_class=\"5xx\"}[5m]))",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Request duration (mean, from sparse log buckets)",
+      "description": "Mean request duration derived from the self-rendered sparse histogram (sum/count).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(aether_gateway_request_duration_seconds_sum[5m]) / rate(aether_gateway_request_duration_seconds_count[5m])",
+          "legendFormat": "mean"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Usage pipeline health",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Usage DLQ length",
+      "description": "Non-empty usage dead-letter queue. Alert: AetherUsageDeadLetterBacklog.",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 25 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(aether_gateway_usage_queue_dlq_length)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.5 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Usage DLQ utilization (per mille)",
+      "description": "Alert: AetherUsageDeadLetterCapacityWarning at 800, AetherUsageDeadLetterRetentionBoundary at 1000.",
+      "gridPos": { "h": 6, "w": 12, "x": 6, "y": 25 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "aether_gateway_usage_queue_dlq_utilization_per_mille",
+          "legendFormat": "utilization"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1000,
+          "custom": { "drawStyle": "line", "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Gateway up",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 25 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(aether_gateway_service_up)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    }
+  ]
+}

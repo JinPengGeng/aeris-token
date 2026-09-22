@@ -1,3 +1,4 @@
+use super::adapter::validate_exchange_state;
 use super::{
     IdentityClaims, IdentityOAuthExchangeContext, IdentityOAuthProvider,
     IdentityOAuthProviderConfig, IdentityOAuthStartContext,
@@ -123,6 +124,7 @@ pub async fn login_with_oauth(
     config: &IdentityOAuthProviderConfig,
     ctx: &IdentityOAuthExchangeContext,
 ) -> Result<OAuthLoginOutcome, OAuthError> {
+    validate_exchange_state(ctx)?;
     let tokens = provider.exchange_code(executor, config, ctx).await?;
     let identity = provider
         .fetch_identity(executor, config, &tokens, ctx.network.clone())
@@ -141,6 +143,7 @@ pub async fn bind_oauth_identity(
     config: &IdentityOAuthProviderConfig,
     ctx: &IdentityOAuthExchangeContext,
 ) -> Result<BoundOAuthIdentity, OAuthError> {
+    validate_exchange_state(ctx)?;
     let tokens = provider.exchange_code(executor, config, ctx).await?;
     let identity = provider
         .fetch_identity(executor, config, &tokens, ctx.network.clone())
@@ -154,7 +157,11 @@ pub async fn bind_oauth_identity(
 
 #[cfg(test)]
 mod tests {
-    use super::IdentityOAuthService;
+    use super::{bind_oauth_identity, login_with_oauth, IdentityOAuthService};
+    use crate::core::OAuthError;
+    use crate::identity::{IdentityOAuthExchangeContext, IdentityOAuthProviderConfig};
+    use crate::network::OAuthNetworkContext;
+    use async_trait::async_trait;
 
     #[test]
     fn builtin_identity_service_registers_login_and_custom_oidc_providers() {
@@ -164,5 +171,76 @@ mod tests {
         assert!(service.provider("custom_oidc").is_ok());
         assert!(service.provider("custom_oidc_work").is_ok());
         assert!(service.provider("missing").is_err());
+    }
+
+    struct PanickingExecutor;
+
+    #[async_trait]
+    impl crate::network::OAuthHttpExecutor for PanickingExecutor {
+        async fn execute(
+            &self,
+            _request: crate::network::OAuthHttpRequest,
+        ) -> Result<crate::network::OAuthHttpResponse, OAuthError> {
+            panic!("state mismatch must be rejected before any HTTP exchange");
+        }
+    }
+
+    fn mismatched_state_context() -> IdentityOAuthExchangeContext {
+        IdentityOAuthExchangeContext {
+            code: "exchange-code".to_string(),
+            state: "attacker-state".to_string(),
+            pkce_verifier: Some("server-verifier".to_string()),
+            network: OAuthNetworkContext::direct_identity(),
+            expected_state: Some("server-state".to_string()),
+        }
+    }
+
+    fn config() -> IdentityOAuthProviderConfig {
+        IdentityOAuthProviderConfig {
+            provider_type: "custom_oidc_work".to_string(),
+            display_name: "Work OIDC".to_string(),
+            authorization_url: "https://idp.example.test/authorize".to_string(),
+            token_url: "https://idp.example.test/token".to_string(),
+            userinfo_url: Some("https://idp.example.test/userinfo".to_string()),
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec!["openid".to_string()],
+            redirect_uri: "https://gateway.example.test/callback".to_string(),
+            frontend_callback_url: "https://app.example.test/callback".to_string(),
+            attribute_mapping: None,
+            extra_config: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn login_with_oauth_rejects_state_mismatch_before_exchange() {
+        let provider = crate::identity::providers::CustomOidcIdentityOAuthProvider;
+
+        let error = login_with_oauth(
+            &provider,
+            &PanickingExecutor,
+            &config(),
+            &mismatched_state_context(),
+        )
+        .await
+        .expect_err("state mismatch must fail closed");
+
+        assert!(matches!(error, OAuthError::InvalidRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn bind_oauth_identity_rejects_state_mismatch_before_exchange() {
+        let provider = crate::identity::providers::CustomOidcIdentityOAuthProvider;
+
+        let error = bind_oauth_identity(
+            &provider,
+            &PanickingExecutor,
+            &config(),
+            &mismatched_state_context(),
+        )
+        .await
+        .expect_err("state mismatch must fail closed");
+
+        assert!(matches!(error, OAuthError::InvalidRequest(_)));
     }
 }

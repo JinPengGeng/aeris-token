@@ -18,8 +18,8 @@ use crate::formats::shared::error_body::{
 use crate::formats::shared::sse::encode_json_sse;
 use crate::formats::shared::stream_core::common::{
     canonical_usage_from_openai_usage, decode_json_data_line, openai_stream_terminal_error_body,
-    openai_stream_terminal_error_message, unsupported_stream_event_message, CanonicalStreamEvent,
-    CanonicalStreamFrame, CanonicalUsage,
+    openai_stream_terminal_error_message, sse_line_may_affect_terminal_observation,
+    unsupported_stream_event_message, CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
 };
 use crate::formats::shared::AiSurfaceFinalizeError;
 
@@ -242,6 +242,14 @@ impl StreamingStandardTerminalObserver {
         };
         match provider {
             TerminalStreamParser::Standard(provider) => {
+                // 预过滤只在状态机 started 之后生效：started 之前的行可能负责
+                // 推进 ensure_started，跳过后 finish() 的兜底 Finish 帧语义会
+                // 与全量解析路径不一致。
+                if provider.has_started()
+                    && !sse_line_may_affect_terminal_observation(provider.format_id(), &line)
+                {
+                    return Ok(());
+                }
                 let frames = provider.push_line(report_context, line)?;
                 let actual_service_tier = provider.actual_service_tier().map(ToOwned::to_owned);
                 self.observe_frames(frames);
@@ -451,6 +459,15 @@ enum ProviderStreamParser {
 }
 
 impl ProviderStreamParser {
+    fn format_id(&self) -> FormatId {
+        match self {
+            ProviderStreamParser::OpenAIChat(_) => FormatId::OpenAiChat,
+            ProviderStreamParser::OpenAIResponses(_) => FormatId::OpenAiResponses,
+            ProviderStreamParser::Claude(_) => FormatId::ClaudeMessages,
+            ProviderStreamParser::Gemini(_) => FormatId::GeminiGenerateContent,
+        }
+    }
+
     fn for_api_format(provider_api_format: &str) -> Option<Self> {
         Some(match FormatId::parse(provider_api_format)? {
             FormatId::OpenAiChat => Self::OpenAIChat(OpenAIChatProviderState::default()),
@@ -471,6 +488,15 @@ impl ProviderStreamParser {
             | FormatId::AliyunMultimodalEmbedding
             | FormatId::CodexLive => return None,
         })
+    }
+
+    fn has_started(&self) -> bool {
+        match self {
+            ProviderStreamParser::OpenAIChat(state) => state.has_started(),
+            ProviderStreamParser::OpenAIResponses(state) => state.has_started(),
+            ProviderStreamParser::Claude(state) => state.has_started(),
+            ProviderStreamParser::Gemini(state) => state.has_started(),
+        }
     }
 
     fn push_line(

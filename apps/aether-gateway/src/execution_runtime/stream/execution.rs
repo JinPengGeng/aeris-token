@@ -386,13 +386,24 @@ impl Drop for StageElapsedGuard {
     }
 }
 
-fn direct_passthrough_channel_capacity() -> usize {
+fn parse_direct_passthrough_channel_capacity(value: &str) -> Option<usize> {
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+}
+
+static DIRECT_PASSTHROUGH_CHANNEL_CAPACITY: LazyLock<usize> = LazyLock::new(|| {
     std::env::var(DIRECT_PASSTHROUGH_CHANNEL_CAPACITY_ENV)
         .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
+        .and_then(|value| parse_direct_passthrough_channel_capacity(&value))
         .unwrap_or(DEFAULT_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY)
         .clamp(1, MAX_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY)
+});
+
+fn direct_passthrough_channel_capacity() -> usize {
+    *DIRECT_PASSTHROUGH_CHANNEL_CAPACITY
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8857,8 +8868,8 @@ mod tests {
         execute_stream_from_frame_stream, execute_stream_from_frame_stream_with_retry_scope,
         execution_stream_frame_codec, maybe_apply_kiro_prompt_cache_usage_to_stream_summary,
         merge_stream_terminal_summary, normalize_declared_stream_response_headers,
-        parse_direct_passthrough_mode, prefetch_direct_stream_error_body,
-        prefetched_openai_responses_body_has_output_boundary,
+        parse_direct_passthrough_channel_capacity, parse_direct_passthrough_mode,
+        prefetch_direct_stream_error_body, prefetched_openai_responses_body_has_output_boundary,
         record_sync_terminal_usage_with_handoff,
         record_sync_terminal_usage_with_handoff_after_spawn,
         resolve_provider_stream_error_status_code, select_direct_anthropic_prefetch_wait,
@@ -14518,6 +14529,24 @@ mod tests {
             "openai_chat_stream",
             false
         ));
+    }
+
+    #[test]
+    fn direct_passthrough_channel_capacity_parser_validates_positive_integers() {
+        for (value, expected) in [("128", Some(128usize)), (" 64\t", Some(64))] {
+            assert_eq!(
+                parse_direct_passthrough_channel_capacity(value),
+                expected,
+                "unexpected capacity for {value:?}"
+            );
+        }
+        for value in ["", "0", " -4 ", "abc", "12.5"] {
+            assert_eq!(
+                parse_direct_passthrough_channel_capacity(value),
+                None,
+                "unexpected capacity for {value:?}"
+            );
+        }
     }
 
     #[test]

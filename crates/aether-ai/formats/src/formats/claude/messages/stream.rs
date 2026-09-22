@@ -34,6 +34,10 @@ pub struct ClaudeProviderState {
 }
 
 impl ClaudeProviderState {
+    pub(crate) fn has_started(&self) -> bool {
+        self.started
+    }
+
     fn identity(&self, report_context: &Value) -> (String, String) {
         resolve_identity(
             self.message_id.as_deref(),

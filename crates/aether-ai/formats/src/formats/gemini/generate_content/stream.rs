@@ -55,6 +55,10 @@ impl GeminiProviderState {
         }
     }
 
+    pub(crate) fn has_started(&self) -> bool {
+        self.started
+    }
+
     fn identity(&self, report_context: &Value) -> (String, String) {
         resolve_identity(
             self.response_id.as_deref(),
