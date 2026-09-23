@@ -451,6 +451,16 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_provider_catalog_keys_with_legacy_credential(
+        &self,
+        limit: i32,
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        match &self.provider_catalog_reader {
+            Some(repository) => repository.list_keys_with_legacy_credential(limit).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) async fn list_provider_catalog_key_summaries_by_provider_ids(
         &self,
         provider_ids: &[String],

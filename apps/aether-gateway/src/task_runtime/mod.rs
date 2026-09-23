@@ -46,6 +46,7 @@ pub(crate) const TASK_KEY_PROXY_NODE_METRICS_CLEANUP: &str =
 pub(crate) const TASK_KEY_PROXY_UPGRADE_ROLLOUT: &str = "maintenance.proxy.upgrade.rollout";
 pub(crate) const TASK_KEY_PROVIDER_CHECKIN: &str = "maintenance.provider.checkin";
 pub(crate) const TASK_KEY_PROVIDER_QUOTA_ALERT: &str = "maintenance.provider.quota_alert";
+pub(crate) const TASK_KEY_PROVIDER_CREDENTIAL_SWEEP: &str = "maintenance.provider.credential_sweep";
 pub(crate) const TASK_KEY_REMOTE_QUOTA_SYNC: &str = "maintenance.provider.remote_quota_sync";
 pub(crate) const TASK_KEY_USAGE_CLEANUP: &str = "maintenance.usage.cleanup";
 pub(crate) const TASK_KEY_DATA_LIFECYCLE_CLEANUP: &str = "maintenance.data.lifecycle.cleanup";
@@ -390,6 +391,14 @@ const TASK_DEFINITIONS: &[TaskDefinition] = &[
     ),
     TaskDefinition::new(
         TASK_KEY_OAUTH_TOKEN_REFRESH,
+        TaskKind::Scheduled,
+        "interval",
+        true,
+        true,
+        RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_PROVIDER_CREDENTIAL_SWEEP,
         TaskKind::Scheduled,
         "interval",
         true,
