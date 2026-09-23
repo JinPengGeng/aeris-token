@@ -31,14 +31,15 @@ use super::{
     spawn_audit_cleanup_worker, spawn_db_maintenance_worker,
     spawn_fixed_provider_reconciliation_task, spawn_oauth_token_refresh_worker,
     spawn_pending_cleanup_worker, spawn_pool_monitor_worker, spawn_pool_quota_probe_worker,
-    spawn_provider_checkin_worker, spawn_proxy_node_stale_cleanup_worker,
-    spawn_proxy_upgrade_rollout_worker, spawn_stats_aggregation_worker,
-    spawn_stats_hourly_aggregation_worker, spawn_usage_cleanup_worker,
-    spawn_wallet_daily_usage_aggregation_worker, start_proxy_upgrade_rollout,
-    stats_aggregation_target_day, stats_hourly_aggregation_target_hour, summarize_database_pool,
-    usage_cleanup_settings, usage_cleanup_window, usage_cleanup_window_for_mode,
-    usage_cleanup_window_with_override, wallet_daily_usage_aggregation_target, AppState,
-    DbMaintenanceRunSummary, FailedPendingUsageRow, GatewayDataState, ManualUsageCleanupMode,
+    spawn_provider_checkin_worker, spawn_provider_credential_sweep_worker,
+    spawn_proxy_node_stale_cleanup_worker, spawn_proxy_upgrade_rollout_worker,
+    spawn_stats_aggregation_worker, spawn_stats_hourly_aggregation_worker,
+    spawn_usage_cleanup_worker, spawn_wallet_daily_usage_aggregation_worker,
+    start_proxy_upgrade_rollout, stats_aggregation_target_day,
+    stats_hourly_aggregation_target_hour, summarize_database_pool, usage_cleanup_settings,
+    usage_cleanup_window, usage_cleanup_window_for_mode, usage_cleanup_window_with_override,
+    wallet_daily_usage_aggregation_target, AppState, DbMaintenanceRunSummary,
+    FailedPendingUsageRow, GatewayDataState, ManualUsageCleanupMode,
     ProxyNodeMetricsCleanupSettings, ProxyUpgradeRolloutProbeConfig, StalePendingUsageRow,
     UsageCleanupSettings, USAGE_CLEANUP_HOUR, USAGE_CLEANUP_MINUTE,
     WALLET_DAILY_USAGE_AGGREGATION_HOUR, WALLET_DAILY_USAGE_AGGREGATION_MINUTE,
@@ -90,6 +91,14 @@ async fn spawn_oauth_token_refresh_worker_skips_when_provider_catalog_unavailabl
         .expect("gateway state should build")
         .with_data_state_for_tests(GatewayDataState::disabled());
     assert!(spawn_oauth_token_refresh_worker(state).is_none());
+}
+
+#[tokio::test]
+async fn spawn_provider_credential_sweep_worker_skips_when_provider_catalog_unavailable() {
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_data_state_for_tests(GatewayDataState::disabled());
+    assert!(spawn_provider_credential_sweep_worker(state).is_none());
 }
 
 #[tokio::test]

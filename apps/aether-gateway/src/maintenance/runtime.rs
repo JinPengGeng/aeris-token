@@ -32,6 +32,8 @@ mod pool_quota_probe;
 mod pool_score_rebuild;
 #[path = "runtime/provider_checkin.rs"]
 mod provider_checkin;
+#[path = "runtime/provider_credential_sweep.rs"]
+mod provider_credential_sweep;
 #[path = "runtime/provider_quota_alert.rs"]
 mod provider_quota_alert;
 #[path = "runtime/proxy_node_metrics_cleanup.rs"]
@@ -105,6 +107,9 @@ pub(crate) use pool_score_rebuild::{
     PoolScoreRebuildRunSummary, PoolScoreRebuildWorkerConfig,
 };
 pub(crate) use provider_checkin::{perform_provider_checkin_once, ProviderCheckinRunSummary};
+pub(crate) use provider_credential_sweep::{
+    perform_provider_credential_sweep_once, ProviderCredentialSweepSummary,
+};
 pub(crate) use provider_quota_alert::{
     perform_provider_quota_alert_once, ProviderQuotaAlertRunSummary,
 };
@@ -168,6 +173,7 @@ const PROXY_NODE_STALE_MIN_GRACE_SECS: u64 = 15;
 const PROXY_NODE_STALE_MISSED_HEARTBEATS: u64 = 3;
 const POOL_MONITOR_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const OAUTH_TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const PROVIDER_CREDENTIAL_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const PROVIDER_CHECKIN_CONCURRENCY: usize = 3;
 const PROVIDER_QUOTA_ALERT_CONCURRENCY: usize = 3;
 const PROVIDER_QUOTA_ALERT_INTERVAL: Duration = Duration::from_secs(5);
