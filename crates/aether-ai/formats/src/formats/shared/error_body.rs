@@ -39,7 +39,7 @@ impl LocalCoreSyncErrorKind {
                 if aether_ai_formats::normalize_api_format_alias(client_api_format)
                     == "claude:messages" =>
             {
-                402
+                403
             }
             Self::RateLimit | Self::QuotaExhausted => 429,
             Self::Overloaded => 503,
@@ -75,9 +75,9 @@ pub fn build_core_error_body_for_client_format(
     // of upstream errors. Gemini retains its existing RESOURCE_EXHAUSTED mapping.
     let (message, code) = if kind == LocalCoreSyncErrorKind::QuotaExhausted {
         if normalized_format.starts_with("openai:") {
-            ("Insufficient quota", Some("credit_balance_exhausted"))
+            ("Insufficient quota", Some("insufficient_quota"))
         } else if normalized_format == "claude:messages" {
-            ("Insufficient quota", Some("balance_exceeded"))
+            ("Insufficient quota", None)
         } else {
             (message, code)
         }
@@ -169,7 +169,7 @@ fn map_local_sync_error_kind_to_claude_type(kind: LocalCoreSyncErrorKind) -> &'s
         LocalCoreSyncErrorKind::PermissionDenied => "permission_error",
         LocalCoreSyncErrorKind::NotFound => "not_found_error",
         LocalCoreSyncErrorKind::RateLimit => "rate_limit_error",
-        LocalCoreSyncErrorKind::QuotaExhausted => "billing_error",
+        LocalCoreSyncErrorKind::QuotaExhausted => "insufficient_quota",
         LocalCoreSyncErrorKind::Overloaded => "overloaded_error",
         LocalCoreSyncErrorKind::ServerError => "api_error",
     }

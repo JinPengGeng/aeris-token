@@ -246,24 +246,19 @@ pub(crate) fn attach_control_metadata_headers(
 pub(crate) fn build_local_balance_denied_response(
     trace_id: &str,
     control_decision: Option<&GatewayControlDecision>,
-    balance_remaining: Option<f64>,
+    _balance_remaining: Option<f64>,
 ) -> Result<Response<Body>, GatewayError> {
-    // 上游同款类型化错误体（fawney19/Aether HEAD ec95989 逐字对齐）：429 + 无
-    // Retry-After（充值前重试无意义）。Generic（未知客户端格式）响应用
-    // `balance_exceeded` 类型并透传剩余余额；客户端格式（OpenAI/Claude）沿用
-    // 各自的格式化 contract（insufficient_quota 等），不回显钱包快照。
-    let message = match balance_remaining {
-        Some(remaining) => format!("余额不足（剩余: ${remaining:.2}）"),
-        None => "余额不足".to_string(),
-    };
+    // 统一配额不足契约：所有客户端格式（OpenAI 路由族、Claude、泛化未知格式）
+    // 的本地余额拒绝都收敛为不回显余额的类型化错误体。OpenAI 与 Claude 走各自
+    // 生态的格式化 contract（见 build_core_error_body_for_client_format 的
+    // QuotaExhausted 覆写），泛化路径的 fallback 固定为 OpenAI 信封
+    // （429 + insufficient_quota），任何位置都不回显钱包快照。
     let fallback_payload = json!({
         "error": {
-            "type": "balance_exceeded",
-            "message": message,
-            "details": {
-                "balance_type": "USD",
-                "remaining": balance_remaining,
-            }
+            "message": "Insufficient quota",
+            "type": "insufficient_quota",
+            "param": null,
+            "code": "insufficient_quota",
         }
     });
     let client_format = if local_error_uses_openai_format(control_decision, None) {
@@ -968,14 +963,15 @@ mod tests {
         assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
         let payload = response_json(response).await;
         assert_eq!(payload["error"]["type"], "insufficient_quota");
-        assert_eq!(payload["error"]["code"], "credit_balance_exhausted");
+        assert_eq!(payload["error"]["code"], "insufficient_quota");
+        assert_eq!(payload["error"]["param"], serde_json::Value::Null);
         assert_eq!(payload["error"]["message"], "Insufficient quota");
         assert!(payload["error"]["details"].is_null());
         assert_eq!(payload["trace_id"], "trace-balance-openai");
     }
 
     #[tokio::test]
-    async fn generic_balance_denial_uses_typed_balance_exceeded_contract() {
+    async fn generic_balance_denial_uses_openai_insufficient_quota_envelope() {
         let response =
             build_local_balance_denied_response("trace-balance-unknown", None, Some(12.34))
                 .expect("balance response should build");
@@ -986,11 +982,12 @@ mod tests {
             "balance denial must not hint a retry before recharge"
         );
         let payload = response_json(response).await;
-        // 上游同款类型化错误体（fawney19/Aether build_local_balance_denied_response）。
-        assert_eq!(payload["error"]["type"], "balance_exceeded");
-        assert_eq!(payload["error"]["message"], "余额不足（剩余: $12.34）");
-        assert_eq!(payload["error"]["details"]["balance_type"], "USD");
-        assert_eq!(payload["error"]["details"]["remaining"], 12.34);
+        // 泛化路径与 OpenAI 契约一致：不回显余额（remaining/余额数字）。
+        assert_eq!(payload["error"]["message"], "Insufficient quota");
+        assert_eq!(payload["error"]["type"], "insufficient_quota");
+        assert_eq!(payload["error"]["param"], serde_json::Value::Null);
+        assert_eq!(payload["error"]["code"], "insufficient_quota");
+        assert!(payload.get("details").is_none());
         assert_eq!(payload["trace_id"], "trace-balance-unknown");
     }
 
@@ -1002,10 +999,10 @@ mod tests {
 
         assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
         let payload = response_json(response).await;
-        assert_eq!(payload["error"]["type"], "balance_exceeded");
-        assert_eq!(payload["error"]["message"], "余额不足");
-        assert_eq!(payload["error"]["details"]["balance_type"], "USD");
-        assert!(payload["error"]["details"]["remaining"].is_null());
+        assert_eq!(payload["error"]["message"], "Insufficient quota");
+        assert_eq!(payload["error"]["type"], "insufficient_quota");
+        assert_eq!(payload["error"]["code"], "insufficient_quota");
+        assert!(payload.get("details").is_none());
     }
 
     #[tokio::test]

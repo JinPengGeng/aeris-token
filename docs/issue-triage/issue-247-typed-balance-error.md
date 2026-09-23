@@ -1,5 +1,11 @@
 # Issue #247：余额不足类型化错误体（方案 A）
 
+> **演进（2026-09-23）：本方案 A（泛化 `balance_exceeded` + `details.remaining` 回显
+> 余额）已被统一配额不足契约取代，见
+> [error-contract.md](../api/error-contract.md) 与 issue #343/#247 最新决策。**
+> 泛化路径与 OpenAI/Claude 一样收敛为 `429/insufficient_quota` 信封且不回显余额；
+> `balance_exceeded` 仅保留为上游入站错误的分类 marker。以下为原始记录。
+
 日期：2026-09-23
 决定：维护者已拍板（issue #247 方案 A）——余额不足响应保持 HTTP 429 不变，
 泛化错误体升级为上游同款类型化 `balance_exceeded` 错误体。
@@ -46,3 +52,27 @@ sync 需要收敛，应先在 issue 里显式废弃 #343 contract。
 + details.remaining + 无 Retry-After）、
 `generic_balance_denial_without_remaining_omits_amount`、
 `openai_balance_denial_uses_insufficient_quota_contract`（#343 contract 不回退）。
+
+## 演进记录（2026-09-23）：从 balance_exceeded 到统一 insufficient_quota
+
+决策（用户定案）：余额/配额不足的全路径响应统一为：
+
+- OpenAI 路由族 + 泛化路径 + 图片预授权：`429` + OpenAI 信封
+  `{"error":{"message":"Insufficient quota","type":"insufficient_quota","param":null,"code":"insufficient_quota"}}`，
+  不回显余额。
+- Claude 路径：`403` + `{"type":"error","error":{"type":"insufficient_quota","message":"Insufficient quota"}}`
+  （无 `code` 字段），不回显余额。
+
+理由：
+
+1. 对齐 OpenAI 官方错误码：`insufficient_quota` 是官方 code，
+   `credit_balance_exhausted` 是社区网关的私有扩展。
+2. 对齐 Anthropic 官方语义：欠费是账户状态错误，不是 429 速率窗口，
+   不可重试；sub2api/new-api 对 Claude 侧均用 403 + Anthropic 信封。
+3. 不回显余额：余额属于账户隐私，`details.remaining` 会泄露钱包快照；
+   不同格式统一也降低客户端分支成本。
+4. 与上游 `balance_exceeded` 的收敛保持刻意分叉：`balance_exceeded` 仍被
+   `is_quota_exhausted_error` 识别用于入站上游错误分类，但对外响应统一重建。
+
+破坏性变更：Claude 402→403；泛化路径不再回显余额且 type/code 改变；
+OpenAI code 从 `credit_balance_exhausted` 改为 `insufficient_quota`。

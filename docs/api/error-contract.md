@@ -56,35 +56,26 @@ a client error, or change deferred cookie/Google Bearer resolution.
 
 ## Quota versus rate limit
 
-Wallet denial is a permanent account state, not a temporary RPM window. For
-OpenAI-family routes it remains HTTP `429` for compatibility with clients that
-recognize OpenAI's quota response, but has this stable payload:
+Wallet denial is a permanent account state, not a temporary RPM window. All
+client formats now share one unified insufficient-quota contract and never echo
+the balance anywhere in the body:
 
-```json
-{
-  "error": {
-    "message": "Insufficient quota",
-    "type": "insufficient_quota",
-    "code": "credit_balance_exhausted"
-  },
-  "trace_id": "trace-..."
-}
-```
+| Client path | HTTP | Envelope |
+| --- | --- | --- |
+| OpenAI family (`/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/images/*`, `/v1/rerank`, `/v1/videos`) | `429` | `{"error":{"message":"Insufficient quota","type":"insufficient_quota","param":null,"code":"insufficient_quota"}}` |
+| Claude Messages (`/v1/messages`, `/v1/messages/count_tokens`) | `403` | `{"type":"error","error":{"type":"insufficient_quota","message":"Insufficient quota"}}`（无 `code` 字段） |
+| Generic (Gemini/Codex Live/Antigravity 等未识别格式、图片预授权) | `429` | 与 OpenAI 信封一致 |
 
-Claude Messages wallet denial uses HTTP `402` and
-`{"type":"error","error":{"type":"billing_error","code":"balance_exceeded","message":"Insufficient quota"},"trace_id":"trace-..."}`.
-Neither format exposes the balance, user/key identifiers, or internal billing
-details. Both retain `x-trace-id` for support correlation.
+All variants retain `x-trace-id` for support correlation and omit
+`Retry-After`（充值前重试无意义）. Neither format exposes the balance, user/key
+identifiers, or internal billing details.
 
-For requests that do not resolve to an OpenAI or Claude client format (no
-recognized route family, endpoint signature, or path), the wallet-denial body
-follows the upstream-typed `balance_exceeded` contract instead:
-HTTP `429` with `{"error":{"type":"balance_exceeded","message":"余额不足（剩余: $X.XX）","details":{"balance_type":"USD","remaining":<number|null>}},"trace_id":"trace-..."}`.
-This aligns the fork with upstream `build_local_balance_denied_response`
-(fawney19/Aether) so a future sync does not conflict; it also lets first-party
-(non-protocol) clients distinguish "recharge required" from rate limiting and
-render the remaining balance. No `Retry-After` is emitted, matching the quota
-formats above. See [Issue 247](../issue-triage/issue-247-typed-balance-error.md).
+OpenAI 侧对齐 OpenAI 官方错误码（`code=insufficient_quota`）；Claude 侧对齐
+Anthropic 官方语义（欠费是非 429、不可重试的错误）及 sub2api/new-api 的既有
+做法（403 + Anthropic 信封）。这与上游 fawney19/Aether 的
+`balance_exceeded`/`details.remaining` 泛化体是**刻意分叉**：余额数字不回显，
+`balance_exceeded` 仅保留为入站上游错误类型的识别 marker（分类为
+QuotaExhausted 后按上表重建信封），不再出现在任何对外响应中。
 
 No `Retry-After` header is emitted for wallet denial or tenant permission
 denial (`403/permission_error`). Provider rate limits remain `429/rate_limit_error`;
@@ -92,7 +83,7 @@ the gateway retains a provider-supplied wait time and does not invent one when
 none is known. Daily usage, plan, and
 RPM windows remain separate errors and include `Retry-After` plus their
 existing `X-RateLimit-*` or `X-Daily-Usage-*` headers. Clients must not treat
-`insufficient_quota` or `billing_error` as a backoff-only event. Some SDKs retry
+`insufficient_quota` as a backoff-only event. Some SDKs retry
 all HTTP `429` responses automatically, even without `Retry-After`; applications
 should inspect the error type/code and disable such retries for exhausted credit.
 
