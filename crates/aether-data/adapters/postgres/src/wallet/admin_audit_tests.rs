@@ -447,3 +447,63 @@ async fn wallet_adjust_and_manual_recharge_audit_are_atomic_and_preserve_replay_
     assert_recovery_jobs(&pool, 1, "audit-wallet-owner").await;
     pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires a fresh migrated AETHER_TEST_AUDIT_DATABASE_URL"]
+async fn admin_debit_beyond_available_balance_records_recharge_debt() {
+    let pool = PgPool::connect(&std::env::var("AETHER_TEST_AUDIT_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(database.starts_with("aether_admin_audit_"));
+    sqlx::raw_sql(
+        "INSERT INTO users(id,username,email_verified) VALUES('audit-debt-owner','audit-debt-owner',true);
+         INSERT INTO wallets(id,user_id,balance,gift_balance,total_recharged,created_at,updated_at)
+           VALUES('audit-debt-wallet','audit-debt-owner',10,3,20,now(),now());",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let repository = SqlxWalletRepository::new(pool.clone());
+    let wallet = repository
+        .adjust_wallet_balance(AdjustWalletBalanceInput {
+            wallet_id: "audit-debt-wallet".to_string(),
+            amount_usd: -20.0,
+            balance_type: "recharge".to_string(),
+            operator_id: Some("audit-operator".to_string()),
+            description: Some("admin debt adjustment".to_string()),
+        })
+        .await
+        .unwrap()
+        .expect("wallet should exist");
+    // INTENTIONAL: an administrator debit larger than both positive buckets
+    // consumes recharge (10) and gift (3) first, then records the remaining 7
+    // as negative recharge balance (recharge debt). This mirrors the
+    // usage-settlement overdraft semantics and is restored by a later recharge.
+    assert_eq!(
+        wallet.0.balance, -7.0,
+        "recharge debt is recorded as negative balance"
+    );
+    assert_eq!(wallet.0.gift_balance, 0.0);
+    assert_eq!(wallet.1.recharge_balance_after, -7.0);
+    assert_eq!(wallet.1.amount, -20.0);
+    let (wallet, _) = repository
+        .create_manual_wallet_recharge(CreateManualWalletRechargeInput {
+            wallet_id: "audit-debt-wallet".to_string(),
+            amount_usd: 7.0,
+            payment_method: "admin_manual".to_string(),
+            operator_id: None,
+            description: None,
+            order_no: "audit-debt-order".to_string(),
+        })
+        .await
+        .unwrap()
+        .expect("wallet should exist");
+    assert_eq!(
+        wallet.balance, 0.0,
+        "recharge restores the negative balance"
+    );
+}

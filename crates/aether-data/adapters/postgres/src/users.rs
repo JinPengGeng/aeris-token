@@ -15,6 +15,7 @@ use aether_data_contracts::repository::users::{
     LAST_ACTIVE_ADMIN_UPDATE_DENIED,
 };
 use aether_data_contracts::DataLayerError;
+use aether_data_query::escape_like_pattern;
 
 use crate::error::SqlxResultExt;
 
@@ -136,7 +137,7 @@ SELECT
   is_deleted
 FROM users
 WHERE is_deleted IS FALSE
-  AND LOWER(username) LIKE $1
+  AND LOWER(username) LIKE $1 ESCAPE '\'
 ORDER BY id ASC
 "#;
 
@@ -774,7 +775,10 @@ impl SqlxUserReadRepository {
 
         collect_query_rows(
             sqlx::query(LIST_USERS_BY_USERNAME_SEARCH_SQL)
-                .bind(format!("%{}%", username_search.to_ascii_lowercase()))
+                .bind(format!(
+                    "%{}%",
+                    escape_like_pattern(&username_search.to_ascii_lowercase())
+                ))
                 .fetch(&self.pool),
             map_user_row,
         )
@@ -1411,15 +1415,15 @@ WHERE user_group_members.user_id IN (
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            let pattern = format!("%{}%", search.to_ascii_lowercase());
+            let pattern = format!("%{}%", escape_like_pattern(&search.to_ascii_lowercase()));
             builder
                 .push(" AND (LOWER(id) LIKE ")
                 .push_bind(pattern.clone())
-                .push(" OR LOWER(username) LIKE ")
+                .push(" ESCAPE '\\' OR LOWER(username) LIKE ")
                 .push_bind(pattern.clone())
-                .push(" OR LOWER(COALESCE(email, '')) LIKE ")
+                .push(" ESCAPE '\\' OR LOWER(COALESCE(email, '')) LIKE ")
                 .push_bind(pattern)
-                .push(")");
+                .push(" ESCAPE '\\')");
         }
 
         match query.sort_by {
@@ -1484,15 +1488,15 @@ WHERE user_group_members.user_id IN (
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            let pattern = format!("%{}%", search.to_ascii_lowercase());
+            let pattern = format!("%{}%", escape_like_pattern(&search.to_ascii_lowercase()));
             builder
                 .push(" AND (LOWER(id) LIKE ")
                 .push_bind(pattern.clone())
-                .push(" OR LOWER(username) LIKE ")
+                .push(" ESCAPE '\\' OR LOWER(username) LIKE ")
                 .push_bind(pattern.clone())
-                .push(" OR LOWER(COALESCE(email, '')) LIKE ")
+                .push(" ESCAPE '\\' OR LOWER(COALESCE(email, '')) LIKE ")
                 .push_bind(pattern)
-                .push(")");
+                .push(" ESCAPE '\\')");
         }
 
         let row = builder
@@ -4528,6 +4532,57 @@ FOR UPDATE OF users, user_sessions
 
 #[cfg(test)]
 mod admin_invariant_tests {
+
+    #[test]
+    fn username_search_escapes_like_wildcards_and_declares_escape_clause() {
+        let source = include_str!("users.rs").replace("\r\n", "\n");
+        let function = source
+            .split("pub async fn list_users_by_username_search")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub async fn list_non_admin_export_users")
+                    .next()
+            })
+            .expect("username search function should be present");
+        assert!(
+            function.contains("escape_like_pattern(&username_search.to_ascii_lowercase())"),
+            "username search must escape LIKE wildcards in user input"
+        );
+        assert!(
+            super::LIST_USERS_BY_USERNAME_SEARCH_SQL.contains("LIKE $1 ESCAPE '\\'"),
+            "username search SQL must declare the LIKE escape clause"
+        );
+    }
+
+    #[test]
+    fn user_export_search_escapes_like_wildcards_and_declares_escape_clause() {
+        let source = include_str!("users.rs").replace("\r\n", "\n");
+        for function_name in [
+            "pub async fn list_export_users_page",
+            "pub async fn count_export_users",
+        ] {
+            let function = source
+                .split(function_name)
+                .nth(1)
+                .expect("export search function should be present");
+            let search_block = function
+                .split("let pattern = ")
+                .nth(1)
+                .and_then(|tail| tail.split(';').next())
+                .expect("search pattern should be present");
+            assert!(
+                search_block.contains("escape_like_pattern(&search.to_ascii_lowercase())"),
+                "{function_name} must escape LIKE wildcards in user input"
+            );
+        }
+        assert_eq!(
+            source
+                .matches(".push(\" ESCAPE '\\\\' OR LOWER(username) LIKE \")")
+                .count(),
+            2,
+            "list and count export search must both declare the LIKE escape clause"
+        );
+    }
     use super::{
         POSTGRES_ANONYMIZE_USER_API_KEY_HISTORY_SQL, POSTGRES_ANONYMIZE_USER_HISTORY_SQL,
         POSTGRES_DELETE_USER_DEPENDENTS_SQL, POSTGRES_LOCK_ACTIVE_ADMINS_SQL,

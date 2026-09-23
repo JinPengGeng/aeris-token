@@ -147,6 +147,10 @@ FROM provider_endpoints
 WHERE provider_id IN (
 "#;
 
+// The legacy plaintext `api_key` column is intentionally kept (no DROP):
+// the migrations/schema are owned by upstream, and the column remains the
+// legacy fallback in `COALESCE(encrypted_key, api_key)` until upstream's
+// cleanup phase 3. See docs/adr/provider-api-key-plaintext-cleanup.md.
 const LIST_KEYS_BY_IDS_PREFIX: &str = r#"
 SELECT
   id,
