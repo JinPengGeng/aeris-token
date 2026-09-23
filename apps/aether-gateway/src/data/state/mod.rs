@@ -405,6 +405,7 @@ mod integrations;
 mod models;
 mod pool_scores;
 mod provider_catalog_cache;
+mod provider_cost_catalogs;
 mod provider_costs;
 mod referrals;
 mod request_candidate_cache;

@@ -20,6 +20,7 @@ mod pool;
 mod pool_scores;
 mod provider_catalog;
 mod provider_cost;
+mod provider_cost_catalog;
 mod proxy_nodes;
 mod quota;
 mod routing_profiles;
@@ -59,6 +60,7 @@ pub use pool::{acquire_postgres_migration_connection, PostgresPool, PostgresPool
 pub use pool_scores::PostgresPoolMemberScoreRepository;
 pub use provider_catalog::SqlxProviderCatalogReadRepository;
 pub use provider_cost::SqlxProviderCostRepository;
+pub use provider_cost_catalog::PostgresProviderCostCatalogRepository;
 pub use proxy_nodes::SqlxProxyNodeRepository;
 pub use quota::SqlxProviderQuotaRepository;
 pub use routing_profiles::PostgresRoutingGroupRepository;

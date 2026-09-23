@@ -392,6 +392,81 @@ pub(super) fn classify_admin_basic_family_route(
     } else if method == http::Method::GET
         && matches!(
             normalized_path,
+            "/api/admin/billing/provider-cost-catalogs"
+                | "/api/admin/billing/provider-cost-catalogs/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            "list_provider_cost_catalogs",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/admin/billing/provider-cost-catalogs/effective"
+                | "/api/admin/billing/provider-cost-catalogs/effective/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            "find_effective_provider_cost_catalog",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
+            "/api/admin/billing/provider-cost-catalogs"
+                | "/api/admin/billing/provider-cost-catalogs/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            "create_provider_cost_catalog",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && normalized_path.starts_with("/api/admin/billing/provider-cost-catalogs/")
+        && normalized_path.matches('/').count() == 5
+    {
+        Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            "get_provider_cost_catalog",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::PUT
+        && normalized_path.starts_with("/api/admin/billing/provider-cost-catalogs/")
+        && normalized_path.matches('/').count() == 5
+    {
+        Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            "update_provider_cost_catalog",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::DELETE
+        && normalized_path.starts_with("/api/admin/billing/provider-cost-catalogs/")
+        && normalized_path.matches('/').count() == 5
+    {
+        Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            "delete_provider_cost_catalog",
+            "admin:billing",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
             "/api/admin/billing/provider-costs/prices"
                 | "/api/admin/billing/provider-costs/prices/"
         )

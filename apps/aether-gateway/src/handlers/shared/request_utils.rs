@@ -382,6 +382,16 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                     http::Method::POST,
                     Some("import_provider_cost_snapshots"),
                 )
+                | (
+                    Some("billing_manage"),
+                    http::Method::POST,
+                    Some("create_provider_cost_catalog"),
+                )
+                | (
+                    Some("billing_manage"),
+                    http::Method::PUT,
+                    Some("update_provider_cost_catalog"),
+                )
                 | (Some("billing_manage"), http::Method::POST, Some("create_rule"))
                 | (Some("billing_manage"), http::Method::PUT, Some("update_rule"))
                 | (Some("billing_manage"), http::Method::POST, Some("create_collector"))
