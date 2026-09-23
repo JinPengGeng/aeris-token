@@ -5550,3 +5550,36 @@ fn attach_usage_settlement_pricing_snapshot_metadata_adds_missing_values_without
         })
     );
 }
+
+#[test]
+fn margin_report_sql_aggregates_charged_attempts_by_period_model_provider() {
+    let source = include_str!("mod.rs");
+    let body = source
+        .split("pub async fn aggregate_margin_report")
+        .nth(1)
+        .and_then(|tail| tail.split("pub async fn aggregate_usage_audits").next())
+        .unwrap_or_else(|| panic!("margin report query should be present"));
+
+    assert!(body.contains("FROM request_fund_reservations"));
+    assert!(body.contains("attempt_id IS NOT NULL"));
+    assert!(body.contains("terminal_facts->'outcome' ? 'Charged'"));
+    assert!(body.contains("billed_usage->>'actual_cost_units'"));
+    assert!(body.contains("billed_usage->'provider_cost'->>'amount_units'"));
+    assert!(body.contains("billed_usage->'provider_cost'->>'certainty'"));
+    assert!(body.contains("cost_unknown_request_count"));
+    assert!(body.contains("GROUP BY 1, 2, 3"));
+}
+
+#[test]
+fn margin_report_fixed_units_text_parsing_is_strict() {
+    assert_eq!(
+        super::parse_fixed_units_text("1500").expect("integer units"),
+        1500
+    );
+    assert_eq!(
+        super::parse_fixed_units_text("1500.00000000").expect("zero fraction"),
+        1500
+    );
+    assert!(super::parse_fixed_units_text("1.5").is_err());
+    assert!(super::parse_fixed_units_text("abc").is_err());
+}

@@ -1,26 +1,27 @@
 use aether_data_contracts::repository::usage::{
     canonical_usage_body_ref_for, parse_usage_body_ref, read_decompressed_usage_json,
-    usage_body_ref, ApiKeyLastUsedDelta, ManagementTokenCounterDelta, ProxyNodeCounterDelta,
-    StoredUsageAuditAggregation, StoredUsageAuditSummary, StoredUsageBodyPayload,
-    StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
-    StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
-    StoredUsageDailyActualCostRollup, StoredUsageDashboardDailyBreakdownRow,
-    StoredUsageDashboardProviderCount, StoredUsageDashboardStatsSummary,
-    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
-    StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
-    StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
-    StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
-    StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UsageAuditAggregationGroupBy,
-    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery,
-    UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
-    UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
-    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCleanupExecutionMode,
-    UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow, UsageCostSavingsSummaryQuery,
-    UsageDailyActualCostRollupQuery, UsageDashboardDailyBreakdownQuery,
-    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
-    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
-    UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery,
-    UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    usage_body_ref, ApiKeyLastUsedDelta, ManagementTokenCounterDelta, MarginReportGranularity,
+    MarginReportQuery, ProxyNodeCounterDelta, StoredMarginReportRow, StoredUsageAuditAggregation,
+    StoredUsageAuditSummary, StoredUsageBodyPayload, StoredUsageBreakdownSummaryRow,
+    StoredUsageCacheAffinityHitSummary, StoredUsageCacheAffinityIntervalRow,
+    StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary, StoredUsageDailyActualCostRollup,
+    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
+    StoredUsageDashboardStatsSummary, StoredUsageDashboardSummary, StoredUsageErrorDistributionRow,
+    StoredUsageLeaderboardSummary, StoredUsagePerformancePercentilesRow,
+    StoredUsageProviderPerformance, StoredUsageProviderPerformanceProviderRow,
+    StoredUsageProviderPerformanceSummary, StoredUsageProviderPerformanceTimelineRow,
+    StoredUsageSettledCostSummary, StoredUsageTimeSeriesBucket, StoredUsageUserTotals,
+    UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery,
+    UsageAuditSummaryQuery, UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy,
+    UsageBreakdownSummaryQuery, UsageCacheAffinityHitSummaryQuery,
+    UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery,
+    UsageCleanupExecutionMode, UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow,
+    UsageCostSavingsSummaryQuery, UsageDailyActualCostRollupQuery,
+    UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
+    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
+    UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
+    UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery, UsageSettledCostSummaryQuery,
+    UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -646,6 +647,59 @@ fn decode_usage_breakdown_summary_row(
             .try_get::<i64, _>("overall_response_time_samples")
             .map_postgres_err()?
             .max(0) as u64,
+    })
+}
+
+fn parse_fixed_units_text(raw: &str) -> Result<i128, DataLayerError> {
+    let normalized = raw.trim();
+    let (int_part, frac_part) = match normalized.split_once('.') {
+        Some((int_part, frac_part)) => (int_part, frac_part),
+        None => (normalized, ""),
+    };
+    if frac_part.bytes().any(|byte| byte != b'0') {
+        return Err(DataLayerError::InvalidInput(format!(
+            "unexpected fractional fixed-point units: {raw}"
+        )));
+    }
+    int_part
+        .parse::<i128>()
+        .map_err(|_| DataLayerError::InvalidInput(format!("invalid fixed-point units: {raw}")))
+}
+
+fn decode_margin_report_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<StoredMarginReportRow, DataLayerError> {
+    let revenue_units_text: String = row
+        .try_get::<String, _>("revenue_units")
+        .map_postgres_err()?;
+    let cost_units_text: String = row.try_get::<String, _>("cost_units").map_postgres_err()?;
+    Ok(StoredMarginReportRow {
+        period_start: row
+            .try_get::<String, _>("period_start")
+            .map_postgres_err()?,
+        model: row.try_get::<String, _>("model").map_postgres_err()?,
+        provider_id: row.try_get::<String, _>("provider_id").map_postgres_err()?,
+        request_count: row
+            .try_get::<i64, _>("request_count")
+            .map_postgres_err()?
+            .max(0) as u64,
+        revenue_units: parse_fixed_units_text(&revenue_units_text)?,
+        cost_units: parse_fixed_units_text(&cost_units_text)?,
+        cost_known_request_count: row
+            .try_get::<i64, _>("cost_known_request_count")
+            .map_postgres_err()?
+            .max(0) as u64,
+        cost_estimated_request_count: row
+            .try_get::<i64, _>("cost_estimated_request_count")
+            .map_postgres_err()?
+            .max(0) as u64,
+        cost_unknown_request_count: row
+            .try_get::<i64, _>("cost_unknown_request_count")
+            .map_postgres_err()?
+            .max(0) as u64,
+        currency: row
+            .try_get::<Option<String>, _>("currency")
+            .map_postgres_err()?,
     })
 }
 
@@ -7807,6 +7861,108 @@ ORDER BY request_count DESC, group_key ASC
         Ok(items)
     }
 
+    pub async fn aggregate_margin_report(
+        &self,
+        query: &MarginReportQuery,
+    ) -> Result<Vec<StoredMarginReportRow>, DataLayerError> {
+        let date_trunc = match query.granularity {
+            MarginReportGranularity::Day => "day",
+            MarginReportGranularity::Week => "week",
+            MarginReportGranularity::Month => "month",
+        };
+        let limit_sql = if query.limit > 0 { "LIMIT $6" } else { "" };
+        let sql = format!(
+            r#"
+WITH charged_attempts AS (
+  SELECT
+    model_id,
+    provider_id,
+    dispatched_at,
+    terminal_facts->'outcome'->'Charged'->'usage' AS billed_usage
+  FROM request_fund_reservations
+  WHERE attempt_id IS NOT NULL
+    AND dispatched_at >= TO_TIMESTAMP($1::double precision)
+    AND dispatched_at < TO_TIMESTAMP($2::double precision)
+    AND terminal_facts->'outcome' ? 'Charged'
+    AND ($4::text IS NULL OR provider_id = $4)
+    AND ($5::text IS NULL OR model_id = $5)
+)
+SELECT
+  to_char(
+    date_trunc('{date_trunc}', dispatched_at AT TIME ZONE 'UTC'),
+    'YYYY-MM-DD'
+  ) AS period_start,
+  COALESCE(NULLIF(BTRIM(model_id), ''), 'unknown') AS model,
+  COALESCE(NULLIF(BTRIM(provider_id), ''), 'unknown') AS provider_id,
+  COUNT(*)::BIGINT AS request_count,
+  COALESCE(SUM((billed_usage->>'actual_cost_units')::numeric), 0)::text AS revenue_units,
+  COALESCE(SUM(CASE
+    WHEN billed_usage->'provider_cost'->>'certainty' IN ('known', 'estimated')
+         AND (billed_usage->'provider_cost'->>'amount_units') IS NOT NULL
+    THEN (billed_usage->'provider_cost'->>'amount_units')::numeric
+    ELSE 0
+  END), 0)::text AS cost_units,
+  SUM(CASE
+    WHEN billed_usage->'provider_cost'->>'certainty' = 'known'
+         AND (billed_usage->'provider_cost'->>'amount_units') IS NOT NULL
+    THEN 1 ELSE 0
+  END)::BIGINT AS cost_known_request_count,
+  SUM(CASE
+    WHEN billed_usage->'provider_cost'->>'certainty' = 'estimated'
+         AND (billed_usage->'provider_cost'->>'amount_units') IS NOT NULL
+    THEN 1 ELSE 0
+  END)::BIGINT AS cost_estimated_request_count,
+  SUM(CASE
+    WHEN billed_usage->'provider_cost' IS NULL
+         OR (billed_usage->'provider_cost'->>'amount_units') IS NULL
+         OR billed_usage->'provider_cost'->>'certainty' NOT IN ('known', 'estimated')
+    THEN 1 ELSE 0
+  END)::BIGINT AS cost_unknown_request_count,
+  MAX(billed_usage->'provider_cost'->>'currency') AS currency
+FROM charged_attempts
+GROUP BY 1, 2, 3
+ORDER BY period_start ASC, request_count DESC, model ASC, provider_id ASC
+{limit_sql}
+"#,
+            date_trunc = date_trunc,
+            limit_sql = limit_sql,
+        );
+
+        let limit_bind = if query.limit > 0 {
+            i64::try_from(query.limit).map_err(|_| {
+                DataLayerError::InvalidInput(format!(
+                    "invalid margin report limit: {}",
+                    query.limit
+                ))
+            })?
+        } else {
+            0
+        };
+        let provider_id_filter = query
+            .provider_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let model_filter = query
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let mut rows = sqlx::query(&sql)
+            .bind(query.created_from_unix_secs as f64)
+            .bind(query.created_until_unix_secs as f64)
+            .bind(0_i64)
+            .bind(provider_id_filter)
+            .bind(model_filter)
+            .bind(limit_bind)
+            .fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(decode_margin_report_row(&row)?);
+        }
+        Ok(items)
+    }
+
     pub async fn aggregate_usage_audits(
         &self,
         query: &UsageAuditAggregationQuery,
@@ -10611,6 +10767,13 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         query: &UsageAuditAggregationQuery,
     ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
         Self::aggregate_usage_audits(self, query).await
+    }
+
+    async fn aggregate_margin_report(
+        &self,
+        query: &MarginReportQuery,
+    ) -> Result<Vec<StoredMarginReportRow>, DataLayerError> {
+        Self::aggregate_margin_report(self, query).await
     }
 
     async fn summarize_usage_audits(

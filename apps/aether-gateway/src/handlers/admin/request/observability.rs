@@ -87,6 +87,14 @@ impl<'a> AdminAppState<'a> {
         self.app.aggregate_usage_audits(query).await
     }
 
+    pub(crate) async fn aggregate_margin_report(
+        &self,
+        query: &aether_data_contracts::repository::usage::MarginReportQuery,
+    ) -> Result<Vec<aether_data_contracts::repository::usage::StoredMarginReportRow>, GatewayError>
+    {
+        self.app.aggregate_margin_report(query).await
+    }
+
     pub(crate) async fn summarize_usage_audits(
         &self,
         query: &aether_data_contracts::repository::usage::UsageAuditSummaryQuery,

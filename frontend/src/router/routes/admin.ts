@@ -104,6 +104,11 @@ export const adminRoutes: RouteRecordRaw[] = [
         component: view(() => import('@/views/admin/CostAnalysis.vue'))
       },
       {
+        path: 'margin-report',
+        name: 'MarginReport',
+        component: view(() => import('@/views/admin/MarginReport.vue'))
+      },
+      {
         path: 'performance-analysis',
         name: 'PerformanceAnalysis',
         component: view(() => import('@/views/admin/PerformanceAnalysis.vue'))

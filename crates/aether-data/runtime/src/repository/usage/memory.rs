@@ -6,12 +6,13 @@ use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_data_contracts::repository::usage::{
     canonical_usage_body_ref_for, next_daily_cost_contribution, parse_usage_body_ref,
     sanitize_usage_request_metadata, usage_body_ref, DailyActualCostCounts, DailyActualCostQuery,
-    DailyCostContribution, InsufficientQuotaWriteoffQuery, StoredInsufficientQuotaWriteoff,
-    StoredUsageAuditAggregation, StoredUsageAuditSummary, StoredUsageBreakdownSummaryRow,
-    StoredUsageCacheAffinityHitSummary, StoredUsageCacheAffinityIntervalRow,
-    StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary, StoredUsageDailyActualCostRollup,
-    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
-    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
+    DailyCostContribution, InsufficientQuotaWriteoffQuery, MarginReportQuery,
+    StoredInsufficientQuotaWriteoff, StoredMarginReportRow, StoredUsageAuditAggregation,
+    StoredUsageAuditSummary, StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
+    StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
+    StoredUsageDailyActualCostRollup, StoredUsageDashboardDailyBreakdownRow,
+    StoredUsageDashboardProviderCount, StoredUsageDashboardSummary,
+    StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
     StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
     StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
     StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
@@ -1700,6 +1701,16 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             items.truncate(query.limit);
         }
         Ok(items)
+    }
+
+    async fn aggregate_margin_report(
+        &self,
+        _query: &MarginReportQuery,
+    ) -> Result<Vec<StoredMarginReportRow>, DataLayerError> {
+        // Margin reporting is sourced from settled attempt funding facts
+        // (`request_fund_reservations.terminal_facts`), which the in-memory
+        // usage repository never holds.
+        Ok(Vec::new())
     }
 
     async fn summarize_usage_audits(

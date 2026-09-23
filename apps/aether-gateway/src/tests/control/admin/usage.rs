@@ -753,6 +753,41 @@ async fn gateway_handles_admin_usage_aggregation_stats_for_legacy_provider_name_
 }
 
 #[tokio::test]
+async fn gateway_handles_admin_usage_margin_stats_locally() {
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![]));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/margin/stats?granularity=day&start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert!(payload.as_array().expect("array response").is_empty());
+
+    let invalid = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/margin/stats?granularity=hour"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_usage_attribution_locally_with_metric_shares() {
     let (upstream_url, upstream_hits, upstream_handle) =
         start_usage_upstream("/api/admin/usage/attribution").await;

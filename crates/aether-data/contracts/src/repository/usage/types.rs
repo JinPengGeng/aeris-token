@@ -1234,6 +1234,44 @@ pub struct StoredUsageAuditAggregation {
     pub success_count: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarginReportGranularity {
+    Day,
+    Week,
+    Month,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MarginReportQuery {
+    pub created_from_unix_secs: u64,
+    pub created_until_unix_secs: u64,
+    pub granularity: MarginReportGranularity,
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
+    pub limit: usize,
+}
+
+/// One margin-report cell: model x provider x period. Amounts are 1e-8
+/// fixed-point units (i128); `cost_units` only covers attempts whose frozen
+/// provider-cost snapshot is known/estimated. Attempts whose snapshot is
+/// `unknown` (or missing an amount) count toward `cost_unknown_request_count`
+/// and must not be treated as zero-cost when deriving margin.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredMarginReportRow {
+    /// UTC period start, `YYYY-MM-DD`.
+    pub period_start: String,
+    pub model: String,
+    pub provider_id: String,
+    pub request_count: u64,
+    pub revenue_units: i128,
+    pub cost_units: i128,
+    pub cost_known_request_count: u64,
+    pub cost_estimated_request_count: u64,
+    pub cost_unknown_request_count: u64,
+    pub currency: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct StoredUsageAuditSummary {
     pub total_requests: u64,
@@ -1979,6 +2017,11 @@ pub trait UsageReadRepository: Send + Sync {
         &self,
         query: &UsageAuditAggregationQuery,
     ) -> Result<Vec<StoredUsageAuditAggregation>, crate::DataLayerError>;
+
+    async fn aggregate_margin_report(
+        &self,
+        query: &MarginReportQuery,
+    ) -> Result<Vec<StoredMarginReportRow>, crate::DataLayerError>;
 
     async fn summarize_usage_audits(
         &self,
