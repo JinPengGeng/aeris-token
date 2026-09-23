@@ -16,6 +16,7 @@ mod candidate_queries;
 mod gemini_files;
 mod monitoring;
 mod payments;
+mod provider_cost_catalogs;
 mod provider_costs;
 mod referrals;
 mod security;

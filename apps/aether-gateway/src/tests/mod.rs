@@ -19,6 +19,7 @@ mod control;
 mod files;
 mod frontdoor;
 mod operational_auth;
+mod provider_cost_catalogs;
 mod provider_costs;
 mod proxy;
 mod usage;
