@@ -815,11 +815,12 @@ async fn connect_protocol_peer(
                                 Err(_) => break,
                             }
                         }
-                        Some(Ok(Message::Ping(payload))) => {
-                            if sink.send(Message::Pong(payload)).await.is_err() {
-                                break;
-                            }
+                        Some(Ok(Message::Ping(payload)))
+                            if sink.send(Message::Pong(payload.clone())).await.is_err() =>
+                        {
+                            break;
                         }
+                        Some(Ok(Message::Ping(_))) => {}
                         None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                         _ => {},
                     }
