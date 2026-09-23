@@ -1,5 +1,55 @@
 use serde_json::{Map, Value};
 
+/// Language negotiated for a client-visible error message.
+///
+/// The gateway defaults to English and only switches to Chinese when the
+/// request's `Accept-Language` header lists a `zh` primary tag. Clients must
+/// branch on status/type/code, never on translated message text.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ErrorMessageLocale {
+    #[default]
+    English,
+    Chinese,
+}
+
+impl ErrorMessageLocale {
+    pub fn quota_exhausted_message(self) -> &'static str {
+        match self {
+            Self::English => "Insufficient quota",
+            Self::Chinese => "余额不足",
+        }
+    }
+}
+
+/// Resolve the error message locale from a raw `Accept-Language` header value.
+///
+/// Returns [`ErrorMessageLocale::English`] when the header is absent or
+/// malformed. Any range entry whose primary subtag is `zh` (for example
+/// `zh`, `zh-CN`, `zh-Hans`, `zh-TW`) selects Chinese; everything else keeps
+/// the English default.
+pub fn resolve_error_message_locale(accept_language: Option<&str>) -> ErrorMessageLocale {
+    let Some(header) = accept_language else {
+        return ErrorMessageLocale::English;
+    };
+    let selects_chinese = header.split(',').any(|entry| {
+        entry
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .split('-')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .eq_ignore_ascii_case("zh")
+    });
+    if selects_chinese {
+        ErrorMessageLocale::Chinese
+    } else {
+        ErrorMessageLocale::English
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalCoreSyncErrorKind {
     InvalidRequest,
@@ -70,14 +120,30 @@ pub fn build_core_error_body_for_client_format(
     code: Option<&str>,
     kind: LocalCoreSyncErrorKind,
 ) -> Option<Value> {
+    build_core_error_body_for_client_format_with_locale(
+        client_api_format,
+        message,
+        code,
+        kind,
+        ErrorMessageLocale::English,
+    )
+}
+
+pub fn build_core_error_body_for_client_format_with_locale(
+    client_api_format: &str,
+    message: &str,
+    code: Option<&str>,
+    kind: LocalCoreSyncErrorKind,
+    locale: ErrorMessageLocale,
+) -> Option<Value> {
     let normalized_format = aether_ai_formats::normalize_api_format_alias(client_api_format);
     // Keep account details out of public quota envelopes, including conversions
     // of upstream errors. Gemini retains its existing RESOURCE_EXHAUSTED mapping.
     let (message, code) = if kind == LocalCoreSyncErrorKind::QuotaExhausted {
         if normalized_format.starts_with("openai:") {
-            ("Insufficient quota", Some("insufficient_quota"))
+            (locale.quota_exhausted_message(), Some("insufficient_quota"))
         } else if normalized_format == "claude:messages" {
-            ("Insufficient quota", None)
+            (locale.quota_exhausted_message(), None)
         } else {
             (message, code)
         }
@@ -208,9 +274,78 @@ fn map_local_sync_error_kind_to_gemini_status(kind: LocalCoreSyncErrorKind) -> &
 #[cfg(test)]
 mod tests {
     use super::{
-        build_core_error_body_for_client_format, core_success_background_report_kind,
-        is_core_error_finalize_kind, LocalCoreSyncErrorKind,
+        build_core_error_body_for_client_format,
+        build_core_error_body_for_client_format_with_locale, core_success_background_report_kind,
+        is_core_error_finalize_kind, resolve_error_message_locale, ErrorMessageLocale,
+        LocalCoreSyncErrorKind,
     };
+
+    #[test]
+    fn resolves_locale_from_accept_language() {
+        assert_eq!(
+            resolve_error_message_locale(None),
+            ErrorMessageLocale::English
+        );
+        assert_eq!(
+            resolve_error_message_locale(Some("")),
+            ErrorMessageLocale::English
+        );
+        assert_eq!(
+            resolve_error_message_locale(Some("en-US,en;q=0.9")),
+            ErrorMessageLocale::English
+        );
+        assert_eq!(
+            resolve_error_message_locale(Some("zh-CN,zh;q=0.9,en;q=0.8")),
+            ErrorMessageLocale::Chinese
+        );
+        assert_eq!(
+            resolve_error_message_locale(Some("en;q=0.9, zh-Hans;q=0.8")),
+            ErrorMessageLocale::Chinese
+        );
+        assert_eq!(
+            resolve_error_message_locale(Some("ZH-tw")),
+            ErrorMessageLocale::Chinese
+        );
+        assert_eq!(
+            resolve_error_message_locale(Some("fr-FR,fr;q=0.9")),
+            ErrorMessageLocale::English
+        );
+    }
+
+    #[test]
+    fn quota_exhausted_message_follows_locale_for_openai_and_claude() {
+        let openai = build_core_error_body_for_client_format_with_locale(
+            "openai:chat",
+            "unused",
+            None,
+            LocalCoreSyncErrorKind::QuotaExhausted,
+            ErrorMessageLocale::Chinese,
+        )
+        .expect("body should build");
+        assert_eq!(openai["error"]["message"], "余额不足");
+        assert_eq!(openai["error"]["type"], "insufficient_quota");
+        assert_eq!(openai["error"]["code"], "insufficient_quota");
+
+        let claude = build_core_error_body_for_client_format_with_locale(
+            "claude:messages",
+            "unused",
+            None,
+            LocalCoreSyncErrorKind::QuotaExhausted,
+            ErrorMessageLocale::Chinese,
+        )
+        .expect("body should build");
+        assert_eq!(claude["error"]["message"], "余额不足");
+        assert_eq!(claude["error"]["type"], "insufficient_quota");
+
+        let default_openai = build_core_error_body_for_client_format(
+            "openai:chat",
+            "unused",
+            None,
+            LocalCoreSyncErrorKind::QuotaExhausted,
+        )
+        .expect("body should build");
+        assert_eq!(default_openai["error"]["message"], "Insufficient quota");
+    }
 
     #[test]
     fn builds_openai_core_error_body() {

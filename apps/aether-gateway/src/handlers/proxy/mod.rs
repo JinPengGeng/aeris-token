@@ -18,12 +18,21 @@ use crate::ai_serving::api::{
     aggregate_openai_chat_stream_sync_response, aggregate_openai_responses_stream_sync_response,
     maybe_bridge_standard_sync_json_to_stream,
 };
+use crate::ai_serving::{resolve_error_message_locale, ErrorMessageLocale};
 use crate::api::response::{
-    build_client_response, build_client_response_from_parts, build_local_auth_rejection_response,
-    build_local_http_error_response, build_local_http_error_response_with_request_path,
-    build_local_overloaded_response, build_local_plan_usage_limited_response,
-    build_local_user_rpm_limited_response,
+    build_client_response, build_client_response_from_parts,
+    build_local_auth_rejection_response_with_locale, build_local_http_error_response,
+    build_local_http_error_response_with_request_path, build_local_overloaded_response,
+    build_local_plan_usage_limited_response, build_local_user_rpm_limited_response,
 };
+
+fn request_error_message_locale(headers: &http::HeaderMap) -> ErrorMessageLocale {
+    resolve_error_message_locale(
+        headers
+            .get(http::header::ACCEPT_LANGUAGE)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
 use crate::constants::{
     CONTROL_CANDIDATE_ID_HEADER, DEPENDENCY_REASON_HEADER, EXECUTION_PATH_CONTROL_EXECUTE_STREAM,
     EXECUTION_PATH_CONTROL_EXECUTE_SYNC, EXECUTION_PATH_DISTRIBUTED_OVERLOADED,
@@ -1513,10 +1522,11 @@ async fn proxy_request_inner(
             let rejection = crate::control::GatewayLocalAuthRejection::IpNotAllowed {
                 remote_ip: client_ip.to_string(),
             };
-            let response = build_local_auth_rejection_response(
+            let response = build_local_auth_rejection_response_with_locale(
                 &trace_id,
                 request_context.control_decision.as_ref(),
                 &rejection,
+                request_error_message_locale(&parts.headers),
             )?;
             return Ok(finalize_gateway_response_with_context(
                 &state,
@@ -1815,8 +1825,12 @@ async fn proxy_request_inner(
     }
 
     if let Some(rejection) = trusted_auth_local_rejection(control_decision, &parts.headers) {
-        let response =
-            build_local_auth_rejection_response(&trace_id, control_decision, &rejection)?;
+        let response = build_local_auth_rejection_response_with_locale(
+            &trace_id,
+            control_decision,
+            &rejection,
+            request_error_message_locale(&parts.headers),
+        )?;
         return Ok(finalize_gateway_response_with_context(
             &state,
             response,
@@ -1843,8 +1857,12 @@ async fn proxy_request_inner(
             auth_model_started_at.elapsed().as_millis() as u64,
         );
         if let Some(rejection) = model_rejection {
-            let response =
-                build_local_auth_rejection_response(&trace_id, control_decision, &rejection)?;
+            let response = build_local_auth_rejection_response_with_locale(
+                &trace_id,
+                control_decision,
+                &rejection,
+                request_error_message_locale(&parts.headers),
+            )?;
             return Ok(finalize_gateway_response_with_context(
                 &state,
                 response,
