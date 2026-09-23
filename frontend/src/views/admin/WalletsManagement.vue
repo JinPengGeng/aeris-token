@@ -334,11 +334,11 @@
                           </div>
                         </div>
                       </TableCell>
-                      <TableCell :class="tx.amount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
-                        {{ tx.amount >= 0 ? '+' : '' }}{{ tx.amount.toFixed(4) }}
+                      <TableCell :class="moneyToNumber(tx.amount) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
+                        {{ moneyToNumber(tx.amount) >= 0 ? '+' : '' }}{{ formatMoney(tx.amount, 4) }}
                       </TableCell>
                       <TableCell class="text-xs tabular-nums whitespace-nowrap">
-                        <div>{{ tx.balance_before.toFixed(4) }} → {{ tx.balance_after.toFixed(4) }}</div>
+                        <div>{{ formatMoney(tx.balance_before, 4) }} → {{ formatMoney(tx.balance_after, 4) }}</div>
                         <div
                           v-if="tx.recharge_balance_before !== null && tx.recharge_balance_before !== undefined && tx.gift_balance_before !== null && tx.gift_balance_before !== undefined"
                           class="text-[11px] text-muted-foreground mt-0.5"
@@ -1239,9 +1239,9 @@
                   </div>
                   <span
                     class="text-sm font-semibold tabular-nums"
-                    :class="currentLedger.amount >= 0 ? 'text-emerald-600' : 'text-rose-600'"
+                    :class="moneyToNumber(currentLedger.amount) >= 0 ? 'text-emerald-600' : 'text-rose-600'"
                   >
-                    {{ currentLedger.amount >= 0 ? '+' : '' }}{{ currentLedger.amount.toFixed(4) }}
+                    {{ moneyToNumber(currentLedger.amount) >= 0 ? '+' : '' }}{{ formatMoney(currentLedger.amount, 4) }}
                   </span>
                 </div>
                 <div class="text-xs text-muted-foreground">
@@ -1273,7 +1273,7 @@
                     余额变化
                   </div>
                   <div class="mt-1 text-sm font-medium tabular-nums">
-                    {{ currentLedger.balance_before.toFixed(4) }} → {{ currentLedger.balance_after.toFixed(4) }}
+                    {{ formatMoney(currentLedger.balance_before, 4) }} → {{ formatMoney(currentLedger.balance_after, 4) }}
                   </div>
                   <div
                     v-if="currentLedger.recharge_balance_before !== null && currentLedger.recharge_balance_before !== undefined && currentLedger.gift_balance_before !== null && currentLedger.gift_balance_before !== undefined"
@@ -1579,6 +1579,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatMoney, moneyToNumber, toMoneyString } from '@/utils/money'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
@@ -1839,7 +1840,7 @@ const completeRefundForm = reactive({
 
 const creditForm = reactive({
   gateway_order_id: '',
-  pay_amount: undefined as number | undefined,
+  pay_amount: undefined as string | undefined,
   pay_currency: '',
   exchange_rate: undefined as number | undefined,
 })
@@ -2291,7 +2292,7 @@ async function submitRedeemCodeBatch() {
     const expiresAt = getRedeemBatchExpiryValue(redeemBatchExpiryPreset.value)
     const payload = {
       name: redeemBatchForm.name.trim(),
-      amount_usd: redeemBatchForm.amount_usd,
+      amount_usd: toMoneyString(redeemBatchForm.amount_usd),
       total_count: redeemBatchForm.total_count,
       expires_at: expiresAt ? new Date(expiresAt).toISOString() : undefined,
       description: redeemBatchForm.description.trim() || undefined,

@@ -591,7 +591,7 @@
                           </div>
                         </TableCell>
                         <TableCell
-                          :class="item.data.amount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'"
+                          :class="moneyToNumber(item.data.amount) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'"
                         >
                           {{ moneyToNumber(item.data.amount) >= 0 ? '+' : '' }}{{ formatMoneyFixed(item.data.amount, 4) }}
                         </TableCell>
@@ -884,7 +884,7 @@ import {
   walletTransactionCategoryLabel,
   walletTransactionReasonLabel,
 } from '@/utils/walletDisplay'
-import { formatMoney as formatMoneyFixed, moneyToNumber } from '@/utils/money'
+import { formatMoney as formatMoneyFixed, moneyToNumber, toMoneyString } from '@/utils/money'
 
 const { success, info, error: showError } = useToast()
 
@@ -964,7 +964,7 @@ const redeemForm = reactive({
 
 const refundableOrders = computed(() =>
   rechargeOrders.value.filter(order =>
-    (order.refundable_amount_usd || 0) > 0
+    moneyToNumber(order.refundable_amount_usd) > 0
     && refundEligiblePaymentMethods.value.has(refundPaymentMethod(order))
   )
 )
@@ -1062,12 +1062,12 @@ const totalAvailableBalance = computed(() => {
   return walletOnlyBalance.value + packageBalance.value
 })
 const dailyQuotaTotal = computed(() => {
-  const value = dailyQuota.value?.total_usd
-  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0
+  const parsedTotal = moneyToNumber(dailyQuota.value?.total_usd, Number.NaN)
+  return Number.isFinite(parsedTotal) ? Math.max(0, parsedTotal) : 0
 })
 const dailyQuotaUsed = computed(() => {
-  const value = dailyQuota.value?.used_usd
-  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0
+  const parsedUsed = moneyToNumber(dailyQuota.value?.used_usd, Number.NaN)
+  return Number.isFinite(parsedUsed) ? Math.max(0, parsedUsed) : 0
 })
 const dailyQuotaRemainingPercent = computed(() => {
   if (!hasActiveDailyQuota.value || dailyQuotaTotal.value <= 0) return 0
@@ -1649,13 +1649,13 @@ async function submitRefund() {
     showError('请选择允许用户退款的充值订单')
     return
   }
-  if (refundForm.amount_usd > (selectedOrder.refundable_amount_usd || 0)) {
+  if (refundForm.amount_usd > moneyToNumber(selectedOrder.refundable_amount_usd)) {
     showError(`退款金额超过该订单可退金额（当前可退 ${formatCurrency(selectedOrder.refundable_amount_usd || 0)}）`)
     return
   }
   const refundableBalance =
     walletBalance.value?.wallet?.refundable_balance ?? walletBalance.value?.refundable_balance ?? null
-  if (refundableBalance !== null && refundForm.amount_usd > refundableBalance) {
+  if (refundableBalance !== null && refundForm.amount_usd > moneyToNumber(refundableBalance)) {
     showError(`退款金额超过可退款余额（当前可退 ${formatCurrency(refundableBalance)}）`)
     return
   }
