@@ -194,6 +194,15 @@
                   variant="ghost"
                   size="icon"
                   class="h-8 w-8"
+                  title="成本价目"
+                  @click="openCostCatalog(model)"
+                >
+                  <Coins class="w-3.5 h-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-8 w-8"
                   title="编辑"
                   @click="editModel(model)"
                 >
@@ -264,6 +273,13 @@
     </div>
   </Card>
 
+  <ProviderCostCatalogDialog
+    :open="costCatalogOpen"
+    :provider-id="provider.id"
+    :model-name="costCatalogModelName"
+    @update:open="costCatalogOpen = $event"
+  />
+
   <ModelTestDialog
     :open="modelTest.dialogOpen.value"
     :result="modelTest.testResult.value"
@@ -304,7 +320,7 @@
 import { ref, computed, watch } from 'vue'
 import { useSmartPagination } from '@/composables/useSmartPagination'
 import { useModelTest } from '@/composables/useModelTest'
-import { Box, Edit, Layers, Power, Copy, Loader2, Play, Trash2 } from 'lucide-vue-next'
+import { Box, Coins, Edit, Layers, Power, Copy, Loader2, Play, Trash2 } from 'lucide-vue-next'
 import Card from '@/components/ui/card.vue'
 import Button from '@/components/ui/button.vue'
 import Checkbox from '@/components/ui/checkbox.vue'
@@ -323,6 +339,7 @@ import { parseApiError } from '@/utils/errorParser'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
 import ModelTestDialog from './ModelTestDialog.vue'
+import ProviderCostCatalogDialog from '../ProviderCostCatalogDialog.vue'
 import {
   buildDefaultModelTestRequestHeaders,
   buildDefaultModelTestRequestBody,
@@ -577,6 +594,14 @@ function getStatusTitle(model: Model): string {
     return '活跃且可用'
   }
   return '活跃但不可用'
+}
+
+const costCatalogOpen = ref(false)
+const costCatalogModelName = ref('')
+
+function openCostCatalog(model: Model) {
+  costCatalogModelName.value = model.provider_model_name
+  costCatalogOpen.value = true
 }
 
 // 编辑模型
