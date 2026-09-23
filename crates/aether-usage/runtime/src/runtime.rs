@@ -22,6 +22,7 @@ use crate::event_capture_budget::{
 };
 use crate::executor::spawn_on_usage_background_runtime;
 use crate::queue::is_permanent_enqueue_error;
+
 use crate::request_metadata::{
     attach_client_request_body_metadata, attach_provider_request_body_metadata,
     attach_provider_response_body_metadata, attach_provider_response_model_metadata,
@@ -4727,14 +4728,142 @@ impl UsageRuntime {
         };
         self.apply_body_capture_policy_from_data(data, &mut event)
             .await;
-        if enrich_terminal_event(data, &mut event).await.is_err() {
-            return;
+        match self
+            .enrich_terminal_event_direct_with_retry(data, &mut event)
+            .await
+        {
+            Ok(()) => {}
+            Err(error) => {
+                self.dead_letter_direct_terminal_event(data, event, error, ordered_completion)
+                    .await;
+                return;
+            }
         }
         let request_id = event.request_id.clone();
         if self.write_event_direct(data, &event).await {
             self.lifecycle_coalescer
                 .cancel_delayed_for_queued_terminal(&request_id)
                 .await;
+            if let Some(completion) = ordered_completion {
+                completion.complete();
+            }
+        }
+    }
+
+    /// Retries the direct terminal enrichment for transient errors.  The
+    /// direct path has no queue entry behind it, so a single enrichment error
+    /// used to drop the record outright; the retry must stay bounded so a
+    /// permanently failing enrichment cannot stall the terminal submission.
+    async fn enrich_terminal_event_direct_with_retry<T>(
+        &self,
+        data: &T,
+        event: &mut UsageEvent,
+    ) -> Result<(), DataLayerError>
+    where
+        T: UsageBillingEventEnricher + Send + Sync,
+    {
+        for attempt in 1..=DIRECT_TERMINAL_ENRICH_MAX_ATTEMPTS {
+            match enrich_terminal_event(data, event).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if attempt == DIRECT_TERMINAL_ENRICH_MAX_ATTEMPTS
+                        || !direct_terminal_enrich_error_retryable(&error)
+                    {
+                        return Err(error);
+                    }
+                    warn!(
+                        event_name = "usage_terminal_direct_enrichment_retry",
+                        log_type = "event",
+                        usage_event_type = ?event.event_type,
+                        request_id = %event.request_id,
+                        attempt,
+                        max_attempts = DIRECT_TERMINAL_ENRICH_MAX_ATTEMPTS,
+                        error = %error,
+                        "usage runtime direct terminal enrichment attempt failed; retrying"
+                    );
+                    tokio::time::sleep(DIRECT_TERMINAL_ENRICH_RETRY_BASE_DELAY * attempt as u32)
+                        .await;
+                }
+            }
+        }
+        unreachable!("loop always returns")
+    }
+
+    /// Hands a terminal event whose enrichment kept failing off to the
+    /// persistent dead-letter stream instead of silently dropping the record,
+    /// so operators can inspect and redrive it.  When no queue is configured
+    /// the event is reported and left for operator retry.
+    async fn dead_letter_direct_terminal_event<T>(
+        &self,
+        data: &T,
+        event: UsageEvent,
+        error: DataLayerError,
+        ordered_completion: Option<OrderedLifecycleCompletion>,
+    ) where
+        T: UsageRuntimeAccess,
+    {
+        let request_id = event.request_id.clone();
+        let usage_event_type = event.event_type;
+        let dead_lettered = match data.usage_worker_queue() {
+            Some(runner) => match UsageQueue::new(runner, self.config.clone()) {
+                Ok(queue) => match queue
+                    .push_event_dead_letter(&event, &error.to_string())
+                    .await
+                {
+                    Ok(destination_id) => {
+                        warn!(
+                            event_name = "usage_terminal_direct_dead_lettered",
+                            log_type = "ops",
+                            usage_event_type = ?usage_event_type,
+                            request_id = %request_id,
+                            dead_letter_id = %destination_id,
+                            error = %error,
+                            "usage runtime dead-lettered terminal event after bounded enrichment retries"
+                        );
+                        true
+                    }
+                    Err(dead_letter_error) => {
+                        warn!(
+                            event_name = "usage_terminal_direct_dead_letter_failed",
+                            log_type = "ops",
+                            usage_event_type = ?usage_event_type,
+                            request_id = %request_id,
+                            error = %dead_letter_error,
+                            original_error = %error,
+                            "usage runtime failed to persist dead-letter for terminal event; record was dropped"
+                        );
+                        false
+                    }
+                },
+                Err(queue_error) => {
+                    warn!(
+                        event_name = "usage_terminal_direct_dead_letter_unavailable",
+                        log_type = "ops",
+                        usage_event_type = ?usage_event_type,
+                        request_id = %request_id,
+                        error = %queue_error,
+                        original_error = %error,
+                        "usage runtime could not init queue for terminal dead-letter; record was dropped"
+                    );
+                    false
+                }
+            },
+            None => {
+                warn!(
+                    event_name = "usage_terminal_direct_dead_letter_unavailable",
+                    log_type = "ops",
+                    usage_event_type = ?usage_event_type,
+                    request_id = %request_id,
+                    error = %error,
+                    "usage runtime has no queue for terminal dead-letter; record was dropped"
+                );
+                false
+            }
+        };
+        if dead_lettered {
+            self.worker_supervisor_state
+                .dead_lettered_entries_total
+                .fetch_add(1, Ordering::Relaxed);
             if let Some(completion) = ordered_completion {
                 completion.complete();
             }
@@ -5606,6 +5735,26 @@ impl UsageQueueHealthSnapshot {
         self.group_lag = stats.group_lag;
         self.oldest_pending_idle_ms = stats.oldest_pending_idle_ms;
     }
+}
+
+/// Bound for the automatic in-line retry of the direct terminal enrichment.
+/// Mirrors the referral credit retry: a crash or transient error between the
+/// enrichment lookup and the write must converge without an operator, but the
+/// retry must stay bounded so a permanently failing enrichment cannot stall
+/// the terminal submission.
+const DIRECT_TERMINAL_ENRICH_MAX_ATTEMPTS: usize = 3;
+const DIRECT_TERMINAL_ENRICH_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
+
+/// Only transient transport/timeout-class errors are retried.  Input and
+/// data-shape errors fail fast: retrying them cannot change the outcome.
+fn direct_terminal_enrich_error_retryable(error: &DataLayerError) -> bool {
+    matches!(
+        error,
+        DataLayerError::Postgres(_)
+            | DataLayerError::Sql(_)
+            | DataLayerError::Redis(_)
+            | DataLayerError::TimedOut(_)
+    )
 }
 
 async fn enrich_terminal_event<T>(data: &T, event: &mut UsageEvent) -> Result<(), DataLayerError>
@@ -8615,6 +8764,95 @@ mod tests {
         }
     }
 
+    struct FlakyEnrichQueueStore {
+        records: Mutex<Vec<UpsertUsageRecord>>,
+        queue: Arc<dyn RuntimeQueueStore>,
+        enrichment_failures: AtomicUsize,
+        enrichment_calls: AtomicUsize,
+        enriched_costs: Option<(f64, f64)>,
+        permanent_enrich_failure: bool,
+    }
+
+    #[async_trait]
+    impl UsageRecordWriter for FlakyEnrichQueueStore {
+        async fn upsert_usage_record(
+            &self,
+            record: UpsertUsageRecord,
+        ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
+            self.records.lock().expect("records lock").push(record);
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl UsageSettlementWriter for FlakyEnrichQueueStore {
+        fn has_usage_settlement_writer(&self) -> bool {
+            false
+        }
+
+        async fn settle_usage(
+            &self,
+            _input: UsageSettlementInput,
+        ) -> Result<Option<StoredUsageSettlement>, DataLayerError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl UsageBillingEventEnricher for FlakyEnrichQueueStore {
+        async fn enrich_usage_event(&self, event: &mut UsageEvent) -> Result<(), DataLayerError> {
+            self.enrichment_calls.fetch_add(1, Ordering::AcqRel);
+            if self.permanent_enrich_failure {
+                return Err(DataLayerError::InvalidInput(
+                    "permanent test enrichment failure".to_string(),
+                ));
+            }
+            if self
+                .enrichment_failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                // Real enrichers may update part of the event before a lookup fails.
+                event.data.total_cost_usd = Some(999.0);
+                return Err(DataLayerError::TimedOut("test billing lookup".to_string()));
+            }
+            if let Some((listed, actual)) = self.enriched_costs {
+                event.data.total_cost_usd = Some(listed);
+                event.data.actual_total_cost_usd = Some(actual);
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ManualProxyNodeCounter for FlakyEnrichQueueStore {
+        async fn increment_manual_proxy_node_requests(
+            &self,
+            _node_id: &str,
+            _total_delta: i64,
+            _failed_delta: i64,
+            _latency_ms: Option<i64>,
+        ) -> Result<(), DataLayerError> {
+            Ok(())
+        }
+    }
+
+    impl UsageRuntimeAccess for FlakyEnrichQueueStore {
+        fn has_usage_writer(&self) -> bool {
+            true
+        }
+
+        fn has_usage_worker_queue(&self) -> bool {
+            true
+        }
+
+        fn usage_worker_queue(&self) -> Option<Arc<dyn RuntimeQueueStore>> {
+            Some(Arc::clone(&self.queue))
+        }
+    }
+
     #[async_trait]
     impl UsageRecordWriter for FailingWriteQueueConfiguredUsageStore {
         fn supports_first_byte_usage_batch(&self) -> bool {
@@ -9061,7 +9299,6 @@ mod tests {
 
     #[derive(Clone, Copy)]
     enum DirectTerminalTestEntry {
-        PublicDirect,
         OrderedDirect,
         QueueDisabled,
     }
@@ -9073,10 +9310,6 @@ mod tests {
         event: UsageEvent,
     ) -> Option<super::TerminalPersistenceOutcome> {
         match entry {
-            DirectTerminalTestEntry::PublicDirect => {
-                runtime.record_terminal_event_direct(store, event).await;
-                None
-            }
             DirectTerminalTestEntry::OrderedDirect => Some(
                 runtime
                     .persist_ordered_terminal_event(store, event, true)
@@ -9188,12 +9421,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_terminal_pricing_failure_preserves_lifecycle_and_allows_correct_retry() {
-        assert_direct_terminal_enrichment_failure_is_not_persisted(
-            DirectTerminalTestEntry::PublicDirect,
-            "direct-terminal-pricing-retry",
+    async fn direct_terminal_pricing_failure_preserves_lifecycle_and_retries_inline() {
+        let runtime = UsageRuntime::new(UsageRuntimeConfig {
+            enabled: true,
+            queue_terminal_events: false,
+            ..UsageRuntimeConfig::default()
+        })
+        .expect("usage runtime");
+        let store = NoRedisUsageStore {
+            enrichment_failures: AtomicUsize::new(1),
+            enriched_costs: Some((0.456, 0.123)),
+            ..NoRedisUsageStore::default()
+        };
+        let request_id = "direct-terminal-pricing-retry";
+        runtime
+            .lifecycle_coalescer
+            .register(request_id.to_string())
+            .await
+            .expect("delayed lifecycle generation");
+        let event = UsageEvent::new(
+            UsageEventType::Completed,
+            request_id,
+            UsageEventData {
+                user_id: Some("user-direct-pricing-retry".to_string()),
+                provider_name: "openai".to_string(),
+                provider_id: Some("provider-direct-pricing-retry".to_string()),
+                model: "gpt-5".to_string(),
+                input_tokens: Some(4),
+                output_tokens: Some(8),
+                total_tokens: Some(12),
+                total_cost_usd: Some(0.9),
+                actual_total_cost_usd: Some(0.8),
+                status_code: Some(200),
+                ..UsageEventData::default()
+            },
+        );
+
+        timeout(
+            Duration::from_secs(2),
+            runtime.record_terminal_event_direct(&store, event),
         )
-        .await;
+        .await
+        .expect("retried enrichment should release the terminal turn");
+
+        assert_eq!(
+            store.enrichment_calls.load(Ordering::Acquire),
+            2,
+            "the transient pricing failure must be retried inline and then succeed"
+        );
+        {
+            let records = store.records.lock().expect("records lock");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].total_cost_usd, Some(0.456));
+            assert_eq!(records[0].actual_total_cost_usd, Some(0.123));
+            assert_eq!(records[0].total_tokens, Some(12));
+        }
+        {
+            let coalescer = &runtime.lifecycle_coalescer;
+            let entries = coalescer.shards[coalescer.shard_index(request_id)]
+                .entries
+                .lock()
+                .await;
+            let marker = entries
+                .get(request_id)
+                .expect("delayed marker is preserved");
+            assert!(marker.terminal_seen_at.is_some());
+        }
+        let snapshot = runtime.metrics_snapshot();
+        assert_eq!(snapshot.ordered_lifecycle_pending, 0);
+        assert_eq!(snapshot.terminal_submission_in_flight, 0);
+        assert_eq!(snapshot.enqueue_retry_scheduled_total, 0);
     }
 
     #[tokio::test]
@@ -9400,6 +9697,159 @@ mod tests {
         assert_eq!(records[0].status, "failed");
         assert_eq!(records[0].billing_status, "void");
         assert_eq!(records[0].status_code, Some(503));
+    }
+
+    fn flaky_enrich_direct_store(enrichment_failures: usize) -> FlakyEnrichQueueStore {
+        FlakyEnrichQueueStore {
+            records: Mutex::new(Vec::new()),
+            queue: Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default())),
+            enrichment_failures: AtomicUsize::new(enrichment_failures),
+            enrichment_calls: AtomicUsize::new(0),
+            enriched_costs: Some((0.25, 0.25)),
+            permanent_enrich_failure: false,
+        }
+    }
+
+    fn direct_completed_event(request_id: &str) -> UsageEvent {
+        UsageEvent::new(
+            UsageEventType::Completed,
+            request_id,
+            UsageEventData {
+                user_id: Some(format!("user-{request_id}")),
+                provider_name: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                input_tokens: Some(4),
+                output_tokens: Some(8),
+                total_tokens: Some(12),
+                status_code: Some(200),
+                ..UsageEventData::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn direct_terminal_enrichment_transient_failure_retries_then_persists_exactly_once() {
+        let runtime = UsageRuntime::new(UsageRuntimeConfig {
+            enabled: true,
+            ..UsageRuntimeConfig::default()
+        })
+        .expect("usage runtime should build");
+        let store = flaky_enrich_direct_store(1);
+
+        runtime
+            .record_terminal_event_direct(&store, direct_completed_event("req-direct-retry-1"))
+            .await;
+
+        assert_eq!(
+            store.enrichment_calls.load(Ordering::Acquire),
+            2,
+            "one transient enrichment failure must be retried once and then succeed"
+        );
+        {
+            let records = store.records.lock().expect("records lock");
+            assert_eq!(
+                records.len(),
+                1,
+                "the retried terminal event must be persisted exactly once"
+            );
+            assert_eq!(records[0].request_id, "req-direct-retry-1");
+            assert_eq!(
+                records[0].total_cost_usd,
+                Some(0.25),
+                "the record must carry the successful enrichment cost, not the partial 999.0 failure mutation"
+            );
+        }
+        let dlq = runtime
+            .dead_letter_page(&store, "0-0", 10)
+            .await
+            .expect("dead letter page should read");
+        assert!(
+            dlq.entries.is_empty(),
+            "a retried-and-persisted event must not also land in the dead letter"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_terminal_enrichment_retry_exhaustion_dead_letters_for_redrive() {
+        let runtime = UsageRuntime::new(UsageRuntimeConfig {
+            enabled: true,
+            ..UsageRuntimeConfig::default()
+        })
+        .expect("usage runtime should build");
+        let store = flaky_enrich_direct_store(usize::MAX);
+
+        runtime
+            .record_terminal_event_direct(&store, direct_completed_event("req-direct-dlq-1"))
+            .await;
+
+        assert_eq!(
+            store.enrichment_calls.load(Ordering::Acquire),
+            3,
+            "transient enrichment failures are retried up to the bounded maximum"
+        );
+        assert!(
+            store.records.lock().expect("records lock").is_empty(),
+            "an event whose enrichment keeps failing must never be settled as a zero-cost record"
+        );
+        assert_eq!(
+            runtime
+                .worker_supervisor_state
+                .dead_lettered_entries_total
+                .load(Ordering::Acquire),
+            1
+        );
+        let dlq = runtime
+            .dead_letter_page(&store, "0-0", 10)
+            .await
+            .expect("dead letter page should read");
+        let entry = dlq
+            .entries
+            .first()
+            .expect("the exhausted event must be persisted in the dead letter stream");
+        let payload = entry
+            .fields
+            .get("payload")
+            .expect("dead letter entry should carry its payload");
+        assert!(
+            payload.contains("req-direct-dlq-1"),
+            "dead letter payload must retain the original event for redrive: {payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_terminal_enrichment_permanent_error_fails_fast_to_dead_letter() {
+        let runtime = UsageRuntime::new(UsageRuntimeConfig {
+            enabled: true,
+            ..UsageRuntimeConfig::default()
+        })
+        .expect("usage runtime should build");
+        let store = FlakyEnrichQueueStore {
+            permanent_enrich_failure: true,
+            ..flaky_enrich_direct_store(0)
+        };
+
+        runtime
+            .record_terminal_event_direct(&store, direct_completed_event("req-direct-permanent-1"))
+            .await;
+
+        assert_eq!(
+            store.enrichment_calls.load(Ordering::Acquire),
+            1,
+            "permanent input errors fail fast instead of burning retry attempts"
+        );
+        assert!(
+            store.records.lock().expect("records lock").is_empty(),
+            "a permanently failing enrichment must not write a record"
+        );
+        let dlq = runtime
+            .dead_letter_page(&store, "0-0", 10)
+            .await
+            .expect("dead letter page should read");
+        assert_eq!(
+            dlq.entries.len(),
+            1,
+            "the fail-fast event must still be persisted in the dead letter stream"
+        );
     }
 
     #[tokio::test]
