@@ -308,6 +308,33 @@ async fn handle_auth_login(
         }
     };
 
+    if auth_type == "local" && !user.email_verified {
+        // 注册强制验证（require_email_verification）开启后，历史遗留的未
+        // 验证本地账号必须先用邮箱验证码闭环完成验证（verify-email 接口
+        // 不需要登录态）才能登录并继续使用 API key。LDAP 身份由外部目录
+        // 管理，不在此门禁范围内。
+        let require_email_verification = match state
+            .read_system_config_json_value("require_email_verification")
+            .await
+        {
+            Ok(value) => system_config_bool(value.as_ref(), false),
+            Err(err) => {
+                return build_auth_internal_error_response(
+                    "auth_login_verification_policy_lookup_failed",
+                    err,
+                    false,
+                )
+            }
+        };
+        if require_email_verification {
+            return build_auth_error_response(
+                http::StatusCode::FORBIDDEN,
+                "邮箱尚未验证，请先验证邮箱后再登录",
+                true,
+            );
+        }
+    }
+
     build_auth_login_success_response(
         state,
         headers,

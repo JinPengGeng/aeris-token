@@ -1837,15 +1837,41 @@ ORDER BY created_at ASC
             if !lifetime_reward_cap_usd.is_finite() || lifetime_reward_cap_usd < 0.0 {
                 return Err(DataLayerError::InvalidInput("返利终身上限无效".to_string()));
             }
-            let amount_usd = if lifetime_reward_cap_usd == 0.0 {
+            let capped_amount_usd = if lifetime_reward_cap_usd == 0.0 {
                 0.0
             } else {
                 amount_usd.min((lifetime_reward_cap_usd - reserved).max(0.0))
             };
-            if !amount_usd.is_finite() || amount_usd <= 0.0 {
+            if capped_amount_usd <= 0.0 || !capped_amount_usd.is_finite() {
+                tracing::info!(
+                    event_name = "referral_reward_lifetime_cap_exhausted",
+                    inviter_user_id = %relationship.inviter_user_id,
+                    invitee_user_id = %relationship.invitee_user_id,
+                    reward_type = reward_type,
+                    requested_amount_usd = amount_usd,
+                    reserved_amount_usd = reserved,
+                    lifetime_reward_cap_usd = lifetime_reward_cap_usd,
+                    "referral reward blocked by the inviter lifetime cap"
+                );
                 tx.commit().await.map_err(DataLayerError::postgres)?;
                 return Ok(false);
             }
+            let amount_usd = if capped_amount_usd < amount_usd {
+                tracing::info!(
+                    event_name = "referral_reward_lifetime_cap_truncated",
+                    inviter_user_id = %relationship.inviter_user_id,
+                    invitee_user_id = %relationship.invitee_user_id,
+                    reward_type = reward_type,
+                    requested_amount_usd = amount_usd,
+                    granted_amount_usd = capped_amount_usd,
+                    reserved_amount_usd = reserved,
+                    lifetime_reward_cap_usd = lifetime_reward_cap_usd,
+                    "referral reward truncated to the inviter lifetime cap remainder"
+                );
+                capped_amount_usd
+            } else {
+                amount_usd
+            };
             let affected = sqlx::query(
                 r#"
 INSERT INTO referral_rewards (

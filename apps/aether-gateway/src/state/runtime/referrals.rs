@@ -124,8 +124,16 @@ impl AppState {
         let headcount_trigger = self
             .read_system_config_json_value("referral_headcount_trigger")
             .await?;
-        let headcount_trigger =
+        let mut headcount_trigger =
             config_string(headcount_trigger.as_ref()).unwrap_or_else(|| "registration".to_string());
+        let require_first_recharge = self
+            .read_system_config_json_value("referral_require_first_recharge")
+            .await?;
+        if config_bool(require_first_recharge.as_ref(), false) {
+            // 风控开关优先：开启后无论人头返利触发时机如何配置，都要求被
+            // 邀请人完成首笔真实支付后才发放人头奖励；比例返利不受影响。
+            headcount_trigger = "first_paid_order".to_string();
+        }
         let lifetime_cap = self
             .read_system_config_json_value("referral_lifetime_reward_cap_usd")
             .await?;
@@ -316,5 +324,63 @@ mod tests {
             }
             other => panic!("expected client error, got {other:?}"),
         }
+    }
+
+    fn app_state_with_system_config(
+        config: impl IntoIterator<Item = (String, serde_json::Value)>,
+    ) -> crate::AppState {
+        crate::AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::disabled().with_system_config_values_for_tests(
+                    [("referral_enabled".to_string(), serde_json::json!(true))]
+                        .into_iter()
+                        .chain(config),
+                ),
+            )
+    }
+
+    #[tokio::test]
+    async fn referral_require_first_recharge_overrides_headcount_trigger() {
+        let state = app_state_with_system_config([
+            (
+                "referral_reward_mode".to_string(),
+                serde_json::json!("both"),
+            ),
+            (
+                "referral_headcount_trigger".to_string(),
+                serde_json::json!("registration"),
+            ),
+            (
+                "referral_require_first_recharge".to_string(),
+                serde_json::json!(true),
+            ),
+        ]);
+
+        let config = state
+            .referral_reward_config()
+            .await
+            .expect("config should read")
+            .expect("referral config should exist");
+
+        assert_eq!(config.headcount_trigger, "first_paid_order");
+        assert!(config.headcount_enabled);
+        assert!(config.percent_enabled);
+    }
+
+    #[tokio::test]
+    async fn referral_headcount_trigger_config_applies_when_first_recharge_switch_off() {
+        let state = app_state_with_system_config([(
+            "referral_headcount_trigger".to_string(),
+            serde_json::json!("registration"),
+        )]);
+
+        let config = state
+            .referral_reward_config()
+            .await
+            .expect("config should read")
+            .expect("referral config should exist");
+
+        assert_eq!(config.headcount_trigger, "registration");
     }
 }

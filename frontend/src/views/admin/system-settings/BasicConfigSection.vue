@@ -379,6 +379,23 @@
           </Select>
         </div>
 
+        <div class="flex items-center justify-between">
+          <Label
+            for="referral-require-first-recharge"
+            class="text-sm font-medium"
+          >
+            人头返利需首笔真实支付
+            <span class="block text-xs text-muted-foreground font-normal mt-1">
+              开启后强制被邀请人完成首笔真实支付才发放人头奖励（覆盖上方触发时机，比例返利不受影响）
+            </span>
+          </Label>
+          <Switch
+            id="referral-require-first-recharge"
+            :model-value="referralRequireFirstRecharge"
+            @update:model-value="$emit('update:referralRequireFirstRecharge', $event)"
+          />
+        </div>
+
         <div>
           <Label
             for="referral-lifetime-reward-cap"
@@ -497,6 +514,7 @@ import SelectTrigger from '@/components/ui/select-trigger.vue'
 import SelectValue from '@/components/ui/select-value.vue'
 import SelectContent from '@/components/ui/select-content.vue'
 import SelectItem from '@/components/ui/select-item.vue'
+import Switch from '@/components/ui/switch.vue'
 import { CardSection } from '@/components/layout'
 
 defineProps<{
@@ -515,6 +533,7 @@ defineProps<{
   referralRechargePercent: number
   referralHeadcountAmountUsd: number
   referralHeadcountTrigger: string
+  referralRequireFirstRecharge: boolean
   referralLifetimeRewardCapUsd: number
   registrationPrivacyPolicyEnabled: boolean
   registrationPrivacyPolicyFormat: string
@@ -543,6 +562,7 @@ defineEmits<{
   'update:referralRechargePercent': [value: number]
   'update:referralHeadcountAmountUsd': [value: number]
   'update:referralHeadcountTrigger': [value: string]
+  'update:referralRequireFirstRecharge': [value: boolean]
   'update:referralLifetimeRewardCapUsd': [value: number]
   'update:registrationPrivacyPolicyEnabled': [value: boolean]
   'update:registrationPrivacyPolicyFormat': [value: string]
