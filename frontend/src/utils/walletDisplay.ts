@@ -25,7 +25,7 @@ export function formatWalletCurrency(
   options?: { decimals?: number }
 ): string {
   const decimals = options?.decimals ?? 2
-  return formatMoney(value, decimals)
+  return `$${formatMoney(value, decimals)}`
 }
 
 /** Recovery amounts are integer 1e-8 USD units, not wallet balance snapshots. */

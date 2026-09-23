@@ -16,12 +16,13 @@ export function parseMoneyUnits(value: string | number | null | undefined): numb
   return negative ? -units : units
 }
 
-// 金额(字符串/数字)安全转 number;无法解析时返回 fallback
+// 金额(字符串/数字)安全转 number(USD 金额,非微单位);无法解析时返回 fallback
 export function moneyToNumber(
   value: string | number | null | undefined,
   fallback = 0
 ): number {
-  return parseMoneyUnits(value) ?? fallback
+  const units = parseMoneyUnits(value)
+  return units === null ? fallback : units / 1e8
 }
 
 // 金额展示:基于微单位做截断/四舍五入,避免二进制浮点误差(如 0.1+0.2)
