@@ -13,8 +13,9 @@ use axum::http::uri::PathAndQuery;
 use axum::http::{HeaderMap, HeaderName, Method, Response, StatusCode, Uri};
 use tracing::{info, warn};
 
+use crate::ai_serving::resolve_error_message_locale;
 use crate::api::response::{
-    build_local_auth_rejection_response, build_local_http_error_response,
+    build_local_auth_rejection_response_with_locale, build_local_http_error_response,
     build_local_overloaded_response,
 };
 use crate::control::{
@@ -161,6 +162,11 @@ pub(crate) async fn prepare_authenticated_ai_websocket(
     spec: WebSocketIngressSpec,
 ) -> Result<AuthenticatedAiWebSocketUpgradePreparation, GatewayError> {
     let trace_id = extract_or_generate_trace_id(&headers);
+    let error_locale = resolve_error_message_locale(
+        headers
+            .get(axum::http::header::ACCEPT_LANGUAGE)
+            .and_then(|value| value.to_str().ok()),
+    );
     let client_ip = effective_client_ip(&headers, &remote_addr);
     if state.admin_security_ip_blacklisted(client_ip).await? {
         return build_local_http_error_response(
@@ -190,8 +196,13 @@ pub(crate) async fn prepare_authenticated_ai_websocket(
         .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected);
     };
     if let Some(rejection) = trusted_auth_local_rejection(Some(&decision), &headers) {
-        return build_local_auth_rejection_response(&trace_id, Some(&decision), &rejection)
-            .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected);
+        return build_local_auth_rejection_response_with_locale(
+            &trace_id,
+            Some(&decision),
+            &rejection,
+            error_locale,
+        )
+        .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected);
     }
     // Browsers attach cookies to WebSocket handshakes automatically and the
     // WebSocket API does not let callers add an Authorization header.  A
@@ -209,18 +220,20 @@ pub(crate) async fn prepare_authenticated_ai_websocket(
             client_ip = %client_ip,
             "gateway rejected cookie-only public WebSocket authentication"
         );
-        return build_local_auth_rejection_response(
+        return build_local_auth_rejection_response_with_locale(
             &trace_id,
             Some(&decision),
             &GatewayLocalAuthRejection::InvalidApiKey,
+            error_locale,
         )
         .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected);
     }
     let Some(auth_context) = decision.auth_context.as_ref() else {
-        return build_local_auth_rejection_response(
+        return build_local_auth_rejection_response_with_locale(
             &trace_id,
             Some(&decision),
             &GatewayLocalAuthRejection::InvalidApiKey,
+            error_locale,
         )
         .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected);
     };
@@ -228,20 +241,22 @@ pub(crate) async fn prepare_authenticated_ai_websocket(
         || auth_context.user_id.trim().is_empty()
         || auth_context.api_key_id.trim().is_empty()
     {
-        return build_local_auth_rejection_response(
+        return build_local_auth_rejection_response_with_locale(
             &trace_id,
             Some(&decision),
             &GatewayLocalAuthRejection::InvalidApiKey,
+            error_locale,
         )
         .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected);
     }
     if !ip_rules_allow(auth_context.ip_rules.as_deref(), client_ip) {
-        return build_local_auth_rejection_response(
+        return build_local_auth_rejection_response_with_locale(
             &trace_id,
             Some(&decision),
             &GatewayLocalAuthRejection::IpNotAllowed {
                 remote_ip: client_ip.to_string(),
             },
+            error_locale,
         )
         .map(AuthenticatedAiWebSocketUpgradePreparation::Rejected);
     }

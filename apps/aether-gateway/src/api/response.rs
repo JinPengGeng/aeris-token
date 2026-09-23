@@ -6,7 +6,10 @@ use axum::http::Response;
 use axum::http::StatusCode;
 use serde_json::json;
 
-use crate::ai_serving::{build_core_error_body_for_client_format, LocalCoreSyncErrorKind};
+use crate::ai_serving::{
+    build_core_error_body_for_client_format, build_core_error_body_for_client_format_with_locale,
+    ErrorMessageLocale, LocalCoreSyncErrorKind,
+};
 use crate::constants::*;
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayLocalAuthRejection;
@@ -246,16 +249,32 @@ pub(crate) fn attach_control_metadata_headers(
 pub(crate) fn build_local_balance_denied_response(
     trace_id: &str,
     control_decision: Option<&GatewayControlDecision>,
+    balance_remaining: Option<f64>,
+) -> Result<Response<Body>, GatewayError> {
+    build_local_balance_denied_response_with_locale(
+        trace_id,
+        control_decision,
+        balance_remaining,
+        ErrorMessageLocale::English,
+    )
+}
+
+pub(crate) fn build_local_balance_denied_response_with_locale(
+    trace_id: &str,
+    control_decision: Option<&GatewayControlDecision>,
     _balance_remaining: Option<f64>,
+    locale: ErrorMessageLocale,
 ) -> Result<Response<Body>, GatewayError> {
     // 统一配额不足契约：所有客户端格式（OpenAI 路由族、Claude、泛化未知格式）
     // 的本地余额拒绝都收敛为不回显余额的类型化错误体。OpenAI 与 Claude 走各自
     // 生态的格式化 contract（见 build_core_error_body_for_client_format 的
     // QuotaExhausted 覆写），泛化路径的 fallback 固定为 OpenAI 信封
     // （429 + insufficient_quota），任何位置都不回显钱包快照。
+    // message 按请求 Accept-Language 协商中英文，默认英文。
+    let quota_message = locale.quota_exhausted_message();
     let fallback_payload = json!({
         "error": {
-            "message": "Insufficient quota",
+            "message": quota_message,
             "type": "insufficient_quota",
             "param": null,
             "code": "insufficient_quota",
@@ -272,7 +291,13 @@ pub(crate) fn build_local_balance_denied_response(
     let payload = client_format
         .and_then(|format| {
             // OpenAI/Claude 错误体保持各自生态的规范文案与类型。
-            build_core_error_body_for_client_format(format, "Insufficient quota", None, kind)
+            build_core_error_body_for_client_format_with_locale(
+                format,
+                quota_message,
+                None,
+                kind,
+                locale,
+            )
         })
         .unwrap_or(fallback_payload);
     let body = serialize_local_error_payload(payload, trace_id)?;
@@ -490,37 +515,80 @@ pub(crate) fn build_local_auth_rejection_response(
     control_decision: Option<&GatewayControlDecision>,
     rejection: &GatewayLocalAuthRejection,
 ) -> Result<Response<Body>, GatewayError> {
-    const ACCESS_POLICY_SUBJECT: &str =
-        "The access policy for the current user, user group, or API key";
+    build_local_auth_rejection_response_with_locale(
+        trace_id,
+        control_decision,
+        rejection,
+        ErrorMessageLocale::English,
+    )
+}
+
+pub(crate) fn build_local_auth_rejection_response_with_locale(
+    trace_id: &str,
+    control_decision: Option<&GatewayControlDecision>,
+    rejection: &GatewayLocalAuthRejection,
+    locale: ErrorMessageLocale,
+) -> Result<Response<Body>, GatewayError> {
+    let access_policy_subject = match locale {
+        ErrorMessageLocale::English => {
+            "The access policy for the current user, user group, or API key"
+        }
+        ErrorMessageLocale::Chinese => "当前用户、用户组或密钥的访问控制策略",
+    };
 
     match rejection {
         GatewayLocalAuthRejection::InvalidApiKey => build_local_http_error_response(
             trace_id,
             control_decision,
             StatusCode::UNAUTHORIZED,
-            "Invalid API key",
+            match locale {
+                ErrorMessageLocale::English => "Invalid API key",
+                ErrorMessageLocale::Chinese => "无效的API密钥",
+            },
         ),
         GatewayLocalAuthRejection::LockedApiKey => build_local_http_error_response(
             trace_id,
             control_decision,
             StatusCode::FORBIDDEN,
-            "This API key has been locked by an administrator. Contact an administrator.",
+            match locale {
+                ErrorMessageLocale::English => {
+                    "This API key has been locked by an administrator. Contact an administrator."
+                }
+                ErrorMessageLocale::Chinese => "该密钥已被管理员锁定，请联系管理员",
+            },
         ),
         GatewayLocalAuthRejection::WalletUnavailable => build_local_http_error_response(
             trace_id,
             control_decision,
             StatusCode::FORBIDDEN,
-            "Wallet unavailable",
+            match locale {
+                ErrorMessageLocale::English => "Wallet unavailable",
+                ErrorMessageLocale::Chinese => "钱包不可用",
+            },
         ),
         GatewayLocalAuthRejection::BalanceDenied { remaining } => {
-            build_local_balance_denied_response(trace_id, control_decision, *remaining)
+            build_local_balance_denied_response_with_locale(
+                trace_id,
+                control_decision,
+                *remaining,
+                locale,
+            )
         }
         GatewayLocalAuthRejection::ProviderNotAllowed { provider } => {
             build_local_http_error_response(
                 trace_id,
                 control_decision,
                 StatusCode::FORBIDDEN,
-                &format!("{ACCESS_POLICY_SUBJECT} does not allow access to provider {provider}"),
+                &match locale {
+                    ErrorMessageLocale::English => {
+                        format!(
+                            "{access_policy_subject} does not allow access to provider {provider}"
+                        )
+                    }
+                    ErrorMessageLocale::Chinese => {
+                        format!("{access_policy_subject}不允许访问 {provider} 提供商")
+                    }
+                },
             )
         }
         GatewayLocalAuthRejection::ApiFormatNotAllowed { api_format } => {
@@ -528,22 +596,41 @@ pub(crate) fn build_local_auth_rejection_response(
                 trace_id,
                 control_decision,
                 StatusCode::FORBIDDEN,
-                &format!(
-                    "{ACCESS_POLICY_SUBJECT} does not allow access to API format {api_format}"
-                ),
+                &match locale {
+                    ErrorMessageLocale::English => format!(
+                        "{access_policy_subject} does not allow access to API format {api_format}"
+                    ),
+                    ErrorMessageLocale::Chinese => {
+                        format!("{access_policy_subject}不允许访问 {api_format} 格式")
+                    }
+                },
             )
         }
         GatewayLocalAuthRejection::ModelNotAllowed { model } => build_local_http_error_response(
             trace_id,
             control_decision,
             StatusCode::FORBIDDEN,
-            &format!("{ACCESS_POLICY_SUBJECT} does not allow access to model {model}"),
+            &match locale {
+                ErrorMessageLocale::English => {
+                    format!("{access_policy_subject} does not allow access to model {model}")
+                }
+                ErrorMessageLocale::Chinese => {
+                    format!("{access_policy_subject}不允许访问模型 {model}")
+                }
+            },
         ),
         GatewayLocalAuthRejection::IpNotAllowed { remote_ip } => build_local_http_error_response(
             trace_id,
             control_decision,
             StatusCode::UNAUTHORIZED,
-            &format!("The API key does not permit access from IP address {remote_ip}"),
+            &match locale {
+                ErrorMessageLocale::English => {
+                    format!("The API key does not permit access from IP address {remote_ip}")
+                }
+                ErrorMessageLocale::Chinese => {
+                    format!("API Key 不允许从当前 IP 访问: {remote_ip}")
+                }
+            },
         ),
     }
 }
@@ -687,10 +774,12 @@ mod tests {
     use super::{
         build_client_response, build_client_response_from_parts,
         build_client_response_from_parts_with_mutator, build_local_auth_rejection_response,
-        build_local_balance_denied_response, build_local_daily_usage_limited_response,
+        build_local_auth_rejection_response_with_locale, build_local_balance_denied_response,
+        build_local_balance_denied_response_with_locale, build_local_daily_usage_limited_response,
         build_local_http_error_response_with_request_path, build_local_overloaded_response,
         build_local_plan_usage_limited_response, build_local_user_rpm_limited_response,
     };
+    use crate::ai_serving::ErrorMessageLocale;
     use crate::control::{GatewayControlDecision, GatewayLocalAuthRejection};
     use crate::daily_usage_limit::FrontdoorDailyUsageRejection;
     use crate::plan_usage_policy::PlanUsagePolicyRejection;
@@ -951,6 +1040,46 @@ mod tests {
         let overloaded = response_json(overloaded).await;
         assert_eq!(overloaded["type"], "error");
         assert_eq!(overloaded["error"]["type"], "overloaded_error");
+    }
+
+    #[tokio::test]
+    async fn chinese_locale_balance_denial_and_auth_rejection_messages() {
+        let decision = openai_decision();
+        let response = build_local_balance_denied_response_with_locale(
+            "trace-balance-zh",
+            Some(&decision),
+            Some(0.0),
+            ErrorMessageLocale::Chinese,
+        )
+        .expect("balance response should build");
+        assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+        let payload = response_json(response).await;
+        assert_eq!(payload["error"]["type"], "insufficient_quota");
+        assert_eq!(payload["error"]["code"], "insufficient_quota");
+        assert_eq!(payload["error"]["message"], "余额不足");
+        assert!(payload["error"]["details"].is_null());
+
+        let generic = build_local_balance_denied_response_with_locale(
+            "trace-balance-zh-generic",
+            None,
+            Some(12.34),
+            ErrorMessageLocale::Chinese,
+        )
+        .expect("generic balance response should build");
+        let generic = response_json(generic).await;
+        assert_eq!(generic["error"]["message"], "余额不足");
+        // 中文协商同样不回显余额。
+        assert!(generic.get("details").is_none());
+
+        let invalid_key = build_local_auth_rejection_response_with_locale(
+            "trace-auth-zh",
+            Some(&decision),
+            &GatewayLocalAuthRejection::InvalidApiKey,
+            ErrorMessageLocale::Chinese,
+        )
+        .expect("invalid-key response should build");
+        let invalid_key = response_json(invalid_key).await;
+        assert_eq!(invalid_key["error"]["message"], "无效的API密钥");
     }
 
     #[tokio::test]
