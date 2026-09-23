@@ -159,8 +159,15 @@ their separate acceptance coverage.
 ## Message language and correlation
 
 Local request-validation, authentication, access-policy, wallet, usage-limit and
-admission-overload builders use English messages. Execution diagnostics and
-provider-supplied messages can use other languages; the gateway does not provide
+admission-overload builders use English messages. The unified
+quota-exhausted contract (OpenAI-family `insufficient_quota`, Claude
+`billing_error`, and the generic fallback envelope) and the local
+authentication/access-policy rejection messages negotiate English/Chinese via
+the request `Accept-Language` header: the gateway defaults to English, and any
+`zh` primary tag (for example `zh`, `zh-CN`, `zh-Hans`) selects Chinese
+("Insufficient quota" / "余额不足"). Execution-runtime paths that no longer
+have request headers in scope, execution diagnostics and provider-supplied
+messages keep the existing language; the gateway does not provide broader
 `Accept-Language` negotiation. Clients should branch on status and available
 type/code fields, not translated message text.
 

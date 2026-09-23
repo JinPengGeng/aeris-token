@@ -302,6 +302,102 @@ async fn gateway_quota_fixture_denials_reach_real_routes_without_hitting_control
 }
 
 #[tokio::test]
+async fn gateway_quota_denial_negotiates_chinese_message_with_accept_language() {
+    let auth_context_hits = Arc::new(Mutex::new(0usize));
+    let auth_context_hits_clone = Arc::clone(&auth_context_hits);
+    let public_hits = Arc::new(Mutex::new(0usize));
+    let public_hits_clone = Arc::clone(&public_hits);
+
+    let upstream = Router::new()
+        .route(
+            "/api/internal/gateway/auth-context",
+            any(move |_request: Request| {
+                let auth_context_hits_inner = Arc::clone(&auth_context_hits_clone);
+                async move {
+                    *auth_context_hits_inner.lock().expect("mutex should lock") += 1;
+                    Json(json!({
+                        "auth_context": {
+                            "user_id": "user-from-control",
+                            "api_key_id": "key-from-control",
+                            "balance_remaining": 99.0,
+                            "access_allowed": true
+                        }
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            any(move |_request: Request| {
+                let public_hits_inner = Arc::clone(&public_hits_clone);
+                async move {
+                    *public_hits_inner.lock().expect("mutex should lock") += 1;
+                    (StatusCode::OK, Body::from("unexpected upstream hit"))
+                }
+            }),
+        );
+
+    let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some("hash-1".to_string()),
+        sample_currently_usable_auth_snapshot("key-123", "user-123"),
+    )]));
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway state should build")
+            .with_auth_api_key_data_reader_for_tests(repository)
+            .with_tunnel_identity_and_relay_secret_for_tests(
+                RELAY_TEST_OWNER,
+                None,
+                RELAY_TEST_SECRET,
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let client = reqwest::Client::new();
+    let body = AFFINITY_TEST_BODY.as_bytes().to_vec();
+    let trace_id = "trace-balance-zh-negotiation";
+    let response = signed_affinity_request(
+        &client,
+        format!("{gateway_url}/v1/chat/completions"),
+        "/v1/chat/completions",
+        "user-123",
+        "key-123",
+        false,
+        Some("-12.345678"),
+        &body,
+    )
+    .header(http::header::CONTENT_TYPE, "application/json")
+    .header(http::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
+    .header(TRACE_ID_HEADER, trace_id)
+    .body(body)
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response.headers()[EXECUTION_PATH_HEADER],
+        EXECUTION_PATH_LOCAL_AUTH_DENIED
+    );
+    let payload: serde_json::Value = response.json().await.expect("response json should parse");
+    assert_eq!(payload["trace_id"], trace_id);
+    assert_eq!(payload["error"]["type"], "insufficient_quota");
+    assert_eq!(payload["error"]["code"], "insufficient_quota");
+    assert_eq!(payload["error"]["message"], "余额不足");
+    // 中文协商保持与英文契约一致：不回显余额或账户标识。
+    let serialized = payload.to_string();
+    for private in ["12.34", "remaining", "USD", "user-123", "key-123"] {
+        assert!(!serialized.contains(private), "leaked {private}");
+    }
+
+    assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
+    assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_locally_denies_invalid_trusted_snapshot_without_hitting_control_or_upstream() {
     let auth_context_hits = Arc::new(Mutex::new(0usize));
     let auth_context_hits_clone = Arc::clone(&auth_context_hits);

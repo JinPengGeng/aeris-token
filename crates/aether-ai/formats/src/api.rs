@@ -86,7 +86,9 @@ pub use crate::formats::openai::{
     },
 };
 pub use crate::formats::shared::error_body::{
-    build_core_error_body_for_client_format, is_core_error_finalize_kind, LocalCoreSyncErrorKind,
+    build_core_error_body_for_client_format, build_core_error_body_for_client_format_with_locale,
+    is_core_error_finalize_kind, resolve_error_message_locale, ErrorMessageLocale,
+    LocalCoreSyncErrorKind,
 };
 pub use crate::formats::shared::image_bridge::{
     build_gemini_image_request_body_from_openai_image_request,
