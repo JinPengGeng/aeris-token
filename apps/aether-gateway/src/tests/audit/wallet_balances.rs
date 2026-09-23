@@ -726,7 +726,7 @@ async fn authenticated_wallet_mutations_enqueue_atomically_and_delivery_never_re
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
     assert_eq!(
-        body["wallet"]["recharge_balance"], 38.0,
+        body["wallet"]["recharge_balance"], "38.00000000",
         "retrying the HTTP request after 502 remains a new monetary operation"
     );
     assert_eq!(body["wallet"]["total_recharged"], "40.00000000");
