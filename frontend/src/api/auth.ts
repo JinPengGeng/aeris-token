@@ -111,18 +111,18 @@ export interface AuthSettingsResponse {
 
 export interface BillingSummary {
   id?: string | null
-  balance: number
-  recharge_balance: number
-  gift_balance: number
-  refundable_balance: number
+  balance: string
+  recharge_balance: string
+  gift_balance: string
+  refundable_balance: string
   currency: string
   status: string
   limit_mode: 'finite' | 'unlimited'
   unlimited: boolean
-  total_recharged: number
-  total_consumed: number
-  total_refunded: number
-  total_adjusted: number
+  total_recharged: string
+  total_consumed: string
+  total_refunded: string
+  total_adjusted: string
   updated_at?: string | null
 }
 

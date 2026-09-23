@@ -84,6 +84,15 @@ fn attribution_metric_total(
     rows.iter().map(|row| metric.value(row).max(0.0)).sum()
 }
 
+fn attribution_total_json(metric: AttributionMetric, total: f64) -> serde_json::Value {
+    match metric {
+        AttributionMetric::ActualCost | AttributionMetric::TotalCost => {
+            serde_json::json!(crate::money_fixed::format_money(total))
+        }
+        AttributionMetric::Tokens | AttributionMetric::Requests => serde_json::json!(total.round()),
+    }
+}
+
 fn attribution_share(value: f64, total: f64) -> f64 {
     if total <= 0.0 {
         0.0
@@ -98,8 +107,8 @@ fn empty_others(total: f64) -> Value {
         "name": "Others",
         "requests": 0,
         "total_tokens": 0,
-        "total_cost": 0.0,
-        "actual_cost": 0.0,
+        "total_cost": "0.00000000",
+        "actual_cost": "0.00000000",
         "share": attribution_share(0.0, total),
     })
 }
@@ -132,8 +141,8 @@ fn aggregate_others(
         "name": "Others",
         "requests": requests,
         "total_tokens": total_tokens,
-        "total_cost": round_to(total_cost, 6),
-        "actual_cost": round_to(actual_cost, 6),
+        "total_cost": crate::money_fixed::format_money(total_cost),
+        "actual_cost": crate::money_fixed::format_money(actual_cost),
         "share": attribution_share(metric_value, total),
     })
 }
@@ -180,8 +189,8 @@ async fn attribution_items_json(
                 "username": if username.is_empty() { Value::Null } else { json!(username) },
                 "requests": row.request_count,
                 "total_tokens": row.total_tokens,
-                "total_cost": round_to(row.total_cost_usd, 6),
-                "actual_cost": round_to(row.actual_total_cost_usd, 6),
+                "total_cost": crate::money_fixed::format_money(row.total_cost_usd),
+                "actual_cost": crate::money_fixed::format_money(row.actual_total_cost_usd),
                 "share": attribution_share(metric_value, total),
             })
         })
@@ -228,7 +237,7 @@ pub(super) async fn build_admin_usage_attribution_response(
             "provider": { "id": provider_id, "name": provider_name },
             "group_by": group_by,
             "metric": metric.as_str(),
-            "total": 0.0,
+            "total": attribution_total_json(metric, 0.0),
             "items": [],
             "others": empty_others(0.0),
         }))
@@ -270,7 +279,7 @@ pub(super) async fn build_admin_usage_attribution_response(
         },
         "group_by": group_by,
         "metric": metric.as_str(),
-        "total": round_to(total, 6),
+        "total": attribution_total_json(metric, total),
         "items": items,
         "others": others,
     }))

@@ -76,7 +76,7 @@ function parseDateMs(value: string | null | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-function sumBy<T>(items: T[], selector: (item: T) => number): number {
+function sumBy<T>(items: T[], selector: (item: T) => unknown): number {
   return items.reduce((total, item) => total + asFiniteNumber(selector(item)), 0)
 }
 

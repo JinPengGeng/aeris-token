@@ -814,6 +814,7 @@
 </template>
 
 <script setup lang="ts">
+import { moneyToNumber } from '@/utils/money'
 import { getI18nLocale } from '@/i18n'
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useToast } from '@/composables/useToast'
@@ -1243,11 +1244,11 @@ function getApiKeyWalletTotalBalance(apiKey: AdminApiKey): number | null {
     return null
   }
   const wallet = getApiKeyWallet(apiKey.id)
-  return wallet ? wallet.balance : 0
+  return wallet ? moneyToNumber(wallet.balance) : 0
 }
 
 function getApiKeyWalletConsumed(apiKey: AdminApiKey): number {
-  return getApiKeyWallet(apiKey.id)?.total_consumed ?? (apiKey.total_cost_usd || 0)
+  return moneyToNumber(getApiKeyWallet(apiKey.id)?.total_consumed, Number.NaN) || (apiKey.total_cost_usd || 0)
 }
 
 function getApiKeyWalletStatus(apiKeyId: string): string | null {

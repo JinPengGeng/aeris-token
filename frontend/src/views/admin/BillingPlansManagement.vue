@@ -1234,6 +1234,7 @@ import { CardSection, PageContainer, PageHeader } from '@/components/layout'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { useI18n } from '@/i18n'
+import { formatMoney, moneyToNumber, toMoneyString } from '@/utils/money'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 
@@ -1743,7 +1744,7 @@ async function loadPlans() {
     const response = await adminBillingPlansApi.list()
     plans.value = [...response.items].sort((left, right) =>
       left.sort_order === right.sort_order
-        ? left.price_amount - right.price_amount
+        ? moneyToNumber(left.price_amount) - moneyToNumber(right.price_amount)
         : left.sort_order - right.sort_order
     )
   } catch (err) {
@@ -1780,7 +1781,7 @@ function formFromPlan(plan: BillingPlan): PlanFormState {
   const next = buildDefaultForm()
   next.title = plan.title
   next.description = plan.description || ''
-  next.price_amount = plan.price_amount
+  next.price_amount = moneyToNumber(plan.price_amount)
   next.price_currency = plan.price_currency.toUpperCase()
   next.duration_unit = plan.duration_unit
   next.duration_value = plan.duration_value
@@ -1793,13 +1794,13 @@ function formFromPlan(plan: BillingPlan): PlanFormState {
     if (entitlement.type === 'wallet_credit') {
       const wallet = entitlement as WalletCreditEntitlement
       next.wallet_credit_enabled = true
-      next.wallet_credit_amount_usd = Number(wallet.amount_usd || next.wallet_credit_amount_usd)
+      next.wallet_credit_amount_usd = moneyToNumber(wallet.amount_usd) || next.wallet_credit_amount_usd
       next.wallet_credit_balance_bucket = wallet.balance_bucket || 'recharge'
       next.wallet_credit_replacement_group = wallet.replacement_group || ''
     } else if (entitlement.type === 'daily_quota') {
       const quota = entitlement as DailyQuotaEntitlement
       next.daily_quota_enabled = true
-      next.daily_quota_usd = Number(quota.daily_quota_usd || next.daily_quota_usd)
+      next.daily_quota_usd = moneyToNumber(quota.daily_quota_usd) || next.daily_quota_usd
       next.reset_timezone = quota.reset_timezone || 'Asia/Shanghai'
       next.carry_over = Boolean(quota.carry_over)
       next.carry_over_days = Number(quota.carry_over_days || next.carry_over_days)
@@ -1876,7 +1877,7 @@ function buildEntitlements(): BillingEntitlement[] {
   if (form.wallet_credit_enabled) {
     const entitlement: WalletCreditEntitlement = {
       type: 'wallet_credit',
-      amount_usd: Number(form.wallet_credit_amount_usd),
+      amount_usd: toMoneyString(form.wallet_credit_amount_usd),
       balance_bucket: form.wallet_credit_balance_bucket,
     }
     attachReplacementGroup(entitlement, form.wallet_credit_replacement_group)
@@ -1885,7 +1886,7 @@ function buildEntitlements(): BillingEntitlement[] {
   if (form.daily_quota_enabled) {
     const entitlement: DailyQuotaEntitlement = {
       type: 'daily_quota',
-      daily_quota_usd: Number(form.daily_quota_usd),
+      daily_quota_usd: toMoneyString(form.daily_quota_usd),
       reset_timezone: form.reset_timezone.trim() || 'Asia/Shanghai',
       carry_over: false,
       allow_wallet_overage: Boolean(form.allow_wallet_overage),
@@ -2236,7 +2237,7 @@ function buildPlanPayload(): BillingPlanWriteRequest | null {
   return {
     title: form.title.trim(),
     description: form.description.trim() || null,
-    price_amount: Number(Number(form.price_amount).toFixed(2)),
+    price_amount: toMoneyString(form.price_amount),
     price_currency: form.price_currency.trim().toUpperCase(),
     duration_unit: form.duration_unit,
     duration_value: Number(form.duration_value),
@@ -2313,7 +2314,7 @@ function addManualGroup() {
 }
 
 function formatPlanPriceAmount(plan: BillingPlan): string {
-  return Number(plan.price_amount || 0).toFixed(2)
+  return formatMoney(plan.price_amount, 2)
 }
 
 function durationUnitLabel(unit: BillingDurationUnit): string {
@@ -2377,10 +2378,10 @@ function groupName(groupId: string): string {
 function entitlementBadges(plan: BillingPlan): string[] {
   return (plan.entitlements || []).map((entitlement) => {
     if (entitlement.type === 'wallet_credit') {
-      return `附赠余额 $${Number(entitlement.amount_usd || 0).toFixed(2)}`
+      return `附赠余额 ${formatMoney(entitlement.amount_usd, 2)}`
     }
     if (entitlement.type === 'daily_quota') {
-      return `每日 $${Number(entitlement.daily_quota_usd || 0).toFixed(2)}`
+      return `每日 ${formatMoney(entitlement.daily_quota_usd, 2)}`
     }
     if (entitlement.type === 'membership_group') {
       const groups = entitlement.grant_user_groups.map(groupName).join(', ')

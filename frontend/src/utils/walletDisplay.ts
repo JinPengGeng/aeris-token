@@ -1,5 +1,6 @@
 import { formatCompactNumber } from '@/utils/format'
 import { getI18nLocale } from '@/i18n'
+import { formatMoney } from '@/utils/money'
 
 export function walletStatusLabel(status: string | null | undefined): string {
   const labels: Record<string, string> = {
@@ -20,12 +21,11 @@ export function walletStatusLabel(status: string | null | undefined): string {
 }
 
 export function formatWalletCurrency(
-  value: number | null | undefined,
+  value: number | string | null | undefined,
   options?: { decimals?: number }
 ): string {
   const decimals = options?.decimals ?? 2
-  const amount = Number(value ?? 0)
-  return `$${amount.toFixed(decimals)}`
+  return `$${formatMoney(value, decimals)}`
 }
 
 /** Recovery amounts are integer 1e-8 USD units, not wallet balance snapshots. */

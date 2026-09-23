@@ -390,7 +390,7 @@ async fn gateway_reports_admin_quota_status_for_multiple_keys_with_limited_key_i
     assert_eq!(key_1["concurrency"]["current"], json!(1));
     assert_eq!(key_1["concurrency"]["limit"], json!(1));
     assert_eq!(key_1["concurrency"]["limited"], json!(true));
-    assert_eq!(key_1["daily_usage"]["used_usd"], json!(0.42));
+    assert_eq!(key_1["daily_usage"]["used_usd"], 0.42);
     assert_eq!(key_1["daily_usage"]["limit_usd"], json!(0.30));
     assert_eq!(key_1["daily_usage"]["limited"], json!(true));
 
@@ -472,7 +472,7 @@ async fn gateway_reports_admin_quota_status_with_zero_usage_and_no_keys_inner() 
     assert_eq!(key["concurrency"]["current"], json!(0));
     assert_eq!(key["concurrency"]["limit"], json!(2));
     assert_eq!(key["concurrency"]["limited"], json!(false));
-    assert_eq!(key["daily_usage"]["used_usd"], json!(0.0));
+    assert_eq!(key["daily_usage"]["used_usd"], 0.0);
     assert_eq!(key["daily_usage"]["limit_usd"], json!(1.0));
     assert_eq!(key["daily_usage"]["limited"], json!(false));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);

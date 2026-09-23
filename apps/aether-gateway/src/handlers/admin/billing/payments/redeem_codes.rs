@@ -21,6 +21,7 @@ use serde_json::json;
 #[derive(Debug, Deserialize)]
 pub(super) struct AdminRedeemCodeBatchCreateRequest {
     pub(super) name: String,
+    #[serde(deserialize_with = "crate::money_fixed::deserialize_money")]
     pub(super) amount_usd: f64,
     pub(super) total_count: usize,
     #[serde(default)]

@@ -542,6 +542,7 @@ import {
 import type { RefundRequest, WalletTransaction } from '@/api/wallet'
 import { parseApiError } from '@/utils/errorParser'
 import { parseNumberInput } from '@/utils/form'
+import { toMoneyString } from '@/utils/money'
 import {
   refundModeLabel,
   refundStatusBadge,
@@ -788,9 +789,9 @@ async function submitRecharge() {
     return
   }
 
-  const rechargeBefore = localWallet.value.recharge_balance
+  const rechargeBefore = toFiniteNumber(localWallet.value.recharge_balance)
   const rechargeAfter = rechargeBefore + actionAmount.value
-  const totalBefore = localWallet.value.balance
+  const totalBefore = toFiniteNumber(localWallet.value.balance)
   const totalAfter = totalBefore + actionAmount.value
   const confirmed = await confirm({
     title: '确认人工充值',
@@ -803,7 +804,7 @@ async function submitRecharge() {
   submittingMoneyAction.value = true
   try {
     const response = await adminWalletApi.rechargeWallet(localWallet.value.id, {
-      amount_usd: actionAmount.value,
+      amount_usd: toMoneyString(actionAmount.value),
       payment_method: 'admin_manual',
       description: actionDescription.value || `管理员为 ${props.ownerName || '钱包'} 人工充值`,
     })
@@ -881,8 +882,8 @@ async function submitAdjust() {
     return
   }
 
-  const rechargeBefore = localWallet.value.recharge_balance
-  const giftBefore = localWallet.value.gift_balance
+  const rechargeBefore = toFiniteNumber(localWallet.value.recharge_balance)
+  const giftBefore = toFiniteNumber(localWallet.value.gift_balance)
   const currentBucketBalance = adjustBalanceType.value === 'gift' ? giftBefore : rechargeBefore
   const preview = previewAdjustResult(
     rechargeBefore,
@@ -891,7 +892,7 @@ async function submitAdjust() {
     adjustBalanceType.value
   )
   const afterBalance = adjustBalanceType.value === 'gift' ? preview.giftAfter : preview.rechargeAfter
-  const totalBefore = localWallet.value.balance
+  const totalBefore = toFiniteNumber(localWallet.value.balance)
   const totalAfter = preview.totalAfter
   const balanceTypeLabel = adjustBalanceType.value === 'gift' ? '赠款余额' : '充值余额'
   const isDeduct = actionAmount.value < 0
@@ -909,7 +910,7 @@ async function submitAdjust() {
   submittingMoneyAction.value = true
   try {
     const response = await adminWalletApi.adjustWallet(localWallet.value.id, {
-      amount_usd: actionAmount.value,
+      amount_usd: toMoneyString(actionAmount.value),
       balance_type: adjustBalanceType.value,
       description: actionDescription.value || `管理员为 ${props.ownerName || '钱包'} 执行钱包调账`,
     })

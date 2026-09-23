@@ -209,7 +209,7 @@ async fn gateway_handles_admin_payments_get_order_locally_with_trusted_admin_pri
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["order"]["id"], "order-1");
     assert_eq!(payload["order"]["payment_method"], "wechat");
-    assert_eq!(payload["order"]["amount_usd"], 12.5);
+    assert_eq!(payload["order"]["amount_usd"], "12.50000000");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -301,7 +301,7 @@ async fn gateway_handles_admin_payments_credit_order_locally_with_trusted_admin_
     assert_eq!(payload["credited"], true);
     assert_eq!(payload["order"]["status"], "credited");
     assert_eq!(payload["order"]["gateway_order_id"], "gateway-order-1");
-    assert_eq!(payload["order"]["pay_amount"], 91.25);
+    assert_eq!(payload["order"]["pay_amount"], "91.25000000");
     assert_eq!(payload["order"]["pay_currency"], "CNY");
     assert_eq!(payload["order"]["exchange_rate"], 7.3);
     assert!(payload["order"]["gateway_response"]
