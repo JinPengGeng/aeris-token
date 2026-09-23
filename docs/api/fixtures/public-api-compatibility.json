@@ -48,7 +48,7 @@
       "status": 429,
       "envelope": "openai",
       "error_type": "insufficient_quota",
-      "error_code": "credit_balance_exhausted",
+      "error_code": "insufficient_quota",
       "retry_after": null,
       "retryable": false,
       "kind": "quota_exhausted"
@@ -178,7 +178,7 @@
       "status": 429,
       "envelope": "openai",
       "error_type": "insufficient_quota",
-      "error_code": "credit_balance_exhausted",
+      "error_code": "insufficient_quota",
       "retry_after": null,
       "retryable": false,
       "kind": "quota_exhausted"
@@ -230,7 +230,7 @@
       "status": 429,
       "envelope": "openai",
       "error_type": "insufficient_quota",
-      "error_code": "credit_balance_exhausted",
+      "error_code": "insufficient_quota",
       "retry_after": null,
       "retryable": false,
       "kind": "quota_exhausted"
@@ -279,10 +279,10 @@
       "endpoint": "/v1/messages",
       "client_format": "claude:messages",
       "request": {"model":"claude-test","max_tokens":16,"messages":[{"role":"user","content":"hello"}]},
-      "status": 402,
+      "status": 403,
       "envelope": "claude",
-      "error_type": "billing_error",
-      "error_code": "balance_exceeded",
+      "error_type": "insufficient_quota",
+      "error_code": null,
       "retry_after": null,
       "retryable": false,
       "kind": "quota_exhausted"

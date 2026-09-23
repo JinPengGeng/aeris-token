@@ -61,6 +61,7 @@ fn cleanup_gateway_error_category(error: &GatewayError) -> &'static str {
         GatewayError::Client { status, .. } if status.is_server_error() => "upstream_error",
         GatewayError::Client { .. } => "request_rejected",
         GatewayError::PlanUsageLimited(_) => "plan_usage_limited",
+        GatewayError::InsufficientQuota => "insufficient_quota",
         GatewayError::LastActiveAdminUpdateDenied | GatewayError::LastActiveAdminDeleteDenied => {
             "operation_rejected"
         }

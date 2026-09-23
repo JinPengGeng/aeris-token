@@ -1,5 +1,10 @@
 # Issue 343: billing and quota error contract
 
+> **已被 2026-09-23 统一契约取代，见 [error-contract.md](../api/error-contract.md)。**
+> 本文保留作为历史决策记录：OpenAI code 已由 `credit_balance_exceeded` 收敛为
+> `insufficient_quota`，Claude 由 `402/billing_error/balance_exceeded` 收敛为
+> `403/insufficient_quota`（无 code），泛化路径不再回显余额。
+
 Decision date: 2026-09-13. Repository: `JinPengGeng/aeris-token` only.
 Parent work: #247 and #254. This supersedes the wallet portion of the
 [247/254 decision](issue-247-254-api-contract-decision.md).

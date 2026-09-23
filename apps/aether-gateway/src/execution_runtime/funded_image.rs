@@ -795,15 +795,11 @@ impl FundedImageAttempt {
                         request.record_rejection(
                             &identity.request.request_id,
                             fallback_data.clone(),
-                            402,
+                            429,
                             "insufficient_quota",
-                            "Insufficient available balance for image authorization",
+                            "Insufficient quota",
                         );
-                        return Err(GatewayError::Client {
-                            status: http::StatusCode::PAYMENT_REQUIRED,
-                            message: "Insufficient available balance for image authorization"
-                                .into(),
-                        });
+                        return Err(GatewayError::InsufficientQuota);
                     }
                     ReserveRequestAttemptFundsOutcome::UsagePolicyRejected {
                         window_index,
