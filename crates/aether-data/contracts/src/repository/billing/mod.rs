@@ -1,6 +1,14 @@
+mod hardcap;
 mod replacement;
 mod types;
 mod usage_policy;
+
+pub use hardcap::{
+    parse_api_key_hardcap_overrides, resolve_api_key_concurrent_limit,
+    resolve_pre_freeze_hardcap_enabled, UsageHardcapDefaults, UsageHardcapValidationError,
+    API_KEY_HARDCAP_FEATURE_SETTINGS_FIELD, API_KEY_PRE_FREEZE_HARDCAP_ENABLED_FIELD,
+    USAGE_HARDCAP_DEFAULT_API_KEY_CONCURRENT_LIMIT_ENV, USAGE_HARDCAP_PRE_FREEZE_ENABLED_ENV,
+};
 
 pub use replacement::{
     entitlements_have_replacement_selector, entitlements_should_replace_existing,

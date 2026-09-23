@@ -2947,6 +2947,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_usage_limits_concurrent_checks_never_exceed_hard_cap() {
+        let runtime =
+            std::sync::Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let mut tasks = Vec::new();
+        for index in 0..128 {
+            let runtime = std::sync::Arc::clone(&runtime);
+            tasks.push(tokio::spawn(async move {
+                let rules = [UsageLimitRule {
+                    key: "usage:{user-1}:concurrent-hard-cap",
+                    limit: 16,
+                    window_seconds: 60,
+                    retention_seconds: 60,
+                }];
+                let event_id = format!("request-{index}");
+                runtime
+                    .check_and_consume_usage_limits(UsageLimitInput {
+                        rules: &rules,
+                        event_id: &event_id,
+                        now_unix_ms: 1_000,
+                    })
+                    .await
+                    .expect("concurrent usage-limit check")
+            }));
+        }
+
+        let mut allowed = 0;
+        let mut rejected = 0;
+        for task in tasks {
+            match task.await.expect("usage-limit task") {
+                UsageLimitCheck::Allowed => allowed += 1,
+                UsageLimitCheck::Rejected {
+                    rule_index: 0,
+                    limit: 16,
+                    ..
+                } => rejected += 1,
+                other => panic!("unexpected usage-limit result: {other:?}"),
+            }
+        }
+        assert_eq!(allowed, 16);
+        assert_eq!(rejected, 112);
+    }
+
+    #[tokio::test]
     async fn memory_lock_fencing_tokens_increase_after_release() {
         let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
         let first = runtime
