@@ -191,7 +191,16 @@ fn dashboard_format_usd(value: f64) -> String {
 }
 
 fn dashboard_json_f64(value: Option<&serde_json::Value>) -> f64 {
-    value.and_then(serde_json::Value::as_f64).unwrap_or(0.0)
+    value.map(dashboard_json_money).unwrap_or(0.0)
+}
+
+fn dashboard_json_money(value: &serde_json::Value) -> f64 {
+    value
+        .as_str()
+        .and_then(|text| crate::money_fixed::parse_money(text).ok())
+        .map(crate::money_fixed::units_to_money)
+        .or_else(|| value.as_f64())
+        .unwrap_or(0.0)
 }
 
 fn dashboard_wallet_card_value_and_subvalue(
@@ -665,7 +674,7 @@ fn dashboard_build_daily_stats_payload(
                         "model": model,
                         "requests": value.requests,
                         "tokens": value.tokens,
-                        "cost": dashboard_round_f64(value.cost, 4),
+                        "cost": crate::money_fixed::format_money(value.cost),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -673,7 +682,7 @@ fn dashboard_build_daily_stats_payload(
                 right["cost"]
                     .as_f64()
                     .unwrap_or_default()
-                    .partial_cmp(&left["cost"].as_f64().unwrap_or_default())
+                    .partial_cmp(&dashboard_json_money(&left["cost"]))
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| {
                         left["model"]
@@ -687,7 +696,7 @@ fn dashboard_build_daily_stats_payload(
                 "date": cursor.to_string(),
                 "requests": aggregate.totals.requests,
                 "tokens": aggregate.totals.total_tokens,
-                "cost": dashboard_round_f64(aggregate.totals.total_cost_usd, 4),
+                "cost": crate::money_fixed::format_money(aggregate.totals.total_cost_usd),
                 "avg_response_time": aggregate.totals.avg_response_time_seconds(),
                 "unique_models": aggregate.models.len(),
                 "model_breakdown": model_breakdown,
@@ -701,7 +710,7 @@ fn dashboard_build_daily_stats_payload(
                 "date": cursor.to_string(),
                 "requests": 0,
                 "tokens": 0,
-                "cost": 0.0,
+                "cost": "0.00000000",
                 "avg_response_time": 0.0,
                 "unique_models": 0,
                 "model_breakdown": [],
@@ -729,9 +738,9 @@ fn dashboard_build_daily_stats_payload(
                 )
             };
             let cost_per_request = if value.requests == 0 {
-                0.0
+                "0.00000000".to_string()
             } else {
-                dashboard_round_f64(value.cost / value.requests as f64, 4)
+                crate::money_fixed::format_money(value.cost / value.requests as f64)
             };
             let tokens_per_request = if value.requests == 0 {
                 0.0
@@ -742,7 +751,7 @@ fn dashboard_build_daily_stats_payload(
                 "model": model,
                 "requests": value.requests,
                 "tokens": value.tokens,
-                "cost": dashboard_round_f64(value.cost, 4),
+                "cost": crate::money_fixed::format_money(value.cost),
                 "avg_response_time": avg_response_time,
                 "cost_per_request": cost_per_request,
                 "tokens_per_request": tokens_per_request,
@@ -753,7 +762,7 @@ fn dashboard_build_daily_stats_payload(
         right["cost"]
             .as_f64()
             .unwrap_or_default()
-            .partial_cmp(&left["cost"].as_f64().unwrap_or_default())
+            .partial_cmp(&dashboard_json_money(&left["cost"]))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -765,7 +774,7 @@ fn dashboard_build_daily_stats_payload(
                     "provider": provider,
                     "requests": value.requests,
                     "tokens": value.tokens,
-                    "cost": dashboard_round_f64(value.cost, 4),
+                    "cost": crate::money_fixed::format_money(value.cost),
                 })
             })
             .collect::<Vec<_>>();
@@ -773,7 +782,7 @@ fn dashboard_build_daily_stats_payload(
             right["cost"]
                 .as_f64()
                 .unwrap_or_default()
-                .partial_cmp(&left["cost"].as_f64().unwrap_or_default())
+                .partial_cmp(&dashboard_json_money(&left["cost"]))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         Some(items)
@@ -1011,8 +1020,8 @@ pub(super) async fn handle_dashboard_stats_get(
     let cache_stats = json!({
         "cache_creation_tokens": period_totals.cache_creation_tokens,
         "cache_read_tokens": period_totals.cache_read_tokens,
-        "cache_creation_cost": dashboard_round_f64(period_totals.cache_creation_cost_usd, 4),
-        "cache_read_cost": dashboard_round_f64(period_totals.cache_read_cost_usd, 4),
+        "cache_creation_cost": crate::money_fixed::format_money(period_totals.cache_creation_cost_usd),
+        "cache_read_cost": crate::money_fixed::format_money(period_totals.cache_read_cost_usd),
         "cache_hit_rate": period_totals.cache_hit_rate(),
         "total_cache_tokens": period_totals.cache_creation_tokens + period_totals.cache_read_tokens,
     });
@@ -1026,8 +1035,8 @@ pub(super) async fn handle_dashboard_stats_get(
     let today_payload = json!({
         "requests": today_totals.requests,
         "tokens": today_token_value,
-        "cost": dashboard_round_f64(today_totals.total_cost_usd, 4),
-        "actual_cost": dashboard_round_f64(today_totals.actual_total_cost_usd, 4),
+        "cost": crate::money_fixed::format_money(today_totals.total_cost_usd),
+        "actual_cost": crate::money_fixed::format_money(today_totals.actual_total_cost_usd),
         "cache_creation_tokens": today_totals.cache_creation_tokens,
         "cache_read_tokens": today_totals.cache_read_tokens,
     });
@@ -1144,9 +1153,9 @@ pub(super) async fn handle_dashboard_stats_get(
                 "total_requests": period_totals.requests,
             },
             "cost_stats": {
-                "total_cost": dashboard_round_f64(period_totals.total_cost_usd, 4),
-                "total_actual_cost": dashboard_round_f64(period_totals.actual_total_cost_usd, 4),
-                "cost_savings": period_cost_savings,
+                "total_cost": crate::money_fixed::format_money(period_totals.total_cost_usd),
+                "total_actual_cost": crate::money_fixed::format_money(period_totals.actual_total_cost_usd),
+                "cost_savings": crate::money_fixed::format_money(period_cost_savings),
             },
             "cache_stats": cache_stats,
             "users": {
@@ -1216,7 +1225,7 @@ pub(super) async fn handle_dashboard_stats_get(
         },
         "cache_stats": cache_stats,
         "token_breakdown": token_breakdown,
-        "monthly_cost": dashboard_round_f64(period_totals.total_cost_usd, 4),
+        "monthly_cost": crate::money_fixed::format_money(period_totals.total_cost_usd),
     });
     dashboard_cached_json_response(state, cache_key, cache_ttl, &payload)
 }

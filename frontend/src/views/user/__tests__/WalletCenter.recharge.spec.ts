@@ -64,21 +64,21 @@ let hidden = false
 function walletBalance(amount: number): WalletBalanceResponse {
   return {
     wallet: {
-      id: 'wallet-1', balance: amount, recharge_balance: amount, gift_balance: 0,
-      refundable_balance: amount, currency: 'USD', status: 'active', total_recharged: amount,
-      total_consumed: 0, total_refunded: 0, total_adjusted: 0, updated_at: '2026-09-11T00:00:00Z',
+      id: 'wallet-1', balance: String(amount), recharge_balance: String(amount), gift_balance: '0',
+      refundable_balance: String(amount), currency: 'USD', status: 'active', total_recharged: String(amount),
+      total_consumed: '0', total_refunded: '0', total_adjusted: '0', updated_at: '2026-09-11T00:00:00Z',
     },
-    balance: amount, unlimited: false, limit_mode: 'finite', currency: 'USD',
-    wallet_balance: amount, package_balance: 3, total_available_balance: amount + 3,
-    daily_quota: { has_active: true, total_usd: 5, used_usd: 2, remaining_usd: 3, allow_wallet_overage: true },
+    balance: String(amount), unlimited: false, limit_mode: 'finite', currency: 'USD',
+    wallet_balance: String(amount), package_balance: '3', total_available_balance: String(amount + 3),
+    daily_quota: { has_active: true, total_usd: '5', used_usd: '2', remaining_usd: '3', allow_wallet_overage: true },
   }
 }
 
 function paymentOrder(status = 'pending', overrides: Partial<PaymentOrder> = {}): PaymentOrder {
   return {
     id: 'order-1', order_no: 'RECHARGE-1', wallet_id: 'wallet-1', user_id: 'user-1',
-    amount_usd: 10, pay_amount: 10, pay_currency: 'USD', exchange_rate: 1,
-    refunded_amount_usd: 0, refundable_amount_usd: status === 'credited' ? 10 : 0,
+    amount_usd: '10', pay_amount: '10', pay_currency: 'USD', exchange_rate: 1,
+    refunded_amount_usd: '0', refundable_amount_usd: status === 'credited' ? '10' : '0',
     payment_method: 'epay', gateway_order_id: 'gateway-1', gateway_response: null,
     status, created_at: '2026-09-11T00:00:00Z', paid_at: null,
     credited_at: status === 'credited' ? '2026-09-11T00:01:00Z' : null, expires_at: null,

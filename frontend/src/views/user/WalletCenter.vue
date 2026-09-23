@@ -560,7 +560,7 @@
                         </div>
                       </TableCell>
                       <TableCell class="text-rose-600 dark:text-rose-400">
-                        -{{ todayUsage.total_cost.toFixed(4) }}
+                        -{{ formatMoneyFixed(todayUsage.total_cost, 4) }}
                       </TableCell>
                       <TableCell class="text-xs text-muted-foreground">
                         按日汇总
@@ -593,10 +593,10 @@
                         <TableCell
                           :class="item.data.amount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'"
                         >
-                          {{ item.data.amount >= 0 ? '+' : '' }}{{ item.data.amount.toFixed(4) }}
+                          {{ moneyToNumber(item.data.amount) >= 0 ? '+' : '' }}{{ formatMoneyFixed(item.data.amount, 4) }}
                         </TableCell>
                         <TableCell class="text-xs tabular-nums">
-                          {{ item.data.balance_before.toFixed(4) }} → {{ item.data.balance_after.toFixed(4) }}
+                          {{ formatMoneyFixed(item.data.balance_before, 4) }} → {{ formatMoneyFixed(item.data.balance_after, 4) }}
                         </TableCell>
                         <TableCell class="text-xs text-muted-foreground">
                           {{ item.data.description || '-' }}
@@ -620,7 +620,7 @@
                           </div>
                         </TableCell>
                         <TableCell class="text-rose-600 dark:text-rose-400">
-                          -{{ item.data.total_cost.toFixed(4) }}
+                          -{{ formatMoneyFixed(item.data.total_cost, 4) }}
                         </TableCell>
                         <TableCell class="text-xs text-muted-foreground">
                           按日汇总
@@ -884,6 +884,7 @@ import {
   walletTransactionCategoryLabel,
   walletTransactionReasonLabel,
 } from '@/utils/walletDisplay'
+import { formatMoney as formatMoneyFixed, moneyToNumber } from '@/utils/money'
 
 const { success, info, error: showError } = useToast()
 
@@ -1033,26 +1034,30 @@ const dailyQuota = computed(() => walletBalance.value?.daily_quota ?? null)
 const hasActiveDailyQuota = computed(() => Boolean(dailyQuota.value?.has_active))
 const walletOnlyBalance = computed(() => {
   const explicitBalance = walletBalance.value?.wallet_balance
-  if (typeof explicitBalance === 'number' && Number.isFinite(explicitBalance)) {
-    return explicitBalance
+  const parsedExplicit = moneyToNumber(explicitBalance, Number.NaN)
+  if (Number.isFinite(parsedExplicit)) {
+    return parsedExplicit
   }
-  return Number(walletBalance.value?.balance ?? 0)
+  return moneyToNumber(walletBalance.value?.balance ?? 0)
 })
 const packageBalance = computed(() => {
   const quotaRemaining = dailyQuota.value?.remaining_usd
-  if (hasActiveDailyQuota.value && typeof quotaRemaining === 'number' && Number.isFinite(quotaRemaining)) {
-    return Math.max(0, quotaRemaining)
+  const parsedRemaining = moneyToNumber(quotaRemaining, Number.NaN)
+  if (hasActiveDailyQuota.value && Number.isFinite(parsedRemaining)) {
+    return Math.max(0, parsedRemaining)
   }
   const explicitBalance = walletBalance.value?.package_balance
-  if (typeof explicitBalance === 'number' && Number.isFinite(explicitBalance)) {
-    return Math.max(0, explicitBalance)
+  const parsedExplicit = moneyToNumber(explicitBalance, Number.NaN)
+  if (Number.isFinite(parsedExplicit)) {
+    return Math.max(0, parsedExplicit)
   }
   return 0
 })
 const totalAvailableBalance = computed(() => {
   const explicitBalance = walletBalance.value?.total_available_balance
-  if (typeof explicitBalance === 'number' && Number.isFinite(explicitBalance)) {
-    return explicitBalance
+  const parsedExplicit = moneyToNumber(explicitBalance, Number.NaN)
+  if (Number.isFinite(parsedExplicit)) {
+    return parsedExplicit
   }
   return walletOnlyBalance.value + packageBalance.value
 })
@@ -1393,13 +1398,13 @@ async function reloadOrders(silent: boolean) {
     // Order lists include the wallet snapshot, but omit the daily package quota.
     const { items: _items, total: _total, limit: _limit, offset: _offset, ...balance } = resp
     const currentPackageBalance = packageBalance.value
-    const currentWalletBalance = Number(balance.wallet?.balance ?? balance.balance ?? 0)
+    const currentWalletBalance = moneyToNumber(balance.wallet?.balance ?? balance.balance ?? 0)
     if (balanceVersionAtStart === balanceLoadVersion) {
       walletBalance.value = {
         ...walletBalance.value,
         ...balance,
-        wallet_balance: Math.max(0, currentWalletBalance),
-        total_available_balance: balance.unlimited ? null : Math.max(0, currentWalletBalance + currentPackageBalance),
+        wallet_balance: toMoneyString(Math.max(0, currentWalletBalance)),
+        total_available_balance: balance.unlimited ? null : toMoneyString(Math.max(0, currentWalletBalance + currentPackageBalance)),
       }
     }
     rechargeOrders.value = resp.items

@@ -1,4 +1,5 @@
 import { getI18nLocale } from '@/i18n'
+import { parseMoneyUnits } from '@/utils/money'
 
 const COMPACT_NUMBER_UNITS = [
   { value: 1_000_000_000_000, suffix: 'T' },
@@ -92,54 +93,34 @@ export function formatTokens(num: number | undefined | null): string {
   return formatCompactNumber(num)
 }
 
-// Currency formatting with high precision for small values
-export function formatCurrency(amount: number | undefined | null): string {
-  if (amount === undefined || amount === null || amount === 0) {
+// Currency formatting with high precision for small values.
+// Accepts fixed-point decimal strings (API money fields) or numbers.
+export function formatCurrency(amount: number | string | undefined | null): string {
+  if (amount === undefined || amount === null || amount === 0 || amount === '0.00000000') {
     return '$0.00'
   }
+  const units = parseMoneyUnits(amount)
+  if (units === null) return '$0.00'
+  const abs = Math.abs(units)
+  const absValue = abs / 1e8
 
-  // For very small amounts (< $0.00001), show up to 8 decimal places
-  if (amount > 0 && amount < 0.00001) {
-    const formatted = amount.toFixed(8)
-    // Remove trailing zeros but keep at least 2 decimal places
-    const trimmed = formatted.replace(/(\.\d\d)0+$/, '$1')
-    return `$${  trimmed}`
+  const formatWith = (decimals: number): string => {
+    const factor = 10 ** (8 - decimals)
+    const rounded = Math.round(abs / factor)
+    const intPart = Math.floor(rounded / 10 ** decimals)
+    const fracPart = String(rounded % 10 ** decimals)
+      .padStart(decimals, '0')
+      .replace(/(\d\d)0+$/, '$1')
+    const sign = units < 0 ? '-' : ''
+    return `$${sign}${intPart}.${fracPart}`
   }
 
-  // For small amounts (< $0.0001), show up to 6 decimal places
-  if (amount < 0.0001) {
-    const formatted = amount.toFixed(6)
-    // Remove trailing zeros but keep at least 2 decimal places
-    const trimmed = formatted.replace(/(\.\d\d)0+$/, '$1')
-    return `$${  trimmed}`
-  }
-
-  // For small amounts (< $0.01), show up to 5 decimal places
-  if (amount < 0.01) {
-    const formatted = amount.toFixed(5)
-    // Remove trailing zeros but keep at least 2 decimal places
-    const trimmed = formatted.replace(/(\.\d\d)0+$/, '$1')
-    return `$${  trimmed}`
-  }
-
-  // For amounts less than $1, show 4 decimal places
-  if (amount < 1) {
-    const formatted = amount.toFixed(4)
-    // Remove trailing zeros but keep at least 2 decimal places
-    const trimmed = formatted.replace(/(\.\d\d)0+$/, '$1')
-    return `$${  trimmed}`
-  }
-
-  // For amounts $1-$100, show 2-3 decimal places
-  if (amount < 100) {
-    const formatted = amount.toFixed(3)
-    // Remove trailing zeros but keep at least 2 decimal places
-    const trimmed = formatted.replace(/(\.\d\d)0+$/, '$1')
-    return `$${  trimmed}`
-  }
-
-  // For larger amounts, show 2 decimal places
-  return `$${  amount.toFixed(2)}`
+  if (absValue > 0 && absValue < 0.00001) return formatWith(8)
+  if (absValue < 0.0001) return formatWith(6)
+  if (absValue < 0.01) return formatWith(5)
+  if (absValue < 1) return formatWith(4)
+  if (absValue < 100) return formatWith(3)
+  return formatWith(2)
 }
 
 // Number formatting with locale support

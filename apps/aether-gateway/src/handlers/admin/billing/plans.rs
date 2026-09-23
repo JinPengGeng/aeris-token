@@ -23,6 +23,7 @@ struct BillingPlanRequest {
     title: String,
     #[serde(default)]
     description: Option<String>,
+    #[serde(deserialize_with = "crate::money_fixed::deserialize_money")]
     price_amount: f64,
     #[serde(default = "default_price_currency")]
     price_currency: String,
@@ -103,11 +104,11 @@ fn validate_entitlements(value: &serde_json::Value) -> Result<(), String> {
             .ok_or_else(|| "entitlement.type is required".to_string())?;
         match kind {
             "wallet_credit" => {
-                let amount = item
+                let amount_units = item
                     .get("amount_usd")
-                    .and_then(|value| value.as_f64())
-                    .ok_or_else(|| "wallet_credit.amount_usd is required".to_string())?;
-                if !amount.is_finite() || amount <= 0.0 {
+                    .ok_or_else(|| "wallet_credit.amount_usd is required".to_string())
+                    .and_then(crate::money_fixed::money_units_from_json)?;
+                if amount_units <= 0 {
                     return Err("wallet_credit.amount_usd must be positive".to_string());
                 }
                 if let Some(bucket) = item.get("balance_bucket") {
@@ -122,11 +123,11 @@ fn validate_entitlements(value: &serde_json::Value) -> Result<(), String> {
                 }
             }
             "daily_quota" => {
-                let amount = item
+                let amount_units = item
                     .get("daily_quota_usd")
-                    .and_then(|value| value.as_f64())
-                    .ok_or_else(|| "daily_quota.daily_quota_usd is required".to_string())?;
-                if !amount.is_finite() || amount <= 0.0 {
+                    .ok_or_else(|| "daily_quota.daily_quota_usd is required".to_string())
+                    .and_then(crate::money_fixed::money_units_from_json)?;
+                if amount_units <= 0 {
                     return Err("daily_quota.daily_quota_usd must be positive".to_string());
                 }
                 if let Some(reset_timezone) = item.get("reset_timezone") {
@@ -277,7 +278,7 @@ pub(crate) fn billing_plan_payload(record: &BillingPlanRecord) -> serde_json::Va
         "id": record.id,
         "title": record.title,
         "description": record.description,
-        "price_amount": record.price_amount,
+        "price_amount": crate::money_fixed::format_money(record.price_amount),
         "price_currency": record.price_currency,
         "duration_unit": record.duration_unit,
         "duration_value": record.duration_value,

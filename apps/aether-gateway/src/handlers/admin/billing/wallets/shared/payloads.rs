@@ -1,6 +1,5 @@
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
-use crate::handlers::shared::round_to;
 use crate::GatewayError;
 use aether_data::repository::wallet::stored_timestamp_unix_secs;
 use serde_json::{json, Map, Value};
@@ -63,13 +62,13 @@ pub(in super::super) fn build_admin_wallet_transaction_payload(
         "wallet_status": wallet.status,
         "category": category,
         "reason_code": reason_code,
-        "amount": amount,
-        "balance_before": balance_before,
-        "balance_after": balance_after,
-        "recharge_balance_before": recharge_balance_before,
-        "recharge_balance_after": recharge_balance_after,
-        "gift_balance_before": gift_balance_before,
-        "gift_balance_after": gift_balance_after,
+        "amount": crate::money_fixed::format_money(amount),
+        "balance_before": crate::money_fixed::format_money(balance_before),
+        "balance_after": crate::money_fixed::format_money(balance_after),
+        "recharge_balance_before": crate::money_fixed::format_money(recharge_balance_before),
+        "recharge_balance_after": crate::money_fixed::format_money(recharge_balance_after),
+        "gift_balance_before": crate::money_fixed::format_money(gift_balance_before),
+        "gift_balance_after": crate::money_fixed::format_money(gift_balance_after),
         "link_type": link_type,
         "link_id": link_id,
         "operator_id": operator_id,
@@ -149,18 +148,18 @@ pub(in super::super) fn build_admin_wallet_summary_payload(
         "api_key_id": wallet.api_key_id.clone(),
         "owner_type": owner.owner_type,
         "owner_name": owner.owner_name.clone(),
-        "balance": wallet.balance + wallet.gift_balance,
-        "recharge_balance": wallet.balance,
-        "gift_balance": wallet.gift_balance,
-        "refundable_balance": wallet.balance,
+        "balance": crate::money_fixed::format_money(wallet.balance + wallet.gift_balance),
+        "recharge_balance": crate::money_fixed::format_money(wallet.balance),
+        "gift_balance": crate::money_fixed::format_money(wallet.gift_balance),
+        "refundable_balance": crate::money_fixed::format_money(wallet.balance),
         "currency": wallet.currency.clone(),
         "status": wallet.status.clone(),
         "limit_mode": wallet.limit_mode.clone(),
         "unlimited": wallet.limit_mode.eq_ignore_ascii_case("unlimited"),
-        "total_recharged": wallet.total_recharged,
-        "total_consumed": wallet.total_consumed,
-        "total_refunded": wallet.total_refunded,
-        "total_adjusted": wallet.total_adjusted,
+        "total_recharged": crate::money_fixed::format_money(wallet.total_recharged),
+        "total_consumed": crate::money_fixed::format_money(wallet.total_consumed),
+        "total_refunded": crate::money_fixed::format_money(wallet.total_refunded),
+        "total_adjusted": crate::money_fixed::format_money(wallet.total_adjusted),
         "created_at": serde_json::Value::Null,
         "updated_at": unix_secs_to_rfc3339(wallet.updated_at_unix_secs),
     })
@@ -219,17 +218,19 @@ pub(in super::super) async fn enrich_admin_wallet_package_summary(
 
     payload["daily_quota"] = json!({
         "has_active": has_active_daily_quota,
-        "total_usd": round_to(total_quota_usd.max(0.0), 6),
-        "used_usd": round_to(used_usd.max(0.0), 6),
-        "remaining_usd": round_to(package_balance, 6),
+        "total_usd": crate::money_fixed::format_money(total_quota_usd.max(0.0)),
+        "used_usd": crate::money_fixed::format_money(used_usd.max(0.0)),
+        "remaining_usd": crate::money_fixed::format_money(package_balance),
         "allow_wallet_overage": allow_wallet_overage,
     });
-    payload["package_balance"] = json!(round_to(package_balance, 6));
-    payload["wallet_balance"] = json!(round_to(wallet_balance.max(0.0), 6));
+    payload["package_balance"] = json!(crate::money_fixed::format_money(package_balance));
+    payload["wallet_balance"] = json!(crate::money_fixed::format_money(wallet_balance.max(0.0)));
     payload["total_available_balance"] = if unlimited {
         serde_json::Value::Null
     } else {
-        json!(round_to((wallet_balance + package_balance).max(0.0), 6))
+        json!(crate::money_fixed::format_money(
+            (wallet_balance + package_balance).max(0.0)
+        ))
     };
     payload["deduction_order"] = json!([
         "package_daily_quota",
@@ -354,7 +355,7 @@ pub(in super::super) fn build_admin_wallet_refund_payload(
         "source_type": refund.source_type.clone(),
         "source_id": refund.source_id.clone(),
         "refund_mode": refund.refund_mode.clone(),
-        "amount_usd": refund.amount_usd,
+        "amount_usd": crate::money_fixed::format_money(refund.amount_usd),
         "status": refund.status.clone(),
         "reason": refund.reason.clone(),
         "failure_reason": refund.failure_reason.clone(),

@@ -3,7 +3,7 @@ use super::{
     query_param_value, resolve_authenticated_local_user, unix_secs_to_rfc3339, AppState, Body,
     GatewayPublicRequestContext, Response, WALLET_LEGACY_TIMEZONE,
 };
-use crate::handlers::shared::round_to;
+use crate::money_fixed::format_money;
 use aether_data::repository::wallet::stored_timestamp_unix_secs;
 use aether_data_contracts::repository::usage::UsageSettledCostSummaryQuery;
 use chrono::{TimeZone, Utc};
@@ -22,19 +22,22 @@ pub(super) fn build_wallet_payload(
             .get("limit_mode")
             .cloned()
             .unwrap_or_else(|| json!("finite")),
-        "balance": wallet_payload.get("balance").cloned().unwrap_or(json!(0.0)),
+        "balance": wallet_payload
+            .get("balance")
+            .cloned()
+            .unwrap_or_else(|| json!("0.00000000")),
         "recharge_balance": wallet_payload
             .get("recharge_balance")
             .cloned()
-            .unwrap_or(json!(0.0)),
+            .unwrap_or_else(|| json!("0.00000000")),
         "gift_balance": wallet_payload
             .get("gift_balance")
             .cloned()
-            .unwrap_or(json!(0.0)),
+            .unwrap_or_else(|| json!("0.00000000")),
         "refundable_balance": wallet_payload
             .get("refundable_balance")
             .cloned()
-            .unwrap_or(json!(0.0)),
+            .unwrap_or_else(|| json!("0.00000000")),
         "currency": wallet_payload
             .get("currency")
             .cloned()
@@ -113,17 +116,17 @@ async fn build_wallet_balance_payload_for_quota_user(
 
     payload["daily_quota"] = json!({
         "has_active": has_active_daily_quota,
-        "total_usd": round_to(total_quota_usd.max(0.0), 6),
-        "used_usd": round_to(used_usd.max(0.0), 6),
-        "remaining_usd": round_to(package_balance, 6),
+        "total_usd": format_money(total_quota_usd.max(0.0)),
+        "used_usd": format_money(used_usd.max(0.0)),
+        "remaining_usd": format_money(package_balance),
         "allow_wallet_overage": allow_wallet_overage,
     });
-    payload["package_balance"] = json!(round_to(package_balance, 6));
-    payload["wallet_balance"] = json!(round_to(wallet_balance.max(0.0), 6));
+    payload["package_balance"] = json!(format_money(package_balance));
+    payload["wallet_balance"] = json!(format_money(wallet_balance.max(0.0)));
     payload["total_available_balance"] = if unlimited {
         serde_json::Value::Null
     } else {
-        json!(round_to((wallet_balance + package_balance).max(0.0), 6))
+        json!(format_money((wallet_balance + package_balance).max(0.0)))
     };
     payload["deduction_order"] = json!([
         "package_daily_quota",
@@ -208,7 +211,7 @@ pub(super) fn build_wallet_daily_usage_payload(
         "id": id,
         "date": date,
         "timezone": timezone,
-        "total_cost": round_to(total_cost, 6),
+        "total_cost": format_money(total_cost),
         "total_requests": total_requests,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -299,13 +302,13 @@ pub(super) fn wallet_transaction_payload_from_record(
         "id": record.id.clone(),
         "category": record.category.clone(),
         "reason_code": record.reason_code.clone(),
-        "amount": record.amount,
-        "balance_before": record.balance_before,
-        "balance_after": record.balance_after,
-        "recharge_balance_before": record.recharge_balance_before,
-        "recharge_balance_after": record.recharge_balance_after,
-        "gift_balance_before": record.gift_balance_before,
-        "gift_balance_after": record.gift_balance_after,
+        "amount": format_money(record.amount),
+        "balance_before": format_money(record.balance_before),
+        "balance_after": format_money(record.balance_after),
+        "recharge_balance_before": format_money(record.recharge_balance_before),
+        "recharge_balance_after": format_money(record.recharge_balance_after),
+        "gift_balance_before": format_money(record.gift_balance_before),
+        "gift_balance_after": format_money(record.gift_balance_after),
         "link_type": record.link_type.clone(),
         "link_id": record.link_id.clone(),
         "operator_id": record.operator_id.clone(),

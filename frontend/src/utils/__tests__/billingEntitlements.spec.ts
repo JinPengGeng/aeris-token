@@ -54,11 +54,11 @@ describe('billing entitlement replacement', () => {
 
   it('preserves legacy whole-package replacement for matching entitlement types', () => {
     const incoming: BillingEntitlement[] = [
-      { type: 'daily_quota', daily_quota_usd: 20 },
+      { type: 'daily_quota', daily_quota_usd: '20' },
       policy('new-policy-group'),
     ]
     const existing: BillingEntitlement[] = [
-      { type: 'daily_quota', daily_quota_usd: 10 },
+      { type: 'daily_quota', daily_quota_usd: '10' },
       policy('old-policy-group'),
     ]
 
@@ -68,7 +68,7 @@ describe('billing entitlement replacement', () => {
       [{ type: 'membership_group', grant_user_groups: ['basic'] }],
     )).toBe(true)
     expect(entitlementsWillReplaceExisting(
-      [{ type: 'daily_quota', daily_quota_usd: 20 }],
+      [{ type: 'daily_quota', daily_quota_usd: '20' }],
       [{ type: 'membership_group', grant_user_groups: ['basic'] }],
     )).toBe(false)
   })
@@ -76,7 +76,7 @@ describe('billing entitlement replacement', () => {
   it('matches explicit groups across entitlement types after trimming whitespace', () => {
     expect(entitlementsWillReplaceExisting(
       [policy(' pro-tier ')],
-      [{ type: 'wallet_credit', replacement_group: 'pro-tier', amount_usd: 10 }],
+      [{ type: 'wallet_credit', replacement_group: 'pro-tier', amount_usd: '10' }],
     )).toBe(true)
   })
 

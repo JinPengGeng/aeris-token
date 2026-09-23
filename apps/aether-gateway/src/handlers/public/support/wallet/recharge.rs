@@ -95,13 +95,17 @@ use aether_data::repository::wallet::{
 
 #[derive(Debug, Deserialize)]
 struct WalletCreateRechargeRequest {
+    #[serde(deserialize_with = "crate::money_fixed::deserialize_money")]
     amount_usd: f64,
     payment_method: String,
     #[serde(default)]
     payment_provider: Option<String>,
     #[serde(default)]
     payment_channel: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::money_fixed::deserialize_optional_money"
+    )]
     pay_amount: Option<f64>,
     #[serde(default)]
     pay_currency: Option<String>,
@@ -663,12 +667,12 @@ fn build_wallet_payment_order_payload(
         "order_no": order_no,
         "wallet_id": wallet_id,
         "user_id": user_id,
-        "amount_usd": amount_usd,
-        "pay_amount": pay_amount,
+        "amount_usd": crate::money_fixed::format_money(amount_usd),
+        "pay_amount": pay_amount.map(crate::money_fixed::format_money),
         "pay_currency": pay_currency,
         "exchange_rate": exchange_rate,
-        "refunded_amount_usd": refunded_amount_usd,
-        "refundable_amount_usd": refundable_amount_usd,
+        "refunded_amount_usd": crate::money_fixed::format_money(refunded_amount_usd),
+        "refundable_amount_usd": crate::money_fixed::format_money(refundable_amount_usd),
         "payment_method": payment_method,
         "gateway_order_id": gateway_order_id,
         "gateway_response": sanitize_wallet_gateway_response(gateway_response),

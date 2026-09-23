@@ -56,14 +56,14 @@ export interface GatewayTestResponse {
 export interface WalletCreditEntitlement {
   type: 'wallet_credit'
   replacement_group?: string
-  amount_usd: number
+  amount_usd: string
   balance_bucket?: WalletCreditBucket
 }
 
 export interface DailyQuotaEntitlement {
   type: 'daily_quota'
   replacement_group?: string
-  daily_quota_usd: number
+  daily_quota_usd: string
   reset_timezone?: string
   carry_over?: boolean
   carry_over_days?: number
@@ -114,7 +114,7 @@ export interface BillingPlan {
   id: string
   title: string
   description?: string | null
-  price_amount: number
+  price_amount: string
   price_currency: string
   duration_unit: BillingDurationUnit
   duration_value: number
@@ -130,7 +130,7 @@ export interface BillingPlan {
 export interface BillingPlanWriteRequest {
   title: string
   description?: string | null
-  price_amount: number
+  price_amount: string
   price_currency: string
   duration_unit: BillingDurationUnit
   duration_value: number
