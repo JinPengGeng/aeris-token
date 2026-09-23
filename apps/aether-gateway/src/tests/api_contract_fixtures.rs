@@ -108,7 +108,7 @@ fn public_api_compatibility_fixture_matches_error_formatters_and_retry_policy() 
                     | (404, LocalCoreSyncErrorKind::NotFound)
                     | (413, LocalCoreSyncErrorKind::RequestTooLarge)
                     | (429, LocalCoreSyncErrorKind::RateLimit)
-                    | (402 | 429, LocalCoreSyncErrorKind::QuotaExhausted)
+                    | (402 | 403 | 429, LocalCoreSyncErrorKind::QuotaExhausted)
                     | (503 | 529, LocalCoreSyncErrorKind::Overloaded)
                     | (500, LocalCoreSyncErrorKind::ServerError)
             ),
