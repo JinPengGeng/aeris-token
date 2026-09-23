@@ -28,6 +28,18 @@ use axum::{
 };
 use serde_json::json;
 
+/// 部署级默认并发硬顶;环境变量缺失或未配置时返回 None(不限制),
+/// 配置非法时告警并回退到不限制,避免阻断密钥创建。
+fn default_api_key_concurrent_limit_from_env() -> Option<i32> {
+    match aether_data::repository::billing::UsageHardcapDefaults::from_env() {
+        Ok(defaults) => defaults.default_api_key_concurrent_limit,
+        Err(error) => {
+            tracing::warn!(error = %error, "invalid usage hardcap defaults; ignoring");
+            None
+        }
+    }
+}
+
 fn parse_standalone_api_key_expires_at(value: Option<&str>) -> Result<Option<u64>, String> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
@@ -185,6 +197,8 @@ pub(super) async fn build_admin_create_api_key_response(
             Ok(value) => value,
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
         };
+    // 未显式指定时套用部署级默认并发硬顶(默认 None=不限制,保持既有行为)。
+    let concurrent_limit = concurrent_limit.or_else(default_api_key_concurrent_limit_from_env);
     let billing_multiplier =
         match normalize_admin_standalone_api_key_billing_multiplier(payload.billing_multiplier) {
             Ok(value) => value,
@@ -684,6 +698,22 @@ mod tests {
     };
     use aether_data::repository::wallet::{StoredWalletSnapshot, WalletLookupKey};
     use std::sync::Arc;
+
+    #[test]
+    fn default_concurrent_limit_env_pipeline_applies_and_recovers() {
+        const ENV: &str =
+            aether_data::repository::billing::USAGE_HARDCAP_DEFAULT_API_KEY_CONCURRENT_LIMIT_ENV;
+        std::env::remove_var(ENV);
+        assert_eq!(super::default_api_key_concurrent_limit_from_env(), None);
+
+        std::env::set_var(ENV, "6");
+        assert_eq!(super::default_api_key_concurrent_limit_from_env(), Some(6));
+
+        // 非法配置回退到不限制,而不是阻断创建。
+        std::env::set_var(ENV, "not-a-number");
+        assert_eq!(super::default_api_key_concurrent_limit_from_env(), None);
+        std::env::remove_var(ENV);
+    }
 
     async fn seed_standalone_key(
         repository: &InMemoryAuthApiKeySnapshotRepository,

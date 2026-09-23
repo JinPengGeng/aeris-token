@@ -1577,6 +1577,97 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_pre_freeze_reservations_keep_wallet_balance_nonnegative() {
+        use crate::repository::settlement::{
+            FinalizeRequestFundsInput, RequestFundsIdentity, ReserveRequestFundsInput,
+            ReserveRequestFundsOutcome,
+        };
+
+        let mut wallet = sample_user_wallet("wallet-pre-freeze", "user-1");
+        wallet.balance = 1.0;
+        wallet.gift_balance = 0.0;
+        let repository = std::sync::Arc::new(InMemorySettlementRepository::seed(vec![wallet]));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(33));
+        // 1e8 cost units per USD: each reservation pre-freezes 0.10 USD of the 1.00 USD wallet.
+        const AUTHORIZED_COST_UNITS: u64 = 10_000_000;
+        const TASKS: usize = 32;
+
+        let mut tasks = Vec::new();
+        for index in 0..TASKS {
+            let repository = std::sync::Arc::clone(&repository);
+            let barrier = std::sync::Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                let identity = RequestFundsIdentity {
+                    reservation_token: format!("token-pre-freeze-{index}"),
+                    request_id: format!("req-pre-freeze-{index}"),
+                    user_id: Some("user-1".to_string()),
+                    api_key_id: None,
+                    api_key_is_standalone: false,
+                };
+                barrier.wait().await;
+                let outcome = repository
+                    .reserve_request_funds(ReserveRequestFundsInput {
+                        identity: identity.clone(),
+                        authorized_cost_units: AUTHORIZED_COST_UNITS,
+                        pricing_snapshot: serde_json::json!({"version": 1}),
+                        admitted_at_unix_secs: 100,
+                    })
+                    .await
+                    .expect("concurrent reservation");
+                if !matches!(outcome, ReserveRequestFundsOutcome::Reserved { .. }) {
+                    return false;
+                }
+                repository
+                    .mark_request_funds_dispatched(identity.clone())
+                    .await
+                    .expect("dispatch");
+                let finalized = repository
+                    .finalize_request_funds(FinalizeRequestFundsInput {
+                        identity: identity.clone(),
+                        usage: UsageSettlementInput {
+                            request_id: identity.request_id.clone(),
+                            user_id: identity.user_id.clone(),
+                            api_key_id: None,
+                            api_key_is_standalone: false,
+                            provider_id: Some("provider-1".to_string()),
+                            status: "completed".to_string(),
+                            billing_status: "pending".to_string(),
+                            total_cost_usd: 0.1,
+                            actual_total_cost_usd: 0.1,
+                            finalized_at_unix_secs: Some(200),
+                        },
+                        reconciliation_facts: None,
+                    })
+                    .await
+                    .expect("finalize");
+                finalized.is_some()
+            }));
+        }
+        barrier.wait().await;
+
+        let mut settled = 0;
+        for task in tasks {
+            if task.await.expect("settlement task") {
+                settled += 1;
+            }
+        }
+        // 预冻结硬顶:余额只允许 10 笔 0.10 USD 冻结,其余请求在准入时被拒绝,
+        // 结清后余额恰好归零,任何时刻都不为负。
+        assert_eq!(settled, 10);
+        repository.wallets.with_mut(|wallets| {
+            let wallet = wallets
+                .get("wallet-pre-freeze")
+                .expect("wallet should exist");
+            assert!(
+                wallet.balance >= 0.0,
+                "wallet balance must never go negative under concurrent pre-freeze"
+            );
+            assert_eq!(wallet.balance, 0.0);
+            assert!((wallet.total_consumed - 1.0).abs() < 1e-9);
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_pending_settlement_debits_once_in_memory() {
         let repository = Arc::new(InMemorySettlementRepository::seed(vec![sample_wallet()]));
         let barrier = Arc::new(tokio::sync::Barrier::new(9));
