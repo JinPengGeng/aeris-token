@@ -100,8 +100,13 @@ FOR UPDATE
                             consume_positive_bucket(&mut after_gift, &mut remaining)?;
                         }
                         if remaining > 0 {
-                            // Administrator adjustments retain the existing ability to
-                            // record recharge debt after consuming both positive buckets.
+                            // INTENTIONAL (issue #208): administrator adjustments may
+                            // drive the recharge balance negative. The excess is
+                            // recorded as recharge debt after both positive buckets
+                            // are consumed, mirroring usage-settlement overdraft so a
+                            // later recharge can restore the balance. This is a
+                            // deliberate operator-facing capability, not an oversight;
+                            // do not "fix" it by rejecting the adjustment.
                             after_recharge -= request_funds_usd(remaining);
                         }
                     }

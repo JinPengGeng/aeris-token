@@ -12,6 +12,7 @@ use aether_data_contracts::repository::global_models::{
     StoredPublicGlobalModelPage, UpdateAdminGlobalModelRecord, UpsertAdminProviderModelRecord,
 };
 use aether_data_contracts::DataLayerError;
+use aether_data_query::escape_like_pattern;
 
 use crate::error::SqlxResultExt;
 
@@ -984,13 +985,13 @@ fn apply_public_model_filters(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let pattern = format!("%{search}%");
+        let pattern = format!("%{}%", escape_like_pattern(search));
         builder
             .push(" AND (name ILIKE ")
             .push_bind(pattern.clone())
-            .push(" OR display_name ILIKE ")
+            .push(" ESCAPE '\\' OR display_name ILIKE ")
             .push_bind(pattern)
-            .push(")");
+            .push(" ESCAPE '\\')");
     }
 }
 
@@ -1008,13 +1009,13 @@ fn apply_admin_global_model_filters(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let pattern = format!("%{search}%");
+        let pattern = format!("%{}%", escape_like_pattern(search));
         builder
             .push(" AND (gm.name ILIKE ")
             .push_bind(pattern.clone())
-            .push(" OR gm.display_name ILIKE ")
+            .push(" ESCAPE '\\' OR gm.display_name ILIKE ")
             .push_bind(pattern)
-            .push(")");
+            .push(" ESCAPE '\\')");
     }
 }
 
@@ -1063,15 +1064,15 @@ fn apply_public_catalog_model_filters(
     }
 
     if let Some(search) = search.map(str::trim).filter(|value| !value.is_empty()) {
-        let pattern = format!("%{search}%");
+        let pattern = format!("%{}%", escape_like_pattern(search));
         builder
             .push(" AND (m.provider_model_name ILIKE ")
             .push_bind(pattern.clone())
-            .push(" OR gm.name ILIKE ")
+            .push(" ESCAPE '\\' OR gm.name ILIKE ")
             .push_bind(pattern.clone())
-            .push(" OR gm.display_name ILIKE ")
+            .push(" ESCAPE '\\' OR gm.display_name ILIKE ")
             .push_bind(pattern)
-            .push(")");
+            .push(" ESCAPE '\\')");
     }
 }
 
@@ -1228,6 +1229,22 @@ fn optional_admin_global_model_usage_count_i64(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn global_model_search_escapes_like_wildcards_and_declares_escape_clause() {
+        let source = include_str!("global_models.rs").replace("\r\n", "\n");
+        assert_eq!(
+            source
+                .matches("let pattern = format!(\"%{}%\", escape_like_pattern(search));")
+                .count(),
+            3,
+            "all global model search filters must escape LIKE wildcards in user input"
+        );
+        assert!(
+            source.contains(" ESCAPE '\\\\' OR gm.display_name ILIKE "),
+            "global model search must declare the ILIKE escape clause"
+        );
+    }
     use super::{
         SqlxGlobalModelReadRepository, LIST_ADMIN_GLOBAL_MODELS_PREFIX,
         LIST_ADMIN_PROVIDER_MODELS_PREFIX,

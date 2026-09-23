@@ -10,6 +10,7 @@ use aether_data_contracts::repository::auth::{
     UpdateUserApiKeyBasicRecord,
 };
 use aether_data_contracts::DataLayerError;
+use aether_data_query::escape_like_pattern;
 
 use crate::error::{postgres_error, SqlxResultExt};
 
@@ -270,7 +271,7 @@ SELECT
   CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
   api_keys.is_standalone
 FROM api_keys
-WHERE LOWER(COALESCE(api_keys.name, '')) LIKE $1
+WHERE LOWER(COALESCE(api_keys.name, '')) LIKE $1 ESCAPE '\'
 ORDER BY api_keys.id ASC
 "#;
 
@@ -1024,7 +1025,10 @@ impl SqlxAuthApiKeySnapshotReadRepository {
 
         Self::collect_query_rows(
             sqlx::query(LIST_EXPORT_BY_NAME_SEARCH_SQL)
-                .bind(format!("%{}%", name_search.to_ascii_lowercase()))
+                .bind(format!(
+                    "%{}%",
+                    escape_like_pattern(&name_search.to_ascii_lowercase())
+                ))
                 .fetch(&self.pool),
             map_auth_api_key_export_row,
         )
@@ -2122,6 +2126,27 @@ fn map_auth_api_key_export_row(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn api_key_name_search_escapes_like_wildcards_and_declares_escape_clause() {
+        let source = include_str!("auth.rs").replace("\r\n", "\n");
+        let function = source
+            .split("pub async fn list_export_api_keys_by_name_search")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub async fn summarize_export_api_keys_by_user_ids")
+                    .next()
+            })
+            .expect("name search function should be present");
+        assert!(
+            function.contains("escape_like_pattern(&name_search.to_ascii_lowercase())"),
+            "api key name search must escape LIKE wildcards in user input"
+        );
+        assert!(
+            super::LIST_EXPORT_BY_NAME_SEARCH_SQL.contains("LIKE $1 ESCAPE '\\'"),
+            "api key name search SQL must declare the LIKE escape clause"
+        );
+    }
     use super::{
         datetime_from_unix_secs, i64_from_u64, DataLayerError,
         SqlxAuthApiKeySnapshotReadRepository, CREATE_STANDALONE_API_KEY_SQL,
