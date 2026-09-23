@@ -1893,10 +1893,8 @@ impl GatewayDataState {
     pub(crate) async fn aggregate_margin_report(
         &self,
         query: &aether_data_contracts::repository::usage::MarginReportQuery,
-    ) -> Result<
-        Vec<aether_data_contracts::repository::usage::StoredMarginReportRow>,
-        DataLayerError,
-    > {
+    ) -> Result<Vec<aether_data_contracts::repository::usage::StoredMarginReportRow>, DataLayerError>
+    {
         match &self.usage_reader {
             Some(repository) => repository.aggregate_margin_report(query).await,
             None => Ok(Vec::new()),

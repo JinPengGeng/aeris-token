@@ -90,10 +90,8 @@ impl<'a> AdminAppState<'a> {
     pub(crate) async fn aggregate_margin_report(
         &self,
         query: &aether_data_contracts::repository::usage::MarginReportQuery,
-    ) -> Result<
-        Vec<aether_data_contracts::repository::usage::StoredMarginReportRow>,
-        GatewayError,
-    > {
+    ) -> Result<Vec<aether_data_contracts::repository::usage::StoredMarginReportRow>, GatewayError>
+    {
         self.app.aggregate_margin_report(query).await
     }
 

@@ -123,9 +123,10 @@ pub(super) async fn build_admin_usage_margin_stats_response(
         })
         .await?;
 
-    Ok(Json(json!(
-        rows.iter().map(margin_report_row_json).collect::<Vec<_>>()
-    ))
+    Ok(Json(json!(rows
+        .iter()
+        .map(margin_report_row_json)
+        .collect::<Vec<_>>()))
     .into_response())
 }
 

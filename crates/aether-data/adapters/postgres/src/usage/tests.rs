@@ -5572,7 +5572,10 @@ fn margin_report_sql_aggregates_charged_attempts_by_period_model_provider() {
 
 #[test]
 fn margin_report_fixed_units_text_parsing_is_strict() {
-    assert_eq!(super::parse_fixed_units_text("1500").expect("integer units"), 1500);
+    assert_eq!(
+        super::parse_fixed_units_text("1500").expect("integer units"),
+        1500
+    );
     assert_eq!(
         super::parse_fixed_units_text("1500.00000000").expect("zero fraction"),
         1500

@@ -1,27 +1,27 @@
 use aether_data_contracts::repository::usage::{
     canonical_usage_body_ref_for, parse_usage_body_ref, read_decompressed_usage_json,
-    usage_body_ref, ApiKeyLastUsedDelta, ManagementTokenCounterDelta, ProxyNodeCounterDelta,
-    StoredUsageAuditAggregation, StoredUsageAuditSummary, StoredUsageBodyPayload,
-    StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
-    StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
-    StoredUsageDailyActualCostRollup, StoredUsageDashboardDailyBreakdownRow,
-    StoredUsageDashboardProviderCount, StoredUsageDashboardStatsSummary,
-    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
-    StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
-    StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
-    StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
-    StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UsageAuditAggregationGroupBy,
-    MarginReportGranularity, MarginReportQuery, StoredMarginReportRow, UsageAuditAggregationQuery,
-    UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery,
-    UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
-    UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
-    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCleanupExecutionMode,
-    UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow, UsageCostSavingsSummaryQuery,
-    UsageDailyActualCostRollupQuery, UsageDashboardDailyBreakdownQuery,
-    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
-    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
-    UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery,
-    UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    usage_body_ref, ApiKeyLastUsedDelta, ManagementTokenCounterDelta, MarginReportGranularity,
+    MarginReportQuery, ProxyNodeCounterDelta, StoredMarginReportRow, StoredUsageAuditAggregation,
+    StoredUsageAuditSummary, StoredUsageBodyPayload, StoredUsageBreakdownSummaryRow,
+    StoredUsageCacheAffinityHitSummary, StoredUsageCacheAffinityIntervalRow,
+    StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary, StoredUsageDailyActualCostRollup,
+    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
+    StoredUsageDashboardStatsSummary, StoredUsageDashboardSummary, StoredUsageErrorDistributionRow,
+    StoredUsageLeaderboardSummary, StoredUsagePerformancePercentilesRow,
+    StoredUsageProviderPerformance, StoredUsageProviderPerformanceProviderRow,
+    StoredUsageProviderPerformanceSummary, StoredUsageProviderPerformanceTimelineRow,
+    StoredUsageSettledCostSummary, StoredUsageTimeSeriesBucket, StoredUsageUserTotals,
+    UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery,
+    UsageAuditSummaryQuery, UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy,
+    UsageBreakdownSummaryQuery, UsageCacheAffinityHitSummaryQuery,
+    UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery,
+    UsageCleanupExecutionMode, UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow,
+    UsageCostSavingsSummaryQuery, UsageDailyActualCostRollupQuery,
+    UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
+    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
+    UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
+    UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery, UsageSettledCostSummaryQuery,
+    UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -672,17 +672,13 @@ fn decode_margin_report_row(
     let revenue_units_text: String = row
         .try_get::<String, _>("revenue_units")
         .map_postgres_err()?;
-    let cost_units_text: String = row
-        .try_get::<String, _>("cost_units")
-        .map_postgres_err()?;
+    let cost_units_text: String = row.try_get::<String, _>("cost_units").map_postgres_err()?;
     Ok(StoredMarginReportRow {
         period_start: row
             .try_get::<String, _>("period_start")
             .map_postgres_err()?,
         model: row.try_get::<String, _>("model").map_postgres_err()?,
-        provider_id: row
-            .try_get::<String, _>("provider_id")
-            .map_postgres_err()?,
+        provider_id: row.try_get::<String, _>("provider_id").map_postgres_err()?,
         request_count: row
             .try_get::<i64, _>("request_count")
             .map_postgres_err()?
