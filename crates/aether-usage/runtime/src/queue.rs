@@ -281,6 +281,23 @@ impl UsageQueue {
             .await
     }
 
+    /// Persists an event that never entered the consumer group (e.g. the
+    /// direct terminal path after its bounded enrichment retries were
+    /// exhausted) into the dead-letter stream, so operators can inspect and
+    /// redrive it instead of the record being silently dropped.
+    pub(crate) async fn push_event_dead_letter(
+        &self,
+        event: &UsageEvent,
+        error: &str,
+    ) -> Result<String, DataLayerError> {
+        let encoded = self.encode_event(event)?;
+        let entry = RuntimeQueueEntry {
+            id: format!("direct:{}", event.request_id),
+            fields: encoded.fields,
+        };
+        self.push_dead_letter(&entry, error).await
+    }
+
     pub(crate) async fn transfer_dead_letter_owned(
         &self,
         entry: RuntimeQueueEntry,
