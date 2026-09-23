@@ -3,26 +3,26 @@ import apiClient from './client'
 export interface WalletSummary {
   id: string
   // balance = 钱包可用余额（充值余额 + 赠款余额），不包含套餐每日额度
-  balance: number
-  recharge_balance: number
-  gift_balance: number
-  refundable_balance: number
+  balance: string
+  recharge_balance: string
+  gift_balance: string
+  refundable_balance: string
   currency: string
   status: string
   limit_mode?: 'finite' | 'unlimited'
   unlimited?: boolean
-  total_recharged: number
-  total_consumed: number
-  total_refunded: number
-  total_adjusted: number
+  total_recharged: string
+  total_consumed: string
+  total_refunded: string
+  total_adjusted: string
   updated_at: string
 }
 
 export interface WalletDailyQuotaSummary {
   has_active: boolean
-  total_usd: number
-  used_usd: number
-  remaining_usd: number
+  total_usd: string
+  used_usd: string
+  remaining_usd: string
   allow_wallet_overage: boolean
 }
 
@@ -31,13 +31,13 @@ export interface WalletBalanceResponse {
   unlimited: boolean
   limit_mode: 'finite' | 'unlimited'
   // balance = 钱包可用余额（充值余额 + 赠款余额），不包含套餐每日额度
-  balance: number | null
-  recharge_balance?: number | null
-  gift_balance?: number | null
-  refundable_balance?: number | null
-  wallet_balance?: number | null
-  package_balance?: number | null
-  total_available_balance?: number | null
+  balance: string | null
+  recharge_balance?: string | null
+  gift_balance?: string | null
+  refundable_balance?: string | null
+  wallet_balance?: string | null
+  package_balance?: string | null
+  total_available_balance?: string | null
   daily_quota?: WalletDailyQuotaSummary | null
   deduction_order?: string[]
   currency: string
@@ -48,15 +48,15 @@ export interface WalletTransaction {
   id: string
   category: string
   reason_code: string
-  amount: number
+  amount: string
   // 总可用余额（充值+赠款）快照
-  balance_before: number
-  balance_after: number
+  balance_before: string
+  balance_after: string
   // 分账户快照
-  recharge_balance_before: number
-  recharge_balance_after: number
-  gift_balance_before: number
-  gift_balance_after: number
+  recharge_balance_before: string
+  recharge_balance_after: string
+  gift_balance_before: string
+  gift_balance_after: string
   link_type?: string | null
   link_id?: string | null
   operator_id?: string | null
@@ -77,7 +77,7 @@ export interface DailyUsageRecord {
   id?: string | null
   date: string | null
   timezone?: string | null
-  total_cost: number
+  total_cost: string
   total_requests: number
   input_tokens: number
   output_tokens: number
@@ -108,12 +108,12 @@ export interface PaymentOrder {
   order_no: string
   wallet_id: string
   user_id: string | null
-  amount_usd: number
-  pay_amount: number | null
+  amount_usd: string
+  pay_amount: string | null
   pay_currency: string | null
   exchange_rate: number | null
-  refunded_amount_usd: number
-  refundable_amount_usd: number
+  refunded_amount_usd: string
+  refundable_amount_usd: string
   payment_method: string
   payment_provider?: string | null
   payment_channel?: string | null
@@ -167,7 +167,7 @@ export interface RefundRequest {
   source_type: string
   source_id: string | null
   refund_mode: string
-  amount_usd: number
+  amount_usd: string
   status: string
   reason: string | null
   failure_reason: string | null
@@ -182,11 +182,11 @@ export interface RefundRequest {
 }
 
 export interface WalletRechargeCreateRequest {
-  amount_usd: number
+  amount_usd: string | number
   payment_method: string
   payment_provider?: string
   payment_channel?: string
-  pay_amount?: number
+  pay_amount?: string | number
   pay_currency?: string
   exchange_rate?: number
   idempotency_key?: string
@@ -205,7 +205,7 @@ export interface WalletRechargeOption {
 }
 
 export interface WalletRefundCreateRequest {
-  amount_usd: number
+  amount_usd: string | number
   payment_order_id?: string
   reason?: string
   idempotency_key?: string
@@ -222,7 +222,7 @@ export interface WalletRedeemRequest {
 export interface WalletRedeemResponse {
   order: PaymentOrder
   wallet: WalletSummary
-  amount_usd: number
+  amount_usd: string
   batch_name: string
 }
 

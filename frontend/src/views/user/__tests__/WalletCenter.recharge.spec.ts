@@ -64,21 +64,21 @@ let hidden = false
 function walletBalance(amount: number): WalletBalanceResponse {
   return {
     wallet: {
-      id: 'wallet-1', balance: amount, recharge_balance: amount, gift_balance: 0,
-      refundable_balance: amount, currency: 'USD', status: 'active', total_recharged: amount,
-      total_consumed: 0, total_refunded: 0, total_adjusted: 0, updated_at: '2026-09-11T00:00:00Z',
+      id: 'wallet-1', balance: amount.toFixed(8), recharge_balance: amount.toFixed(8), gift_balance: '0.00000000',
+      refundable_balance: amount.toFixed(8), currency: 'USD', status: 'active', total_recharged: amount.toFixed(8),
+      total_consumed: '0.00000000', total_refunded: '0.00000000', total_adjusted: '0.00000000', updated_at: '2026-09-11T00:00:00Z',
     },
-    balance: amount, unlimited: false, limit_mode: 'finite', currency: 'USD',
-    wallet_balance: amount, package_balance: 3, total_available_balance: amount + 3,
-    daily_quota: { has_active: true, total_usd: 5, used_usd: 2, remaining_usd: 3, allow_wallet_overage: true },
+    balance: amount.toFixed(8), unlimited: false, limit_mode: 'finite', currency: 'USD',
+    wallet_balance: amount.toFixed(8), package_balance: '3.00000000', total_available_balance: (amount + 3).toFixed(8),
+    daily_quota: { has_active: true, total_usd: '5.00000000', used_usd: '2.00000000', remaining_usd: '3.00000000', allow_wallet_overage: true },
   }
 }
 
 function paymentOrder(status = 'pending', overrides: Partial<PaymentOrder> = {}): PaymentOrder {
   return {
     id: 'order-1', order_no: 'RECHARGE-1', wallet_id: 'wallet-1', user_id: 'user-1',
-    amount_usd: 10, pay_amount: 10, pay_currency: 'USD', exchange_rate: 1,
-    refunded_amount_usd: 0, refundable_amount_usd: status === 'credited' ? 10 : 0,
+    amount_usd: '10.00000000', pay_amount: '10.00000000', pay_currency: 'USD', exchange_rate: 1,
+    refunded_amount_usd: '0.00000000', refundable_amount_usd: status === 'credited' ? '10.00000000' : '0.00000000',
     payment_method: 'epay', gateway_order_id: 'gateway-1', gateway_response: null,
     status, created_at: '2026-09-11T00:00:00Z', paid_at: null,
     credited_at: status === 'credited' ? '2026-09-11T00:01:00Z' : null, expires_at: null,

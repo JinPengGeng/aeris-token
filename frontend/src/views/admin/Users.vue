@@ -192,6 +192,7 @@
 </template>
 
 <script setup lang="ts">
+import { moneyToNumber } from '@/utils/money'
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useUsersStore } from '@/stores/users'
 import { useAuthStore } from '@/stores/auth'
@@ -647,17 +648,15 @@ function getUserWalletTotalBalance(user: User): number | null {
 
 function getUserWalletBalance(user: User): number {
   const wallet = getUserWallet(user.id)
-  const value = wallet?.wallet_balance ?? wallet?.balance ?? 0
-  return Number.isFinite(value) ? value : 0
+  return moneyToNumber(wallet?.wallet_balance ?? wallet?.balance ?? 0)
 }
 
 function getUserPackageBalance(user: User): number {
-  const value = getUserWallet(user.id)?.package_balance ?? 0
-  return Number.isFinite(value) ? value : 0
+  return moneyToNumber(getUserWallet(user.id)?.package_balance ?? 0)
 }
 
 function getUserWalletConsumed(user: User): number {
-  return getUserWallet(user.id)?.total_consumed ?? 0
+  return moneyToNumber(getUserWallet(user.id)?.total_consumed ?? 0)
 }
 
 function getUserWalletStatus(userId: string): string | null {
