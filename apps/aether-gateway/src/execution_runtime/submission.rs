@@ -388,7 +388,12 @@ pub(crate) fn resolve_local_sync_error_status_code(
     let error_type = error.get("type").and_then(serde_json::Value::as_str);
     let code = error.get("code").and_then(serde_json::Value::as_str);
     if LocalCoreSyncErrorKind::is_quota_exhausted_error(error_type, code) {
-        let format = if error_type.is_some_and(|value| value == "billing_error") {
+        // Claude 侧欠费是 403（Anthropic 信封：顶层 "type":"error" 包裹 error
+        // 对象，或 legacy billing_error）；其余按 OpenAI 契约 429。
+        let is_claude_envelope = error_type.is_some_and(|value| value == "billing_error")
+            || (body_json.get("type").and_then(serde_json::Value::as_str) == Some("error")
+                && body_json.get("error").is_some());
+        let format = if is_claude_envelope {
             "claude:messages"
         } else {
             "openai:chat"

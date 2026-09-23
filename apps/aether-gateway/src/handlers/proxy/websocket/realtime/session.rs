@@ -707,6 +707,7 @@ fn gateway_error_kind(error: &GatewayError) -> &'static str {
         GatewayError::LastActiveAdminUpdateDenied => "last_admin_update_denied",
         GatewayError::LastActiveAdminDeleteDenied => "last_admin_delete_denied",
         GatewayError::Client { .. } => "client_error",
+        GatewayError::InsufficientQuota => "insufficient_quota",
         GatewayError::Internal(_) => "internal_error",
     }
 }

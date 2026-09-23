@@ -1668,14 +1668,14 @@ mod tests {
                 (
                     "openai:chat",
                     "insufficient_quota",
-                    "credit_balance_exhausted",
+                    Some("insufficient_quota"),
                 ),
                 (
                     "openai:responses",
                     "insufficient_quota",
-                    "credit_balance_exhausted",
+                    Some("insufficient_quota"),
                 ),
-                ("claude:messages", "billing_error", "balance_exceeded"),
+                ("claude:messages", "insufficient_quota", None),
             ] {
                 let error = json!({"type": error_type, "code": legacy_code, "message": "balance_remaining=-12.345678"});
                 let payload = if provider == "openai:responses" {
@@ -1698,7 +1698,15 @@ mod tests {
                     })
                     .expect("stream must contain a terminal error");
                 assert_eq!(error["type"], expected_type, "{provider} -> {client}");
-                assert_eq!(error["code"], expected_code, "{provider} -> {client}");
+                match expected_code {
+                    Some(expected_code) => {
+                        assert_eq!(error["code"], expected_code, "{provider} -> {client}")
+                    }
+                    None => assert!(
+                        error.get("code").is_none(),
+                        "claude quota errors must not carry a code field: {error}"
+                    ),
+                }
                 assert_eq!(error["message"], "Insufficient quota");
                 assert!(!String::from_utf8(output).unwrap().contains("12.345678"));
                 assert!(matrix

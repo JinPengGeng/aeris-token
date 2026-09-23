@@ -171,6 +171,10 @@ pub(crate) enum GatewayError {
         status: StatusCode,
         message: String,
     },
+    /// Local quota denial (funded pre-authorization). Always renders the
+    /// unified OpenAI insufficient_quota envelope; balance details stay
+    /// internal and never echo to the client.
+    InsufficientQuota,
     PlanUsageLimited(crate::plan_usage_policy::PlanUsagePolicyRejection),
     LastActiveAdminUpdateDenied,
     LastActiveAdminDeleteDenied,
@@ -219,6 +223,7 @@ impl GatewayError {
                 "subscription plan {} limit {} reached for {} window; retry after {} seconds",
                 rejection.metric, rejection.limit, rejection.window, rejection.retry_after
             ),
+            Self::InsufficientQuota => "Insufficient quota".to_string(),
             Self::LocalExecutionPlanningTimeout {
                 phase, timeout_ms, ..
             } => {
@@ -337,6 +342,18 @@ impl IntoResponse for GatewayError {
                 Json(json!({
                     "error": {
                         "message": message,
+                    }
+                })),
+            )
+                .into_response(),
+            Self::InsufficientQuota => (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({
+                    "error": {
+                        "message": "Insufficient quota",
+                        "type": "insufficient_quota",
+                        "param": null,
+                        "code": "insufficient_quota",
                     }
                 })),
             )
