@@ -27,10 +27,13 @@ impl SqlxGeminiFileMappingRepository {
             id: row.try_get("id").map_postgres_err()?,
             file_name: row.try_get("file_name").map_postgres_err()?,
             key_id: row.try_get("key_id").map_postgres_err()?,
-            user_id: row.try_get("user_id").ok().flatten(),
-            display_name: row.try_get("display_name").ok().flatten(),
-            mime_type: row.try_get("mime_type").ok().flatten(),
-            source_hash: row.try_get("source_hash").ok().flatten(),
+            // `try_get::<Option<String>>` already returns `Ok(None)` for NULL, so
+            // propagating the error only surfaces genuine decode/column errors
+            // instead of silently collapsing them into `None`.
+            user_id: row.try_get("user_id").map_postgres_err()?,
+            display_name: row.try_get("display_name").map_postgres_err()?,
+            mime_type: row.try_get("mime_type").map_postgres_err()?,
+            source_hash: row.try_get("source_hash").map_postgres_err()?,
             created_at_unix_ms: u64::try_from(
                 row.try_get::<i64, _>("created_at_unix_ms")
                     .map_postgres_err()?,
@@ -516,6 +519,28 @@ fn apply_list_filters(
             SqlDialect::Postgres,
             &["file_name", "COALESCE(display_name, '')"],
             search,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn gemini_file_mapping_row_mapping_propagates_decode_errors() {
+        let source = include_str!("gemini_file_mappings.rs");
+        let mapping = source
+            .split_once("fn map_row(row: &PgRow)")
+            .and_then(|(_, remainder)| remainder.split_once("#[cfg(test)]"))
+            .map(|(mapping, _)| mapping)
+            .expect("map_row source should be present");
+
+        assert!(
+            !mapping.contains(".ok().flatten()"),
+            "gemini file mapping row decoding must not silently collapse sqlx decode errors into None"
+        );
+        assert!(
+            !mapping.contains(".ok()"),
+            "gemini file mapping row decoding must not silently discard sqlx errors"
         );
     }
 }

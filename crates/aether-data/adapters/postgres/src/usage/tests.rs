@@ -3811,6 +3811,46 @@ fn usage_sql_keyword_search_error_filter_keeps_where_state_before_keywords() {
 }
 
 #[test]
+fn usage_sql_keyword_search_escapes_like_wildcards_and_declares_escape_clause() {
+    let source = include_str!("mod.rs");
+    for function_name in [
+        "pub async fn list_usage_audits_by_keyword_search",
+        "pub async fn count_usage_audits_by_keyword_search",
+    ] {
+        let function = source
+            .split(function_name)
+            .nth(1)
+            .expect("keyword search function should be present");
+        let keyword_loop = function
+            .split("for (index, keyword) in query.keywords.iter().enumerate()")
+            .nth(1)
+            .and_then(|tail| tail.split("if let Some(username_keyword)").next())
+            .expect("keyword loop should be present");
+
+        assert!(
+            keyword_loop.contains("escape_like_pattern(&keyword.to_ascii_lowercase())"),
+            "{function_name} must escape LIKE wildcards in keyword input"
+        );
+        assert!(
+            keyword_loop.contains(" ESCAPE '\\\\'"),
+            "{function_name} must declare the LIKE escape clause"
+        );
+    }
+}
+
+#[test]
+fn usage_sql_username_keyword_escapes_like_wildcards() {
+    let source = include_str!("mod.rs");
+    let count = source
+        .matches("escape_like_pattern(&username_keyword.to_ascii_lowercase())")
+        .count();
+    assert_eq!(
+        count, 2,
+        "list and count keyword search must both escape the username keyword"
+    );
+}
+
+#[test]
 fn usage_sql_reads_list_output_price_from_settlement_snapshots_before_legacy_usage_column() {
     assert!(super::LIST_USAGE_AUDITS_PREFIX
         .contains("CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION)"));

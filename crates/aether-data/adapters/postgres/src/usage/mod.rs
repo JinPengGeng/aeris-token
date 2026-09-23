@@ -57,6 +57,7 @@ use aether_data_contracts::repository::usage::{
     REQUESTED_REASONING_EFFORT_METADATA_KEY,
 };
 use aether_data_contracts::DataLayerError;
+use aether_data_query::escape_like_pattern;
 
 pub mod cleanup;
 mod daily_cost;
@@ -3278,16 +3279,18 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
             if keyword.is_empty() {
                 continue;
             }
-            let pattern = format!("%{}%", keyword.to_ascii_lowercase());
+            let pattern = format!("%{}%", escape_like_pattern(&keyword.to_ascii_lowercase()));
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
             builder.push("(");
             builder
                 .push("LOWER(COALESCE(\"usage\".model, '')) LIKE ")
-                .push_bind(pattern.clone());
+                .push_bind(pattern.clone())
+                .push(" ESCAPE '\\'");
             builder
                 .push(" OR LOWER(COALESCE(\"usage\".provider_name, '')) LIKE ")
-                .push_bind(pattern.clone());
+                .push_bind(pattern.clone())
+                .push(" ESCAPE '\\'");
             if query.auth_user_reader_available {
                 let matched_user_ids = query
                     .matched_user_ids_by_keyword
@@ -3305,7 +3308,8 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
             } else {
                 builder
                     .push(" OR LOWER(COALESCE(\"usage\".username, '')) LIKE ")
-                    .push_bind(pattern.clone());
+                    .push_bind(pattern.clone())
+                    .push(" ESCAPE '\\'");
             }
             if query.auth_api_key_reader_available {
                 let matched_ids = query
@@ -3324,7 +3328,8 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
             } else {
                 builder
                     .push(" OR LOWER(COALESCE(\"usage\".api_key_name, '')) LIKE ")
-                    .push_bind(pattern);
+                    .push_bind(pattern)
+                    .push(" ESCAPE '\\'");
             }
             builder.push(")");
         }
@@ -3349,7 +3354,11 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
             } else {
                 builder
                     .push("LOWER(COALESCE(\"usage\".username, '')) LIKE ")
-                    .push_bind(format!("%{}%", username_keyword.to_ascii_lowercase()));
+                    .push_bind(format!(
+                        "%{}%",
+                        escape_like_pattern(&username_keyword.to_ascii_lowercase())
+                    ))
+                    .push(" ESCAPE '\\'");
             }
         }
 
@@ -3574,16 +3583,18 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
             if keyword.is_empty() {
                 continue;
             }
-            let pattern = format!("%{}%", keyword.to_ascii_lowercase());
+            let pattern = format!("%{}%", escape_like_pattern(&keyword.to_ascii_lowercase()));
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
             builder.push("(");
             builder
                 .push("LOWER(COALESCE(\"usage\".model, '')) LIKE ")
-                .push_bind(pattern.clone());
+                .push_bind(pattern.clone())
+                .push(" ESCAPE '\\'");
             builder
                 .push(" OR LOWER(COALESCE(\"usage\".provider_name, '')) LIKE ")
-                .push_bind(pattern.clone());
+                .push_bind(pattern.clone())
+                .push(" ESCAPE '\\'");
             if query.auth_user_reader_available {
                 let matched_user_ids = query
                     .matched_user_ids_by_keyword
@@ -3601,7 +3612,8 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
             } else {
                 builder
                     .push(" OR LOWER(COALESCE(\"usage\".username, '')) LIKE ")
-                    .push_bind(pattern.clone());
+                    .push_bind(pattern.clone())
+                    .push(" ESCAPE '\\'");
             }
             if query.auth_api_key_reader_available {
                 let matched_ids = query
@@ -3620,7 +3632,8 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
             } else {
                 builder
                     .push(" OR LOWER(COALESCE(\"usage\".api_key_name, '')) LIKE ")
-                    .push_bind(pattern);
+                    .push_bind(pattern)
+                    .push(" ESCAPE '\\'");
             }
             builder.push(")");
         }
@@ -3645,7 +3658,11 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
             } else {
                 builder
                     .push("LOWER(COALESCE(\"usage\".username, '')) LIKE ")
-                    .push_bind(format!("%{}%", username_keyword.to_ascii_lowercase()));
+                    .push_bind(format!(
+                        "%{}%",
+                        escape_like_pattern(&username_keyword.to_ascii_lowercase())
+                    ))
+                    .push(" ESCAPE '\\'");
             }
         }
 
