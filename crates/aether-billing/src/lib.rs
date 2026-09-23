@@ -34,13 +34,13 @@ pub use pricing::{
     BillingUsageInput,
 };
 pub use provider_cost::{
-    calculate_provider_cost_amount, estimate_provider_cost_component,
-    estimate_provider_request_cost, provider_cost_token_quantities_from_standardized_usage,
-    resolve_provider_cost_price, CostCertainty, ProviderCostDimension,
-    ProviderCostEstimateComponent, ProviderCostEstimateError, ProviderCostEstimateInput,
-    ProviderCostInputPriceMode, ProviderCostPrice, ProviderCostPriceError,
-    ProviderCostRequestEstimate, ProviderCostSnapshot, ProviderCostTokenQuantities,
-    ProviderCostUnit, PROVIDER_COST_SCALE,
+    calculate_provider_cost_amount, estimate_attempt_provider_cost,
+    estimate_provider_cost_component, estimate_provider_request_cost,
+    provider_cost_token_quantities_from_standardized_usage, resolve_provider_cost_price,
+    CostCertainty, ProviderCostDimension, ProviderCostEstimateComponent, ProviderCostEstimateError,
+    ProviderCostEstimateInput, ProviderCostInputPriceMode, ProviderCostPrice,
+    ProviderCostPriceError, ProviderCostRequestEstimate, ProviderCostSnapshot,
+    ProviderCostTokenQuantities, ProviderCostUnit, PROVIDER_COST_SCALE,
 };
 pub use schema::{
     BillingSnapshot, BillingSnapshotStatus, CostResult, BILLING_SNAPSHOT_SCHEMA_VERSION,

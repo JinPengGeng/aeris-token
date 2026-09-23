@@ -182,6 +182,7 @@ fn provider_cost_unit_denominator(
             ProviderCostUnit::PerMillionTokens,
         ) => Ok(TOKENS_PER_MILLION),
         (ProviderCostDimension::Request, ProviderCostUnit::PerRequest) => Ok(1),
+        (ProviderCostDimension::Image, ProviderCostUnit::PerImage) => Ok(1),
         (_, ProviderCostUnit::PerImage) => Err(ProviderCostEstimateError::UnsupportedUnit(unit)),
         _ => Err(ProviderCostEstimateError::UnitDimensionMismatch { unit, dimension }),
     }
@@ -229,6 +230,93 @@ pub fn estimate_provider_cost_component(
             price.dimension,
         )?,
     })
+}
+
+/// Resolves a settled attempt's provider cost from a supplier price book.
+/// Every price is resolved at `frozen_at_unix_secs` — the reservation's frozen
+/// admission time — so catalog changes that take effect later never rewrite an
+/// already settled attempt. Token dimensions are required whenever quantities
+/// are supplied; cache dimensions join only for positive frozen quantities and
+/// the per-image dimension only for image attempts. Returns `Ok(None)` when a
+/// required price is absent at the frozen time, preserving unknown cost.
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_attempt_provider_cost(
+    prices: &[ProviderCostPrice],
+    supplier: &str,
+    provider: &str,
+    model: &str,
+    quantities: Option<&ProviderCostTokenQuantities>,
+    image_count: u64,
+    currency: &str,
+    frozen_at_unix_secs: u64,
+) -> Result<Option<ProviderCostRequestEstimate>, ProviderCostEstimateError> {
+    if quantities.is_none() && image_count == 0 {
+        return Ok(None);
+    }
+    let mut inputs = Vec::with_capacity(5);
+    if let Some(quantities) = quantities {
+        for (dimension, quantity) in [
+            (ProviderCostDimension::Input, quantities.input),
+            (ProviderCostDimension::Output, quantities.output),
+        ] {
+            inputs.push(ProviderCostEstimateInput {
+                price: resolve_provider_cost_price(
+                    prices,
+                    supplier,
+                    provider,
+                    model,
+                    dimension,
+                    currency,
+                    ProviderCostUnit::PerMillionTokens,
+                    frozen_at_unix_secs,
+                )
+                .ok()
+                .cloned(),
+                quantity: Some(quantity),
+            });
+        }
+        for (dimension, quantity) in [
+            (ProviderCostDimension::CacheWrite, quantities.cache_write),
+            (ProviderCostDimension::CacheRead, quantities.cache_read),
+        ] {
+            if quantity == 0 {
+                continue;
+            }
+            inputs.push(ProviderCostEstimateInput {
+                price: resolve_provider_cost_price(
+                    prices,
+                    supplier,
+                    provider,
+                    model,
+                    dimension,
+                    currency,
+                    ProviderCostUnit::PerMillionTokens,
+                    frozen_at_unix_secs,
+                )
+                .ok()
+                .cloned(),
+                quantity: Some(quantity),
+            });
+        }
+    }
+    if image_count > 0 {
+        inputs.push(ProviderCostEstimateInput {
+            price: resolve_provider_cost_price(
+                prices,
+                supplier,
+                provider,
+                model,
+                ProviderCostDimension::Image,
+                currency,
+                ProviderCostUnit::PerImage,
+                frozen_at_unix_secs,
+            )
+            .ok()
+            .cloned(),
+            quantity: Some(image_count),
+        });
+    }
+    estimate_provider_request_cost(&inputs)
 }
 
 /// Returns `None` when a component price or quantity is absent, preserving
@@ -962,6 +1050,155 @@ mod tests {
                 ProviderCostDimension::Request,
             ),
             Err(ProviderCostEstimateError::ArithmeticOverflow)
+        );
+    }
+
+    #[test]
+    fn frozen_attempt_cost_survives_price_changes() {
+        // A reservation admitted while v1 was effective keeps the v1 cost basis
+        // even after v2 takes effect, mirroring frozen-quote settlement.
+        let prices = [
+            price("v1", 0, Some(200), 1_000_000),
+            price("v2", 200, None, 5_000_000),
+            price_for(
+                ProviderCostDimension::Output,
+                ProviderCostUnit::PerMillionTokens,
+                "out-v1",
+                0,
+                None,
+                1_000_000,
+            ),
+        ];
+        let quantities = ProviderCostTokenQuantities {
+            input: 1_000_000,
+            output: 0,
+            cache_write: 0,
+            cache_read: 0,
+        };
+        let frozen = estimate_attempt_provider_cost(
+            &prices,
+            "supplier-a",
+            "provider-a",
+            "model-a",
+            Some(&quantities),
+            0,
+            "USD",
+            100,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(frozen.amount_units, 1_000_000);
+        assert_eq!(frozen.components[0].price_version, "v1");
+
+        let settled_later_at_admission = estimate_attempt_provider_cost(
+            &prices,
+            "supplier-a",
+            "provider-a",
+            "model-a",
+            Some(&quantities),
+            0,
+            "USD",
+            100,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(settled_later_at_admission.amount_units, 1_000_000);
+    }
+
+    #[test]
+    fn attempt_cost_joins_token_cache_and_per_image_dimensions() {
+        let prices = [
+            price_for(
+                ProviderCostDimension::Input,
+                ProviderCostUnit::PerMillionTokens,
+                "input-v1",
+                0,
+                None,
+                1_000_000,
+            ),
+            price_for(
+                ProviderCostDimension::Output,
+                ProviderCostUnit::PerMillionTokens,
+                "output-v1",
+                0,
+                None,
+                2_000_000,
+            ),
+            price_for(
+                ProviderCostDimension::CacheRead,
+                ProviderCostUnit::PerMillionTokens,
+                "cache-read-v1",
+                0,
+                None,
+                500_000,
+            ),
+            price_for(
+                ProviderCostDimension::Image,
+                ProviderCostUnit::PerImage,
+                "image-v1",
+                0,
+                None,
+                30,
+            ),
+        ];
+        let quantities = ProviderCostTokenQuantities {
+            input: 500_000,
+            output: 1_000_000,
+            cache_write: 0,
+            cache_read: 2_000_000,
+        };
+        let estimate = estimate_attempt_provider_cost(
+            &prices,
+            "supplier-a",
+            "provider-a",
+            "model-a",
+            Some(&quantities),
+            2,
+            "USD",
+            50,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(estimate.amount_units, 500_000 + 2_000_000 + 1_000_000 + 60);
+        assert_eq!(estimate.components.len(), 4);
+    }
+
+    #[test]
+    fn missing_frozen_price_leaves_attempt_cost_unknown() {
+        let prices = [price("v2", 200, None, 5_000_000)];
+        let quantities = ProviderCostTokenQuantities {
+            input: 1,
+            output: 0,
+            cache_write: 0,
+            cache_read: 0,
+        };
+        assert_eq!(
+            estimate_attempt_provider_cost(
+                &prices,
+                "supplier-a",
+                "provider-a",
+                "model-a",
+                Some(&quantities),
+                0,
+                "USD",
+                100,
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            estimate_attempt_provider_cost(
+                &prices,
+                "supplier-a",
+                "provider-a",
+                "model-a",
+                None,
+                0,
+                "USD",
+                100,
+            )
+            .unwrap(),
+            None
         );
     }
 }

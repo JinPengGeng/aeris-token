@@ -1,6 +1,8 @@
 //! Attempt accounting keeps the public request identifier stable across retries.
 use serde::{Deserialize, Serialize};
 
+use crate::repository::provider_cost::ProviderCostCertainty;
+
 use super::{
     RequestFundsIdentity, ReserveRequestFundsInput, ReserveUsagePolicyCostInput,
     StoredRequestFundsReservation, UsagePolicyCostWindow, MAX_REQUEST_FUNDS_UNITS,
@@ -169,6 +171,28 @@ pub struct RequestAttemptBilledUsage {
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Frozen provider-cost snapshot taken at outcome settlement. Absence means
+    /// no cost basis was configured; older stored records never rewrite it.
+    #[serde(default)]
+    pub provider_cost: Option<RequestAttemptCostSnapshot>,
+}
+
+/// Provider cost frozen at the reservation's admission time. Later catalog
+/// price changes must not rewrite an already settled attempt's cost basis.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestAttemptCostSnapshot {
+    #[serde(default)]
+    pub certainty: Option<ProviderCostCertainty>,
+    #[serde(default)]
+    pub amount_units: Option<u64>,
+    #[serde(default)]
+    pub currency: Option<String>,
+    /// Effective price version(s) used for the estimate, joined when several
+    /// dimensions resolved to different catalog versions.
+    #[serde(default)]
+    pub price_version: Option<String>,
+    #[serde(default)]
+    pub source_reference: Option<String>,
 }
 
 impl RequestAttemptBilledUsage {
@@ -223,6 +247,11 @@ impl RequestAttemptTerminalFacts {
                 || usage
                     .total_tokens()
                     .is_none_or(|tokens| tokens > i32::MAX as u64)
+                || usage
+                    .provider_cost
+                    .as_ref()
+                    .and_then(|cost| cost.amount_units)
+                    .is_some_and(|units| units > i64::MAX as u64)
             {
                 return Err(invalid("attempt billing facts exceed supported range"));
             }
@@ -393,6 +422,43 @@ mod tests {
                 }],
             }),
         }
+    }
+
+    #[test]
+    fn legacy_billed_usage_without_provider_cost_still_deserializes() {
+        let legacy = serde_json::json!({
+            "total_cost_units": 5,
+            "actual_cost_units": 5,
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+        });
+        let usage: RequestAttemptBilledUsage = serde_json::from_value(legacy).unwrap();
+        assert_eq!(usage.provider_cost, None);
+    }
+
+    #[test]
+    fn billed_usage_cost_snapshot_round_trips_with_frozen_provenance() {
+        let mut usage = RequestAttemptBilledUsage {
+            total_cost_units: 5,
+            actual_cost_units: 5,
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            ..Default::default()
+        };
+        usage.provider_cost = Some(RequestAttemptCostSnapshot {
+            certainty: Some(ProviderCostCertainty::Estimated),
+            amount_units: Some(3),
+            currency: Some("USD".into()),
+            price_version: Some("2026-09".into()),
+            source_reference: Some("frozen-attempt-cost".into()),
+        });
+        let decoded: RequestAttemptBilledUsage =
+            serde_json::from_value(serde_json::to_value(&usage).unwrap()).unwrap();
+        assert_eq!(decoded, usage);
     }
 
     #[test]

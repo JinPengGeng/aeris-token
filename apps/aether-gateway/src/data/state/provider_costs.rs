@@ -24,14 +24,15 @@ pub(crate) use aether_data::repository::provider_cost::{
 
 use super::GatewayDataState;
 
-const PROVIDER_COST_SUPPLIER_BINDINGS_CONFIG_KEY: &str = "provider_cost_supplier_bindings";
+pub(super) const PROVIDER_COST_SUPPLIER_BINDINGS_CONFIG_KEY: &str =
+    "provider_cost_supplier_bindings";
 const GATEWAY_AUTO_PROVIDER_COST_IMPORTER: &str = "gateway_auto_capture";
 
 #[derive(Debug, Deserialize)]
-struct ProviderCostSupplierBinding {
-    supplier: String,
-    currency: String,
-    input_price_mode: ProviderCostInputPriceMode,
+pub(super) struct ProviderCostSupplierBinding {
+    pub(super) supplier: String,
+    pub(super) currency: String,
+    pub(super) input_price_mode: ProviderCostInputPriceMode,
 }
 
 impl ProviderCostSupplierBinding {
@@ -64,7 +65,7 @@ impl GatewayDataState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn find_effective_provider_cost_price(
+    pub(super) async fn find_effective_provider_cost_price(
         &self,
         supplier: &str,
         provider: &str,
@@ -199,7 +200,7 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-fn provider_cost_supplier_binding(
+pub(super) fn provider_cost_supplier_binding(
     value: Option<&Value>,
     provider_id: &str,
 ) -> Option<ProviderCostSupplierBinding> {
