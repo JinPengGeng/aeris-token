@@ -598,8 +598,12 @@ async fn live_request_funds_reserve_settle_release_protect_shared_wallet_and_rol
         assert_eq!(balance(&first).await, 0.10);
         let ordinary = quote("ordinary", "key-a", 3_000_000);
         let ordinary_usage = persist_usage(&first, &ordinary.identity, 0.03).await;
-        assert_eq!(a.settle_usage(ordinary_usage).await.unwrap().unwrap().billing_status, "insufficient_quota");
-        assert_eq!(balance(&first).await, 0.10);
+        // The winner's 0.08 hold stays reserved, leaving only 0.02 available against this
+        // 0.03 bill. New semantics settle the full amount as recharge overdraft debt
+        // (0.10 - 0.03 = 0.07) instead of an insufficient_quota write-off.
+        let ordinary_settlement = a.settle_usage(ordinary_usage).await.unwrap().unwrap();
+        assert_eq!(ordinary_settlement.billing_status, "settled");
+        assert!((balance(&first).await - 0.07).abs() < 1e-12);
 
         a.mark_request_funds_dispatched(winner.identity.clone()).await.unwrap().unwrap();
         assert!(a.release_request_funds(ReleaseRequestFundsInput { identity: winner.identity.clone(), terminal_no_charge:false }).await.is_err());
@@ -610,15 +614,16 @@ async fn live_request_funds_reserve_settle_release_protect_shared_wallet_and_rol
             .execute(&first).await.unwrap();
         let finalize = FinalizeRequestFundsInput { identity: winner.identity.clone(), usage, reconciliation_facts: None };
         assert!(a.finalize_request_funds(finalize.clone()).await.is_err());
-        assert_eq!(balance(&first).await, 0.10, "failure after wallet UPDATE must roll the debit back");
+        assert_eq!(balance(&first).await, 0.07, "failure after wallet UPDATE must roll the debit back");
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(collected_cost_units),0)::bigint FROM request_fund_allocations").fetch_one(&first).await.unwrap(), 0);
         sqlx::query("DROP TRIGGER reject_terminal_funds ON request_fund_reservations").execute(&first).await.unwrap();
         let settled = a.finalize_request_funds(finalize.clone()).await.unwrap().unwrap();
         assert_eq!(settled.state, RequestFundsState::Settled);
         assert_eq!(settled.collected_cost_units, 4_000_000);
-        assert!((balance(&first).await - 0.06).abs() < 1e-12);
+        assert!((balance(&first).await - 0.03).abs() < 1e-12);
         assert_eq!(b.finalize_request_funds(finalize).await.unwrap().unwrap(), settled);
-        let followup = quote("followup", "key-b", 5_000_000);
+        // The ordinary overdraft left 0.03 unheld, so the follow-up admission fits exactly.
+        let followup = quote("followup", "key-b", 3_000_000);
         assert!(matches!(a.reserve_request_funds(followup.clone()).await.unwrap(), ReserveRequestFundsOutcome::Reserved { .. }));
         let released = a.release_request_funds(ReleaseRequestFundsInput { identity: followup.identity.clone(), terminal_no_charge:false }).await.unwrap().unwrap();
         assert_eq!(released.state, RequestFundsState::Released);
@@ -643,16 +648,20 @@ async fn live_request_funds_recovery_collects_only_unreserved_funds_once() {
     let (admin, first, second, schema) = fixture().await;
     let result = AssertUnwindSafe(async {
         let repo = SqlxSettlementRepository::new(first.clone());
+        // Insufficient-balance settlement no longer produces insufficient_quota rows: it
+        // overdraws the wallet and settles immediately (see
+        // live_settlement_overdraws_finite_wallet_until_top_up). Seed a legacy
+        // insufficient_quota row directly, the state recover_insufficient_quota exists for.
         let debt = quote("debt", "key-a", 15_000_000);
-        let usage = persist_usage(&first, &debt.identity, 0.15).await;
-        assert_eq!(
-            repo.settle_usage(usage)
-                .await
-                .unwrap()
-                .unwrap()
-                .billing_status,
-            "insufficient_quota"
-        );
+        persist_usage(&first, &debt.identity, 0.15).await;
+        sqlx::query("UPDATE usage SET billing_status='insufficient_quota' WHERE request_id='debt'")
+            .execute(&first)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO usage_settlement_snapshots (request_id, billing_status) VALUES ('debt', 'insufficient_quota')")
+            .execute(&first)
+            .await
+            .unwrap();
         let other = quote("held", "key-b", 8_000_000);
         repo.reserve_request_funds(other.clone()).await.unwrap();
         let recover = RecoverInsufficientQuotaInput {
@@ -703,6 +712,50 @@ async fn live_request_funds_recovery_collects_only_unreserved_funds_once() {
                 .unwrap(),
             2
         );
+    })
+    .catch_unwind()
+    .await;
+    first.close().await;
+    second.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic)
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated AETHER_TEST_DATABASE_URL; runs real migrations"]
+async fn live_settlement_overdraws_finite_wallet_until_top_up() {
+    let (admin, first, second, schema) = fixture().await;
+    let result = AssertUnwindSafe(async {
+        let repo = SqlxSettlementRepository::new(first.clone());
+        let overdraft = quote("overdraft", "key-a", 15_000_000);
+        let usage = persist_usage(&first, &overdraft.identity, 0.15).await;
+        let settlement = repo.settle_usage(usage).await.unwrap().unwrap();
+        assert_eq!(settlement.billing_status, "settled");
+        assert!(
+            (settlement.wallet_recharge_balance_after.unwrap() + 0.05).abs() < 1e-12,
+            "insufficient balance settles the full bill as recharge overdraft debt"
+        );
+        assert!((balance(&first).await + 0.05).abs() < 1e-12);
+        // Already-settled rows are not recoverable insufficient_quota debt.
+        assert!(repo
+            .recover_insufficient_quota(RecoverInsufficientQuotaInput {
+                request_id: "overdraft".to_string(),
+            })
+            .await
+            .unwrap()
+            .is_none());
+        // A later top-up absorbs the overdraft automatically; no recovery pass is needed.
+        sqlx::query("UPDATE wallets SET balance=balance+0.05 WHERE id='wallet'")
+            .execute(&first)
+            .await
+            .unwrap();
+        assert!((balance(&first).await).abs() < 1e-12);
     })
     .catch_unwind()
     .await;
