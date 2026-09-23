@@ -2,7 +2,7 @@
 
 > 状态：**历史归档 / 未部署设计 / 不可执行**
 >
-> 归档原因：该设计已被 v2 终态取代；其中的 Writer、Publisher、Candidate、Finalizer、AI 冲突处理、旧同步链、变量和部署步骤均已删除或从未部署，不能作为当前运维规范执行。当前替代文档：[GitHub 自动化与 Agent 架构](automation-architecture.md)。
+> 归档原因：该设计已被 v2 终态取代（#179 自动化体系 v2 roadmap 已全部落地）；其中的 Writer、Publisher、Candidate、Finalizer、AI 冲突处理、旧同步链、变量和部署步骤均已删除或从未部署，不能作为当前运维规范执行。当前替代文档：[GitHub 自动化与 Agent 架构](automation-architecture.md)。
 >
 > 下文仅为历史审计记录。文中所有 workflow、Environment、变量、权限、ruleset、token、canary、部署和回滚步骤均不可执行、不可恢复，也不代表远端现状；与替代文档冲突时以替代文档和仓库实际 workflow 为准。
 

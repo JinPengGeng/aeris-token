@@ -19,10 +19,10 @@
 
 AI 没有 shell、代码写入或 GitHub 写入凭据。标签和 comment 的写回由确定性代码完成：标签只使用 registry/policy 允许的名称，comment 使用固定 marker 并按 fingerprint 收敛。managed comment 是 best-effort projection，不是锁、租约、CAS 或审计数据库；重复事件和模型失败必须 fail closed/可观察。
 
-实际配置接口只有以下五个 repository 配置名；文档不写入任何秘密值：
+实际配置接口只有以下六个 repository 配置名；文档不写入任何秘密值：
 
 - Secret：`AERIS_AI_API_KEY`
-- Variables：`AERIS_AGENTS_ENABLED`、`AERIS_AI_BASE_URL`、`AERIS_AI_MODEL`、`AERIS_AI_MODEL_REVIEWER`
+- Variables：`AERIS_AGENTS_ENABLED`、`AERIS_AI_BASE_URL`、`AERIS_AI_MODEL`、`AERIS_AI_MODEL_REVIEWER`、`AERIS_UPSTREAM_SYNC_ENABLED`
 
 模型 registry（`.github/ai-executors.json`）只保留 executor `openai-chat-v1`，并将 `agent_analysis` 路由到它。当前 Agent registry 中的逻辑角色为 `triage`、`planner`、`reviewer`，均为 read-only；reviewer 只读 PR/repository 并更新 managed comment。模型 ID 必须来自受信 registry/Variables，Issue 或评论不能指定任意模型。
 
@@ -55,6 +55,10 @@ git rev-list --count origin/main..upstream/main == 0
 - **Phase 2：已完成**——Actions-only 只读 issue triage（prepare/analyze）、受限 AI 调用、确定性标签和 managed comment。
 - **Phase 3 及以后：不存在/暂不实施**——不实施 Candidate/Writer/Publisher、AI conflict resolver/reviewer、Finalizer、autonomous code write 或自动合并生产链。任何未来改变必须先更新本文和对应 contract tests；不要依据历史归档部署。
 
-## 6. 验证与审计
+## 6. 历史（#179 自动化体系 v2 roadmap）
+
+旧 Writer 体系（8 个 workflow、checkpoint 状态机、AI 冲突解决链、~20 个 variables、Writer/Finalizer secrets、每 5 分钟 revoker cron、`main-linear-history` 与 `agent-head-fence-v1` ruleset）已在 #179 Phase 0/1 全部退役，当前只剩本文描述的 15 个 workflow、2-job issue-triage 与 5 个 variables。Phase 2 编排/模型路由收敛与 Phase 3 文档对齐随 #179 收尾完成。历史设计审计记录见 [历史归档：单 Writer App 自主开发实施规格](single-writer-autonomy-implementation.md)，不能作为运维规范执行。
+
+## 7. 验证与审计
 
 自动化 contract 由 `Frontend CI / check` 中的 `Automation Contracts` job 执行，覆盖 Agent workflow、AI executor、同步告警和 bounded fetch。文档或 workflow 变更至少运行该 job 对应的 contract tests，并执行 `git diff --check`。研究报告保留历史背景，不是当前运维规范。
