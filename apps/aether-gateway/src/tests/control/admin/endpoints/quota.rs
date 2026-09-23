@@ -244,7 +244,7 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_a
     );
     assert_eq!(
         payload["results"][0]["quota_snapshot"]["credits"]["balance"],
-        json!(42.0)
+        42.0
     );
     assert_eq!(
         payload["results"][0]["quota_snapshot"]["windows"]

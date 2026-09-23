@@ -370,9 +370,9 @@ mod tests {
 
         assert_eq!(payload["status"], "available");
         assert_eq!(payload["scope"], "key");
-        assert_eq!(payload["limit_usd"], 5.0);
-        assert_eq!(payload["user"]["used_usd"], 4.0);
-        assert_eq!(payload["key"]["remaining_usd"], 2.0);
+        assert_eq!(payload["limit_usd"], "5.00000000");
+        assert_eq!(payload["user"]["used_usd"], "4.00000000");
+        assert_eq!(payload["key"]["remaining_usd"], "2.00000000");
         assert_eq!(payload["timezone"], "Asia/Shanghai");
     }
 

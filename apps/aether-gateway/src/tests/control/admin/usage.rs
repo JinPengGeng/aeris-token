@@ -887,12 +887,12 @@ async fn gateway_handles_admin_usage_attribution_locally_with_metric_shares() {
     assert_eq!(items.len(), 2);
     assert_eq!(items[0]["id"], "user-1");
     assert_eq!(items[0]["name"], "alice");
-    assert_eq!(items[0]["actual_cost"], 0.6);
+    assert_eq!(items[0]["actual_cost"], "0.60000000");
     assert_eq!(items[0]["share"], 0.6);
     assert_eq!(items[1]["id"], "user-2");
     assert_eq!(items[1]["share"], 0.3);
     assert_eq!(payload["others"]["requests"], 2);
-    assert_eq!(payload["others"]["actual_cost"], 0.1);
+    assert_eq!(payload["others"]["actual_cost"], "0.10000000");
     assert_eq!(payload["others"]["share"], 0.1);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -963,7 +963,7 @@ async fn gateway_usage_attribution_provider_name_matches_legacy_rows_only() {
     let items = payload["items"].as_array().expect("items array");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], "legacy-user");
-    assert_eq!(items[0]["actual_cost"], 0.7);
+    assert_eq!(items[0]["actual_cost"], "0.70000000");
 
     gateway_handle.abort();
 }
@@ -1031,7 +1031,7 @@ async fn gateway_usage_attribution_sorts_metric_before_visible_limit() {
     let items = payload["items"].as_array().expect("items array");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], "user-zz-high-cost");
-    assert_eq!(items[0]["actual_cost"], 9.0);
+    assert_eq!(items[0]["actual_cost"], "9.00000000");
     assert_eq!(payload["others"]["requests"], 10_001);
     assert_eq!(payload["total"], 19.001);
 
@@ -1105,7 +1105,7 @@ async fn gateway_handles_admin_usage_attribution_for_legacy_provider_name_only()
     let items = payload["items"].as_array().expect("items array");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], "legacy-user");
-    assert_eq!(items[0]["actual_cost"], 0.7);
+    assert_eq!(items[0]["actual_cost"], "0.70000000");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1177,7 +1177,7 @@ async fn gateway_handles_admin_usage_attribution_without_internal_group_truncati
     let items = payload["items"].as_array().expect("items array");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], "user-zz-high-cost");
-    assert_eq!(items[0]["actual_cost"], 9.0);
+    assert_eq!(items[0]["actual_cost"], "9.00000000");
     assert_eq!(payload["total"], 19.001);
     assert_eq!(payload["others"]["requests"], 10_001);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);

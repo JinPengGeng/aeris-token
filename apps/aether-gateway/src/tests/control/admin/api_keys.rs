@@ -275,7 +275,7 @@ async fn gateway_handles_admin_api_keys_list_locally_with_trusted_admin_principa
         payload["api_keys"][0]["wallet"]["id"],
         json!("wallet-key-1")
     );
-    assert_eq!(payload["api_keys"][0]["wallet"]["balance"], json!(20.0));
+    assert_eq!(payload["api_keys"][0]["wallet"]["balance"], 20.0);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -333,7 +333,7 @@ async fn gateway_handles_admin_api_keys_detail_locally_with_trusted_admin_princi
     assert_eq!(payload["user_id"], json!("user-1"));
     assert_eq!(payload["wallet"]["id"], json!("wallet-key-1"));
     assert_eq!(payload["wallet"]["unlimited"], json!(true));
-    assert_eq!(payload["wallet"]["balance"], json!(20.0));
+    assert_eq!(payload["wallet"]["balance"], 20.0);
     assert_eq!(payload["key_display"], json!("sk-ke...text"));
     assert_eq!(payload["total_tokens"], json!(77));
     assert_eq!(payload["created_at"], json!("2024-03-21T05:48:20+00:00"));
@@ -622,7 +622,7 @@ async fn gateway_handles_admin_api_keys_create_locally_with_trusted_admin_princi
     assert_eq!(payload["allowed_api_formats"], json!(["openai:chat"]));
     assert_eq!(payload["allowed_models"], json!(["gpt-4.1"]));
     assert_eq!(payload["auto_delete_on_expiry"], json!(true));
-    assert_eq!(payload["wallet"]["balance"], json!(12.5));
+    assert_eq!(payload["wallet"]["balance"], 12.5);
     assert_eq!(payload["wallet"]["limit_mode"], json!("finite"));
     assert_eq!(payload["wallet"]["unlimited"], json!(false));
     assert!(payload["expires_at"]

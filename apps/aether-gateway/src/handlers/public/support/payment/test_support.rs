@@ -71,7 +71,9 @@ pub(super) async fn handle_payment_callback_with_test_store(
         return payment_callback_mark_failed_response();
     }
 
-    let order_amount = order.payload["amount_usd"].as_f64().unwrap_or_default();
+    let order_amount = crate::money_fixed::money_units_from_json(&order.payload["amount_usd"])
+        .map(crate::money_fixed::units_to_money)
+        .unwrap_or_default();
     if (payload.amount_usd - order_amount).abs() > f64::EPSILON {
         callback_store.push(PaymentTestCallbackRecord {
             callback_key: payload.callback_key.clone(),

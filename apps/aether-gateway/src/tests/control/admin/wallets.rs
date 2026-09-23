@@ -1154,14 +1154,14 @@ async fn gateway_handles_admin_wallets_adjust_locally_with_trusted_admin_princip
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["wallet"]["id"], "wallet-adjust-123");
-    assert_eq!(payload["wallet"]["balance"], json!(19.0));
-    assert_eq!(payload["wallet"]["recharge_balance"], json!(16.5));
-    assert_eq!(payload["wallet"]["total_adjusted"], json!(5.5));
+    assert_eq!(payload["wallet"]["balance"], "19.00000000");
+    assert_eq!(payload["wallet"]["recharge_balance"], "16.50000000");
+    assert_eq!(payload["wallet"]["total_adjusted"], "5.50000000");
     assert_eq!(payload["transaction"]["category"], "adjust");
     assert_eq!(payload["transaction"]["reason_code"], "adjust_admin");
-    assert_eq!(payload["transaction"]["amount"], json!(4.0));
-    assert_eq!(payload["transaction"]["balance_before"], json!(15.0));
-    assert_eq!(payload["transaction"]["balance_after"], json!(19.0));
+    assert_eq!(payload["transaction"]["amount"], "4.00000000");
+    assert_eq!(payload["transaction"]["balance_before"], "15.00000000");
+    assert_eq!(payload["transaction"]["balance_after"], "19.00000000");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1216,10 +1216,10 @@ async fn gateway_handles_admin_wallets_recharge_locally_with_trusted_admin_princ
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["wallet"]["id"], "wallet-recharge-123");
-    assert_eq!(payload["wallet"]["balance"], json!(23.0));
-    assert_eq!(payload["wallet"]["recharge_balance"], json!(20.5));
-    assert_eq!(payload["wallet"]["total_recharged"], json!(38.0));
-    assert_eq!(payload["payment_order"]["amount_usd"], json!(8.0));
+    assert_eq!(payload["wallet"]["balance"], "23.00000000");
+    assert_eq!(payload["wallet"]["recharge_balance"], "20.50000000");
+    assert_eq!(payload["wallet"]["total_recharged"], "38.00000000");
+    assert_eq!(payload["payment_order"]["amount_usd"], 8.0);
     assert_eq!(payload["payment_order"]["payment_method"], "admin_manual");
     assert_eq!(payload["payment_order"]["status"], "credited");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -1290,15 +1290,15 @@ async fn gateway_handles_admin_wallets_process_refund_locally_with_trusted_admin
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["wallet"]["id"], json!("wallet-123"));
-    assert_eq!(payload["wallet"]["balance"], json!(11.0));
-    assert_eq!(payload["wallet"]["recharge_balance"], json!(8.5));
-    assert_eq!(payload["wallet"]["total_refunded"], json!(7.0));
+    assert_eq!(payload["wallet"]["balance"], "11.00000000");
+    assert_eq!(payload["wallet"]["recharge_balance"], "8.50000000");
+    assert_eq!(payload["wallet"]["total_refunded"], "7.00000000");
     assert_eq!(payload["refund"]["status"], json!("processing"));
     assert_eq!(payload["refund"]["approved_by"], json!("admin-user-123"));
     assert_eq!(payload["refund"]["processed_by"], json!("admin-user-123"));
     assert_eq!(payload["transaction"]["category"], json!("refund"));
     assert_eq!(payload["transaction"]["reason_code"], json!("refund_out"));
-    assert_eq!(payload["transaction"]["amount"], json!(-4.0));
+    assert_eq!(payload["transaction"]["amount"], "-4.00000000");
     assert_eq!(payload["transaction"]["description"], json!("退款占款"));
 
     let ledger_response = reqwest::Client::new()
@@ -1322,7 +1322,7 @@ async fn gateway_handles_admin_wallets_process_refund_locally_with_trusted_admin
         ledger_payload["items"][0]["reason_code"],
         json!("refund_out")
     );
-    assert_eq!(ledger_payload["items"][0]["amount"], json!(-4.0));
+    assert_eq!(ledger_payload["items"][0]["amount"], -4.0);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1585,15 +1585,15 @@ async fn gateway_releases_offline_processing_refund_without_gateway_evidence() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["wallet"]["balance"], json!(15.0));
-    assert_eq!(payload["wallet"]["recharge_balance"], json!(12.5));
-    assert_eq!(payload["wallet"]["total_refunded"], json!(3.0));
+    assert_eq!(payload["wallet"]["balance"], "15.00000000");
+    assert_eq!(payload["wallet"]["recharge_balance"], "12.50000000");
+    assert_eq!(payload["wallet"]["total_refunded"], "3.00000000");
     assert_eq!(payload["refund"]["status"], json!("failed"));
     assert_eq!(
         payload["transaction"]["reason_code"],
         json!("refund_revert")
     );
-    assert_eq!(payload["transaction"]["amount"], json!(4.0));
+    assert_eq!(payload["transaction"]["amount"], "4.00000000");
 
     let ledger_response = reqwest::Client::new()
         .get(format!(
@@ -1616,7 +1616,7 @@ async fn gateway_releases_offline_processing_refund_without_gateway_evidence() {
         ledger_payload["items"][0]["reason_code"],
         json!("refund_revert")
     );
-    assert_eq!(ledger_payload["items"][0]["amount"], json!(4.0));
+    assert_eq!(ledger_payload["items"][0]["amount"], 4.0);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

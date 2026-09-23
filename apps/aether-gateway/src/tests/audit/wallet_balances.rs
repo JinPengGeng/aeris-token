@@ -452,9 +452,9 @@ async fn authenticated_wallet_mutations_enqueue_atomically_and_delivery_never_re
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["wallet"]["recharge_balance"], 14.0);
-    assert_eq!(body["wallet"]["gift_balance"], 3.0);
-    assert_eq!(body["wallet"]["total_adjusted"], 4.0);
+    assert_eq!(body["wallet"]["recharge_balance"], "14.00000000");
+    assert_eq!(body["wallet"]["gift_balance"], "3.00000000");
+    assert_eq!(body["wallet"]["total_adjusted"], "4.00000000");
     let queued = intents(&pool).await;
     assert_eq!(queued.len(), 1);
     assert_audit(&queued[0], &admin.id, false, &secrets);
@@ -498,8 +498,8 @@ async fn authenticated_wallet_mutations_enqueue_atomically_and_delivery_never_re
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["wallet"]["recharge_balance"], 19.0);
-    assert_eq!(body["wallet"]["total_recharged"], 25.0);
+    assert_eq!(body["wallet"]["recharge_balance"], "19.00000000");
+    assert_eq!(body["wallet"]["total_recharged"], "25.00000000");
     assert_eq!(body["payment_order"]["status"], "credited");
     let first_order = body["payment_order"]["order_no"]
         .as_str()
@@ -601,8 +601,8 @@ async fn authenticated_wallet_mutations_enqueue_atomically_and_delivery_never_re
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
     assert_ne!(body["payment_order"]["order_no"], first_order);
-    assert_eq!(body["wallet"]["recharge_balance"], 24.0);
-    assert_eq!(body["wallet"]["total_recharged"], 30.0);
+    assert_eq!(body["wallet"]["recharge_balance"], "24.00000000");
+    assert_eq!(body["wallet"]["total_recharged"], "30.00000000");
     let response = admin_client
         .post(&adjust_endpoint)
         .json(&adjust_payload)
@@ -611,8 +611,8 @@ async fn authenticated_wallet_mutations_enqueue_atomically_and_delivery_never_re
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["wallet"]["recharge_balance"], 28.0);
-    assert_eq!(body["wallet"]["total_adjusted"], 8.0);
+    assert_eq!(body["wallet"]["recharge_balance"], "28.00000000");
+    assert_eq!(body["wallet"]["total_adjusted"], "8.00000000");
     assert_eq!(intents(&pool).await.len(), 4);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -729,7 +729,7 @@ async fn authenticated_wallet_mutations_enqueue_atomically_and_delivery_never_re
         body["wallet"]["recharge_balance"], 38.0,
         "retrying the HTTP request after 502 remains a new monetary operation"
     );
-    assert_eq!(body["wallet"]["total_recharged"], 40.0);
+    assert_eq!(body["wallet"]["total_recharged"], "40.00000000");
     assert_recovery_jobs(&pool, 4, &owner.id).await;
     server.abort();
     pool.close().await;
@@ -841,7 +841,10 @@ async fn wallet_audit_unsupported_adapter_is_non_mutating_and_http_fallback_is_p
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: Value = response.json().await.unwrap();
-        assert_eq!(body["wallet"]["recharge_balance"], balance);
+        assert_eq!(
+            body["wallet"]["recharge_balance"],
+            crate::money_fixed::format_money(balance)
+        );
     }
     assert_eq!(
         state
