@@ -35,8 +35,13 @@ fn metadata_u64(metadata: Option<&serde_json::Value>, key: &str) -> Option<u64> 
 pub fn build_upsert_usage_record_from_event(
     event: &UsageEvent,
 ) -> Result<UpsertUsageRecord, DataLayerError> {
-    let (status, billing_status) =
-        lifecycle_status_and_billing(event.event_type, event.data.request_metadata.as_ref());
+    let (status, billing_status) = lifecycle_status_and_billing(
+        event.event_type,
+        event.data.request_metadata.as_ref(),
+        event.data.total_cost_usd,
+        event.data.actual_total_cost_usd,
+        event.data.total_tokens,
+    );
     let finalized_at_unix_secs = match event.event_type {
         UsageEventType::Pending | UsageEventType::Streaming => None,
         UsageEventType::Completed | UsageEventType::Failed | UsageEventType::Cancelled => {
@@ -220,6 +225,9 @@ fn clear_unavailable_pricing_fields(data: &mut crate::UsageEventData) {
 fn lifecycle_status_and_billing(
     event_type: UsageEventType,
     request_metadata: Option<&serde_json::Value>,
+    total_cost_usd: Option<f64>,
+    actual_total_cost_usd: Option<f64>,
+    total_tokens: Option<u64>,
 ) -> (&'static str, &'static str) {
     match event_type {
         UsageEventType::Pending => ("pending", "pending"),
@@ -233,8 +241,11 @@ fn lifecycle_status_and_billing(
         UsageEventType::Completed => ("completed", "pending"),
         UsageEventType::Failed => ("failed", "void"),
         UsageEventType::Cancelled
-            if aether_data_contracts::repository::usage::cancelled_request_fee_is_billable(
+            if aether_data_contracts::repository::usage::cancelled_usage_is_billable(
                 request_metadata,
+                total_cost_usd,
+                actual_total_cost_usd,
+                total_tokens,
             ) =>
         {
             ("cancelled", "pending")
@@ -521,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_terminal_record_is_void_for_billing() {
+    fn cancelled_terminal_record_with_produced_usage_stays_pending_for_billing() {
         let record = build_upsert_usage_record_from_event(&UsageEvent {
             event_type: UsageEventType::Cancelled,
             request_id: "req-cancelled".to_string(),
@@ -543,13 +554,32 @@ mod tests {
         .expect("record should build");
 
         assert_eq!(record.status, "cancelled");
-        assert_eq!(record.billing_status, "void");
+        assert_eq!(record.billing_status, "pending");
         assert_eq!(record.total_tokens, Some(30));
         assert_eq!(record.total_cost_usd, Some(0.03));
         assert_eq!(record.actual_total_cost_usd, Some(0.02));
         assert_eq!(record.status_code, Some(499));
         assert_eq!(record.response_time_ms, Some(200));
         assert_eq!(record.first_byte_time_ms, Some(50));
+    }
+
+    #[test]
+    fn cancelled_terminal_record_without_usage_remains_void_for_billing() {
+        let record = build_upsert_usage_record_from_event(&UsageEvent {
+            event_type: UsageEventType::Cancelled,
+            request_id: "req-cancelled-empty".to_string(),
+            timestamp_ms: 1_700_000_000_000,
+            data: UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                status_code: Some(499),
+                ..UsageEventData::default()
+            },
+        })
+        .expect("record should build");
+
+        assert_eq!(record.status, "cancelled");
+        assert_eq!(record.billing_status, "void");
     }
 
     #[test]

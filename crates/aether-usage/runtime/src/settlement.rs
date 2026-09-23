@@ -7,7 +7,7 @@ use aether_data_contracts::repository::settlement::{
 };
 use aether_data_contracts::repository::usage::PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY;
 use aether_data_contracts::repository::usage::{
-    cancelled_request_fee_is_billable, StoredRequestUsageAudit,
+    cancelled_usage_is_billable, StoredRequestUsageAudit,
 };
 use aether_data_contracts::{DataLayerError, DataLayerError::InvalidInput};
 use async_trait::async_trait;
@@ -84,7 +84,12 @@ pub(crate) async fn reconcile_usage_policy_cost_for_event_with_result(
     let terminal_state = match event.event_type {
         UsageEventType::Completed => UsagePolicyCostReservationState::Finalized,
         UsageEventType::Cancelled
-            if cancelled_request_fee_is_billable(event.data.request_metadata.as_ref()) =>
+            if cancelled_usage_is_billable(
+                event.data.request_metadata.as_ref(),
+                event.data.total_cost_usd,
+                event.data.actual_total_cost_usd,
+                event.data.total_tokens,
+            ) =>
         {
             UsagePolicyCostReservationState::Finalized
         }
@@ -186,8 +191,12 @@ async fn settle_usage_with_reconciled_cost_impl(
         ) {
             let (terminal_state, actual_cost_units) = if usage.status == "completed"
                 || (usage.status == "cancelled"
-                    && cancelled_request_fee_is_billable(usage.request_metadata.as_ref()))
-            {
+                    && cancelled_usage_is_billable(
+                        usage.request_metadata.as_ref(),
+                        Some(usage.total_cost_usd),
+                        Some(usage.actual_total_cost_usd),
+                        Some(usage.total_tokens),
+                    )) {
                 (
                     UsagePolicyCostReservationState::Finalized,
                     nonnegative_usd_to_usage_policy_cost_units(
@@ -227,7 +236,12 @@ async fn settle_usage_with_reconciled_cost_impl(
         return Ok(());
     }
     if usage.status == "cancelled"
-        && !cancelled_request_fee_is_billable(usage.request_metadata.as_ref())
+        && !cancelled_usage_is_billable(
+            usage.request_metadata.as_ref(),
+            Some(usage.total_cost_usd),
+            Some(usage.actual_total_cost_usd),
+            Some(usage.total_tokens),
+        )
     {
         return Ok(());
     }
@@ -264,6 +278,32 @@ async fn settle_usage_with_reconciled_cost_impl(
             actual_total_cost_usd = usage.actual_total_cost_usd,
             finalized_at_unix_secs = finalized_at_unix_secs,
             "completed usage settled as insufficient_quota; delivered service recorded at no charge"
+        );
+    }
+    if outcome.newly_finalized
+        && outcome
+            .settlement
+            .as_ref()
+            .and_then(|settlement| settlement.wallet_recharge_balance_after)
+            .is_some_and(|balance| balance < 0.0)
+    {
+        tracing::warn!(
+            event_name = "wallet_overdraft_settlement",
+            log_type = "risk",
+            request_id = usage.request_id.as_str(),
+            user_id = usage.user_id.as_deref().unwrap_or("-"),
+            api_key_id = usage.api_key_id.as_deref().unwrap_or("-"),
+            provider_id = usage.provider_id.as_deref().unwrap_or("-"),
+            model = usage.model.as_str(),
+            total_cost_usd = usage.total_cost_usd,
+            actual_total_cost_usd = usage.actual_total_cost_usd,
+            wallet_recharge_balance_after = outcome
+                .settlement
+                .as_ref()
+                .and_then(|settlement| settlement.wallet_recharge_balance_after)
+                .unwrap_or(0.0),
+            finalized_at_unix_secs = finalized_at_unix_secs,
+            "usage settled into a negative wallet recharge balance; the overdraft is recovered by later recharge top-ups"
         );
     }
     if usage.status == "completed"
@@ -622,6 +662,11 @@ mod tests {
         let mut usage = sample_usage();
         usage.status = "cancelled".to_string();
         usage.status_code = Some(499);
+        // A cancelled request that produced no usage at all stays billing-void and
+        // never reaches wallet settlement.
+        usage.total_cost_usd = 0.0;
+        usage.actual_total_cost_usd = 0.0;
+        usage.total_tokens = 0;
 
         settle_usage_if_needed(&writer, &usage)
             .await

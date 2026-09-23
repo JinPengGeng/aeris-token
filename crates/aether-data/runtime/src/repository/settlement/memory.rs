@@ -645,20 +645,28 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
                         let available_gift = super::request_funds_available_units(before_gift)?
                             .saturating_sub(held_gift);
                         let required = super::request_funds_authorized_units(billable_cost_usd)?;
-                        if before_recharge < 0.0 || required > available_recharge + available_gift {
-                            final_billing_status = "insufficient_quota".to_string();
-                            settlement.billing_status = final_billing_status.clone();
-                            return Ok(settlement);
-                        }
+                        // Insufficient wallet balance settles as debt instead of a write-off:
+                        // the recharge balance may go negative and is recovered by later
+                        // recharge top-ups (sub2api/new-api overdraft semantics). Only the
+                        // recharge balance may overdraw; gift balances stop at zero.
                         let recharge_debit = required.min(available_recharge);
-                        let gift_debit = required - recharge_debit;
-                        let after_recharge = if recharge_debit == 0 {
+                        let gift_debit = (required - recharge_debit).min(available_gift);
+                        let overdraft = required - recharge_debit - gift_debit;
+                        let after_recharge = if recharge_debit == 0 && overdraft == 0 {
                             before_recharge
                         } else {
-                            super::request_funds_usd(
-                                super::request_funds_available_units(before_recharge)?
-                                    - recharge_debit,
-                            )
+                            let before_units =
+                                super::request_funds_available_units(before_recharge.max(0.0))?;
+                            let after_units =
+                                before_units as i128 - recharge_debit as i128 - overdraft as i128;
+                            if after_units >= 0 {
+                                super::request_funds_usd(after_units as u64)
+                            } else {
+                                -super::request_funds_usd(
+                                    u64::try_from(-after_units)
+                                        .expect("overdraft units fit u64 by construction"),
+                                )
+                            }
                         };
                         let after_gift = if gift_debit == 0 {
                             before_gift
@@ -1468,11 +1476,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finite_wallet_insufficient_balance_stays_nonnegative_and_recovers_after_funding() {
+    async fn finite_wallet_insufficient_balance_overdraws_and_settles() {
         let repository = InMemorySettlementRepository::seed(vec![sample_wallet()]);
         let settlement = repository
             .settle_usage(UsageSettlementInput {
-                request_id: "req-insufficient-wallet".to_string(),
+                request_id: "req-overdraft-wallet".to_string(),
                 user_id: Some("user-1".to_string()),
                 api_key_id: Some("key-1".to_string()),
                 api_key_is_standalone: false,
@@ -1487,49 +1495,57 @@ mod tests {
             .expect("settlement should succeed")
             .expect("settlement should exist");
 
-        assert_eq!(settlement.billing_status, "insufficient_quota");
+        // Insufficient balance settles the full bill as recharge overdraft debt instead of an
+        // insufficient_quota write-off: recharge covers 10.0, gift covers 2.0, and the remaining
+        // 3.0 drives the recharge balance negative for later top-ups to absorb.
+        assert_eq!(settlement.billing_status, "settled");
         assert_eq!(settlement.wallet_balance_before, Some(12.0));
-        assert_eq!(settlement.wallet_balance_after, Some(12.0));
-        assert_eq!(settlement.wallet_recharge_balance_after, Some(10.0));
-        assert_eq!(settlement.wallet_gift_balance_after, Some(2.0));
-        assert_eq!(settlement.provider_monthly_used_usd, None);
-        let input = crate::repository::settlement::RecoverInsufficientQuotaInput {
-            request_id: "req-insufficient-wallet".to_string(),
-        };
-        let first = repository
-            .recover_insufficient_quota(input.clone())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(first.collected_cost_units, 1_200_000_000);
-        assert_eq!(first.outstanding_cost_units, 300_000_000);
+        assert_eq!(settlement.wallet_recharge_balance_after, Some(-3.0));
+        assert_eq!(settlement.wallet_gift_balance_after, Some(0.0));
+        assert_eq!(settlement.wallet_balance_after, Some(-3.0));
+        assert_eq!(settlement.provider_monthly_used_usd, Some(15.0));
         assert_eq!(
             repository
-                .recover_insufficient_quota(input.clone())
-                .await
-                .unwrap()
-                .unwrap(),
-            first
+                .wallets
+                .with_mut(|wallets| wallets.get("wallet-1").unwrap().total_consumed),
+            15.0
         );
-        repository
-            .wallets
-            .with_mut(|wallets| wallets.get_mut("wallet-1").unwrap().balance += 3.0);
-        let recovered = repository
-            .recover_insufficient_quota(input.clone())
+
+        // Replays observe the committed snapshot and never debit twice.
+        let replay = repository
+            .settle_usage(UsageSettlementInput {
+                request_id: "req-overdraft-wallet".to_string(),
+                user_id: Some("user-1".to_string()),
+                api_key_id: Some("key-1".to_string()),
+                api_key_is_standalone: false,
+                provider_id: Some("provider-1".to_string()),
+                status: "completed".to_string(),
+                billing_status: "pending".to_string(),
+                total_cost_usd: 3.0,
+                actual_total_cost_usd: 15.0,
+                finalized_at_unix_secs: Some(200),
+            })
             .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(recovered.outstanding_cost_units, 0);
-        assert_eq!(recovered.settlement.billing_status, "settled");
-        assert_eq!(recovered.settlement.provider_monthly_used_usd, Some(15.0));
+            .expect("replay should succeed")
+            .expect("replay should observe the committed settlement");
+        assert_eq!(replay, settlement);
         assert_eq!(
             repository
-                .recover_insufficient_quota(input)
-                .await
-                .unwrap()
-                .unwrap(),
-            recovered
+                .wallets
+                .with_mut(|wallets| wallets.get("wallet-1").unwrap().total_consumed),
+            15.0
         );
+
+        // Overdrawn rows are not queued as insufficient_quota debt: they are already settled.
+        let recovery = repository
+            .recover_insufficient_quota(
+                crate::repository::settlement::RecoverInsufficientQuotaInput {
+                    request_id: "req-overdraft-wallet".to_string(),
+                },
+            )
+            .await
+            .expect("recovery lookup should succeed");
+        assert!(recovery.is_none());
     }
 
     #[tokio::test]

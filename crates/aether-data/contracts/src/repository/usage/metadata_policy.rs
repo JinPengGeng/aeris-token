@@ -30,6 +30,32 @@ pub fn cancelled_request_fee_is_billable(metadata: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns true when a cancelled request produced billable usage (tokens or cost) before it was
+/// terminated. Such requests settle normally against the wallet (sub2api/new-api semantics);
+/// cancelled requests with no produced usage remain billing-void at no charge.
+pub fn cancelled_usage_has_produced_usage(
+    total_cost_usd: Option<f64>,
+    actual_total_cost_usd: Option<f64>,
+    total_tokens: Option<u64>,
+) -> bool {
+    total_cost_usd.is_some_and(|value| value > 0.0)
+        || actual_total_cost_usd.is_some_and(|value| value > 0.0)
+        || total_tokens.is_some_and(|value| value > 0)
+}
+
+/// Combined gate for whether a cancelled usage row/event participates in wallet settlement:
+/// either the gateway explicitly marked the cancelled fee as billable, or the request produced
+/// usage before cancellation.
+pub fn cancelled_usage_is_billable(
+    metadata: Option<&Value>,
+    total_cost_usd: Option<f64>,
+    actual_total_cost_usd: Option<f64>,
+    total_tokens: Option<u64>,
+) -> bool {
+    cancelled_request_fee_is_billable(metadata)
+        || cancelled_usage_has_produced_usage(total_cost_usd, actual_total_cost_usd, total_tokens)
+}
+
 /// Projects request metadata onto the persistence contract. Unknown fields and malformed values
 /// are discarded instead of being recursively copied into an audit row.
 pub fn sanitize_usage_request_metadata(value: Option<Value>) -> Option<Value> {

@@ -10399,7 +10399,8 @@ mod tests {
                 .expect("terminal handoff must persist after backpressure clears");
                 assert_eq!(terminal.status, if eof { "completed" } else { "cancelled" });
                 // This fixture installs only a usage writer, not a settlement
-                // writer. Completed usage awaits billing; cancellation is void.
+                // writer. Completed usage awaits billing; this cancellation produced
+                // no usage, so it stays billing-void.
                 assert_eq!(
                     terminal.billing_status,
                     if eof { "pending" } else { "void" }

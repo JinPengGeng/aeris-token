@@ -291,6 +291,13 @@ async fn cancellation_release_billable_cancellation_and_zero_cost_preserve_settl
                 UsageEventType::Cancelled,
                 false,
                 0.75,
+                UsagePolicyCostReservationState::Finalized,
+                1,
+            ),
+            (
+                UsageEventType::Cancelled,
+                false,
+                0.0,
                 UsagePolicyCostReservationState::Released,
                 0,
             ),
@@ -312,7 +319,9 @@ async fn cancellation_release_billable_cancellation_and_zero_cost_preserve_settl
             let store = ReuseStore::default();
             let mut event = event();
             event.event_type = event_type;
+            event.data.total_cost_usd = Some(cost);
             event.data.actual_total_cost_usd = Some(cost);
+            event.data.total_tokens = Some(0);
             event.data.request_metadata.as_mut().unwrap()["cancelled_request_fee"] =
                 json!(billable_cancel);
             write(&store, event, direct).await;
@@ -321,7 +330,7 @@ async fn cancellation_release_billable_cancellation_and_zero_cost_preserve_settl
             assert_eq!(reconciliations[0].terminal_state, terminal_state);
             assert_eq!(
                 reconciliations[0].actual_cost_units,
-                if billable_cancel { 75_000_000 } else { 0 }
+                if cost > 0.0 { 75_000_000 } else { 0 }
             );
             assert_eq!(store.settlements.lock().unwrap().len(), wallets);
         }

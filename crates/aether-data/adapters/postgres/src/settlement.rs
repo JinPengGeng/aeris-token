@@ -1499,10 +1499,10 @@ LIMIT 1
                             None
                         };
 
-                        let wallet_can_overdraft = wallet_row.as_ref().is_some_and(|row| {
-                            row.try_get::<String, _>("limit_mode").ok()
-                                .is_some_and(|mode| mode.eq_ignore_ascii_case("unlimited"))
-                        });
+                        // Any wallet-backed settlement may draw the recharge balance negative:
+                        // the overdraft is recovered by later recharge top-ups. Rows without a
+                        // wallet still settle as insufficient_quota debt (recoverable on funding).
+                        let wallet_can_overdraft = wallet_row.is_some();
                         let wallet_available_usd = match wallet_row.as_ref() {
                             Some(row) => {
                                 let recharge_balance: f64 =
@@ -1613,28 +1613,28 @@ LIMIT 1
                                         tx, &wallet_id, before_recharge, before_gift,
                                     ).await?;
                                     let required = aether_data_contracts::repository::settlement::request_funds_authorized_units(wallet_debit_cost_usd)?;
-                                    if required > available_recharge + available_gift {
-                                        // Daily grants, when present, were checked before mutation.
-                                        // Standalone/key wallets reach this exact guard directly.
-                                        final_billing_status = "insufficient_quota".to_string();
-                                        settlement.billing_status = final_billing_status.clone();
-                                        sync_usage_settlement_snapshot(&mut **tx, &settlement).await?;
-                                        sqlx::query(FINALIZE_USAGE_BILLING_SQL).bind(&input.request_id)
-                                            .bind(&final_billing_status).bind(finalized_at)
-                                            .execute(&mut **tx).await.map_postgres_err()?;
-                                        return Ok(aether_data_contracts::repository::settlement::UsageSettlementWriteOutcome {
-                                            settlement: Some(settlement),
-                                            newly_finalized: true,
-                                        });
-                                    }
+                                    // Insufficient wallet balance settles as debt instead of a
+                                    // write-off: the recharge balance may go negative and is
+                                    // recovered by later recharge top-ups. Only the recharge
+                                    // balance may overdraw; gift balances stop at zero.
                                     let recharge_debit = required.min(available_recharge);
-                                    let gift_debit = required - recharge_debit;
+                                    let gift_debit = (required - recharge_debit).min(available_gift);
+                                    let overdraft = required - recharge_debit - gift_debit;
                                     // Canonical integer subtraction preserves every unit owned
                                     // by another reservation (e.g. 0.30 - 0.10 must remain 0.20).
-                                    if recharge_debit > 0 {
-                                        after_recharge = aether_data_contracts::repository::settlement::request_funds_usd(
-                                            aether_data_contracts::repository::settlement::request_funds_available_units(before_recharge)? - recharge_debit,
-                                        );
+                                    if recharge_debit > 0 || overdraft > 0 {
+                                        let before_units = aether_data_contracts::repository::settlement::request_funds_available_units(before_recharge.max(0.0))?;
+                                        let after_units = before_units as i128
+                                            - recharge_debit as i128
+                                            - overdraft as i128;
+                                        after_recharge = if after_units >= 0 {
+                                            aether_data_contracts::repository::settlement::request_funds_usd(after_units as u64)
+                                        } else {
+                                            -aether_data_contracts::repository::settlement::request_funds_usd(
+                                                u64::try_from(-after_units)
+                                                    .expect("overdraft units fit u64 by construction"),
+                                            )
+                                        };
                                     }
                                     if gift_debit > 0 {
                                         after_gift = aether_data_contracts::repository::settlement::request_funds_usd(
