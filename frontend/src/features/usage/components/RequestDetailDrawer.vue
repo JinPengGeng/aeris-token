@@ -1055,6 +1055,7 @@ const emit = defineEmits<{
     reasoningEffort?: string | null
     serviceTier?: string | null
     actualServiceTier?: string | null
+    responseModel?: string | null
     imageProgress?: ImageProgress | null
     errorMessage?: string | null
     updatedAt?: string | null
@@ -1203,6 +1204,7 @@ type HeaderModelTextField =
   | 'model'
   | 'target_model'
   | 'model_version'
+  | 'response_model'
   | 'request_type'
   | 'requested_reasoning_effort'
   | 'reasoning_effort'
@@ -1211,6 +1213,7 @@ type HeaderModelTextField =
 
 const FINAL_PROVIDER_HEADER_FIELDS = new Set<HeaderModelTextField>([
   'target_model',
+  'response_model',
   'reasoning_effort',
   'service_tier',
   'actual_service_tier',
@@ -1297,6 +1300,7 @@ watch(
     props.summaryRecord?.model,
     props.summaryRecord?.target_model,
     props.summaryRecord?.model_version,
+    props.summaryRecord?.response_model,
     props.summaryRecord?.request_type,
     props.summaryRecord?.requested_reasoning_effort,
     props.summaryRecord?.reasoning_effort,
@@ -1343,6 +1347,7 @@ function emitDetailRequestState(nextDetail: RequestDetail) {
   const reasoningEffort = resolveHeaderModelTextField('reasoning_effort', nextDetail)
   const serviceTier = resolveHeaderModelTextField('service_tier', nextDetail)
   const actualServiceTier = resolveHeaderModelTextField('actual_service_tier', nextDetail)
+  const responseModel = resolveHeaderModelTextField('response_model', nextDetail)
 
   emit('requestState', {
     id,
@@ -1379,6 +1384,7 @@ function emitDetailRequestState(nextDetail: RequestDetail) {
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(serviceTier ? { serviceTier } : {}),
     ...(actualServiceTier ? { actualServiceTier } : {}),
+    ...(responseModel ? { responseModel } : {}),
     errorMessage: nextDetail.error_message ?? undefined,
     updatedAt: nextDetail.updated_at ?? undefined,
   })
@@ -1655,7 +1661,7 @@ const headerModelRecord = computed(() => {
   return {
     model: resolveHeaderModelTextField('model', currentDetail) ?? '-',
     target_model: resolveHeaderModelTextField('target_model', currentDetail),
-    model_version: resolveHeaderModelTextField('model_version', currentDetail),
+    response_model: resolveHeaderModelTextField('response_model', currentDetail),
     request_type: resolveHeaderModelTextField('request_type', currentDetail),
     requested_reasoning_effort: resolveHeaderModelTextField(
       'requested_reasoning_effort',
