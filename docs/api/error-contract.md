@@ -76,6 +76,16 @@ Claude Messages wallet denial uses HTTP `402` and
 Neither format exposes the balance, user/key identifiers, or internal billing
 details. Both retain `x-trace-id` for support correlation.
 
+For requests that do not resolve to an OpenAI or Claude client format (no
+recognized route family, endpoint signature, or path), the wallet-denial body
+follows the upstream-typed `balance_exceeded` contract instead:
+HTTP `429` with `{"error":{"type":"balance_exceeded","message":"余额不足（剩余: $X.XX）","details":{"balance_type":"USD","remaining":<number|null>}},"trace_id":"trace-..."}`.
+This aligns the fork with upstream `build_local_balance_denied_response`
+(fawney19/Aether) so a future sync does not conflict; it also lets first-party
+(non-protocol) clients distinguish "recharge required" from rate limiting and
+render the remaining balance. No `Retry-After` is emitted, matching the quota
+formats above. See [Issue 247](../issue-triage/issue-247-typed-balance-error.md).
+
 No `Retry-After` header is emitted for wallet denial or tenant permission
 denial (`403/permission_error`). Provider rate limits remain `429/rate_limit_error`;
 the gateway retains a provider-supplied wait time and does not invent one when
