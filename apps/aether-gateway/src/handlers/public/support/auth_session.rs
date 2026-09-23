@@ -46,20 +46,20 @@ pub(crate) fn build_auth_wallet_summary_payload(
         .unwrap_or_else(|| "finite".to_string());
     json!({
         "id": wallet.map(|value| value.id.clone()),
-        "balance": recharge_balance + gift_balance,
-        "recharge_balance": recharge_balance,
-        "gift_balance": gift_balance,
-        "refundable_balance": recharge_balance,
+        "balance": crate::money_fixed::format_money(recharge_balance + gift_balance),
+        "recharge_balance": crate::money_fixed::format_money(recharge_balance),
+        "gift_balance": crate::money_fixed::format_money(gift_balance),
+        "refundable_balance": crate::money_fixed::format_money(recharge_balance),
         "currency": wallet.map(|value| value.currency.clone()).unwrap_or_else(|| "USD".to_string()),
         "status": wallet.map(|value| value.status.clone()).unwrap_or_else(|| "active".to_string()),
         "limit_mode": limit_mode,
         "unlimited": wallet
             .map(|value| value.limit_mode.eq_ignore_ascii_case("unlimited"))
             .unwrap_or(false),
-        "total_recharged": wallet.map(|value| value.total_recharged).unwrap_or(0.0),
-        "total_consumed": wallet.map(|value| value.total_consumed).unwrap_or(0.0),
-        "total_refunded": wallet.map(|value| value.total_refunded).unwrap_or(0.0),
-        "total_adjusted": wallet.map(|value| value.total_adjusted).unwrap_or(0.0),
+        "total_recharged": crate::money_fixed::format_money(wallet.map(|value| value.total_recharged).unwrap_or(0.0)),
+        "total_consumed": crate::money_fixed::format_money(wallet.map(|value| value.total_consumed).unwrap_or(0.0)),
+        "total_refunded": crate::money_fixed::format_money(wallet.map(|value| value.total_refunded).unwrap_or(0.0)),
+        "total_adjusted": crate::money_fixed::format_money(wallet.map(|value| value.total_adjusted).unwrap_or(0.0)),
         "updated_at": wallet
             .and_then(|value| {
                 chrono::DateTime::<chrono::Utc>::from_timestamp(value.updated_at_unix_secs as i64, 0)

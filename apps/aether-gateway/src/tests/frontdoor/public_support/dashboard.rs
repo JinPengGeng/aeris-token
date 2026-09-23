@@ -199,7 +199,7 @@ async fn gateway_handles_dashboard_stats_locally_without_proxying_upstream() {
     assert_eq!(payload["token_breakdown"]["output"], 60);
     assert_eq!(payload["token_breakdown"]["cache_creation"], 20);
     assert_eq!(payload["token_breakdown"]["cache_read"], 30);
-    assert_eq!(payload["monthly_cost"], json!(2.5));
+    assert_eq!(payload["monthly_cost"], json!("2.50000000"));
     assert_eq!(payload["stats"].as_array().map(Vec::len), Some(4));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -373,7 +373,7 @@ async fn gateway_dashboard_stats_include_end_of_day_boundary() {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["today"]["requests"], 1);
-    assert_eq!(payload["monthly_cost"], json!(1.25));
+    assert_eq!(payload["monthly_cost"], json!("1.25000000"));
     assert_eq!(payload["stats"][1]["value"], json!("1"));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -647,8 +647,8 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["today"]["requests"], 2);
     assert_eq!(payload["today"]["tokens"], 16_250);
-    assert_eq!(payload["today"]["cost"], json!(2.5));
-    assert_eq!(payload["cost_stats"]["cost_savings"], json!(0.025));
+    assert_eq!(payload["today"]["cost"], json!("2.50000000"));
+    assert_eq!(payload["cost_stats"]["cost_savings"], json!("0.02500000"));
     let stats = payload["stats"].as_array().expect("stats should be array");
     assert_eq!(stats.len(), 4);
     let today_request_stats = stats

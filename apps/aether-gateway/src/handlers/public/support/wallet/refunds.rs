@@ -39,6 +39,7 @@ fn wallet_refund_internal_error<E: Debug>(operation: &'static str, error: E) -> 
 
 #[derive(Debug, Deserialize)]
 struct WalletCreateRefundRequest {
+    #[serde(deserialize_with = "crate::money_fixed::deserialize_money")]
     amount_usd: f64,
     #[serde(default)]
     payment_order_id: Option<String>,
@@ -156,7 +157,7 @@ fn wallet_refund_payload_from_record(
         "source_type": record.source_type,
         "source_id": record.source_id,
         "refund_mode": record.refund_mode,
-        "amount_usd": record.amount_usd,
+        "amount_usd": crate::money_fixed::format_money(record.amount_usd),
         "status": record.status,
         "reason": record.reason,
         "failure_reason": record.failure_reason,
@@ -249,7 +250,7 @@ pub(super) async fn handle_wallet_refunds_list(
                 "source_type": record.source_type,
                 "source_id": record.source_id,
                 "refund_mode": record.refund_mode,
-                "amount_usd": record.amount_usd,
+                "amount_usd": crate::money_fixed::format_money(record.amount_usd),
                 "status": record.status,
                 "reason": record.reason,
                 "failure_reason": record.failure_reason,
@@ -525,7 +526,10 @@ pub(super) async fn handle_wallet_create_refund(
                 payload.idempotency_key,
                 created.clone(),
             );
-            return build_auth_json_response(http::StatusCode::OK, created, None);
+            let mut response = created;
+            response["amount_usd"] =
+                serde_json::json!(crate::money_fixed::format_money(payload.amount_usd));
+            return build_auth_json_response(http::StatusCode::OK, response, None);
         }
         #[cfg(not(test))]
         return build_wallet_refund_storage_unavailable_response();

@@ -4289,13 +4289,13 @@ async fn gateway_redeems_wallet_code_locally() {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["batch_name"], "测试兑换");
-    assert_eq!(payload["amount_usd"], 6.5);
+    assert_eq!(payload["amount_usd"], "6.50000000");
     assert_eq!(payload["order"]["payment_method"], "gift_code");
-    assert_eq!(payload["order"]["refundable_amount_usd"], 0.0);
-    assert_eq!(payload["wallet"]["total_recharged"], 26.5);
-    assert_eq!(payload["wallet"]["recharge_balance"], 12.5);
-    assert_eq!(payload["wallet"]["gift_balance"], 9.5);
-    assert_eq!(payload["wallet"]["refundable_balance"], 12.5);
+    assert_eq!(payload["order"]["refundable_amount_usd"], "0.00000000");
+    assert_eq!(payload["wallet"]["total_recharged"], "26.50000000");
+    assert_eq!(payload["wallet"]["recharge_balance"], "12.50000000");
+    assert_eq!(payload["wallet"]["gift_balance"], "9.50000000");
+    assert_eq!(payload["wallet"]["refundable_balance"], "12.50000000");
 
     gateway_handle.abort();
 }
@@ -4402,8 +4402,8 @@ async fn gateway_creates_wallet_recharge_orders_locally_without_proxying_upstrea
         create_payload["order"]["wallet_id"],
         "wallet-recharge-create"
     );
-    assert_eq!(create_payload["order"]["amount_usd"], 10.0);
-    assert_eq!(create_payload["order"]["pay_amount"], 72.5);
+    assert_eq!(create_payload["order"]["amount_usd"], "10.00000000");
+    assert_eq!(create_payload["order"]["pay_amount"], "72.50000000");
     assert_eq!(create_payload["order"]["pay_currency"], "CNY");
     assert_eq!(create_payload["order"]["exchange_rate"], 7.25);
     assert_eq!(create_payload["order"]["payment_method"], "manual");
@@ -4779,7 +4779,7 @@ async fn gateway_creates_wallet_refunds_locally_without_proxying_upstream() {
     assert_eq!(create_payload["status"], "pending_approval");
     assert_eq!(create_payload["source_type"], "wallet_balance");
     assert_eq!(create_payload["refund_mode"], "offline_payout");
-    assert_eq!(create_payload["amount_usd"], 5.0);
+    assert_eq!(create_payload["amount_usd"], "5.00000000");
     assert_eq!(create_payload["reason"], "need refund");
 
     let idempotent_response = client
@@ -5181,10 +5181,10 @@ async fn gateway_handles_wallet_balance_locally_without_proxying_upstream() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["balance"], 15.5);
-    assert_eq!(payload["recharge_balance"], 12.5);
-    assert_eq!(payload["gift_balance"], 3.0);
-    assert_eq!(payload["refundable_balance"], 12.5);
+    assert_eq!(payload["balance"], "15.50000000");
+    assert_eq!(payload["recharge_balance"], "12.50000000");
+    assert_eq!(payload["gift_balance"], "3.00000000");
+    assert_eq!(payload["refundable_balance"], "12.50000000");
     assert_eq!(payload["currency"], "USD");
     assert_eq!(payload["limit_mode"], "finite");
     assert_eq!(payload["unlimited"], false);
@@ -5246,10 +5246,10 @@ async fn gateway_handles_ccswitch_usage_with_api_key_without_proxying_upstream()
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["is_valid"], true);
     assert_eq!(payload["plan_name"], "Aether");
-    assert_eq!(payload["remaining"], 15.5);
-    assert_eq!(payload["used"], 1.25);
+    assert_eq!(payload["remaining"], "15.50000000");
+    assert_eq!(payload["used"], "1.25000000");
     assert_eq!(payload["unit"], "USD");
-    assert_eq!(payload["wallet"]["wallet_balance"], 15.5);
+    assert_eq!(payload["wallet"]["wallet_balance"], "15.50000000");
     assert_eq!(payload["today"]["total_requests"], 1);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -5328,8 +5328,8 @@ async fn gateway_handles_ccswitch_usage_for_standalone_key_without_owner_usage()
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["is_valid"], true);
-    assert_eq!(payload["remaining"], 2.5);
-    assert_eq!(payload["used"], 0.5);
+    assert_eq!(payload["remaining"], "2.50000000");
+    assert_eq!(payload["used"], "0.50000000");
     assert_eq!(payload["wallet"]["wallet"]["id"], "wallet-standalone-1");
     assert_eq!(payload["today"]["total_requests"], 1);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -5406,7 +5406,7 @@ async fn gateway_handles_wallet_today_cost_locally_without_proxying_upstream() {
     assert_eq!(payload["total_requests"], 1);
     assert_eq!(payload["input_tokens"], 120);
     assert_eq!(payload["cache_read_tokens"], 15);
-    assert_eq!(payload["total_cost"], 1.25);
+    assert_eq!(payload["total_cost"], "1.25000000");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -5473,7 +5473,7 @@ async fn gateway_wallet_flow_today_entry_uses_live_settled_usage() {
     assert_eq!(payload["today_entry"]["total_requests"], 1);
     assert_eq!(payload["today_entry"]["input_tokens"], 120);
     assert_eq!(payload["today_entry"]["cache_read_tokens"], 15);
-    assert_eq!(payload["today_entry"]["total_cost"], 1.25);
+    assert_eq!(payload["today_entry"]["total_cost"], "1.25000000");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -9263,7 +9263,7 @@ async fn gateway_handles_users_me_detail_locally_without_proxying_upstream() {
     assert_eq!(payload["auth_source"], "local");
     assert_eq!(payload["has_password"], true);
     assert_eq!(payload["billing"]["id"], "wallet-auth-1");
-    assert_eq!(payload["billing"]["balance"], 15.5);
+    assert_eq!(payload["billing"]["balance"], "15.50000000");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -9697,7 +9697,7 @@ async fn gateway_handles_auth_ldap_login_locally_without_proxying_upstream() {
     assert_eq!(me_payload["id"], user_id);
     assert_eq!(me_payload["email"], "alice@example.com");
     assert_eq!(me_payload["username"], "alice");
-    assert_eq!(me_payload["billing"]["balance"], 9.5);
+    assert_eq!(me_payload["billing"]["balance"], "9.50000000");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -9706,7 +9706,7 @@ async fn gateway_handles_auth_ldap_login_locally_without_proxying_upstream() {
 
 #[tokio::test]
 async fn gateway_register_uses_zero_default_and_preserves_configured_gift() {
-    for (configured_gift, expected_gift) in [(None, 0.0), (Some(12.5), 12.5)] {
+    for (configured_gift, expected_gift) in [(None, "0.00000000"), (Some(12.5), "12.50000000")] {
         let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
             start_auth_gateway_with_builder(|| {
                 let mut config = vec![
@@ -10896,7 +10896,7 @@ async fn gateway_handles_auth_me_locally_without_proxying_upstream() {
     assert_eq!(payload["email"], "alice@example.com");
     assert_eq!(payload["username"], "alice");
     assert_eq!(payload["billing"]["id"], "wallet-auth-1");
-    assert_eq!(payload["billing"]["balance"], 15.5);
+    assert_eq!(payload["billing"]["balance"], "15.50000000");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -12351,7 +12351,10 @@ async fn gateway_rejects_payment_callback_with_mismatched_payment_method_locally
         .await
         .expect("json body should parse");
     assert_eq!(detail_payload["order"]["status"], "pending");
-    assert_eq!(detail_payload["order"]["refundable_amount_usd"], 0.0);
+    assert_eq!(
+        detail_payload["order"]["refundable_amount_usd"],
+        "0.00000000"
+    );
 
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
     gateway_handle.abort();

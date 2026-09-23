@@ -823,12 +823,12 @@ async fn wallet_audit_unsupported_adapter_is_non_mutating_and_http_fallback_is_p
         (
             "adjust",
             json!({"amount_usd":4.0,"balance_type":"recharge"}),
-            14.0,
+            "14.00000000",
         ),
         (
             "recharge",
             json!({"amount_usd":5.0,"payment_method":"admin_manual"}),
-            19.0,
+            "19.00000000",
         ),
     ] {
         let response = admin_client

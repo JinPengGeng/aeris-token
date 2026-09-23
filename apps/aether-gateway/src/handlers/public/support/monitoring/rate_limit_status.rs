@@ -49,19 +49,19 @@ fn daily_usage_available_payload(
     json!({
         "available": true,
         "status": "available",
-        "limit_usd": primary.map(|scope| scope.limit_usd),
-        "used_usd": primary.map(|scope| scope.used_usd),
-        "remaining_usd": primary.map(|scope| scope.remaining_usd),
+        "limit_usd": primary.map(|scope| crate::money_fixed::format_money(scope.limit_usd)),
+        "used_usd": primary.map(|scope| crate::money_fixed::format_money(scope.used_usd)),
+        "remaining_usd": primary.map(|scope| crate::money_fixed::format_money(scope.remaining_usd)),
         "scope": primary.map(|scope| scope.scope),
         "user": status.user.map(|scope| json!({
-            "limit_usd": scope.limit_usd,
-            "used_usd": scope.used_usd,
-            "remaining_usd": scope.remaining_usd,
+            "limit_usd": crate::money_fixed::format_money(scope.limit_usd),
+            "used_usd": crate::money_fixed::format_money(scope.used_usd),
+            "remaining_usd": crate::money_fixed::format_money(scope.remaining_usd),
         })),
         "key": status.key.map(|scope| json!({
-            "limit_usd": scope.limit_usd,
-            "used_usd": scope.used_usd,
-            "remaining_usd": scope.remaining_usd,
+            "limit_usd": crate::money_fixed::format_money(scope.limit_usd),
+            "used_usd": crate::money_fixed::format_money(scope.used_usd),
+            "remaining_usd": crate::money_fixed::format_money(scope.remaining_usd),
         })),
         "timezone": status.timezone,
         "window": "1d",
@@ -370,9 +370,9 @@ mod tests {
 
         assert_eq!(payload["status"], "available");
         assert_eq!(payload["scope"], "key");
-        assert_eq!(payload["limit_usd"], 5.0);
-        assert_eq!(payload["user"]["used_usd"], 4.0);
-        assert_eq!(payload["key"]["remaining_usd"], 2.0);
+        assert_eq!(payload["limit_usd"], "5.00000000");
+        assert_eq!(payload["user"]["used_usd"], "4.00000000");
+        assert_eq!(payload["key"]["remaining_usd"], "2.00000000");
         assert_eq!(payload["timezone"], "Asia/Shanghai");
     }
 

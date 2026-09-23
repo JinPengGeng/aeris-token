@@ -8,6 +8,7 @@ pub(in super::super) const ADMIN_WALLETS_API_KEY_GIFT_ADJUST_DETAIL: &str =
 
 #[derive(Debug, serde::Deserialize)]
 pub(in super::super) struct AdminWalletRechargeRequest {
+    #[serde(deserialize_with = "crate::money_fixed::deserialize_money")]
     pub(in super::super) amount_usd: f64,
     #[serde(default = "default_admin_wallet_payment_method")]
     pub(in super::super) payment_method: String,
@@ -17,6 +18,7 @@ pub(in super::super) struct AdminWalletRechargeRequest {
 
 #[derive(Debug, serde::Deserialize)]
 pub(in super::super) struct AdminWalletAdjustRequest {
+    #[serde(deserialize_with = "crate::money_fixed::deserialize_money")]
     pub(in super::super) amount_usd: f64,
     #[serde(default = "default_admin_wallet_balance_type")]
     pub(in super::super) balance_type: String,

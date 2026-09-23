@@ -95,13 +95,17 @@ use aether_data::repository::wallet::{
 
 #[derive(Debug, Deserialize)]
 struct WalletCreateRechargeRequest {
+    #[serde(deserialize_with = "crate::money_fixed::deserialize_money")]
     amount_usd: f64,
     payment_method: String,
     #[serde(default)]
     payment_provider: Option<String>,
     #[serde(default)]
     payment_channel: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::money_fixed::deserialize_optional_money"
+    )]
     pay_amount: Option<f64>,
     #[serde(default)]
     pay_currency: Option<String>,
@@ -663,12 +667,12 @@ fn build_wallet_payment_order_payload(
         "order_no": order_no,
         "wallet_id": wallet_id,
         "user_id": user_id,
-        "amount_usd": amount_usd,
-        "pay_amount": pay_amount,
+        "amount_usd": crate::money_fixed::format_money(amount_usd),
+        "pay_amount": pay_amount.map(crate::money_fixed::format_money),
         "pay_currency": pay_currency,
         "exchange_rate": exchange_rate,
-        "refunded_amount_usd": refunded_amount_usd,
-        "refundable_amount_usd": refundable_amount_usd,
+        "refunded_amount_usd": crate::money_fixed::format_money(refunded_amount_usd),
+        "refundable_amount_usd": crate::money_fixed::format_money(refundable_amount_usd),
         "payment_method": payment_method,
         "gateway_order_id": gateway_order_id,
         "gateway_response": sanitize_wallet_gateway_response(gateway_response),
@@ -901,10 +905,8 @@ fn wallet_test_recharge_payload_matches_request(
     order: &Value,
     payload: &NormalizedWalletCreateRechargeRequest,
 ) -> bool {
-    let amount_matches = order
-        .get("amount_usd")
-        .and_then(Value::as_f64)
-        .is_some_and(|value| {
+    let amount_matches =
+        crate::money_fixed::json_money_f64(order.get("amount_usd")).is_some_and(|value| {
             value.is_finite() && (value - payload.amount_usd).abs() <= PAYMENT_AMOUNT_EPSILON
         });
     let stored_method = order.get("payment_method").and_then(Value::as_str);
@@ -946,12 +948,9 @@ fn wallet_test_recharge_payload_matches_request(
         )
     });
     let pay_amount_matches = payload.pay_amount.is_none_or(|value| {
-        order
-            .get("pay_amount")
-            .and_then(Value::as_f64)
-            .is_some_and(|stored| {
-                stored.is_finite() && (stored - value).abs() <= PAYMENT_AMOUNT_EPSILON
-            })
+        crate::money_fixed::json_money_f64(order.get("pay_amount")).is_some_and(|stored| {
+            stored.is_finite() && (stored - value).abs() <= PAYMENT_AMOUNT_EPSILON
+        })
     });
     let currency_matches = payload.pay_currency.as_deref().is_none_or(|currency| {
         order

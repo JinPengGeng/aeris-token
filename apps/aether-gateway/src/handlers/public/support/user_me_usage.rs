@@ -575,7 +575,7 @@ fn build_users_me_usage_record_payload(
         "effective_input_tokens": users_me_usage_effective_input_tokens(item),
         "output_tokens": item.output_tokens,
         "total_tokens": item.total_tokens,
-        "cost": round_to(item.total_cost_usd, 6),
+        "cost": crate::money_fixed::format_money(item.total_cost_usd),
         "response_time_ms": item.response_time_ms,
         "first_byte_time_ms": item.first_byte_time_ms,
         "is_stream": item.is_stream,
@@ -635,7 +635,8 @@ fn build_users_me_usage_record_payload(
         payload["actual_service_tier"] = json!(actual_service_tier);
     }
     if include_actual_cost {
-        payload["actual_cost"] = json!(round_to(item.actual_total_cost_usd, 6));
+        payload["actual_cost"] =
+            json!(crate::money_fixed::format_money(item.actual_total_cost_usd));
         payload["rate_multiplier"] = json!(rate_multiplier);
     }
     payload
@@ -656,8 +657,8 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         "cache_creation_ephemeral_5m_input_tokens": item.cache_creation_ephemeral_5m_input_tokens,
         "cache_creation_ephemeral_1h_input_tokens": item.cache_creation_ephemeral_1h_input_tokens,
         "cache_read_input_tokens": item.cache_read_input_tokens,
-        "cost": round_to(item.total_cost_usd, 6),
-        "actual_cost": round_to(item.actual_total_cost_usd, 6),
+        "cost": crate::money_fixed::format_money(item.total_cost_usd),
+        "actual_cost": crate::money_fixed::format_money(item.actual_total_cost_usd),
         "rate_multiplier": item.settlement_rate_multiplier(),
         "response_time_ms": item.response_time_ms,
         "first_byte_time_ms": item.first_byte_time_ms,
@@ -872,10 +873,11 @@ fn build_users_me_usage_summary_by_model(
                     row.total_input_context,
                     row.cache_read_tokens,
                 ),
-                "total_cost_usd": round_to(row.total_cost_usd, 6),
+                "total_cost_usd": crate::money_fixed::format_money(row.total_cost_usd),
             });
             if include_actual_cost {
-                value["actual_total_cost_usd"] = json!(round_to(row.actual_total_cost_usd, 6));
+                value["actual_total_cost_usd"] =
+                    json!(crate::money_fixed::format_money(row.actual_total_cost_usd));
             }
             value
         })
@@ -902,7 +904,7 @@ fn build_users_me_usage_summary_by_provider(
                     row.total_input_context,
                     row.cache_read_tokens,
                 ),
-                "total_cost_usd": round_to(row.total_cost_usd, 6),
+                "total_cost_usd": crate::money_fixed::format_money(row.total_cost_usd),
                 "success_rate": if row.request_count == 0 {
                     100.0
                 } else {
@@ -938,7 +940,7 @@ fn build_users_me_usage_summary_by_api_format(
                     row.total_input_context,
                     row.cache_read_tokens,
                 ),
-                "total_cost_usd": round_to(row.total_cost_usd, 6),
+                "total_cost_usd": crate::money_fixed::format_money(row.total_cost_usd),
                 "avg_response_time_ms": if row.overall_response_time_samples == 0 {
                     0.0
                 } else {
@@ -1320,8 +1322,8 @@ pub(super) async fn handle_users_me_usage_get(
     let total_input_tokens = usage_summary.input_tokens;
     let total_output_tokens = usage_summary.output_tokens;
     let total_tokens = usage_summary.total_tokens;
-    let total_cost = round_to(usage_summary.total_cost_usd, 6);
-    let total_actual_cost = round_to(usage_summary.actual_total_cost_usd, 6);
+    let total_cost = crate::money_fixed::format_money(usage_summary.total_cost_usd);
+    let total_actual_cost = crate::money_fixed::format_money(usage_summary.actual_total_cost_usd);
     let avg_response_time = if usage_summary.response_time_samples == 0 {
         0.0
     } else {
@@ -1635,10 +1637,10 @@ pub(super) async fn handle_users_me_usage_heatmap_get(
             "date": date_str,
             "requests": requests,
             "total_tokens": total_tokens,
-            "total_cost": round_to(total_cost, 6),
+            "total_cost": crate::money_fixed::format_money(total_cost),
         });
         if include_actual_cost {
-            day["actual_total_cost"] = json!(round_to(actual_total_cost, 6));
+            day["actual_total_cost"] = json!(crate::money_fixed::format_money(actual_total_cost));
         }
         days.push(day);
         cursor = cursor
