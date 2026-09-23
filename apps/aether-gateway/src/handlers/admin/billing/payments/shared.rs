@@ -17,7 +17,10 @@ const ADMIN_PAYMENTS_DATA_UNAVAILABLE_DETAIL: &str = "Admin payments data unavai
 pub(super) struct AdminPaymentOrderCreditRequest {
     #[serde(default)]
     pub(super) gateway_order_id: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::money_fixed::deserialize_optional_money"
+    )]
     pub(super) pay_amount: Option<f64>,
     #[serde(default)]
     pub(super) pay_currency: Option<String>,
@@ -389,12 +392,12 @@ pub(super) fn build_admin_payment_order_payload(
         "order_no": record.order_no,
         "wallet_id": record.wallet_id,
         "user_id": record.user_id,
-        "amount_usd": record.amount_usd,
-        "pay_amount": record.pay_amount,
+        "amount_usd": crate::money_fixed::format_money(record.amount_usd),
+        "pay_amount": record.pay_amount.map(crate::money_fixed::format_money),
         "pay_currency": record.pay_currency,
         "exchange_rate": record.exchange_rate,
-        "refunded_amount_usd": record.refunded_amount_usd,
-        "refundable_amount_usd": record.refundable_amount_usd,
+        "refunded_amount_usd": crate::money_fixed::format_money(record.refunded_amount_usd),
+        "refundable_amount_usd": crate::money_fixed::format_money(record.refundable_amount_usd),
         "payment_method": record.payment_method,
         "gateway_order_id": record.gateway_order_id,
         "gateway_response": admin_payment_gateway_response_projection(record.gateway_response.as_ref()),

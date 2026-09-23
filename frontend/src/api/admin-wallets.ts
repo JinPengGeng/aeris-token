@@ -8,9 +8,9 @@ export interface AdminWallet extends WalletSummary {
   owner_type: 'user' | 'api_key'
   owner_name: string | null
   created_at: string
-  wallet_balance?: number | null
-  package_balance?: number | null
-  total_available_balance?: number | null
+  wallet_balance?: string | null
+  package_balance?: string | null
+  total_available_balance?: string | null
   daily_quota?: WalletDailyQuotaSummary | null
   deduction_order?: string[]
 }
@@ -71,13 +71,13 @@ export interface AdminGlobalRefundsListResponse {
 }
 
 export interface ManualRechargeRequest {
-  amount_usd: number
+  amount_usd: string
   payment_method?: string
   description?: string
 }
 
 export interface WalletAdjustRequest {
-  amount_usd: number
+  amount_usd: string
   balance_type?: 'recharge' | 'gift'
   description?: string
 }

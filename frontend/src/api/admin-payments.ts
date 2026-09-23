@@ -48,7 +48,7 @@ export interface AdminPaymentCallbacksResponse {
 
 export interface AdminPaymentCreditRequest {
   gateway_order_id?: string
-  pay_amount?: number
+  pay_amount?: string
   pay_currency?: string
   exchange_rate?: number
   gateway_response?: Record<string, unknown>
@@ -57,7 +57,7 @@ export interface AdminPaymentCreditRequest {
 export interface RedeemCodeBatch {
   id: string
   name: string
-  amount_usd: number
+  amount_usd: string
   currency: string
   balance_bucket: string
   total_count: number
@@ -93,7 +93,7 @@ export interface RedeemCodeRecord {
 
 export interface CreateRedeemCodeBatchRequest {
   name: string
-  amount_usd: number
+  amount_usd: string
   total_count: number
   expires_at?: string
   description?: string

@@ -66,9 +66,9 @@ pub(super) async fn build_admin_usage_cache_affinity_hit_analysis_response(
         "total_cache_read_tokens": summary.cache_read_tokens,
         "total_cache_creation_tokens": summary.cache_creation_tokens,
         "token_cache_hit_rate": token_cache_hit_rate,
-        "total_cache_read_cost_usd": round_to(summary.cache_read_cost_usd, 4),
-        "total_cache_creation_cost_usd": round_to(summary.cache_creation_cost_usd, 4),
-        "estimated_savings_usd": round_to(summary.cache_read_cost_usd * 9.0, 4),
+        "total_cache_read_cost_usd": crate::money_fixed::format_money(summary.cache_read_cost_usd),
+        "total_cache_creation_cost_usd": crate::money_fixed::format_money(summary.cache_creation_cost_usd),
+        "estimated_savings_usd": crate::money_fixed::format_money(summary.cache_read_cost_usd * 9.0),
     }))
     .into_response())
 }

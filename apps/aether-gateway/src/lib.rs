@@ -60,6 +60,7 @@ mod maintenance;
 mod management_token_auth;
 pub(crate) mod middleware;
 mod model_fetch;
+mod money_fixed;
 mod oauth;
 mod orchestration;
 mod plan_usage_policy;

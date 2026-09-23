@@ -657,6 +657,7 @@
 </template>
 
 <script setup lang="ts">
+import { moneyToNumber } from '@/utils/money'
 import { ref, computed, onMounted, watch } from 'vue'
 import { getI18nLocale, normalizeLocale, useI18n } from '@/i18n'
 import { useRoute, useRouter } from 'vue-router'
@@ -1193,8 +1194,8 @@ async function updatePreferences() {
 function getBillingUsagePercentage(): number {
   const billing = profile.value?.billing
   if (!billing) return 0
-  const consumed = billing.total_consumed || 0
-  const denominator = consumed + (billing.balance || 0)
+  const consumed = moneyToNumber(billing.total_consumed)
+  const denominator = consumed + moneyToNumber(billing.balance)
   if (denominator <= 0) return 0
   return Math.min(100, (consumed / denominator) * 100)
 }

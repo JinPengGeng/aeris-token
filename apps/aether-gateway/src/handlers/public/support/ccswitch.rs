@@ -43,7 +43,10 @@ fn ccswitch_usage_auth_error_response(
 }
 
 fn json_f64(value: &serde_json::Value, key: &str) -> Option<f64> {
-    value.get(key).and_then(serde_json::Value::as_f64)
+    value
+        .get(key)
+        .and_then(|field| crate::money_fixed::money_units_from_json(field).ok())
+        .map(crate::money_fixed::units_to_money)
 }
 
 fn json_bool(value: &serde_json::Value, key: &str) -> bool {
@@ -160,8 +163,8 @@ pub(super) async fn maybe_build_local_ccswitch_response(
         Json(json!({
             "is_valid": true,
             "plan_name": if unlimited { "Aether Unlimited" } else { "Aether" },
-            "remaining": remaining.map(|value| round_to(value.max(0.0), 6)),
-            "used": round_to(used_today.max(0.0), 6),
+            "remaining": remaining.map(|value| crate::money_fixed::format_money(value.max(0.0))),
+            "used": crate::money_fixed::format_money(used_today.max(0.0)),
             "unit": wallet_payload
                 .get("currency")
                 .and_then(serde_json::Value::as_str)

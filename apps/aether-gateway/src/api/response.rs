@@ -278,6 +278,7 @@ pub(crate) fn build_local_balance_denied_response_with_locale(
             "type": "insufficient_quota",
             "param": null,
             "code": "insufficient_quota",
+
         }
     });
     let client_format = if local_error_uses_openai_format(control_decision, None) {
