@@ -126,7 +126,8 @@ decision.
 ## Other public formats
 
 Claude Messages uses the Anthropic envelope (`type=error` with a nested
-`error` object), including `402/billing_error` for exhausted credit. Gemini
+`error` object) and returns `403/insufficient_quota` for exhausted credit (see
+the unified quota contract table above). Gemini
 retains its existing `error.code/message/status` envelope and resource-exhaustion
 semantics; this decision does not introduce a Gemini billing contract.
 Provider error bodies are not copied blindly across the public boundary;
@@ -161,7 +162,7 @@ their separate acceptance coverage.
 Local request-validation, authentication, access-policy, wallet, usage-limit and
 admission-overload builders use English messages. The unified
 quota-exhausted contract (OpenAI-family `insufficient_quota`, Claude
-`billing_error`, and the generic fallback envelope) and the local
+`insufficient_quota`, and the generic fallback envelope) and the local
 authentication/access-policy rejection messages negotiate English/Chinese via
 the request `Accept-Language` header: the gateway defaults to English, and any
 `zh` primary tag (for example `zh`, `zh-CN`, `zh-Hans`) selects Chinese
