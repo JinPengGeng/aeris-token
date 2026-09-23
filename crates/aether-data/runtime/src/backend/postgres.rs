@@ -50,6 +50,7 @@ use crate::repository::provider_catalog::{
     SqlxProviderCatalogReadRepository,
 };
 use crate::repository::provider_cost::ProviderCostRepository;
+use crate::repository::provider_cost_catalog::ProviderCostCatalogRepository;
 use crate::repository::proxy_nodes::{
     ProxyNodeReadRepository, ProxyNodeWriteRepository, SqlxProxyNodeRepository,
 };
@@ -139,6 +140,12 @@ impl PostgresBackend {
         Arc::new(aether_data_postgres::SqlxProviderCostRepository::new(
             self.pool_clone(),
         ))
+    }
+
+    pub fn provider_cost_catalog_repository(&self) -> Arc<dyn ProviderCostCatalogRepository> {
+        Arc::new(
+            aether_data_postgres::PostgresProviderCostCatalogRepository::new(self.pool_clone()),
+        )
     }
 
     pub fn emergency_chain_grant_repository(&self) -> Arc<dyn EmergencyChainGrantRepository> {
