@@ -158,7 +158,7 @@ SELECT
   api_formats,
   auth_type_by_format,
   allow_auth_channel_mismatch_formats,
-  COALESCE(api_key, encrypted_key) AS api_key,
+  COALESCE(encrypted_key, api_key) AS api_key,
   auth_config,
   note,
   internal_priority,
@@ -217,7 +217,7 @@ SELECT
   api_formats,
   auth_type_by_format,
   allow_auth_channel_mismatch_formats,
-  COALESCE(api_key, encrypted_key) AS api_key,
+  COALESCE(encrypted_key, api_key) AS api_key,
   auth_config,
   note,
   internal_priority,
@@ -353,7 +353,8 @@ SET
   provider_id = $2,
   api_formats = $3,
   auth_type = $4,
-  api_key = $5,
+  encrypted_key = $5,
+  api_key = NULL,
   auth_config = $6,
   name = $7,
   note = $8,
@@ -386,7 +387,7 @@ SET
 WHERE id = $1
   AND provider_id = $2
   AND auth_type = $4
-  AND api_key IS NOT DISTINCT FROM $5
+  AND COALESCE(encrypted_key, api_key) IS NOT DISTINCT FROM $5
   AND auth_config IS NOT DISTINCT FROM $6
 "#;
 
@@ -578,8 +579,9 @@ fn push_admin_key_assignments<'args>(
         .push_bind(&key.api_formats)
         .push(", auth_type = ")
         .push_bind(&key.auth_type)
-        .push(", api_key = ")
+        .push(", encrypted_key = ")
         .push_bind(&key.encrypted_api_key)
+        .push(", api_key = NULL")
         .push(", auth_config = ")
         .push_bind(&key.encrypted_auth_config)
         .push(", name = ")
@@ -970,6 +972,21 @@ impl SqlxProviderCatalogReadRepository {
         .await
     }
 
+    pub async fn list_keys_with_legacy_credential(
+        &self,
+        limit: i32,
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        let select = LIST_KEYS_BY_IDS_PREFIX
+            .trim_end()
+            .strip_suffix("WHERE id IN (")
+            .expect("list keys prefix keeps its IN filter suffix");
+        let mut builder = QueryBuilder::<Postgres>::new(select);
+        builder.push(" FROM provider_api_keys WHERE api_key IS NOT NULL");
+        builder.push(" ORDER BY id ASC LIMIT ");
+        builder.push_bind(i64::from(limit.clamp(1, 1000)));
+        collect_query_rows(builder.build().fetch(&self.pool), map_key_row).await
+    }
+
     pub async fn update_key_oauth_runtime_state(
         &self,
         key_id: &str,
@@ -1081,9 +1098,13 @@ SET
   END,
   oauth_invalid_reason = $3,
   auth_config = $4,
+  encrypted_key = CASE
+    WHEN $5::text IS NULL THEN encrypted_key
+    ELSE $5
+  END,
   api_key = CASE
     WHEN $5::text IS NULL THEN api_key
-    ELSE $5
+    ELSE NULL
   END,
   expires_at = CASE
     WHEN $6::boolean IS FALSE THEN expires_at
@@ -1107,7 +1128,7 @@ WHERE id = $1
     ($8::jsonb IS NULL AND $9::text IS NULL)
     OR jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'
   )
-  AND ($14::boolean IS FALSE OR api_key IS NOT DISTINCT FROM $15)
+  AND ($14::boolean IS FALSE OR COALESCE(encrypted_key, api_key) IS NOT DISTINCT FROM $15)
   AND ($16::text IS NULL OR auth_type = $16)
   AND ($17::text IS NULL OR provider_id = $17)
   AND (
@@ -1675,7 +1696,7 @@ INSERT INTO provider_api_keys (
   api_formats,
   auth_type_by_format,
   auth_type,
-  api_key,
+  encrypted_key,
   auth_config,
   name,
   note,
@@ -2298,10 +2319,10 @@ WHERE id = $1
         let rows_affected = sqlx::query(
             r#"
 UPDATE provider_api_keys
-SET api_key = $5, encrypted_key = NULL, auth_config = $6
+SET encrypted_key = $5, api_key = NULL, auth_config = $6
 WHERE id = $1
   AND provider_id = $2
-  AND COALESCE(api_key, encrypted_key) IS NOT DISTINCT FROM $3
+  AND COALESCE(encrypted_key, api_key) IS NOT DISTINCT FROM $3
   AND auth_config IS NOT DISTINCT FROM $4
 "#,
         )
@@ -2348,7 +2369,7 @@ WHERE id = $1
         builder
             .push(" WHERE id = ")
             .push_bind(&key.id)
-            .push(" AND api_key IS NOT DISTINCT FROM ")
+            .push(" AND COALESCE(encrypted_key, api_key) IS NOT DISTINCT FROM ")
             .push_bind(update.expected_credential.encrypted_api_key.as_deref())
             .push(" AND auth_config IS NOT DISTINCT FROM ")
             .push_bind(update.expected_encrypted_auth_config.as_deref())
@@ -2364,7 +2385,7 @@ WHERE id = $1
         if update.codex_rotation.is_some() {
             builder
                 .push(" AND jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'")
-                .push(" AND NOT (api_key IS NOT DISTINCT FROM ")
+                .push(" AND NOT (COALESCE(encrypted_key, api_key) IS NOT DISTINCT FROM ")
                 .push_bind(key.encrypted_api_key.as_deref())
                 .push(" AND auth_config IS NOT DISTINCT FROM ")
                 .push_bind(key.encrypted_auth_config.as_deref())
@@ -2482,7 +2503,7 @@ WHERE id = $1
 DELETE FROM provider_api_keys
 WHERE id = $1
   AND auth_config IS NOT DISTINCT FROM $2
-  AND api_key IS NOT DISTINCT FROM $3
+  AND COALESCE(encrypted_key, api_key) IS NOT DISTINCT FROM $3
   AND auth_type = $4
   AND provider_id = $5
   AND EXISTS (
@@ -3011,6 +3032,13 @@ impl ProviderCatalogReadRepository for SqlxProviderCatalogReadRepository {
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKeyStats>, DataLayerError> {
         Self::list_key_stats_by_provider_ids(self, provider_ids).await
+    }
+
+    async fn list_keys_with_legacy_credential(
+        &self,
+        limit: i32,
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        Self::list_keys_with_legacy_credential(self, limit).await
     }
 }
 
@@ -3955,7 +3983,7 @@ SELECT
         assert!(
             source
                 .matches(
-                    "auth_type_by_format,\n  allow_auth_channel_mismatch_formats,\n  COALESCE(api_key, encrypted_key) AS api_key",
+                    "auth_type_by_format,\n  allow_auth_channel_mismatch_formats,\n  COALESCE(encrypted_key, api_key) AS api_key",
                 )
                 .count()
                 >= 2
@@ -4151,22 +4179,31 @@ VALUES ($1, $2, $3, 0, 0, $4::jsonb)
         }
         assert!(sql.contains("is_active = $25"));
         assert!(sql.contains("rpm_limit = $12"));
-        assert!(sql.contains("api_key is not distinct from $5"));
+        assert!(sql.contains("coalesce(encrypted_key, api_key) is not distinct from $5"));
         assert!(sql.contains("auth_config is not distinct from $6"));
     }
 
     #[test]
-    fn credential_cas_migrates_legacy_encrypted_key_with_null_safe_fence() {
+    fn credential_cas_writes_encrypted_key_and_clears_legacy_column() {
         let source = include_str!("provider_catalog.rs");
-        assert!(source.contains("SET api_key = $5, encrypted_key = NULL, auth_config = $6"));
-        assert!(source.contains("AND COALESCE(api_key, encrypted_key) IS NOT DISTINCT FROM $3"));
+        assert!(source.contains("SET encrypted_key = $5, api_key = NULL, auth_config = $6"));
+        assert!(source.contains("AND COALESCE(encrypted_key, api_key) IS NOT DISTINCT FROM $3"));
+    }
+
+    #[test]
+    fn legacy_credential_sweep_lists_only_rows_with_legacy_column_set() {
+        let source = include_str!("provider_catalog.rs").replace("\r\n", "\n");
+        assert!(source.contains("pub async fn list_keys_with_legacy_credential"));
+        assert!(source.contains(".strip_suffix(\"WHERE id IN (\")"));
+        assert!(source.contains("FROM provider_api_keys WHERE api_key IS NOT NULL"));
+        assert!(source.contains("ORDER BY id ASC LIMIT "));
     }
 
     #[test]
     fn admin_credential_cas_has_atomic_rotation_guards() {
         let source = include_str!("provider_catalog.rs");
         for predicate in [
-            "api_key IS NOT DISTINCT FROM ",
+            "COALESCE(encrypted_key, api_key) IS NOT DISTINCT FROM ",
             "auth_config IS NOT DISTINCT FROM ",
             "jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'",
             "jsonb_typeof(COALESCE(status_snapshot::jsonb, '{}'::jsonb)) = 'object'",

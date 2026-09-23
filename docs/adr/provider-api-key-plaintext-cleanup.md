@@ -31,3 +31,7 @@
 - 阶段 1 之前，本批保持 `COALESCE(api_key, encrypted_key)` 语义不变，避免“密文列为空时把可用密钥读成 NULL”的可用性回归。
 - 迁移脚本必须幂等且带 checksum（遵循现有 migrations 纪律）。
 - 删除明文列不可逆，必须与运维确认备份/回滚方案后方可执行。
+
+## 进展
+
+- 2026-09-23（阶段 1+2 合并实施）：数据层写入路径改为只写 `encrypted_key` 并将 `api_key` 置 NULL；读取/CAS/删除围栏统一改为 `COALESCE(encrypted_key, api_key)`（密文优先、明文 legacy fallback）；新增 maintenance 任务 `provider_credential_sweep`（启动即跑一次，此后每 5 分钟幂等巡检），把 `api_key` 列残余行搬入 `encrypted_key`（明文行先加密、已是密文的行原样搬移、无法用任何已配置 key 解密的密文行跳过并告警）。未删列——阶段 3 的 `DROP COLUMN` 仍为单独后续批次。

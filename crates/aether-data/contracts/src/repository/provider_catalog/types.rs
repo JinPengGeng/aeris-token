@@ -1474,6 +1474,17 @@ pub trait ProviderCatalogReadRepository: Send + Sync {
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKeyStats>, crate::DataLayerError>;
+
+    /// Lists key records whose credential still lives in the legacy `api_key`
+    /// column (i.e. `api_key IS NOT NULL`), for the one-time credential-column
+    /// sweep that moves secrets into `encrypted_key`. Repositories without a
+    /// legacy column return an empty list.
+    async fn list_keys_with_legacy_credential(
+        &self,
+        _limit: i32,
+    ) -> Result<Vec<StoredProviderCatalogKey>, crate::DataLayerError> {
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait]
