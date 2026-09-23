@@ -29,8 +29,10 @@ kill_switch:
 
 commands:
   prefix: /agent
-  supported: [triage, plan, review, status, cancel, implement, retry-write, merge]
-  maintainer_only: [implement, retry-write, merge]
+  # 只读体系（#179）只支持以下五个命令；Writer 时代的 implement/retry-write/merge
+  # 随 8 个旧 workflow 一并退役，router 从不解析它们。
+  supported: [triage, plan, review, status, cancel]
+  maintainer_only: []
   accepted_author_associations: [OWNER, MEMBER, COLLABORATOR]
   ignore_actors:
     - github-actions[bot]
