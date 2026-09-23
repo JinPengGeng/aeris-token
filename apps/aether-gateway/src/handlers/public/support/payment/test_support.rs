@@ -113,7 +113,7 @@ pub(super) async fn handle_payment_callback_with_test_store(
     if let Some(gateway_order_id) = payload.gateway_order_id.as_deref() {
         order.payload["gateway_order_id"] = json!(gateway_order_id);
     }
-    order.payload["refundable_amount_usd"] = json!(order_amount);
+    order.payload["refundable_amount_usd"] = json!(crate::money_fixed::format_money(order_amount));
     order.payload["paid_at"] = json!(now.clone());
     order.payload["credited_at"] = json!(now);
     callback_store.push(PaymentTestCallbackRecord {

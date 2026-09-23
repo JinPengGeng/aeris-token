@@ -404,7 +404,7 @@ async fn gateway_reports_admin_quota_status_for_multiple_keys_with_limited_key_i
     assert_eq!(key_2["concurrency"]["current"], json!(0));
     assert_eq!(key_2["concurrency"]["limit"], json!(null));
     assert_eq!(key_2["concurrency"]["limited"], json!(false));
-    assert_eq!(key_2["daily_usage"]["used_usd"], "0.00000000");
+    assert_eq!(key_2["daily_usage"]["used_usd"], json!(0.0));
     // key-2 has no explicit daily limit: falls back to the system default.
     assert_eq!(key_2["daily_usage"]["limit_usd"], json!(0.10));
     assert_eq!(key_2["daily_usage"]["limited"], json!(false));

@@ -882,7 +882,7 @@ async fn gateway_handles_admin_usage_attribution_locally_with_metric_shares() {
     assert_eq!(payload["provider"]["id"], "provider-openai");
     assert_eq!(payload["group_by"], "user");
     assert_eq!(payload["metric"], "actual_cost");
-    assert_eq!(payload["total"], 1.0);
+    assert_eq!(payload["total"], "1.00000000");
     let items = payload["items"].as_array().expect("items array");
     assert_eq!(items.len(), 2);
     assert_eq!(items[0]["id"], "user-1");
@@ -959,7 +959,7 @@ async fn gateway_usage_attribution_provider_name_matches_legacy_rows_only() {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["provider"]["name"], "OpenAI");
-    assert_eq!(payload["total"], 0.7);
+    assert_eq!(payload["total"], "0.70000000");
     let items = payload["items"].as_array().expect("items array");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], "legacy-user");
@@ -1033,7 +1033,7 @@ async fn gateway_usage_attribution_sorts_metric_before_visible_limit() {
     assert_eq!(items[0]["id"], "user-zz-high-cost");
     assert_eq!(items[0]["actual_cost"], "9.00000000");
     assert_eq!(payload["others"]["requests"], 10_001);
-    assert_eq!(payload["total"], 19.001);
+    assert_eq!(payload["total"], "19.00100000");
 
     gateway_handle.abort();
 }
@@ -1101,7 +1101,7 @@ async fn gateway_handles_admin_usage_attribution_for_legacy_provider_name_only()
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["provider"]["name"], "OpenAI");
-    assert_eq!(payload["total"], 0.7);
+    assert_eq!(payload["total"], "0.70000000");
     let items = payload["items"].as_array().expect("items array");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], "legacy-user");
@@ -1178,7 +1178,7 @@ async fn gateway_handles_admin_usage_attribution_without_internal_group_truncati
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], "user-zz-high-cost");
     assert_eq!(items[0]["actual_cost"], "9.00000000");
-    assert_eq!(payload["total"], 19.001);
+    assert_eq!(payload["total"], "19.00100000");
     assert_eq!(payload["others"]["requests"], 10_001);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -3834,9 +3834,9 @@ async fn gateway_handles_admin_usage_cache_affinity_hit_analysis_locally_with_tr
     assert_eq!(payload["total_cache_read_tokens"], 50);
     assert_eq!(payload["total_cache_creation_tokens"], 15);
     assert_eq!(payload["token_cache_hit_rate"], 35.71);
-    assert_eq!(payload["total_cache_read_cost_usd"], 0.02);
-    assert_eq!(payload["total_cache_creation_cost_usd"], 0.015);
-    assert_eq!(payload["estimated_savings_usd"], 0.18);
+    assert_eq!(payload["total_cache_read_cost_usd"], "0.02000000");
+    assert_eq!(payload["total_cache_creation_cost_usd"], "0.01500000");
+    assert_eq!(payload["estimated_savings_usd"], "0.18000000");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

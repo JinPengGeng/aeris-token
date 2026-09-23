@@ -679,9 +679,7 @@ fn dashboard_build_daily_stats_payload(
                 })
                 .collect::<Vec<_>>();
             model_breakdown.sort_by(|left, right| {
-                right["cost"]
-                    .as_f64()
-                    .unwrap_or_default()
+                dashboard_json_money(&right["cost"])
                     .partial_cmp(&dashboard_json_money(&left["cost"]))
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| {
@@ -759,9 +757,7 @@ fn dashboard_build_daily_stats_payload(
         })
         .collect::<Vec<_>>();
     model_summary_payload.sort_by(|left, right| {
-        right["cost"]
-            .as_f64()
-            .unwrap_or_default()
+        dashboard_json_money(&right["cost"])
             .partial_cmp(&dashboard_json_money(&left["cost"]))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
@@ -779,9 +775,7 @@ fn dashboard_build_daily_stats_payload(
             })
             .collect::<Vec<_>>();
         items.sort_by(|left, right| {
-            right["cost"]
-                .as_f64()
-                .unwrap_or_default()
+            dashboard_json_money(&right["cost"])
                 .partial_cmp(&dashboard_json_money(&left["cost"]))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });

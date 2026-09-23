@@ -326,8 +326,8 @@ async fn gateway_handles_admin_stats_provider_quota_usage_locally_with_trusted_a
     assert_eq!(payload["providers"][0]["usage_percent"], 80.0);
     assert_eq!(payload["providers"][1]["id"], "provider-openai");
     assert_eq!(payload["providers"][1]["quota_usd"], 100.0);
-    assert_eq!(payload["providers"][1]["used_usd"], "25.00000000");
-    assert_eq!(payload["providers"][1]["remaining_usd"], "75.00000000");
+    assert_eq!(payload["providers"][1]["used_usd"], 25.0);
+    assert_eq!(payload["providers"][1]["remaining_usd"], 75.0);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -418,9 +418,9 @@ async fn gateway_handles_admin_stats_comparison_locally_with_trusted_admin_princ
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["current"]["total_requests"], 1);
     assert_eq!(payload["current"]["total_tokens"], 150);
-    assert_eq!(payload["current"]["total_cost"], "0.30000000");
+    assert_eq!(payload["current"]["total_cost"], 0.3);
     assert_eq!(payload["comparison"]["total_requests"], 1);
-    assert_eq!(payload["comparison"]["total_cost"], "0.20000000");
+    assert_eq!(payload["comparison"]["total_cost"], 0.2);
     assert_eq!(payload["current_start"], "2024-03-21");
     assert_eq!(payload["comparison_start"], "2024-03-20");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -523,9 +523,9 @@ async fn gateway_handles_admin_stats_cost_forecast_locally_with_trusted_admin_pr
         Some(2)
     );
     assert_eq!(payload["history"][0]["date"], "2024-03-21");
-    assert_eq!(payload["history"][0]["total_cost"], "0.10000000");
+    assert_eq!(payload["history"][0]["total_cost"], 0.1);
     assert_eq!(payload["history"][1]["date"], "2024-03-22");
-    assert_eq!(payload["history"][1]["total_cost"], "0.20000000");
+    assert_eq!(payload["history"][1]["total_cost"], 0.2);
     assert_eq!(
         payload["forecast"].as_array().map(|items| items.len()),
         Some(2)

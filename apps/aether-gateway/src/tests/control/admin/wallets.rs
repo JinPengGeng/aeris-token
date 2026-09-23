@@ -637,10 +637,10 @@ async fn gateway_handles_admin_wallets_detail_locally_with_trusted_admin_princip
     assert_eq!(payload["user_id"], json!("user-123"));
     assert_eq!(payload["owner_type"], json!("user"));
     assert_eq!(payload["owner_name"], json!("alice"));
-    assert_eq!(payload["balance"], json!(15.0));
-    assert_eq!(payload["recharge_balance"], json!(12.5));
-    assert_eq!(payload["gift_balance"], json!(2.5));
-    assert_eq!(payload["refundable_balance"], json!(12.5));
+    assert_eq!(payload["balance"], json!("15.00000000"));
+    assert_eq!(payload["recharge_balance"], json!("12.50000000"));
+    assert_eq!(payload["gift_balance"], json!("2.50000000"));
+    assert_eq!(payload["refundable_balance"], json!("12.50000000"));
     assert_eq!(payload["unlimited"], json!(false));
     assert_eq!(payload["pending_refund_count"], serde_json::Value::Null);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);

@@ -1253,15 +1253,9 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
     assert_eq!(payload["users"][0]["request_count"], json!(0));
     assert_eq!(payload["users"][0]["total_tokens"], json!(0));
     assert_eq!(payload["users"][0]["wallet"]["balance"], 12.5);
-    assert_eq!(
-        payload["users"][0]["wallet"]["recharge_balance"],
-        "10.00000000"
-    );
-    assert_eq!(payload["users"][0]["wallet"]["gift_balance"], "2.50000000");
-    assert_eq!(
-        payload["users"][0]["wallet"]["refundable_balance"],
-        "10.00000000"
-    );
+    assert_eq!(payload["users"][0]["wallet"]["recharge_balance"], 10.0);
+    assert_eq!(payload["users"][0]["wallet"]["gift_balance"], 2.5);
+    assert_eq!(payload["users"][0]["wallet"]["refundable_balance"], 10.0);
     assert_eq!(payload["users"][0]["unlimited"], json!(false));
     assert_eq!(
         payload["users"][0]["api_keys"][0]["credential_state"],
