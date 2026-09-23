@@ -2101,6 +2101,84 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse([])
   },
 
+  'GET /api/admin/usage/margin/stats': async (config) => {
+    await delay()
+    requireAdmin()
+    const params = config.params || {}
+    const granularity = params.granularity || 'day'
+    const records = getUsageRecords()
+
+    // 毛利报表 mock:按 模型 x 供应商 x 时间粒度 聚合,成本按 70% 估算,
+    // 模拟少量 unknown 成本行(毛利输出 null)。
+    const buckets = new Map<string, {
+      period_start: string
+      model: string
+      provider_id: string
+      request_count: number
+      revenue_units: number
+      cost_units: number
+      estimated_requests: number
+      unknown_requests: number
+    }>()
+
+    for (const r of records) {
+      const date = new Date(r.created_at || Date.now())
+      const periodStart = granularity === 'month'
+        ? new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1))
+        : granularity === 'week'
+          ? new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - date.getUTCDay()))
+          : new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
+      const period = periodStart.toISOString().slice(0, 10)
+      const providerId = r.provider || 'unknown'
+      const key = `${period}|${r.model}|${providerId}`
+      const revenue = r.cost * 1e8
+      const isUnknown = (r.model || '').length % 5 === 0
+      const bucket = buckets.get(key) || {
+        period_start: period,
+        model: r.model,
+        provider_id: providerId,
+        request_count: 0,
+        revenue_units: 0,
+        cost_units: 0,
+        estimated_requests: 0,
+        unknown_requests: 0
+      }
+      bucket.request_count += 50
+      bucket.revenue_units += revenue * 50
+      if (isUnknown) {
+        bucket.unknown_requests += 50
+      } else {
+        bucket.cost_units += revenue * 0.7 * 50
+        bucket.estimated_requests += 50
+      }
+      buckets.set(key, bucket)
+    }
+
+    const formatUnits = (units: number) => (units / 1e8).toFixed(8)
+    return createMockResponse(
+      Array.from(buckets.values()).map((bucket) => ({
+        period_start: bucket.period_start,
+        model: bucket.model,
+        provider_id: bucket.provider_id,
+        request_count: bucket.request_count,
+        revenue: formatUnits(bucket.revenue_units),
+        cost: formatUnits(bucket.cost_units),
+        margin: bucket.unknown_requests > 0 ? null : formatUnits(bucket.revenue_units - bucket.cost_units),
+        margin_rate: bucket.unknown_requests > 0
+          ? null
+          : Number((((bucket.revenue_units - bucket.cost_units) / bucket.revenue_units) * 100).toFixed(2)),
+        currency: 'USD',
+        cost_coverage: {
+          estimated_requests: bucket.estimated_requests,
+          known_requests: 0,
+          unknown_requests: bucket.unknown_requests,
+          total_requests: bucket.request_count,
+          estimated_share_percent: Number(((bucket.estimated_requests / bucket.request_count) * 100).toFixed(2))
+        }
+      }))
+    )
+  },
+
   'GET /api/admin/usage/active': async () => {
     await delay()
     requireAdmin()

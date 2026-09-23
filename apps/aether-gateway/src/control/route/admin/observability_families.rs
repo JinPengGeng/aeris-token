@@ -416,6 +416,19 @@ pub(super) fn classify_admin_observability_family_route(
     } else if method == http::Method::GET
         && matches!(
             normalized_path,
+            "/api/admin/usage/margin/stats" | "/api/admin/usage/margin/stats/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "usage_manage",
+            "margin_report",
+            "admin:usage",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
             "/api/admin/usage/attribution" | "/api/admin/usage/attribution/"
         )
     {

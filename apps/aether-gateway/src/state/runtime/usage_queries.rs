@@ -121,6 +121,16 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn aggregate_margin_report(
+        &self,
+        query: &usage::MarginReportQuery,
+    ) -> Result<Vec<usage::StoredMarginReportRow>, GatewayError> {
+        self.data
+            .aggregate_margin_report(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn summarize_usage_audits(
         &self,
         query: &usage::UsageAuditSummaryQuery,

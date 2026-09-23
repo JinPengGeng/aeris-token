@@ -4,6 +4,7 @@ mod cache_affinity_hit_analysis;
 mod cache_affinity_interval_timeline;
 mod cache_affinity_ttl_analysis;
 mod heatmap;
+mod margin;
 
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
@@ -99,6 +100,17 @@ pub(super) async fn maybe_build_local_admin_usage_analytics_response(
             )
             .await
             .map(Some);
+        }
+        Some("margin_report")
+            if request_context.request_method == http::Method::GET
+                && matches!(
+                    request_context.request_path.as_str(),
+                    "/api/admin/usage/margin/stats" | "/api/admin/usage/margin/stats/"
+                ) =>
+        {
+            return margin::build_admin_usage_margin_stats_response(state, request_context)
+                .await
+                .map(Some);
         }
         _ => {}
     }

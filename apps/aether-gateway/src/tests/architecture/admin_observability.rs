@@ -534,6 +534,14 @@ fn admin_usage_root_stays_thin() {
         "usage/analytics_routes/mod.rs should delegate aggregation handling to aggregation owner"
     );
     assert!(
+        analytics_routes.contains("mod margin;"),
+        "usage/analytics_routes/mod.rs should register margin owner"
+    );
+    assert!(
+        analytics_routes.contains("margin::build_admin_usage_margin_stats_response"),
+        "usage/analytics_routes/mod.rs should delegate margin handling to margin owner"
+    );
+    assert!(
         !workspace_file_exists(
             "apps/aether-gateway/src/handlers/admin/observability/usage/analytics_routes.rs"
         ),

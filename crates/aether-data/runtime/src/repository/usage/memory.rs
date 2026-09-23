@@ -16,7 +16,7 @@ use aether_data_contracts::repository::usage::{
     StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
     StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
     StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UsageAuditAggregationGroupBy,
-    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery,
+    MarginReportQuery, StoredMarginReportRow, UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery,
     UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
     UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
     UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCostSavingsSummaryQuery,
@@ -1700,6 +1700,16 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             items.truncate(query.limit);
         }
         Ok(items)
+    }
+
+    async fn aggregate_margin_report(
+        &self,
+        _query: &MarginReportQuery,
+    ) -> Result<Vec<StoredMarginReportRow>, DataLayerError> {
+        // Margin reporting is sourced from settled attempt funding facts
+        // (`request_fund_reservations.terminal_facts`), which the in-memory
+        // usage repository never holds.
+        Ok(Vec::new())
     }
 
     async fn summarize_usage_audits(

@@ -161,6 +161,31 @@ export interface UsageByApiFormat {
   cache_hit_rate?: number
 }
 
+// 毛利报表行(1e-8 定点字符串金额)。margin 为 null 表示该组合存在
+// certainty=unknown 的成本快照,毛利未知而非零成本。
+export interface UsageMarginCostCoverage {
+  estimated_requests: number
+  known_requests: number
+  unknown_requests: number
+  total_requests: number
+  estimated_share_percent: number
+}
+
+export interface UsageMarginRow {
+  period_start: string // YYYY-MM-DD (UTC)
+  model: string
+  provider_id: string
+  request_count: number
+  revenue: string
+  cost: string
+  margin: string | null
+  margin_rate: number | null
+  currency: string | null
+  cost_coverage: UsageMarginCostCoverage
+}
+
+export type UsageMarginGranularity = 'day' | 'week' | 'month'
+
 export interface UsageFilters {
   user_id?: string // UUID
   user_group_id?: string // UUID
@@ -524,6 +549,28 @@ export const usageApi = {
       async () => {
         const response = await apiClient.get<T>('/api/admin/usage/aggregation/stats', {
           params: { group_by: groupBy, ...filters },
+          timeout: USAGE_ANALYTICS_REQUEST_TIMEOUT_MS,
+        })
+        return response.data
+      },
+      options?.skipCache ? 0 : USAGE_ANALYTICS_CACHE_TTL_MS
+    )
+  },
+
+  /**
+   * Get margin report (revenue - frozen provider cost) grouped by
+   * period x model x provider (RESTful API, admin only).
+   */
+  async getUsageMarginStats(
+    filters?: UsageFilters & { granularity?: UsageMarginGranularity; limit?: number },
+    options?: UsageRequestOptions
+  ): Promise<UsageMarginRow[]> {
+    const cacheKey = `usage-margin-${JSON.stringify(filters || {})}${options?.skipCache ? ':fresh' : ''}`
+    return cachedRequest(
+      cacheKey,
+      async () => {
+        const response = await apiClient.get<UsageMarginRow[]>('/api/admin/usage/margin/stats', {
+          params: filters,
           timeout: USAGE_ANALYTICS_REQUEST_TIMEOUT_MS,
         })
         return response.data

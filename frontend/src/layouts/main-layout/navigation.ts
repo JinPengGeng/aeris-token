@@ -122,6 +122,7 @@ export function buildNavigation(options: {
         { name: t('nav.healthMonitor'), href: '/admin/health-monitor', icon: Activity },
         { name: t('nav.userStats'), href: '/admin/user-stats', icon: BarChart3 },
         { name: t('nav.costAnalysis'), href: '/admin/cost-analysis', icon: Gauge },
+        { name: t('nav.marginReport'), href: '/admin/margin-report', icon: Gauge },
         { name: t('nav.performanceAnalysis'), href: '/admin/performance-analysis', icon: Activity },
         ...activeModuleItems(modules, 'overview'),
       ]
