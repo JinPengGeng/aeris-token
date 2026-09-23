@@ -26,6 +26,7 @@ export interface SystemConfig {
   referral_recharge_percent: number
   referral_headcount_amount_usd: number
   referral_headcount_trigger: string
+  referral_require_first_recharge: boolean
   referral_lifetime_reward_cap_usd: number
   registration_privacy_policy_enabled: boolean
   registration_privacy_policy_format: string
@@ -78,6 +79,7 @@ const CONFIG_KEYS = [
   'referral_recharge_percent',
   'referral_headcount_amount_usd',
   'referral_headcount_trigger',
+  'referral_require_first_recharge',
   'referral_lifetime_reward_cap_usd',
   'registration_privacy_policy_enabled',
   'registration_privacy_policy_format',
@@ -132,6 +134,7 @@ function createDefaultConfig(): SystemConfig {
     referral_recharge_percent: 5,
     referral_headcount_amount_usd: 0,
     referral_headcount_trigger: 'registration',
+    referral_require_first_recharge: false,
     referral_lifetime_reward_cap_usd: 100,
     registration_privacy_policy_enabled: false,
     registration_privacy_policy_format: 'markdown',
@@ -215,6 +218,7 @@ export function useSystemConfig() {
       systemConfig.value.referral_recharge_percent !== originalConfig.value.referral_recharge_percent ||
       systemConfig.value.referral_headcount_amount_usd !== originalConfig.value.referral_headcount_amount_usd ||
       systemConfig.value.referral_headcount_trigger !== originalConfig.value.referral_headcount_trigger ||
+      systemConfig.value.referral_require_first_recharge !== originalConfig.value.referral_require_first_recharge ||
       systemConfig.value.referral_lifetime_reward_cap_usd !==
       originalConfig.value.referral_lifetime_reward_cap_usd ||
       systemConfig.value.registration_privacy_policy_enabled !==
@@ -451,6 +455,11 @@ export function useSystemConfig() {
           description: '邀请人头返利触发时机',
         },
         {
+          key: 'referral_require_first_recharge',
+          value: systemConfig.value.referral_require_first_recharge,
+          description: '开启后强制要求被邀请人完成首笔真实支付后才发放人头奖励（比例返利不受影响）',
+        },
+        {
           key: 'referral_lifetime_reward_cap_usd',
           value: systemConfig.value.referral_lifetime_reward_cap_usd,
           description: '每位邀请人终身返利上限（美元）',
@@ -518,6 +527,8 @@ export function useSystemConfig() {
           systemConfig.value.referral_headcount_amount_usd
         originalConfig.value.referral_headcount_trigger =
           systemConfig.value.referral_headcount_trigger
+        originalConfig.value.referral_require_first_recharge =
+          systemConfig.value.referral_require_first_recharge
         originalConfig.value.referral_lifetime_reward_cap_usd =
           systemConfig.value.referral_lifetime_reward_cap_usd
         originalConfig.value.registration_privacy_policy_enabled =

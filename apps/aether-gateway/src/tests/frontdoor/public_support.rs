@@ -2868,6 +2868,68 @@ fn sample_usage_auth_snapshot(
     .expect("auth api key snapshot should build")
 }
 
+fn sample_unverified_auth_user(now: chrono::DateTime<chrono::Utc>) -> StoredUserAuthRecord {
+    StoredUserAuthRecord::new(
+        "user-auth-1".to_string(),
+        Some("alice@example.com".to_string()),
+        false,
+        "alice".to_string(),
+        Some("$2y$10$.OBQfixAECpsb8V/VS3csOMf00x2E/jD/gnud20t6RG0yiQosyOZ2".to_string()),
+        "user".to_string(),
+        "local".to_string(),
+        Some(json!(["openai"])),
+        Some(json!(["openai:chat"])),
+        Some(json!(["gpt-5"])),
+        true,
+        false,
+        Some(now),
+        Some(now),
+    )
+    .expect("auth user should build")
+}
+
+async fn start_auth_gateway_with_state_and_system_config(
+    user: StoredUserAuthRecord,
+    wallet: StoredWalletSnapshot,
+    sessions: impl IntoIterator<Item = crate::data::state::StoredUserSessionRecord>,
+    system_config: impl IntoIterator<Item = (String, serde_json::Value)>,
+) -> (
+    String,
+    Arc<Mutex<usize>>,
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/{*path}",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("proxied"))
+            }
+        }),
+    );
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![user]));
+    let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![wallet]));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_user_and_wallet_for_tests(
+                user_repository,
+                wallet_repository,
+            )
+            .with_system_config_values_for_tests(system_config),
+        )
+        .with_auth_sessions_for_tests(sessions);
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    (gateway_url, upstream_hits, gateway_handle, upstream_handle)
+}
+
 async fn start_auth_gateway_with_state(
     user: StoredUserAuthRecord,
     wallet: StoredWalletSnapshot,
@@ -9265,6 +9327,107 @@ async fn gateway_handles_auth_login_locally_without_proxying_upstream() {
 
     assert_eq!(me_response.status(), StatusCode::OK);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_auth_login_blocks_unverified_local_user_when_verification_required() {
+    let now = Utc::now();
+    let user = sample_unverified_auth_user(now);
+    let (gateway_url, _upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_state_and_system_config(
+            user,
+            sample_auth_wallet("user-auth-1", now),
+            [],
+            [("require_email_verification".to_string(), json!(true))],
+        )
+        .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/auth/login"))
+        .header("x-client-device-id", "device-auth-login-verification-gate")
+        .header("user-agent", "AetherTest/1.0")
+        .json(&json!({
+            "email": "alice@example.com",
+            "password": "secret123",
+            "auth_type": "local",
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert!(payload["detail"]
+        .as_str()
+        .expect("detail should exist")
+        .contains("验证"));
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_auth_login_allows_unverified_local_user_when_verification_not_required() {
+    let now = Utc::now();
+    let user = sample_unverified_auth_user(now);
+    let (gateway_url, _upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_state_and_system_config(
+            user,
+            sample_auth_wallet("user-auth-1", now),
+            [],
+            [("require_email_verification".to_string(), json!(false))],
+        )
+        .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/auth/login"))
+        .header("x-client-device-id", "device-auth-login-verification-off")
+        .header("user-agent", "AetherTest/1.0")
+        .json(&json!({
+            "email": "alice@example.com",
+            "password": "secret123",
+            "auth_type": "local",
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_auth_login_allows_verified_local_user_when_verification_required() {
+    let now = Utc::now();
+    let user = sample_auth_user(now);
+    let (gateway_url, _upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_state_and_system_config(
+            user,
+            sample_auth_wallet("user-auth-1", now),
+            [],
+            [("require_email_verification".to_string(), json!(true))],
+        )
+        .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/auth/login"))
+        .header("x-client-device-id", "device-auth-login-verified")
+        .header("user-agent", "AetherTest/1.0")
+        .json(&json!({
+            "email": "alice@example.com",
+            "password": "secret123",
+            "auth_type": "local",
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
 
     gateway_handle.abort();
     upstream_handle.abort();
