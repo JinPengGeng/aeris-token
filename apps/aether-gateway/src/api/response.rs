@@ -248,7 +248,6 @@ pub(crate) fn build_local_balance_denied_response(
     control_decision: Option<&GatewayControlDecision>,
     _balance_remaining: Option<f64>,
 ) -> Result<Response<Body>, GatewayError> {
-
     // 统一配额不足契约：所有客户端格式（OpenAI 路由族、Claude、泛化未知格式）
     // 的本地余额拒绝都收敛为不回显余额的类型化错误体。OpenAI 与 Claude 走各自
     // 生态的格式化 contract（见 build_core_error_body_for_client_format 的
