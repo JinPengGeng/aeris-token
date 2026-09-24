@@ -1223,9 +1223,17 @@ fn add_wallet_recharge_fee_metadata(
     fee_amount: f64,
 ) -> Value {
     if let Some(object) = checkout.as_object_mut() {
-        object.insert("base_pay_amount".to_string(), json!(base_pay_amount));
+        // #532 口径:API 边界金额统一 8 位小数字符串。支付货币只到分,
+        // 先量化到 1e-8 微单位再格式化,避免浮点直出/拼接误差。
+        object.insert(
+            "base_pay_amount".to_string(),
+            json!(crate::money_fixed::format_money(base_pay_amount)),
+        );
         object.insert("fee_rate".to_string(), json!(fee_rate));
-        object.insert("fee_amount".to_string(), json!(fee_amount));
+        object.insert(
+            "fee_amount".to_string(),
+            json!(crate::money_fixed::format_money(fee_amount)),
+        );
     }
     checkout
 }
@@ -2742,7 +2750,8 @@ pub(super) async fn handle_wallet_recharge_detail(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_wallet_recharge_claim_token, prepare_wallet_gateway_response_for_storage,
+        add_wallet_recharge_fee_metadata, attach_wallet_recharge_claim_token,
+        prepare_wallet_gateway_response_for_storage,
         prepare_wallet_gateway_response_for_storage_with_encrypt, sanitize_wallet_gateway_response,
         stripe_wallet_checkout_response_is_canceled, stripe_wallet_idempotency_key,
         wallet_payment_instructions_from_checkout, wallet_payment_instructions_from_stored,
@@ -3736,5 +3745,34 @@ mod tests {
             ),
             (10.0, 0.25, 10.25)
         );
+    }
+
+    #[test]
+    fn recharge_fee_metadata_outputs_fixed_point_strings() {
+        let checkout =
+            add_wallet_recharge_fee_metadata(json!({"gateway": "alipay"}), 70.0, 2.5, 1.75);
+        assert_eq!(checkout["base_pay_amount"], json!("70.00000000"));
+        assert_eq!(checkout["fee_amount"], json!("1.75000000"));
+        assert_eq!(checkout["fee_rate"], json!(2.5));
+        // 金额为字符串后仍能原样通过存储/回放的网关响应白名单。
+        let sanitized = sanitize_wallet_gateway_response(Some(checkout));
+        assert_eq!(sanitized["base_pay_amount"], json!("70.00000000"));
+        assert_eq!(sanitized["fee_amount"], json!("1.75000000"));
+    }
+
+    #[test]
+    fn recharge_fee_metadata_fixed_point_edge_cases() {
+        // 0 手续费。
+        let zero = add_wallet_recharge_fee_metadata(json!({}), 100.0, 0.0, 0.0);
+        assert_eq!(zero["base_pay_amount"], json!("100.00000000"));
+        assert_eq!(zero["fee_amount"], json!("0.00000000"));
+        // 分位进位:0.1 + 0.2 类浮点噪声不得出现在输出中。
+        let cents = add_wallet_recharge_fee_metadata(json!({}), 72.05, 0.0, 0.3);
+        assert_eq!(cents["base_pay_amount"], json!("72.05000000"));
+        assert_eq!(cents["fee_amount"], json!("0.30000000"));
+        // 大数:千元级 CNY 金额 + 分位。
+        let large = add_wallet_recharge_fee_metadata(json!({}), 99999999.99, 0.0, 1234567.89);
+        assert_eq!(large["base_pay_amount"], json!("99999999.99000000"));
+        assert_eq!(large["fee_amount"], json!("1234567.89000000"));
     }
 }
