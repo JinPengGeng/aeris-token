@@ -954,6 +954,15 @@ fn memory_state() -> (
     AppState,
     Arc<aether_data::repository::usage::InMemoryUsageReadRepository>,
 ) {
+    memory_state_with_balance(0.20)
+}
+
+fn memory_state_with_balance(
+    balance: f64,
+) -> (
+    AppState,
+    Arc<aether_data::repository::usage::InMemoryUsageReadRepository>,
+) {
     use aether_data::repository::{
         settlement::InMemorySettlementRepository,
         usage::InMemoryUsageReadRepository,
@@ -964,7 +973,7 @@ fn memory_state() -> (
         "wallet".into(),
         Some("owner".into()),
         None,
-        0.20,
+        balance,
         0.0,
         "finite".into(),
         "USD".into(),
@@ -1148,5 +1157,100 @@ async fn production_image_heartbeat_executes_funded_public_attempt() {
         .await
         .unwrap();
     assert_upstream_calls(&url, &count, 1).await;
+    server.abort();
+}
+
+async fn image_preauth_quota_denial(
+    state: &AppState,
+    request_id: &str,
+    url: &str,
+    scope_locale: Option<ErrorMessageLocale>,
+) -> GatewayError {
+    async fn prepare<'a>(
+        state: &'a AppState,
+        request_id: &'a str,
+        url: &'a str,
+    ) -> Result<Option<Arc<FundedImageAttempt>>, GatewayError> {
+        FundedImageAttempt::prepare(
+            state,
+            &plan(request_id, "a", url),
+            &decision(),
+            Some(&context()),
+        )
+        .await
+    }
+    match scope_locale {
+        Some(locale) => {
+            request_scope_with_policy_and_locale(
+                state,
+                None,
+                locale,
+                prepare(state, request_id, url),
+            )
+            .await
+        }
+        None => request_scope(state, prepare(state, request_id, url)).await,
+    }
+    .err()
+    .unwrap_or_else(|| panic!("zero-balance image pre-authorization must deny quota"))
+}
+
+#[tokio::test]
+async fn image_preauth_quota_message_follows_scoped_locale() {
+    let (state, _usage) = memory_state_with_balance(0.0);
+    let (url, count, server) = upstream(vec![(200, image(6))]).await;
+
+    let chinese = image_preauth_quota_denial(
+        &state,
+        "gateway-locale-zh",
+        &url,
+        Some(ErrorMessageLocale::Chinese),
+    )
+    .await;
+    match chinese {
+        GatewayError::InsufficientQuota { message_locale } => {
+            assert_eq!(message_locale, ErrorMessageLocale::Chinese);
+            assert_eq!(message_locale.quota_exhausted_message(), "余额不足");
+        }
+        other => panic!("expected insufficient quota denial, got {other:?}"),
+    }
+
+    let english = image_preauth_quota_denial(
+        &state,
+        "gateway-locale-en",
+        &url,
+        Some(ErrorMessageLocale::English),
+    )
+    .await;
+    match english {
+        GatewayError::InsufficientQuota { message_locale } => {
+            assert_eq!(message_locale, ErrorMessageLocale::English);
+            assert_eq!(
+                message_locale.quota_exhausted_message(),
+                "Insufficient quota"
+            );
+        }
+        other => panic!("expected insufficient quota denial, got {other:?}"),
+    }
+
+    // Headerless/system scope: no locale negotiated, English fallback.
+    let fallback = image_preauth_quota_denial(&state, "gateway-locale-none", &url, None).await;
+    match fallback {
+        GatewayError::InsufficientQuota { message_locale } => {
+            assert_eq!(message_locale, ErrorMessageLocale::English);
+            assert_eq!(
+                message_locale.quota_exhausted_message(),
+                "Insufficient quota"
+            );
+        }
+        other => panic!("expected insufficient quota denial, got {other:?}"),
+    }
+
+    assert_upstream_calls(&url, &count, 0).await;
+    state
+        .usage_runtime
+        .shutdown(Duration::from_secs(10))
+        .await
+        .unwrap();
     server.abort();
 }

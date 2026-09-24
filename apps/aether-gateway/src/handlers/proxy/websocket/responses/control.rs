@@ -141,7 +141,9 @@ fn websocket_auth_rejection_error(rejection: GatewayLocalAuthRejection) -> Gatew
         }
         GatewayLocalAuthRejection::BalanceDenied { .. } => {
             // 统一配额不足契约：不回显余额，429 + insufficient_quota 信封。
-            return GatewayError::InsufficientQuota;
+            return GatewayError::InsufficientQuota {
+                message_locale: crate::ai_serving::ErrorMessageLocale::default(),
+            };
         }
         GatewayLocalAuthRejection::ProviderNotAllowed { .. } => (
             StatusCode::FORBIDDEN,

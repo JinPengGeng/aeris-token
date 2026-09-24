@@ -214,7 +214,7 @@ fn persisted_sync_abort_message(error: &GatewayError) -> &'static str {
         GatewayError::LastActiveAdminUpdateDenied | GatewayError::LastActiveAdminDeleteDenied => {
             "local sync attempt aborted before terminal finalization: policy denied"
         }
-        GatewayError::InsufficientQuota => {
+        GatewayError::InsufficientQuota { .. } => {
             "local sync attempt aborted before terminal finalization: insufficient quota"
         }
         GatewayError::Internal(_) => {

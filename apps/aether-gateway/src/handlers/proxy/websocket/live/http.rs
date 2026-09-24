@@ -692,7 +692,7 @@ fn gateway_error_status(error: &GatewayError) -> StatusCode {
             StatusCode::BAD_REQUEST
         }
         GatewayError::Client { status, .. } => *status,
-        GatewayError::InsufficientQuota => StatusCode::TOO_MANY_REQUESTS,
+        GatewayError::InsufficientQuota { .. } => StatusCode::TOO_MANY_REQUESTS,
         GatewayError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
