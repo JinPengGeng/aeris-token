@@ -406,7 +406,7 @@ fn gateway_error_kind(error: &GatewayError) -> &'static str {
         GatewayError::LocalExecutionPlanningTimeout { .. } => "planning_timeout",
         GatewayError::AdmissionTimeout { .. } => "admission_timeout",
         GatewayError::Client { .. } => "client",
-        GatewayError::InsufficientQuota => "insufficient_quota",
+        GatewayError::InsufficientQuota { .. } => "insufficient_quota",
         GatewayError::PlanUsageLimited(_) => "plan_usage_limited",
         GatewayError::LastActiveAdminUpdateDenied => "last_admin_update_denied",
         GatewayError::LastActiveAdminDeleteDenied => "last_admin_delete_denied",

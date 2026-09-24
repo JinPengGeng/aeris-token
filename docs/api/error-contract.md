@@ -162,11 +162,15 @@ their separate acceptance coverage.
 Local request-validation, authentication, access-policy, wallet, usage-limit and
 admission-overload builders use English messages. The unified
 quota-exhausted contract (OpenAI-family `insufficient_quota`, Claude
-`insufficient_quota`, and the generic fallback envelope) and the local
+`insufficient_quota`, the funded image pre-authorization `insufficient_quota`,
+and the generic fallback envelope) and the local
 authentication/access-policy rejection messages negotiate English/Chinese via
 the request `Accept-Language` header: the gateway defaults to English, and any
 `zh` primary tag (for example `zh`, `zh-CN`, `zh-Hans`) selects Chinese
-("Insufficient quota" / "余额不足"). Execution-runtime paths that no longer
+("Insufficient quota" / "余额不足"). The frontdoor resolves the locale from the
+request headers and carries it into the funded image admission scope, so the
+image pre-authorization denial renders in the negotiated language; headerless
+system paths keep the English default. Execution-runtime paths that no longer
 have request headers in scope, execution diagnostics and provider-supplied
 messages keep the existing language; the gateway does not provide broader
 `Accept-Language` negotiation. Clients should branch on status and available

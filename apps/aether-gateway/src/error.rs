@@ -11,7 +11,7 @@ use tracing::warn;
 
 use aether_data_contracts::DataLayerError;
 
-use crate::ai_serving::AiSurfaceFinalizeError;
+use crate::ai_serving::{AiSurfaceFinalizeError, ErrorMessageLocale};
 use crate::constants::*;
 use crate::insert_header_if_missing;
 
@@ -173,8 +173,12 @@ pub(crate) enum GatewayError {
     },
     /// Local quota denial (funded pre-authorization). Always renders the
     /// unified OpenAI insufficient_quota envelope; balance details stay
-    /// internal and never echo to the client.
-    InsufficientQuota,
+    /// internal and never echo to the client. `message_locale` is negotiated
+    /// from the request's Accept-Language at the funding admission scope;
+    /// headerless system paths keep the English default.
+    InsufficientQuota {
+        message_locale: ErrorMessageLocale,
+    },
     PlanUsageLimited(crate::plan_usage_policy::PlanUsagePolicyRejection),
     LastActiveAdminUpdateDenied,
     LastActiveAdminDeleteDenied,
@@ -223,7 +227,9 @@ impl GatewayError {
                 "subscription plan {} limit {} reached for {} window; retry after {} seconds",
                 rejection.metric, rejection.limit, rejection.window, rejection.retry_after
             ),
-            Self::InsufficientQuota => "Insufficient quota".to_string(),
+            Self::InsufficientQuota { message_locale } => {
+                message_locale.quota_exhausted_message().to_string()
+            }
             Self::LocalExecutionPlanningTimeout {
                 phase, timeout_ms, ..
             } => {
@@ -346,11 +352,11 @@ impl IntoResponse for GatewayError {
                 })),
             )
                 .into_response(),
-            Self::InsufficientQuota => (
+            Self::InsufficientQuota { message_locale } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({
                     "error": {
-                        "message": "Insufficient quota",
+                        "message": message_locale.quota_exhausted_message(),
                         "type": "insufficient_quota",
                         "param": null,
                         "code": "insufficient_quota",

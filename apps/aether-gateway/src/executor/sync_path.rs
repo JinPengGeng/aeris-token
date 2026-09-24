@@ -94,11 +94,17 @@ pub(crate) async fn maybe_execute_via_sync_decision_path(
         transfer_tracker: ProviderTransferTracker::for_request(parts),
     };
 
-    crate::execution_runtime::funded_image::request_scope_with_policy(
+    crate::execution_runtime::funded_image::request_scope_with_policy_and_locale(
         state,
         parts
             .extensions
             .get::<crate::plan_usage_policy::PlanUsageReservationContext>(),
+        crate::ai_serving::resolve_error_message_locale(
+            parts
+                .headers
+                .get(http::header::ACCEPT_LANGUAGE)
+                .and_then(|value| value.to_str().ok()),
+        ),
         async {
             Ok(from_ai_serving_outcome(
                 run_ai_sync_execution_path(&port).await?,
