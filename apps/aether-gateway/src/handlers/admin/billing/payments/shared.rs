@@ -236,9 +236,14 @@ fn admin_payment_gateway_response_field(key: &str, value: &Value) -> Option<Valu
         "display_name" | "provider_label" => admin_payment_bounded_string(value, 128),
         "gateway_order_id" | "intent_id" => admin_payment_bounded_string(value, 256),
         "expires_at" => admin_payment_bounded_string(value, 64),
-        "pay_amount" | "base_pay_amount" | "fee_rate" | "fee_amount" => {
-            value.is_number().then(|| value.clone())
+        // 金额字段(支付货币)按 #532 口径定点化为 8 位小数字符串;兼容历史
+        // 存量 JSON number,超精度/非金额输入直接丢弃。
+        "pay_amount" | "base_pay_amount" | "fee_amount" => {
+            crate::money_fixed::money_units_from_json(value)
+                .ok()
+                .map(|units| json!(crate::money_fixed::format_money_units(units)))
         }
+        "fee_rate" => value.is_number().then(|| value.clone()),
         "manual_credit" => value.as_bool().map(Value::Bool),
         "payment_method_types" => {
             let values = value.as_array()?;
@@ -553,6 +558,41 @@ mod tests {
         ] {
             assert!(!encoded.contains(forbidden), "persisted {forbidden}");
         }
+    }
+
+    #[test]
+    fn admin_payment_gateway_response_projections_fixed_point_money_fields() {
+        // 历史存量为 JSON number:定点化为 8 位小数字符串。
+        let projected = prepare_admin_payment_gateway_response_for_storage(Some(json!({
+            "gateway": "epay",
+            "pay_amount": 71.75,
+            "base_pay_amount": 70.0,
+            "fee_amount": 1.75,
+            "fee_rate": 2.5,
+        })))
+        .expect("provided gateway response should remain present");
+        assert_eq!(projected["pay_amount"], json!("71.75000000"));
+        assert_eq!(projected["base_pay_amount"], json!("70.00000000"));
+        assert_eq!(projected["fee_amount"], json!("1.75000000"));
+        // fee_rate 是费率不是金额,保持 number。
+        assert_eq!(projected["fee_rate"], json!(2.5));
+
+        // 已是定点字符串的输入(回放/再投影)原样保留。
+        let republished =
+            prepare_admin_payment_gateway_response_for_storage(Some(projected.clone()))
+                .expect("republished gateway response should remain present");
+        assert_eq!(republished, projected);
+
+        // 超精度或非法金额直接丢弃,不做静默截断。
+        let rejected = prepare_admin_payment_gateway_response_for_storage(Some(json!({
+            "pay_amount": 1.234567891,
+            "base_pay_amount": "abc",
+            "fee_amount": {"nested": true},
+        })))
+        .expect("object shape should remain");
+        assert!(rejected.get("pay_amount").is_none());
+        assert!(rejected.get("base_pay_amount").is_none());
+        assert!(rejected.get("fee_amount").is_none());
     }
 
     #[test]
