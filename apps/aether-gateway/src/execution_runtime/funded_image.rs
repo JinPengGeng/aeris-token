@@ -24,6 +24,7 @@ use aether_usage_runtime::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::ai_serving::ErrorMessageLocale;
 use crate::control::{GatewayControlAuthContext, GatewayControlDecision};
 use crate::plan_usage_policy::PlanUsageReservationContext;
 use crate::usage::GatewaySyncReportRequest;
@@ -197,6 +198,7 @@ struct RequestFinancialState {
 struct RequestAdmission {
     state: AppState,
     usage_policy: Option<PlanUsageReservationContext>,
+    message_locale: ErrorMessageLocale,
     financial: Mutex<RequestFinancialState>,
     preparation_finished: tokio::sync::Notify,
 }
@@ -411,9 +413,18 @@ fn new_request(
     state: &AppState,
     usage_policy: Option<PlanUsageReservationContext>,
 ) -> Arc<RequestAdmission> {
+    new_request_with_locale(state, usage_policy, ErrorMessageLocale::default())
+}
+
+fn new_request_with_locale(
+    state: &AppState,
+    usage_policy: Option<PlanUsageReservationContext>,
+    message_locale: ErrorMessageLocale,
+) -> Arc<RequestAdmission> {
     Arc::new(RequestAdmission {
         state: state.clone(),
         usage_policy,
+        message_locale,
         financial: Mutex::new(RequestFinancialState::default()),
         preparation_finished: tokio::sync::Notify::new(),
     })
@@ -452,6 +463,20 @@ pub(crate) async fn request_scope_with_policy<T>(
     usage_policy: Option<&PlanUsageReservationContext>,
     future: impl Future<Output = Result<T, GatewayError>>,
 ) -> Result<T, GatewayError> {
+    request_scope_with_policy_and_locale(state, usage_policy, ErrorMessageLocale::default(), future)
+        .await
+}
+
+/// Request-frontdoor variant: the caller resolves the client-visible message
+/// locale from the request's Accept-Language header, so execution-runtime
+/// quota denials can be rendered in the negotiated language. Headerless
+/// callers use [`request_scope_with_policy`] and keep the English default.
+pub(crate) async fn request_scope_with_policy_and_locale<T>(
+    state: &AppState,
+    usage_policy: Option<&PlanUsageReservationContext>,
+    message_locale: ErrorMessageLocale,
+    future: impl Future<Output = Result<T, GatewayError>>,
+) -> Result<T, GatewayError> {
     if let Ok(request) = REQUEST.try_with(Arc::clone) {
         if usage_policy.is_some() && request.usage_policy.as_ref() != usage_policy {
             return Err(unavailable(
@@ -460,7 +485,7 @@ pub(crate) async fn request_scope_with_policy<T>(
         }
         return future.await;
     }
-    let request = new_request(state, usage_policy.cloned());
+    let request = new_request_with_locale(state, usage_policy.cloned(), message_locale);
     let guard = RequestAdmissionGuard::new(request.clone());
     owned_request_scope(request, guard, future).await
 }
@@ -799,7 +824,9 @@ impl FundedImageAttempt {
                             "insufficient_quota",
                             "Insufficient quota",
                         );
-                        return Err(GatewayError::InsufficientQuota);
+                        return Err(GatewayError::InsufficientQuota {
+                            message_locale: request.message_locale,
+                        });
                     }
                     ReserveRequestAttemptFundsOutcome::UsagePolicyRejected {
                         window_index,

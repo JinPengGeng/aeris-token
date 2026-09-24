@@ -104,7 +104,7 @@ impl LiveRelayAdmissionError {
             Self::Gateway(GatewayError::LastActiveAdminUpdateDenied)
             | Self::Gateway(GatewayError::LastActiveAdminDeleteDenied) => StatusCode::BAD_REQUEST,
             Self::Gateway(GatewayError::Client { status, .. }) => *status,
-            Self::Gateway(GatewayError::InsufficientQuota) => StatusCode::TOO_MANY_REQUESTS,
+            Self::Gateway(GatewayError::InsufficientQuota { .. }) => StatusCode::TOO_MANY_REQUESTS,
             Self::Gateway(GatewayError::LocalExecutionPlanningTimeout { .. }) => {
                 StatusCode::GATEWAY_TIMEOUT
             }
@@ -151,7 +151,7 @@ impl LiveRelayAdmissionError {
             Self::Gateway(GatewayError::LastActiveAdminUpdateDenied) => "last_admin_update_denied",
             Self::Gateway(GatewayError::LastActiveAdminDeleteDenied) => "last_admin_delete_denied",
             Self::Gateway(GatewayError::Client { .. }) => "request_rejected",
-            Self::Gateway(GatewayError::InsufficientQuota) => "insufficient_quota",
+            Self::Gateway(GatewayError::InsufficientQuota { .. }) => "insufficient_quota",
             Self::Gateway(GatewayError::LocalExecutionPlanningTimeout { .. }) => {
                 "admission_planning_timeout"
             }
@@ -1291,7 +1291,7 @@ fn gateway_error_kind(error: &GatewayError) -> &'static str {
         GatewayError::LastActiveAdminUpdateDenied => "last_admin_update_denied",
         GatewayError::LastActiveAdminDeleteDenied => "last_admin_delete_denied",
         GatewayError::Client { .. } => "client_error",
-        GatewayError::InsufficientQuota => "insufficient_quota",
+        GatewayError::InsufficientQuota { .. } => "insufficient_quota",
         GatewayError::Internal(_) => "internal_error",
     }
 }
@@ -1308,7 +1308,7 @@ fn gateway_error_status(error: &GatewayError) -> StatusCode {
             StatusCode::BAD_REQUEST
         }
         GatewayError::Client { status, .. } => *status,
-        GatewayError::InsufficientQuota => StatusCode::TOO_MANY_REQUESTS,
+        GatewayError::InsufficientQuota { .. } => StatusCode::TOO_MANY_REQUESTS,
         GatewayError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

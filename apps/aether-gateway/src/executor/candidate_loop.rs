@@ -205,9 +205,15 @@ where
         candidate_count,
     );
 
-    crate::execution_runtime::funded_image::request_scope_with_policy(
+    crate::execution_runtime::funded_image::request_scope_with_policy_and_locale(
         state,
         transfer_tracker.usage_policy_reservation.as_ref(),
+        crate::ai_serving::resolve_error_message_locale(
+            parts
+                .headers
+                .get(http::header::ACCEPT_LANGUAGE)
+                .and_then(|value| value.to_str().ok()),
+        ),
         async move {
             tracing::debug!(
                 event_name = "candidate_loop_started",
@@ -297,9 +303,15 @@ where
 {
     let span = tracing::debug_span!("candidates", trace_id = %trace_id, plan_kind);
 
-    crate::execution_runtime::funded_image::request_scope_with_policy(
+    crate::execution_runtime::funded_image::request_scope_with_policy_and_locale(
         state,
         transfer_tracker.usage_policy_reservation.as_ref(),
+        crate::ai_serving::resolve_error_message_locale(
+            parts
+                .headers
+                .get(http::header::ACCEPT_LANGUAGE)
+                .and_then(|value| value.to_str().ok()),
+        ),
         async move {
             tracing::debug!(
                 event_name = "candidate_loop_started",
