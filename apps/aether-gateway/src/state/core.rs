@@ -55,6 +55,7 @@ use super::super::router::RequestAdmissionError;
 use super::super::{control::GatewayControlDecision, error::GatewayError};
 use super::super::{provider_transport, usage};
 
+use crate::codex_profile::spawn_worker as spawn_codex_client_profile_worker;
 use crate::maintenance::spawn_account_self_check_worker;
 use crate::maintenance::spawn_audit_cleanup_worker;
 use crate::maintenance::spawn_data_lifecycle_cleanup_worker;
@@ -181,6 +182,10 @@ impl AppState {
     /// stay O(1) and reads lazy-expire per key; past it, one write pays the
     /// O(n) sweep so memory stays bounded.
     const PROVIDER_KEY_RPM_RESET_SWEEP_MIN_LEN: usize = 1024;
+
+    pub async fn prewarm_codex_client_profile(&self) -> Result<String, String> {
+        crate::codex_profile::prewarm(self.runtime_state()).await
+    }
 
     pub async fn prewarm_chat_pii_redaction_runtime_config(&self) -> Result<bool, String> {
         crate::privacy::read_chat_pii_redaction_runtime_config(self)
@@ -2595,6 +2600,10 @@ impl AppState {
         supervise_worker(
             crate::task_runtime::TASK_KEY_MODEL_FETCH_WORKER,
             spawn_model_fetch_worker(background_state.clone()),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_CODEX_CLIENT_PROFILE,
+            Some(spawn_codex_client_profile_worker(background_state.clone())),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_VIDEO_TASK_POLLER,
