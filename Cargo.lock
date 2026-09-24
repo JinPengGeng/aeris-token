@@ -171,6 +171,7 @@ dependencies = [
  "aether-data-postgres",
  "aether-wallet",
  "async-trait",
+ "bigdecimal",
  "chrono",
  "chrono-tz",
  "flate2",
@@ -196,6 +197,7 @@ dependencies = [
  "async-trait",
  "base64",
  "bcrypt",
+ "bigdecimal",
  "chrono",
  "chrono-tz",
  "serde",
@@ -216,6 +218,7 @@ dependencies = [
  "aether-data-contracts",
  "aether-data-query",
  "async-trait",
+ "bigdecimal",
  "chrono",
  "chrono-tz",
  "flate2",
@@ -299,6 +302,7 @@ dependencies = [
  "axum",
  "base64",
  "bcrypt",
+ "bigdecimal",
  "brotli",
  "bytes",
  "chrono",
@@ -1132,6 +1136,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]

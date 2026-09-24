@@ -1,4 +1,7 @@
+use bigdecimal::BigDecimal;
+use serde::Deserialize;
 use serde_json::Value;
+use std::str::FromStr;
 
 use crate::DataLayerError;
 
@@ -51,6 +54,8 @@ impl ProviderCostTaskType {
 /// `tiered_pricing` pair is deliberately isomorphic to the sales-side
 /// `BillingModelPricingSnapshot` catalog shape so PR-B can run the same
 /// formula engine over cost and price catalogs without translation.
+/// `price_per_request` is an exact decimal (`NUMERIC(20,8)` in postgres);
+/// `tiered_pricing` stays JSON numbers, isomorphic to the sales-side catalog.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCostCatalogRecord {
     pub cost_id: String,
@@ -58,7 +63,8 @@ pub struct ProviderCostCatalogRecord {
     pub model: String,
     pub task_type: ProviderCostTaskType,
     pub currency: String,
-    pub price_per_request: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_price")]
+    pub price_per_request: Option<BigDecimal>,
     pub tiered_pricing: Option<Value>,
     pub effective_from_unix_secs: u64,
     pub effective_to_unix_secs: Option<u64>,
@@ -118,8 +124,8 @@ impl ProviderCostCatalogRecord {
             PROVIDER_COST_CATALOG_MAX_OPERATOR_LEN,
             true,
         )?;
-        if let Some(price) = self.price_per_request {
-            validate_price("price_per_request", &Value::from(price))?;
+        if let Some(price) = &self.price_per_request {
+            validate_decimal_price("price_per_request", price)?;
         }
         if let Some(catalog) = &self.tiered_pricing {
             validate_provider_cost_catalog_tiered_pricing(catalog)?;
@@ -276,6 +282,52 @@ fn validate_overlay_fields(object: &serde_json::Map<String, Value>) -> Result<()
     Ok(())
 }
 
+fn validate_decimal_price(field: &str, price: &BigDecimal) -> Result<(), DataLayerError> {
+    if price < &BigDecimal::from(0) {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "provider cost catalog {field} must be a non-negative number"
+        )));
+    }
+    if price > &BigDecimal::from(1_000_000_000_000_000_u64) {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "provider cost catalog {field} exceeds the supported range"
+        )));
+    }
+    // NUMERIC(20,8) rounds at 8 fractional digits; reject inputs that would
+    // silently lose precision instead of persisting a different value.
+    let (_, scale) = price.as_bigint_and_exponent();
+    if scale > 8 {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "provider cost catalog {field} supports at most 8 fractional digits"
+        )));
+    }
+    Ok(())
+}
+
+/// serde deserializer for optional decimal price fields. JSON numbers are
+/// converted through their textual representation (e.g. `0.01` stays exactly
+/// `0.01`) instead of bigdecimal's default `visit_f64`, which expands the
+/// exact binary float and would fabricate ~55 fractional digits.
+pub fn deserialize_optional_price<'de, D>(deserializer: D) -> Result<Option<BigDecimal>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    value
+        .map(|value| match value {
+            Value::String(text) => BigDecimal::from_str(&text).map_err(|error| {
+                serde::de::Error::custom(format!("price_per_request is not a decimal: {error}"))
+            }),
+            Value::Number(number) => BigDecimal::from_str(&number.to_string()).map_err(|error| {
+                serde::de::Error::custom(format!("price_per_request is not a decimal: {error}"))
+            }),
+            _ => Err(serde::de::Error::custom(
+                "price_per_request must be a decimal string or number",
+            )),
+        })
+        .transpose()
+}
+
 fn validate_price(field: &str, value: &Value) -> Result<(), DataLayerError> {
     if value.is_null() {
         return Ok(());
@@ -337,6 +389,7 @@ fn bounded_value(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::str::FromStr;
 
     fn record() -> ProviderCostCatalogRecord {
         ProviderCostCatalogRecord {
@@ -365,6 +418,46 @@ mod tests {
             created_at_unix_secs: 900,
             updated_at_unix_secs: 900,
         }
+    }
+
+    #[test]
+    fn price_per_request_deserializes_from_number_and_string() {
+        let record: ProviderCostCatalogRecord =
+            serde_json::from_value(record_json(serde_json::json!("0.1")))
+                .expect("string price deserializes");
+        assert_eq!(
+            record.price_per_request,
+            Some(BigDecimal::from_str("0.1").expect("decimal parses"))
+        );
+        let record: ProviderCostCatalogRecord =
+            serde_json::from_value(record_json(serde_json::json!(0.1)))
+                .expect("numeric price deserializes");
+        assert_eq!(
+            record.price_per_request,
+            Some(BigDecimal::from_str("0.1").expect("decimal parses"))
+        );
+        assert_eq!(
+            serde_json::to_value(&record.price_per_request)
+                .expect("serializes")
+                .as_str(),
+            Some("0.1")
+        );
+    }
+
+    fn record_json(price_per_request: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "cost_id": "cost-a",
+            "provider_id": "provider-a",
+            "model": "gpt-x",
+            "task_type": "text",
+            "currency": "USD",
+            "price_per_request": price_per_request,
+            "effective_from_unix_secs": 1_000,
+            "effective_to_unix_secs": 2_000,
+            "created_by": "admin-a",
+            "created_at_unix_secs": 900,
+            "updated_at_unix_secs": 900,
+        })
     }
 
     #[test]
@@ -408,8 +501,16 @@ mod tests {
         assert!(value.validate().is_err());
 
         let mut value = record();
-        value.price_per_request = Some(-1.0);
+        value.price_per_request = Some(BigDecimal::from(-1));
         assert!(value.validate().is_err());
+
+        let mut value = record();
+        value.price_per_request = Some("0.123456789".parse().expect("decimal parses"));
+        assert!(value.validate().is_err());
+
+        let mut value = record();
+        value.price_per_request = Some("0.1".parse().expect("decimal parses"));
+        assert!(value.validate().is_ok());
     }
 
     #[test]

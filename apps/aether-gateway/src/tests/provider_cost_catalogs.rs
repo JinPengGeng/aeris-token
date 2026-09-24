@@ -194,7 +194,7 @@ async fn provider_cost_catalog_http_crud_round_trip() {
         .await
         .expect("admin get should complete");
     let refetched: Value = refetched.json().await.expect("get body should decode");
-    assert_eq!(refetched["item"]["price_per_request"], 0.01);
+    assert_eq!(refetched["item"]["price_per_request"], "0.01");
     assert_eq!(refetched["item"]["tiered_pricing"], Value::Null);
 
     let deleted = admin_client

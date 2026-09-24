@@ -52,6 +52,7 @@ async-trait.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 base64.workspace = true
 bcrypt.workspace = true
+bigdecimal.workspace = true
 brotli.workspace = true
 bytes.workspace = true
 chrono.workspace = true

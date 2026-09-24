@@ -169,7 +169,7 @@ describe('ProviderCostCatalogDialog', () => {
         provider_id: 'provider-a',
         model: 'gpt-x',
         task_type: 'text',
-        price_per_request: 0.01,
+        price_per_request: '0.01',
         tiered_pricing: { tiers: [{ input_price_per_1m: 0.5 }] },
         effective_to_unix_secs: null,
       })

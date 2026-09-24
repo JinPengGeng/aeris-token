@@ -242,7 +242,10 @@ fn decode_record(row: &sqlx::postgres::PgRow) -> Result<ProviderCostCatalogRecor
             &row.try_get::<String, _>("task_type").map_postgres_err()?,
         )?,
         currency: row.try_get("currency").map_postgres_err()?,
-        price_per_request: row.try_get("price_per_request").map_postgres_err()?,
+        price_per_request: row
+            .try_get::<Option<bigdecimal::BigDecimal>, _>("price_per_request")
+            .map_postgres_err()?
+            .map(|price| price.normalized()),
         tiered_pricing,
         effective_from_unix_secs: to_u64(
             row.try_get("effective_from_unix_secs").map_postgres_err()?,
