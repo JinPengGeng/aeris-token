@@ -1,6 +1,6 @@
 pub(crate) mod provenance;
-pub(crate) mod service;
+pub mod service;
 mod tui;
-pub(crate) mod upgrade;
+pub mod upgrade;
 
 pub use self::tui::{run, SetupOutcome};

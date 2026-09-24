@@ -133,7 +133,7 @@ test('every Rust and database job consumes changes, while all aggregate gates an
     'shell fixtures must reject live DB runs with zero executed tests');
   assert.equal(
     gatewayIntegrationStep.run,
-    'cargo nextest run -p aether-gateway --test admin_unsigned_identity_headers',
+    'cargo nextest run -p aether-gateway --test admin_unsigned_identity_headers --test architecture_guard',
     'gateway security integration target must use the pinned nextest command',
   );
   assert.ok(workflow.jobs.shell_security.steps.some((step) =>
