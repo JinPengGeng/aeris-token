@@ -10,12 +10,13 @@ description = "PostgreSQL repositories, pools, transactions, and migrations for 
 aether-ai-formats.workspace = true
 aether-data-contracts.workspace = true
 aether-data-query.workspace = true
+bigdecimal.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
-sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls", "chrono", "migrate", "macros", "uuid"] }
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls", "chrono", "migrate", "macros", "uuid", "bigdecimal"] }
 serde_json.workspace = true
 serde.workspace = true
 sha2.workspace = true

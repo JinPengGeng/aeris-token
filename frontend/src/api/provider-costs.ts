@@ -9,7 +9,8 @@ export interface ProviderCostCatalogRecord {
   model: string
   task_type: ProviderCostTaskType
   currency: string
-  price_per_request: number | null
+  /** 序列化为十进制字符串(如 "0.01"),避免 float 精度损失。 */
+  price_per_request: string | null
   tiered_pricing: Record<string, unknown> | null
   effective_from_unix_secs: number
   effective_to_unix_secs: number | null
@@ -23,7 +24,7 @@ export interface ProviderCostCatalogWriteRequest {
   model: string
   task_type: ProviderCostTaskType
   currency?: string
-  price_per_request?: number | null
+  price_per_request?: string | null
   tiered_pricing?: Record<string, unknown> | null
   effective_from_unix_secs: number
   effective_to_unix_secs?: number | null

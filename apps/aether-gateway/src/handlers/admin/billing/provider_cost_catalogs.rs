@@ -7,8 +7,9 @@ use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::GatewayError;
 use aether_data::repository::provider_cost_catalog::{
-    ProviderCostCatalogDeleteOutcome, ProviderCostCatalogListQuery, ProviderCostCatalogRecord,
-    ProviderCostCatalogUpsertOutcome, ProviderCostTaskType, PROVIDER_COST_CATALOG_MAX_LIST_LIMIT,
+    deserialize_optional_price, ProviderCostCatalogDeleteOutcome, ProviderCostCatalogListQuery,
+    ProviderCostCatalogRecord, ProviderCostCatalogUpsertOutcome, ProviderCostTaskType,
+    PROVIDER_COST_CATALOG_MAX_LIST_LIMIT,
 };
 use axum::{
     body::{Body, Bytes},
@@ -27,8 +28,8 @@ struct ProviderCostCatalogWriteRequest {
     task_type: String,
     #[serde(default = "default_provider_cost_catalog_currency")]
     currency: String,
-    #[serde(default)]
-    price_per_request: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_price")]
+    price_per_request: Option<bigdecimal::BigDecimal>,
     #[serde(default)]
     tiered_pricing: Option<serde_json::Value>,
     effective_from_unix_secs: u64,

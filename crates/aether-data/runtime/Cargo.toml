@@ -18,6 +18,7 @@ aether-data-contracts.workspace = true
 aether-data-postgres = { workspace = true, optional = true }
 aether-cache.workspace = true
 aether-wallet.workspace = true
+bigdecimal.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true

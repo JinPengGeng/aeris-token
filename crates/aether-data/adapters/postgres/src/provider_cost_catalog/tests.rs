@@ -1,5 +1,6 @@
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
+use std::str::FromStr;
 
 use super::*;
 use aether_data_contracts::repository::provider_cost_catalog::ProviderCostTaskType;
@@ -80,7 +81,7 @@ async fn upsert_get_list_delete_round_trip() {
     );
 
     let mut updated = record.clone();
-    updated.price_per_request = Some(0.25);
+    updated.price_per_request = Some(bigdecimal::BigDecimal::from_str("0.25").unwrap());
     updated.updated_at_unix_secs = 1_100;
     assert_eq!(
         repository
@@ -234,6 +235,44 @@ async fn find_effective_picks_latest_window() {
         .await
         .expect("lookup succeeds");
     assert!(before_any.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable AETHER_TEST_DATABASE_URL; runs real migrations"]
+async fn price_per_request_round_trips_exact_decimal() {
+    let (pool, _schema) = fixture().await;
+    let repository = PostgresProviderCostCatalogRepository::new(pool);
+    let mut record = sample_record("cost-a", "provider-a", 1_000);
+    record.tiered_pricing = None;
+    // 0.1 has no exact float8 representation; NUMERIC(20,8) must preserve it.
+    record.price_per_request = Some(bigdecimal::BigDecimal::from_str("0.1").unwrap());
+    repository
+        .upsert_provider_cost_catalog(record.clone())
+        .await
+        .expect("insert succeeds");
+    let fetched = repository
+        .get_provider_cost_catalog("cost-a")
+        .await
+        .expect("get succeeds")
+        .expect("record exists");
+    assert_eq!(
+        fetched.price_per_request,
+        Some(bigdecimal::BigDecimal::from_str("0.1").unwrap())
+    );
+    assert_eq!(
+        serde_json::to_value(&fetched.price_per_request)
+            .expect("serializes")
+            .as_str(),
+        Some("0.1")
+    );
+
+    let mut too_precise = sample_record("cost-b", "provider-a", 2_000);
+    too_precise.tiered_pricing = None;
+    too_precise.price_per_request = Some(bigdecimal::BigDecimal::from_str("0.123456789").unwrap());
+    assert!(repository
+        .upsert_provider_cost_catalog(too_precise)
+        .await
+        .is_err());
 }
 
 #[tokio::test]

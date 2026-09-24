@@ -1,4 +1,5 @@
 use serde_json::json;
+use std::str::FromStr;
 
 use super::*;
 
@@ -46,7 +47,7 @@ async fn upsert_get_list_delete_round_trip() {
     );
 
     let mut updated = record.clone();
-    updated.price_per_request = Some(0.25);
+    updated.price_per_request = Some(bigdecimal::BigDecimal::from_str("0.25").unwrap());
     updated.updated_at_unix_secs = 1_100;
     assert_eq!(
         repository

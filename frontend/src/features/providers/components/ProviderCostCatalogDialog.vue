@@ -321,10 +321,11 @@ function parseForm(): {
       return { error: '分档 catalog 不是合法 JSON' }
     }
   }
-  const price = pricePerRequest ? Number(pricePerRequest) : null
-  if (price != null && (!Number.isFinite(price) || price < 0)) {
-    return { error: '按次成本必须是非负数字' }
+  // 后端按 NUMERIC(20,8) 精确存储,字符串直传避免 float 中间态。
+  if (!/^\d+(\.\d{1,8})?$/.test(pricePerRequest)) {
+    return { error: '按次成本必须是非负数字,最多 8 位小数' }
   }
+  const price = pricePerRequest ? pricePerRequest : null
   const effectiveFrom = Number(current.effectiveFrom)
   if (!Number.isInteger(effectiveFrom) || effectiveFrom < 0) {
     return { error: '生效开始必须是有效的 unix 秒' }

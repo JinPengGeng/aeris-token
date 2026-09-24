@@ -3,11 +3,12 @@ mod types;
 use async_trait::async_trait;
 
 pub use types::{
-    validate_provider_cost_catalog_tiered_pricing, ProviderCostCatalogDeleteOutcome,
-    ProviderCostCatalogListQuery, ProviderCostCatalogRecord, ProviderCostCatalogUpsertOutcome,
-    ProviderCostTaskType, PROVIDER_COST_CATALOG_MAX_CURRENCY_LEN, PROVIDER_COST_CATALOG_MAX_ID_LEN,
-    PROVIDER_COST_CATALOG_MAX_LIST_LIMIT, PROVIDER_COST_CATALOG_MAX_MODEL_LEN,
-    PROVIDER_COST_CATALOG_MAX_OPERATOR_LEN, PROVIDER_COST_CATALOG_MAX_TIERED_PRICING_BYTES,
+    deserialize_optional_price, validate_provider_cost_catalog_tiered_pricing,
+    ProviderCostCatalogDeleteOutcome, ProviderCostCatalogListQuery, ProviderCostCatalogRecord,
+    ProviderCostCatalogUpsertOutcome, ProviderCostTaskType, PROVIDER_COST_CATALOG_MAX_CURRENCY_LEN,
+    PROVIDER_COST_CATALOG_MAX_ID_LEN, PROVIDER_COST_CATALOG_MAX_LIST_LIMIT,
+    PROVIDER_COST_CATALOG_MAX_MODEL_LEN, PROVIDER_COST_CATALOG_MAX_OPERATOR_LEN,
+    PROVIDER_COST_CATALOG_MAX_TIERED_PRICING_BYTES,
 };
 
 /// Stores provider-side cost catalogs. The catalog JSON is isomorphic to the
