@@ -246,6 +246,8 @@ from variable names. Request candidate persistence is a mode (`full`, `terminal`
 | `AETHER_BARK_ALLOW_HTTP` | [bark_push.rs](../../apps/aether-gateway/src/bark_push.rs) |
 | `AETHER_BARK_ALLOW_PRIVATE_TARGETS` | [bark_push.rs](../../apps/aether-gateway/src/bark_push.rs) |
 | `AETHER_BASE_DIR` | [handlers/admin/system/shared/update.rs](../../apps/aether-gateway/src/handlers/admin/system/shared/update.rs) |
+| `AETHER_CODEX_CLIENT_PROFILE_REFRESH` | [codex_profile.rs](../../apps/aether-gateway/src/codex_profile.rs) |
+| `AETHER_CODEX_CLIENT_VERSION` | [codex_profile.rs](../../apps/aether-gateway/src/codex_profile.rs) |
 | `AETHER_CODEX_WS_PROBE_ACCESS_TOKEN` | [bin/aether-codex-ws-probe.rs](../../apps/aether-gateway/src/bin/aether-codex-ws-probe.rs) |
 | `AETHER_CODEX_WS_PROBE_ACCOUNT_ID` | [bin/aether-codex-ws-probe.rs](../../apps/aether-gateway/src/bin/aether-codex-ws-probe.rs) |
 | `AETHER_CODEX_WS_PROBE_MODEL` | [bin/aether-codex-ws-probe.rs](../../apps/aether-gateway/src/bin/aether-codex-ws-probe.rs) |
