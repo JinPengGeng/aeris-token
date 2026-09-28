@@ -125,6 +125,7 @@ use crate::execution_runtime::{
 };
 use crate::execution_runtime::{
     MAX_ERROR_BODY_BYTES, MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES,
+    MAX_STREAM_PREFETCH_OVERFLOW_BYTES,
 };
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
@@ -6824,6 +6825,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let mut prefetched_chunks: Vec<Bytes> = Vec::new();
     let mut provider_prefetched_body = Vec::new();
     let mut provider_prefetched_body_truncated = false;
+    let mut provider_prefetched_overflow: Vec<u8> = Vec::new();
     let mut prefetched_body = Vec::new();
     let mut prefetched_inspection_body = Vec::new();
     let mut prefetched_inspection_body_truncated = false;
@@ -7077,12 +7079,53 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         }
                     }
 
+                    let provider_captured_before = provider_prefetched_body.len();
                     append_stream_capture_bytes(
                         &mut provider_prefetched_body,
                         &chunk,
                         MAX_STREAM_PREFETCH_BYTES,
                         &mut provider_prefetched_body_truncated,
                     );
+                    // The capture above is bounded for reporting only. Processor state must be
+                    // restored from every byte consumed, so bytes dropped by the capture cap
+                    // are kept here. The prefetch loop exits once the capture crosses the cap,
+                    // so this only ever holds the tail of a single provider frame; a frame tail
+                    // beyond the overflow bound fails closed rather than replaying truncated
+                    // bytes.
+                    let provider_captured =
+                        provider_prefetched_body.len() - provider_captured_before;
+                    if provider_captured < chunk.len() {
+                        let overflow_tail = &chunk[provider_captured..];
+                        if provider_prefetched_overflow
+                            .len()
+                            .saturating_add(overflow_tail.len())
+                            > MAX_STREAM_PREFETCH_OVERFLOW_BYTES
+                        {
+                            return handle_prefetch_stream_failure(
+                                state,
+                                trace_id,
+                                decision,
+                                &plan,
+                                report_context,
+                                request_id,
+                                candidate_id,
+                                report_kind,
+                                headers,
+                                prefetched_usage_telemetry.clone(),
+                                &provider_prefetched_body,
+                                candidate_started_unix_secs,
+                                stream_elapsed_ms_since(stream_started_at),
+                                build_stream_failure_report(
+                                    "execution_runtime_stream_prefetch_overflow",
+                                    "provider stream frame exceeded the prefetch overflow bound",
+                                    502,
+                                ),
+                                retry_scope_out.as_deref_mut(),
+                            )
+                            .await;
+                        }
+                        provider_prefetched_overflow.extend_from_slice(overflow_tail);
+                    }
                     append_stream_capture_bytes(
                         &mut prefetched_inspection_body,
                         &chunk,
@@ -7510,6 +7553,11 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let report_context_owned = report_context;
     let normalized_stream_report_context_owned = normalized_stream_report_context;
     let lifecycle_seed_for_report = lifecycle_seed;
+    let provider_prefetched_replay_body = [
+        provider_prefetched_body.as_slice(),
+        provider_prefetched_overflow.as_slice(),
+    ]
+    .concat();
     let provider_prefetched_body_for_report = provider_prefetched_body;
     let prefetched_body_for_report = prefetched_body;
     let prefetched_chunks_for_body = prefetched_chunks;
@@ -7729,7 +7777,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             let normalized_prefetched_chunk = if let Some(normalizer) =
                 private_stream_normalizer.as_mut()
             {
-                match normalizer.push_chunk(&provider_prefetched_body_for_report) {
+                match normalizer.push_chunk(&provider_prefetched_replay_body) {
                     Ok(normalized_chunk) => Some(normalized_chunk),
                     Err(err) => {
                         warn!(
@@ -7756,7 +7804,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             };
             let replay_chunk = normalized_prefetched_chunk
                 .as_deref()
-                .unwrap_or(provider_prefetched_body_for_report.as_slice());
+                .unwrap_or(provider_prefetched_replay_body.as_slice());
             if let Some(error_body_json) = provider_error_inspection
                 .observe(stream_usage_report_context.as_ref(), replay_chunk)
             {
@@ -7815,6 +7863,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         // its budgeted copies; retaining semantic prefetch duplicates for the
         // rest of the stream would bypass the capture memory limit.
         drop(provider_prefetched_body_for_report);
+        drop(provider_prefetched_replay_body);
         drop(prefetched_body_for_report);
 
         if terminal_failure.is_none() && !reached_eof {
@@ -9622,6 +9671,132 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn prefetch_overflow_bytes_are_replayed_into_stream_rewriter_state() {
+        // Opening Responses events echo the request and can exceed
+        // MAX_STREAM_PREFETCH_BYTES. The frame that crosses the capture cap ends mid-line,
+        // so its tail must survive the pump handoff or the client receives an event with a
+        // hole in it. The hole is placed on a plain string char, inside an escape sequence,
+        // and on a structural char.
+        for (name, filler, filler_offset) in [
+            ("plain_char", "x".repeat(24_000), 8i64),
+            ("escape_sequence", "x\\ny".repeat(6_000), 2),
+            ("structural_char", "x".repeat(24_000), -2),
+        ] {
+            let request_id = "req-prefetch-overflow-replay";
+            let plan = codex_cyber_policy_plan(request_id);
+            let provider_catalog = provider_catalog_for_plan(&plan, None);
+            let data_state =
+                crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+                    Arc::new(provider_catalog),
+                    DEVELOPMENT_ENCRYPTION_KEY,
+                );
+            let state = AppState::new()
+                .expect("app state should build")
+                .with_data_state_for_tests(data_state);
+            let created_prefix =
+                "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"instructions\":\"";
+            let created_suffix = "\"}}\n\n";
+            let in_progress = format!(
+                "event: response.in_progress\ndata: {{\"type\":\"response.in_progress\",\"response\":{{\"instructions\":\"{filler}\"}}}}\n\n"
+            );
+            let filler_start = in_progress.find(&filler).expect("filler should be present");
+            let cut = (filler_start as i64 + filler_offset) as usize;
+            let split_at = filler_start + 4096;
+            assert!(split_at < in_progress.len());
+            let created_filler_len = crate::execution_runtime::MAX_STREAM_PREFETCH_BYTES
+                - created_prefix.len()
+                - created_suffix.len()
+                - cut;
+            let created = format!(
+                "{created_prefix}{}{created_suffix}",
+                "y".repeat(created_filler_len)
+            );
+            assert!(created.len() < crate::execution_runtime::MAX_STREAM_PREFETCH_BYTES);
+            assert_eq!(
+                crate::execution_runtime::MAX_STREAM_PREFETCH_BYTES - created.len(),
+                cut,
+                "capture cap should cross at the chosen hole start for {name}"
+            );
+            let delta = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n".to_string();
+            let upstream_chunks = vec![
+                created,
+                in_progress[..split_at].to_string(),
+                in_progress[split_at..].to_string(),
+                delta,
+            ];
+            let expected_body: String = upstream_chunks.concat();
+            let frame_stream = stream! {
+                yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                    frame_type: StreamFrameType::Headers,
+                    payload: StreamFramePayload::Headers {
+                        status_code: 200,
+                        headers: BTreeMap::from([(
+                            "content-type".to_string(),
+                            "text/event-stream".to_string(),
+                        )]),
+                        response_observation: None,
+                    },
+                }));
+                for chunk in upstream_chunks {
+                    yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                        frame_type: StreamFrameType::Data,
+                        payload: StreamFramePayload::Data {
+                            chunk_b64: None,
+                            text: Some(chunk),
+                        },
+                    }));
+                }
+                yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame::eof()));
+            }
+            .boxed();
+
+            let response = execute_stream_from_frame_stream(
+                &state,
+                plan,
+                "trace-prefetch-overflow-replay",
+                &test_decision(),
+                "openai_responses_stream",
+                Some("openai_responses_stream_success".to_string()),
+                Some(json!({
+                    "request_id": request_id,
+                    "candidate_id": "candidate-prefetch-overflow-replay",
+                    "candidate_index": 0,
+                    "retry_index": 0,
+                    "provider_api_format": "openai:responses",
+                    "client_api_format": "openai:responses"
+                })),
+                crate::clock::current_unix_ms(),
+                Instant::now(),
+                RequestStageTrace::from_env(),
+                true,
+                frame_stream,
+                None,
+            )
+            .await
+            .expect("stream execution should succeed")
+            .expect("stream execution should return a response");
+
+            let body = tokio::time::timeout(
+                Duration::from_secs(5),
+                to_bytes(response.into_body(), usize::MAX),
+            )
+            .await
+            .expect("client body should finish")
+            .expect("client body should read");
+            assert_eq!(
+                body.len(),
+                expected_body.len(),
+                "client body should not be silently shortened for {name}"
+            );
+            assert_eq!(
+                body.as_ref(),
+                expected_body.as_bytes(),
+                "client body should match provider bytes byte for byte for {name}"
+            );
+        }
     }
 
     #[tokio::test]
