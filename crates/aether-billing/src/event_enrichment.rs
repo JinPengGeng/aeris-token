@@ -401,11 +401,10 @@ fn apply_billing_computation(
     let api_key_billing_multiplier = event
         .data
         .api_key_billing_multiplier
-        .filter(|value| value.is_finite() && *value >= 0.0)
-        .unwrap_or(1.0);
-    let combined_rate_multiplier = provider_rate_multiplier * api_key_billing_multiplier;
+        .unwrap_or(aether_contracts::billing_multiplier::BillingMultiplier::ONE);
+    let combined_rate_multiplier = provider_rate_multiplier * api_key_billing_multiplier.to_f64();
     let actual_total_cost =
-        crate::quantize_cost(computation.cost_before_final_rounding(api_key_billing_multiplier))
+        crate::quantize_cost(computation.cost_before_final_rounding(api_key_billing_multiplier.to_f64()))
             .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
     event.data.total_cost_usd = Some(computation.cost_result.cost);
     event.data.actual_total_cost_usd = Some(actual_total_cost);
@@ -444,7 +443,7 @@ fn merge_billing_snapshot_metadata(
     computation: &BillingComputation,
     actual_total_cost: f64,
     provider_rate_multiplier: f64,
-    api_key_billing_multiplier: f64,
+    api_key_billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier,
     rate_multiplier: f64,
 ) -> Result<(), DataLayerError> {
     let snapshot = &computation.cost_result.snapshot;
@@ -481,7 +480,7 @@ fn merge_billing_snapshot_metadata(
     );
     metadata.insert(
         "api_key_billing_multiplier".to_string(),
-        Value::from(api_key_billing_multiplier),
+        Value::from(api_key_billing_multiplier.to_f64()),
     );
     metadata.insert(
         "is_free_tier".to_string(),
@@ -496,7 +495,7 @@ fn build_settlement_snapshot(
     computation: &BillingComputation,
     actual_total_cost: f64,
     provider_rate_multiplier: f64,
-    api_key_billing_multiplier: f64,
+    api_key_billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier,
     rate_multiplier: f64,
 ) -> Value {
     let snapshot = &computation.cost_result.snapshot;
@@ -522,7 +521,7 @@ fn build_settlement_snapshot(
             "price_per_request": resolution.price_per_request,
             "rate_multiplier": rate_multiplier,
             "provider_rate_multiplier": provider_rate_multiplier,
-            "api_key_billing_multiplier": api_key_billing_multiplier,
+            "api_key_billing_multiplier": api_key_billing_multiplier.to_f64(),
             "is_free_tier": computation.is_free_tier,
         },
         "billing_plan_snapshot": {
@@ -1762,7 +1761,7 @@ mod tests {
                 request_type: Some("chat".to_string()),
                 api_format: Some("openai:chat".to_string()),
                 endpoint_api_format: Some("openai:chat".to_string()),
-                api_key_billing_multiplier: Some(2.0),
+                api_key_billing_multiplier: Some(aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(2.0).unwrap()),
                 status_code: Some(200),
                 ..UsageEventData::default()
             },
@@ -1829,7 +1828,7 @@ mod tests {
                 request_type: Some("chat".to_string()),
                 api_format: Some("openai:chat".to_string()),
                 endpoint_api_format: Some("openai:chat".to_string()),
-                api_key_billing_multiplier: Some(0.0),
+                api_key_billing_multiplier: Some(aether_contracts::billing_multiplier::BillingMultiplier::ZERO),
                 status_code: Some(200),
                 ..UsageEventData::default()
             },
@@ -1879,7 +1878,7 @@ mod tests {
                 request_type: Some("chat".to_string()),
                 api_format: Some("openai:chat".to_string()),
                 endpoint_api_format: Some("openai:chat".to_string()),
-                api_key_billing_multiplier: Some(2.0),
+                api_key_billing_multiplier: Some(aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(2.0).unwrap()),
                 status_code: Some(200),
                 ..UsageEventData::default()
             },
@@ -2028,7 +2027,7 @@ mod tests {
                         }],
                         api_format: Some("openai:image".into()),
                         requested_processing_tier: None,
-                        api_key_multiplier: 10.0,
+                        api_key_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(10.0).unwrap(),
                         token_bounds: None,
                     },
                 )
@@ -2042,7 +2041,7 @@ mod tests {
                     model: "image-model".into(),
                     provider_id: Some("provider-1".into()),
                     provider_api_key_id: Some("key-1".into()),
-                    api_key_billing_multiplier: Some(10.0),
+                    api_key_billing_multiplier: Some(aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(10.0).unwrap()),
                     request_type: Some("image".into()),
                     api_format: Some("openai:image".into()),
                     endpoint_api_format: Some("openai:image".into()),

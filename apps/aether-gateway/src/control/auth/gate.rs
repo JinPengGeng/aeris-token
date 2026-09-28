@@ -147,13 +147,7 @@ async fn execution_plan_balance_capacity_rejection_inner(
         validate_execution_plan_pricing_configuration_for_plan(state, plan, report_context).await?;
         return Ok(None);
     };
-    let api_key_billing_multiplier = auth_context.api_key_billing_multiplier;
-    let api_key_billing_multiplier =
-        if api_key_billing_multiplier.is_finite() && api_key_billing_multiplier >= 0.0 {
-            api_key_billing_multiplier
-        } else {
-            1.0
-        };
+    let api_key_billing_multiplier = auth_context.api_key_billing_multiplier.to_f64();
     let image_cost_is_proven_zero = is_image_authorization_plan(plan, report_context)
         && execution_plan_cost_is_proven_zero(state, plan, report_context).await;
     match estimate_execution_plan_cost_upper_bound_usd(state, plan, report_context)
@@ -1072,7 +1066,7 @@ mod tests {
             api_key_id: "api-key-1".to_string(),
             username: None,
             api_key_name: None,
-            api_key_billing_multiplier: 1.0,
+            api_key_billing_multiplier: aether_data_contracts::billing_multiplier::BillingMultiplier::ONE,
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,

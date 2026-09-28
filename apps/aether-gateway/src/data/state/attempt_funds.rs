@@ -151,6 +151,21 @@ impl GatewayDataState {
                                 quote.input().api_format.as_deref(),
                             )
                             .await?;
+                        let actual_cost_units = u64::try_from(priced.calculated_units)
+                            .map_err(|_| invalid("negative calculated attempt cost"))?;
+                        // 标价收入:结算时刻把已冻结快照里的两个倍率轴除掉,
+                        // 管理员事后改价或改倍率都不回溯在途/已结请求。
+                        let combined_multiplier = priced.computation.rate_multiplier
+                            * quote.input().api_key_multiplier.to_f64();
+                        let list_price_cost_units = if combined_multiplier.is_finite()
+                            && combined_multiplier > 0.0
+                        {
+                            Some(
+                                (actual_cost_units as f64 / combined_multiplier).round() as u64,
+                            )
+                        } else {
+                            None
+                        };
                         RequestAttemptFinancialOutcome::Charged {
                             usage: RequestAttemptBilledUsage {
                                 requires_reconciliation: priced.requires_reconciliation,
@@ -160,12 +175,12 @@ impl GatewayDataState {
                                     )
                                     .map_err(|_| invalid("attempt cost is not finite"))?,
                                 )?,
-                                actual_cost_units: u64::try_from(priced.calculated_units)
-                                    .map_err(|_| invalid("negative calculated attempt cost"))?,
+                                actual_cost_units,
                                 input_tokens: usage.input_tokens,
                                 output_tokens: usage.output_tokens,
                                 cache_creation_tokens: usage.cache_creation_tokens,
                                 cache_read_tokens: usage.cache_read_tokens,
+                                list_price_cost_units,
                                 provider_cost,
                             },
                         }

@@ -72,7 +72,7 @@ pub(crate) struct GatewayControlAuthContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) api_key_name: Option<String>,
     #[serde(default = "default_api_key_billing_multiplier")]
-    pub(crate) api_key_billing_multiplier: f64,
+    pub(crate) api_key_billing_multiplier: aether_data_contracts::billing_multiplier::BillingMultiplier,
     pub(crate) balance_remaining: Option<f64>,
     pub(crate) access_allowed: bool,
     #[serde(skip)]
@@ -121,7 +121,7 @@ impl std::fmt::Debug for VerifiedApiKeyHash {
     }
 }
 
-fn default_api_key_billing_multiplier() -> f64 {
+fn default_api_key_billing_multiplier() -> aether_data_contracts::billing_multiplier::BillingMultiplier {
     aether_data::repository::auth::DEFAULT_API_KEY_BILLING_MULTIPLIER
 }
 
@@ -2014,7 +2014,7 @@ mod tests {
                 total_requests: 0,
                 total_tokens: 0,
                 total_cost_usd: 0.0,
-                billing_multiplier: 1.0,
+                billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             })
             .await
             .expect("same-ID API key recreation should resolve")

@@ -2819,6 +2819,25 @@ impl GatewayDataState {
         snapshot.user_allowed_models = allowed_models;
         snapshot.user_rate_limit = user_rate_limit;
         snapshot.user_daily_usage_limit_usd = user_daily_usage_limit_usd;
+        // Single-layer billing overlay: an explicit key-level multiplier
+        // (anything other than the neutral default) wins; otherwise the
+        // user's group multiplier applies, and the absence of both leaves
+        // the neutral default. Key and group multipliers never multiply
+        // each other.
+        if snapshot.api_key_billing_multiplier.is_one() {
+            let configured = crate::group_billing::parse_group_billing_multipliers(
+                self.find_system_config_value(
+                    crate::group_billing::USER_GROUP_BILLING_MULTIPLIERS_CONFIG_KEY,
+                )
+                .await?
+                .as_ref(),
+            );
+            if let Some(group_multiplier) =
+                crate::group_billing::resolve_group_billing_multiplier(&groups, &configured)
+            {
+                snapshot.api_key_billing_multiplier = group_multiplier;
+            }
+        }
         Ok(Some(GatewayAuthApiKeySnapshot::from_stored(
             snapshot,
             now_unix_secs,
@@ -3218,6 +3237,99 @@ mod tests {
         assert!(!auth_user_wallet_matches(&user_wallet, "user-2"));
         assert!(!auth_user_wallet_matches(&api_key_wallet, "user-1"));
         assert!(!auth_user_wallet_matches(&other_user_wallet, "user-1"));
+    }
+
+    #[tokio::test]
+    async fn billing_multiplier_resolves_key_first_group_second_default_last() {
+        use aether_contracts::billing_multiplier::BillingMultiplier;
+
+        let mut snapshot = sample_snapshot_with_role("key-user", "user-1", "user");
+        snapshot.api_key_billing_multiplier = BillingMultiplier::from_f64_rounded(3.0)
+            .expect("multiplier");
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-user".to_string()),
+            snapshot,
+        )]));
+        let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+            sample_auth_user("user-1", "user"),
+        ]));
+        let group = UserGroupWriteRepository::create_user_group(
+            user_repository.as_ref(),
+            UpsertUserGroupRecord {
+                name: "Priced".to_string(),
+                description: None,
+                priority: 10,
+                allowed_providers: None,
+                allowed_providers_mode: "inherit".to_string(),
+                allowed_api_formats: None,
+                allowed_api_formats_mode: "inherit".to_string(),
+                allowed_models: None,
+                allowed_models_mode: "inherit".to_string(),
+                rate_limit: None,
+                rate_limit_mode: "inherit".to_string(),
+                daily_usage_limit_usd: None,
+                daily_usage_limit_mode: "inherit".to_string(),
+            },
+        )
+        .await
+        .expect("group should create")
+        .expect("group should exist");
+        UserGroupWriteRepository::add_user_to_group(user_repository.as_ref(), &group.id, "user-1")
+            .await
+            .expect("group membership should create");
+        let group_id = group.id.clone();
+
+        let state = GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository)
+            .with_user_reader(user_repository)
+            .with_system_config_values_for_tests([(
+                crate::group_billing::USER_GROUP_BILLING_MULTIPLIERS_CONFIG_KEY.to_string(),
+                serde_json::json!({ group_id.clone(): 2.0 }),
+            )]);
+        // Key-level explicit multiplier wins; it never multiplies with the group.
+        let resolved = state
+            .read_auth_api_key_snapshot_by_key_hash("hash-user", 100)
+            .await
+            .expect("snapshot should resolve")
+            .expect("snapshot should exist");
+        assert_eq!(
+            resolved.api_key_billing_multiplier,
+            BillingMultiplier::from_f64_rounded(3.0).expect("multiplier")
+        );
+
+        // A neutral key falls back to the group multiplier.
+        let mut snapshot = sample_snapshot_with_role("key-user", "user-1", "user");
+        snapshot.api_key_billing_multiplier = BillingMultiplier::DEFAULT;
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-user".to_string()),
+            snapshot,
+        )]));
+        let state = GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository)
+            .with_user_reader(state.user_reader.clone().expect("user reader"))
+            .with_system_config_values_for_tests([(
+                crate::group_billing::USER_GROUP_BILLING_MULTIPLIERS_CONFIG_KEY.to_string(),
+                serde_json::json!({ group_id.clone(): 2.0 }),
+            )]);
+        let resolved = state
+            .read_auth_api_key_snapshot_by_key_hash("hash-user", 100)
+            .await
+            .expect("snapshot should resolve")
+            .expect("snapshot should exist");
+        assert_eq!(
+            resolved.api_key_billing_multiplier,
+            BillingMultiplier::from_f64_rounded(2.0).expect("multiplier")
+        );
+
+        // No key override and no configured group keeps the neutral default.
+        let state = GatewayDataState::with_auth_api_key_reader_for_tests(
+            state.auth_api_key_reader.clone().expect("auth reader"),
+        )
+        .with_user_reader(state.user_reader.clone().expect("user reader"));
+        let resolved = state
+            .read_auth_api_key_snapshot_by_key_hash("hash-user", 100)
+            .await
+            .expect("snapshot should resolve")
+            .expect("snapshot should exist");
+        assert_eq!(resolved.api_key_billing_multiplier, BillingMultiplier::DEFAULT);
     }
 
     #[tokio::test]

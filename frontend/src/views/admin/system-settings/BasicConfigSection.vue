@@ -78,6 +78,52 @@
 
       <div>
         <Label
+          for="billing-multiplier-clamp-min"
+          class="block text-sm font-medium"
+        >
+          计费倍率钳制下限
+        </Label>
+        <Input
+          id="billing-multiplier-clamp-min"
+          :model-value="billingMultiplierClampMin"
+          type="number"
+          min="0.0001"
+          max="9999.9999"
+          step="0.0001"
+          placeholder="0.01"
+          class="mt-1"
+          @update:model-value="$emit('update:billingMultiplierClampMin', Math.max(0.0001, Number($event) || 0.01))"
+        />
+        <p class="mt-1 text-xs text-muted-foreground">
+          管理员配置 key/组计费倍率时下限之下会被钳到边界；显式 0（免费）不受钳制
+        </p>
+      </div>
+
+      <div>
+        <Label
+          for="billing-multiplier-clamp-max"
+          class="block text-sm font-medium"
+        >
+          计费倍率钳制上限
+        </Label>
+        <Input
+          id="billing-multiplier-clamp-max"
+          :model-value="billingMultiplierClampMax"
+          type="number"
+          min="0.0001"
+          max="9999.9999"
+          step="0.0001"
+          placeholder="100"
+          class="mt-1"
+          @update:model-value="$emit('update:billingMultiplierClampMax', Math.max(0.0001, Number($event) || 100))"
+        />
+        <p class="mt-1 text-xs text-muted-foreground">
+          管理员配置 key/组计费倍率时上限之上会被钳到边界；需在系统设置端点校验下限小于上限
+        </p>
+      </div>
+
+      <div>
+        <Label
           for="password-policy-level"
           class="block text-sm font-medium mb-2"
         >
@@ -521,6 +567,8 @@ defineProps<{
   defaultUserInitialGiftUsd: number
   rateLimitPerMinute: number
   dailyUsageLimitUsd: number
+  billingMultiplierClampMin: number
+  billingMultiplierClampMax: number
   enableRegistration: boolean
   passwordPolicyLevel: string
   turnstileEnabled: boolean
@@ -550,6 +598,8 @@ defineEmits<{
   'update:defaultUserInitialGiftUsd': [value: number]
   'update:rateLimitPerMinute': [value: number]
   'update:dailyUsageLimitUsd': [value: number]
+  'update:billingMultiplierClampMin': [value: number]
+  'update:billingMultiplierClampMax': [value: number]
   'update:enableRegistration': [value: boolean]
   'update:passwordPolicyLevel': [value: string]
   'update:turnstileEnabled': [value: boolean]

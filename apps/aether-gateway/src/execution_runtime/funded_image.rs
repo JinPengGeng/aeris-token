@@ -1047,7 +1047,7 @@ impl FundedImageAttempt {
 fn quote_final_image_projection(
     plan: &ExecutionPlan,
     pricing: &BillingModelPricingSnapshot,
-    multiplier: f64,
+    multiplier: aether_contracts::billing_multiplier::BillingMultiplier,
 ) -> Result<BillingImageAuthorizationQuote, GatewayError> {
     let body = plan
         .body

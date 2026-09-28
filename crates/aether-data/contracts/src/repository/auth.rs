@@ -4,7 +4,8 @@ fn redacted_optional_secret<T>(value: &Option<T>) -> Option<&'static str> {
     value.as_ref().map(|_| "[REDACTED]")
 }
 
-pub const DEFAULT_API_KEY_BILLING_MULTIPLIER: f64 = 1.0;
+pub const DEFAULT_API_KEY_BILLING_MULTIPLIER: crate::billing_multiplier::BillingMultiplier =
+    crate::billing_multiplier::BillingMultiplier::DEFAULT;
 pub const MAX_API_KEY_BILLING_MULTIPLIER: f64 = 1000.0;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -34,7 +35,7 @@ pub struct StoredAuthApiKeySnapshot {
     pub api_key_allowed_models: Option<Vec<String>>,
     pub api_key_ip_rules: Option<Vec<String>>,
     pub api_key_daily_usage_limit_usd: Option<f64>,
-    pub api_key_billing_multiplier: f64,
+    pub api_key_billing_multiplier: crate::billing_multiplier::BillingMultiplier,
 }
 
 impl StoredAuthApiKeySnapshot {
@@ -188,7 +189,7 @@ pub struct ResolvedAuthApiKeySnapshot {
     pub api_key_allowed_models: Option<Vec<String>>,
     pub api_key_ip_rules: Option<Vec<String>>,
     pub api_key_daily_usage_limit_usd: Option<f64>,
-    pub api_key_billing_multiplier: f64,
+    pub api_key_billing_multiplier: crate::billing_multiplier::BillingMultiplier,
     pub currently_usable: bool,
 }
 
@@ -405,7 +406,7 @@ pub struct StoredAuthApiKeyExportRecord {
     pub total_requests: u64,
     pub total_tokens: u64,
     pub total_cost_usd: f64,
-    pub billing_multiplier: f64,
+    pub billing_multiplier: crate::billing_multiplier::BillingMultiplier,
     pub last_used_at_unix_secs: Option<u64>,
     pub created_at_unix_secs: Option<u64>,
     pub updated_at_unix_secs: Option<u64>,
@@ -585,7 +586,7 @@ pub struct CreateUserApiKeyRecord {
     pub total_requests: u64,
     pub total_tokens: u64,
     pub total_cost_usd: f64,
-    pub billing_multiplier: f64,
+    pub billing_multiplier: crate::billing_multiplier::BillingMultiplier,
 }
 
 impl std::fmt::Debug for CreateUserApiKeyRecord {
@@ -668,7 +669,7 @@ pub struct CreateStandaloneApiKeyRecord {
     pub total_requests: u64,
     pub total_tokens: u64,
     pub total_cost_usd: f64,
-    pub billing_multiplier: f64,
+    pub billing_multiplier: crate::billing_multiplier::BillingMultiplier,
 }
 
 impl std::fmt::Debug for CreateStandaloneApiKeyRecord {
@@ -1134,14 +1135,15 @@ fn normalize_optional_json(value: Option<serde_json::Value>) -> Option<serde_jso
 
 pub fn normalize_api_key_billing_multiplier(
     value: Option<f64>,
-) -> Result<f64, crate::DataLayerError> {
-    let value = value.unwrap_or(DEFAULT_API_KEY_BILLING_MULTIPLIER);
+) -> Result<crate::billing_multiplier::BillingMultiplier, crate::DataLayerError> {
+    let value = value.unwrap_or(1.0);
     if !value.is_finite() || !(0.0..=MAX_API_KEY_BILLING_MULTIPLIER).contains(&value) {
         return Err(crate::DataLayerError::UnexpectedValue(format!(
             "api_keys.billing_multiplier must be between 0 and {MAX_API_KEY_BILLING_MULTIPLIER}"
         )));
     }
-    Ok(value)
+    crate::billing_multiplier::BillingMultiplier::from_f64_rounded(value)
+        .map_err(|err| crate::DataLayerError::UnexpectedValue(err.to_string()))
 }
 
 #[cfg(test)]

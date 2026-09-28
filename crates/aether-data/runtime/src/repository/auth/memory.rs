@@ -737,7 +737,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             api_key_ip_rules: record.ip_rules.clone(),
             user_daily_usage_limit_usd: None,
             api_key_daily_usage_limit_usd: None,
-            api_key_billing_multiplier: 1.0,
+            api_key_billing_multiplier: aether_data_contracts::billing_multiplier::BillingMultiplier::ONE,
         };
 
         let now_unix_secs = current_unix_secs() as i64;
@@ -1648,7 +1648,7 @@ mod tests {
             total_requests: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
-            billing_multiplier: 1.0,
+            billing_multiplier: aether_data_contracts::billing_multiplier::BillingMultiplier::ONE,
         }
     }
 

@@ -153,7 +153,10 @@ pub(crate) async fn build_admin_create_user_api_key_response(
             }
         };
     let billing_multiplier =
-        match normalize_admin_api_key_billing_multiplier(payload.billing_multiplier) {
+        match normalize_admin_api_key_billing_multiplier(
+            payload.billing_multiplier,
+            crate::group_billing::read_billing_multiplier_clamp(state.app()).await,
+        ) {
             Ok(value) => value,
             Err(detail) => {
                 return Ok((

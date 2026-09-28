@@ -137,6 +137,7 @@ admin_user_api_key_revealed
 admin_user_api_key_updated
 admin_user_created
 admin_user_deleted
+admin_user_group_billing_multiplier_updated
 admin_user_group_created
 admin_user_group_deleted
 admin_user_group_members_updated

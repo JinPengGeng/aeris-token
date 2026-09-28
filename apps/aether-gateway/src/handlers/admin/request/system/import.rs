@@ -1986,7 +1986,9 @@ fn imported_optional_f64(value: Option<&Value>, field_name: &str) -> Result<Opti
     Ok(parsed)
 }
 
-fn imported_api_key_billing_multiplier(value: Option<&Value>) -> Result<f64, String> {
+fn imported_api_key_billing_multiplier(
+    value: Option<&Value>,
+) -> Result<aether_data_contracts::billing_multiplier::BillingMultiplier, String> {
     aether_data::repository::auth::normalize_api_key_billing_multiplier(imported_optional_f64(
         value,
         "billing_multiplier",
@@ -7770,7 +7772,7 @@ impl<'a> AdminAppState<'a> {
                                             .then(|| ip_rules.clone()),
                                         billing_multiplier_present: key
                                             .contains_key("billing_multiplier"),
-                                        billing_multiplier: Some(billing_multiplier),
+                                        billing_multiplier: Some(billing_multiplier.to_f64()),
                                         feature_settings: key
                                             .contains_key("feature_settings")
                                             .then(|| feature_settings.clone()),
@@ -8134,7 +8136,7 @@ impl<'a> AdminAppState<'a> {
                                     auto_delete_on_expiry: false,
                                     billing_multiplier_present: key
                                         .contains_key("billing_multiplier"),
-                                    billing_multiplier: Some(billing_multiplier),
+                                    billing_multiplier: Some(billing_multiplier.to_f64()),
                                 },
                             )
                             .await?;

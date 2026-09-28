@@ -29,6 +29,8 @@ pub struct AdminSystemSettingsUpdate {
     pub default_model: Option<Option<String>>,
     pub enable_usage_tracking: Option<bool>,
     pub password_policy_level: Option<String>,
+    pub billing_multiplier_clamp_min: Option<f64>,
+    pub billing_multiplier_clamp_max: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1259,13 +1261,37 @@ pub fn build_admin_system_settings_payload(
     default_model: Option<String>,
     enable_usage_tracking: bool,
     password_policy_level: String,
+    billing_multiplier_clamp_min: f64,
+    billing_multiplier_clamp_max: f64,
 ) -> serde_json::Value {
     json!({
         "default_provider": default_provider,
         "default_model": default_model,
         "enable_usage_tracking": enable_usage_tracking,
         "password_policy_level": password_policy_level,
+        "billing_multiplier_clamp_min": billing_multiplier_clamp_min,
+        "billing_multiplier_clamp_max": billing_multiplier_clamp_max,
     })
+}
+
+fn parse_optional_finite_number(
+    payload: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<f64>, (http::StatusCode, serde_json::Value)> {
+    match payload.get(key) {
+        Some(Value::Number(_)) => match payload.get(key).and_then(Value::as_f64) {
+            Some(value) if value.is_finite() => Ok(Some(value)),
+            _ => Err((
+                http::StatusCode::BAD_REQUEST,
+                json!({ "detail": format!("{key} 必须是有限数值") }),
+            )),
+        },
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err((
+            http::StatusCode::BAD_REQUEST,
+            json!({ "detail": format!("{key} 必须是有限数值") }),
+        )),
+    }
 }
 
 pub fn parse_admin_system_settings_update(
@@ -1357,11 +1383,18 @@ pub fn parse_admin_system_settings_update(
         None => None,
     };
 
+    let billing_multiplier_clamp_min =
+        parse_optional_finite_number(&payload, "billing_multiplier_clamp_min")?;
+    let billing_multiplier_clamp_max =
+        parse_optional_finite_number(&payload, "billing_multiplier_clamp_max")?;
+
     Ok(AdminSystemSettingsUpdate {
         default_provider,
         default_model,
         enable_usage_tracking,
         password_policy_level,
+        billing_multiplier_clamp_min,
+        billing_multiplier_clamp_max,
     })
 }
 

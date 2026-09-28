@@ -163,6 +163,11 @@ pub struct RequestAttemptExecutionFacts {
 pub struct RequestAttemptBilledUsage {
     pub total_cost_units: u64,
     pub actual_cost_units: u64,
+    /// Revenue before any billing multiplier was applied (list price), frozen
+    /// at settlement. Absent on records written before this field existed or
+    /// when no multiplier snapshot was available.
+    #[serde(default)]
+    pub list_price_cost_units: Option<u64>,
     /// The observation differs from the frozen quote, even when the price fits
     /// its authorization. Older stored facts without the flag retain their meaning.
     #[serde(default)]

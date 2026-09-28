@@ -95,7 +95,7 @@ pub struct LifecycleUsageSeed {
     pub api_key_id: Option<String>,
     pub username: Option<String>,
     pub api_key_name: Option<String>,
-    pub api_key_billing_multiplier: Option<f64>,
+    pub api_key_billing_multiplier: Option<aether_contracts::billing_multiplier::BillingMultiplier>,
     pub provider_name: String,
     pub model: String,
     pub target_model: Option<String>,
@@ -134,7 +134,7 @@ pub struct TerminalUsageContextSeed {
     pub api_key_id: Option<String>,
     pub username: Option<String>,
     pub api_key_name: Option<String>,
-    pub api_key_billing_multiplier: Option<f64>,
+    pub api_key_billing_multiplier: Option<aether_contracts::billing_multiplier::BillingMultiplier>,
     pub provider_name: String,
     pub model: String,
     pub target_model: Option<String>,
@@ -201,7 +201,7 @@ pub struct TerminalUsageSeed {
     pub api_key_id: Option<String>,
     pub username: Option<String>,
     pub api_key_name: Option<String>,
-    pub api_key_billing_multiplier: Option<f64>,
+    pub api_key_billing_multiplier: Option<aether_contracts::billing_multiplier::BillingMultiplier>,
     pub provider_name: String,
     pub model: String,
     pub target_model: Option<String>,
@@ -306,7 +306,7 @@ pub fn build_lifecycle_usage_seed(
         api_key_id: context_string(context, "api_key_id"),
         username: context_string(context, "username"),
         api_key_name: context_string(context, "api_key_name"),
-        api_key_billing_multiplier: context_f64(context, "api_key_billing_multiplier"),
+        api_key_billing_multiplier: context_multiplier(context, "api_key_billing_multiplier"),
         provider_name,
         model,
         target_model: context_string(context, "mapped_model"),
@@ -886,7 +886,7 @@ pub fn build_terminal_usage_context_seed(
         api_key_id: context_string(context, "api_key_id"),
         username: context_string(context, "username"),
         api_key_name: context_string(context, "api_key_name"),
-        api_key_billing_multiplier: context_f64(context, "api_key_billing_multiplier"),
+        api_key_billing_multiplier: context_multiplier(context, "api_key_billing_multiplier"),
         provider_name: context_string(context, "provider_name")
             .or_else(|| non_empty_str(plan.provider_name.as_deref()))
             .unwrap_or_else(|| "unknown".to_string()),
@@ -1846,7 +1846,7 @@ fn build_usage_event_data_seed_with_detail(
         api_key_id: context_string(context, "api_key_id"),
         username: context_string(context, "username"),
         api_key_name: context_string(context, "api_key_name"),
-        api_key_billing_multiplier: context_f64(context, "api_key_billing_multiplier"),
+        api_key_billing_multiplier: context_multiplier(context, "api_key_billing_multiplier"),
         provider_name,
         model,
         target_model: context_string(context, "mapped_model"),
@@ -2026,6 +2026,16 @@ fn context_f64(context: Option<&Map<String, Value>>, key: &str) -> Option<f64> {
         .get(key)
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())
+}
+
+fn context_multiplier(
+    context: Option<&Map<String, Value>>,
+    key: &str,
+) -> Option<aether_contracts::billing_multiplier::BillingMultiplier> {
+    context_f64(context, key)
+        .and_then(|value| {
+            aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(value).ok()
+        })
 }
 
 fn routing_u64_from_metadata(value: Option<&Value>, key: &str) -> Option<u64> {

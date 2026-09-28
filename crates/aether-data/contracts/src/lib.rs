@@ -1,3 +1,4 @@
+pub mod billing_multiplier;
 pub mod database;
 mod error;
 pub mod migration;

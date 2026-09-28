@@ -130,7 +130,10 @@ pub(crate) async fn build_admin_update_user_api_key_response(
         None => None,
     };
     let billing_multiplier =
-        match normalize_admin_api_key_billing_multiplier(payload.billing_multiplier) {
+        match normalize_admin_api_key_billing_multiplier(
+            payload.billing_multiplier,
+            crate::group_billing::read_billing_multiplier_clamp(state.app()).await,
+        ) {
             Ok(value) => value,
             Err(detail) => {
                 return Ok((
@@ -160,7 +163,7 @@ pub(crate) async fn build_admin_update_user_api_key_response(
             concurrent_limit_present,
             ip_rules,
             billing_multiplier_present: field_presence.contains("billing_multiplier"),
-            billing_multiplier: Some(billing_multiplier),
+            billing_multiplier: Some(billing_multiplier.to_f64()),
             feature_settings,
         })
         .await?

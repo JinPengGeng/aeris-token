@@ -1448,7 +1448,7 @@ mod tests {
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
             api_key_ip_rules: None,
-            api_key_billing_multiplier: 1.0,
+            api_key_billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             currently_usable: true,
         }
     }

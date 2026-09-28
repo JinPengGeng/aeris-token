@@ -1778,7 +1778,7 @@ async fn seed_client_api_key(backends: &DataBackends, user_id: &str) -> Result<(
             total_requests: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
-            billing_multiplier: 1.0,
+            billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::ONE,
         })
         .await?;
     backends
@@ -1844,7 +1844,7 @@ async fn seed_weekly_request_limit(
             total_requests: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
-            billing_multiplier: 1.0,
+            billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::ONE,
         })
         .await?;
 

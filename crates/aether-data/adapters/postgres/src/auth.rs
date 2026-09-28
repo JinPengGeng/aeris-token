@@ -1308,7 +1308,7 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(i64_from_u64(record.total_tokens, "api_keys.total_tokens")?)
             .bind(record.total_cost_usd)
             .bind(record.daily_usage_limit_usd)
-            .bind(record.billing_multiplier)
+            .bind(record.billing_multiplier.to_f64())
             .fetch_optional(&mut *tx)
             .await
             .map_postgres_err()?;
@@ -1380,7 +1380,7 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(i64_from_u64(record.total_tokens, "api_keys.total_tokens")?)
             .bind(record.total_cost_usd)
             .bind(record.daily_usage_limit_usd)
-            .bind(record.billing_multiplier)
+            .bind(record.billing_multiplier.to_f64())
             .fetch_optional(&mut *tx)
             .await
             .map_postgres_err()?;
@@ -1482,7 +1482,7 @@ WHERE id = $2
             .bind(feature_settings)
             .bind(true)
             .bind(record.billing_multiplier_present)
-            .bind(billing_multiplier)
+            .bind(billing_multiplier.to_f64())
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -1553,7 +1553,7 @@ WHERE id = $2
             .bind(record.daily_usage_limit_present)
             .bind(record.daily_usage_limit_usd)
             .bind(record.billing_multiplier_present)
-            .bind(billing_multiplier)
+            .bind(billing_multiplier.to_f64())
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;

@@ -130,6 +130,34 @@
     </div>
 
     <div class="space-y-2">
+      <Label class="text-sm font-medium">{{ legacyT('计费倍率') }}</Label>
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div class="flex min-h-10 w-full items-center gap-2 sm:w-auto sm:shrink-0">
+          <Switch
+            :model-value="form.billing_multiplier_mode === 'system'"
+            @update:model-value="setSystemBillingMultiplier"
+          />
+          <span class="text-xs text-muted-foreground sm:sr-only">
+            {{ legacyT(form.billing_multiplier_mode === 'system' ? '系统默认' : '自定义') }}
+          </span>
+        </div>
+        <div class="min-w-0 flex-1">
+          <Input
+            :model-value="form.billing_multiplier ?? ''"
+            type="number"
+            min="0"
+            max="9999.9999"
+            step="0.0001"
+            class="h-10"
+            :disabled="form.billing_multiplier_mode === 'system'"
+            :placeholder="legacyT(form.billing_multiplier_mode === 'system' ? '不设置组倍率' : '0 = 免费,留空 = 不设置')"
+            @update:model-value="updateBillingMultiplier"
+          />
+        </div>
+      </div>
+    </div>
+
+    <div class="space-y-2">
       <Label class="text-sm font-medium">{{ legacyT('额度限制 (美元/日)') }}</Label>
       <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div class="flex min-h-10 w-full items-center gap-2 sm:w-auto sm:shrink-0">
@@ -218,5 +246,13 @@ function setSystemDailyUsageLimit(value: boolean): void {
 
 function updateDailyUsageLimit(value: string | number): void {
   updateForm({ daily_usage_limit_usd: parseNumberInput(value, { allowFloat: true, min: 0 }) })
+}
+
+function setSystemBillingMultiplier(value: boolean): void {
+  updateForm({ billing_multiplier_mode: value ? 'system' : 'custom' })
+}
+
+function updateBillingMultiplier(value: string | number): void {
+  updateForm({ billing_multiplier: parseNumberInput(value, { allowFloat: true, min: 0, max: 9999.9999 }) })
 }
 </script>

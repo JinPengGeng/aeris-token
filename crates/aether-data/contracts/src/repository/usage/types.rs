@@ -1265,6 +1265,7 @@ pub struct StoredMarginReportRow {
     pub provider_id: String,
     pub request_count: u64,
     pub revenue_units: i128,
+    pub list_price_revenue_units: i128,
     pub cost_units: i128,
     pub cost_known_request_count: u64,
     pub cost_estimated_request_count: u64,
