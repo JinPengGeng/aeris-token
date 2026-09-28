@@ -72,7 +72,8 @@ pub(crate) struct GatewayControlAuthContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) api_key_name: Option<String>,
     #[serde(default = "default_api_key_billing_multiplier")]
-    pub(crate) api_key_billing_multiplier: aether_data_contracts::billing_multiplier::BillingMultiplier,
+    pub(crate) api_key_billing_multiplier:
+        aether_data_contracts::billing_multiplier::BillingMultiplier,
     pub(crate) balance_remaining: Option<f64>,
     pub(crate) access_allowed: bool,
     #[serde(skip)]
@@ -121,7 +122,8 @@ impl std::fmt::Debug for VerifiedApiKeyHash {
     }
 }
 
-fn default_api_key_billing_multiplier() -> aether_data_contracts::billing_multiplier::BillingMultiplier {
+fn default_api_key_billing_multiplier(
+) -> aether_data_contracts::billing_multiplier::BillingMultiplier {
     aether_data::repository::auth::DEFAULT_API_KEY_BILLING_MULTIPLIER
 }
 

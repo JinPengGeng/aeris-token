@@ -4,8 +4,7 @@ use aether_contracts::billing_multiplier::{
     BillingMultiplier, BILLING_MULTIPLIER_CLAMP_MAX_UNITS, BILLING_MULTIPLIER_CLAMP_MIN_UNITS,
 };
 
-pub(crate) const USER_GROUP_BILLING_MULTIPLIERS_CONFIG_KEY: &str =
-    "user_group_billing_multipliers";
+pub(crate) const USER_GROUP_BILLING_MULTIPLIERS_CONFIG_KEY: &str = "user_group_billing_multipliers";
 pub(crate) const BILLING_MULTIPLIER_CLAMP_MIN_CONFIG_KEY: &str = "billing_multiplier_clamp_min";
 pub(crate) const BILLING_MULTIPLIER_CLAMP_MAX_CONFIG_KEY: &str = "billing_multiplier_clamp_max";
 
@@ -40,8 +39,10 @@ pub(crate) fn resolve_group_billing_multiplier(
     groups: &[aether_data::repository::users::StoredUserGroup],
     configured: &BTreeMap<String, BillingMultiplier>,
 ) -> Option<BillingMultiplier> {
-    let mut best: Option<(&aether_data::repository::users::StoredUserGroup, BillingMultiplier)> =
-        None;
+    let mut best: Option<(
+        &aether_data::repository::users::StoredUserGroup,
+        BillingMultiplier,
+    )> = None;
     for group in groups {
         let Some(multiplier) = configured.get(&group.id) else {
             continue;
@@ -64,12 +65,18 @@ pub(crate) fn resolve_billing_multiplier_clamp(
         .and_then(serde_json::Value::as_f64)
         .and_then(|value| BillingMultiplier::from_f64_rounded(value).ok())
         .filter(|value| !value.is_zero())
-        .unwrap_or_else(|| BillingMultiplier::from_units(BILLING_MULTIPLIER_CLAMP_MIN_UNITS).expect("default clamp min"));
+        .unwrap_or_else(|| {
+            BillingMultiplier::from_units(BILLING_MULTIPLIER_CLAMP_MIN_UNITS)
+                .expect("default clamp min")
+        });
     let max = max_value
         .and_then(serde_json::Value::as_f64)
         .and_then(|value| BillingMultiplier::from_f64_rounded(value).ok())
         .filter(|value| !value.is_zero())
-        .unwrap_or_else(|| BillingMultiplier::from_units(BILLING_MULTIPLIER_CLAMP_MAX_UNITS).expect("default clamp max"));
+        .unwrap_or_else(|| {
+            BillingMultiplier::from_units(BILLING_MULTIPLIER_CLAMP_MAX_UNITS)
+                .expect("default clamp max")
+        });
     if min.units() <= max.units() {
         (min, max)
     } else {
@@ -149,7 +156,10 @@ mod tests {
             Some(BillingMultiplier::from_f64_rounded(2.0).expect("value"))
         );
         let no_match = vec![group("g-none", 99)];
-        assert_eq!(resolve_group_billing_multiplier(&no_match, &configured), None);
+        assert_eq!(
+            resolve_group_billing_multiplier(&no_match, &configured),
+            None
+        );
     }
 
     #[test]

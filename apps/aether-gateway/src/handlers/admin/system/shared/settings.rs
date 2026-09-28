@@ -668,11 +668,16 @@ pub(crate) async fn apply_admin_system_settings_update(
             .await?;
     }
 
-    if update.billing_multiplier_clamp_min.is_some() || update.billing_multiplier_clamp_max.is_some()
+    if update.billing_multiplier_clamp_min.is_some()
+        || update.billing_multiplier_clamp_max.is_some()
     {
         let current = crate::group_billing::read_billing_multiplier_clamp(state.app()).await;
-        let requested_min = update.billing_multiplier_clamp_min.unwrap_or_else(|| current.0.to_f64());
-        let requested_max = update.billing_multiplier_clamp_max.unwrap_or_else(|| current.1.to_f64());
+        let requested_min = update
+            .billing_multiplier_clamp_min
+            .unwrap_or_else(|| current.0.to_f64());
+        let requested_max = update
+            .billing_multiplier_clamp_max
+            .unwrap_or_else(|| current.1.to_f64());
         let min = aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(
             requested_min,
         )

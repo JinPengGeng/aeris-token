@@ -61,7 +61,8 @@ mod tests {
                 api_key_id: "key-1".to_string(),
                 username: None,
                 api_key_name: None,
-                api_key_billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::ONE,
+                api_key_billing_multiplier:
+                    aether_contracts::billing_multiplier::BillingMultiplier::ONE,
                 balance_remaining: Some(12.5),
                 access_allowed: true,
                 api_key_is_standalone: false,

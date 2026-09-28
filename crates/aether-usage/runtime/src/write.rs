@@ -2032,10 +2032,9 @@ fn context_multiplier(
     context: Option<&Map<String, Value>>,
     key: &str,
 ) -> Option<aether_contracts::billing_multiplier::BillingMultiplier> {
-    context_f64(context, key)
-        .and_then(|value| {
-            aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(value).ok()
-        })
+    context_f64(context, key).and_then(|value| {
+        aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(value).ok()
+    })
 }
 
 fn routing_u64_from_metadata(value: Option<&Value>, key: &str) -> Option<u64> {

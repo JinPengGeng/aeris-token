@@ -353,7 +353,8 @@ impl BillingService {
                                 return Ok(None);
                             }
                             let Some(units) = ceil_cost_units(
-                                calculated.cost_before_final_rounding(input.api_key_multiplier.to_f64()),
+                                calculated
+                                    .cost_before_final_rounding(input.api_key_multiplier.to_f64()),
                             ) else {
                                 return Ok(None);
                             };
@@ -536,7 +537,7 @@ mod tests {
         pricing.provider_api_key_rate_multipliers = Some(json!({"openai:image": 2.0}));
         let mut input = input();
         input.api_key_multiplier =
-                aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(1.5).unwrap();
+            aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(1.5).unwrap();
         for count in [1, 10] {
             input.image_count = count;
             let quote = service
@@ -564,7 +565,8 @@ mod tests {
             let mut input = input();
             input.image_count = 1;
             input.api_key_multiplier =
-                aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(10.0).unwrap();
+                aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(10.0)
+                    .unwrap();
             let quote = service
                 .quote_image_authorization(&pricing, &input)
                 .unwrap()
@@ -903,10 +905,12 @@ mod tests {
                 .is_none());
         }
         for multiplier in [f64::NAN, f64::INFINITY, -1.0, f64::MAX] {
-            assert!(aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(
-                multiplier
-            )
-            .is_err());
+            assert!(
+                aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(
+                    multiplier
+                )
+                .is_err()
+            );
         }
         let mut bad = input();
         bad.possible_outputs[0].size = "9223372036854775807x2".into();

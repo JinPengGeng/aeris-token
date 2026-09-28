@@ -160,9 +160,7 @@ impl GatewayDataState {
                         let list_price_cost_units = if combined_multiplier.is_finite()
                             && combined_multiplier > 0.0
                         {
-                            Some(
-                                (actual_cost_units as f64 / combined_multiplier).round() as u64,
-                            )
+                            Some((actual_cost_units as f64 / combined_multiplier).round() as u64)
                         } else {
                             None
                         };

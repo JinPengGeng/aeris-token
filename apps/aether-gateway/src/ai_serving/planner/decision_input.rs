@@ -1370,7 +1370,8 @@ mod tests {
             api_key_id: "api-key-1".to_string(),
             username: None,
             api_key_name: None,
-            api_key_billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::ONE,
+            api_key_billing_multiplier:
+                aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             balance_remaining: None,
             access_allowed: true,
             api_key_is_standalone: false,
@@ -1404,7 +1405,8 @@ mod tests {
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
             api_key_ip_rules: None,
-            api_key_billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::ONE,
+            api_key_billing_multiplier:
+                aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             currently_usable: true,
         }
     }

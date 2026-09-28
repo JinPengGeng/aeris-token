@@ -13,7 +13,9 @@ impl std::fmt::Display for BillingMultiplierError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidValue(message) => write!(formatter, "{message}"),
-            Self::OutOfRange(units) => write!(formatter, "billing multiplier units out of range: {units}"),
+            Self::OutOfRange(units) => {
+                write!(formatter, "billing multiplier units out of range: {units}")
+            }
         }
     }
 }
@@ -37,8 +39,11 @@ pub const BILLING_MULTIPLIER_CLAMP_MAX_UNITS: i32 = 1_000_000;
 pub struct BillingMultiplier(i32);
 
 impl BillingMultiplier {
+    /// Constant: explicit free-tier multiplier (0.0).
     pub const ZERO: Self = Self(0);
+    /// Constant: neutral multiplier (1.0).
     pub const ONE: Self = Self(BILLING_MULTIPLIER_SCALE as i32);
+    /// Constant: multiplier used when nothing is configured.
     pub const DEFAULT: Self = Self::ONE;
 
     /// Parses a finite non-negative decimal, rounding half-away-from-zero to
@@ -59,6 +64,7 @@ impl BillingMultiplier {
         Ok(Self(units as i32))
     }
 
+    /// Function: builds a multiplier from raw 1e-4 units.
     pub fn from_units(units: i32) -> Result<Self, BillingMultiplierError> {
         if !(0..=BILLING_MULTIPLIER_MAX_UNITS).contains(&units) {
             return Err(BillingMultiplierError::OutOfRange(units));
@@ -66,6 +72,7 @@ impl BillingMultiplier {
         Ok(Self(units))
     }
 
+    /// Method: raw 1e-4 units.
     pub fn units(self) -> i32 {
         self.0
     }
@@ -76,10 +83,12 @@ impl BillingMultiplier {
         f64::from(self.0) / BILLING_MULTIPLIER_SCALE as f64
     }
 
+    /// Method: whether this is the explicit free-tier multiplier.
     pub fn is_zero(self) -> bool {
         self.0 == 0
     }
 
+    /// Method: whether this is the neutral default multiplier.
     pub fn is_one(self) -> bool {
         self.0 == Self::ONE.0
     }

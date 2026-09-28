@@ -3244,8 +3244,8 @@ mod tests {
         use aether_contracts::billing_multiplier::BillingMultiplier;
 
         let mut snapshot = sample_snapshot_with_role("key-user", "user-1", "user");
-        snapshot.api_key_billing_multiplier = BillingMultiplier::from_f64_rounded(3.0)
-            .expect("multiplier");
+        snapshot.api_key_billing_multiplier =
+            BillingMultiplier::from_f64_rounded(3.0).expect("multiplier");
         let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
             Some("hash-user".to_string()),
             snapshot,
@@ -3329,7 +3329,10 @@ mod tests {
             .await
             .expect("snapshot should resolve")
             .expect("snapshot should exist");
-        assert_eq!(resolved.api_key_billing_multiplier, BillingMultiplier::DEFAULT);
+        assert_eq!(
+            resolved.api_key_billing_multiplier,
+            BillingMultiplier::DEFAULT
+        );
     }
 
     #[tokio::test]

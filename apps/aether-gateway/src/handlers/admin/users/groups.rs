@@ -103,10 +103,8 @@ pub(in super::super) async fn build_admin_create_user_group_response(
     };
     let default_group_id = read_default_user_group_id(state).await?;
     write_group_billing_multiplier(state, group.id.as_str(), record.billing_multiplier).await?;
-    let response = Json(
-        user_group_payload(state, group, default_group_id.as_deref()).await?,
-    )
-    .into_response();
+    let response =
+        Json(user_group_payload(state, group, default_group_id.as_deref()).await?).into_response();
     let response = attach_admin_audit_response(
         response,
         "admin_user_group_created",
@@ -114,7 +112,10 @@ pub(in super::super) async fn build_admin_create_user_group_response(
         "user_group",
         "user_groups",
     );
-    Ok(attach_group_billing_multiplier_audit(response, record.billing_multiplier.is_some()))
+    Ok(attach_group_billing_multiplier_audit(
+        response,
+        record.billing_multiplier.is_some(),
+    ))
 }
 
 pub(in super::super) async fn build_admin_update_user_group_response(
@@ -144,10 +145,8 @@ pub(in super::super) async fn build_admin_update_user_group_response(
     };
     let default_group_id = read_default_user_group_id(state).await?;
     write_group_billing_multiplier(state, group.id.as_str(), record.billing_multiplier).await?;
-    let response = Json(
-        user_group_payload(state, group, default_group_id.as_deref()).await?,
-    )
-    .into_response();
+    let response =
+        Json(user_group_payload(state, group, default_group_id.as_deref()).await?).into_response();
     let response = attach_admin_audit_response(
         response,
         "admin_user_group_updated",
@@ -155,7 +154,10 @@ pub(in super::super) async fn build_admin_update_user_group_response(
         "user_group",
         &group_id,
     );
-    Ok(attach_group_billing_multiplier_audit(response, record.billing_multiplier.is_some()))
+    Ok(attach_group_billing_multiplier_audit(
+        response,
+        record.billing_multiplier.is_some(),
+    ))
 }
 
 pub(in super::super) async fn build_admin_delete_user_group_response(
@@ -454,22 +456,22 @@ async fn parse_group_record(
         normalize_admin_user_string_list(payload.allowed_models, "allowed_models")?;
     Ok(ParsedUserGroupRecord {
         record: aether_data::repository::users::UpsertUserGroupRecord {
-        name,
-        description: payload
-            .description
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        priority: 0,
-        allowed_providers,
-        allowed_providers_mode: normalize_list_mode(&payload.allowed_providers_mode)?,
-        allowed_api_formats,
-        allowed_api_formats_mode: normalize_list_mode(&payload.allowed_api_formats_mode)?,
-        allowed_models,
-        allowed_models_mode: normalize_list_mode(&payload.allowed_models_mode)?,
-        rate_limit: payload.rate_limit,
-        rate_limit_mode: normalize_rate_mode(&payload.rate_limit_mode)?,
-        daily_usage_limit_usd: payload.daily_usage_limit_usd,
-        daily_usage_limit_mode: normalize_rate_mode(&payload.daily_usage_limit_mode)?,
+            name,
+            description: payload
+                .description
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            priority: 0,
+            allowed_providers,
+            allowed_providers_mode: normalize_list_mode(&payload.allowed_providers_mode)?,
+            allowed_api_formats,
+            allowed_api_formats_mode: normalize_list_mode(&payload.allowed_api_formats_mode)?,
+            allowed_models,
+            allowed_models_mode: normalize_list_mode(&payload.allowed_models_mode)?,
+            rate_limit: payload.rate_limit,
+            rate_limit_mode: normalize_rate_mode(&payload.rate_limit_mode)?,
+            daily_usage_limit_usd: payload.daily_usage_limit_usd,
+            daily_usage_limit_mode: normalize_rate_mode(&payload.daily_usage_limit_mode)?,
         },
         billing_multiplier,
     })
@@ -501,11 +503,12 @@ async fn user_group_payload(
 fn user_group_payload_with_multipliers(
     group: &aether_data::repository::users::StoredUserGroup,
     default_group_id: Option<&str>,
-    configured: &std::collections::BTreeMap<String, aether_contracts::billing_multiplier::BillingMultiplier>,
+    configured: &std::collections::BTreeMap<
+        String,
+        aether_contracts::billing_multiplier::BillingMultiplier,
+    >,
 ) -> serde_json::Value {
-    let billing_multiplier = configured
-        .get(&group.id)
-        .map(|value| value.to_f64());
+    let billing_multiplier = configured.get(&group.id).map(|value| value.to_f64());
     json!({
         "id": group.id,
         "name": group.name,
@@ -530,13 +533,19 @@ fn user_group_payload_with_multipliers(
 
 async fn read_group_billing_multipliers(
     state: &AdminAppState<'_>,
-) -> Result<std::collections::BTreeMap<String, aether_contracts::billing_multiplier::BillingMultiplier>, GatewayError>
-{
+) -> Result<
+    std::collections::BTreeMap<String, aether_contracts::billing_multiplier::BillingMultiplier>,
+    GatewayError,
+> {
     let value = state
         .app()
-        .read_system_config_json_value(crate::group_billing::USER_GROUP_BILLING_MULTIPLIERS_CONFIG_KEY)
+        .read_system_config_json_value(
+            crate::group_billing::USER_GROUP_BILLING_MULTIPLIERS_CONFIG_KEY,
+        )
         .await?;
-    Ok(crate::group_billing::parse_group_billing_multipliers(value.as_ref()))
+    Ok(crate::group_billing::parse_group_billing_multipliers(
+        value.as_ref(),
+    ))
 }
 
 async fn write_group_billing_multiplier(

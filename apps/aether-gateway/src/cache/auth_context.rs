@@ -413,7 +413,8 @@ mod tests {
             api_key_id: api_key_id.to_string(),
             username: None,
             api_key_name: None,
-            api_key_billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::ONE,
+            api_key_billing_multiplier:
+                aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,

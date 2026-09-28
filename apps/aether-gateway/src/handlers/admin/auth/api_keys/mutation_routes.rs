@@ -205,14 +205,13 @@ pub(super) async fn build_admin_create_api_key_response(
         };
     // 未显式指定时套用部署级默认并发硬顶(默认 None=不限制,保持既有行为)。
     let concurrent_limit = concurrent_limit.or_else(default_api_key_concurrent_limit_from_env);
-    let billing_multiplier =
-        match normalize_admin_standalone_api_key_billing_multiplier(
-            payload.billing_multiplier,
-            crate::group_billing::read_billing_multiplier_clamp(state.app()).await,
-        ) {
-            Ok(value) => value,
-            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
-        };
+    let billing_multiplier = match normalize_admin_standalone_api_key_billing_multiplier(
+        payload.billing_multiplier,
+        crate::group_billing::read_billing_multiplier_clamp(state.app()).await,
+    ) {
+        Ok(value) => value,
+        Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+    };
     let (initial_balance_usd, unlimited_balance) = match normalize_standalone_initial_balance(
         payload.initial_balance_usd,
         payload.unlimited_balance,
@@ -450,14 +449,13 @@ pub(super) async fn build_admin_update_api_key_response(
             Ok(value) => value,
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
         };
-    let billing_multiplier =
-        match normalize_admin_standalone_api_key_billing_multiplier(
-            payload.billing_multiplier,
-            crate::group_billing::read_billing_multiplier_clamp(state.app()).await,
-        ) {
-            Ok(value) => value,
-            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
-        };
+    let billing_multiplier = match normalize_admin_standalone_api_key_billing_multiplier(
+        payload.billing_multiplier,
+        crate::group_billing::read_billing_multiplier_clamp(state.app()).await,
+    ) {
+        Ok(value) => value,
+        Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+    };
     let allowed_providers = if field_presence.contains("allowed_providers") {
         match normalize_admin_user_string_list(payload.allowed_providers, "allowed_providers") {
             Ok(value) => Some(value),
