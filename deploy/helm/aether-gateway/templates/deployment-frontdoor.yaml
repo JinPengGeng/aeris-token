@@ -48,6 +48,13 @@ spec:
           livenessProbe:
             httpGet: { path: /health, port: 8084 }
             periodSeconds: 10
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # 镜像 HOME=/tmp/aether-home；readOnlyRootFilesystem 下需要可写 /tmp
+        - name: tmp
+          emptyDir: {}
       {{- if .Values.frontdoor.podAntiAffinity }}
       affinity:
         podAntiAffinity:
