@@ -1,0 +1,57 @@
+name: Helm CI
+
+# Helm chart 渲染冒烟：appVersion/values/模板改动后至少保证
+# `helm lint` + `helm template` 能过，避免发版后才发现模板语法漂移。
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - "deploy/helm/**"
+      - ".github/workflows/helm-ci.yml"
+  pull_request:
+    paths:
+      - "deploy/helm/**"
+      - ".github/workflows/helm-ci.yml"
+
+concurrency:
+  group: helm-ci-${{ github.event_name }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    name: helm lint & template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install pinned helm
+        shell: bash
+        run: |
+          version="v3.17.1"
+          checksum="3b66f3cd28409f29832b1b35b43d9922959a32d795003149707fea84cbcd4469"
+          archive="${RUNNER_TEMP}/helm.tar.gz"
+          curl -fsSL "https://get.helm.sh/helm-${version}-linux-amd64.tar.gz" -o "${archive}"
+          echo "${checksum}  ${archive}" | sha256sum -c -
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
+          "${RUNNER_TEMP}/linux-amd64/helm" version
+
+      - name: helm lint
+        shell: bash
+        run: "${RUNNER_TEMP}/linux-amd64/helm" lint deploy/helm/aether-gateway
+
+      - name: helm template
+        shell: bash
+        run: |
+          "${RUNNER_TEMP}/linux-amd64/helm" template smoke deploy/helm/aether-gateway \
+            --set secrets.jwtSecretKey=ci --set secrets.encryptionKey=ci \
+            --set database.url=postgresql://ci --set redis.url=redis://ci > "${RUNNER_TEMP}/rendered.yaml"
+          grep -q 'mountPath: /tmp' "${RUNNER_TEMP}/rendered.yaml"

@@ -3,4 +3,8 @@ name: aether-gateway
 description: Aether gateway multi-node Helm chart (frontdoor replicas + background node)
 type: application
 version: 0.1.0
-appVersion: "0.1.0"
+# appVersion 是 image.tag 留空时的默认镜像 tag，必须等于最近一次
+# aeris-token-vX.Y.Z 发版 tag 去掉前缀后的版本号（release.yml 的
+# docker/metadata-action 会按该规则同时发布裸 X.Y.Z tag）。
+# 每次 fork 发版后手动对齐到最新 tag，详见 README「appVersion 维护」。
+appVersion: "0.1.2"

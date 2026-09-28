@@ -41,3 +41,18 @@ helm install aether ./deploy/helm/aether-gateway \
   暴露 ClusterIP 即可。
 - 无 HPA/VPA/PDB：容量伸缩以压测基线（`tools/pressure/`）为准入门槛，
   自动伸缩策略待有生产指标后再定。
+
+## appVersion 维护
+
+`Chart.yaml` 的 `appVersion` 是 `values.yaml` 里 `image.tag` 留空时的默认
+镜像 tag（见 `templates/_helpers.tpl` 的 `aether-gateway.image`）。fork 的
+release.yml 对每个 `aeris-token-vX.Y.Z` tag 都会同时发布裸 `X.Y.Z` 镜像
+tag，因此**每次 fork 发版后把 appVersion 更新为最新 tag 去掉
+`aeris-token-v` 前缀的版本号**（如 `aeris-token-v0.1.2` → `0.1.2`）。
+生产部署建议改为 pin `image.digest`，appVersion 仅作默认值兜底。
+
+## /tmp 卷
+
+镜像 `HOME=/tmp/aether-home`（与 compose 的 tmpfs 语义对齐），两个
+Deployment 均 `readOnlyRootFilesystem: true`，模板已挂载内存型 emptyDir
+到 `/tmp`；如应用增加其他临时写路径，需同步扩展 volumes。

@@ -48,6 +48,13 @@ spec:
           readinessProbe:
             httpGet: { path: /readyz, port: 8084 }
             periodSeconds: 5
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # 镜像 HOME=/tmp/aether-home；readOnlyRootFilesystem 下需要可写 /tmp
+        - name: tmp
+          emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
