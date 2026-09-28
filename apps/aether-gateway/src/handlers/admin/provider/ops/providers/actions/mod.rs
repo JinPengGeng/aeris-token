@@ -55,10 +55,14 @@ pub(crate) async fn admin_provider_ops_local_action_response(
     }
     let credential_snapshot = match admin_provider_ops_credential_snapshot(state, provider).await {
         Ok(snapshot) => snapshot,
-        Err(_) => {
+        // 携带真实错误类别（配置无效 vs 无法解密 vs 存储故障），避免误导排障。
+        Err(crate::GatewayError::Internal(message)) => {
+            return responses::admin_provider_ops_action_not_configured(action_type, message)
+        }
+        Err(error) => {
             return responses::admin_provider_ops_action_not_configured(
                 action_type,
-                "已保存的 Provider Ops 凭据无法解密或迁移",
+                format!("Provider Ops 已保存凭据读取失败: {}", error.into_message()),
             )
         }
     };
