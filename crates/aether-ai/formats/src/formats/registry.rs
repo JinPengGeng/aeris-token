@@ -4342,6 +4342,73 @@ mod tests {
     }
 
     #[test]
+    fn pure_gemini_to_openai_chat_stringifies_structured_tool_results() {
+        let body = json!({
+            "model": "gemini-source",
+            "contents": [{
+                "role": "model",
+                "parts": [{
+                    "functionCall": {
+                        "id": "call_lookup_1",
+                        "name": "lookup",
+                        "args": {"q": "rust"}
+                    }
+                }]
+            }, {
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {
+                        "id": "call_lookup_1",
+                        "name": "lookup",
+                        "response": {"ok": true, "rows": [1, 2, 3]}
+                    }
+                }]
+            }]
+        });
+
+        let converted = convert_request_pure("gemini:generate_content", "openai:chat", &body)
+            .expect("pure conversion should succeed")
+            .value;
+
+        let content = &converted["messages"][1]["content"];
+        let content_text = content.as_str().unwrap_or_else(|| {
+            panic!("structured Gemini tool result should stringify, got {content}")
+        });
+        let decoded: serde_json::Value =
+            serde_json::from_str(content_text).expect("tool content should stay valid JSON");
+        assert_eq!(decoded, json!({"ok": true, "rows": [1, 2, 3]}));
+    }
+
+    #[test]
+    fn pure_openai_chat_round_trip_keeps_tool_result_content_verbatim() {
+        let body = json!({
+            "model": "gpt-source",
+            "messages": [{
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_lookup_1",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": "{\"q\":\"rust\"}"
+                    }
+                }]
+            }, {
+                "role": "tool",
+                "tool_call_id": "call_lookup_1",
+                "content": {"ok": true}
+            }]
+        });
+
+        let converted = convert_request_pure("openai:chat", "openai:chat", &body)
+            .expect("pure conversion should succeed")
+            .value;
+
+        assert_eq!(converted["messages"][1]["content"], json!({"ok": true}));
+    }
+
+    #[test]
     fn pure_gemini_idless_parallel_tool_history_stays_paired_for_standard_targets() {
         let body = json!({
             "model": "gemini-source",
