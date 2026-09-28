@@ -60,7 +60,8 @@ pub(crate) struct LocalExecutionRuntimeMissContext {
     pub(crate) auth_api_key_id: Option<String>,
     pub(crate) auth_username: Option<String>,
     pub(crate) auth_api_key_name: Option<String>,
-    pub(crate) auth_api_key_billing_multiplier: Option<f64>,
+    pub(crate) auth_api_key_billing_multiplier:
+        Option<aether_contracts::billing_multiplier::BillingMultiplier>,
     candidate_contexts: Vec<RuntimeMissCandidateContext>,
 }
 

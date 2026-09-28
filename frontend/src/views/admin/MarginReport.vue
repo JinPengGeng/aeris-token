@@ -71,6 +71,9 @@
                 收入
               </th>
               <th class="py-2 pr-3 text-right font-medium">
+                标价收入
+              </th>
+              <th class="py-2 pr-3 text-right font-medium">
                 成本
               </th>
               <th class="py-2 pr-3 text-right font-medium">
@@ -104,6 +107,9 @@
               </td>
               <td class="py-2 pr-3 text-right whitespace-nowrap">
                 {{ formatMoney(row.revenue, 8) }}
+              </td>
+              <td class="py-2 pr-3 text-right whitespace-nowrap">
+                {{ formatMoney(row.list_price_revenue, 8) }}
               </td>
               <td class="py-2 pr-3 text-right whitespace-nowrap">
                 {{ formatMoney(row.cost, 8) }}

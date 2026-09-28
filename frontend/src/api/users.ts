@@ -178,6 +178,7 @@ export interface UserGroup {
   rate_limit_mode: RateLimitPolicyMode
   daily_usage_limit_usd?: number | null
   daily_usage_limit_mode: RateLimitPolicyMode
+  billing_multiplier?: number | null
   is_default?: boolean
   created_at?: string | null
   updated_at?: string | null
@@ -196,6 +197,7 @@ export interface UpsertUserGroupRequest {
   rate_limit_mode?: RateLimitPolicyMode
   daily_usage_limit_usd?: number | null
   daily_usage_limit_mode?: RateLimitPolicyMode
+  billing_multiplier?: number | null
 }
 
 export interface UserGroupMember {

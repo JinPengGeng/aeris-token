@@ -13,13 +13,13 @@ pub struct ExecutionRuntimeAuthContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_name: Option<String>,
     #[serde(default = "default_api_key_billing_multiplier")]
-    pub api_key_billing_multiplier: f64,
+    pub api_key_billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier,
     pub balance_remaining: Option<f64>,
     pub access_allowed: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub api_key_is_standalone: bool,
 }
 
-fn default_api_key_billing_multiplier() -> f64 {
-    1.0
+fn default_api_key_billing_multiplier() -> aether_contracts::billing_multiplier::BillingMultiplier {
+    aether_contracts::billing_multiplier::BillingMultiplier::ONE
 }

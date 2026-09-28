@@ -571,6 +571,7 @@ pub(crate) async fn build_admin_system_settings_payload(
     let password_policy_level_config = state
         .read_system_config_json_value("password_policy_level")
         .await?;
+    let clamp_config = crate::group_billing::read_billing_multiplier_clamp(state.app()).await;
 
     let default_provider = match system_config_string(default_provider_config.as_ref()) {
         Some(value) => Some(value),
@@ -595,6 +596,8 @@ pub(crate) async fn build_admin_system_settings_payload(
         default_model,
         enable_usage_tracking,
         password_policy_level,
+        clamp_config.0.to_f64(),
+        clamp_config.1.to_f64(),
     ))
 }
 
@@ -661,6 +664,46 @@ pub(crate) async fn apply_admin_system_settings_update(
                 "password_policy_level",
                 &json!(password_policy_level),
                 None,
+            )
+            .await?;
+    }
+
+    if update.billing_multiplier_clamp_min.is_some()
+        || update.billing_multiplier_clamp_max.is_some()
+    {
+        let current = crate::group_billing::read_billing_multiplier_clamp(state.app()).await;
+        let requested_min = update
+            .billing_multiplier_clamp_min
+            .unwrap_or_else(|| current.0.to_f64());
+        let requested_max = update
+            .billing_multiplier_clamp_max
+            .unwrap_or_else(|| current.1.to_f64());
+        let min = aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(
+            requested_min,
+        )
+        .map_err(|_| GatewayError::Internal("billing_multiplier_clamp_min 不合法".to_string()))?;
+        let max = aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(
+            requested_max,
+        )
+        .map_err(|_| GatewayError::Internal("billing_multiplier_clamp_max 不合法".to_string()))?;
+        if min.is_zero() || max.is_zero() || min.units() >= max.units() {
+            return Ok(Err((
+                http::StatusCode::BAD_REQUEST,
+                json!({ "detail": "计费倍率钳制区间不合法:上下限必须在 0.0001 到 9999.9999 之间且下限小于上限" }),
+            )));
+        }
+        let _ = state
+            .upsert_system_config_json_value(
+                crate::group_billing::BILLING_MULTIPLIER_CLAMP_MIN_CONFIG_KEY,
+                &json!(min.to_f64()),
+                Some("计费倍率风控钳制下限"),
+            )
+            .await?;
+        let _ = state
+            .upsert_system_config_json_value(
+                crate::group_billing::BILLING_MULTIPLIER_CLAMP_MAX_CONFIG_KEY,
+                &json!(max.to_f64()),
+                Some("计费倍率风控钳制上限"),
             )
             .await?;
     }

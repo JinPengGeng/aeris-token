@@ -177,6 +177,7 @@ export interface UsageMarginRow {
   provider_id: string
   request_count: number
   revenue: string
+  list_price_revenue: string
   cost: string
   margin: string | null
   margin_rate: number | null

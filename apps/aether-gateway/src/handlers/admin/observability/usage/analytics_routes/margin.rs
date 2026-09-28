@@ -54,6 +54,9 @@ fn margin_report_row_json(row: &StoredMarginReportRow) -> serde_json::Value {
         "provider_id": row.provider_id,
         "request_count": row.request_count,
         "revenue": crate::money_fixed::format_money_units(revenue_units),
+        "list_price_revenue": crate::money_fixed::format_money_units(clamp_units(
+            row.list_price_revenue_units,
+        )),
         "cost": crate::money_fixed::format_money_units(cost_units),
         "margin": margin,
         "margin_rate": margin_rate,
@@ -147,6 +150,7 @@ mod tests {
             provider_id: "provider-openai".to_string(),
             request_count: 10,
             revenue_units,
+            list_price_revenue_units: revenue_units / 2,
             cost_units,
             cost_known_request_count,
             cost_estimated_request_count,
@@ -159,6 +163,7 @@ mod tests {
     fn margin_row_computes_fixed_point_margin_and_rate() {
         let value = margin_report_row_json(&row(200_000_000, 150_000_000, 10, 0, 0));
         assert_eq!(value["revenue"], "2.00000000");
+        assert_eq!(value["list_price_revenue"], "1.00000000");
         assert_eq!(value["cost"], "1.50000000");
         assert_eq!(value["margin"], "0.50000000");
         assert_eq!(value["margin_rate"], 25.0);

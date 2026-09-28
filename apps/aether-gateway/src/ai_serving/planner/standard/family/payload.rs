@@ -360,7 +360,8 @@ mod tests {
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
             api_key_ip_rules: None,
-            api_key_billing_multiplier: 1.0,
+            api_key_billing_multiplier:
+                aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             currently_usable: true,
         }
     }
@@ -372,7 +373,8 @@ mod tests {
                 api_key_id: "api-key-1".to_string(),
                 username: Some("alice".to_string()),
                 api_key_name: Some("default".to_string()),
-                api_key_billing_multiplier: 1.0,
+                api_key_billing_multiplier:
+                    aether_contracts::billing_multiplier::BillingMultiplier::ONE,
                 balance_remaining: Some(10.0),
                 access_allowed: true,
                 api_key_is_standalone: false,

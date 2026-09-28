@@ -673,6 +673,9 @@ fn decode_margin_report_row(
         .try_get::<String, _>("revenue_units")
         .map_postgres_err()?;
     let cost_units_text: String = row.try_get::<String, _>("cost_units").map_postgres_err()?;
+    let list_price_revenue_units_text: String = row
+        .try_get::<String, _>("list_price_revenue_units")
+        .map_postgres_err()?;
     Ok(StoredMarginReportRow {
         period_start: row
             .try_get::<String, _>("period_start")
@@ -684,6 +687,7 @@ fn decode_margin_report_row(
             .map_postgres_err()?
             .max(0) as u64,
         revenue_units: parse_fixed_units_text(&revenue_units_text)?,
+        list_price_revenue_units: parse_fixed_units_text(&list_price_revenue_units_text)?,
         cost_units: parse_fixed_units_text(&cost_units_text)?,
         cost_known_request_count: row
             .try_get::<i64, _>("cost_known_request_count")
@@ -7896,6 +7900,11 @@ SELECT
   COALESCE(NULLIF(BTRIM(provider_id), ''), 'unknown') AS provider_id,
   COUNT(*)::BIGINT AS request_count,
   COALESCE(SUM((billed_usage->>'actual_cost_units')::numeric), 0)::text AS revenue_units,
+  COALESCE(SUM(CASE
+    WHEN billed_usage->>'list_price_cost_units' IS NOT NULL
+    THEN (billed_usage->>'list_price_cost_units')::numeric
+    ELSE (billed_usage->>'actual_cost_units')::numeric
+  END), 0)::text AS list_price_revenue_units,
   COALESCE(SUM(CASE
     WHEN billed_usage->'provider_cost'->>'certainty' IN ('known', 'estimated')
          AND (billed_usage->'provider_cost'->>'amount_units') IS NOT NULL

@@ -40,7 +40,7 @@ pub struct UsageEventData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_billing_multiplier: Option<f64>,
+    pub api_key_billing_multiplier: Option<aether_contracts::billing_multiplier::BillingMultiplier>,
     /// Server capability, never synthesized from request_metadata or bodies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_funds: Option<Box<crate::UsageAttemptFundsEvent>>,

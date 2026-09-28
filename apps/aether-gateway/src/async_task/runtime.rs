@@ -530,7 +530,10 @@ fn build_video_task_terminal_usage_event(task: &StoredVideoTask) -> Option<Usage
                 .as_ref()
                 .and_then(|value| value.get("api_key_billing_multiplier"))
                 .and_then(serde_json::Value::as_f64)
-                .filter(|value| value.is_finite()),
+                .and_then(|value| {
+                    aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(value)
+                        .ok()
+                }),
             provider_name,
             model: task.model.clone().unwrap_or_else(|| "unknown".to_string()),
             provider_id: task.provider_id.clone(),

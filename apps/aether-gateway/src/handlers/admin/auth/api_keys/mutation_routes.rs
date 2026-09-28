@@ -78,9 +78,15 @@ fn normalize_standalone_initial_balance(
 
 fn normalize_admin_standalone_api_key_billing_multiplier(
     value: Option<f64>,
-) -> Result<f64, String> {
-    aether_data::repository::auth::normalize_api_key_billing_multiplier(value)
-        .map_err(|_| "billing_multiplier 必须在 0 到 1000 之间".to_string())
+    clamp: (
+        aether_contracts::billing_multiplier::BillingMultiplier,
+        aether_contracts::billing_multiplier::BillingMultiplier,
+    ),
+) -> Result<aether_data_contracts::billing_multiplier::BillingMultiplier, String> {
+    match value {
+        Some(number) => crate::group_billing::clamp_admin_billing_multiplier(number, clamp),
+        None => Ok(aether_contracts::billing_multiplier::BillingMultiplier::DEFAULT),
+    }
 }
 
 /// Compensate the rows created by a standalone API-key request when wallet
@@ -199,11 +205,13 @@ pub(super) async fn build_admin_create_api_key_response(
         };
     // 未显式指定时套用部署级默认并发硬顶(默认 None=不限制,保持既有行为)。
     let concurrent_limit = concurrent_limit.or_else(default_api_key_concurrent_limit_from_env);
-    let billing_multiplier =
-        match normalize_admin_standalone_api_key_billing_multiplier(payload.billing_multiplier) {
-            Ok(value) => value,
-            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
-        };
+    let billing_multiplier = match normalize_admin_standalone_api_key_billing_multiplier(
+        payload.billing_multiplier,
+        crate::group_billing::read_billing_multiplier_clamp(state.app()).await,
+    ) {
+        Ok(value) => value,
+        Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+    };
     let (initial_balance_usd, unlimited_balance) = match normalize_standalone_initial_balance(
         payload.initial_balance_usd,
         payload.unlimited_balance,
@@ -441,11 +449,13 @@ pub(super) async fn build_admin_update_api_key_response(
             Ok(value) => value,
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
         };
-    let billing_multiplier =
-        match normalize_admin_standalone_api_key_billing_multiplier(payload.billing_multiplier) {
-            Ok(value) => value,
-            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
-        };
+    let billing_multiplier = match normalize_admin_standalone_api_key_billing_multiplier(
+        payload.billing_multiplier,
+        crate::group_billing::read_billing_multiplier_clamp(state.app()).await,
+    ) {
+        Ok(value) => value,
+        Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+    };
     let allowed_providers = if field_presence.contains("allowed_providers") {
         match normalize_admin_user_string_list(payload.allowed_providers, "allowed_providers") {
             Ok(value) => Some(value),
@@ -566,7 +576,7 @@ pub(super) async fn build_admin_update_api_key_response(
                 auto_delete_on_expiry_present: field_presence.contains("auto_delete_on_expiry"),
                 auto_delete_on_expiry: effective_auto_delete_on_expiry,
                 billing_multiplier_present: field_presence.contains("billing_multiplier"),
-                billing_multiplier: Some(billing_multiplier),
+                billing_multiplier: Some(billing_multiplier.to_f64()),
             },
         )
         .await?
@@ -741,7 +751,7 @@ mod tests {
                 total_requests: 0,
                 total_tokens: 0,
                 total_cost_usd: 0.0,
-                billing_multiplier: 1.0,
+                billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             })
             .await
             .expect("key creation should succeed")

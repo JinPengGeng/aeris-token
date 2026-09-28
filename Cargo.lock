@@ -116,6 +116,7 @@ dependencies = [
 name = "aether-billing"
 version = "0.1.0"
 dependencies = [
+ "aether-contracts",
  "aether-data-contracts",
  "aether-runtime-state",
  "aether-usage-runtime",

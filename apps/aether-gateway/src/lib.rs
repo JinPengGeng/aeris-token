@@ -47,6 +47,7 @@ mod execution_runtime;
 mod executor;
 mod fallback_metrics;
 mod frontdoor_loop_guard;
+mod group_billing;
 mod handlers;
 mod headers;
 mod hooks;

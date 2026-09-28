@@ -259,7 +259,7 @@ fn decision() -> GatewayControlDecision {
         api_key_id: "key-a".into(),
         username: None,
         api_key_name: None,
-        api_key_billing_multiplier: 1.0,
+        api_key_billing_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::ONE,
         balance_remaining: None,
         access_allowed: true,
         user_rate_limit: None,
@@ -643,13 +643,22 @@ fn image_quote_rejects_unproven_projections_and_evidence() {
     let mut plan = plan("quote", "a", "http://localhost/v1/images/generations");
     let pricing = BillingModelPricingSnapshot::from(pricing("a"));
     assert_eq!(
-        quote_final_image_projection(&plan, &pricing, 1.0)
-            .unwrap()
-            .upper_bound_units(),
+        quote_final_image_projection(
+            &plan,
+            &pricing,
+            aether_contracts::billing_multiplier::BillingMultiplier::ONE
+        )
+        .unwrap()
+        .upper_bound_units(),
         8_000_000
     );
     plan.body.json_body.as_mut().unwrap()["size"] = json!("auto");
-    assert!(quote_final_image_projection(&plan, &pricing, 1.0).is_err());
+    assert!(quote_final_image_projection(
+        &plan,
+        &pricing,
+        aether_contracts::billing_multiplier::BillingMultiplier::ONE
+    )
+    .is_err());
     assert_eq!(
         image_output_evidence(Some(&json!({"data":[]}))),
         UsageAttemptChargeEvidence::Unknown

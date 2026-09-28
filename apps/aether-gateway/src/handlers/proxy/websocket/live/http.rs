@@ -1187,7 +1187,8 @@ mod tests {
             api_key_id: "key-codex-realtime".to_string(),
             username: Some("codex-realtime".to_string()),
             api_key_name: Some("codex-realtime".to_string()),
-            api_key_billing_multiplier: 1.0,
+            api_key_billing_multiplier:
+                aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,
@@ -1257,7 +1258,8 @@ mod tests {
             api_key_id: "key-finite".to_string(),
             username: Some("finite".to_string()),
             api_key_name: Some("finite".to_string()),
-            api_key_billing_multiplier: 1.0,
+            api_key_billing_multiplier:
+                aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             balance_remaining: Some(1.25),
             access_allowed: true,
             user_rate_limit: None,
@@ -1316,7 +1318,8 @@ mod tests {
             api_key_id: "key-live-accounting-gate".to_string(),
             username: Some("live-gate".to_string()),
             api_key_name: Some("live-gate".to_string()),
-            api_key_billing_multiplier: 1.0,
+            api_key_billing_multiplier:
+                aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,
@@ -1424,7 +1427,8 @@ mod tests {
             api_key_id: "key-live-unmapped".to_string(),
             username: Some("unmapped".to_string()),
             api_key_name: Some("unmapped".to_string()),
-            api_key_billing_multiplier: 1.0,
+            api_key_billing_multiplier:
+                aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,

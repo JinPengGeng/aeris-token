@@ -129,17 +129,19 @@ pub(crate) async fn build_admin_update_user_api_key_response(
         },
         None => None,
     };
-    let billing_multiplier =
-        match normalize_admin_api_key_billing_multiplier(payload.billing_multiplier) {
-            Ok(value) => value,
-            Err(detail) => {
-                return Ok((
-                    http::StatusCode::BAD_REQUEST,
-                    Json(json!({ "detail": detail })),
-                )
-                    .into_response());
-            }
-        };
+    let billing_multiplier = match normalize_admin_api_key_billing_multiplier(
+        payload.billing_multiplier,
+        crate::group_billing::read_billing_multiplier_clamp(state.app()).await,
+    ) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok((
+                http::StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": detail })),
+            )
+                .into_response());
+        }
+    };
     let name_present = name.is_some();
     let rate_limit_present = payload.rate_limit.is_some();
     let concurrent_limit_present = concurrent_limit.is_some();
@@ -160,7 +162,7 @@ pub(crate) async fn build_admin_update_user_api_key_response(
             concurrent_limit_present,
             ip_rules,
             billing_multiplier_present: field_presence.contains("billing_multiplier"),
-            billing_multiplier: Some(billing_multiplier),
+            billing_multiplier: Some(billing_multiplier.to_f64()),
             feature_settings,
         })
         .await?

@@ -73,7 +73,7 @@ pub struct BillingImageAuthorizationInput {
     /// Field: requested processing tier.
     pub requested_processing_tier: Option<String>,
     /// Field: api key multiplier.
-    pub api_key_multiplier: f64,
+    pub api_key_multiplier: aether_contracts::billing_multiplier::BillingMultiplier,
     /// Field: token bounds.
     pub token_bounds: Option<BillingImageTokenBounds>,
 }
@@ -135,8 +135,6 @@ fn valid_input(input: &BillingImageAuthorizationInput) -> bool {
         && input.max_image_count <= 10
         && matches!(input.operation.as_str(), "generate" | "edit")
         && input.partial_images <= 3
-        && input.api_key_multiplier.is_finite()
-        && input.api_key_multiplier >= 0.0
         && input
             .output_format
             .as_deref()
@@ -283,7 +281,7 @@ impl BillingService {
             return Ok(None);
         };
         let mut upper_bound_units = 0;
-        if !pricing.is_free_tier() && input.api_key_multiplier != 0.0 {
+        if !pricing.is_free_tier() && !input.api_key_multiplier.is_zero() {
             for catalog in catalogs {
                 let Some(has_token_cost) = token_catalog_has_cost(catalog.tiered_pricing.as_ref())
                 else {
@@ -355,7 +353,8 @@ impl BillingService {
                                 return Ok(None);
                             }
                             let Some(units) = ceil_cost_units(
-                                calculated.cost_before_final_rounding(input.api_key_multiplier),
+                                calculated
+                                    .cost_before_final_rounding(input.api_key_multiplier.to_f64()),
                             ) else {
                                 return Ok(None);
                             };
@@ -434,7 +433,7 @@ impl BillingService {
             return Ok(None);
         }
         let Some(calculated_units) = settled_cost_units(
-            calculation.cost_before_final_rounding(quote.input.api_key_multiplier),
+            calculation.cost_before_final_rounding(quote.input.api_key_multiplier.to_f64()),
         ) else {
             return Ok(None);
         };
@@ -514,7 +513,7 @@ mod tests {
             }],
             api_format: Some("openai:image".into()),
             requested_processing_tier: None,
-            api_key_multiplier: 1.0,
+            api_key_multiplier: aether_contracts::billing_multiplier::BillingMultiplier::ONE,
             token_bounds: None,
         }
     }
@@ -537,7 +536,8 @@ mod tests {
         let mut pricing = pricing(json!({"image_output_price_default": 0.05}));
         pricing.provider_api_key_rate_multipliers = Some(json!({"openai:image": 2.0}));
         let mut input = input();
-        input.api_key_multiplier = 1.5;
+        input.api_key_multiplier =
+            aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(1.5).unwrap();
         for count in [1, 10] {
             input.image_count = count;
             let quote = service
@@ -564,7 +564,9 @@ mod tests {
             pricing.provider_api_key_rate_multipliers = Some(json!({"openai:image": 0.1}));
             let mut input = input();
             input.image_count = 1;
-            input.api_key_multiplier = 10.0;
+            input.api_key_multiplier =
+                aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(10.0)
+                    .unwrap();
             let quote = service
                 .quote_image_authorization(&pricing, &input)
                 .unwrap()
@@ -903,12 +905,12 @@ mod tests {
                 .is_none());
         }
         for multiplier in [f64::NAN, f64::INFINITY, -1.0, f64::MAX] {
-            let mut input = input();
-            input.api_key_multiplier = multiplier;
-            assert!(service
-                .quote_image_authorization(&pricing, &input)
-                .unwrap()
-                .is_none());
+            assert!(
+                aether_contracts::billing_multiplier::BillingMultiplier::from_f64_rounded(
+                    multiplier
+                )
+                .is_err()
+            );
         }
         let mut bad = input();
         bad.possible_outputs[0].size = "9223372036854775807x2".into();
@@ -974,7 +976,7 @@ mod tests {
             .unwrap();
         assert_eq!(free.upper_bound_units(), 0);
         pricing.provider_billing_type = Some("pay_as_you_go".into());
-        input.api_key_multiplier = 0.0;
+        input.api_key_multiplier = aether_contracts::billing_multiplier::BillingMultiplier::ZERO;
         let zero = service
             .quote_image_authorization(&pricing, &input)
             .unwrap()

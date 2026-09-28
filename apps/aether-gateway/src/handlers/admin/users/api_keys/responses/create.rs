@@ -152,17 +152,19 @@ pub(crate) async fn build_admin_create_user_api_key_response(
                     .into_response());
             }
         };
-    let billing_multiplier =
-        match normalize_admin_api_key_billing_multiplier(payload.billing_multiplier) {
-            Ok(value) => value,
-            Err(detail) => {
-                return Ok((
-                    http::StatusCode::BAD_REQUEST,
-                    Json(json!({ "detail": detail })),
-                )
-                    .into_response());
-            }
-        };
+    let billing_multiplier = match normalize_admin_api_key_billing_multiplier(
+        payload.billing_multiplier,
+        crate::group_billing::read_billing_multiplier_clamp(state.app()).await,
+    ) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok((
+                http::StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": detail })),
+            )
+                .into_response());
+        }
+    };
 
     let plaintext_key = generate_admin_user_api_key_plaintext();
     let api_key_id = uuid::Uuid::new_v4().to_string();

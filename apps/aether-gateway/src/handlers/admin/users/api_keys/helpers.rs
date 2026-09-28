@@ -102,9 +102,15 @@ pub(crate) fn default_admin_user_api_key_name() -> String {
 
 pub(super) fn normalize_admin_api_key_billing_multiplier(
     value: Option<f64>,
-) -> Result<f64, String> {
-    aether_data::repository::auth::normalize_api_key_billing_multiplier(value)
-        .map_err(|_| "billing_multiplier 必须在 0 到 1000 之间".to_string())
+    clamp: (
+        aether_contracts::billing_multiplier::BillingMultiplier,
+        aether_contracts::billing_multiplier::BillingMultiplier,
+    ),
+) -> Result<aether_data_contracts::billing_multiplier::BillingMultiplier, String> {
+    match value {
+        Some(number) => crate::group_billing::clamp_admin_billing_multiplier(number, clamp),
+        None => Ok(aether_contracts::billing_multiplier::BillingMultiplier::DEFAULT),
+    }
 }
 
 pub(super) fn attach_audit_response(

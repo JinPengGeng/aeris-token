@@ -28,6 +28,8 @@ export interface UserGroupFormState {
   rate_limit: number | undefined
   daily_usage_limit_mode: RateLimitPolicyMode
   daily_usage_limit_usd: number | undefined
+  billing_multiplier_mode: RateLimitPolicyMode
+  billing_multiplier: number | undefined
 }
 
 export interface UserManagementRow {

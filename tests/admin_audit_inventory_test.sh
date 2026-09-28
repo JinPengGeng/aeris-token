@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INVENTORY="${REPO_ROOT}/docs/issue-triage/issue-255-admin-mutation-inventory.txt"
-EXPECTED_EXPLICIT_EVENTS=148
+EXPECTED_EXPLICIT_EVENTS=149
 SCAN_PATHS=(
   "${REPO_ROOT}/apps/aether-gateway/src/handlers/admin"
   "${REPO_ROOT}/apps/aether-gateway/src/handlers/proxy/local.rs"

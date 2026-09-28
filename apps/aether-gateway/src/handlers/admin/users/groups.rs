@@ -41,6 +41,8 @@ struct AdminUserGroupPayload {
     daily_usage_limit_usd: Option<f64>,
     #[serde(default = "default_rate_limit_mode")]
     daily_usage_limit_mode: String,
+    #[serde(default)]
+    billing_multiplier: Option<f64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -58,11 +60,14 @@ pub(in super::super) async fn build_admin_list_user_groups_response(
     state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     let default_group_id = read_default_user_group_id(state).await?;
+    let configured = read_group_billing_multipliers(state).await?;
     let items = state
         .list_user_groups()
         .await?
         .into_iter()
-        .map(|group| user_group_payload(group, default_group_id.as_deref()))
+        .map(|group| {
+            user_group_payload_with_multipliers(&group, default_group_id.as_deref(), &configured)
+        })
         .collect::<Vec<_>>();
     Ok(Json(json!({
         "items": items,
@@ -80,11 +85,11 @@ pub(in super::super) async fn build_admin_create_user_group_response(
             "当前为只读模式，无法创建用户分组",
         ));
     }
-    let record = match parse_group_record(request_body) {
+    let record = match parse_group_record(state, request_body).await {
         Ok(value) => value,
         Err(detail) => return Ok(bad_request_owned(detail)),
     };
-    let group = match state.create_user_group(record).await {
+    let group = match state.create_user_group(record.record).await {
         Ok(Some(group)) => group,
         Ok(None) => {
             return Ok(build_admin_users_read_only_response(
@@ -97,12 +102,19 @@ pub(in super::super) async fn build_admin_create_user_group_response(
         Err(err) => return Err(err),
     };
     let default_group_id = read_default_user_group_id(state).await?;
-    Ok(attach_admin_audit_response(
-        Json(user_group_payload(group, default_group_id.as_deref())).into_response(),
+    write_group_billing_multiplier(state, group.id.as_str(), record.billing_multiplier).await?;
+    let response =
+        Json(user_group_payload(state, group, default_group_id.as_deref()).await?).into_response();
+    let response = attach_admin_audit_response(
+        response,
         "admin_user_group_created",
         "create_user_group",
         "user_group",
         "user_groups",
+    );
+    Ok(attach_group_billing_multiplier_audit(
+        response,
+        record.billing_multiplier.is_some(),
     ))
 }
 
@@ -119,11 +131,11 @@ pub(in super::super) async fn build_admin_update_user_group_response(
     let Some(group_id) = user_group_id_from_path(request_context.path()) else {
         return Ok(build_admin_users_bad_request_response("缺少 group_id"));
     };
-    let record = match parse_group_record(request_body) {
+    let record = match parse_group_record(state, request_body).await {
         Ok(value) => value,
         Err(detail) => return Ok(bad_request_owned(detail)),
     };
-    let group = match state.update_user_group(&group_id, record).await {
+    let group = match state.update_user_group(&group_id, record.record).await {
         Ok(Some(group)) => group,
         Ok(None) => return Ok(not_found("用户分组不存在")),
         Err(err) if is_duplicate_group_name_error(&err) => {
@@ -132,12 +144,19 @@ pub(in super::super) async fn build_admin_update_user_group_response(
         Err(err) => return Err(err),
     };
     let default_group_id = read_default_user_group_id(state).await?;
-    Ok(attach_admin_audit_response(
-        Json(user_group_payload(group, default_group_id.as_deref())).into_response(),
+    write_group_billing_multiplier(state, group.id.as_str(), record.billing_multiplier).await?;
+    let response =
+        Json(user_group_payload(state, group, default_group_id.as_deref()).await?).into_response();
+    let response = attach_admin_audit_response(
+        response,
         "admin_user_group_updated",
         "update_user_group",
         "user_group",
         &group_id,
+    );
+    Ok(attach_group_billing_multiplier_audit(
+        response,
+        record.billing_multiplier.is_some(),
     ))
 }
 
@@ -159,6 +178,7 @@ pub(in super::super) async fn build_admin_delete_user_group_response(
     if !state.delete_user_group(&group_id).await? {
         return Ok(not_found("用户分组不存在"));
     }
+    write_group_billing_multiplier(state, &group_id, None).await?;
     Ok(attach_admin_audit_response(
         Json(json!({ "deleted": true })).into_response(),
         "admin_user_group_deleted",
@@ -392,9 +412,15 @@ pub(crate) async fn read_default_user_group_id(
     state.effective_default_user_group_id().await
 }
 
-fn parse_group_record(
+struct ParsedUserGroupRecord {
+    record: aether_data::repository::users::UpsertUserGroupRecord,
+    billing_multiplier: Option<aether_contracts::billing_multiplier::BillingMultiplier>,
+}
+
+async fn parse_group_record(
+    state: &AdminAppState<'_>,
     request_body: Option<&axum::body::Bytes>,
-) -> Result<aether_data::repository::users::UpsertUserGroupRecord, String> {
+) -> Result<ParsedUserGroupRecord, String> {
     let Some(body) = request_body.filter(|body| !body.is_empty()) else {
         return Err("请求数据验证失败".to_string());
     };
@@ -413,28 +439,41 @@ fn parse_group_record(
     {
         return Err("daily_usage_limit_usd 必须是大于等于 0 的有限数值".to_string());
     }
+    let billing_multiplier = match payload.billing_multiplier {
+        Some(value) if !value.is_finite() || value < 0.0 => {
+            return Err("billing_multiplier 必须是大于等于 0 的有限数值".to_string());
+        }
+        Some(value) => Some(crate::group_billing::clamp_admin_billing_multiplier(
+            value,
+            crate::group_billing::read_billing_multiplier_clamp(state.app()).await,
+        )?),
+        None => None,
+    };
     let allowed_providers =
         normalize_admin_user_string_list(payload.allowed_providers, "allowed_providers")?;
     let allowed_api_formats = normalize_admin_user_api_formats(payload.allowed_api_formats)?;
     let allowed_models =
         normalize_admin_user_string_list(payload.allowed_models, "allowed_models")?;
-    Ok(aether_data::repository::users::UpsertUserGroupRecord {
-        name,
-        description: payload
-            .description
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        priority: 0,
-        allowed_providers,
-        allowed_providers_mode: normalize_list_mode(&payload.allowed_providers_mode)?,
-        allowed_api_formats,
-        allowed_api_formats_mode: normalize_list_mode(&payload.allowed_api_formats_mode)?,
-        allowed_models,
-        allowed_models_mode: normalize_list_mode(&payload.allowed_models_mode)?,
-        rate_limit: payload.rate_limit,
-        rate_limit_mode: normalize_rate_mode(&payload.rate_limit_mode)?,
-        daily_usage_limit_usd: payload.daily_usage_limit_usd,
-        daily_usage_limit_mode: normalize_rate_mode(&payload.daily_usage_limit_mode)?,
+    Ok(ParsedUserGroupRecord {
+        record: aether_data::repository::users::UpsertUserGroupRecord {
+            name,
+            description: payload
+                .description
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            priority: 0,
+            allowed_providers,
+            allowed_providers_mode: normalize_list_mode(&payload.allowed_providers_mode)?,
+            allowed_api_formats,
+            allowed_api_formats_mode: normalize_list_mode(&payload.allowed_api_formats_mode)?,
+            allowed_models,
+            allowed_models_mode: normalize_list_mode(&payload.allowed_models_mode)?,
+            rate_limit: payload.rate_limit,
+            rate_limit_mode: normalize_rate_mode(&payload.rate_limit_mode)?,
+            daily_usage_limit_usd: payload.daily_usage_limit_usd,
+            daily_usage_limit_mode: normalize_rate_mode(&payload.daily_usage_limit_mode)?,
+        },
+        billing_multiplier,
     })
 }
 
@@ -448,10 +487,28 @@ fn parse_members_payload(
         .map_err(|_| "请求数据验证失败".to_string())
 }
 
-fn user_group_payload(
+async fn user_group_payload(
+    state: &AdminAppState<'_>,
     group: aether_data::repository::users::StoredUserGroup,
     default_group_id: Option<&str>,
+) -> Result<serde_json::Value, GatewayError> {
+    let configured = read_group_billing_multipliers(state).await?;
+    Ok(user_group_payload_with_multipliers(
+        &group,
+        default_group_id,
+        &configured,
+    ))
+}
+
+fn user_group_payload_with_multipliers(
+    group: &aether_data::repository::users::StoredUserGroup,
+    default_group_id: Option<&str>,
+    configured: &std::collections::BTreeMap<
+        String,
+        aether_contracts::billing_multiplier::BillingMultiplier,
+    >,
 ) -> serde_json::Value {
+    let billing_multiplier = configured.get(&group.id).map(|value| value.to_f64());
     json!({
         "id": group.id,
         "name": group.name,
@@ -468,9 +525,74 @@ fn user_group_payload(
         "daily_usage_limit_usd": group.daily_usage_limit_usd,
         "daily_usage_limit_mode": group.daily_usage_limit_mode,
         "is_default": default_group_id == Some(group.id.as_str()),
+        "billing_multiplier": billing_multiplier,
         "created_at": format_optional_datetime_iso8601(group.created_at),
         "updated_at": format_optional_datetime_iso8601(group.updated_at),
     })
+}
+
+async fn read_group_billing_multipliers(
+    state: &AdminAppState<'_>,
+) -> Result<
+    std::collections::BTreeMap<String, aether_contracts::billing_multiplier::BillingMultiplier>,
+    GatewayError,
+> {
+    let value = state
+        .app()
+        .read_system_config_json_value(
+            crate::group_billing::USER_GROUP_BILLING_MULTIPLIERS_CONFIG_KEY,
+        )
+        .await?;
+    Ok(crate::group_billing::parse_group_billing_multipliers(
+        value.as_ref(),
+    ))
+}
+
+async fn write_group_billing_multiplier(
+    state: &AdminAppState<'_>,
+    group_id: &str,
+    multiplier: Option<aether_contracts::billing_multiplier::BillingMultiplier>,
+) -> Result<(), GatewayError> {
+    let mut configured = read_group_billing_multipliers(state).await?;
+    match multiplier {
+        Some(value) => {
+            configured.insert(group_id.to_string(), value);
+        }
+        None => {
+            configured.remove(group_id);
+        }
+    }
+    let json = serde_json::Value::Object(
+        configured
+            .into_iter()
+            .map(|(group_id, multiplier)| (group_id, serde_json::Value::from(multiplier.to_f64())))
+            .collect(),
+    );
+    state
+        .app()
+        .upsert_system_config_json_value(
+            crate::group_billing::USER_GROUP_BILLING_MULTIPLIERS_CONFIG_KEY,
+            &json,
+            Some("用户组计费倍率配置"),
+        )
+        .await?;
+    Ok(())
+}
+
+fn attach_group_billing_multiplier_audit(
+    response: Response<Body>,
+    multiplier_present: bool,
+) -> Response<Body> {
+    if !multiplier_present {
+        return response;
+    }
+    attach_admin_audit_response(
+        response,
+        "admin_user_group_billing_multiplier_updated",
+        "update_user_group_billing_multiplier",
+        "user_group",
+        "user_group_billing_multipliers",
+    )
 }
 
 fn normalize_list_mode(value: &str) -> Result<String, String> {

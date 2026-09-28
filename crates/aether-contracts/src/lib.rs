@@ -2,6 +2,8 @@
 //! exchanged between Aether gateway components.
 #![warn(missing_docs)]
 
+/// Module: fixed-point billing multiplier.
+pub mod billing_multiplier;
 mod error;
 mod frame;
 /// Module: internal gateway.

@@ -209,6 +209,8 @@ async function selectGroup(groupId: string): Promise<void> {
     rate_limit: group.rate_limit ?? undefined,
     daily_usage_limit_mode: normalizeRateMode(group.daily_usage_limit_mode),
     daily_usage_limit_usd: group.daily_usage_limit_usd ?? undefined,
+    billing_multiplier_mode: group.billing_multiplier == null ? 'system' : 'custom',
+    billing_multiplier: group.billing_multiplier ?? undefined,
   }
   try {
     const members = await usersStore.listUserGroupMembers(group.id)
@@ -240,6 +242,8 @@ function createEmptyForm(): UserGroupFormState {
     rate_limit: undefined,
     daily_usage_limit_mode: 'system',
     daily_usage_limit_usd: undefined,
+    billing_multiplier_mode: 'system',
+    billing_multiplier: undefined,
   }
 }
 
@@ -294,6 +298,9 @@ function buildPayload(): UpsertUserGroupRequest {
     daily_usage_limit_mode: form.value.daily_usage_limit_mode,
     daily_usage_limit_usd: form.value.daily_usage_limit_mode === 'custom'
       ? (form.value.daily_usage_limit_usd ?? 0)
+      : null,
+    billing_multiplier: form.value.billing_multiplier_mode === 'custom'
+      ? (form.value.billing_multiplier ?? 1)
       : null,
   }
 }
