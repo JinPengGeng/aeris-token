@@ -46,7 +46,7 @@ jobs:
 
       - name: helm lint
         shell: bash
-        run: "${RUNNER_TEMP}/linux-amd64/helm" lint deploy/helm/aether-gateway
+        run: ${RUNNER_TEMP}/linux-amd64/helm lint deploy/helm/aether-gateway
 
       - name: helm template
         shell: bash
