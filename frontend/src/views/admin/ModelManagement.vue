@@ -97,7 +97,7 @@
               <TableHead class="w-[70px]">
                 状态
               </TableHead>
-              <TableHead class="w-[140px] text-center">
+              <TableHead class="w-[176px] text-center">
                 操作
               </TableHead>
             </TableRow>
@@ -230,6 +230,16 @@
                       variant="ghost"
                       size="icon"
                       class="h-8 w-8"
+                      title="复制模型"
+                      :data-testid="`model-copy-desktop-${model.id}`"
+                      @click.stop="copyModel(model)"
+                    >
+                      <CopyPlus class="w-4 h-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      class="h-8 w-8"
                       :title="model.is_active ? '停用模型' : '启用模型'"
                       @click.stop="toggleModelStatus(model)"
                     >
@@ -303,6 +313,7 @@
                   variant="ghost"
                   size="icon"
                   class="h-7 w-7"
+                  title="编辑模型"
                   @click="editModel(model)"
                 >
                   <Edit class="w-3.5 h-3.5" />
@@ -311,6 +322,17 @@
                   variant="ghost"
                   size="icon"
                   class="h-7 w-7"
+                  title="复制模型"
+                  :data-testid="`model-copy-mobile-${model.id}`"
+                  @click="copyModel(model)"
+                >
+                  <CopyPlus class="w-3.5 h-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-7 w-7"
+                  :title="model.is_active ? '停用模型' : '启用模型'"
                   @click="toggleModelStatus(model)"
                 >
                   <Power class="w-3.5 h-3.5" />
@@ -357,6 +379,7 @@
     <GlobalModelFormDialog
       :open="createModelDialogOpen"
       :model="editingModel"
+      :copy-from="copyingModel"
       @update:open="handleModelDialogUpdate"
       @success="handleModelFormSuccess"
       @edit-model="editModel"
@@ -734,6 +757,7 @@ import {
   Search,
   Power,
   Copy,
+  CopyPlus,
   Server,
   Check,
   ListChecks,
@@ -839,6 +863,8 @@ const selectedModel = ref<GlobalModelResponse | null>(null)
 const modelDetailDrawerRef = ref<InstanceType<typeof ModelDetailDrawer> | null>(null)
 const createModelDialogOpen = ref(false)
 const editingModel = ref<GlobalModelResponse | null>(null)
+// 复制来源模型：以"新建"模式打开表单对话框并预填其定价/配置
+const copyingModel = ref<GlobalModelResponse | null>(null)
 
 // 数据
 const globalModels = ref<GlobalModelResponse[]>([])
@@ -2003,6 +2029,7 @@ async function confirmDeleteProviderImplementation(provider: ModelProviderDispla
 
 function openCreateModelDialog() {
   editingModel.value = null
+  copyingModel.value = null
   createModelDialogOpen.value = true
 }
 
@@ -2011,6 +2038,7 @@ function handleModelDialogUpdate(value: boolean) {
   createModelDialogOpen.value = value
   if (!value) {
     editingModel.value = null
+    copyingModel.value = null
   }
 }
 
@@ -2021,11 +2049,19 @@ async function handleModelFormSuccess() {
     createModelDialogOpen.value = false
     editingModel.value = null
   }
+  copyingModel.value = null
   await loadGlobalModels()
 }
 
 async function editModel(model: GlobalModelResponse) {
   editingModel.value = model
+  createModelDialogOpen.value = true
+}
+
+// 复制模型：以新建模式打开对话框并预填源模型的定价/配置（name 待重填）
+function copyModel(model: GlobalModelResponse) {
+  copyingModel.value = model
+  editingModel.value = null
   createModelDialogOpen.value = true
 }
 

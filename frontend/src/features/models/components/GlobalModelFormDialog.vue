@@ -860,6 +860,7 @@ import {
 } from './global-model-form-helpers'
 import { tieredPricingHasImageOutputPricing } from '../utils/tiered-pricing'
 import {
+  MODELS_DEV_PRICING_SOURCE_CONFIG_KEY,
   getModelsDevPricingSourceFromConfig,
   modelsDevPricingSourcesEqual,
   useModelsDevPricingSources,
@@ -869,6 +870,8 @@ import {
 const props = defineProps<{
   open: boolean
   model?: GlobalModelResponse | null
+  /** 复制来源模型：以新建模式打开时预填其定价与配置（name/display_name 置空待改） */
+  copyFrom?: GlobalModelResponse | null
 }>()
 
 const emit = defineEmits<{
@@ -1767,6 +1770,40 @@ function populateFormFromGlobalModel(model: GlobalModelResponse) {
   billingMode.value = 'token'
 }
 
+/**
+ * 复制模型（新建模式预填）：将源模型的定价/能力/config 全量填入表单。
+ * name/display_name 保持为空 —— 模型 ID 必须唯一，派生模型（如 codex-auto-review）
+ * 的名称应由管理员显式指定，避免误以源模型 ID 直接提交。
+ */
+function prefillFromModel(source: GlobalModelResponse) {
+  imageGenerationExplicitOverride.value = null
+  selectedModel.value = null
+  const modelTieredPricing = source.default_tiered_pricing
+    ? cloneTieredPricingConfig(source.default_tiered_pricing)
+    : null
+  const supportedCapabilities = new Set(source.supported_capabilities || [])
+  if (tieredPricingHasImageOutputPricing(modelTieredPricing)) {
+    supportedCapabilities.add('image_generation')
+  }
+  // 深拷贝 config（源模型来自父组件响应式状态）。在线价格来源标记描述的是
+  // 源模型的取价渠道，派生模型名称不同、无法按名解析在线价格，复制时移除，
+  // 避免编辑派生模型时"同步在线价格"必然失败。
+  const copiedConfig: Record<string, unknown> = source.config
+    ? JSON.parse(JSON.stringify(source.config)) as Record<string, unknown>
+    : { streaming: true }
+  delete copiedConfig[MODELS_DEV_PRICING_SOURCE_CONFIG_KEY]
+
+  form.value = {
+    ...defaultForm(),
+    default_price_per_request: source.default_price_per_request,
+    supported_capabilities: [...supportedCapabilities],
+    config: copiedConfig,
+  }
+  tieredPricing.value = modelTieredPricing
+  loadVideoPricingFromConfig()
+  billingMode.value = 'token'
+}
+
 // 加载模型数据（编辑模式）
 function loadModelData() {
   if (!props.model) return
@@ -1796,8 +1833,24 @@ const { isEditMode, handleDialogUpdate, handleCancel } = useFormDialog({
   extraLoadingStates: [syncingOnlinePricing],
 })
 
+// 复制模式：copyFrom 优先于 models.dev 预设面板。useFormDialog 在打开
+// （pre flush）时会先 resetForm，这里在 post flush 再预填源模型数据，
+// 并折叠预设面板、聚焦基础信息，与选择预设后的交互保持一致。
+watch(
+  () => [props.open, props.copyFrom] as const,
+  ([isOpen, copyFrom]) => {
+    if (!isOpen || !copyFrom || props.model) return
+    prefillFromModel(copyFrom)
+    presetPanelCollapsed.value = true
+    scrollToBasicInformation()
+  },
+  { flush: 'post' },
+)
+
+// 复制模式不自动补默认缓存价格：派生模型需要精确还原源模型的定价，
+// 源模型未设置的缓存价格保持未设置，由管理员显式开启。
 const autoFillMissingCachePrices = computed(() => (
-  !isEditMode.value && selectedModel.value === null
+  !isEditMode.value && selectedModel.value === null && !props.copyFrom
 ))
 
 async function handleSubmit() {
