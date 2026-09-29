@@ -224,6 +224,17 @@ fn notification_service_default_items() -> serde_json::Value {
             "system": true
         },
         {
+            "key": "provider_credential_undecryptable",
+            "name": "号池凭据无法解密",
+            "enabled": true,
+            "channel": "global",
+            "title_template": "号池凭据无法解密",
+            "markdown_template": "以下提供商密钥的凭据无法解密，请删除后重新添加这些密钥：{key_ids}\n\n受影响密钥数：{key_count}",
+            "text_template": "以下提供商密钥的凭据无法解密，请删除后重新添加这些密钥：{key_ids}（受影响密钥数：{key_count}）",
+            "user_email_enabled": false,
+            "system": true
+        },
+        {
             "key": "user_balance_low",
             "name": "用户余额不足",
             "enabled": true,
