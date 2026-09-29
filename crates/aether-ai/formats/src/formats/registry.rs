@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use serde_json::{Map, Value};
 
 use crate::formats::openai::namespace::NamespaceToolAliases;
@@ -123,6 +125,12 @@ pub fn convert_request_pure_with_context(
     let source = parse_format(source_format)?;
     let target = parse_format(target_format)?;
     let normalized_body = normalize_openai_responses_to_chat_body(source, target, body)?;
+    let (normalized_body, degraded_items) = degrade_openai_responses_unmapped_input_items(
+        source,
+        target,
+        &normalized_body,
+        ctx.allow_lossy_responses_input_items,
+    );
     let request = parse_request(source_format, &normalized_body, &pure_ctx)?;
     validate_openai_responses_target_contract(target_format, &normalized_body)?;
     validate_request_conversion(
@@ -133,7 +141,8 @@ pub fn convert_request_pure_with_context(
         ctx.mapped_model.as_deref(),
     )?;
     let value = emit_request_inner(target_format, &request, &pure_ctx)?;
-    let report = build_request_conversion_report(source_format, target_format, body, &value);
+    let mut report = build_request_conversion_report(source_format, target_format, body, &value);
+    record_degraded_responses_input_items(&mut report, &degraded_items);
     Ok(Converted { value, report })
 }
 
@@ -166,6 +175,12 @@ pub fn convert_request(
     };
     let body = expanded_body.as_ref().unwrap_or(body);
     let normalized_body = normalize_openai_responses_to_chat_body(source, target, body)?;
+    let (normalized_body, _degraded_items) = degrade_openai_responses_unmapped_input_items(
+        source,
+        target,
+        &normalized_body,
+        ctx.allow_lossy_responses_input_items,
+    );
     validate_openai_responses_target_contract(target_format, &normalized_body)?;
     let mut request = parse_request(source_format, &normalized_body, ctx)?;
     validate_runtime_request_conversion(
@@ -633,19 +648,7 @@ fn validate_openai_responses_cross_format_input(
             .unwrap_or("message")
             .trim()
             .to_ascii_lowercase();
-        if !matches!(
-            item_type.as_str(),
-            "message"
-                | "reasoning"
-                | "function_call"
-                | "custom_tool_call"
-                | "function_call_output"
-                | "custom_tool_call_output"
-                | "local_shell_call_output"
-                | "shell_call_output"
-                | "apply_patch_call_output"
-                | "computer_call_output"
-        ) {
+        if !openai_responses_input_item_type_has_lossless_mapping(&item_type) {
             return openai_responses_lossy_input(
                 source,
                 target,
@@ -717,6 +720,131 @@ fn openai_responses_lossy_input(
         field,
         reason: reason.to_string(),
     })
+}
+
+/// Item types whose Responses wire shape survives canonicalization and has a
+/// lossless mapping into every non-Responses target.
+///
+/// This list mirrors exactly the first-class item arms of
+/// `openai_responses_input_to_canonical_messages` (protocol/canonical.rs): it
+/// is the authoritative lossless set, and both the cross-format guard and the
+/// degradation path must derive their decisions from it so they can never
+/// drift apart.
+fn openai_responses_input_item_type_has_lossless_mapping(item_type: &str) -> bool {
+    matches!(
+        item_type,
+        "message"
+            | "reasoning"
+            | "function_call"
+            | "custom_tool_call"
+            | "function_call_output"
+            | "custom_tool_call_output"
+            | "local_shell_call_output"
+            | "shell_call_output"
+            | "apply_patch_call_output"
+            | "computer_call_output"
+    )
+}
+
+/// One Responses input item that was dropped by the lossy degradation path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DegradedResponsesInputItem {
+    /// Position of the item in the `input` array it was removed from (after
+    /// `normalize_openai_responses_to_chat_body`, the same array the
+    /// cross-format guard validates).
+    index: usize,
+    /// Lowercased Responses item `type` of the skipped item.
+    item_type: String,
+}
+
+/// Optional lossy degradation for Responses input items without a lossless
+/// cross-format mapping (fork issue #568).
+///
+/// By default a single such item (`item_reference`, `web_search_call`,
+/// `mcp_call`, `compaction`, ...) rejects the whole request in
+/// `validate_openai_responses_cross_format_input`. When the caller opts in via
+/// `FormatContext::allow_lossy_responses_input_items`, this pass removes those
+/// items from the `input` array up front so the conversion proceeds without
+/// them. This is a documented lossy downgrade: the dropped history/control
+/// items are gone from the upstream request, and every skip is reported as a
+/// `ConversionFieldStatus::LossyDegraded` record in the conversion report.
+///
+/// Deliberately conservative boundaries (still fail closed after degradation):
+/// - items that are neither objects nor strings (no item type to judge);
+/// - `message` items whose content blocks are unmappable;
+/// - `function_call`/`function_call_output` items carrying `caller` provenance;
+/// - the `multi_agent` request contract.
+///
+/// Returns the (possibly rebuilt) body plus the skipped items; when nothing
+/// needs skipping the body is returned borrowed, so clean requests pay no
+/// extra clone.
+fn degrade_openai_responses_unmapped_input_items(
+    source: FormatId,
+    target: FormatId,
+    body: &Value,
+    allow_lossy: bool,
+) -> (Cow<'_, Value>, Vec<DegradedResponsesInputItem>) {
+    if !allow_lossy
+        || !matches!(
+            source,
+            FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact
+        )
+        || matches!(
+            target,
+            FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact
+        )
+    {
+        return (Cow::Borrowed(body), Vec::new());
+    }
+    let Some(items) = body.get("input").and_then(Value::as_array) else {
+        return (Cow::Borrowed(body), Vec::new());
+    };
+    let unmappable: Vec<DegradedResponsesInputItem> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let item_type = item
+                .as_object()
+                .and_then(|item_object| item_object.get("type"))
+                .and_then(Value::as_str)
+                .map(|item_type| item_type.trim().to_ascii_lowercase())?;
+            (!openai_responses_input_item_type_has_lossless_mapping(&item_type))
+                .then_some(DegradedResponsesInputItem { index, item_type })
+        })
+        .collect();
+    if unmappable.is_empty() {
+        return (Cow::Borrowed(body), Vec::new());
+    }
+
+    let mut degraded = body.clone();
+    let degraded_input = degraded
+        .as_object_mut()
+        .and_then(|object| object.get_mut("input"))
+        .and_then(Value::as_array_mut)
+        .expect("input array existed on the source body");
+    for skip in unmappable.iter().rev() {
+        degraded_input.remove(skip.index);
+    }
+    (Cow::Owned(degraded), unmappable)
+}
+
+fn record_degraded_responses_input_items(
+    report: &mut ConversionReport,
+    degraded_items: &[DegradedResponsesInputItem],
+) {
+    for item in degraded_items {
+        report
+            .fields
+            .push(crate::formats::context::ConversionFieldRecord::new(
+                format!("input[{}]", item.index),
+                ConversionFieldStatus::LossyDegraded,
+                Some(format!(
+                    "skipped Responses input item of type {:?}: target format has no lossless \
+                 mapping; dropped by allow_lossy_responses_input_items degradation",
+                    item.item_type
+                )),
+            ));
+    }
 }
 
 fn validate_response_conversion(
@@ -5557,6 +5685,301 @@ mod tests {
             super::FormatError::LossyConversionBlocked { ref field, .. }
                 if field == "input[1]"
         ));
+    }
+
+    #[test]
+    fn openai_responses_whitelisted_input_item_types_convert_cross_format() {
+        // Item types whose full conversion to a non-Responses target is
+        // lossless end to end (items + their provider extension fields).
+        // Note: `custom_tool_call_output` items are admitted by the item-type
+        // guard but still fail a separate per-key extension audit for Chat
+        // targets (`openai_responses.item_type`); that pre-existing boundary is
+        // out of scope here and is covered by the guard-admission matrix below.
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"type": "message", "role": "user", "content": "plan the deploy"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{\"q\":\"docs\"}"
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+                {"type": "custom_tool_call", "call_id": "call_2", "name": "submit", "input": "{}"}
+            ]
+        });
+
+        let converted = convert_request_pure("openai:responses", "openai:chat", &body)
+            .expect("fully mappable whitelisted item types must convert cross-format");
+        assert!(
+            !converted
+                .report
+                .fields
+                .iter()
+                .any(|field| field.status == super::ConversionFieldStatus::LossyDegraded),
+            "whitelisted items must not be recorded as degraded: {:?}",
+            converted.report.fields
+        );
+    }
+
+    #[test]
+    fn openai_responses_item_type_whitelist_admits_every_lossless_item_type() {
+        // The item-type guard admits all ten lossless item types. Hosted tool
+        // outputs additionally carry provider extension fields that are judged
+        // by the separate per-key extension audits, so this matrix asserts the
+        // item-type guard itself: none of these may fail with the item-type
+        // rejection (`input[...]` + "no lossless mapping ... item type").
+        let item_cases = [
+            json!({"type": "message", "role": "user", "content": "hello"}),
+            json!({"type": "reasoning", "id": "rs_1", "status": "completed"}),
+            json!({
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": "{}"
+            }),
+            json!({"type": "custom_tool_call", "call_id": "call_2", "name": "submit"}),
+            json!({"type": "function_call_output", "call_id": "call_1", "output": "ok"}),
+            json!({"type": "custom_tool_call_output", "call_id": "call_2", "output": "ok"}),
+            json!({"type": "local_shell_call_output", "call_id": "call_3", "output": "ok"}),
+            json!({"type": "shell_call_output", "call_id": "call_4", "output": "ok"}),
+            json!({"type": "apply_patch_call_output", "call_id": "call_5", "output": "ok"}),
+            json!({"type": "computer_call_output", "call_id": "call_6", "output": "ok"}),
+        ];
+        for item in item_cases {
+            let item_type = item["type"].as_str().expect("matrix item has a type");
+            let body = json!({
+                "model": "gpt-5.6-sol",
+                "input": [item]
+            });
+            let result = convert_request_pure("openai:responses", "openai:chat", &body);
+            if let Err(error) = result {
+                assert!(
+                    !matches!(
+                        error,
+                        super::FormatError::LossyConversionBlocked {
+                            ref field,
+                            ref reason,
+                            ..
+                        } if field == "input[0]"
+                            && reason == "target format has no lossless mapping for this Responses input item type"
+                    ),
+                    "item type {item_type} is whitelisted but was rejected by the item-type guard: {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn openai_responses_unmapped_input_item_types_fail_closed_by_default() {
+        let cases = [
+            "item_reference",
+            "web_search_call",
+            "file_search_call",
+            "code_interpreter_call",
+            "mcp_call",
+            "mcp_list_tools",
+            "compaction",
+            "compaction_trigger",
+            "computer_call",
+            "local_shell_call",
+            "shell_call",
+            "apply_patch_call",
+        ];
+        for item_type in cases {
+            let body = json!({
+                "model": "gpt-5.6-sol",
+                "input": [
+                    {"type": "message", "role": "user", "content": "hello"},
+                    {"type": item_type, "id": "item_1"}
+                ]
+            });
+            let error = convert_request_pure("openai:responses", "openai:chat", &body)
+                .expect_err("default policy must stay fail-closed outside the lossless whitelist");
+            assert!(
+                matches!(
+                    error,
+                    super::FormatError::LossyConversionBlocked {
+                        ref field,
+                        ref reason,
+                        ..
+                    } if field == "input[1]"
+                        && reason == "target format has no lossless mapping for this Responses input item type"
+                ),
+                "unexpected rejection for {item_type}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lossy_degradation_skips_unmapped_items_and_records_report_warnings() {
+        assert!(!FormatContext::default().allow_lossy_responses_input_items);
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"type": "message", "role": "user", "content": "hello"},
+                {"type": "web_search_call", "id": "search_1"},
+                {"type": "item_reference", "id": "item_ref_1"},
+                {"type": "mcp_call", "id": "mcp_1", "name": "lookup"}
+            ]
+        });
+        let ctx = FormatContext::default().with_allow_lossy_responses_input_items(true);
+
+        let converted =
+            convert_request_pure_with_context("openai:responses", "openai:chat", &body, &ctx)
+                .expect("degradation must drop unmappable items instead of failing the request");
+
+        assert_eq!(
+            converted.value["messages"],
+            json!([{"role": "user", "content": "hello"}]),
+            "only the whitelisted message item may reach the upstream body"
+        );
+        let degraded: Vec<_> = converted
+            .report
+            .fields
+            .iter()
+            .filter(|field| field.status == super::ConversionFieldStatus::LossyDegraded)
+            .collect();
+        assert_eq!(degraded.len(), 3);
+        for (record, (index, item_type)) in degraded.iter().zip([
+            (1usize, "web_search_call"),
+            (2, "item_reference"),
+            (3, "mcp_call"),
+        ]) {
+            assert_eq!(record.field, format!("input[{index}]"));
+            let detail = record
+                .detail
+                .as_deref()
+                .expect("degraded records must carry a structured detail");
+            assert!(
+                detail.contains(item_type) && detail.contains("no lossless"),
+                "detail must name the skipped item type: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn lossy_degradation_applies_to_claude_and_gemini_targets() {
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"type": "message", "role": "user", "content": "hello"},
+                {"type": "web_search_call", "id": "search_1"}
+            ]
+        });
+        let ctx = FormatContext::default().with_allow_lossy_responses_input_items(true);
+        for target in ["claude:messages", "gemini:generate_content"] {
+            let converted =
+                convert_request_pure_with_context("openai:responses", target, &body, &ctx)
+                    .unwrap_or_else(|error| {
+                        panic!("degradation must cover {target} targets: {error:?}")
+                    });
+            assert!(
+                converted
+                    .report
+                    .fields
+                    .iter()
+                    .any(|field| field.status == super::ConversionFieldStatus::LossyDegraded),
+                "{target} conversion must record the skipped item"
+            );
+        }
+    }
+
+    #[test]
+    fn lossy_degradation_keeps_failing_closed_at_conservative_boundaries() {
+        let ctx = FormatContext::default().with_allow_lossy_responses_input_items(true);
+        let cases: [(&str, serde_json::Value, &str); 4] = [
+            (
+                "unmappable message content blocks",
+                json!({
+                    "model": "gpt-5.6-sol",
+                    "input": [{
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "future_content_block", "payload": {}}]
+                    }]
+                }),
+                "input[0].content[0]",
+            ),
+            (
+                "raw non-object input items",
+                json!({
+                    "model": "gpt-5.6-sol",
+                    "input": [42]
+                }),
+                "input[0]",
+            ),
+            (
+                "function call caller provenance",
+                json!({
+                    "model": "gpt-5.6-sol",
+                    "input": [{
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "lookup",
+                        "arguments": "{}",
+                        "caller": {"type": "multi_agent", "id": "agent_1"}
+                    }]
+                }),
+                "input[0].caller",
+            ),
+            (
+                "multi-agent request contract",
+                json!({
+                    "model": "gpt-5.6-sol",
+                    "input": "hello",
+                    "multi_agent": {"enabled": true}
+                }),
+                "multi_agent",
+            ),
+        ];
+        for (label, body, expected_field) in cases {
+            let error =
+                convert_request_pure_with_context("openai:responses", "openai:chat", &body, &ctx)
+                    .expect_err("degradation boundaries must keep failing closed");
+            assert!(
+                matches!(
+                    error,
+                    super::FormatError::LossyConversionBlocked { ref field, .. }
+                        if field == expected_field
+                ),
+                "unexpected boundary failure for {label}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lossy_degradation_dropping_every_item_yields_empty_upstream_history() {
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"type": "web_search_call", "id": "search_1"},
+                {"type": "compaction"}
+            ]
+        });
+        let ctx = FormatContext::default().with_allow_lossy_responses_input_items(true);
+
+        let converted =
+            convert_request_pure_with_context("openai:responses", "openai:chat", &body, &ctx)
+                .expect("all-item degradation must convert with an empty history");
+
+        assert_eq!(converted.value["messages"], json!([]));
+    }
+
+    #[test]
+    fn same_format_responses_round_trip_preserves_unmapped_input_items() {
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"type": "message", "role": "user", "content": "hello"},
+                {"type": "web_search_call", "id": "search_1"}
+            ]
+        });
+
+        let converted = convert_request_pure("openai:responses", "openai:responses", &body)
+            .expect("same-format Responses traffic must stay a transparent pass-through");
+        assert_eq!(converted.value["input"][1], body["input"][1]);
     }
 
     #[test]
