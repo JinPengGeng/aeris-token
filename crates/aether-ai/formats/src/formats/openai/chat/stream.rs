@@ -2272,6 +2272,20 @@ impl OpenAIChatClientEmitter {
     }
 
     fn encode_chunk(&self, mut chunk: Value) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        if let Some(object) = chunk.as_object_mut() {
+            // Inline-synthesized chunks have no upstream `created` to preserve;
+            // strict OpenAI clients require it on `chat.completion.chunk`.
+            // Chunks built by the shared stream_core builders already carry it
+            // and are left untouched here.
+            if object.get("object").and_then(Value::as_str) == Some("chat.completion.chunk")
+                && !object.contains_key("created")
+            {
+                object.insert(
+                    "created".to_string(),
+                    Value::from(openai_responses_current_timestamp()),
+                );
+            }
+        }
         if let (Some(service_tier), Some(object)) =
             (self.actual_service_tier.as_ref(), chunk.as_object_mut())
         {
@@ -7167,5 +7181,80 @@ mod tests {
             frame.event,
             CanonicalStreamEvent::ReasoningDelta(ref text) if text == "item fallback reasoning"
         )));
+    }
+
+    fn unix_now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or_default()
+    }
+
+    fn sse_events(bytes: &[u8]) -> Vec<Value> {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|payload| *payload != "[DONE]")
+            .filter_map(|payload| serde_json::from_str(payload).ok())
+            .collect()
+    }
+
+    /// `ReasoningDelta` 等内联 `json!` 合成路径绕过共享 builders，`encode_chunk`
+    /// 必须统一补上 `created`，否则严格客户端反序列化失败（issue #569）。
+    #[test]
+    fn openai_chat_client_emitter_stamps_created_on_inline_chunks() {
+        let before = unix_now_secs();
+        let mut emitter = OpenAIChatClientEmitter::default();
+        let mut bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "chatcmpl_created_1".to_string(),
+                model: "gpt-5.4".to_string(),
+                event: CanonicalStreamEvent::ReasoningDelta("because".to_string()),
+            })
+            .expect("reasoning should encode");
+        bytes.extend(
+            emitter
+                .emit(CanonicalStreamFrame {
+                    id: "chatcmpl_created_1".to_string(),
+                    model: "gpt-5.4".to_string(),
+                    event: CanonicalStreamEvent::Finish {
+                        finish_reason: Some("stop".to_string()),
+                        usage: None,
+                    },
+                })
+                .expect("finish should encode"),
+        );
+        let after = unix_now_secs();
+
+        let events = sse_events(&bytes);
+        assert!(!events.is_empty(), "emitter should emit chunks");
+        for event in &events {
+            assert_eq!(event["object"], "chat.completion.chunk", "{event}");
+            let created = event["created"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("chunk missing created: {event}"));
+            assert!(
+                (before..=after).contains(&created),
+                "created {created} must fall in [{before}, {after}]"
+            );
+        }
+    }
+
+    /// 透传对照：chunk 已带 `created`（上游原值或共享 builders 已注入）时，
+    /// `encode_chunk` 不得覆盖。
+    #[test]
+    fn openai_chat_client_emitter_preserves_existing_created() {
+        let emitter = OpenAIChatClientEmitter::default();
+        let chunk = json!({
+            "id": "chatcmpl_created_keep",
+            "object": "chat.completion.chunk",
+            "created": 1_770_000_000i64,
+            "model": "gpt-5.4",
+            "choices": []
+        });
+        let encoded = emitter.encode_chunk(chunk).expect("chunk should encode");
+        let events = sse_events(&encoded);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["created"], 1_770_000_000i64);
     }
 }

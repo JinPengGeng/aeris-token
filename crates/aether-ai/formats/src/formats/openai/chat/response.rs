@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use crate::{
-    formats::context::FormatContext,
+    formats::{
+        context::FormatContext, openai::responses::response::openai_responses_current_timestamp,
+    },
     protocol::canonical::{
         canonical_blocks_to_openai_chat_message, canonical_stop_reason_to_openai,
         canonical_usage_to_openai, openai_extensions, openai_finish_reason_to_canonical,
@@ -206,7 +208,11 @@ pub fn to_raw(canonical: &CanonicalResponse) -> Value {
             "total_tokens": 0,
         })),
     });
-    if let Some(created_at) = canonical
+    // Canonical responses converted from other formats (claude, gemini, ...)
+    // carry no `created_at` extension, so fall back to the current unix time:
+    // strict OpenAI clients treat `created` as required on `chat.completion`.
+    // An upstream-provided extension value always wins over the fallback.
+    let created_at = canonical
         .extensions
         .get(OPENAI_RESPONSES_EXTENSION_NAMESPACE)
         .or_else(|| {
@@ -220,9 +226,8 @@ pub fn to_raw(canonical: &CanonicalResponse) -> Value {
                 .as_i64()
                 .or_else(|| value.as_u64().map(|value| value as i64))
         })
-    {
-        response["created"] = Value::from(created_at);
-    }
+        .unwrap_or_else(openai_responses_current_timestamp);
+    response["created"] = Value::from(created_at);
     if let Some(service_tier) = openai_service_tier_extension(&canonical.extensions).cloned() {
         response["service_tier"] = service_tier;
     }
@@ -401,5 +406,54 @@ mod tests {
         .expect("openrouter response should convert");
 
         assert!(thinking_texts(&response).is_empty());
+    }
+
+    fn unix_now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or_default()
+    }
+
+    fn minimal_canonical() -> CanonicalResponse {
+        from_raw(&json!({
+            "id": "chatcmpl-created-123",
+            "model": "gpt-5.4",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "done"},
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("response should convert")
+    }
+
+    /// 跨格式 canonical（claude/gemini 等来源）没有 `created_at` 扩展：
+    /// `to_raw` 必须回退当前 unix 秒，否则严格客户端反序列化 `chat.completion`
+    /// 会报 "missing field `created`"（fork issue #569 / 上游 #738）。
+    #[test]
+    fn to_raw_falls_back_to_current_unix_seconds_without_created_at() {
+        let canonical = minimal_canonical();
+        let before = unix_now_secs();
+        let raw = to_raw(&canonical);
+        let created = raw["created"]
+            .as_i64()
+            .expect("created must be present on chat.completion");
+        assert!(
+            created >= before && created <= unix_now_secs(),
+            "created {created} must be a plausible unix second"
+        );
+    }
+
+    /// 透传对照：canonical 已带 `created_at` 扩展时保留上游原值，不被回退覆盖。
+    #[test]
+    fn to_raw_keeps_created_at_extension_value() {
+        let mut canonical = minimal_canonical();
+        canonical.extensions.insert(
+            OPENAI_RESPONSES_EXTENSION_NAMESPACE.to_string(),
+            json!({"created_at": 1_770_000_000i64}),
+        );
+        let raw = to_raw(&canonical);
+        assert_eq!(raw["created"], 1_770_000_000i64);
     }
 }
