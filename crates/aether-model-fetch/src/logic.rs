@@ -562,6 +562,7 @@ pub fn preset_models_for_provider(provider_type: &str) -> Option<Vec<Value>> {
         ],
         "kiro" => vec![
             preset_model("auto", "kiro", "Auto", "claude:messages"),
+            preset_model("claude-opus-4.8", "anthropic", "Claude Opus 4.8", "claude:messages"),
             preset_model("claude-opus-4.7", "anthropic", "Claude Opus 4.7", "claude:messages"),
             preset_model("claude-opus-4.6", "anthropic", "Claude Opus 4.6", "claude:messages"),
             preset_model("claude-sonnet-4.6", "anthropic", "Claude Sonnet 4.6", "claude:messages"),
@@ -2379,6 +2380,7 @@ mod tests {
             model_ids,
             vec![
                 "auto",
+                "claude-opus-4.8",
                 "claude-opus-4.7",
                 "claude-opus-4.6",
                 "claude-sonnet-4.6",
