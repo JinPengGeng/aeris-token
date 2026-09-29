@@ -21,6 +21,9 @@ pub(crate) struct AdminAuditEvent {
     pub(crate) action: &'static str,
     pub(crate) target_type: &'static str,
     pub(crate) target_id: String,
+    /// Action-specific metadata merged into the persisted audit record's
+    /// `event_metadata` (for example batch adjustment summary fields).
+    pub(crate) details: Option<serde_json::Value>,
 }
 
 /// A response extension consumed by the outer request future after the normal
@@ -84,11 +87,30 @@ pub(crate) fn attach_admin_audit_event(
     target_type: &'static str,
     target_id: impl Into<String>,
 ) {
+    attach_admin_audit_event_with_details(
+        response,
+        event_name,
+        action,
+        target_type,
+        target_id,
+        None,
+    );
+}
+
+pub(crate) fn attach_admin_audit_event_with_details(
+    response: &mut Response<Body>,
+    event_name: &'static str,
+    action: &'static str,
+    target_type: &'static str,
+    target_id: impl Into<String>,
+    details: Option<serde_json::Value>,
+) {
     response.extensions_mut().insert(AdminAuditEvent {
         event_name,
         action,
         target_type,
         target_id: target_id.into(),
+        details,
     });
 }
 
@@ -113,6 +135,9 @@ pub(crate) fn emit_admin_audit(
     };
 
     let attached_event = response.extensions_mut().remove::<AdminAuditEvent>();
+    let audit_event_details = attached_event
+        .as_ref()
+        .and_then(|event| event.details.clone());
     let route_family = decision.route_family.as_deref().unwrap_or("unknown");
     let route_kind = decision.route_kind.as_deref().unwrap_or("unknown");
     let status_code = response.status().as_u16();
@@ -193,7 +218,7 @@ pub(crate) fn emit_admin_audit(
     } else {
         "admin_mutation"
     };
-    let metadata = json!({
+    let mut metadata = json!({
         "schema_version": 1,
         "event_name": event_name,
         "status": audit_status,
@@ -209,6 +234,14 @@ pub(crate) fn emit_admin_audit(
         "target_id": target_id,
         "target_truncated": target_truncated.then_some(true),
     });
+    if let Some(details) = audit_event_details {
+        if let (Some(base), serde_json::Value::Object(extra)) = (metadata.as_object_mut(), details)
+        {
+            for (key, value) in extra {
+                base.insert(key, value);
+            }
+        }
+    }
     let record = CreateAdminAuditLog {
         id: uuid::Uuid::now_v7().to_string(),
         event_type: event_type.to_string(),

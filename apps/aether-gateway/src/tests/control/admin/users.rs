@@ -1196,6 +1196,301 @@ async fn gateway_handles_admin_user_batch_actions_locally() {
     upstream_handle.abort();
 }
 
+fn admin_batch_action_headers() -> http::HeaderMap {
+    let mut headers = http::HeaderMap::new();
+    for (name, value) in [
+        (crate::constants::GATEWAY_HEADER, "rust-phase3b"),
+        (TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123"),
+        (TRUSTED_ADMIN_USER_ROLE_HEADER, "admin"),
+        (TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123"),
+    ] {
+        headers.insert(name, http::HeaderValue::from_static(value));
+    }
+    headers
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_user_batch_wallet_balance_adjustments_locally() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().fallback(any(move |_request: Request| {
+        let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+        async move {
+            *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+            (StatusCode::OK, Body::from("unexpected upstream hit"))
+        }
+    }));
+
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+        sample_admin_user("user-1"),
+        sample_admin_user_with_role("user-2", "user", "bob@example.com", "bob"),
+        sample_admin_user_with_role("user-3", "user", "carol@example.com", "carol"),
+    ]));
+    let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![
+        sample_admin_wallet("user-1", "finite"),
+        sample_admin_wallet("user-2", "finite"),
+    ]));
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_user_and_wallet_for_tests(
+                user_repository,
+                wallet_repository,
+            ))
+            .with_auth_users_for_tests([
+                sample_admin_user("user-1"),
+                sample_admin_user_with_role("user-2", "user", "bob@example.com", "bob"),
+                sample_admin_user_with_role("user-3", "user", "carol@example.com", "carol"),
+            ])
+            .with_auth_wallets_for_tests([
+                sample_admin_wallet("user-1", "finite"),
+                sample_admin_wallet("user-2", "finite"),
+            ]),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    // Batch gift increase: user-3 has no wallet and ghost-user does not exist;
+    // both fail per-user without interrupting the rest of the batch.
+    let increase_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .headers(admin_batch_action_headers())
+        .json(&json!({
+            "selection": {
+                "user_ids": ["user-1", "user-2", "user-3", "ghost-user"]
+            },
+            "action": "adjust_wallet_balance",
+            "payload": {
+                "amount_usd": "2.50",
+                "balance_type": "gift",
+                "description": "批量赠送"
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(increase_response.status(), StatusCode::OK);
+    let increase_payload: serde_json::Value = increase_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(increase_payload["total"], 4);
+    assert_eq!(increase_payload["success"], 2);
+    assert_eq!(increase_payload["failed"], 2);
+    assert_eq!(increase_payload["action"], json!("adjust_wallet_balance"));
+    assert_eq!(increase_payload["modified_fields"], json!(["balance"]));
+    let failures = increase_payload["failures"]
+        .as_array()
+        .expect("failures should be array");
+    assert_eq!(failures.len(), 2);
+    assert_eq!(failures[0]["user_id"], "ghost-user");
+    assert_eq!(failures[0]["reason"], "用户不存在或已删除");
+    assert_eq!(failures[1]["user_id"], "user-3");
+    assert_eq!(failures[1]["reason"], "用户钱包不可用");
+
+    let user1_wallet_response = client
+        .get(format!("{gateway_url}/api/admin/wallets/wallet-user-1"))
+        .headers(admin_batch_action_headers())
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(user1_wallet_response.status(), StatusCode::OK);
+    let user1_wallet: serde_json::Value = user1_wallet_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(user1_wallet["recharge_balance"], json!("12.50000000"));
+    assert_eq!(user1_wallet["gift_balance"], json!("5.00000000"));
+    assert_eq!(user1_wallet["balance"], json!("17.50000000"));
+
+    let user2_wallet_response = client
+        .get(format!("{gateway_url}/api/admin/wallets/wallet-user-2"))
+        .headers(admin_batch_action_headers())
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(user2_wallet_response.status(), StatusCode::OK);
+    let user2_wallet: serde_json::Value = user2_wallet_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(user2_wallet["gift_balance"], json!("5.00000000"));
+
+    // Overdraft debit: the fork intentionally allows admin adjustments to
+    // drive the recharge balance negative (issue #208 recharge debt), so the
+    // debit beyond the total balance succeeds instead of being clamped.
+    let overdraft_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .headers(admin_batch_action_headers())
+        .json(&json!({
+            "selection": {
+                "user_ids": ["user-1"]
+            },
+            "action": "adjust_wallet_balance",
+            "payload": {
+                "amount_usd": -20
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(overdraft_response.status(), StatusCode::OK);
+    let overdraft_payload: serde_json::Value = overdraft_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(overdraft_payload["success"], 1);
+    assert_eq!(overdraft_payload["failed"], 0);
+
+    let overdrafted_wallet_response = client
+        .get(format!("{gateway_url}/api/admin/wallets/wallet-user-1"))
+        .headers(admin_batch_action_headers())
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(overdrafted_wallet_response.status(), StatusCode::OK);
+    let overdrafted_wallet: serde_json::Value = overdrafted_wallet_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(overdrafted_wallet["recharge_balance"], json!("-2.50000000"));
+    assert_eq!(overdrafted_wallet["gift_balance"], json!("0.00000000"));
+    assert_eq!(overdrafted_wallet["balance"], json!("-2.50000000"));
+
+    // Invalid payloads are rejected up front with the same money rules as the
+    // single-wallet adjust endpoint.
+    for (payload, expected_detail) in [
+        (json!({ "amount_usd": 0 }), json!("amount_usd 不能为 0")),
+        (
+            json!({ "amount_usd": "-0.00000000" }),
+            json!("amount_usd 不能为 0"),
+        ),
+        (
+            json!({ "amount_usd": "1.000000001" }),
+            json!("amount_usd 必须为定点金额（至多 8 位小数）"),
+        ),
+        (
+            json!({ "amount_usd": "1", "balance_type": "credit" }),
+            json!("balance_type 必须为 recharge 或 gift"),
+        ),
+    ] {
+        let invalid_response = client
+            .post(format!("{gateway_url}/api/admin/users/batch-action"))
+            .headers(admin_batch_action_headers())
+            .json(&json!({
+                "selection": { "user_ids": ["user-1"] },
+                "action": "adjust_wallet_balance",
+                "payload": payload
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+        let invalid_payload: serde_json::Value = invalid_response
+            .json()
+            .await
+            .expect("json body should parse");
+        assert_eq!(invalid_payload["detail"], expected_detail);
+    }
+
+    let missing_payload_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .headers(admin_batch_action_headers())
+        .json(&json!({
+            "selection": { "user_ids": ["user-1"] },
+            "action": "adjust_wallet_balance"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(missing_payload_response.status(), StatusCode::BAD_REQUEST);
+
+    let unknown_action_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .headers(admin_batch_action_headers())
+        .json(&json!({
+            "selection": { "user_ids": ["user-1"] },
+            "action": "adjust_wallet_balances",
+            "payload": { "amount_usd": "1" }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(unknown_action_response.status(), StatusCode::BAD_REQUEST);
+    let unknown_action_payload: serde_json::Value = unknown_action_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(unknown_action_payload["detail"], json!("不支持的批量操作"));
+
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn local_admin_user_batch_wallet_adjustment_attaches_explicit_audit() {
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_auth_users_for_tests([sample_admin_user("user-1")])
+        .with_auth_wallets_for_tests([sample_admin_wallet("user-1", "finite")]);
+    let context = crate::control::resolve_public_request_context(
+        &state,
+        &http::Method::POST,
+        &"/api/admin/users/batch-action"
+            .parse()
+            .expect("uri should parse"),
+        &admin_batch_action_headers(),
+        "batch-wallet-audit-trace",
+    )
+    .await
+    .expect("request context should resolve");
+    let body = axum::body::Bytes::from(
+        json!({
+            "selection": { "user_ids": ["user-1", "ghost-user"] },
+            "action": "adjust_wallet_balance",
+            "payload": {
+                "amount_usd": "2.5",
+                "balance_type": "gift",
+                "description": "批量赠送"
+            }
+        })
+        .to_string(),
+    );
+    let response = crate::admin_api::maybe_build_local_admin_response(
+        crate::admin_api::AdminRouteRequest::new(
+            &state,
+            &context,
+            &"127.0.0.1:12345".parse().expect("addr should parse"),
+            &admin_batch_action_headers(),
+            Some(&body),
+        ),
+    )
+    .await
+    .expect("local response should build")
+    .expect("batch action route should resolve locally");
+    assert_eq!(response.status(), StatusCode::OK);
+    let audit = response
+        .extensions()
+        .get::<crate::audit::AdminAuditEvent>()
+        .cloned()
+        .expect("batch adjustment should attach audit");
+    assert_eq!(audit.event_name, "admin_users_batch_action_executed");
+    assert_eq!(audit.action, "batch_adjust_wallet_balance");
+    assert_eq!(audit.target_type, "user_batch");
+    assert_eq!(audit.target_id, "users");
+    let details = audit
+        .details
+        .expect("batch adjustment details should attach");
+    assert_eq!(details["amount_usd"], json!("2.50000000"));
+    assert_eq!(details["balance_type"], json!("gift"));
+    assert_eq!(details["success"], json!(1));
+    assert_eq!(details["failed"], json!(1));
+}
+
 #[tokio::test]
 async fn gateway_handles_admin_users_root_locally_with_bearer_admin_session() {
     let upstream_hits = Arc::new(Mutex::new(0usize));

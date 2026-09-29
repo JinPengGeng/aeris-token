@@ -22,8 +22,9 @@ mod system_config_values;
 mod usage_stats;
 
 pub(crate) use self::admin_proxy::{
-    attach_admin_audit_response, build_admin_proxy_auth_required_response,
-    build_unhandled_admin_proxy_response, mark_sensitive_admin_response_no_store,
+    attach_admin_audit_response, attach_admin_audit_response_with_details,
+    build_admin_proxy_auth_required_response, build_unhandled_admin_proxy_response,
+    mark_sensitive_admin_response_no_store,
 };
 pub(crate) use self::api_keys::{
     api_key_placeholder_display, configured_api_key_prefix, generate_gateway_api_key_plaintext,
