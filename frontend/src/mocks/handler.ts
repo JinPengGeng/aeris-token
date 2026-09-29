@@ -2192,6 +2192,20 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse(MOCK_MODULE_STATUSES)
   },
 
+  // ========== User: Modules ==========
+  // 用户侧只读模块状态：仅暴露 name 与 active（issue #579）
+  'GET /api/modules/status': async () => {
+    await delay()
+    return createMockResponse(
+      Object.fromEntries(
+        Object.entries(MOCK_MODULE_STATUSES).map(([name, status]) => [
+          name,
+          { name, active: status.active },
+        ])
+      )
+    )
+  },
+
   // ========== Admin: System ==========
   'GET /api/admin/system/configs': async () => {
     await delay()

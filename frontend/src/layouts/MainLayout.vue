@@ -502,6 +502,7 @@ import { isDemoMode } from '@/config/demo'
 import { adminApi, type CheckUpdateResponse, type ReleaseEntry, type SystemUpdateCapabilityResponse, type UpdateTaskStatusResponse } from '@/api/admin'
 import { announcementApi, type Announcement } from '@/api/announcements'
 import { parseApiError } from '@/utils/errorParser'
+import { log } from '@/utils/logger'
 import Button from '@/components/ui/button.vue'
 import { Dialog } from '@/components/ui'
 import AppShell from '@/components/layout/AppShell.vue'
@@ -1133,6 +1134,55 @@ async function loadRequiredAnnouncements() {
   return requiredAnnouncementsPromise
 }
 
+// 预取模块状态：会话就绪后加载一次，失败时有限重试（issue #579——
+// 此前仅 onMounted 对管理员一次性预取且静默吞错，一旦失败模块入口再也不恢复）。
+const MODULE_PREFETCH_MAX_ATTEMPTS = 3
+const MODULE_PREFETCH_RETRY_DELAY_MS = 2_000
+let modulePrefetchAttempts = 0
+let modulePrefetchRetryTimer: number | null = null
+
+function clearModulePrefetchRetryTimer() {
+  if (modulePrefetchRetryTimer !== null) {
+    window.clearTimeout(modulePrefetchRetryTimer)
+    modulePrefetchRetryTimer = null
+  }
+}
+
+async function prefetchModuleStatus() {
+  if (!authStore.user || !authStore.token) return
+  if (moduleStore.loaded) {
+    modulePrefetchAttempts = 0
+    return
+  }
+  modulePrefetchAttempts += 1
+  try {
+    await moduleStore.fetchModules()
+    modulePrefetchAttempts = 0
+  } catch (err) {
+    // 记录失败而不是静默吞掉；路由守卫仍会按需 fail-close，
+    // 这里的重试只负责在瞬时故障后恢复预取。
+    log.error('Failed to prefetch module status', err)
+    if (modulePrefetchAttempts < MODULE_PREFETCH_MAX_ATTEMPTS) {
+      clearModulePrefetchRetryTimer()
+      modulePrefetchRetryTimer = window.setTimeout(() => {
+        modulePrefetchRetryTimer = null
+        void prefetchModuleStatus()
+      }, MODULE_PREFETCH_RETRY_DELAY_MS)
+    }
+  }
+}
+
+watch(
+  () => [authStore.user, authStore.token] as const,
+  () => {
+    // 会话变化（登录/token 刷新/登出）时复位重试并重新预取。
+    clearModulePrefetchRetryTimer()
+    modulePrefetchAttempts = 0
+    void prefetchModuleStatus()
+  },
+  { immediate: true }
+)
+
 function renderRequiredAnnouncement(content: string): string {
   return sanitizeMarkdown(marked(content || '') as string)
 }
@@ -1158,12 +1208,6 @@ onMounted(() => {
   syncAuthNotice()
   applyCachedVersionStatus()
 
-  // 管理员预加载模块状态（路由守卫会按需加载，这里提前加载以避免菜单闪烁）
-  if (authStore.canAccessAdmin && !moduleStore.loaded && !moduleStore.loading) {
-    void moduleStore.fetchModules().catch(() => {
-      // 路由守卫会在需要模块状态时按需处理失败场景。
-    })
-  }
   void loadRequiredAnnouncements()
 
   // 延迟检查更新，避免 GitHub Releases 检查和首屏业务数据争抢资源。
@@ -1184,6 +1228,7 @@ onUnmounted(() => {
     window.clearTimeout(updateCheckTimer)
     updateCheckTimer = null
   }
+  clearModulePrefetchRetryTimer()
   stopUpdateStatusPolling()
   if (import.meta.env.DEV && window.__aetherShowUpdateDialog === showDebugUpdateDialog) {
     delete window.__aetherShowUpdateDialog

@@ -1,5 +1,6 @@
 import apiClient from './client'
 import { buildCacheKey, cache, cachedRequest } from '@/utils/cache'
+import { useAuthStore } from '@/stores/auth'
 
 const MODULE_MANAGEMENT_ORDER_CONFIG_KEY = 'module_management.extension_order'
 const ALL_SYSTEM_CONFIGS_CACHE_KEY = 'admin:system:configs'
@@ -186,15 +187,69 @@ async function getAllSystemConfigValues(): Promise<Map<string, unknown>> {
   return new Map(configs.map(config => [config.key, config.value]))
 }
 
+/**
+ * 用户侧只读模块状态（GET /api/modules/status 的返回项）。
+ * 仅暴露 name 与 active，不含管理端内部字段。
+ */
+export interface UserModuleStatus {
+  name: string
+  active: boolean
+}
+
+/**
+ * 将用户侧只读 payload 归一化为 ModuleStatus 形状。
+ *
+ * 后端语义：active = available && enabled && config_validated，因此
+ * active=true 蕴含 available/enabled/config_validated=true；active=false
+ * 时三者一律取 false（fail-close）。管理端专用字段（admin_route 等）
+ * 对普通用户不可见也不可用，保持中性默认值。
+ */
+function normalizeUserModuleStatuses(
+  payload: Record<string, UserModuleStatus>
+): Record<string, ModuleStatus> {
+  const normalized: Record<string, ModuleStatus> = {}
+  for (const [name, status] of Object.entries(payload)) {
+    const active = status?.active === true
+    normalized[name] = {
+      name,
+      available: active,
+      enabled: active,
+      active,
+      config_validated: active,
+      config_error: null,
+      display_name: name,
+      description: '',
+      category: 'integration',
+      admin_route: null,
+      admin_menu_icon: null,
+      admin_menu_group: null,
+      admin_menu_order: 0,
+      health: 'unknown',
+    }
+  }
+  return normalized
+}
+
 export const modulesApi = {
   /**
-   * 获取所有模块状态（管理员）
+   * 获取所有模块状态。
+   *
+   * 管理员走 /api/admin/modules/status（完整字段，供管理端菜单/守卫使用）；
+   * 普通用户走用户侧只读端点 /api/modules/status（仅 name + active），
+   * 避免普通用户请求管理端接口 403 导致模块状态永远加载失败（issue #579）。
    */
   async getAllStatus(): Promise<Record<string, ModuleStatus>> {
-    const response = await apiClient.get<Record<string, ModuleStatus>>(
-      '/api/admin/modules/status'
+    // 仅在调用时读取角色（auth store 已随应用激活），api 层不缓存角色状态。
+    if (useAuthStore().canAccessAdmin) {
+      const response = await apiClient.get<Record<string, ModuleStatus>>(
+        '/api/admin/modules/status'
+      )
+      return response.data
+    }
+    const response = await apiClient.get<Record<string, UserModuleStatus>>(
+      '/api/modules/status'
     )
-    return response.data
+    return normalizeUserModuleStatuses(response.data)
   },
 
   /**
