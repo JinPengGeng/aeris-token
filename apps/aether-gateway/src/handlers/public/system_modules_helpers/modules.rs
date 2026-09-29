@@ -1,3 +1,5 @@
+use crate::admin_api::AdminAppState;
+use crate::handlers::admin::build_admin_modules_status_payload;
 use crate::handlers::shared::{module_available_from_env, system_config_bool};
 use crate::{AppState, GatewayError};
 use serde_json::json;
@@ -79,4 +81,116 @@ pub(crate) async fn build_public_auth_modules_status_payload(
     }
 
     Ok(serde_json::Value::Array(items))
+}
+
+/// 从管理端模块状态 payload 投影出用户侧只读视图。
+///
+/// 仅保留 `name` 与 `active`（`active = available && enabled && config_validated`
+/// 的最终结果），不泄露 `enabled` / `config_validated` / `config_error` 等内部
+/// 配置细节，也不包含管理端菜单路由信息。
+pub(crate) fn build_user_modules_status_payload_from_admin(
+    admin_payload: serde_json::Value,
+) -> serde_json::Value {
+    let Some(modules) = admin_payload.as_object() else {
+        return serde_json::Value::Object(serde_json::Map::new());
+    };
+    let mut payload = serde_json::Map::new();
+    for (name, status) in modules {
+        payload.insert(
+            name.clone(),
+            json!({
+                "name": name,
+                "active": status
+                    .get("active")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            }),
+        );
+    }
+    serde_json::Value::Object(payload)
+}
+
+/// 用户侧只读模块状态：登录用户可访问，复用管理端 `active` 计算逻辑。
+pub(crate) async fn build_user_modules_status_payload(
+    state: &AppState,
+) -> Result<serde_json::Value, GatewayError> {
+    let admin_payload = build_admin_modules_status_payload(&AdminAppState::new(state)).await?;
+    Ok(build_user_modules_status_payload_from_admin(admin_payload))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_user_modules_status_payload_from_admin;
+    use serde_json::json;
+
+    #[test]
+    fn user_payload_keeps_only_name_and_active() {
+        let admin_payload = json!({
+            "referral": {
+                "name": "referral",
+                "available": true,
+                "enabled": true,
+                "active": true,
+                "config_validated": true,
+                "config_error": null,
+                "display_name": "邀请返利",
+                "description": "管理用户邀请关系与返利记录",
+                "category": "integration",
+                "admin_route": "/admin/referrals",
+                "admin_menu_icon": "Gift",
+                "admin_menu_group": "management",
+                "admin_menu_order": 75,
+                "health": "unknown"
+            },
+            "oauth": {
+                "name": "oauth",
+                "available": true,
+                "enabled": false,
+                "active": false,
+                "config_validated": true,
+                "config_error": null,
+                "display_name": "OAuth 登录",
+                "description": "支持通过第三方 OAuth Provider 登录/绑定账号",
+                "category": "auth",
+                "admin_route": "/admin/oauth",
+                "admin_menu_icon": "Key",
+                "admin_menu_group": null,
+                "admin_menu_order": 55,
+                "health": "unknown"
+            }
+        });
+
+        let payload = build_user_modules_status_payload_from_admin(admin_payload);
+
+        assert_eq!(
+            payload,
+            json!({
+                "referral": { "name": "referral", "active": true },
+                "oauth": { "name": "oauth", "active": false }
+            })
+        );
+    }
+
+    #[test]
+    fn user_payload_defaults_missing_active_to_false() {
+        let payload = build_user_modules_status_payload_from_admin(json!({
+            "referral": { "name": "referral", "enabled": true }
+        }));
+        assert_eq!(
+            payload,
+            json!({ "referral": { "name": "referral", "active": false } })
+        );
+    }
+
+    #[test]
+    fn user_payload_of_non_object_admin_payload_is_empty_object() {
+        let payload = build_user_modules_status_payload_from_admin(json!([]));
+        assert_eq!(payload, json!({}));
+    }
+
+    #[test]
+    fn user_payload_of_empty_admin_payload_is_empty_object() {
+        let payload = build_user_modules_status_payload_from_admin(json!({}));
+        assert_eq!(payload, json!({}));
+    }
 }

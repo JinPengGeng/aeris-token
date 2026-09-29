@@ -105,6 +105,7 @@ pub(crate) const RUST_FRONTDOOR_OWNED_ROUTE_PATTERNS: &[&str] = &[
     "/api/user/oauth/{provider_type}/bind",
     "/api/user/oauth/{provider_type}",
     "/api/modules/auth-status",
+    "/api/modules/status",
     "/api/capabilities",
     "/api/capabilities/user-configurable",
     "/api/capabilities/model/{path...}",

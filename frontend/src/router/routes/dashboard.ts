@@ -56,7 +56,8 @@ export const dashboardRoutes: RouteRecordRaw[] = [
       {
         path: 'referral',
         name: 'ReferralCenter',
-        component: view(() => import('@/views/user/ReferralCenter.vue'))
+        component: view(() => import('@/views/user/ReferralCenter.vue')),
+        meta: { module: 'referral' }
       },
       {
         path: 'models',
