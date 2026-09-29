@@ -123,6 +123,9 @@ async fn gateway_exposes_frontdoor_manifest_without_proxying_upstream() {
         .any(|value| value == "/api/modules/auth-status"));
     assert!(owned_routes
         .iter()
+        .any(|value| value == "/api/modules/status"));
+    assert!(owned_routes
+        .iter()
         .any(|value| value == "/api/internal/gateway/{path...}"));
     assert!(owned_routes
         .iter()

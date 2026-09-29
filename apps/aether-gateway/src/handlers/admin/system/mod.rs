@@ -17,3 +17,4 @@ pub(crate) use self::proxy_nodes::{
     override_proxy_connectivity_probe_url_for_tests,
 };
 pub(super) use self::routes::maybe_build_local_admin_system_response;
+pub(crate) use self::shared::modules::build_admin_modules_status_payload;

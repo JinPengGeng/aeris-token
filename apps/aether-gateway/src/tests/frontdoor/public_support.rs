@@ -12369,3 +12369,105 @@ async fn gateway_rejects_payment_callback_with_mismatched_payment_method_locally
     gateway_handle.abort();
     upstream_handle.abort();
 }
+
+#[tokio::test]
+async fn gateway_serves_user_modules_status_to_authenticated_users_without_internal_fields() {
+    let now = Utc::now();
+    let user = sample_auth_user(now);
+    let access_token = build_test_auth_token(
+        "access",
+        serde_json::Map::from_iter([
+            ("user_id".to_string(), json!(user.id)),
+            ("role".to_string(), json!(user.role)),
+            (
+                "created_at".to_string(),
+                json!(user.created_at.map(|value| value.to_rfc3339())),
+            ),
+            ("session_id".to_string(), json!("session-modules-user-1")),
+        ]),
+        now + chrono::Duration::hours(1),
+    );
+    let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_state_and_system_config(
+            user,
+            sample_auth_wallet("user-auth-1", now),
+            [sample_auth_session(
+                "user-auth-1",
+                "session-modules-user-1",
+                "device-modules-user-1",
+                "refresh-modules-user-1",
+                now,
+            )],
+            [
+                ("module.referral.enabled".to_string(), json!(true)),
+                ("module.oauth.enabled".to_string(), json!(true)),
+            ],
+        )
+        .await;
+
+    // Unauthenticated requests are rejected before any payload is built.
+    let anonymous_response = reqwest::Client::new()
+        .get(format!("{gateway_url}/api/modules/status"))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(anonymous_response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = reqwest::Client::new()
+        .get(format!("{gateway_url}/api/modules/status"))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("x-client-device-id", "device-modules-user-1")
+        .header("user-agent", "AetherTest/1.0")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let modules = payload.as_object().expect("payload should be an object");
+    assert!(
+        modules.len() >= 2,
+        "payload should cover the builtin modules, got {modules:?}"
+    );
+    assert_eq!(
+        payload["referral"],
+        json!({ "name": "referral", "active": true })
+    );
+    assert_eq!(payload["oauth"]["active"], json!(false));
+    for (name, status) in modules {
+        assert_eq!(
+            status
+                .as_object()
+                .expect("module entry should be object")
+                .len(),
+            2,
+            "module '{name}' should only expose name and active, got {status}"
+        );
+        assert_eq!(status["name"], json!(name));
+        assert!(status["active"].is_boolean());
+    }
+
+    // The user-visible active set must match what admins see for the same state.
+    let admin_response = reqwest::Client::new()
+        .get(format!("{gateway_url}/api/admin/modules/status"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("admin request should succeed");
+    assert_eq!(admin_response.status(), StatusCode::OK);
+    let admin_payload: serde_json::Value =
+        admin_response.json().await.expect("json body should parse");
+    for (name, status) in modules {
+        assert_eq!(
+            status["active"], admin_payload[name]["active"],
+            "module '{name}' active should be consistent between user and admin payloads"
+        );
+    }
+
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
