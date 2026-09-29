@@ -237,6 +237,8 @@
               <Badge
                 v-if="isUsageRecordFailed(record)"
                 variant="destructive"
+                :title="getFailedBadgeTitle(record)"
+                :aria-label="getFailedBadgeAriaLabel(record)"
                 class="whitespace-nowrap text-[10px] px-1.5 h-4 leading-4 inline-flex items-center flex-shrink-0"
               >
                 失败
@@ -404,7 +406,12 @@
           >
             <span class="text-muted-foreground">Tokens</span>
             <span
-              v-if="record.usage_available !== false"
+              v-if="record.usage_available !== false && isFailedRecordWithoutTokens(record)"
+              class="ml-1 text-muted-foreground"
+              data-usage-failed-no-usage="tokens"
+            >—</span>
+            <span
+              v-else-if="record.usage_available !== false"
               class="ml-1"
             >{{ formatTokens(getRecordEffectiveInputTokens(record)) }} / {{ formatTokens(record.output_tokens || 0) }}</span>
             <span
@@ -862,6 +869,8 @@
             <Badge
               v-if="isUsageRecordFailed(record)"
               variant="destructive"
+              :title="getFailedBadgeTitle(record)"
+              :aria-label="getFailedBadgeAriaLabel(record)"
               class="whitespace-nowrap"
             >
               失败
@@ -922,7 +931,17 @@
             class="py-4 w-[10%]"
           >
             <template v-if="record.usage_available !== false">
-              <div class="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-x-1 text-xs leading-tight tabular-nums">
+              <div
+                v-if="isFailedRecordWithoutTokens(record)"
+                class="text-right text-xs leading-tight tabular-nums text-muted-foreground"
+                data-usage-failed-no-usage="tokens"
+              >
+                —
+              </div>
+              <div
+                v-else
+                class="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-x-1 text-xs leading-tight tabular-nums"
+              >
                 <span class="justify-self-end whitespace-nowrap text-right">
                   {{ formatTokens(getRecordEffectiveInputTokens(record)) }}
                 </span>
@@ -1133,6 +1152,7 @@ import { formatClientFamily } from '@/features/usage/utils/clientFamily'
 import { formatServiceTierFact } from '../utils/service-tier'
 import { formatCandidateSkipReason } from '../utils/skipReason'
 import { isCyberPolicyError } from '../utils/cyberError'
+import { mergeUsageRecordErrorMessage } from '../utils/recordSync'
 import { formatUsageWebSocketTransportTitle as getWebSocketTransportTitle } from '../utils/websocketTransport'
 import type { DateRangeParams, UsageRecord } from '../types'
 import { MultiSelect, TimeRangePicker } from '@/components/common'
@@ -1551,6 +1571,16 @@ function getRecordCacheTokensTitle(record: UsageRecord): string {
   ].join('\n')
 }
 
+// 失败请求没有产生任何 token 用量时，token 单元格用"—"占位而不是"0 / 0"，
+// 避免把占位数字误读成真实用量；失败但确有部分用量（如流式中途失败）时仍如实展示。
+function isFailedRecordWithoutTokens(record: UsageRecord): boolean {
+  if (!isUsageRecordFailed(record)) {
+    return false
+  }
+  return !hasPositiveTokens(getRecordEffectiveInputTokens(record)) &&
+    !hasPositiveTokens(record.output_tokens || 0)
+}
+
 function formatRecordLatencyPair(record: UsageRecord): string {
   const firstByte = formatRecordDurationSeconds(
     record.end_to_end_first_byte_time_ms ?? record.first_byte_time_ms,
@@ -1636,6 +1666,28 @@ function skippedCandidateTooltip(record: UsageRecord): string {
 function skippedCandidateAriaLabel(record: UsageRecord): string {
   const reasons = (record.skipped_candidate_reasons ?? []).map(formatCandidateSkipReason)
   return reasons.length ? `有候选被调度跳过：${reasons.join('；')}` : '有候选被调度跳过'
+}
+
+// "失败"角标的悬停/无障碍说明：带上合并后的上游错误摘要（截断到 200 字符），
+// 让非调试环境在行内即可定位失败原因（如"上下文超出模型限制"）。
+// 复用 mergeUsageRecordErrorMessage 做空白消息归一化（列表快照已合并过一次，此处兜底）。
+// 文案经 :title/:aria-label 插值绑定渲染，Vue 会自动做 HTML 转义，不使用 v-html。
+const FAILED_BADGE_TITLE_MAX_LENGTH = 200
+
+function getFailedBadgeTitle(record: UsageRecord): string | undefined {
+  const message = mergeUsageRecordErrorMessage(record.error_message, undefined)?.trim()
+  if (!message) {
+    return undefined
+  }
+  if (message.length <= FAILED_BADGE_TITLE_MAX_LENGTH) {
+    return message
+  }
+  return `${message.slice(0, FAILED_BADGE_TITLE_MAX_LENGTH)}…`
+}
+
+function getFailedBadgeAriaLabel(record: UsageRecord): string {
+  const title = getFailedBadgeTitle(record)
+  return title ? `失败：${title}` : '失败'
 }
 
 // 获取 API 格式的 tooltip（包含转换信息）

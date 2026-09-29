@@ -343,6 +343,106 @@ describe('UsageRecordsTable', () => {
     expect(root.textContent).not.toContain('等待中')
   })
 
+  it('replaces the 0 / 0 token cell with a dash for failed requests without usage', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'failed',
+      status_code: 400,
+      error_message: 'prompt is too long: 200000 tokens > 128000 token limit',
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      cost: 0,
+    })])
+
+    const dashes = [...root.querySelectorAll<HTMLElement>('[data-usage-failed-no-usage="tokens"]')]
+    // 移动端卡片与桌面表格各渲染一份
+    expect(dashes.length).toBeGreaterThanOrEqual(2)
+    expect(dashes.every(element => element.textContent?.trim() === '—')).toBe(true)
+    expect(root.textContent).not.toContain('0 / 0')
+  })
+
+  it('keeps partial token usage visible for a failed request that consumed tokens', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'failed',
+      status_code: 500,
+      error_message: 'stream closed early',
+      input_tokens: 100,
+      output_tokens: 50,
+    })])
+
+    expect(root.querySelector('[data-usage-failed-no-usage="tokens"]')).toBeNull()
+    expect(root.textContent).toContain('100 / 50')
+  })
+
+  it('does not dash tokens or badge failure for a completed request with a fallback error', () => {
+    // 更靠前的候选失败但最终成功：status=completed 携带历史 error_message 时
+    // 不能被误判成失败行，token 与"失败"角标都应保持正常展示
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'completed',
+      has_fallback: true,
+      error_message: 'first candidate failed',
+    })])
+
+    expect(root.querySelector('[data-usage-failed-no-usage="tokens"]')).toBeNull()
+    expect(root.textContent).toContain('100 / 50')
+    const failedBadges = [...root.querySelectorAll<HTMLElement>('span')]
+      .filter(element => element.textContent?.trim() === '失败')
+    expect(failedBadges.length).toBe(0)
+  })
+
+  it('surfaces the merged error message on the failed badge tooltip', () => {
+    const errorMessage = 'prompt is too long: 200000 tokens > 128000 token limit'
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'failed',
+      status_code: 400,
+      error_message: errorMessage,
+      input_tokens: 0,
+      output_tokens: 0,
+    })])
+
+    const badges = [...root.querySelectorAll<HTMLElement>('span')]
+      .filter(element => element.textContent?.trim() === '失败')
+    expect(badges.length).toBeGreaterThanOrEqual(2)
+    expect(badges.every(badge => badge.title === errorMessage)).toBe(true)
+    expect(badges.every(badge => badge.getAttribute('aria-label') === `失败：${errorMessage}`)).toBe(true)
+  })
+
+  it('truncates long error messages on the failed badge tooltip', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'failed',
+      status_code: 400,
+      error_message: 'x'.repeat(300),
+      input_tokens: 0,
+      output_tokens: 0,
+    })])
+
+    const badges = [...root.querySelectorAll<HTMLElement>('span')]
+      .filter(element => element.textContent?.trim() === '失败')
+    expect(badges.length).toBeGreaterThanOrEqual(2)
+    for (const badge of badges) {
+      expect(badge.title?.length).toBe(201)
+      expect(badge.title?.endsWith('…')).toBe(true)
+      expect(badge.getAttribute('aria-label')).toBe(`失败：${badge.title}`)
+    }
+  })
+
+  it('omits the failed badge tooltip when no error message is available', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'failed',
+      status_code: 500,
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      cost: 0,
+    })])
+
+    const badges = [...root.querySelectorAll<HTMLElement>('span')]
+      .filter(element => element.textContent?.trim() === '失败')
+    expect(badges.length).toBeGreaterThanOrEqual(2)
+    expect(badges.every(badge => !badge.hasAttribute('title'))).toBe(true)
+    expect(badges.every(badge => badge.getAttribute('aria-label') === '失败')).toBe(true)
+  })
+
   it('renders output TPS in the non-admin usage table', () => {
     const root = mountUsageRecordsTable([buildRecord()], { isAdmin: false })
 
