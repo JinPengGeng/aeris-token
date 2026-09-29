@@ -3414,6 +3414,96 @@ mod tests {
             Some(&json!("medium"))
         );
     }
+
+    fn unix_now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or_default()
+    }
+
+    /// 严格 OpenAI 客户端把 `created` 视为 `chat.completion.chunk` 必填字段。
+    /// 跨格式合成路径（gemini/claude → openai:chat）没有上游 `created` 可透传，
+    /// 每个合成 chunk 都必须补上当前 unix 秒（fork issue #569 / 上游 #738）。
+    #[test]
+    fn cross_format_chat_chunks_carry_created_unix_seconds() {
+        let before = unix_now_secs();
+        let mut output = Vec::new();
+
+        let gemini_context = report_context("gemini:generate_content", "openai:chat");
+        let mut gemini_matrix = StreamingStandardFormatMatrix::default();
+        output.extend(
+            gemini_matrix
+                .transform_line(
+                    &gemini_context,
+                    data_line(json!({
+                        "candidates": [{"content": {"parts": [{"text": "hello"}]}}]
+                    })),
+                )
+                .expect("gemini text chunk should convert"),
+        );
+        output.extend(
+            gemini_matrix
+                .finish(&gemini_context)
+                .expect("gemini finish should encode"),
+        );
+
+        let claude_context = report_context("claude:messages", "openai:chat");
+        let mut claude_matrix = StreamingStandardFormatMatrix::default();
+        for line in [
+            json!({
+                "type": "message_start",
+                "message": {"id": "msg_created_123", "model": "claude-sonnet-4-5"}
+            }),
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            }),
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "hello"}
+            }),
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"input_tokens": 1, "output_tokens": 2}
+            }),
+        ] {
+            output.extend(
+                claude_matrix
+                    .transform_line(&claude_context, data_line(line))
+                    .expect("claude chunk should convert"),
+            );
+        }
+        output.extend(
+            claude_matrix
+                .finish(&claude_context)
+                .expect("claude finish should encode"),
+        );
+
+        let after = unix_now_secs();
+
+        let events = json_data_events(&output);
+        assert!(
+            !events.is_empty(),
+            "cross-format stream should emit chat chunks"
+        );
+        for event in &events {
+            assert_eq!(
+                event["object"], "chat.completion.chunk",
+                "every synthesized event must be a chat.completion.chunk: {event}"
+            );
+            let created = event["created"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("chunk missing created: {event}"));
+            assert!(
+                (before..=after).contains(&created),
+                "created {created} must fall in [{before}, {after}]"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
