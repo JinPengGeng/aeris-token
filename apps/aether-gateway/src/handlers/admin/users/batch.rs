@@ -4,7 +4,9 @@ use super::{
     management_token_may_administer_user_accounts, normalize_admin_user_role,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
-use crate::handlers::admin::shared::attach_admin_audit_response;
+use crate::handlers::admin::shared::{
+    attach_admin_audit_response, attach_admin_audit_response_with_details,
+};
 use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
@@ -83,17 +85,29 @@ struct ResolvedAdminUserSelection {
     warnings: Vec<AdminUserSelectionWarning>,
 }
 
+#[derive(Debug, Clone)]
+struct AdminUserBatchWalletAdjustment {
+    amount_usd: f64,
+    balance_type: String,
+    description: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct AdminUserBatchMutation {
     role: Option<String>,
     is_active: Option<bool>,
     unlimited: Option<bool>,
+    wallet_adjustment: Option<AdminUserBatchWalletAdjustment>,
     modified_fields: Vec<&'static str>,
 }
 
 impl AdminUserBatchMutation {
     fn has_auth_user_fields(&self) -> bool {
         self.role.is_some() || self.is_active.is_some()
+    }
+
+    fn has_wallet_fields(&self) -> bool {
+        self.unlimited.is_some() || self.wallet_adjustment.is_some()
     }
 }
 
@@ -155,7 +169,7 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
             "当前为只读模式，无法批量更新用户",
         ));
     }
-    if mutation.unlimited.is_some() && !state.has_auth_wallet_write_capability() {
+    if mutation.has_wallet_fields() && !state.has_auth_wallet_write_capability() {
         return Ok(build_admin_users_read_only_response(
             "当前为只读模式，无法批量更新用户钱包",
         ));
@@ -184,6 +198,25 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
                 "user_id": item.user_id,
                 "reason": "用户不存在或已删除",
             }));
+            continue;
+        }
+
+        if let Some(adjustment) = mutation.wallet_adjustment.as_ref() {
+            if let Some(reason) = apply_batch_user_wallet_balance_adjustment(
+                state,
+                request_context,
+                &item.user_id,
+                adjustment,
+            )
+            .await?
+            {
+                failures.push(json!({
+                    "user_id": item.user_id,
+                    "reason": reason,
+                }));
+                continue;
+            }
+            success += 1;
             continue;
         }
 
@@ -251,6 +284,22 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
         "modified_fields": mutation.modified_fields,
     }))
     .into_response();
+
+    if let Some(adjustment) = mutation.wallet_adjustment.as_ref() {
+        return Ok(attach_admin_audit_response_with_details(
+            response,
+            "admin_users_batch_action_executed",
+            "batch_adjust_wallet_balance",
+            "user_batch",
+            "users",
+            json!({
+                "amount_usd": crate::money_fixed::format_money(adjustment.amount_usd),
+                "balance_type": adjustment.balance_type,
+                "success": success,
+                "failed": failed,
+            }),
+        ));
+    }
 
     Ok(attach_admin_audit_response(
         response,
@@ -604,8 +653,64 @@ fn parse_batch_mutation(
         }),
         "update_access_control" => parse_access_control_mutation(payload),
         "update_role" => parse_role_mutation(payload),
+        "adjust_wallet_balance" => parse_wallet_balance_adjustment_mutation(payload),
         _ => Err("不支持的批量操作".to_string()),
     }
+}
+
+fn parse_wallet_balance_adjustment_mutation(
+    payload: Option<Value>,
+) -> Result<AdminUserBatchMutation, String> {
+    let Some(Value::Object(payload)) = payload else {
+        return Err("payload 必须是对象".to_string());
+    };
+    let Some(amount_value) = payload.get("amount_usd") else {
+        return Err("amount_usd 参数不能为空".to_string());
+    };
+    // Keep the money parsing contract identical to the single-wallet adjust
+    // endpoint: fixed-point (at most 8 decimals), non-zero, no silent rounding.
+    let amount_units = crate::money_fixed::money_units_from_json(amount_value)
+        .map_err(|_| "amount_usd 必须为定点金额（至多 8 位小数）".to_string())?;
+    if amount_units == 0 {
+        return Err("amount_usd 不能为 0".to_string());
+    }
+    let amount_usd = crate::money_fixed::units_to_money(amount_units);
+    let balance_type = match payload.get("balance_type") {
+        None | Some(Value::Null) => "recharge".to_string(),
+        Some(value) => {
+            let Some(balance_type) = value.as_str() else {
+                return Err("balance_type 必须为 recharge 或 gift".to_string());
+            };
+            match balance_type.trim().to_ascii_lowercase().as_str() {
+                "recharge" => "recharge".to_string(),
+                "gift" => "gift".to_string(),
+                _ => return Err("balance_type 必须为 recharge 或 gift".to_string()),
+            }
+        }
+    };
+    let description = match payload.get("description") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let Some(description) = value.as_str() else {
+                return Err("description 必须是字符串".to_string());
+            };
+            let trimmed = description.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.chars().take(500).collect::<String>())
+            }
+        }
+    };
+    Ok(AdminUserBatchMutation {
+        wallet_adjustment: Some(AdminUserBatchWalletAdjustment {
+            amount_usd,
+            balance_type,
+            description,
+        }),
+        modified_fields: vec!["balance"],
+        ..AdminUserBatchMutation::default()
+    })
 }
 
 fn parse_role_mutation(payload: Option<Value>) -> Result<AdminUserBatchMutation, String> {
@@ -721,6 +826,86 @@ async fn apply_batch_user_wallet_limit_mode(
             .initialize_auth_user_wallet(user_id, 0.0, unlimited)
             .await?
             .is_some()),
+    }
+}
+
+/// Adjust one selected user's primary wallet balance through the existing
+/// admin ledger mutation path (same one used by the single-wallet adjust
+/// endpoint).
+///
+/// Returns `Ok(None)` when the user's wallet was adjusted and
+/// `Ok(Some(reason))` when this single user fails; a per-user failure (for
+/// example a missing wallet) never aborts the remaining batch. Negative
+/// resulting balances are intentionally permitted (fork issue #208): the
+/// ledger records the excess as recharge debt, mirroring the single-wallet
+/// adjust semantics — this batch action deliberately does not clamp to zero.
+async fn apply_batch_user_wallet_balance_adjustment(
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
+    user_id: &str,
+    adjustment: &AdminUserBatchWalletAdjustment,
+) -> Result<Option<String>, GatewayError> {
+    const USER_WALLET_UNAVAILABLE: &str = "用户钱包不可用";
+    let Some(wallet) = state
+        .find_wallet(aether_data::repository::wallet::WalletLookupKey::UserId(
+            user_id,
+        ))
+        .await?
+    else {
+        return Ok(Some(USER_WALLET_UNAVAILABLE.to_string()));
+    };
+    if wallet.api_key_id.is_some() && adjustment.balance_type.eq_ignore_ascii_case("gift") {
+        return Ok(Some("独立密钥钱包不支持赠款调账".to_string()));
+    }
+    let operator_id = request_context
+        .decision()
+        .and_then(|decision| decision.admin_principal.as_ref())
+        .map(|principal| principal.user_id.clone());
+    let audit = request_context.decision().and_then(|decision| {
+        crate::audit::build_admin_wallet_balance_audit(
+            decision,
+            &wallet.id,
+            false,
+            request_context.public().client_ip.as_deref(),
+        )
+    });
+    use aether_data::repository::wallet::WalletMutationOutcome;
+    let durable = match audit.as_ref() {
+        Some(audit) => {
+            state
+                .app()
+                .admin_adjust_wallet_balance_with_audit(
+                    &wallet.id,
+                    adjustment.amount_usd,
+                    &adjustment.balance_type,
+                    operator_id.as_deref(),
+                    adjustment.description.as_deref(),
+                    audit,
+                )
+                .await?
+        }
+        None => None,
+    };
+    let result = match durable {
+        Some(WalletMutationOutcome::Applied(result)) => Some(result),
+        Some(WalletMutationOutcome::NotFound) => None,
+        Some(WalletMutationOutcome::Invalid(detail)) => return Ok(Some(detail)),
+        None => {
+            state
+                .admin_adjust_wallet_balance(
+                    &wallet.id,
+                    adjustment.amount_usd,
+                    &adjustment.balance_type,
+                    operator_id.as_deref(),
+                    adjustment.description.as_deref(),
+                )
+                .await?
+        }
+    };
+    if result.is_some() {
+        Ok(None)
+    } else {
+        Ok(Some(USER_WALLET_UNAVAILABLE.to_string()))
     }
 }
 

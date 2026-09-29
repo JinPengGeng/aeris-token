@@ -1,4 +1,4 @@
-use crate::audit::attach_admin_audit_event;
+use crate::audit::{attach_admin_audit_event, attach_admin_audit_event_with_details};
 use crate::control::GatewayPublicRequestContext;
 use axum::{
     body::Body,
@@ -48,6 +48,25 @@ pub(crate) fn attach_admin_audit_response(
     target_id: &str,
 ) -> Response<Body> {
     attach_admin_audit_event(&mut response, event_name, action, target_type, target_id);
+    response
+}
+
+pub(crate) fn attach_admin_audit_response_with_details(
+    mut response: Response<Body>,
+    event_name: &'static str,
+    action: &'static str,
+    target_type: &'static str,
+    target_id: &str,
+    details: serde_json::Value,
+) -> Response<Body> {
+    attach_admin_audit_event_with_details(
+        &mut response,
+        event_name,
+        action,
+        target_type,
+        target_id,
+        Some(details),
+    );
     response
 }
 
