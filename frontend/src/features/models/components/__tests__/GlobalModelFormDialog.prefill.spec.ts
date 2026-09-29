@@ -126,6 +126,69 @@ const unsupportedPreset: ModelsDevModelItem = {
   pricingUnsupportedFields: ['reasoning'],
 }
 
+// 复制来源模型：人工设置的标准价格（第二档无缓存价格）+ 在线价格来源标记
+const copySourceModel: GlobalModelResponse = {
+  id: 'source-model',
+  name: 'codex',
+  display_name: 'Codex',
+  is_active: true,
+  default_price_per_request: 0.02,
+  default_tiered_pricing: {
+    tiers: [
+      {
+        up_to: 99_999,
+        input_price_per_1m: 1.25,
+        output_price_per_1m: 5,
+        cache_creation_price_per_1m: 1.25,
+        cache_read_price_per_1m: 0.1,
+      },
+      {
+        up_to: null,
+        input_price_per_1m: 2.5,
+        output_price_per_1m: 10,
+      },
+    ],
+  },
+  supported_capabilities: ['image_generation'],
+  config: {
+    streaming: true,
+    context_limit: 272_000,
+    description: 'source description',
+    models_dev_pricing_source: {
+      provider_id: 'openai',
+      provider_name: 'OpenAI',
+    },
+  },
+  created_at: '2026-09-01T00:00:00Z',
+}
+
+function mountDialog(copyFrom: GlobalModelResponse | null = null) {
+  const root = document.createElement('div')
+  document.body.appendChild(root)
+  const open = ref(false)
+  const editingModel = ref<GlobalModelResponse | null>(null)
+  const editModel = vi.fn((model: GlobalModelResponse) => {
+    editingModel.value = model
+  })
+  const pricingSynced = vi.fn()
+  const app = createApp(defineComponent({
+    setup() {
+      return () => h(GlobalModelFormDialog, {
+        open: open.value,
+        model: editingModel.value,
+        copyFrom,
+        onEditModel: editModel,
+        onPricingSynced: pricingSynced,
+        'onUpdate:open': (value: boolean) => { open.value = value },
+      })
+    },
+  }))
+  app.mount(root)
+  mountedApps.push({ app, root })
+  open.value = true
+  return { root, open, editingModel, editModel, pricingSynced }
+}
+
 function buildExistingStaleModel(): GlobalModelResponse {
   return {
     id: 'global-stale-model',
@@ -142,32 +205,6 @@ function buildExistingStaleModel(): GlobalModelResponse {
     config: { streaming: true },
     created_at: '2026-07-23T00:00:00Z',
   }
-}
-
-function mountDialog() {
-  const root = document.createElement('div')
-  document.body.appendChild(root)
-  const open = ref(false)
-  const editingModel = ref<GlobalModelResponse | null>(null)
-  const editModel = vi.fn((model: GlobalModelResponse) => {
-    editingModel.value = model
-  })
-  const pricingSynced = vi.fn()
-  const app = createApp(defineComponent({
-    setup() {
-      return () => h(GlobalModelFormDialog, {
-        open: open.value,
-        model: editingModel.value,
-        onEditModel: editModel,
-        onPricingSynced: pricingSynced,
-        'onUpdate:open': (value: boolean) => { open.value = value },
-      })
-    },
-  }))
-  app.mount(root)
-  mountedApps.push({ app, root })
-  open.value = true
-  return { root, open, editingModel, editModel, pricingSynced }
 }
 
 async function settle() {
@@ -773,5 +810,88 @@ describe('GlobalModelFormDialog preset replacement', () => {
 
     expect(document.body.querySelector('[data-testid="online-pricing-source-openai"]')).toBeNull()
     expect(globalModelMocks.updateGlobalModel).not.toHaveBeenCalled()
+  })
+})
+
+describe('GlobalModelFormDialog copy prefill (fork issue #570)', () => {
+  it('prefills pricing and config from copyFrom while leaving name/display_name empty', async () => {
+    mountDialog(copySourceModel)
+    await settle()
+
+    // 新建模式标题，而非编辑模式
+    expect(document.body.textContent).toContain('创建统一模型')
+    expect(document.body.textContent).not.toContain('编辑模型')
+    // 预设面板折叠，展示已预填的表单
+    expect([...document.body.querySelectorAll('button')]
+      .some(button => button.textContent?.trim() === '手动填写')).toBe(false)
+    // name/display_name 为空时提交按钮保持禁用
+    expect(findExactButton('添加').disabled).toBe(true)
+
+    // name/display_name 置空待改（模型 ID 必须唯一）
+    expect(document.body.querySelector<HTMLInputElement>('#model-name')?.value).toBe('')
+    expect(document.body.querySelector<HTMLInputElement>('#model-display-name')?.value).toBe('')
+    // config 全量复制
+    expect(document.body.querySelector<HTMLInputElement>('#model-description')?.value)
+      .toBe('source description')
+    // 阶梯价全量复制（含人工设置的标准价格）
+    expect(
+      [...document.body.querySelectorAll<HTMLInputElement>('[data-testid="tier-input-price"]')]
+        .map(input => input.value),
+    ).toEqual(['1.25', '2.5'])
+
+    // 按次计费复制
+    findBillingTab('request').click()
+    await nextTick()
+    expect(document.body.querySelector<HTMLInputElement>('input[placeholder="如 0.01"]')?.value)
+      .toBe('0.02')
+  })
+
+  it('submits the copied draft through the create API without the source pricing-source marker', async () => {
+    mountDialog(copySourceModel)
+    await settle()
+
+    await setInput(
+      document.body.querySelector<HTMLInputElement>('#model-name'),
+      'codex-auto-review',
+    )
+    await setInput(
+      document.body.querySelector<HTMLInputElement>('#model-display-name'),
+      'Codex Auto Review',
+    )
+
+    findExactButton('添加').click()
+    await settle()
+
+    expect(globalModelMocks.createGlobalModel).toHaveBeenCalledOnce()
+    expect(globalModelMocks.updateGlobalModel).not.toHaveBeenCalled()
+    const payload = globalModelMocks.createGlobalModel.mock.calls[0][0]
+    expect(payload).toMatchObject({
+      name: 'codex-auto-review',
+      display_name: 'Codex Auto Review',
+      default_price_per_request: 0.02,
+      supported_capabilities: ['image_generation'],
+      config: {
+        streaming: true,
+        context_limit: 272_000,
+        description: 'source description',
+      },
+    })
+    // 源模型的在线价格来源标记不随复制继承
+    expect(payload.config).not.toHaveProperty('models_dev_pricing_source')
+    // 源模型未设置缓存价格的档位不注入默认缓存价格（精确还原源定价）
+    expect(payload.default_tiered_pricing.tiers).toEqual([
+      {
+        up_to: 99_999,
+        input_price_per_1m: 1.25,
+        output_price_per_1m: 5,
+        cache_creation_price_per_1m: 1.25,
+        cache_read_price_per_1m: 0.1,
+      },
+      {
+        up_to: null,
+        input_price_per_1m: 2.5,
+        output_price_per_1m: 10,
+      },
+    ])
   })
 })
