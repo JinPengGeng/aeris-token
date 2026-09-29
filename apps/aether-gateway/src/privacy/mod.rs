@@ -2983,6 +2983,16 @@ fn ensure_identity_response_encoding(
         if encoding.trim().is_empty() || encoding.trim().eq_ignore_ascii_case("identity") {
             continue;
         }
+        // Fail-closed diagnostics: the request still errors below, but the
+        // "placeholders were not restored" symptom needs a searchable event
+        // that names the offending content-encoding value.
+        tracing::warn!(
+            event_name = "pii_restore_skipped",
+            log_type = "ops",
+            reason = "unsupported_response_content_encoding",
+            content_encoding = %encoding.trim(),
+            "gateway skipped pii placeholder restoration because the response body is content-encoded"
+        );
         return Err(GatewayError::Internal(
             "redaction response restoration does not support encoded response bodies".to_string(),
         ));
@@ -4687,11 +4697,68 @@ mod tests {
         SentinelMatcher, StreamingResponseRestorer,
     };
     use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use aether_runtime_state::{RedisClientConfig, RuntimeState};
     use aether_test_support::ManagedRedisServer;
     use serde_json::{json, Value};
+    use tracing_subscriber::prelude::*;
+
+    /// Captures JSON log lines emitted through a thread-local tracing
+    /// dispatcher so tests can assert on dedicated diagnostic events.
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    struct SharedLogBufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedLogBuffer {
+        fn lines(&self) -> Vec<serde_json::Value> {
+            String::from_utf8(self.0.lock().expect("buffer should lock").clone())
+                .expect("buffer should contain valid utf-8")
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).expect("json log line should parse"))
+                .collect()
+        }
+    }
+
+    impl std::io::Write for SharedLogBufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("buffer should lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogBufferWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogBufferWriter(Arc::clone(&self.0))
+        }
+    }
+
+    fn capture_warn_logs() -> (SharedLogBuffer, tracing::subscriber::DefaultGuard) {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .flatten_event(true)
+                .with_current_span(false)
+                .with_span_list(false)
+                .with_writer(buffer.clone())
+                .with_filter(tracing_subscriber::filter::LevelFilter::WARN),
+        );
+        let guard = tracing::dispatcher::set_default(&tracing::Dispatch::new(subscriber));
+        (buffer, guard)
+    }
 
     fn assert_debug_surface_hides_values(debug: &str, originals: &[&str], sentinels: &[String]) {
         for original in originals {
@@ -6100,6 +6167,8 @@ mod tests {
             ("content-length".to_string(), body.len().to_string()),
         ]);
 
+        let (log_buffer, _log_guard) = capture_warn_logs();
+
         let err = restore_sync_response_body(&mut headers, &body, &session)
             .expect_err("compressed response should fail safely");
 
@@ -6129,6 +6198,19 @@ mod tests {
         assert!(stream_message.contains("encoded response bodies"));
         assert!(!stream_message.contains("alice@example.com"));
         assert!(!stream_message.contains(sentinel));
+
+        let events = log_buffer.lines();
+        assert_eq!(
+            events.len(),
+            2,
+            "sync and stream restore paths should each emit one pii_restore_skipped event: {events:?}"
+        );
+        for event in &events {
+            assert_eq!(event["event_name"], "pii_restore_skipped");
+            assert_eq!(event["reason"], "unsupported_response_content_encoding");
+            assert_eq!(event["content_encoding"], "gzip");
+            assert_eq!(event["level"], "WARN");
+        }
     }
 
     #[test]
