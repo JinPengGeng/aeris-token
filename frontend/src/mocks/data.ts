@@ -1254,6 +1254,36 @@ export const MOCK_MODULE_STATUSES: Record<string, ModuleStatus> = Object.fromEnt
   ])
 ) as Record<string, ModuleStatus>
 
+// ========== 内置导航项可见性（issue #573） ==========
+
+// 演示模式镜像后端 ADMIN_NAVIGATION_ITEM_DEFINITIONS 的可隐藏内置导航项
+// （与 frontend/src/layouts/main-layout/navigation.ts 的 BUILTIN_ADMIN_NAV_ITEM_KEYS 同步维护）
+export const MOCK_NAVIGATION_ITEM_DEFINITIONS: Array<{
+  key: string
+  href: string
+  menu_group: 'overview' | 'management' | 'system'
+  display_name: string
+}> = [
+  { key: 'operations', href: '/admin/operations', menu_group: 'overview', display_name: '运维总览' },
+  { key: 'healthMonitor', href: '/admin/health-monitor', menu_group: 'overview', display_name: '健康监控' },
+  { key: 'userStats', href: '/admin/user-stats', menu_group: 'overview', display_name: '用户统计' },
+  { key: 'costAnalysis', href: '/admin/cost-analysis', menu_group: 'overview', display_name: '成本分析' },
+  { key: 'marginReport', href: '/admin/margin-report', menu_group: 'overview', display_name: '毛利报表' },
+  { key: 'performanceAnalysis', href: '/admin/performance-analysis', menu_group: 'overview', display_name: '性能分析' },
+  { key: 'userManagement', href: '/admin/users', menu_group: 'management', display_name: '用户管理' },
+  { key: 'providers', href: '/admin/providers', menu_group: 'management', display_name: '提供商' },
+  { key: 'modelManagement', href: '/admin/models', menu_group: 'management', display_name: '模型管理' },
+  { key: 'routing', href: '/admin/routing', menu_group: 'management', display_name: '调度策略' },
+  { key: 'pool', href: '/admin/pool', menu_group: 'management', display_name: '号池管理' },
+  { key: 'standaloneKeys', href: '/admin/keys', menu_group: 'management', display_name: '独立密钥' },
+  { key: 'walletManagement', href: '/admin/wallets', menu_group: 'management', display_name: '钱包管理' },
+  { key: 'billingManagement', href: '/admin/billing-plans', menu_group: 'management', display_name: '套餐管理' },
+  { key: 'asyncTasks', href: '/admin/async-tasks', menu_group: 'management', display_name: '异步任务' },
+  { key: 'usageRecords', href: '/admin/usage', menu_group: 'management', display_name: '使用记录' },
+  { key: 'announcements', href: '/admin/announcements', menu_group: 'system', display_name: '公告管理' },
+  { key: 'cacheMonitoring', href: '/admin/cache-monitoring', menu_group: 'system', display_name: '缓存监控' },
+]
+
 // ========== API 格式 ==========
 
 export const MOCK_API_FORMATS = {

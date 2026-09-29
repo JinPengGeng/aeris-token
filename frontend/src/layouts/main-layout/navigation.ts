@@ -67,14 +67,66 @@ function activeModuleItems(modules: ModuleRecord, group: string): NavItem[] {
     }))
 }
 
+/**
+ * 内置管理导航项的 href -> key 镜像表。
+ *
+ * **与后端同步维护**：key 必须与
+ * `apps/aether-gateway/src/handlers/admin/system/shared/navigation.rs` 中
+ * `ADMIN_NAVIGATION_ITEM_DEFINITIONS` 保持一致；后端 GET
+ * /api/admin/navigation/preferences 返回的 items 即来自该清单。
+ * 修改任一侧时需同步另一侧。
+ *
+ * 不在此表内的条目（dashboard / moduleManagement / systemSettings、
+ * activeModuleItems 生成的扩展模块项）永远不受隐藏配置影响。
+ */
+export const BUILTIN_ADMIN_NAV_ITEM_KEYS: Record<string, string> = {
+  '/admin/operations': 'operations',
+  '/admin/health-monitor': 'healthMonitor',
+  '/admin/user-stats': 'userStats',
+  '/admin/cost-analysis': 'costAnalysis',
+  '/admin/margin-report': 'marginReport',
+  '/admin/performance-analysis': 'performanceAnalysis',
+  '/admin/users': 'userManagement',
+  '/admin/providers': 'providers',
+  '/admin/models': 'modelManagement',
+  '/admin/routing': 'routing',
+  '/admin/pool': 'pool',
+  '/admin/keys': 'standaloneKeys',
+  '/admin/wallets': 'walletManagement',
+  '/admin/billing-plans': 'billingManagement',
+  '/admin/async-tasks': 'asyncTasks',
+  '/admin/usage': 'usageRecords',
+  '/admin/announcements': 'announcements',
+  '/admin/cache-monitoring': 'cacheMonitoring',
+}
+
+/**
+ * 判断内置管理导航项是否被管理员隐藏（issue #573）。
+ *
+ * 隐藏仅作用于菜单与面包屑展示：路由注册、权限与深链接访问不受影响。
+ * 未提供谓词时默认全部显示（默认行为零改变）。
+ */
+export function isItemHidden(hiddenItems: ReadonlyArray<string>, key: string): boolean {
+  return hiddenItems.includes(key)
+}
+
+function filterHiddenItems(items: NavItem[], isHidden: (key: string) => boolean): NavItem[] {
+  return items.filter(item => {
+    const key = BUILTIN_ADMIN_NAV_ITEM_KEYS[item.href]
+    return key === undefined || !isHidden(key)
+  })
+}
+
 export function buildNavigation(options: {
   canAccessAdmin: boolean
   modules: ModuleRecord
   isModuleActive: (name: string) => boolean
+  isItemHidden?: (key: string) => boolean
   t?: Translate
 }): NavigationGroup[] {
   const { canAccessAdmin, modules, isModuleActive } = options
   const t = options.t ?? ((key: MessageKey) => key)
+  const isHidden = options.isItemHidden ?? (() => false)
 
   if (!canAccessAdmin) {
     return [
@@ -116,7 +168,7 @@ export function buildNavigation(options: {
   return [
     {
       title: t('nav.group.overview'),
-      items: [
+      items: filterHiddenItems([
         { name: t('nav.dashboard'), href: '/admin/dashboard', icon: Home },
         { name: t('nav.operations'), href: '/admin/operations', icon: Activity },
         { name: t('nav.healthMonitor'), href: '/admin/health-monitor', icon: Activity },
@@ -125,11 +177,11 @@ export function buildNavigation(options: {
         { name: t('nav.marginReport'), href: '/admin/margin-report', icon: Gauge },
         { name: t('nav.performanceAnalysis'), href: '/admin/performance-analysis', icon: Activity },
         ...activeModuleItems(modules, 'overview'),
-      ]
+      ], isHidden)
     },
     {
       title: t('nav.group.management'),
-      items: [
+      items: filterHiddenItems([
         { name: t('nav.userManagement'), href: '/admin/users', icon: Users },
         { name: t('nav.providers'), href: '/admin/providers', icon: FolderTree },
         { name: t('nav.modelManagement'), href: '/admin/models', icon: Layers },
@@ -141,11 +193,11 @@ export function buildNavigation(options: {
         ...activeModuleItems(modules, 'management'),
         { name: t('nav.asyncTasks'), href: '/admin/async-tasks', icon: Zap },
         { name: t('nav.usageRecords'), href: '/admin/usage', icon: BarChart3 },
-      ]
+      ], isHidden)
     },
     {
       title: t('nav.group.system'),
-      items: systemItems
+      items: filterHiddenItems(systemItems, isHidden)
     }
   ]
 }

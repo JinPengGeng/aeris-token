@@ -81,6 +81,50 @@ fn classifies_admin_modules_set_enabled_as_admin_proxy_route() {
 }
 
 #[test]
+fn classifies_admin_navigation_preferences_get_as_system_manage_route() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/navigation/preferences"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::GET, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(decision.route_family.as_deref(), Some("system_manage"));
+    assert_eq!(
+        decision.route_kind.as_deref(),
+        Some("navigation_preferences_get")
+    );
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("admin:system")
+    );
+    assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
+fn classifies_admin_navigation_preferences_put_as_system_manage_route() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/navigation/preferences/"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::PUT, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(decision.route_family.as_deref(), Some("system_manage"));
+    assert_eq!(
+        decision.route_kind.as_deref(),
+        Some("navigation_preferences_set")
+    );
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("admin:system")
+    );
+    assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
 fn classifies_admin_system_version_as_admin_proxy_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/admin/system/version"

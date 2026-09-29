@@ -553,6 +553,51 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         ));
     }
 
+    if decision.route_kind.as_deref() == Some("navigation_preferences_get")
+        && request_method == http::Method::GET
+        && matches!(
+            request_path,
+            "/api/admin/navigation/preferences" | "/api/admin/navigation/preferences/"
+        )
+    {
+        return Ok(Some(
+            Json(state.build_admin_navigation_preferences_payload().await?).into_response(),
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("navigation_preferences_set")
+        && request_method == http::Method::PUT
+        && matches!(
+            request_path,
+            "/api/admin/navigation/preferences" | "/api/admin/navigation/preferences/"
+        )
+    {
+        let Some(request_body) = request_body else {
+            return Ok(Some(
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": "请求数据验证失败" })),
+                )
+                    .into_response(),
+            ));
+        };
+        return Ok(Some(
+            match state
+                .apply_admin_navigation_preferences_update(request_body)
+                .await?
+            {
+                Ok(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_navigation_preferences_updated",
+                    "update_navigation_preferences",
+                    "system_config",
+                    "admin.nav.hidden_items",
+                ),
+                Err((status, payload)) => (status, Json(payload)).into_response(),
+            },
+        ));
+    }
+
     if decision.route_kind.as_deref() == Some("configs_list")
         && request_method == http::Method::GET
         && is_admin_system_configs_root(request_path)

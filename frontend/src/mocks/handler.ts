@@ -24,8 +24,12 @@ import {
   MOCK_GLOBAL_MODELS,
   MOCK_SYSTEM_CONFIGS,
   MOCK_MODULE_STATUSES,
+  MOCK_NAVIGATION_ITEM_DEFINITIONS,
   MOCK_API_FORMATS
 } from './data'
+
+// 内置管理导航项隐藏清单（演示模式内存态，issue #573）
+let mockNavigationHiddenItems: string[] = []
 
 // 当前登录用户的 token（用于判断角色）
 let currentUserToken: string | null = null
@@ -2190,6 +2194,48 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     await delay()
     requireAdmin()
     return createMockResponse(MOCK_MODULE_STATUSES)
+  },
+
+  // ========== Admin: Navigation preferences ==========
+  // 内置管理导航项可见性（issue #573）。演示模式镜像后端
+  // ADMIN_NAVIGATION_ITEM_DEFINITIONS；隐藏状态保存在 mock 服务内存中。
+  'GET /api/admin/navigation/preferences': async () => {
+    await delay()
+    requireAdmin()
+    return createMockResponse({
+      hidden_items: [...mockNavigationHiddenItems],
+      items: MOCK_NAVIGATION_ITEM_DEFINITIONS,
+    })
+  },
+
+  'PUT /api/admin/navigation/preferences': async (config) => {
+    await delay()
+    requireAdmin()
+    const body = (config.data ? JSON.parse(config.data as string) : {}) as {
+      hidden_items?: unknown
+    }
+    if (!Array.isArray(body.hidden_items)) {
+      return createMockResponse({ detail: 'hidden_items 必须为字符串数组' }, 400)
+    }
+    const knownKeys = new Set(MOCK_NAVIGATION_ITEM_DEFINITIONS.map(item => item.key))
+    const normalized: string[] = []
+    for (const entry of body.hidden_items) {
+      if (typeof entry !== 'string') {
+        return createMockResponse({ detail: 'hidden_items 必须为字符串数组' }, 400)
+      }
+      const key = entry.trim()
+      if (!knownKeys.has(key)) {
+        return createMockResponse({ detail: `未知的导航项 key: ${key}` }, 400)
+      }
+      if (!normalized.includes(key)) {
+        normalized.push(key)
+      }
+    }
+    mockNavigationHiddenItems = normalized
+    return createMockResponse({
+      hidden_items: [...mockNavigationHiddenItems],
+      items: MOCK_NAVIGATION_ITEM_DEFINITIONS,
+    })
   },
 
   // ========== Admin: System ==========
