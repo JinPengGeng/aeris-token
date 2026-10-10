@@ -355,11 +355,16 @@ fn converts_claude_chat_response_to_openai_chat_response() {
     )
     .expect("result should exist");
 
+    let created = result["created"]
+        .as_i64()
+        .expect("created should be a unix timestamp");
+
     assert_eq!(
         result,
         json!({
             "id": "msg_123",
             "object": "chat.completion",
+            "created": created,
             "model": "claude-sonnet-4-upstream",
             "choices": [{
                 "index": 0,
@@ -409,11 +414,16 @@ fn converts_claude_chat_tool_use_to_openai_chat_tool_calls() {
     )
     .expect("result should exist");
 
+    let created = result["created"]
+        .as_i64()
+        .expect("created should be a unix timestamp");
+
     assert_eq!(
         result,
         json!({
             "id": "msg_tool_123",
             "object": "chat.completion",
+            "created": created,
             "model": "claude-sonnet-4-upstream",
             "choices": [{
                 "index": 0,
@@ -501,11 +511,16 @@ fn converts_gemini_chat_response_to_openai_chat_response() {
     )
     .expect("result should exist");
 
+    let created = result["created"]
+        .as_i64()
+        .expect("created should be a unix timestamp");
+
     assert_eq!(
         result,
         json!({
             "id": "resp_123",
             "object": "chat.completion",
+            "created": created,
             "model": "gemini-2.5-pro-upstream",
             "choices": [{
                 "index": 0,
@@ -555,11 +570,16 @@ fn converts_gemini_chat_function_call_to_openai_chat_tool_calls() {
     )
     .expect("result should exist");
 
+    let created = result["created"]
+        .as_i64()
+        .expect("created should be a unix timestamp");
+
     assert_eq!(
         result,
         json!({
             "id": "resp_tool_123",
             "object": "chat.completion",
+            "created": created,
             "model": "gemini-2.5-pro-upstream",
             "choices": [{
                 "index": 0,
