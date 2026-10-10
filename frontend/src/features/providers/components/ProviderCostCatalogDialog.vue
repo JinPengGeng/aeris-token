@@ -152,7 +152,7 @@
             v-model="editing.tieredPricing"
             rows="8"
             class="font-mono text-xs"
-            placeholder='{"tiers":[{"input_price_per_1m":0.5,"output_price_per_1m":1.5}]}'
+            placeholder="{&quot;tiers&quot;:[{&quot;input_price_per_1m&quot;:0.5,&quot;output_price_per_1m&quot;:1.5}]}"
           />
         </div>
         <p

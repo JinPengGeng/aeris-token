@@ -35,7 +35,10 @@ use super::super::selection::{
     collect_selectable_candidates_with_skip_reasons as collect_selectable_candidates_with_skip_reasons_impl,
     is_exact_all_skipped_by_auth_limit, select_minimal_candidate as select_candidate_impl,
 };
-use super::support::{sample_auth_snapshot, sample_key, sample_provider, sample_row};
+use super::support::{
+    sample_auth_snapshot, sample_key, sample_provider, sample_row,
+    sample_row_without_model_mappings,
+};
 
 async fn state_with_routing_default_policy(
     data_state: GatewayDataState,
@@ -373,7 +376,7 @@ async fn selects_by_provider_priority_when_priority_mode_is_provider() {
 }
 
 #[tokio::test]
-async fn selects_by_global_key_priority_when_priority_mode_is_global_key() {
+async fn legacy_global_key_routing_default_selects_by_provider_priority() {
     let mut provider_first = sample_row();
     provider_first.provider_id = "provider-a".to_string();
     provider_first.provider_name = "provider-a".to_string();
@@ -405,6 +408,13 @@ async fn selects_by_global_key_priority_when_priority_mode_is_global_key() {
     )
     .await;
 
+    // Legacy configuration stays readable, but the routing-to-scheduler
+    // boundary normalizes it to the supported provider ordering mode.
+    assert_eq!(
+        ordering_config(&state).await.priority_mode,
+        aether_scheduler_core::SchedulerPriorityMode::Provider
+    );
+
     let selected = select_candidate(
         state.data.as_ref(),
         &state,
@@ -418,8 +428,8 @@ async fn selects_by_global_key_priority_when_priority_mode_is_global_key() {
     .expect("selection should succeed")
     .expect("candidate should exist");
 
-    assert_eq!(selected.provider_id, "provider-b");
-    assert_eq!(selected.key_id, "key-b");
+    assert_eq!(selected.provider_id, "provider-a");
+    assert_eq!(selected.key_id, "key-a");
 }
 
 #[tokio::test]
@@ -2448,7 +2458,7 @@ async fn keeps_codex_candidate_selectable_when_oauth_token_is_expired() {
 
 #[tokio::test]
 async fn keeps_refreshable_kiro_candidate_selectable_with_runtime_oauth_invalid_marker() {
-    let mut row = sample_row();
+    let mut row = sample_row_without_model_mappings();
     row.provider_id = "provider-kiro".to_string();
     row.provider_name = "kiro".to_string();
     row.provider_type = "kiro".to_string();
@@ -2509,7 +2519,7 @@ async fn keeps_refreshable_kiro_candidate_selectable_with_runtime_oauth_invalid_
 
 #[tokio::test]
 async fn keeps_refreshable_kiro_candidate_selectable_when_oauth_token_expired() {
-    let mut row = sample_row();
+    let mut row = sample_row_without_model_mappings();
     row.provider_id = "provider-kiro".to_string();
     row.provider_name = "kiro".to_string();
     row.provider_type = "kiro".to_string();
@@ -2569,7 +2579,7 @@ async fn keeps_refreshable_kiro_candidate_selectable_when_oauth_token_expired() 
 
 #[tokio::test]
 async fn keeps_kiro_candidate_selectable_after_refresh_token_failure_until_access_token_expiry() {
-    let mut row = sample_row();
+    let mut row = sample_row_without_model_mappings();
     row.provider_id = "provider-kiro".to_string();
     row.provider_name = "kiro".to_string();
     row.provider_type = "kiro".to_string();
@@ -2634,7 +2644,7 @@ async fn keeps_kiro_candidate_selectable_after_refresh_token_failure_until_acces
 
 #[tokio::test]
 async fn skips_kiro_candidate_after_refresh_token_failure_and_access_token_expiry() {
-    let mut row = sample_row();
+    let mut row = sample_row_without_model_mappings();
     row.provider_id = "provider-kiro".to_string();
     row.provider_name = "kiro".to_string();
     row.provider_type = "kiro".to_string();
@@ -2700,7 +2710,7 @@ async fn skips_kiro_candidate_after_refresh_token_failure_and_access_token_expir
 
 #[tokio::test]
 async fn skips_refreshable_kiro_candidate_when_oauth_marker_is_account_block() {
-    let mut row = sample_row();
+    let mut row = sample_row_without_model_mappings();
     row.provider_id = "provider-kiro".to_string();
     row.provider_name = "kiro".to_string();
     row.provider_type = "kiro".to_string();
@@ -2843,7 +2853,7 @@ async fn keeps_codex_candidate_selectable_when_exhausted_account_flag_is_disable
 
 #[tokio::test]
 async fn skips_kiro_candidate_when_account_quota_is_exhausted_and_pool_flag_enabled() {
-    let mut first = sample_row();
+    let mut first = sample_row_without_model_mappings();
     first.provider_id = "provider-kiro".to_string();
     first.provider_name = "kiro".to_string();
     first.provider_type = "kiro".to_string();
@@ -2855,7 +2865,7 @@ async fn skips_kiro_candidate_when_account_quota_is_exhausted_and_pool_flag_enab
     first.key_api_formats = Some(vec!["claude:messages".to_string()]);
     first.key_global_priority_by_format = Some(serde_json::json!({"claude:messages": 1}));
 
-    let mut second = sample_row();
+    let mut second = sample_row_without_model_mappings();
     second.provider_id = "provider-openai".to_string();
     second.provider_name = "openai".to_string();
     second.endpoint_id = "endpoint-openai".to_string();

@@ -1287,6 +1287,7 @@ impl GatewayDataState {
         // exists while avoiding an unbounded read during error compensation.
         let page = repository
             .list_admin_wallets(&aether_data::repository::wallet::AdminWalletListQuery {
+                user_id: None,
                 status: None,
                 owner_type: Some("api_key".to_string()),
                 limit: 1,

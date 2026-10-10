@@ -2,7 +2,10 @@
   <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 border-t border-border/60 px-4 sm:px-6 py-3 sm:py-4 bg-muted/20">
     <!-- 左侧：记录范围和每页数量 -->
     <div class="flex items-center justify-between sm:justify-start gap-3 text-sm text-muted-foreground">
-      <span class="font-medium whitespace-nowrap" aria-live="polite">
+      <span
+        class="font-medium whitespace-nowrap"
+        aria-live="polite"
+      >
         {{ rangeSummary }}
       </span>
       <Select

@@ -114,6 +114,14 @@ fn openai_responses_incomplete_stop_reason(body: &Map<String, Value>) -> Canonic
     }
 }
 
+fn canonical_incomplete_reason(canonical: &CanonicalResponse) -> Option<&'static str> {
+    match canonical.stop_reason.as_ref()? {
+        CanonicalStopReason::MaxTokens => Some("max_output_tokens"),
+        CanonicalStopReason::ContentFiltered => Some("content_filter"),
+        _ => None,
+    }
+}
+
 pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bool) -> Value {
     let namespace_tool_aliases = NamespaceToolAliases::from_report_context(report_context);
     let mut response = Map::new();
@@ -143,6 +151,17 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bo
             .cloned()
         {
             response.insert("status".to_string(), raw_status);
+        } else if let Some(reason) = canonical_incomplete_reason(canonical) {
+            // Cross-format sources carry no Responses status of their own; a
+            // truncated or filtered answer must not be reported as completed.
+            response.insert(
+                "status".to_string(),
+                Value::String("incomplete".to_string()),
+            );
+            response.insert(
+                "incomplete_details".to_string(),
+                json!({ "reason": reason }),
+            );
         }
     }
 
@@ -256,7 +275,7 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bo
                     }));
                 }
                 let namespaced_tool = namespace_tool_aliases.responses_name(name);
-                if namespaced_tool.is_none() && is_responses_web_search_tool(name) {
+                if namespace_tool_aliases.emits_hosted_web_search_call(name) {
                     output.push(json!({
                         "type": "web_search_call",
                         "id": id,
@@ -582,10 +601,6 @@ fn openai_responses_output_format_from_mime_type(mime_type: &str) -> String {
     .to_string()
 }
 
-fn is_responses_web_search_tool(name: &str) -> bool {
-    matches!(name, "web_search" | "web_search_preview")
-}
-
 fn web_search_query_from_value(input: &Value) -> String {
     input
         .get("query")
@@ -626,6 +641,70 @@ mod tests {
         assert_eq!(body["output_text"], "");
         assert!(body["created_at"].as_i64().is_some());
         assert!(body["completed_at"].as_i64().is_some());
+    }
+
+    #[test]
+    fn responses_response_builder_keeps_client_declared_web_search_function_as_function_call() {
+        let report_context = json!({
+            "original_request_body": {
+                "tools": [{
+                    "type": "function",
+                    "name": "web_search",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
+                }]
+            }
+        });
+        let response = CanonicalResponse {
+            id: "resp_test".to_string(),
+            model: "gemini-3.8-flash".to_string(),
+            content: vec![CanonicalContentBlock::ToolUse {
+                id: "call_ws_1".to_string(),
+                name: "web_search".to_string(),
+                input: json!({"query": "today tech"}),
+                extensions: BTreeMap::new(),
+            }],
+            outputs: Vec::new(),
+            stop_reason: Some(CanonicalStopReason::ToolUse),
+            usage: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let body = to_raw(&response, &report_context, false);
+
+        let item = &body["output"][0];
+        assert_eq!(item["type"], "function_call");
+        assert_eq!(item["name"], "web_search");
+        assert_eq!(item["call_id"], "call_ws_1");
+        assert_eq!(
+            serde_json::from_str::<Value>(item["arguments"].as_str().unwrap()).unwrap(),
+            json!({"query": "today tech"})
+        );
+    }
+
+    #[test]
+    fn responses_response_builder_emits_web_search_call_for_hosted_web_search_tool() {
+        let report_context = json!({
+            "original_request_body": {"tools": [{"type": "web_search"}]}
+        });
+        let response = CanonicalResponse {
+            id: "resp_test".to_string(),
+            model: "gpt-5-5-low".to_string(),
+            content: vec![CanonicalContentBlock::ToolUse {
+                id: "call_ws_1".to_string(),
+                name: "web_search".to_string(),
+                input: json!({"query": "today tech"}),
+                extensions: BTreeMap::new(),
+            }],
+            outputs: Vec::new(),
+            stop_reason: Some(CanonicalStopReason::ToolUse),
+            usage: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let body = to_raw(&response, &report_context, false);
+
+        assert_eq!(body["output"][0]["type"], "web_search_call");
+        assert_eq!(body["output"][0]["action"]["query"], "today tech");
     }
 
     #[test]
@@ -929,6 +1008,75 @@ mod tests {
             input,
             ..
         }) if id == "call_ws_1" && name == "web_search" && input["query"] == "today tech")
+        );
+    }
+
+    #[test]
+    fn responses_response_builder_reports_cross_format_truncation_as_incomplete() {
+        let response = |stop_reason| CanonicalResponse {
+            id: "gemini-resp".to_string(),
+            model: "gemini-3.8-flash".to_string(),
+            content: vec![CanonicalContentBlock::Text {
+                text: "partial".to_string(),
+                extensions: BTreeMap::new(),
+            }],
+            outputs: Vec::new(),
+            stop_reason: Some(stop_reason),
+            usage: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let truncated = to_raw(&response(CanonicalStopReason::MaxTokens), &json!({}), false);
+        assert_eq!(truncated["status"], "incomplete");
+        assert_eq!(
+            truncated["incomplete_details"],
+            json!({"reason": "max_output_tokens"})
+        );
+
+        let filtered = to_raw(
+            &response(CanonicalStopReason::ContentFiltered),
+            &json!({}),
+            false,
+        );
+        assert_eq!(filtered["status"], "incomplete");
+        assert_eq!(
+            filtered["incomplete_details"],
+            json!({"reason": "content_filter"})
+        );
+
+        let finished = to_raw(&response(CanonicalStopReason::EndTurn), &json!({}), false);
+        assert_eq!(finished["status"], "completed");
+        assert!(finished.get("incomplete_details").is_none());
+    }
+
+    #[test]
+    fn gemini_max_tokens_response_converts_to_incomplete_responses_body() {
+        let gemini = json!({
+            "responseId": "gemini-trunc-123",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "The printing press"}]},
+                "finishReason": "MAX_TOKENS"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 19,
+                "candidatesTokenCount": 256,
+                "totalTokenCount": 275
+            }
+        });
+
+        let body = crate::formats::registry::convert_response(
+            "gemini:generate_content",
+            "openai:responses",
+            &gemini,
+            &FormatContext::default(),
+        )
+        .expect("gemini response should convert");
+
+        assert_eq!(body["status"], "incomplete");
+        assert_eq!(
+            body["incomplete_details"],
+            json!({"reason": "max_output_tokens"})
         );
     }
 }

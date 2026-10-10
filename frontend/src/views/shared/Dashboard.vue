@@ -1,12 +1,8 @@
 <template>
   <div class="space-y-6 px-4 sm:px-6 lg:px-0">
-    <!-- 页面头部：统计卡片 + 公告 -->
-    <div class="flex flex-col lg:flex-row gap-6 lg:items-start">
-      <!-- 左侧统计区域 -->
-      <div
-        ref="statsPanelRef"
-        class="flex-1 min-w-0 flex flex-col"
-      >
+    <!-- 页面头部：统计卡片与系统公告 -->
+    <div class="grid min-w-0 grid-cols-1 gap-4 min-[1440px]:grid-cols-[minmax(0,1fr)_240px] 2xl:grid-cols-[minmax(0,1fr)_260px]">
+      <div class="min-w-0 flex flex-col">
         <Badge
           :variant="authStore.isAdmin ? 'default' : 'secondary'"
           class="mb-4 self-start uppercase tracking-[0.45em]"
@@ -14,8 +10,29 @@
           {{ dashboardModeLabel }}
         </Badge>
 
+        <div
+          v-if="dashboardError && !isAdmin"
+          role="alert"
+          class="mb-4 flex items-center justify-between gap-3 text-sm text-destructive"
+        >
+          <span>{{ dashboardError }}</span>
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="loading"
+            @click="loadDashboardData"
+          >
+            {{ getI18nLocale() === 'en-US' ? 'Retry' : '重试' }}
+          </Button>
+        </div>
+
         <!-- 主要统计卡片 -->
-        <div class="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
+        <div
+          class="grid gap-3 sm:gap-4"
+          :class="isAdmin
+            ? 'grid-cols-1 min-[480px]:grid-cols-2 xl:grid-cols-5'
+            : 'grid-cols-2 xl:grid-cols-4'"
+        >
           <!-- 加载中骨架屏 -->
           <template v-if="loading">
             <Card
@@ -33,8 +50,8 @@
             <Card
               v-for="(stat, index) in stats"
               :key="stat.name"
-              class="relative overflow-hidden p-3 sm:p-5"
-              :class="statCardBorders[index % statCardBorders.length]"
+              class="relative overflow-hidden p-3"
+              :class="[statCardBorders[index % statCardBorders.length], isAdmin ? 'sm:p-4' : 'sm:p-5'].join(' ')"
             >
               <div
                 class="pointer-events-none absolute -right-4 -top-6 h-28 w-28 rounded-full blur-3xl opacity-40"
@@ -42,6 +59,7 @@
               />
               <!-- 图标固定在右上角 -->
               <div
+                v-if="!isAdmin"
                 class="absolute top-3 right-3 sm:top-5 sm:right-5 rounded-xl sm:rounded-2xl border border-border bg-card/50 p-2 sm:p-3 shadow-inner backdrop-blur-sm"
                 :class="getStatIconColor(index)"
               >
@@ -51,25 +69,55 @@
                 />
               </div>
               <!-- 内容区域 -->
-              <div>
+              <div :class="isAdmin ? 'grid min-w-0 grid-rows-[20px_36px_auto] gap-y-1' : ''">
                 <p
-                  class="min-h-10 text-xs font-semibold leading-snug tracking-normal break-words text-muted-foreground pr-10 sm:pr-14"
+                  class="text-xs font-semibold tracking-normal text-muted-foreground"
+                  :class="isAdmin ? 'whitespace-nowrap leading-5' : 'min-h-10 pr-10 sm:pr-14 leading-snug break-words'"
+                  :title="isAdmin ? statisticsScope : undefined"
                 >
                   {{ stat.name }}
                 </p>
+                <div
+                  v-if="isAdmin"
+                  class="flex h-9 min-w-0 items-center"
+                >
+                  <MetricValue
+                    :value="stat.value"
+                    :max-font-size="30"
+                    :title="stat.valueHint || stat.value"
+                    class="w-full font-semibold leading-none tabular-nums text-foreground"
+                  />
+                </div>
                 <p
-                  class="mt-2 sm:mt-4 text-xl sm:text-3xl font-semibold text-foreground"
+                  v-else
+                  :title="stat.valueHint"
+                  class="mt-2 sm:mt-4 text-xl sm:text-3xl font-semibold tabular-nums text-foreground"
                 >
                   {{ stat.value }}
                 </p>
                 <p
                   v-if="stat.subValue"
-                  class="mt-0.5 sm:mt-1 text-[10px] sm:text-sm text-muted-foreground"
+                  :title="stat.totalHint || (isAdmin ? statisticsScope : undefined)"
+                  class="break-words text-[10px] sm:text-sm text-muted-foreground"
+                  :class="isAdmin ? 'leading-5' : 'mt-0.5 sm:mt-1'"
                 >
-                  {{ stat.subValue }}
+                  <span>{{ stat.subValue }}</span>
+                  <span
+                    v-if="stat.userChange"
+                    class="ml-2 inline-flex gap-2 whitespace-nowrap tabular-nums"
+                  >
+                    <span
+                      class="text-red-600 dark:text-red-400"
+                      :title="t('今日新增', 'Added today')"
+                    >+{{ metricCount(stat.userChange.added) }}</span>
+                    <span
+                      class="text-green-600 dark:text-green-400"
+                      :title="t('今日减少', 'Removed today')"
+                    >-{{ metricCount(stat.userChange.removed) }}</span>
+                  </span>
                 </p>
                 <div
-                  v-if="stat.change || stat.extraBadge"
+                  v-if="!isAdmin && (stat.change || stat.extraBadge)"
                   class="mt-1.5 sm:mt-2 flex items-center gap-1 sm:gap-1.5 flex-wrap"
                 >
                   <Badge
@@ -95,14 +143,15 @@
             <Card
               v-for="(placeholder, index) in emptyStatPlaceholders"
               :key="'empty-' + index"
-              class="relative overflow-hidden p-3 sm:p-5"
-              :class="statCardBorders[index % statCardBorders.length]"
+              class="relative overflow-hidden p-3"
+              :class="[statCardBorders[index % statCardBorders.length], isAdmin ? 'sm:p-4' : 'sm:p-5'].join(' ')"
             >
               <div
                 class="pointer-events-none absolute -right-4 -top-6 h-28 w-28 rounded-full blur-3xl opacity-20"
                 :class="statCardGlows[index % statCardGlows.length]"
               />
               <div
+                v-if="!isAdmin"
                 class="absolute top-3 right-3 sm:top-5 sm:right-5 rounded-xl sm:rounded-2xl border border-border bg-card/50 p-2 sm:p-3 shadow-inner backdrop-blur-sm"
                 :class="getStatIconColor(index)"
               >
@@ -111,19 +160,23 @@
                   class="h-4 w-4 sm:h-5 sm:w-5"
                 />
               </div>
-              <div>
+              <div :class="isAdmin ? 'grid min-w-0 grid-rows-[20px_36px_auto] gap-y-1' : ''">
                 <p
-                  class="min-h-10 text-xs font-semibold leading-snug tracking-normal break-words text-muted-foreground pr-10 sm:pr-14"
+                  class="text-xs font-semibold tracking-normal text-muted-foreground"
+                  :class="isAdmin ? 'whitespace-nowrap leading-5' : 'min-h-10 pr-10 sm:pr-14 leading-snug break-words'"
+                  :title="isAdmin ? statisticsScope : undefined"
                 >
                   {{ placeholder.name }}
                 </p>
                 <p
-                  class="mt-2 sm:mt-4 text-xl sm:text-3xl font-semibold text-muted-foreground/50"
+                  class="font-semibold text-muted-foreground/50"
+                  :class="isAdmin ? 'flex h-9 items-center text-3xl leading-none' : 'mt-2 sm:mt-4 text-xl sm:text-3xl'"
                 >
-                  --
+                  {{ isAdmin ? '—' : '--' }}
                 </p>
                 <p
-                  class="mt-0.5 sm:mt-1 text-[10px] sm:text-sm text-muted-foreground/50"
+                  class="text-[10px] sm:text-sm text-muted-foreground/50"
+                  :class="isAdmin ? 'leading-5' : 'mt-0.5 sm:mt-1'"
                 >
                   暂无数据
                 </p>
@@ -132,105 +185,45 @@
           </template>
         </div>
 
-        <!-- 管理员：系统健康摘要 -->
+        <!-- 管理员：全站今日性能 -->
         <div
-          v-if="isAdmin && systemHealth"
+          v-if="isAdmin"
           class="mt-6"
+          :aria-busy="loading"
         >
-          <div class="mb-3 flex items-center justify-between">
+          <div class="mb-3 flex items-center justify-between gap-2">
             <h3 class="text-sm font-medium text-foreground">
-              本月系统健康
+              {{ t('请求概况', 'Request overview') }}
             </h3>
             <Badge
               variant="outline"
-              class="uppercase tracking-[0.3em] text-[10px]"
+              class="shrink-0 text-[10px]"
             >
-              Monthly
+              {{ t('实时', 'Live') }}
             </Badge>
           </div>
-          <div class="grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-4">
-            <Card class="relative p-3 sm:p-4 border-book-cloth/30">
-              <Clock
-                class="absolute top-3 right-3 h-3.5 w-3.5 sm:h-4 sm:w-4 text-muted-foreground"
-              />
-              <div class="pr-6">
-                <p
-                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
-                >
-                  平均响应
-                </p>
-                <p
-                  class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold text-foreground"
-                >
-                  {{ systemHealth.avg_response_time }}s
-                </p>
-              </div>
-            </Card>
-            <Card class="relative p-3 sm:p-4 border-kraft/30">
-              <AlertTriangle
-                class="absolute top-3 right-3 h-3.5 w-3.5 sm:h-4 sm:w-4 text-muted-foreground"
-              />
-              <div class="pr-6">
-                <p
-                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
-                >
-                  错误率
-                </p>
-                <p
-                  class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold"
-                  :class="
-                    systemHealth.error_rate > 5
-                      ? 'text-destructive'
-                      : 'text-foreground'
-                  "
-                >
-                  {{ systemHealth.error_rate }}%
-                </p>
-              </div>
-            </Card>
-            <Card class="relative p-3 sm:p-4 border-book-cloth/25">
-              <Shuffle
-                class="absolute top-3 right-3 h-3.5 w-3.5 sm:h-4 sm:w-4 text-muted-foreground"
-              />
-              <div class="pr-6">
-                <p
-                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
-                >
-                  转移次数
-                </p>
-                <p
-                  class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold text-foreground"
-                >
-                  {{ systemHealth.fallback_count }}
-                </p>
-              </div>
-            </Card>
+          <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 xl:grid-cols-6">
             <Card
-              v-if="costStats"
-              class="relative p-3 sm:p-4 border-manilla/40"
+              v-for="(metric, index) in performanceCards"
+              :key="metric.key"
+              :data-request-metric="metric.key"
+              :title="metric.tooltip"
+              :tabindex="metric.tooltip ? 0 : undefined"
+              class="relative min-w-0 p-3 sm:p-4"
+              :class="statCardBorders[index % statCardBorders.length]"
             >
-              <DollarSign
-                class="absolute top-3 right-3 h-3.5 w-3.5 sm:h-4 sm:w-4 text-muted-foreground"
+              <p class="text-xs font-semibold break-words text-muted-foreground">
+                {{ metric.label }}
+              </p>
+              <Skeleton
+                v-if="loading"
+                class="mt-2 h-7 w-16"
               />
-              <div class="pr-6">
-                <p
-                  class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
-                >
-                  本月费用
-                </p>
-                <p
-                  class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold text-foreground"
-                >
-                  {{ formatCurrency(costStats.total_cost) }}
-                </p>
-                <Badge
-                  v-if="costStats.cost_savings > 0"
-                  variant="success"
-                  class="mt-1 text-[9px] sm:text-[10px]"
-                >
-                  节省 {{ formatCurrency(costStats.cost_savings) }}
-                </Badge>
-              </div>
+              <MetricValue
+                v-else
+                :value="metric.value"
+                class="mt-2 font-semibold tabular-nums"
+              />
             </Card>
           </div>
         </div>
@@ -338,126 +331,21 @@
           </div>
         </div>
       </div>
-
-      <!-- 右侧系统公告 -->
-      <div
-        id="announcements-section"
-        class="w-full lg:w-[300px] xl:w-[320px] flex-shrink-0 flex flex-col min-h-0"
-        :style="announcementsContainerStyle"
-      >
-        <div class="mb-3 flex items-center justify-between flex-shrink-0">
-          <h3 class="text-sm font-medium text-foreground">
-            系统公告
-          </h3>
-          <Badge
-            variant="outline"
-            class="uppercase tracking-[0.3em] text-[10px]"
-          >
-            Live
-          </Badge>
-        </div>
-
-        <Card
-          class="overflow-hidden p-4 flex flex-col flex-1 min-h-0 h-full max-h-[280px] lg:max-h-none"
-        >
-          <div
-            v-if="loadingAnnouncements"
-            class="flex-1 flex items-center justify-center"
-          >
-            <Loader2 class="h-5 w-5 animate-spin text-muted-foreground" />
-          </div>
-
-          <div
-            v-else-if="announcements.length === 0"
-            class="flex-1 flex flex-col items-center justify-center"
-          >
-            <Bell class="h-8 w-8 text-muted-foreground/40" />
-            <p class="mt-2 text-xs text-muted-foreground">
-              暂无公告
-            </p>
-          </div>
-
-          <div
-            v-else
-            class="-mx-4 px-4 flex-1 overflow-y-auto scrollbar-thin min-h-0 pb-2"
-          >
-            <div
-              ref="announcementsTimelineRef"
-              class="relative pl-5"
-            >
-              <div
-                v-if="announcements.length > 1"
-                class="absolute left-[7px] w-[2px] bg-slate-200 dark:bg-muted"
-                :style="timelineLineStyle"
-              />
-
-              <button
-                v-for="announcement in announcements"
-                :key="announcement.id"
-                data-announcement-item
-                type="button"
-                class="relative w-full text-left mb-3 last:mb-0"
-                @click="viewAnnouncementDetail(announcement)"
-              >
-                <div class="flex gap-2">
-                  <div class="absolute left-[-18px] top-1 z-10">
-                    <span
-                      data-announcement-marker
-                      class="flex h-3 w-3 items-center justify-center rounded-full border-2 border-white dark:border-slate-900"
-                      :class="[
-                        announcement.is_pinned
-                          ? 'bg-amber-500 dark:bg-amber-400'
-                          : announcement.is_read
-                            ? 'bg-slate-300 dark:bg-slate-600'
-                            : getAnnouncementDotColor(announcement.type),
-                      ]"
-                    >
-                      <span
-                        v-if="!announcement.is_read && !announcement.is_pinned"
-                        class="h-1.5 w-1.5 rounded-full bg-white"
-                      />
-                    </span>
-                  </div>
-
-                  <div
-                    class="flex-1 rounded-lg p-2 transition"
-                    :class="[
-                      announcement.is_pinned
-                        ? 'hover:bg-amber-50/50 dark:hover:bg-amber-900/10'
-                        : 'hover:bg-slate-50/50 dark:hover:bg-slate-800/30',
-                    ]"
-                  >
-                    <div class="flex items-center gap-2 mb-1">
-                      <h4
-                        translate="no"
-                        class="text-xs font-medium text-foreground line-clamp-1 flex-1"
-                      >
-                        {{ announcement.title }}
-                      </h4>
-                      <span
-                        v-if="announcement.is_pinned"
-                        class="flex-shrink-0 rounded-full bg-amber-100 dark:bg-amber-900/30 px-1.5 py-0.5 text-[9px] font-medium text-amber-700 dark:text-amber-400"
-                      >
-                        置顶
-                      </span>
-                    </div>
-                    <div
-                      translate="no"
-                      class="text-[11px] text-muted-foreground leading-relaxed line-clamp-2 mb-1"
-                    >
-                      {{ getPlainText(announcement.content) }}
-                    </div>
-                    <div class="text-[10px] text-muted-foreground/70">
-                      {{ formatAnnouncementDate(announcement.created_at) }}
-                    </div>
-                  </div>
-                </div>
-              </button>
-            </div>
-          </div>
-        </Card>
+      <div class="min-w-0 min-[1440px]:relative">
+        <DashboardAnnouncements class="min-[1440px]:absolute min-[1440px]:inset-0" />
       </div>
     </div>
+
+    <DashboardActivity
+      v-if="isAdmin"
+      :data="activityHeatmap"
+      :consecutive-active-days="dashboardSnapshot?.consecutive_active_days ?? null"
+      :active-days="dashboardSnapshot?.active_days ?? null"
+      :scope-hint="activityScope"
+      :loading="loading"
+      :error="false"
+      :timeline-data="isDemo ? demoTimeline : undefined"
+    />
 
     <!-- 趋势图表筛选 -->
     <div class="flex flex-wrap items-center justify-between gap-3">
@@ -468,12 +356,31 @@
       </h3>
       <TimeRangePicker
         v-model="dailyTimeRange"
-        :allow-hourly="true"
+        :allow-hourly="!isAdmin"
+        :show-granularity="!isAdmin"
       />
     </div>
 
+    <div
+      v-if="dailyError"
+      role="alert"
+      class="flex items-center justify-between gap-3 rounded-lg border border-border p-4 text-sm text-muted-foreground"
+    >
+      <span>{{ dailyError }}</span>
+      <Button
+        variant="outline"
+        size="sm"
+        @click="loadDailyStats"
+      >
+        {{ t('重试', 'Retry') }}
+      </Button>
+    </div>
+
     <!-- 趋势图表区域 -->
-    <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+    <div
+      v-if="!dailyError"
+      class="grid grid-cols-1 gap-6 lg:grid-cols-2"
+    >
       <!-- 每日使用趋势（折线图）- 普通用户可见 -->
       <Card
         v-if="!isAdmin"
@@ -511,7 +418,7 @@
         </div>
       </Card>
 
-      <!-- 每日模型成本（堆叠柱状图）- 仅管理员可见 -->
+      <!-- 每日模型费用（堆叠柱状图）- 仅管理员可见 -->
       <Card
         v-if="isAdmin"
         class="p-5"
@@ -519,7 +426,7 @@
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
-          每日模型成本
+          每日模型费用
         </h4>
         <div
           v-if="loadingDaily"
@@ -534,7 +441,7 @@
           <BarChart
             v-if="
               dailyModelCostChartData.labels &&
-                dailyModelCostChartData.labels.length > 0
+                dailyModelCostChartData.labels.length > 0 && hasDailyModelCost
             "
             :data="dailyModelCostChartData"
             :options="dailyModelCostChartOptions"
@@ -543,12 +450,12 @@
             v-else
             class="flex h-full items-center justify-center text-xs text-muted-foreground"
           >
-            暂无数据
+            {{ dailyCostEmptyLabel }}
           </div>
         </div>
       </Card>
 
-      <!-- 提供商成本分布（环形图）- 仅管理员可见 -->
+      <!-- 提供商费用分布（环形图）- 仅管理员可见 -->
       <Card
         v-if="isAdmin"
         class="p-5"
@@ -556,7 +463,7 @@
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
-          提供商成本分布
+          提供商费用分布
         </h4>
         <div
           v-if="loadingDaily"
@@ -580,12 +487,12 @@
             v-else
             class="flex h-full items-center justify-center text-xs text-muted-foreground"
           >
-            暂无数据
+            {{ dailyCostEmptyLabel }}
           </div>
         </div>
       </Card>
 
-      <!-- 每日模型成本（堆叠柱状图）- 普通用户可见 -->
+      <!-- 每日模型费用（堆叠柱状图）- 普通用户可见 -->
       <Card
         v-if="!isAdmin"
         class="p-5"
@@ -593,7 +500,7 @@
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
-          每日模型成本
+          每日模型费用
         </h4>
         <div
           v-if="loadingDaily"
@@ -623,8 +530,18 @@
       </Card>
     </div>
 
+    <p
+      v-if="dailyCostsPartial && !loadingDaily"
+      class="mt-3 text-xs text-amber-700 dark:text-amber-400"
+    >
+      {{ t('统计为已知数据小计，分布占比按已知金额计算', 'Statistics are known subtotals; distribution shares use known amounts') }}
+    </p>
+
     <!-- 每日统计 -->
-    <Card class="overflow-hidden mt-6">
+    <Card
+      v-if="!dailyError"
+      class="overflow-hidden mt-6"
+    >
       <!-- 移动端：卡片列表 -->
       <div class="sm:hidden">
         <div class="px-4 py-3 border-b border-border/60">
@@ -640,7 +557,7 @@
           <span class="ml-2 text-muted-foreground text-xs">加载中...</span>
         </div>
         <div
-          v-else-if="dailyStats.length === 0"
+          v-else-if="displayDailyStats.length === 0"
           class="py-8 text-center text-muted-foreground text-xs"
         >
           暂无数据
@@ -650,19 +567,20 @@
           class="divide-y divide-border/60"
         >
           <div
-            v-for="stat in dailyStats.slice().reverse()"
+            v-for="stat in displayDailyStats.slice().reverse()"
             :key="stat.date"
             class="p-4 space-y-2"
           >
             <div class="flex items-center justify-between">
               <span class="font-medium text-sm">{{
-                formatDate(stat.date)
+                formatDailyDate(stat.date)
               }}</span>
               <Badge
                 variant="success"
                 class="text-[10px]"
               >
-                ${{ stat.cost.toFixed(4) }}
+                {{ formatDailyCost(stat.cost) }}
+                <span v-if="stat.billableAmount">{{ amountStatus(stat.billableAmount, t) }}</span>
               </Badge>
             </div>
             <div class="grid grid-cols-2 gap-2 text-xs">
@@ -672,7 +590,7 @@
               </div>
               <div class="flex justify-between">
                 <span class="text-muted-foreground">Tokens</span>
-                <span>{{ formatTokens(stat.tokens) }}</span>
+                <span>{{ compactTokens(stat.tokens) }}</span>
               </div>
               <div class="flex justify-between">
                 <span class="text-muted-foreground">响应</span>
@@ -729,7 +647,7 @@
               </div>
             </TableCell>
           </TableRow>
-          <TableRow v-else-if="dailyStats.length === 0">
+          <TableRow v-else-if="displayDailyStats.length === 0">
             <TableCell
               :colspan="isAdmin ? 7 : 6"
               class="text-center py-8 text-muted-foreground text-xs"
@@ -739,11 +657,12 @@
           </TableRow>
           <template v-else>
             <TableRow
-              v-for="stat in dailyStats.slice().reverse()"
+              v-for="stat in displayDailyStats.slice().reverse()"
               :key="stat.date"
+              :data-daily-date="stat.date"
             >
               <TableCell class="font-medium text-xs">
-                {{ formatDate(stat.date) }}
+                {{ formatDailyDate(stat.date) }}
               </TableCell>
               <TableCell class="text-center text-xs">
                 {{ stat.requests.toLocaleString() }}
@@ -753,7 +672,7 @@
                   variant="secondary"
                   class="text-[10px]"
                 >
-                  {{ formatTokens(stat.tokens) }}
+                  {{ compactTokens(stat.tokens) }}
                 </Badge>
               </TableCell>
               <TableCell class="text-center">
@@ -761,7 +680,8 @@
                   variant="success"
                   class="text-[10px]"
                 >
-                  ${{ stat.cost.toFixed(4) }}
+                  {{ formatDailyCost(stat.cost) }}
+                  <span v-if="stat.billableAmount">{{ amountStatus(stat.billableAmount, t) }}</span>
                 </Badge>
               </TableCell>
               <TableCell class="text-center">
@@ -779,7 +699,7 @@
                 v-if="isAdmin"
                 class="text-center text-xs"
               >
-                {{ stat.unique_providers }}
+                {{ stat.unique_providers ?? '—' }}
               </TableCell>
             </TableRow>
           </template>
@@ -788,8 +708,9 @@
 
       <!-- 汇总信息 -->
       <div
-        v-if="dailyStats.length > 0"
+        v-if="displayDailyStats.length > 0 && !loadingDaily"
         class="border-t border-border bg-muted/30 backdrop-blur-sm px-4 py-3 text-xs"
+        data-daily-total
       >
         <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div class="text-center">
@@ -805,7 +726,7 @@
               总Tokens
             </div>
             <div class="font-semibold text-book-cloth dark:text-kraft">
-              {{ formatTokens(totalStats.tokens) }}
+              {{ compactTokens(totalStats.tokens) }}
             </div>
           </div>
           <div class="text-center">
@@ -813,7 +734,8 @@
               总费用
             </div>
             <div class="font-semibold text-amber-600 dark:text-amber-400">
-              ${{ totalStats.cost.toFixed(4) }}
+              {{ formatDailyCost(totalStats.cost) }}
+              <span v-if="adminDailyCharts">{{ amountStatus(adminDailyCharts.summary.billable_amount, t) }}</span>
             </div>
           </div>
           <div class="text-center">
@@ -828,62 +750,6 @@
       </div>
     </Card>
   </div>
-
-  <!-- 公告详情对话框 -->
-  <Dialog
-    v-model="detailDialogOpen"
-    size="lg"
-  >
-    <template #header>
-      <div class="border-b border-border px-6 py-4">
-        <div class="flex items-center gap-3">
-          <component
-            :is="getAnnouncementIcon(selectedAnnouncement.type)"
-            v-if="selectedAnnouncement"
-            class="h-5 w-5 flex-shrink-0"
-            :class="getAnnouncementIconColor(selectedAnnouncement.type)"
-          />
-          <div class="flex-1 min-w-0">
-            <h3
-              class="text-lg font-semibold text-foreground leading-tight truncate"
-            >
-              {{ selectedAnnouncement?.title || "公告详情" }}
-            </h3>
-            <p class="text-xs text-muted-foreground">
-              系统公告
-            </p>
-          </div>
-        </div>
-      </div>
-    </template>
-
-    <div
-      v-if="selectedAnnouncement"
-      class="space-y-4"
-    >
-      <div class="text-xs text-muted-foreground">
-        {{ formatFullDate(selectedAnnouncement.created_at) }}
-      </div>
-
-      <!-- eslint-disable vue/no-v-html -->
-      <div
-        translate="no"
-        class="prose prose-sm dark:prose-invert max-w-none"
-        v-html="renderMarkdown(selectedAnnouncement.content)"
-      />
-      <!-- eslint-enable vue/no-v-html -->
-    </div>
-
-    <template #footer>
-      <Button
-        variant="outline"
-        class="h-10 px-5"
-        @click="detailDialogOpen = false"
-      >
-        关闭
-      </Button>
-    </template>
-  </Dialog>
 </template>
 
 <script setup lang="ts">
@@ -894,27 +760,38 @@ import {
   onMounted,
   computed,
   onBeforeUnmount,
-  nextTick,
   watch,
   markRaw,
+  inject,
 } from "vue";
 import type { Component } from "vue";
+import { routeLocationKey } from "vue-router";
+import type { IntervalTimelineResponse } from "@/api/cache";
 import { useAuthStore } from "@/stores/auth";
 import {
   dashboardApi,
   type DashboardStat,
+  type DashboardStatsResponse,
   type DailyStat,
   type ProviderSummary,
 } from "@/api/dashboard";
+import { overviewApi, type OverviewAmount, type OverviewDashboardCharts, type OverviewDashboardSummary, type OverviewRange } from "@/api/overview";
+import { amountStatus, amountValue } from "@/features/overview/dashboard/amount";
+import { chartDate, dashboardChartRange, modelDatasets, providerSlices } from "@/features/overview/dashboard/charts";
+import { zonedInput } from "@/features/overview/query";
+import { count, percent, timestamp } from "@/features/overview/format";
+import DashboardActivity from "@/features/overview/dashboard/DashboardActivity.vue";
+import DashboardAnnouncements from "@/features/overview/dashboard/DashboardAnnouncements.vue";
+import MetricValue from "@/features/overview/components/MetricValue.vue";
+import type { ActivityHeatmap } from "@/types/activity";
+import { useOverviewI18n } from "@/features/overview/i18n";
 import { getDateRangeFromPeriod } from "@/features/usage/composables";
 import type { DateRangeParams } from "@/features/usage/types";
-import { announcementApi, type Announcement } from "@/api/announcements";
 import {
   Card,
   Badge,
   Button,
   Skeleton,
-  Dialog,
   Table,
   TableHeader,
   TableBody,
@@ -934,20 +811,10 @@ import {
   Key,
   Hash,
   Zap,
-  Bell,
-  AlertCircle,
-  AlertTriangle,
-  Info,
-  Wrench,
-  Loader2,
-  Clock,
   Database,
-  Shuffle,
 } from "lucide-vue-next";
 import { formatTokens, formatCurrency } from "@/utils/format";
 import { parseDateLike } from "@/utils/date";
-import { marked } from "marked";
-import { sanitizeMarkdown } from "@/utils/sanitize";
 import type {
   ChartData,
   ChartOptions,
@@ -956,110 +823,22 @@ import type {
 } from "chart.js";
 
 const authStore = useAuthStore();
+const { t } = useOverviewI18n();
 
 type DashboardStatCard = Omit<DashboardStat, "icon"> & {
   icon: Component;
+  userChange?: { added: number; removed: number };
+  valueHint?: string;
+  totalHint?: string;
 };
 
-const statsPanelRef = ref<HTMLElement | null>(null);
-const announcementsHeight = ref<number | null>(null);
-const announcementsTimelineRef = ref<HTMLElement | null>(null);
-const timelineLineStyle = ref<{ top: string; bottom: string }>({
-  top: "0px",
-  bottom: "0px",
-});
-const isLargeScreen = ref(false);
-
-const announcementsContainerStyle = computed(() => {
-  // 移动端不设置固定高度，让内容自然流动
-  if (!isLargeScreen.value || !announcementsHeight.value) return {};
-  // 桌面端设置固定高度，与左侧统计面板保持一致
-  return { height: `${announcementsHeight.value}px` };
-});
-
-function checkScreenSize() {
-  if (typeof window !== "undefined") {
-    isLargeScreen.value = window.innerWidth >= 1024; // lg breakpoint
-  }
-}
-
-let statsPanelObserver: ResizeObserver | null = null;
-let announcementsTimelineObserver: ResizeObserver | null = null;
-
-function updateAnnouncementsHeight() {
-  if (typeof window === "undefined") return;
-  const panel = statsPanelRef.value;
-  if (!panel) return;
-  const { height } = panel.getBoundingClientRect();
-  if (height <= 0) return;
-  announcementsHeight.value = Math.round(height);
-  nextTick(() => updateTimelineLine());
-}
-
-function updateTimelineLine() {
-  if (typeof window === "undefined") return;
-  const container = announcementsTimelineRef.value;
-  if (!container) return;
-  const items = container.querySelectorAll<HTMLElement>(
-    "[data-announcement-item]",
-  );
-  if (items.length < 2) {
-    timelineLineStyle.value = { top: "0px", bottom: "0px" };
-    return;
-  }
-  const firstMarker = items[0].querySelector<HTMLElement>(
-    "[data-announcement-marker]",
-  );
-  const lastMarker = items[items.length - 1].querySelector<HTMLElement>(
-    "[data-announcement-marker]",
-  );
-  if (!firstMarker || !lastMarker) return;
-  const containerRect = container.getBoundingClientRect();
-  const firstRect = firstMarker.getBoundingClientRect();
-  const lastRect = lastMarker.getBoundingClientRect();
-  const topOffset = Math.max(
-    0,
-    firstRect.top + firstRect.height / 2 - containerRect.top,
-  );
-  const bottomOffset = Math.max(
-    0,
-    containerRect.bottom - (lastRect.top + lastRect.height / 2),
-  );
-  timelineLineStyle.value = {
-    top: `${topOffset}px`,
-    bottom: `${bottomOffset}px`,
-  };
-}
-
-function handleWindowResize() {
-  checkScreenSize();
-  updateAnnouncementsHeight();
-  updateTimelineLine();
-}
-
-function setupResizeObserver() {
-  if (typeof window === "undefined") return;
-  const panel = statsPanelRef.value;
-  if (!panel || !("ResizeObserver" in window)) return;
-  statsPanelObserver = new ResizeObserver(() => updateAnnouncementsHeight());
-  statsPanelObserver.observe(panel);
-  updateAnnouncementsHeight();
-}
-
-function setupTimelineResizeObserver() {
-  if (typeof window === "undefined" || !("ResizeObserver" in window)) return;
-  const container = announcementsTimelineRef.value;
-  announcementsTimelineObserver?.disconnect();
-  announcementsTimelineObserver = null;
-  if (!container) return;
-  announcementsTimelineObserver = new ResizeObserver(() =>
-    updateTimelineLine(),
-  );
-  announcementsTimelineObserver.observe(container);
-}
 
 const isAdmin = computed(() => authStore.canAccessAdmin);
+const route = inject(routeLocationKey, undefined);
+const isDemo = computed(() => import.meta.env.DEV && isAdmin.value && route?.query.demo === '1');
+const demoTimeline = ref<IntervalTimelineResponse | null>(null);
 const dashboardModeLabel = computed(() => {
+  if (isDemo.value) return t('演示数据', 'DEMO DATA');
   if (authStore.isAdmin) return "ADMIN MODE";
   if (authStore.isAuditAdmin) return "AUDIT MODE";
   return "PERSONAL MODE";
@@ -1084,7 +863,10 @@ const getStatIconColor = (_index: number): string => {
 };
 
 // 统计数据
-const stats = ref<DashboardStatCard[]>([]);
+const personalStats = ref<DashboardStatCard[]>([]);
+const stats = computed(() => isAdmin.value
+  ? dashboardSnapshot.value ? adminStatCards(dashboardSnapshot.value) : []
+  : personalStats.value);
 const todayStats = ref<{
   requests: number;
   tokens: number;
@@ -1094,19 +876,67 @@ const todayStats = ref<{
   cache_read_tokens?: number;
 }>({ requests: 0, tokens: 0, cost: 0 });
 
-const systemHealth = ref<{
-  avg_response_time: number;
-  error_rate: number;
-  error_requests: number;
-  fallback_count: number;
-  total_requests: number;
-} | null>(null);
-
-const costStats = ref<{
-  total_cost: number;
-  total_actual_cost: number;
-  cost_savings: number;
-} | null>(null);
+const dashboardSnapshot = ref<OverviewDashboardSummary | null>(null);
+const statsSince = computed(() => timestamp(dashboardSnapshot.value?.stats_since, dashboardSnapshot.value?.timezone));
+const statisticsScope = computed(() => `${t('统计自', 'Statistics since')} ${statsSince.value} · ${t('更新于', 'Updated at')} ${timestamp(dashboardSnapshot.value?.generated_at, dashboardSnapshot.value?.timezone)}`);
+const activityScope = computed(() => [
+  statisticsScope.value,
+  t('展示近365天', 'Last 365 days shown'),
+  dashboardSnapshot.value?.activity_timezone ?? dashboardSnapshot.value?.timezone,
+].filter(Boolean).join(' · '));
+const activityHeatmap = computed<ActivityHeatmap | null>(() => {
+  const snapshot = dashboardSnapshot.value;
+  if (!snapshot) return null;
+  const dateParts = new Intl.DateTimeFormat('en', {
+    timeZone: snapshot.activity_timezone ?? snapshot.timezone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date(snapshot.generated_at));
+  const datePart = (type: Intl.DateTimeFormatPartTypes) => Number(dateParts.find(part => part.type === type)?.value);
+  const today = Date.UTC(datePart('year'), datePart('month') - 1, datePart('day'));
+  const requestsByDate = new Map(snapshot.activity_days.map(day => [day.date, day.requests]));
+  const days = Array.from({ length: 365 }, (_, index) => {
+    const date = new Date(today - (364 - index) * 86_400_000).toISOString().slice(0, 10);
+    return { date, requests: requestsByDate.get(date) ?? 0 };
+  });
+  return {
+    start_date: new Date(today - 364 * 86_400_000).toISOString().slice(0, 10),
+    end_date: new Date(today).toISOString().slice(0, 10),
+    total_days: 365,
+    max_requests: days.reduce((max, day) => Math.max(max, day.requests), 0),
+    days,
+  };
+});
+const metricCount = (value: number | null | undefined) => value == null || !Number.isFinite(value) ? '—' : count(value);
+const compactTokens = (value: number | null | undefined) => value == null ? '—' : formatTokens(value);
+function cacheHitRate(metrics: { cache_read_tokens: number | null; cache_input_tokens: number | null } | undefined): string {
+  const read = metrics?.cache_read_tokens;
+  const input = metrics?.cache_input_tokens;
+  return read != null && input != null && Number.isFinite(read) && Number.isFinite(input) && input > 0
+    ? percent(read / input) : '—';
+}
+const performanceCards = computed(() => {
+  const today = dashboardSnapshot.value?.today;
+  const concurrency = dashboardSnapshot.value?.concurrency;
+  const duration = (value: number | null | undefined) => {
+    if (value == null || !Number.isFinite(value)) return '—';
+    return value < 1000 ? `${count(value)}ms` : `${count(value / 1000)}s`;
+  };
+  const concurrencyAvailable = concurrency && concurrency.coverage !== 'unavailable';
+  const concurrencyNote = concurrency?.coverage === 'complete'
+    ? t('当前节点 · 今日观测', 'Current node · Observed today')
+    : concurrency?.coverage === 'partial'
+      ? t('当前节点 · 部分时段', 'Current node · Partial observation')
+      : t('当前节点 · 暂无观测', 'Current node · No observation');
+  const concurrencyTooltip = `${concurrencyNote} · ${t('有效观测时间', 'Observed interval')}: ${timestamp(concurrency?.observed_from, dashboardSnapshot.value?.timezone)} — ${timestamp(concurrency?.observed_through, dashboardSnapshot.value?.timezone)}`;
+  return [
+    { key: 'first-byte', label: t('平均首字', 'Avg first byte'), value: duration(today?.avg_first_byte_ms) },
+    { key: 'response', label: t('平均响应', 'Avg response'), value: duration(today?.avg_response_ms) },
+    { key: 'concurrency-avg', label: t('平均并发', 'Average concurrency'), value: metricCount(concurrencyAvailable ? concurrency.avg : null), tooltip: concurrencyTooltip },
+    { key: 'concurrency-peak', label: t('峰值并发', 'Peak concurrency'), value: metricCount(concurrencyAvailable ? concurrency.peak : null), tooltip: concurrencyTooltip },
+    { key: 'stream', label: t('流式请求', 'Streaming requests'), value: metricCount(today?.stream_requests) },
+    { key: 'standard', label: t('标准请求', 'Standard requests'), value: metricCount(today?.standard_requests) },
+  ];
+});
 
 const cacheStats = ref<{
   cache_creation_tokens: number;
@@ -1130,25 +960,47 @@ const tokenBreakdown = ref<{
   cache_read: number;
 } | null>(null);
 
-const activeUsers = ref(0);
 const dailyStats = ref<DailyStat[]>([]);
 const providerSummary = ref<ProviderSummary[]>([]);
+const adminDailyCharts = ref<OverviewDashboardCharts | null>(null);
+const adminDailyRange = ref<OverviewRange | null>(null);
+type DisplayDailyStat = Omit<DailyStat, 'tokens' | 'cost' | 'avg_response_time' | 'model_breakdown' | 'unique_providers'> & {
+  tokens: number | null;
+  cost: number | null;
+  avg_response_time: number | null;
+  unique_providers?: number | null;
+  billableAmount?: OverviewAmount;
+};
+const displayDailyStats = computed<DisplayDailyStat[]>(() => {
+  if (!isAdmin.value || (import.meta.env.DEV && isDemo.value)) return dailyStats.value;
+  const charts = adminDailyCharts.value;
+  if (!charts) return [];
+  return charts.series.map(day => ({
+    date: day.bucket_start,
+    requests: day.request_count,
+    tokens: day.total_tokens,
+    cost: amountValue(day.billable_amount),
+    billableAmount: day.billable_amount,
+    avg_response_time: day.latency_ms.avg === null ? null : day.latency_ms.avg / 1000,
+    unique_models: new Set(charts.models.filter(model => Date.parse(model.bucket_start) === Date.parse(day.bucket_start) && model.id !== null).map(model => model.id)).size,
+    unique_providers: day.unique_providers,
+  }));
+});
 const dailyTimeRange = ref<DateRangeParams>(
-  getDateRangeFromPeriod("last7days"),
+  { ...getDateRangeFromPeriod("last7days"), granularity: 'day' },
 );
 // 统计周期
 const loadingDaily = ref(false);
+const dailyError = ref('');
 const loading = ref(false);
+const dashboardError = ref("");
+let dashboardRequestId = 0;
+let dashboardController: AbortController | null = null;
+let dashboardTimezone: string | null = null;
 let dailyStatsRequestId = 0;
-let dailyStatsLoadPromise: Promise<void> | null = null;
-let hasPendingDailyStatsLoad = false;
+let dailyStatsController: AbortController | null = null;
 let dailyStatsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-// 公告
-const announcements = ref<Announcement[]>([]);
-const loadingAnnouncements = ref(false);
-const selectedAnnouncement = ref<Announcement | null>(null);
-const detailDialogOpen = ref(false);
 
 const iconMap: Record<string, Component> = {
   Users,
@@ -1165,10 +1017,11 @@ const iconMap: Record<string, Component> = {
 const emptyStatPlaceholders = computed(() => {
   if (isAdmin.value) {
     return [
-      { name: "今日请求 / 今日费用", icon: Activity },
-      { name: "今日 Tokens", icon: Hash },
-      { name: "全站 RPM / 全站 TPM", icon: Activity },
-      { name: "在线用户 / 启用用户", icon: Users },
+      { name: "今日请求", icon: Activity },
+      { name: "今日 Token", icon: Hash },
+      { name: "今日缓存", icon: Database },
+      { name: "今日消费", icon: DollarSign },
+      { name: "今日活跃用户", icon: Users },
     ];
   }
   return [
@@ -1182,6 +1035,15 @@ const emptyStatPlaceholders = computed(() => {
 const statSkeletonCount = computed(() => emptyStatPlaceholders.value.length);
 
 const totalStats = computed(() => {
+  if (isAdmin.value && adminDailyCharts.value) {
+    const summary = adminDailyCharts.value.summary;
+    return {
+      requests: summary.request_count,
+      tokens: summary.total_tokens,
+      cost: amountValue(summary.billable_amount),
+      avgResponseTime: summary.latency_ms.avg === null ? null : summary.latency_ms.avg / 1000,
+    };
+  }
   if (dailyStats.value.length === 0) {
     return { requests: 0, tokens: 0, cost: 0, avgResponseTime: 0 };
   }
@@ -1204,7 +1066,7 @@ const totalStats = computed(() => {
   };
 });
 
-// 每日模型成本（堆叠柱状图）
+// 每日模型费用（堆叠柱状图）
 const MODEL_COLORS = [
   "rgba(59, 130, 246, 0.8)", // blue
   "rgba(239, 68, 68, 0.8)", // red
@@ -1217,6 +1079,13 @@ const MODEL_COLORS = [
 ];
 
 const dailyModelCostChartData = computed<ChartData<"bar">>(() => {
+  if (isAdmin.value && adminDailyCharts.value && adminDailyRange.value) {
+    const timezone = adminDailyRange.value.timezone;
+    return {
+      labels: adminDailyCharts.value.series.map(day => chartDate(day.bucket_start, timezone)),
+      datasets: modelDatasets(adminDailyCharts.value, t('未知模型', 'Unknown model'), t('其他模型', 'Other models')),
+    };
+  }
   if (dailyStats.value.length === 0) {
     return { labels: [], datasets: [] };
   }
@@ -1262,6 +1131,23 @@ const dailyModelCostChartData = computed<ChartData<"bar">>(() => {
     labels: dailyStats.value.map((stat) => formatDateForChart(stat.date)),
     datasets,
   };
+});
+
+const hasDailyModelCost = computed(() => dailyModelCostChartData.value.datasets.some(dataset => dataset.data.some(value => typeof value === 'number' && value !== 0)));
+const dailyCostsPartial = computed(() => {
+  const data = adminDailyCharts.value;
+  if (!data) return false;
+  const amounts = [data.summary, ...data.series, ...data.models, ...data.providers].map(row => row.billable_amount);
+  return amounts.some(amount => amountValue(amount) !== null)
+    && amounts.some(amount => amountValue(amount) === null || amount.status === 'known_subtotal' || amount.status === 'estimated_subtotal');
+});
+const dailyCostEmptyLabel = computed(() => {
+  const data = adminDailyCharts.value;
+  if (!data) return t('暂无数据', 'No data');
+  const amount = amountValue(data.summary.billable_amount);
+  if (amount === null || dailyCostsPartial.value) return t('费用尚未确认', 'Cost not yet known');
+  if (amount > 0) return t('暂无费用明细', 'No cost breakdown available');
+  return data.summary.request_count === 0 ? t('暂无数据', 'No data') : t('此周期暂无计费费用', 'No billable cost in this period');
 });
 
 const dailyModelCostChartOptions = computed<ChartOptions<"bar">>(() => ({
@@ -1313,7 +1199,7 @@ const dailyModelCostChartOptions = computed<ChartOptions<"bar">>(() => ({
   },
 }));
 
-// 提供商成本分布（环形图）
+// 提供商费用分布（环形图）
 const PROVIDER_COLORS = [
   "rgba(59, 130, 246, 0.8)", // blue
   "rgba(239, 68, 68, 0.8)", // red
@@ -1326,6 +1212,13 @@ const PROVIDER_COLORS = [
 ];
 
 const providerCostChartData = computed<ChartData<"doughnut">>(() => {
+  if (isAdmin.value && adminDailyCharts.value) {
+    const slices = providerSlices(adminDailyCharts.value.providers, t('未知提供商', 'Unknown provider'), t('其他提供商', 'Other providers'));
+    return {
+      labels: slices.map(slice => slice.label),
+      datasets: [{ data: slices.map(slice => slice.value), backgroundColor: slices.map((_, i) => PROVIDER_COLORS[i % PROVIDER_COLORS.length]), borderWidth: 2, borderColor: 'rgba(255, 255, 255, 0.1)' }],
+    };
+  }
   if (providerSummary.value.length === 0) {
     return { labels: [], datasets: [] };
   }
@@ -1471,106 +1364,166 @@ const dailyUsageTrendChartOptions = computed<ChartOptions<"line">>(() => {
 });
 
 onMounted(async () => {
-  checkScreenSize();
-  setupResizeObserver();
-  if (typeof window !== "undefined") {
-    window.addEventListener("resize", handleWindowResize);
-  }
   await Promise.all([
     loadDashboardData(),
     loadDailyStats(),
-    loadAnnouncements(),
   ]);
-  await nextTick();
-  setupTimelineResizeObserver();
-  updateAnnouncementsHeight();
-  updateTimelineLine();
 });
 
 onBeforeUnmount(() => {
-  if (typeof window !== "undefined") {
-    window.removeEventListener("resize", handleWindowResize);
-  }
-  if (statsPanelObserver && statsPanelRef.value) {
-    statsPanelObserver.unobserve(statsPanelRef.value);
-  }
-  statsPanelObserver?.disconnect();
-  statsPanelObserver = null;
-  announcementsTimelineObserver?.disconnect();
-  announcementsTimelineObserver = null;
   if (dailyStatsDebounceTimer) {
     clearTimeout(dailyStatsDebounceTimer);
     dailyStatsDebounceTimer = null;
   }
-  hasPendingDailyStatsLoad = false;
-  dailyStatsLoadPromise = null;
   dailyStatsRequestId += 1;
+  dailyStatsController?.abort();
+  dailyStatsController = null;
+  dashboardRequestId += 1;
+  dashboardController?.abort();
+  dashboardController = null;
 });
 
 async function loadDashboardData() {
+  if (isAdmin.value) {
+    return loadAdminDashboard();
+  }
+  const requestId = ++dashboardRequestId;
   loading.value = true;
+  dashboardError.value = "";
   try {
     const statsData = await dashboardApi.getStats({
       timezone: dailyTimeRange.value.timezone,
       tz_offset_minutes: dailyTimeRange.value.tz_offset_minutes,
     });
-    stats.value = statsData.stats.map((stat) => ({
+    if (requestId !== dashboardRequestId) return;
+    personalStats.value = statsData.stats.map((stat) => ({
       ...stat,
       icon: markRaw(iconMap[stat.icon] || Activity),
     }));
-    if (statsData.today) todayStats.value = statsData.today;
-    if (isAdmin.value) {
-      if (statsData.system_health) systemHealth.value = statsData.system_health;
-      if (statsData.cost_stats) costStats.value = statsData.cost_stats;
-      if (statsData.cache_stats) cacheStats.value = statsData.cache_stats;
-      if (statsData.token_breakdown)
-        tokenBreakdown.value = statsData.token_breakdown;
-      if (statsData.users) activeUsers.value = statsData.users.active;
-    } else {
-      if (statsData.cache_stats) cacheStats.value = statsData.cache_stats;
-      if (statsData.token_breakdown)
-        tokenBreakdown.value = statsData.token_breakdown;
-      if (statsData.monthly_cost !== undefined)
-        userMonthlyCost.value = statsData.monthly_cost;
-    }
+    applyDashboardDetails(statsData);
+  } catch {
+    if (requestId !== dashboardRequestId) return;
+    dashboardError.value = getI18nLocale() === 'en-US'
+      ? 'Dashboard statistics could not be loaded.' : '仪表盘统计加载失败，请重试。';
   } finally {
-    loading.value = false;
+    if (requestId === dashboardRequestId) loading.value = false;
   }
+}
+
+function selectedDashboardTimezone(): string {
+  return dailyTimeRange.value.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+async function loadAdminDashboard() {
+  const timezone = selectedDashboardTimezone();
+  if (dashboardController && dashboardTimezone === timezone) return;
+  dashboardController?.abort();
+  if (dashboardTimezone !== timezone) dashboardSnapshot.value = null;
+  dashboardTimezone = timezone;
+  const requestId = ++dashboardRequestId;
+  const controller = new AbortController();
+  dashboardController = controller;
+  loading.value = true;
+  dashboardError.value = '';
+  try {
+    let snapshot: OverviewDashboardSummary;
+    if (import.meta.env.DEV && isDemo.value) {
+      const demo = await import('@/features/overview/dashboard/demo');
+      snapshot = demo.createDashboardDemo(timezone);
+      if (requestId !== dashboardRequestId || controller.signal.aborted) return;
+      demoTimeline.value = demo.createDashboardTimelineDemo();
+    } else {
+      snapshot = await overviewApi.dashboardSummary(timezone, controller.signal);
+    }
+    if (requestId !== dashboardRequestId || controller.signal.aborted) return;
+    dashboardSnapshot.value = snapshot;
+  } catch {
+    if (requestId !== dashboardRequestId || controller.signal.aborted) return;
+    dashboardError.value = t('仪表盘统计加载失败，请重试。', 'Dashboard statistics could not be loaded. Please retry.');
+  } finally {
+    if (requestId === dashboardRequestId) {
+      loading.value = false;
+      dashboardController = null;
+    }
+  }
+}
+
+function applyDashboardDetails(statsData: DashboardStatsResponse) {
+  if (statsData.today) todayStats.value = statsData.today;
+  if (statsData.cache_stats) cacheStats.value = statsData.cache_stats;
+  if (statsData.token_breakdown) tokenBreakdown.value = statsData.token_breakdown;
+  if (statsData.monthly_cost !== undefined) {
+    userMonthlyCost.value = statsData.monthly_cost;
+  }
+}
+
+function adminStatCards(snapshot: OverviewDashboardSummary): DashboardStatCard[] {
+  const { today, total, users } = snapshot;
+  const cost = (value: typeof today.billable_amount) => {
+    const amount = amountValue(value);
+    return amount === null ? '—' : formatCurrency(amount);
+  };
+  const costHint = (value: typeof today.billable_amount) => {
+    if (value.status === 'known_subtotal' || value.status === 'estimated_subtotal') {
+      return t('部分请求价格未知，当前为已知金额小计。', 'Some request prices are unknown; this is the subtotal of known amounts.');
+    }
+    if (value.status === 'estimated') return t('估算金额', 'Estimated amount');
+    return amountValue(value) === null ? t('金额未知', 'Amount unknown') : undefined;
+  };
+  return [
+    { name: t('今日请求', "Today's requests"), value: metricCount(today.request_count), subValue: `${t('总请求', 'Total requests')} ${metricCount(total.request_count)}`, icon: markRaw(Activity) },
+    { name: t('今日 Token', "Today's tokens"), value: `${compactTokens(today.input_tokens)} / ${compactTokens(today.output_tokens)}`, subValue: `${t('总 Token', 'Total tokens')} ${compactTokens(total.total_tokens)}`, icon: markRaw(Hash) },
+    { name: t('今日缓存', "Today's cache"), value: cacheHitRate(today), valueHint: t('缓存读取 Token / 输入上下文 Token', 'Cache read tokens / input context tokens'), subValue: `${t('总缓存', 'Total cache')} ${cacheHitRate(total)}`, totalHint: `${statisticsScope.value} · ${t('累计缓存读取 Token / 累计输入上下文 Token', 'Total cache read tokens / total input context tokens')}`, icon: markRaw(Database) },
+    { name: t('今日消费', "Today's spending"), value: cost(today.billable_amount), valueHint: costHint(today.billable_amount), subValue: `${t('总消费', 'Total spending')} ${cost(total.billable_amount)}`, totalHint: [statisticsScope.value, costHint(total.billable_amount)].filter(Boolean).join(' · '), icon: markRaw(DollarSign) },
+    { name: t('今日活跃用户', 'Active users today'), value: metricCount(today.active_users), subValue: `${t('总用户', 'Total users')} ${metricCount(users.total)}`, userChange: { added: users.created_today, removed: users.deleted_today }, icon: markRaw(Users) },
+  ];
 }
 
 async function loadDailyStats() {
-  if (dailyStatsLoadPromise) {
-    hasPendingDailyStatsLoad = true;
-    return dailyStatsLoadPromise;
-  }
+  dailyStatsController?.abort();
+  const controller = new AbortController();
+  dailyStatsController = controller;
   const requestId = ++dailyStatsRequestId;
   loadingDaily.value = true;
-  dailyStatsLoadPromise = (async () => {
-    try {
-      const response = await dashboardApi.getDailyStats(dailyTimeRange.value);
-      if (requestId !== dailyStatsRequestId) return;
-      dailyStats.value = response.daily_stats;
-      providerSummary.value = response.provider_summary || [];
-    } catch {
-      if (requestId !== dailyStatsRequestId) return;
+  dailyError.value = '';
+  try {
+    if (isAdmin.value && !(import.meta.env.DEV && isDemo.value)) {
+      const range = dashboardChartRange(dailyTimeRange.value);
+      const response = await overviewApi.dashboardCharts(range, controller.signal);
+      if (requestId !== dailyStatsRequestId || controller.signal.aborted) return;
+      adminDailyCharts.value = response.data;
+      adminDailyRange.value = range;
       dailyStats.value = [];
       providerSummary.value = [];
-    } finally {
-      if (requestId === dailyStatsRequestId) {
-        loadingDaily.value = false;
-      }
+    } else {
+      const response = import.meta.env.DEV && isDemo.value
+        ? (await import('@/features/overview/dashboard/demo')).createDashboardDailyDemo(dailyTimeRange.value)
+        : await dashboardApi.getDailyStats(dailyTimeRange.value);
+      if (requestId !== dailyStatsRequestId || controller.signal.aborted) return;
+      adminDailyCharts.value = null;
+      adminDailyRange.value = null;
+      dailyStats.value = response.daily_stats;
+      providerSummary.value = response.provider_summary || [];
     }
-  })().finally(() => {
-    dailyStatsLoadPromise = null;
-    if (hasPendingDailyStatsLoad) {
-      hasPendingDailyStatsLoad = false;
-      void loadDailyStats();
+  } catch {
+    if (requestId !== dailyStatsRequestId || controller.signal.aborted) return;
+    if (isAdmin.value) dailyError.value = t('统计加载失败，请重试', 'Statistics could not be loaded. Please retry.');
+    dailyStats.value = [];
+    providerSummary.value = [];
+    adminDailyCharts.value = null;
+    adminDailyRange.value = null;
+  } finally {
+    if (requestId === dailyStatsRequestId) {
+      loadingDaily.value = false;
+      dailyStatsController = null;
     }
-  });
-  return dailyStatsLoadPromise;
+  }
 }
 
 function scheduleDailyStatsLoad() {
+  dailyStatsController?.abort();
+  dailyStatsRequestId += 1;
+  loadingDaily.value = true;
   if (dailyStatsDebounceTimer) {
     clearTimeout(dailyStatsDebounceTimer);
   }
@@ -1580,7 +1533,30 @@ function scheduleDailyStatsLoad() {
   }, 120);
 }
 
-watch(dailyTimeRange, scheduleDailyStatsLoad, { deep: true });
+watch(() => JSON.stringify([
+  dailyTimeRange.value.from, dailyTimeRange.value.to,
+  dailyTimeRange.value.start_date, dailyTimeRange.value.end_date,
+  dailyTimeRange.value.preset, dailyTimeRange.value.granularity,
+  dailyTimeRange.value.timezone, dailyTimeRange.value.tz_offset_minutes,
+]), scheduleDailyStatsLoad);
+watch(isDemo, () => {
+  dashboardController?.abort();
+  dashboardController = null;
+  dashboardSnapshot.value = null;
+  demoTimeline.value = null;
+  dailyStatsRequestId += 1;
+  dailyStatsController?.abort();
+  dailyStats.value = [];
+  providerSummary.value = [];
+  adminDailyCharts.value = null;
+  adminDailyRange.value = null;
+  dailyError.value = '';
+  void loadDashboardData();
+  void loadDailyStats();
+});
+watch(() => dailyTimeRange.value.timezone, () => {
+  if (isAdmin.value) void loadDashboardData();
+});
 
 function formatDate(dateString: string): string {
   const date = parseDateLike(dateString);
@@ -1606,229 +1582,28 @@ function formatDateForChart(dateString: string): string {
   return date.toLocaleDateString(getI18nLocale(), { month: "numeric", day: "numeric" });
 }
 
-function formatResponseTime(seconds: number): string {
+function formatDailyCost(cost: number | null): string {
+  return cost === null ? '—' : `$${cost.toFixed(4)}`;
+}
+
+function formatDailyDate(value: string): string {
+  if (isAdmin.value && adminDailyRange.value) {
+    const timezone = adminDailyRange.value.timezone;
+    const date = zonedInput(value, timezone).slice(0, 10);
+    const today = zonedInput(new Date(), timezone).slice(0, 10);
+    const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+    if (date === today) return formatRelativeTime(0, 'day');
+    if (date === yesterday) return formatRelativeTime(-1, 'day');
+    return parseDateLike(date).toLocaleDateString(getI18nLocale(), { month: '2-digit', day: '2-digit', weekday: 'short' });
+  }
+  return formatDate(value);
+}
+
+function formatResponseTime(seconds: number | null): string {
+  if (seconds === null) return '—';
   if (seconds === 0) return "-";
   if (seconds < 1) return `${(seconds * 1000).toFixed(0)}ms`;
   return `${seconds.toFixed(2)}s`;
 }
 
-// 公告相关
-async function loadAnnouncements() {
-  loadingAnnouncements.value = true;
-  try {
-    const response = await announcementApi.getAnnouncements({
-      active_only: true,
-      limit: 100,
-    });
-    announcements.value = response.items;
-  } catch {
-    announcements.value = [];
-  } finally {
-    loadingAnnouncements.value = false;
-    await nextTick();
-    setupTimelineResizeObserver();
-    updateTimelineLine();
-  }
-}
-
-watch(
-  () => announcements.value.length,
-  async () => {
-    await nextTick();
-    setupTimelineResizeObserver();
-    updateTimelineLine();
-  },
-);
-
-async function viewAnnouncementDetail(announcement: Announcement) {
-  if (!announcement.is_read && !isAdmin.value) {
-    try {
-      await announcementApi.markAsRead(announcement.id);
-      announcement.is_read = true;
-    } catch {
-      /* 静默忽略标记已读错误 */
-    }
-  }
-  selectedAnnouncement.value = announcement;
-  detailDialogOpen.value = true;
-}
-
-function getPlainText(content: string): string {
-  const cleaned = content
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/`[^`]*`/g, " ")
-    .replace(/!\[[^\]]*]\([^)]*\)/g, " ")
-    .replace(/\[[^\]]*]\(([^)]*)\)/g, "$1")
-    .replace(/[#>*_~]/g, "")
-    .replace(/\n+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (cleaned.length <= 100) return cleaned;
-  return `${cleaned.slice(0, 100).trim()}...`;
-}
-
-function getAnnouncementIcon(type: string) {
-  switch (type) {
-    case "important":
-      return AlertCircle;
-    case "warning":
-      return AlertTriangle;
-    case "maintenance":
-      return Wrench;
-    default:
-      return Info;
-  }
-}
-
-function getAnnouncementIconColor(type: string) {
-  switch (type) {
-    case "important":
-      return "text-rose-600 dark:text-rose-400";
-    case "warning":
-      return "text-amber-600 dark:text-amber-400";
-    case "maintenance":
-      return "text-orange-600 dark:text-orange-400";
-    default:
-      return "text-primary dark:text-primary";
-  }
-}
-
-function formatAnnouncementDate(dateString: string): string {
-  const date = new Date(dateString);
-  const now = new Date();
-  const diff = now.getTime() - date.getTime();
-  const minutes = Math.floor(diff / (1000 * 60));
-  const hours = Math.floor(diff / (1000 * 60 * 60));
-  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-  if (minutes < 1) return formatRelativeTime(0, 'second');
-  if (minutes < 60) return formatRelativeTime(-minutes, 'minute');
-  if (hours < 24) return formatRelativeTime(-hours, 'hour');
-  if (days < 7) return formatRelativeTime(-days, 'day');
-  return date.toLocaleDateString(getI18nLocale(), {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function getAnnouncementDotColor(type: string): string {
-  switch (type) {
-    case "important":
-      return "bg-rose-500 dark:bg-rose-400";
-    case "warning":
-      return "bg-amber-500 dark:bg-amber-400";
-    case "maintenance":
-      return "bg-orange-500 dark:bg-orange-400";
-    default:
-      return "bg-emerald-500 dark:bg-emerald-400";
-  }
-}
-
-function formatFullDate(dateString: string): string {
-  const date = new Date(dateString);
-  return date.toLocaleDateString(getI18nLocale(), {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function renderMarkdown(content: string): string {
-  const rawHtml = marked(content) as string;
-  return sanitizeMarkdown(rawHtml);
-}
 </script>
-
-<style scoped>
-.line-clamp-1,
-.line-clamp-2 {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.line-clamp-1 {
-  -webkit-line-clamp: 1;
-}
-.line-clamp-2 {
-  -webkit-line-clamp: 2;
-}
-
-.scrollbar-thin::-webkit-scrollbar {
-  width: 5px;
-}
-.scrollbar-thin::-webkit-scrollbar-track {
-  background: transparent;
-}
-.scrollbar-thin::-webkit-scrollbar-thumb {
-  background: rgb(203 213 225);
-  border-radius: 2px;
-}
-.dark .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: rgb(71 85 105);
-}
-.scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: rgb(148 163 184);
-}
-.dark .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: rgb(100 116 139);
-}
-
-:deep(.prose) {
-  color: var(--color-text);
-}
-:deep(.prose p) {
-  margin-top: 0.75em;
-  margin-bottom: 0.75em;
-  line-height: 1.65;
-}
-:deep(.prose ul),
-:deep(.prose ol) {
-  margin-top: 0.75em;
-  margin-bottom: 0.75em;
-  padding-left: 1.5em;
-}
-:deep(.prose li) {
-  margin-top: 0.25em;
-  margin-bottom: 0.25em;
-}
-:deep(.prose h1),
-:deep(.prose h2),
-:deep(.prose h3),
-:deep(.prose h4) {
-  margin-top: 1.5em;
-  margin-bottom: 0.75em;
-  font-weight: 600;
-  color: var(--color-text);
-}
-:deep(.prose code) {
-  background: var(--color-code-background);
-  color: var(--color-code-text);
-  padding: 0.2em 0.4em;
-  border-radius: 4px;
-  font-size: 0.9em;
-  font-weight: 500;
-}
-:deep(.prose pre) {
-  background: var(--color-code-background);
-  padding: 1em;
-  border-radius: 8px;
-  overflow-x: auto;
-}
-:deep(.prose a) {
-  color: var(--book-cloth);
-  text-decoration: underline;
-}
-:deep(.prose blockquote) {
-  border-left: 3px solid var(--book-cloth);
-  padding-left: 1em;
-  margin-left: 0;
-  font-style: italic;
-  color: var(--cloud-dark);
-}
-:deep(.prose strong) {
-  font-weight: 600;
-}
-</style>

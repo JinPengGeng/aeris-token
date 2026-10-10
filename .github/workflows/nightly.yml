@@ -213,6 +213,14 @@ jobs:
             echo "enabled=true" >> "${GITHUB_OUTPUT}"
           fi
 
+  # Keep the scheduled backend coverage in one place so it cannot drift from PR CI.
+  rust_ci:
+    name: Rust CI
+    needs: source
+    uses: ./.github/workflows/rust-ci.yml
+    with:
+      full_scope: true
+
   frontend:
     name: Build frontend
     needs: source

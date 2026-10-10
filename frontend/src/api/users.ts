@@ -121,9 +121,28 @@ export interface UserBatchRolePayload {
   role: UserRole
 }
 
-export type UserBatchAction = 'enable' | 'disable' | 'update_access_control' | 'update_role'
+export type UserBatchBalanceOperation = 'add' | 'deduct'
 
-export type UserBatchActionPayload = UserBatchAccessControlPayload | UserBatchRolePayload
+export interface UserBatchBalanceAdjustmentPayload {
+  operation: UserBatchBalanceOperation
+  amount: number
+}
+
+export function buildUserBatchBalanceAdjustmentPayload(
+  operation: UserBatchBalanceOperation,
+  amountInput: string | number,
+): UserBatchBalanceAdjustmentPayload | null {
+  const amount = typeof amountInput === 'number' ? amountInput : Number(amountInput.trim())
+  if (!Number.isFinite(amount) || amount <= 0) return null
+  return { operation, amount }
+}
+
+export type UserBatchAction = 'enable' | 'disable' | 'update_access_control' | 'update_role' | 'adjust_wallet_balance'
+
+export type UserBatchActionPayload =
+  | UserBatchAccessControlPayload
+  | UserBatchRolePayload
+  | UserBatchBalanceAdjustmentPayload
 
 export interface UserBatchToggleActionRequest {
   selection: UserBatchSelection
@@ -143,10 +162,18 @@ export interface UserBatchRoleActionRequest {
   payload: UserBatchRolePayload
 }
 
+export interface UserBatchBalanceActionRequest {
+  selection: UserBatchSelection
+  action: 'adjust_wallet_balance'
+  payload: UserBatchBalanceAdjustmentPayload
+  idempotency_key: string
+}
+
 export type UserBatchActionRequest =
   | UserBatchToggleActionRequest
   | UserBatchAccessControlActionRequest
   | UserBatchRoleActionRequest
+  | UserBatchBalanceActionRequest
 
 export interface UserBatchActionFailure {
   user_id: string
@@ -158,6 +185,10 @@ export interface UserBatchActionResponse {
   success: number
   failed: number
   failures: UserBatchActionFailure[]
+  interrupted?: boolean
+  completed_user_ids?: string[]
+  uncertain_user_ids?: string[]
+  unprocessed_user_ids?: string[]
   warnings?: UserBatchSelectionWarning[]
   action?: string
   modified_fields?: string[]
@@ -441,9 +472,14 @@ export const usersApi = {
     return response.data
   },
 
-  async listUserPlanEntitlements(userId: string): Promise<AdminUserPlanEntitlementsResponse> {
+  async listUserPlanEntitlements(
+    userId: string,
+    options: { include_inactive?: boolean } = {},
+    signal?: AbortSignal,
+  ): Promise<AdminUserPlanEntitlementsResponse> {
     const response = await apiClient.get<AdminUserPlanEntitlementsResponse>(
-      `/api/admin/users/${userId}/billing/entitlements`
+      `/api/admin/users/${userId}/billing/entitlements`,
+      { params: options, signal },
     )
     return response.data
   },

@@ -30,6 +30,10 @@ export interface UsageRecord {
   cache_read_input_tokens?: number
   total_tokens: number
   cost?: number
+  billing_multiplier?: number | null
+  routing_group_id?: string | null
+  routing_group_name?: string | null
+  billing_cost?: number | null
   response_time?: number
   response_time_ms?: number | null
   first_byte_time_ms?: number | null
@@ -188,6 +192,8 @@ export interface UsageMarginRow {
 export type UsageMarginGranularity = 'day' | 'week' | 'month'
 
 export interface UsageFilters {
+  from?: string
+  to?: string
   user_id?: string // UUID
   user_group_id?: string // UUID
   provider_id?: string // UUID
@@ -249,6 +255,10 @@ type ActiveUsageRequestsResponse = {
     cost: number
     actual_cost?: number | null
     rate_multiplier?: number | null
+    billing_multiplier?: number | null
+    routing_group_id?: string | null
+    routing_group_name?: string | null
+    billing_cost?: number | null
     response_time_ms: number | null
     first_byte_time_ms: number | null
     end_to_end_time_ms?: number | null
@@ -662,6 +672,17 @@ export const usageApi = {
   },
 
   async getAllUsageRecords(params?: {
+    from?: string
+    to?: string
+    provider_id?: string
+    api_key_id?: string
+    request_id?: string
+    attribution_kind?: string
+    endpoint_kind?: string
+    request_type?: string
+    is_stream?: boolean
+    has_format_conversion?: boolean
+    slow_threshold_ms?: number
     start_date?: string
     end_date?: string
     preset?: string
@@ -702,6 +723,17 @@ export const usageApi = {
   },
 
   async getAllUsageRecordTotal(params?: {
+    from?: string
+    to?: string
+    provider_id?: string
+    api_key_id?: string
+    request_id?: string
+    attribution_kind?: string
+    endpoint_kind?: string
+    request_type?: string
+    is_stream?: boolean
+    has_format_conversion?: boolean
+    slow_threshold_ms?: number
     start_date?: string
     end_date?: string
     preset?: string
@@ -739,11 +771,15 @@ export const usageApi = {
    */
   async getActiveRequests(
     ids?: string[],
-    timeRange?: Pick<UsageFilters, 'start_date' | 'end_date' | 'preset' | 'timezone' | 'tz_offset_minutes'>
+    timeRange?: Pick<UsageFilters, 'from' | 'to' | 'start_date' | 'end_date' | 'preset' | 'timezone' | 'tz_offset_minutes'>
   ): Promise<ActiveUsageRequestsResponse> {
     const params: Record<string, string | number> = {}
     if (ids?.length) {
       params.ids = ids.join(',')
+    }
+    if (timeRange?.from && timeRange.to) {
+      params.from = timeRange.from
+      params.to = timeRange.to
     }
     if (timeRange?.start_date) {
       params.start_date = timeRange.start_date

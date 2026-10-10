@@ -18,7 +18,7 @@ EXEMPT_FILES=(
   "20260518000000_add_usage_counter_deltas.sql"
   "20260903010000_add_daily_usage_limits.sql"
   "20260913010000_add_request_fund_reservations.sql"
-  "20260923000000_add_provider_cost_catalogs.sql"
+  "20260923000100_add_provider_cost_catalogs.sql"
 )
 
 is_exempt() {

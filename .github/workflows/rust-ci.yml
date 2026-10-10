@@ -3,10 +3,11 @@ name: Rust CI
 on:
   workflow_call:
     inputs:
-      force_full:
-        description: Run the full Rust/DB graph for reusable workflow callers.
+      full_scope:
+        description: "Run all Rust and shell scopes, used by Nightly"
+        required: false
         type: boolean
-        default: true
+        default: false
   workflow_dispatch:
   push:
     branches:
@@ -16,8 +17,10 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
+      - ".cargo/**"
       - "crates/**"
       - "apps/**"
+      - "*.sql"
       - "Dockerfile.app.local"
       - "frontend/vite.config.ts"
       - "frontend/src/**"
@@ -47,7 +50,42 @@ on:
       - ".github/workflows/release.yml"
       - ".github/workflows/rust-ci.yml"
       - ".github/workflows/prometheus-ci.yml"
+      - "tests/compose_database_config_test.py"
+      - "tests/install_*_test.sh"
+      - "tests/deploy_*_test.sh"
+      - "tests/update_*_test.sh"
+      - "tests/release_supply_chain_test.sh"
+      - "tests/tunnel_installer_config_security_test.sh"
+      - ".github/workflows/*.yml"
+      - ".github/workflows/*.yaml"
   pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "crates/**"
+      - "apps/**"
+      - "*.sql"
+      - "install.sh"
+      - "deploy.sh"
+      - "update.sh"
+      - "generate_keys.sh"
+      - ".env.example"
+      - "README.md"
+      - "Dockerfile.app"
+      - "docker-compose.yml"
+      - "docker-compose.single-node.yml"
+      - "docker-compose.local.yml"
+      - "docker-compose.release-local.yml"
+      - "tests/compose_database_config_test.py"
+      - "tests/install_*_test.sh"
+      - "tests/deploy_*_test.sh"
+      - "tests/update_*_test.sh"
+      - "tests/release_supply_chain_test.sh"
+      - "tests/tunnel_installer_config_security_test.sh"
+      - ".github/workflows/*.yml"
+      - ".github/workflows/*.yaml"
 
 concurrency:
   group: rust-ci-${{ github.event_name }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -78,13 +116,61 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36
-        id: filter
-        if: ${{ github.event_name == 'pull_request' && !inputs.force_full }}
-        with:
-          token: ''
-          base: ${{ github.base_ref }}
-          filters: .github/change-filters.yml
+      - name: Classify changed paths
+        id: scope
+        shell: bash
+        env:
+          RUST_CI_FULL_SCOPE: ${{ inputs.full_scope || false }}
+        run: |
+          # 任何命令失败都必须让本 job 失败，否则 git fetch/diff 出错后仍会写出
+          # rust=false/shell=false，下游会误判为“无需测试”而假绿放行。
+          set -euo pipefail
+
+          # Nightly 通过 workflow_call 显式传入 full_scope；普通 push/PR 只按源码和构建
+          # 指纹触发 Rust jobs，安装脚本、Compose、README 等由 shell scope 覆盖。
+          if [ "$RUST_CI_FULL_SCOPE" = "true" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "shell=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] \
+            && [ -n "${GITHUB_BASE_REF:-}" ] \
+            && [ -n "${GITHUB_SHA:-}" ]; then
+            git fetch --no-tags origin "$GITHUB_BASE_REF" --depth=1
+            changed_paths=$(git diff --name-only "origin/$GITHUB_BASE_REF...$GITHUB_SHA")
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] \
+            && [ -n "${GITHUB_EVENT_BEFORE:-}" ] \
+            && [ "$GITHUB_EVENT_BEFORE" != "0000000000000000000000000000000000000000" ] \
+            && [ -n "${GITHUB_SHA:-}" ]; then
+            changed_paths=$(git diff --name-only "$GITHUB_EVENT_BEFORE" "$GITHUB_SHA")
+          else
+            changed_paths=$(git ls-files)
+          fi
+
+          # 防御性兜底：diff 结果为空（异常事件或比较失败）时按全量运行，
+          # 宁可多跑也不能漏测。
+          if [ -z "$changed_paths" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "shell=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          rust=false
+          shell=false
+          while IFS= read -r path; do
+            case "$path" in
+              Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/*|*.rs|*/Cargo.toml|*/build.rs|*.sql|.github/workflows/*.yml|.github/workflows/*.yaml)
+                rust=true
+                ;;
+              *.sh|*.py|README.md|*/README.md|.env.example|Dockerfile*|docker-compose*.yml|docker-compose*.yaml)
+                shell=true
+                ;;
+            esac
+          done <<< "$changed_paths"
+
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "shell=$shell" >> "$GITHUB_OUTPUT"
 
   shell_security:
     name: Shell security fixtures
@@ -878,6 +964,13 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           AETHER_TEST_DATABASE_URL: postgres://aether:aether@127.0.0.1:5432/aether_test
         run: cargo test -p aether-data-postgres live_payment_callback --lib -- --ignored --nocapture
+
+      - name: Run Postgres batch wallet deduction regression
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          AETHER_TEST_DATABASE_URL: postgres://aether:aether@127.0.0.1:5432/aether_test
+        run: cargo test -p aether-data-postgres live_bulk_wallet_adjustment_persists_actual_delta_and_skips_zero_ledger --lib -- --ignored --nocapture
 
       - name: Run Postgres API key lifecycle tests
         env:

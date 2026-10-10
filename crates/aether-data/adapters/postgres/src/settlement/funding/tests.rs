@@ -121,6 +121,7 @@ pub(crate) async fn persist_usage(
         billing_status: "pending".to_string(),
         total_cost_usd: cost,
         actual_total_cost_usd: cost,
+        billing_cost_usd: None,
         finalized_at_unix_secs: Some(1_800_000_001),
     }
 }
@@ -237,6 +238,7 @@ async fn live_request_funds_retention_preserves_reconciliation_and_allows_later_
             api_key_id: Some("key-a".to_string()), api_key_is_standalone: false,
             provider_id: None, status: "completed".to_string(), billing_status: "pending".to_string(),
             total_cost_usd: 0.06, actual_total_cost_usd: 0.06,
+        billing_cost_usd: None,
             finalized_at_unix_secs: Some(now.timestamp() as u64),
         };
         repo.finalize_request_funds(FinalizeRequestFundsInput {
@@ -387,9 +389,13 @@ async fn live_request_funds_preserve_decimal_holds_across_ordinary_settlement_an
                         let outcome = wallet_repo.adjust_wallet_balance(AdjustWalletBalanceInput {
                             wallet_id: "wallet".to_string(), amount_usd: -amount,
                             balance_type: bucket.to_string(), operator_id: None, description: None,
+            batch_context: None,
+            clamp_deduction_to_available_balance: false,
                         }).await;
                         if should_apply {
-                            let (wallet, transaction) = outcome.expect("exact boundary adjustment must succeed").unwrap();
+                            let (wallet, Some(transaction)) = outcome.expect("exact boundary adjustment must succeed").unwrap() else {
+                                panic!("adjustment transaction missing")
+                            };
                             assert_eq!(wallet.balance + wallet.gift_balance, 0.20);
                             assert_eq!(transaction.recharge_balance_after + transaction.gift_balance_after, 0.20);
                         } else {
@@ -440,6 +446,8 @@ async fn live_request_funds_preserve_decimal_holds_across_ordinary_settlement_an
         let (adjusted, _) = wallet_repo.adjust_wallet_balance(AdjustWalletBalanceInput {
             wallet_id: "wallet".to_string(), amount_usd: -0.50,
             balance_type: "gift".to_string(), operator_id: None, description: None,
+            batch_context: None,
+            clamp_deduction_to_available_balance: false,
         }).await.unwrap().unwrap();
         assert_eq!((adjusted.balance, adjusted.gift_balance), (-0.10, 0.0));
         sqlx::query("UPDATE wallets SET balance=-0.10, gift_balance=0 WHERE id='wallet'")
@@ -590,7 +598,8 @@ async fn live_request_funds_reserve_settle_release_protect_shared_wallet_and_rol
 
         let wallet = SqlxWalletRepository::new(first.clone());
         assert!(wallet.adjust_wallet_balance(AdjustWalletBalanceInput { wallet_id: "wallet".to_string(),
-            amount_usd: -0.03, balance_type: "recharge".to_string(), operator_id: None, description: None }).await.is_err());
+            amount_usd: -0.03, balance_type: "recharge".to_string(), operator_id: None, description: None,
+            batch_context: None, clamp_deduction_to_available_balance: false }).await.is_err());
         sqlx::query("INSERT INTO refund_requests (id,refund_no,wallet_id,user_id,amount_usd,status,source_type,refund_mode,created_at,updated_at) VALUES ('refund','refund-no','wallet','owner',0.03,'approved','wallet','offline',NOW(),NOW())")
             .execute(&first).await.unwrap();
         assert!(matches!(wallet.process_admin_wallet_refund(ProcessAdminWalletRefundInput {

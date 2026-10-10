@@ -104,6 +104,7 @@ ALTER TABLE ONLY public.payment_orders ADD CONSTRAINT uq_payment_orders_order_no
 CREATE INDEX IF NOT EXISTS idx_payment_orders_wallet_created ON public.payment_orders USING btree (wallet_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_user_created ON public.payment_orders USING btree (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_status ON public.payment_orders USING btree (status);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_status_credited_user ON public.payment_orders USING btree (status, credited_at, user_id);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_gateway_order_id ON public.payment_orders USING btree (gateway_order_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_orders_payment_method_gateway_order_id ON public.payment_orders USING btree (payment_method, gateway_order_id);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_kind_status ON public.payment_orders USING btree (order_kind, status);
@@ -342,4 +343,18 @@ CREATE INDEX IF NOT EXISTS idx_redeem_codes_batch_created ON public.redeem_codes
 CREATE INDEX IF NOT EXISTS idx_redeem_codes_status ON public.redeem_codes USING btree (status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_redeem_codes_redeemed_user ON public.redeem_codes USING btree (redeemed_by_user_id, redeemed_at);
 CREATE INDEX IF NOT EXISTS idx_redeem_codes_redeemed_order ON public.redeem_codes USING btree (redeemed_payment_order_id);
+
+CREATE TABLE IF NOT EXISTS public.admin_user_wallet_balance_batches (
+    admin_user_id character varying(64) NOT NULL,
+    idempotency_key character varying(128) NOT NULL,
+    request_fingerprint character varying(64) NOT NULL,
+    target_user_ids jsonb NOT NULL,
+    missing_user_ids jsonb NOT NULL,
+    warnings jsonb NOT NULL,
+    user_outcomes jsonb NOT NULL,
+    created_at_unix_secs bigint NOT NULL,
+    updated_at_unix_secs bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.admin_user_wallet_balance_batches ADD CONSTRAINT admin_user_wallet_balance_batches_pkey PRIMARY KEY (admin_user_id, idempotency_key);
 

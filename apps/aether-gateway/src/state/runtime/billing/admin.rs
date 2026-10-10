@@ -610,6 +610,17 @@ impl AppState {
             .map_err(data_error)
     }
 
+    pub(crate) async fn list_user_plan_entitlements_with_history(
+        &self,
+        user_id: &str,
+        include_inactive: bool,
+    ) -> Result<Option<Vec<UserPlanEntitlementRecord>>, GatewayError> {
+        self.data
+            .list_user_plan_entitlements_with_history(user_id, include_inactive)
+            .await
+            .map_err(data_error)
+    }
+
     pub(crate) async fn revoke_user_plan_entitlement(
         &self,
         user_id: &str,
@@ -631,10 +642,18 @@ impl AppState {
         &self,
         user_id: &str,
     ) -> Result<Option<UserDailyQuotaAvailabilityRecord>, GatewayError> {
-        self.data
+        let mut quota = self
+            .data
             .find_user_daily_quota_availability(user_id)
             .await
-            .map_err(data_error)
+            .map_err(data_error)?;
+        if let Some(quota) = quota.as_mut() {
+            quota.allow_wallet_overage = self
+                .read_user_preferences(user_id)
+                .await?
+                .is_some_and(|preferences| preferences.allow_wallet_overage);
+        }
+        Ok(quota)
     }
 
     pub(crate) async fn find_user_daily_quota_availability_for_auth(

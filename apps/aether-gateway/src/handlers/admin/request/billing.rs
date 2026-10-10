@@ -121,6 +121,7 @@ impl<'a> AdminAppState<'a> {
 
     pub(crate) async fn list_admin_wallets(
         &self,
+        user_id: Option<&str>,
         status: Option<&str>,
         owner_type: Option<&str>,
         limit: usize,
@@ -133,7 +134,7 @@ impl<'a> AdminAppState<'a> {
         GatewayError,
     > {
         self.app
-            .list_admin_wallets(status, owner_type, limit, offset)
+            .list_admin_wallets(user_id, status, owner_type, limit, offset)
             .await
     }
 
@@ -387,10 +388,11 @@ impl<'a> AdminAppState<'a> {
         balance_type: &str,
         operator_id: Option<&str>,
         description: Option<&str>,
+        clamp_deduction_to_available_balance: bool,
     ) -> Result<
         Option<(
             aether_data::repository::wallet::StoredWalletSnapshot,
-            crate::AdminWalletTransactionRecord,
+            Option<crate::AdminWalletTransactionRecord>,
         )>,
         GatewayError,
     > {
@@ -401,6 +403,7 @@ impl<'a> AdminAppState<'a> {
                 balance_type,
                 operator_id,
                 description,
+                clamp_deduction_to_available_balance,
             )
             .await
     }

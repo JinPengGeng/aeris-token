@@ -776,6 +776,8 @@ async fn wallet_audit_unsupported_adapter_is_non_mutating_and_http_fallback_is_p
                 balance_type: "recharge".to_string(),
                 operator_id: None,
                 description: None,
+                batch_context: None,
+                clamp_deduction_to_available_balance: false,
             },
             &audit
         )
