@@ -620,8 +620,7 @@ FOR UPDATE OF user_plan_entitlements
     .map_postgres_err()?;
     let mut allow_wallet_overage = true;
     for grant in grants {
-        allow_wallet_overage &= user_allow_wallet_overage
-            .unwrap_or(grant.allow_wallet_overage);
+        allow_wallet_overage &= user_allow_wallet_overage.unwrap_or(grant.allow_wallet_overage);
         let used = sqlx::query_scalar::<_, i64>(
             r#"
 SELECT CEIL(COALESCE(SUM(amount_usd), 0) * 100000000)::bigint

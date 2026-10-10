@@ -1231,15 +1231,16 @@ ORDER BY user_plan_entitlements.expires_at ASC,
         let mut total_quota_usd = 0.0;
         let mut used_usd = 0.0;
         let mut remaining_usd = 0.0;
-        let allow_wallet_overage = sqlx::query_scalar::<_, bool>(
+        let user_allow_wallet_overage = sqlx::query_scalar::<_, bool>(
             "SELECT allow_wallet_overage FROM user_preferences WHERE user_id = $1",
         )
         .bind(user_id)
         .fetch_optional(&self.pool)
         .await
-        .map_postgres_err()?
-        .unwrap_or(false);
+        .map_postgres_err()?;
+        let mut allow_wallet_overage = true;
         for grant in &grants {
+            allow_wallet_overage &= user_allow_wallet_overage.unwrap_or(grant.allow_wallet_overage);
             let mut used = 0.0;
             for usage_date in &grant.usage_dates {
                 used += sqlx::query_scalar::<_, Option<f64>>(
