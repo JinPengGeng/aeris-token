@@ -219,7 +219,7 @@ jobs:
     needs: source
     uses: ./.github/workflows/rust-ci.yml
     with:
-      full_scope: true
+      force_full: true
 
   frontend:
     name: Build frontend

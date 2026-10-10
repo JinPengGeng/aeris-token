@@ -1,0 +1,14 @@
+{
+  "exceptions": [
+    {
+      "directory": "frontend",
+      "package": "braces",
+      "ghsa_id": "GHSA-vfj7-8cjw-p6xm",
+      "owner": "aeris-token maintainers",
+      "created_on": "2026-10-10",
+      "expires_on": "2026-11-09",
+      "review_cadence": "at least every 30 days and on each braces/tailwindcss release",
+      "rationale": "braces has no fixed release for GHSA-vfj7-8cjw-p6xm (affects all published versions). It only reaches the frontend through the tailwindcss 3.x -> chokidar/fast-glob build-time dependency chain, so the pattern-parsing DoS is not reachable from production runtime or CI build inputs. Moving to tailwindcss 4.x is a breaking migration tracked separately; dependabot PR #597 (dompurify) is unrelated. This PR additionally fixes the fixable frontend advisories (vue, @vue/server-renderer, brace-expansion) and the aether-vscodex/web advisories (brace-expansion, source-map-js) via npm audit fix."
+    }
+  ]
+}
