@@ -60,12 +60,13 @@ pub(crate) use self::request::{
     AdminRequestContext, AdminRouteRequest, AdminRouteResponse, AdminRouteResult, SystemExportMode,
 };
 pub(crate) use self::routes::maybe_build_local_admin_response;
+pub(crate) use self::system::{
+    build_admin_modules_status_payload, execute_admin_system_import_exclusively,
+    release_admin_system_import_lease, try_acquire_admin_system_import_lease,
+    AdminSystemImportLockError,
+};
 #[cfg(test)]
 pub(crate) use self::system::{
     clear_proxy_node_references_with_cache_failure_for_tests,
     override_proxy_connectivity_probe_url_for_tests,
-};
-pub(crate) use self::system::{
-    execute_admin_system_import_exclusively, release_admin_system_import_lease,
-    try_acquire_admin_system_import_lease, AdminSystemImportLockError,
 };
