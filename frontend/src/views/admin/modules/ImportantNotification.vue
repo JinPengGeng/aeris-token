@@ -64,7 +64,10 @@
           </div>
 
           <div class="max-w-xs">
-            <Label for="notification-low-balance-threshold" class="block text-sm font-medium">
+            <Label
+              for="notification-low-balance-threshold"
+              class="block text-sm font-medium"
+            >
               低余额提醒阈值（美元）
             </Label>
             <Input
@@ -209,10 +212,16 @@
                   >
                     内置
                   </Badge>
-                  <Badge v-if="isUnsupportedItem(item)" variant="outline">
+                  <Badge
+                    v-if="isUnsupportedItem(item)"
+                    variant="outline"
+                  >
                     未接入
                   </Badge>
-                  <Badge v-else :variant="isItemReady(item) ? 'success' : 'outline'">
+                  <Badge
+                    v-else
+                    :variant="isItemReady(item) ? 'success' : 'outline'"
+                  >
                     {{ isItemReady(item) ? '可投递' : '未就绪' }}
                   </Badge>
                 </div>
@@ -221,7 +230,10 @@
                 </p>
               </div>
               <div class="flex items-center gap-2">
-                <Switch v-model="item.enabled" :disabled="isUnsupportedItem(item)" />
+                <Switch
+                  v-model="item.enabled"
+                  :disabled="isUnsupportedItem(item)"
+                />
                 <Button
                   v-if="!item.system"
                   size="icon"
@@ -259,7 +271,10 @@
                 <Label class="block text-xs font-medium">
                   推送服务
                 </Label>
-                <Select v-model="item.channel" :disabled="isUnsupportedItem(item)">
+                <Select
+                  v-model="item.channel"
+                  :disabled="isUnsupportedItem(item)"
+                >
                   <SelectTrigger class="mt-1">
                     <SelectValue />
                   </SelectTrigger>

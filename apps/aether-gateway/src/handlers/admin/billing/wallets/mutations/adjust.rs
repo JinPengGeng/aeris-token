@@ -93,17 +93,17 @@ pub(in super::super) async fn build_admin_wallet_adjust_response(
         Some(WalletMutationOutcome::Applied(result)) => Some(result),
         Some(WalletMutationOutcome::NotFound) => None,
         Some(WalletMutationOutcome::Invalid(detail)) => return Err(GatewayError::Internal(detail)),
-        None => {
-            state
-                .admin_adjust_wallet_balance(
-                    &wallet_id,
-                    amount_usd,
-                    &balance_type,
-                    operator_id.as_deref(),
-                    description.as_deref(),
-                )
-                .await?
-        }
+        None => state
+            .admin_adjust_wallet_balance(
+                &wallet_id,
+                amount_usd,
+                &balance_type,
+                operator_id.as_deref(),
+                description.as_deref(),
+                false,
+            )
+            .await?
+            .and_then(|(wallet, txn)| txn.map(|txn| (wallet, txn))),
     };
     let Some((wallet, transaction)) = result else {
         return if has_wallet_writer {

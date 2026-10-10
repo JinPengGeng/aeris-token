@@ -9,7 +9,10 @@
         @click.stop
         @mousedown.stop
       >
-        <CircleHelp class="h-3.5 w-3.5" aria-hidden="true" />
+        <CircleHelp
+          class="h-3.5 w-3.5"
+          aria-hidden="true"
+        />
       </button>
     </PopoverTrigger>
     <PopoverContent

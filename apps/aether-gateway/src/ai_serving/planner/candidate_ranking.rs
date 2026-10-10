@@ -369,6 +369,8 @@ mod tests {
         candidate.key_internal_priority = 3;
         candidate.key_global_priority_for_format = Some(2);
         let policy = aether_routing_core::ResolvedRoutingPolicy {
+            billing_multiplier: 1.0,
+            group_name: None,
             group_id: Some("group-1".to_string()),
             group_version: Some(1),
             selection_source: "system_default".to_string(),
@@ -406,6 +408,8 @@ mod tests {
             .expect("state should build")
             .with_data_state_for_tests(data_state);
         let policy = aether_routing_core::ResolvedRoutingPolicy {
+            billing_multiplier: 1.0,
+            group_name: None,
             group_id: Some("group-1".to_string()),
             group_version: Some(1),
             selection_source: "system_default".to_string(),
@@ -441,6 +445,8 @@ mod tests {
         candidate.key_internal_priority = 3;
         candidate.key_global_priority_for_format = Some(2);
         let policy = aether_routing_core::ResolvedRoutingPolicy {
+            billing_multiplier: 1.0,
+            group_name: None,
             group_id: Some("group-1".to_string()),
             group_version: Some(1),
             selection_source: "system_default".to_string(),

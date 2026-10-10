@@ -9,6 +9,9 @@
 006_usage.sql
 007_stats.sql
 008_background_tasks.sql
+009_overview.sql
 009_request_funds.sql
 010_daily_cost.sql
+010_dashboard.sql
+010_provider_expenses.sql
 011_provider_costs_emergency_chain.sql

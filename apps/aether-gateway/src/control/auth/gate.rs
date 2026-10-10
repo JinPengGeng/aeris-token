@@ -1,5 +1,6 @@
 use axum::body::Bytes;
 use axum::http::Uri;
+use std::collections::BTreeMap;
 
 use super::super::GatewayControlDecision;
 use super::credentials::{contains_string, extract_requested_model};
@@ -143,7 +144,13 @@ async fn execution_plan_balance_capacity_rejection_inner(
         validate_execution_plan_pricing_configuration_for_plan(state, plan, report_context).await?;
         return Ok(None);
     }
-    let Some(available_usd) = available_balance_capacity_usd(state, auth_context).await? else {
+    let wallet_only = report_context
+        .and_then(|context| context.get("plan_wallet_fallback"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let Some(available_usd) =
+        available_balance_capacity_usd(state, auth_context, wallet_only).await?
+    else {
         validate_execution_plan_pricing_configuration_for_plan(state, plan, report_context).await?;
         return Ok(None);
     };
@@ -220,11 +227,16 @@ async fn validate_execution_plan_pricing_configuration_for_plan(
 async fn available_balance_capacity_usd(
     state: &AppState,
     auth_context: &GatewayControlAuthContext,
+    wallet_only: bool,
 ) -> Result<Option<f64>, GatewayError> {
     let quota_started_at = std::time::Instant::now();
-    let quota_result = state
-        .find_user_daily_quota_availability_for_auth(&auth_context.user_id)
-        .await;
+    let quota_result = if wallet_only {
+        Ok(None)
+    } else {
+        state
+            .find_user_daily_quota_availability_for_auth(&auth_context.user_id)
+            .await
+    };
     observe_gateway_stage_ms(
         "auth_capacity_quota",
         quota_started_at.elapsed().as_millis() as u64,
@@ -244,6 +256,13 @@ async fn available_balance_capacity_usd(
         wallet_started_at.elapsed().as_millis() as u64,
     );
     let wallet = wallet_result?;
+    if wallet_only
+        && !wallet
+            .as_ref()
+            .is_some_and(|wallet| wallet.status.eq_ignore_ascii_case("active"))
+    {
+        return Ok(Some(0.0));
+    }
     let wallet_available_usd = wallet.as_ref().and_then(wallet_finite_available_usd);
     let wallet_is_unlimited = wallet
         .as_ref()
@@ -274,8 +293,32 @@ pub(crate) async fn estimate_execution_plan_cost_upper_bound_usd(
     report_context: Option<&serde_json::Value>,
 ) -> Result<Option<f64>, GatewayError> {
     let started_at = std::time::Instant::now();
-    let result =
-        estimate_execution_plan_cost_upper_bound_usd_inner(state, plan, report_context).await;
+    let result = async {
+        let multiplier_snapshot =
+            aether_data_contracts::repository::usage::billing_multiplier_snapshot(report_context)
+                .map_err(|error| GatewayError::Internal(error.to_string()))?;
+        let estimate = estimate_execution_plan_cost_upper_bound_usd_inner(
+            state,
+            plan,
+            report_context,
+            multiplier_snapshot.is_some(),
+        )
+        .await?;
+        let Some(snapshot) = multiplier_snapshot else {
+            return Ok(estimate);
+        };
+        // Cache the unmultiplied base estimate so different request snapshots
+        // cannot reuse one another's charge. Pricing validation still runs for
+        // a zero multiplier, even when the request has no finite token bound.
+        if snapshot.multiplier() == 0.0 {
+            return Ok(Some(0.0));
+        }
+        estimate
+            .map(|cost| snapshot.cost(cost))
+            .transpose()
+            .map_err(|error| GatewayError::Internal(error.to_string()))
+    }
+    .await;
     observe_gateway_stage_ms(
         "auth_capacity_cost_estimate",
         started_at.elapsed().as_millis() as u64,
@@ -309,6 +352,7 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
     state: &AppState,
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
+    use_base_cost: bool,
 ) -> Result<Option<f64>, GatewayError> {
     let api_format = crate::ai_serving::normalize_api_format_alias(&plan.provider_api_format);
     let body_json = plan.body.json_body.as_ref();
@@ -403,7 +447,7 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
     if model_id.is_none() && global_model_name.is_none() {
         return Ok(None);
     }
-    let cache_key = execution_plan_cost_upper_bound_cache_key(
+    let mut cache_key = execution_plan_cost_upper_bound_cache_key(
         plan,
         model_id,
         global_model_name,
@@ -414,6 +458,11 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
         cache_ttl_minutes,
         image_fields.as_ref(),
     );
+    if use_base_cost {
+        // Legacy requests cache provider Key cost; new requests cache base cost.
+        // These values must never share a cache entry for the same provider Key.
+        cache_key.insert_str(0, "base\x1f");
+    }
     let ttl = state.frontdoor_runtime_guards.auth_capacity_cache_ttl;
     if ttl.is_zero() {
         let _permit = state.acquire_auth_snapshot_load_gate().await?;
@@ -429,6 +478,7 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
             requested_processing_tier.as_deref(),
             cache_ttl_minutes,
             image_fields.as_ref(),
+            use_base_cost,
         )
         .await;
     }
@@ -448,6 +498,7 @@ async fn estimate_execution_plan_cost_upper_bound_usd_inner(
                 requested_processing_tier.as_deref(),
                 cache_ttl_minutes,
                 image_fields.as_ref(),
+                use_base_cost,
             )
             .await
         })
@@ -467,6 +518,7 @@ async fn calculate_execution_plan_cost_upper_bound(
     requested_processing_tier: Option<&str>,
     cache_ttl_minutes: Option<i64>,
     image_fields: Option<&ImageAuthorizationEstimateFields>,
+    use_base_cost: bool,
 ) -> Result<Option<f64>, GatewayError> {
     let context =
         load_execution_plan_billing_context(state, plan, model_id, global_model_name).await?;
@@ -484,11 +536,13 @@ async fn calculate_execution_plan_cost_upper_bound(
         estimate.image_size = image_fields.image_size.clone();
         estimate.image_quality = image_fields.image_quality.clone();
     }
+    let mut pricing = aether_billing::BillingModelPricingSnapshot::from(context);
+    if use_base_cost {
+        pricing.provider_billing_type = None;
+        pricing.provider_api_key_rate_multipliers = None;
+    }
     aether_billing::BillingService::new()
-        .estimate_authorization_cost_upper_bound(
-            &aether_billing::BillingModelPricingSnapshot::from(context),
-            &estimate,
-        )
+        .estimate_authorization_cost_upper_bound(&pricing, &estimate)
         .map_err(|err| GatewayError::Internal(err.to_string()))
 }
 
@@ -896,6 +950,11 @@ async fn request_model_resolves_to_allowed_model(
         return Ok(false);
     };
 
+    // Global model names are a reserved routing namespace, so authorization has to
+    // resolve a request the same way candidate planning will: a provider whose own
+    // model carries the requested name only as an upstream alias must not make the
+    // request resolve to that provider's global model.
+    let mut reserved_global_model_names: BTreeMap<String, Option<String>> = BTreeMap::new();
     for api_format in candidate_api_formats_for_model_resolution(&client_api_format) {
         let resolution = decision
             .model_directive_policy
@@ -911,23 +970,45 @@ async fn request_model_resolves_to_allowed_model(
                 .list_minimal_candidate_selection_rows_for_api_format(&api_format)
                 .await?
         };
+        let reserved_global_model_name = match reserved_global_model_names.get(routing_model) {
+            Some(cached) => cached.clone(),
+            None => {
+                let reserved_global_model_name =
+                    crate::data::candidate_selection::resolve_reserved_global_model_name(
+                        state.data.as_ref(),
+                        &rows,
+                        routing_model,
+                    )
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                reserved_global_model_names.insert(
+                    routing_model.to_string(),
+                    reserved_global_model_name.clone(),
+                );
+                reserved_global_model_name
+            }
+        };
         let matching_rows = rows
             .into_iter()
             .filter(|row| {
-                aether_scheduler_core::row_supports_requested_model_with_model_directives(
+                aether_scheduler_core::row_supports_requested_model_with_reserved_global_model(
                     row,
                     routing_model,
                     &api_format,
                     false,
+                    None,
+                    reserved_global_model_name.as_deref(),
                 )
             })
             .collect::<Vec<_>>();
         let Some(resolved_global_model) =
-            aether_scheduler_core::resolve_requested_global_model_name_with_model_directives(
+            aether_scheduler_core::resolve_requested_global_model_name_with_reserved_global_model(
                 &matching_rows,
                 routing_model,
                 &api_format,
                 false,
+                None,
+                reserved_global_model_name.as_deref(),
             )
         else {
             continue;
@@ -981,11 +1062,12 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        available_balance_capacity_usd, execution_plan_balance_capacity_rejection,
-        execution_plan_cost_is_proven_zero, execution_plan_cost_upper_bound_cache_key,
-        image_authorization_estimate_fields, max_output_tokens_from_request,
-        openai_request_input_is_self_contained, output_choice_count_upper_bound,
-        request_model_local_rejection, GatewayLocalAuthRejection, ImageAuthorizationEstimateFields,
+        available_balance_capacity_usd, estimate_execution_plan_cost_upper_bound_usd,
+        execution_plan_balance_capacity_rejection, execution_plan_cost_is_proven_zero,
+        execution_plan_cost_upper_bound_cache_key, image_authorization_estimate_fields,
+        max_output_tokens_from_request, openai_request_input_is_self_contained,
+        output_choice_count_upper_bound, request_model_local_rejection, GatewayLocalAuthRejection,
+        ImageAuthorizationEstimateFields,
     };
     use crate::control::{GatewayControlAuthContext, GatewayControlDecision};
     use crate::data::GatewayDataState;
@@ -1105,6 +1187,11 @@ mod tests {
         context: StoredBillingModelContext,
         wallet: StoredWalletSnapshot,
     ) -> AppState {
+        let mut preferences =
+            aether_data_contracts::repository::users::StoredUserPreferenceRecord::default_for_user(
+                "user-1",
+            );
+        preferences.allow_wallet_overage = quota.allow_wallet_overage;
         let candidate_repository =
             Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
                 sample_row(),
@@ -1113,7 +1200,8 @@ mod tests {
         let data = GatewayDataState::with_minimal_candidate_selection_and_billing_for_tests(
             candidate_repository,
             billing_repository,
-        );
+        )
+        .with_user_preferences_for_tests([preferences]);
         AppState::new()
             .expect("state should build")
             .with_data_state_for_tests(data)
@@ -1528,7 +1616,7 @@ mod tests {
             .as_ref()
             .expect("decision should include auth context");
 
-        let capacity = available_balance_capacity_usd(&state, auth_context)
+        let capacity = available_balance_capacity_usd(&state, auth_context, false)
             .await
             .expect("capacity should resolve");
 
@@ -1765,10 +1853,16 @@ mod tests {
             Arc::clone(&quota_calls),
             Arc::clone(&model_context_calls),
         ));
+        let mut preferences =
+            aether_data_contracts::repository::users::StoredUserPreferenceRecord::default_for_user(
+                "user-1",
+            );
+        preferences.allow_wallet_overage = true;
         let data = GatewayDataState::with_minimal_candidate_selection_and_billing_for_tests(
             candidate_repository,
             billing_repository,
-        );
+        )
+        .with_user_preferences_for_tests([preferences]);
         let state = AppState::new()
             .expect("state should build")
             .with_data_state_for_tests(data)
@@ -2384,7 +2478,7 @@ mod tests {
                 .auth_context
                 .as_ref()
                 .expect("decision should carry auth context");
-            let available = available_balance_capacity_usd(&state, auth_context)
+            let available = available_balance_capacity_usd(&state, auth_context, false)
                 .await
                 .expect("capacity should resolve")
                 .expect("finite wallet should expose capacity");
@@ -2575,6 +2669,40 @@ mod tests {
         assert_eq!(rejection, None);
     }
 
+    #[tokio::test]
+    async fn plan_recovery_wallet_fallback_cannot_spend_available_daily_quota() {
+        let context = billing_context_with_pricing(
+            Some(
+                json!({"tiers": [{"up_to": null, "input_price_per_1m": 0.0, "output_price_per_1m": 70.0}]}),
+            ),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(50.0, true), context);
+        let decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
+        let plan = execution_plan(
+            json!({"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1_000_000}),
+            "openai:chat",
+        );
+        let mut report_context = billing_report_context();
+        report_context["plan_wallet_fallback"] = json!(true);
+        let rejection = execution_plan_balance_capacity_rejection(
+            &state,
+            &decision,
+            &plan,
+            Some(&report_context),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rejection,
+            Some(GatewayLocalAuthRejection::BalanceDenied {
+                remaining: Some(30.0)
+            })
+        );
+    }
+
     #[test]
     fn daily_quota_estimate_falls_back_to_default_tiers_when_model_tiers_empty() {
         let context = billing_context_with_pricing(
@@ -2617,6 +2745,166 @@ mod tests {
                 .expect("estimate should be bounded");
 
         assert_eq!(estimate, 6.5);
+    }
+
+    #[tokio::test]
+    async fn charge_estimate_and_capacity_use_request_multiplier_without_key_cost_or_cache_leaks() {
+        let context = billing_context_with_pricing(
+            Some(json!({"tiers": [{
+                "up_to": null,
+                "input_price_per_1m": 0.0,
+                "output_price_per_1m": 10.0
+            }]})),
+            None,
+            Some(json!({"openai:chat": 2.0})),
+            None,
+        );
+        let mut state = state_with_quota_and_wallet(quota_availability(15.0, false), context);
+        Arc::make_mut(&mut state.frontdoor_runtime_guards).auth_capacity_cache_ttl =
+            Duration::from_secs(60);
+        let decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
+        let plan = execution_plan(
+            json!({"model": "gpt-5", "messages": [], "max_tokens": 1_000_000}),
+            "openai:chat",
+        );
+        let legacy = billing_report_context();
+        let mut discounted = legacy.clone();
+        discounted["billing_multiplier_snapshot"] = json!({
+            "version": 1,
+            "factors": {"routing_group": 2.0, "promotion": 0.25},
+            "multiplier": 0.5
+        });
+        let mut marked_up = legacy.clone();
+        marked_up["billing_multiplier_snapshot"] = json!({
+            "version": 1,
+            "factors": {"routing_group": 3.0},
+            "multiplier": 3.0
+        });
+        let mut legacy_group_snapshot = legacy.clone();
+        legacy_group_snapshot["routing_group_billing_multiplier"] = json!(1.0);
+
+        // Reuse the same cache for legacy Key cost, independent request
+        // multipliers, and the old group-only snapshot representation.
+        for (report_context, expected) in [
+            (&legacy, 20.0),
+            (&discounted, 5.0),
+            (&marked_up, 30.0),
+            (&legacy_group_snapshot, 10.0),
+            (&discounted, 5.0),
+            (&legacy, 20.0),
+        ] {
+            assert_eq!(
+                estimate_execution_plan_cost_upper_bound_usd(&state, &plan, Some(report_context))
+                    .await
+                    .expect("charge estimate should resolve"),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            execution_plan_balance_capacity_rejection(&state, &decision, &plan, Some(&discounted))
+                .await
+                .expect("discounted request capacity should resolve"),
+            None
+        );
+        assert_eq!(
+            execution_plan_balance_capacity_rejection(&state, &decision, &plan, Some(&marked_up))
+                .await
+                .expect("marked-up request capacity should resolve"),
+            Some(GatewayLocalAuthRejection::BalanceDenied {
+                remaining: Some(15.0)
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn charge_estimate_uses_base_price_when_provider_is_free_tier() {
+        let context = billing_context_with_pricing(
+            Some(json!({"tiers": [{
+                "up_to": null,
+                "input_price_per_1m": 0.0,
+                "output_price_per_1m": 10.0
+            }]})),
+            None,
+            Some(json!({"openai:chat": 0.0})),
+            Some("free_tier"),
+        );
+        let state = state_with_quota_and_wallet(quota_availability(15.0, false), context);
+        let plan = execution_plan(
+            json!({"model": "gpt-5", "messages": [], "max_tokens": 1_000_000}),
+            "openai:chat",
+        );
+        let mut report_context = billing_report_context();
+        assert_eq!(
+            estimate_execution_plan_cost_upper_bound_usd(&state, &plan, Some(&report_context))
+                .await
+                .expect("legacy free-tier estimate should resolve"),
+            Some(0.0)
+        );
+        report_context["routing_group_billing_multiplier"] = json!(0.5);
+        assert_eq!(
+            estimate_execution_plan_cost_upper_bound_usd(&state, &plan, Some(&report_context))
+                .await
+                .expect("charge estimate should use the model base price"),
+            Some(5.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_charge_multiplier_bounds_unknown_cost_but_still_rejects_invalid_pricing() {
+        let context = billing_context_with_pricing(
+            Some(json!({"tiers": [{
+                "up_to": null,
+                "input_price_per_1m": 0.0,
+                "output_price_per_1m": 10.0
+            }]})),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(0.0, false), context);
+        let plan = execution_plan(json!({"model": "gpt-5", "messages": []}), "openai:chat");
+        let mut report_context = billing_report_context();
+        assert_eq!(
+            estimate_execution_plan_cost_upper_bound_usd(&state, &plan, Some(&report_context))
+                .await
+                .expect("an unspecified output limit has no finite estimate"),
+            None
+        );
+        report_context["billing_multiplier_snapshot"] = json!({
+            "version": 1,
+            "factors": {"routing_group": 0.0},
+            "multiplier": 0.0
+        });
+        assert_eq!(
+            estimate_execution_plan_cost_upper_bound_usd(&state, &plan, Some(&report_context))
+                .await
+                .expect("zero multiplier should bound the charge"),
+            Some(0.0)
+        );
+        let invalid_context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 1.0}],
+                "processing_tiers": {
+                    "priority": {"tiers": [{}], "price_multiplier": -1.0}
+                }
+            })),
+            None,
+            None,
+            None,
+        );
+        let invalid_state =
+            state_with_quota_and_wallet(quota_availability(0.0, false), invalid_context);
+        let invalid_plan = execution_plan(
+            json!({"model": "gpt-5", "messages": [], "service_tier": "priority"}),
+            "openai:chat",
+        );
+        assert!(estimate_execution_plan_cost_upper_bound_usd(
+            &invalid_state,
+            &invalid_plan,
+            Some(&report_context)
+        )
+        .await
+        .is_err());
     }
 
     #[test]

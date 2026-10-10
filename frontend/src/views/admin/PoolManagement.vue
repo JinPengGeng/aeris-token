@@ -1071,6 +1071,7 @@ import { useConfirm } from '@/composables/useConfirm'
 import { useRouteQuery } from '@/composables/useRouteQuery'
 import { useBatchSelection } from '@/composables/useBatchSelection'
 import { useI18n } from '@/i18n'
+import type { MessageKey } from '@/i18n/messages'
 import { parseApiError } from '@/utils/errorParser'
 import {
   getPoolOverview,
@@ -1696,6 +1697,7 @@ watch(showAdaptiveHotPoolMetricsButton, (enabled) => {
 
 const showAccountQuotaColumn = computed(() => {
   return selectedProviderType.value === 'codex'
+    || selectedProviderType.value === 'claude_code'
     || selectedProviderType.value === 'gemini_cli'
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'windsurf'
@@ -2061,17 +2063,23 @@ const quotaProgressMap = computed<Record<string, QuotaProgressItem[]>>(() => {
 const quotaProgressDisplayMap = computed<Record<string, QuotaProgressDisplayItem[]>>(() => {
   const map: Record<string, QuotaProgressDisplayItem[]> = {}
   for (const key of keyPage.value.keys) {
-    map[key.key_id] = (quotaProgressMap.value[key.key_id] || []).map(item => ({
-      label: getQuotaProgressLabel(item.label),
-      remainingPercent: item.remainingPercent,
-      resetText: getQuotaProgressResetDisplayText(item),
-      meterText: item.numericOnly
-        ? item.detail || formatQuotaValue(item.remainingPercent)
-        : getQuotaProgressMeterDisplayText(item),
-      barClass: getQuotaRemainingBarColorByRemaining(item.remainingPercent),
-      meterClass: getQuotaRemainingClassByRemaining(item.remainingPercent),
-      numericOnly: item.numericOnly,
-    }))
+    map[key.key_id] = (quotaProgressMap.value[key.key_id] || []).map(item => {
+      // 倒计时归零表示窗口已越过重置时间点：按“已重置”展示 100%，
+      // 不再显示重置前的旧用量文本，与后端读取口径、调度口径保持一致。
+      const expired = !item.numericOnly && getQuotaProgressCountdown(item)?.isExpired === true
+      const remainingPercent = expired ? 100 : item.remainingPercent
+      return {
+        label: getQuotaProgressLabel(item.label),
+        remainingPercent,
+        resetText: getQuotaProgressResetDisplayText(item),
+        meterText: item.numericOnly
+          ? item.detail || formatQuotaValue(remainingPercent)
+          : getQuotaProgressMeterDisplayText(item, remainingPercent, expired),
+        barClass: getQuotaRemainingBarColorByRemaining(remainingPercent),
+        meterClass: getQuotaRemainingClassByRemaining(remainingPercent),
+        numericOnly: item.numericOnly,
+      }
+    })
   }
   return map
 })
@@ -2146,6 +2154,7 @@ function getPoolKeyAccountStatsMetrics(key: PoolKeyDetail): PoolStatsMetric[] {
 
 const quotaRefreshSupported = computed(() => {
   return selectedProviderType.value === 'codex'
+    || selectedProviderType.value === 'claude_code'
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'gemini_cli'
     || selectedProviderType.value === 'windsurf'
@@ -2271,7 +2280,19 @@ function getPendingCodexResetCreditIdempotencyKey(key: PoolKeyDetail): string | 
     : readPendingCodexResetCreditIdempotencyKey(key.key_id, generation)
 }
 
+function getClaudeCodeResetCredits(key: PoolKeyDetail) {
+  if (getQuotaSnapshotProviderType(key) !== 'claude_code') return null
+  return key.status_snapshot?.quota?.reset_credits
+    ?? key.upstream_metadata?.claude_code?.reset_credits
+    ?? null
+}
+
 function getCodexResetCreditCountText(key: PoolKeyDetail): string | null {
+  const claudeCredits = getClaudeCodeResetCredits(key)
+  if (claudeCredits) {
+    const claudeCount = getCodexResetCreditAvailableCount(claudeCredits)
+    return claudeCount === null ? null : formatCodexResetCreditCount(claudeCount)
+  }
   const count = getCodexResetCreditAvailableCount(getCodexResetCredits(key))
   return count === null && !getPendingCodexResetCreditIdempotencyKey(key)
     ? null
@@ -2279,7 +2300,11 @@ function getCodexResetCreditCountText(key: PoolKeyDetail): string | null {
 }
 
 function getCodexResetCreditItemTexts(key: PoolKeyDetail): string[] {
-  return getVisibleCodexResetCreditItems(getCodexResetCredits(key), undefined, 3)
+  return getVisibleCodexResetCreditItems(
+    getClaudeCodeResetCredits(key) ?? getCodexResetCredits(key),
+    undefined,
+    3,
+  )
     .map(item => `${item.displayKey} ${formatCodexResetCreditExpiresAt(item.expiresAt)}`)
 }
 
@@ -3544,10 +3569,15 @@ function getQuotaProgressResetDisplayText(item: QuotaProgressItem): string {
   return ''
 }
 
-function getQuotaProgressMeterDisplayText(item: QuotaProgressItem): string {
-  const detail = item.detail?.trim() || ''
+function getQuotaProgressMeterDisplayText(
+  item: QuotaProgressItem,
+  remainingPercent = item.remainingPercent,
+  suppressDetail = false,
+): string {
+  // 窗口已重置时忽略重置前的旧用量文本，直接显示归一化后的剩余百分比。
+  const detail = suppressDetail ? '' : (item.detail?.trim() || '')
   if (!shouldHideQuotaProgressDetailText(detail) && detail) return detail
-  return `${item.remainingPercent.toFixed(1)}%`
+  return `${remainingPercent.toFixed(1)}%`
 }
 
 function getQuotaFallbackText(key: PoolKeyDetail): string | null {
@@ -3895,6 +3925,33 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
           remainingPercent,
           resetAtSeconds: normalizeUnixSeconds(window.reset_at ?? quota.reset_at ?? null),
           resetSeconds: normalizeRemainingSeconds(window.reset_seconds ?? quota.reset_seconds ?? null),
+          updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
+          allowDynamicReset: true,
+        }
+      })
+      .filter((item): item is QuotaProgressItem => item != null)
+  }
+
+  if (providerType === 'claude_code') {
+    const quotaResetAtSeconds = getQuotaSnapshotResetAtSeconds(quota)
+    const quotaResetSeconds = getQuotaSnapshotResetSeconds(quota)
+    const windowPresentations: Record<string, { labelKey: MessageKey, sortOrder: number }> = {
+      '5h': { labelKey: 'poolQuota.claudeCode.window5h', sortOrder: 0 },
+      weekly: { labelKey: 'poolQuota.claudeCode.weekly', sortOrder: 1 },
+      weekly_sonnet: { labelKey: 'poolQuota.claudeCode.weeklySonnet', sortOrder: 2 },
+      weekly_fable: { labelKey: 'poolQuota.claudeCode.weeklyFable', sortOrder: 3 },
+    }
+    return (quota.windows ?? [])
+      .map((window): QuotaProgressItem | null => {
+        const remainingPercent = getQuotaWindowRemainingPercent(window)
+        if (remainingPercent == null) return null
+        const presentation = windowPresentations[String(window.code || '')]
+        return {
+          label: t(presentation?.labelKey ?? 'poolQuota.claudeCode.unknownWindow'),
+          sortOrder: presentation?.sortOrder ?? 9,
+          remainingPercent,
+          resetAtSeconds: normalizeUnixSeconds(window.reset_at ?? quotaResetAtSeconds ?? null),
+          resetSeconds: normalizeRemainingSeconds(window.reset_seconds ?? quotaResetSeconds ?? null),
           updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
           allowDynamicReset: true,
         }

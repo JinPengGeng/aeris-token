@@ -310,11 +310,15 @@ async fn validate_empty_drill_database(
         if table == "_sqlx_migrations" {
             continue;
         }
-        // Only the two canonical bootstrap seed rows are allowed in an otherwise empty database.
+        // Only the canonical bootstrap seed rows are allowed in an otherwise empty database.
         let predicate = match table.as_str() {
             "user_groups" => " WHERE NOT (id = '00000000-0000-0000-0000-000000000001' AND name = 'Default' AND normalized_name = 'default')",
             "system_configs" => " WHERE NOT (id = '00000000-0000-0000-0000-000000000002' AND key = 'default_user_group_id' AND value::jsonb = '\"00000000-0000-0000-0000-000000000001\"'::jsonb)",
             "recharge_recovery_activation" => " WHERE NOT (version = 1 AND enabled IS TRUE)",
+            // Dashboard projections bootstrap themselves during migrations:
+            // one singleton stats row and empty per-shard totals.
+            "dashboard_stats_state" => " WHERE NOT (singleton IS TRUE)",
+            "dashboard_stats_total" => " WHERE NOT (metrics = '{}'::jsonb)",
             _ => "",
         };
         let query = format!(

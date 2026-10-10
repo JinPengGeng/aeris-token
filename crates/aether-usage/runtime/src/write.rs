@@ -3,9 +3,11 @@ use std::collections::BTreeMap;
 use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
 use aether_data_contracts::repository::usage::{
-    UpsertUsageRecord, UsageBodyCaptureState, LIVE_SESSION_METADATA_KEY,
-    USAGE_AVAILABLE_METADATA_KEY, USAGE_PRICING_AVAILABLE_METADATA_KEY,
-    WEBSOCKET_MODE_METADATA_KEY, WEBSOCKET_TRANSPORT_METADATA_KEY,
+    UpsertUsageRecord, UsageBodyCaptureState, BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY,
+    LIVE_SESSION_METADATA_KEY, ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
+    ROUTING_GROUP_ID_METADATA_KEY, ROUTING_GROUP_NAME_METADATA_KEY, USAGE_AVAILABLE_METADATA_KEY,
+    USAGE_PRICING_AVAILABLE_METADATA_KEY, WEBSOCKET_MODE_METADATA_KEY,
+    WEBSOCKET_TRANSPORT_METADATA_KEY,
 };
 use aether_data_contracts::DataLayerError;
 use serde_json::{json, Map, Value};
@@ -127,6 +129,7 @@ pub enum UsageTerminalState {
 
 #[derive(Debug, Clone)]
 pub struct TerminalUsageContextSeed {
+    token_measurement_source: &'static str,
     pub client_contract: String,
     pub provider_contract: String,
     pub request_id: String,
@@ -193,6 +196,7 @@ pub struct StreamTerminalUsagePayloadSeed {
 
 #[derive(Debug, Clone)]
 pub struct TerminalUsageSeed {
+    token_measurement_source: &'static str,
     pub terminal_state: UsageTerminalState,
     pub client_contract: String,
     pub provider_contract: String,
@@ -655,6 +659,7 @@ fn build_terminal_usage_event_from_seed_impl(
     trusted_request_metadata: bool,
 ) -> Result<UsageEvent, DataLayerError> {
     let TerminalUsageSeed {
+        token_measurement_source,
         terminal_state,
         client_contract,
         provider_contract,
@@ -801,7 +806,7 @@ fn build_terminal_usage_event_from_seed_impl(
     };
 
     if let Some(usage) = standardized_usage.as_ref() {
-        apply_standardized_usage_seed(usage, &mut data);
+        apply_standardized_usage_seed(usage, &mut data, token_measurement_source);
     }
 
     if data.total_tokens.is_none() {
@@ -811,6 +816,7 @@ fn build_terminal_usage_event_from_seed_impl(
             .and_then(extract_token_counts_from_value)
         {
             data.input_tokens = Some(tokens.0);
+            mark_analytics_measurement(&mut data, token_measurement_source);
             data.output_tokens = Some(tokens.1);
             data.total_tokens = Some(tokens.2);
         }
@@ -878,6 +884,13 @@ pub fn build_terminal_usage_context_seed(
     );
 
     TerminalUsageContextSeed {
+        token_measurement_source: match context_value_ref(context, "usage_token_source")
+            .and_then(Value::as_str)
+        {
+            Some("estimated") => "estimated",
+            Some("mixed") => "mixed",
+            _ => "reported",
+        },
         client_contract,
         provider_contract,
         has_format_conversion,
@@ -1075,6 +1088,21 @@ pub fn build_sync_terminal_usage_seed(
     let derived_standardized_usage = provider_response_full
         .as_ref()
         .map(|response| map_usage_from_response(response, context_seed.provider_contract.as_str()));
+    // Context usage here is Kiro's locally simulated input/cache usage. A
+    // standard response may still contribute independently reported output.
+    let token_measurement_source =
+        if standardized_usage.is_some() && context_seed.token_measurement_source != "estimated" {
+            if derived_standardized_usage
+                .as_ref()
+                .is_some_and(|usage| usage.output_tokens > 0 || usage.reasoning_tokens > 0)
+            {
+                "mixed"
+            } else {
+                "estimated"
+            }
+        } else {
+            context_seed.token_measurement_source
+        };
     let standardized_usage =
         merge_standardized_usage_with_context_cache(standardized_usage, derived_standardized_usage);
     let terminal_state = infer_sync_terminal_state(
@@ -1097,6 +1125,7 @@ pub fn build_sync_terminal_usage_seed(
     );
 
     TerminalUsageSeed {
+        token_measurement_source,
         terminal_state,
         client_contract: context_seed.client_contract,
         provider_contract: context_seed.provider_contract,
@@ -1291,6 +1320,7 @@ pub fn build_stream_terminal_usage_seed(
     );
 
     TerminalUsageSeed {
+        token_measurement_source: context_seed.token_measurement_source,
         terminal_state,
         client_contract: context_seed.client_contract,
         provider_contract: context_seed.provider_contract,
@@ -2234,6 +2264,28 @@ fn build_runtime_request_metadata_seed_from_parts(
     provider_request_body_base64: Option<&str>,
 ) -> Option<Value> {
     let mut metadata = Map::new();
+    // Lifecycle writes need the same immutable routing and billing identity as terminal
+    // writes, without retaining the larger report-context payloads.
+    let routing_snapshot = Map::from_iter(
+        [
+            ROUTING_GROUP_ID_METADATA_KEY,
+            ROUTING_GROUP_NAME_METADATA_KEY,
+            ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
+            BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY,
+        ]
+        .into_iter()
+        .filter_map(|key| context_value_ref(context, key).map(|value| (key.into(), value.clone()))),
+    );
+    if let Some(Value::Object(snapshot)) =
+        sanitize_usage_request_metadata(Some(Value::Object(routing_snapshot)))
+    {
+        metadata.extend(snapshot);
+    }
+    for key in ["analytics_attribution", "analytics_failure"] {
+        if let Some(value) = context_value_ref(context, key) {
+            metadata.insert(key.into(), value.clone());
+        }
+    }
     if let Some(trace_id) = context_string(context, "trace_id") {
         metadata.insert("trace_id".to_string(), Value::String(trace_id));
     }
@@ -2259,6 +2311,12 @@ fn build_runtime_request_metadata_seed_from_parts(
         metadata.insert(
             "api_key_is_standalone".to_string(),
             Value::Bool(api_key_is_standalone),
+        );
+    }
+    if let Some(wallet_fallback) = context_bool(context, "plan_wallet_fallback") {
+        metadata.insert(
+            "plan_wallet_fallback".to_string(),
+            Value::Bool(wallet_fallback),
         );
     }
     if let Some(websocket_mode) = context_bool(context, WEBSOCKET_MODE_METADATA_KEY) {
@@ -2706,7 +2764,30 @@ fn infer_endpoint_kind(api_format: &str) -> Option<&str> {
     api_format.split_once(':').map(|(_, kind)| kind)
 }
 
-fn apply_standardized_usage_seed(usage: &StandardizedUsage, data: &mut UsageEventData) {
+fn apply_standardized_usage_seed(
+    usage: &StandardizedUsage,
+    data: &mut UsageEventData,
+    token_source: &str,
+) {
+    let token_source = usage
+        .token_source
+        .map(|source| source.as_str())
+        .unwrap_or(token_source);
+    // Dimensions such as image_count are not evidence of measured tokens.
+    if [
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_creation_tokens,
+        usage.cache_creation_ephemeral_5m_tokens,
+        usage.cache_creation_ephemeral_1h_tokens,
+        usage.cache_read_tokens,
+        usage.reasoning_tokens,
+    ]
+    .into_iter()
+    .any(|tokens| tokens > 0)
+    {
+        mark_analytics_measurement(data, token_source);
+    }
     if usage.input_tokens > 0 {
         data.input_tokens = Some(usage.input_tokens as u64);
     }
@@ -3137,14 +3218,26 @@ fn parse_sse_body_for_storage(text: &str) -> Option<Value> {
     let mut chunks = Vec::new();
     let mut total_chunks = 0_u64;
     let mut saw_done = false;
+    let mut first_parse_error = None;
     for_each_sse_payload(text, |payload| {
         if payload == "[DONE]" {
             saw_done = true;
             return;
         }
         total_chunks += 1;
-        if let Ok(json_body) = serde_json::from_str::<Value>(payload) {
-            chunks.push(json_body);
+        match serde_json::from_str::<Value>(payload) {
+            Ok(json_body) => chunks.push(json_body),
+            Err(error) if first_parse_error.is_none() => {
+                // A later valid event must not hide an earlier broken one.
+                // Store diagnostics only, without duplicating raw user content.
+                first_parse_error = Some(json!({
+                    "chunk_index": total_chunks - 1,
+                    "line": error.line(),
+                    "column": error.column(),
+                    "message": error.to_string(),
+                }));
+            }
+            Err(_) => {}
         }
     });
     if total_chunks == 0 && !saw_done {
@@ -3160,6 +3253,11 @@ fn parse_sse_body_for_storage(text: &str) -> Option<Value> {
     ]);
     if saw_done {
         metadata.insert("has_completion".to_string(), Value::Bool(true));
+    }
+    if let Some(error) = first_parse_error {
+        // Capture truncation can also cause a parse error; this describes the
+        // captured payload, not an assertion that the provider sent bad JSON.
+        metadata.insert("first_parse_error".to_string(), error);
     }
     if stored_chunks < total_chunks {
         metadata.insert(
@@ -3230,6 +3328,7 @@ fn apply_completed_image_usage_estimate(data: &mut UsageEventData) {
     if positive_tokens(data.input_tokens) == 0 {
         if let Some(usage) = request_usage.as_ref() {
             data.input_tokens = Some(usage.input_tokens);
+            mark_analytics_measurement(data, "estimated");
         }
     }
     apply_request_cache_usage_estimate(data, request_usage.as_ref());
@@ -3240,6 +3339,25 @@ fn apply_completed_image_usage_estimate(data: &mut UsageEventData) {
             data.total_tokens = Some(total_tokens);
         }
     }
+}
+
+fn mark_analytics_measurement(data: &mut UsageEventData, source: &str) {
+    let mut metadata = data
+        .request_metadata
+        .take()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let previous = metadata
+        .get("analytics_measurement")
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str);
+    let source = match previous {
+        Some("mixed") => "mixed",
+        Some(old) if old != source && old != "unknown" => "mixed",
+        _ => source,
+    };
+    metadata.insert("analytics_measurement".into(), json!({"source":source}));
+    data.request_metadata = Some(Value::Object(metadata));
 }
 
 fn apply_completed_image_dimensions(data: &mut UsageEventData) {
@@ -3640,6 +3758,7 @@ mod tests {
             terminal_state: UsageTerminalState::Completed,
             client_contract: "openai:chat".to_string(),
             provider_contract: "openai:chat".to_string(),
+            token_measurement_source: "reported",
             request_id: "usage-availability-request".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("key-1".to_string()),
@@ -4074,6 +4193,14 @@ mod tests {
                 Some(&json!({
                     "candidate_id": "cand-pending-event-1",
                     "candidate_index": 3,
+                    "routing_group_id": "group-free",
+                    "routing_group_name": "免费分组",
+                    "routing_group_billing_multiplier": 0.0,
+                    "billing_multiplier_snapshot": {
+                        "version": 1,
+                        "factors": {"routing_group": 0.0},
+                        "multiplier": 0.0
+                    },
                     "websocket_mode": true,
                     "websocket_transport": "responses",
                     "original_request_body": {"messages": [{"content": "omit me"}]},
@@ -4098,6 +4225,17 @@ mod tests {
         assert!(record.provider_request_body.is_none());
         assert_eq!(record.candidate_id.as_deref(), Some("cand-pending-event-1"));
         assert_eq!(record.candidate_index, Some(3));
+        let metadata = record.request_metadata.as_ref().expect("routing snapshot");
+        assert_eq!(metadata["routing_group_id"], "group-free");
+        assert_eq!(metadata["routing_group_name"], "免费分组");
+        assert_eq!(metadata["routing_group_billing_multiplier"], 0.0);
+        assert_eq!(
+            aether_data_contracts::repository::usage::billing_multiplier_snapshot(Some(metadata))
+                .unwrap()
+                .unwrap()
+                .multiplier(),
+            0.0
+        );
         assert_eq!(
             record
                 .request_metadata
@@ -4146,6 +4284,14 @@ mod tests {
                 Some(&json!({
                     "candidate_id": "cand-streaming-event-1",
                     "candidate_index": 4,
+                    "routing_group_id": "group-discount",
+                    "routing_group_name": "折扣分组",
+                    "routing_group_billing_multiplier": 0.5,
+                    "billing_multiplier_snapshot": {
+                        "version": 1,
+                        "factors": {"routing_group": 0.5},
+                        "multiplier": 0.5
+                    },
                     "provider_request_body": {"input": "omit me"}
                 })),
             ),
@@ -4170,6 +4316,115 @@ mod tests {
             Some("cand-streaming-event-1")
         );
         assert_eq!(record.candidate_index, Some(4));
+        let metadata = record.request_metadata.as_ref().expect("routing snapshot");
+        assert_eq!(metadata["routing_group_id"], "group-discount");
+        assert_eq!(metadata["routing_group_name"], "折扣分组");
+        assert_eq!(metadata["routing_group_billing_multiplier"], 0.5);
+        assert_eq!(
+            aether_data_contracts::repository::usage::billing_multiplier_snapshot(Some(metadata))
+                .unwrap()
+                .unwrap()
+                .multiplier(),
+            0.5
+        );
+    }
+
+    #[test]
+    fn lifecycle_routing_snapshot_preserves_legacy_factors_and_invalid_markers() {
+        use aether_data_contracts::repository::usage::billing_multiplier_snapshot;
+
+        let plan = ExecutionPlan {
+            request_id: "req-lifecycle-snapshot".to_string(),
+            candidate_id: None,
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-5.4"})),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+
+        for (snapshot, expected_multiplier) in [
+            (json!({"routing_group_billing_multiplier": 2.0}), Some(2.0)),
+            (json!({"routing_group_billing_multiplier": -1}), None),
+            (
+                json!({
+                    "routing_group_billing_multiplier": 0.5,
+                    "billing_multiplier_snapshot": null
+                }),
+                None,
+            ),
+            (
+                json!({
+                    "routing_group_billing_multiplier": 0.5,
+                    "billing_multiplier_snapshot": {
+                        "version": 1,
+                        "factors": {"routing_group": 2.0},
+                        "multiplier": 1.0
+                    }
+                }),
+                None,
+            ),
+        ] {
+            let mut context = snapshot;
+            context["routing_group_id"] = json!("group-1");
+            context["routing_group_name"] = json!("请求时分组");
+            context["original_request_body"] = json!({"secret": "do not capture"});
+            context["billing_snapshot"] = json!({"payload": "x".repeat(32 * 1024)});
+            let seed = super::build_lifecycle_usage_seed(&plan, Some(&context));
+            let pending_event =
+                build_pending_usage_event_from_owned_seed(seed.clone(), 1_700_000_000).unwrap();
+            let streaming_event =
+                build_streaming_usage_event_from_owned_seed(seed.clone(), 200, None, 1_700_000_001)
+                    .unwrap();
+            let records = [
+                build_pending_usage_record(&plan, Some(&context), 1_700_000_000).unwrap(),
+                build_streaming_usage_record(&plan, Some(&context), 200, None, 1_700_000_001)
+                    .unwrap(),
+                build_upsert_usage_record_from_event(&pending_event).unwrap(),
+                build_upsert_usage_record_from_event(&streaming_event).unwrap(),
+            ];
+
+            for metadata in std::iter::once(seed.request_metadata.as_ref()).chain(
+                records.iter().map(|record| {
+                    assert!(record.request_body.is_none());
+                    assert!(record.provider_request_body.is_none());
+                    record.request_metadata.as_ref()
+                }),
+            ) {
+                let metadata = metadata.expect("lifecycle routing snapshot");
+                assert_eq!(metadata["routing_group_id"], "group-1");
+                assert_eq!(metadata["routing_group_name"], "请求时分组");
+                assert!(metadata.get("original_request_body").is_none());
+                assert!(metadata.get("billing_snapshot").is_none());
+                if let Some(expected) = expected_multiplier {
+                    assert_eq!(
+                        billing_multiplier_snapshot(Some(metadata))
+                            .unwrap()
+                            .unwrap()
+                            .multiplier(),
+                        expected
+                    );
+                } else {
+                    assert_eq!(
+                        metadata.get("billing_multiplier_snapshot"),
+                        Some(&Value::Null)
+                    );
+                    assert!(billing_multiplier_snapshot(Some(metadata)).is_err());
+                }
+            }
+        }
     }
 
     #[test]
@@ -5477,6 +5732,10 @@ mod tests {
         assert_eq!(event.data.output_tokens.unwrap_or_default(), 0);
         assert_eq!(event.data.total_tokens, event.data.input_tokens);
         assert_eq!(
+            event.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+            "estimated"
+        );
+        assert_eq!(
             event
                 .data
                 .request_metadata
@@ -5922,6 +6181,44 @@ mod tests {
         assert_eq!(event.data.input_tokens, Some(4));
         assert_eq!(event.data.output_tokens, Some(6));
         assert_eq!(event.data.total_tokens, Some(10));
+        assert_eq!(
+            event.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+            "reported"
+        );
+        for source in ["estimated", "mixed"] {
+            let mut payload = payload.clone();
+            payload.report_context.as_mut().unwrap()["usage_token_source"] = json!(source);
+            let event =
+                build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                    .unwrap();
+            assert_eq!(event.data.input_tokens, Some(4));
+            assert_eq!(event.data.output_tokens, Some(6));
+            assert_eq!(event.data.total_tokens, Some(10));
+            assert_eq!(
+                event.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+                source
+            );
+            assert!(event
+                .data
+                .request_metadata
+                .as_ref()
+                .unwrap()
+                .get("usage_token_source")
+                .is_none());
+
+            payload.status_code = 500;
+            payload.body_json = Some(json!({"error": {"message": "no token measurement"}}));
+            let failed =
+                build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                    .unwrap();
+            assert!(failed
+                .data
+                .request_metadata
+                .as_ref()
+                .unwrap()
+                .get("analytics_measurement")
+                .is_none());
+        }
         assert_eq!(
             event.data.response_headers,
             Some(json!({
@@ -6758,6 +7055,32 @@ mod tests {
         assert_eq!(event.data.cache_creation_input_tokens, Some(1200));
         assert_eq!(event.data.cache_read_input_tokens, Some(300));
         assert_eq!(event.data.total_tokens, Some(300));
+        assert_eq!(
+            event.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+            "estimated"
+        );
+
+        let mut payload = payload;
+        payload.body_json = Some(json!({"usage": {"output_tokens": 17}}));
+        let mixed =
+            build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .unwrap();
+        assert_eq!(mixed.data.output_tokens, Some(17));
+        assert_eq!(mixed.data.cache_read_input_tokens, Some(300));
+        assert_eq!(
+            mixed.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+            "mixed"
+        );
+
+        payload.report_context.as_mut().unwrap()["usage_token_source"] = json!("estimated");
+        let native =
+            build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .unwrap();
+        assert_eq!(native.data.output_tokens, Some(17));
+        assert_eq!(
+            native.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+            "estimated"
+        );
     }
 
     #[test]
@@ -6827,6 +7150,7 @@ mod tests {
     #[test]
     fn manual_terminal_seed_event_builder_sanitizes_metadata_but_preserves_headers_and_bodies() {
         let event = build_terminal_usage_event_from_seed(TerminalUsageSeed {
+            token_measurement_source: "reported",
             terminal_state: UsageTerminalState::Completed,
             client_contract: "openai:chat".to_string(),
             provider_contract: "openai:chat".to_string(),
@@ -7350,6 +7674,20 @@ mod tests {
                 }
             })),
         );
+    }
+
+    #[test]
+    fn parse_sse_body_for_storage_reports_bad_event_before_valid_terminal() {
+        let body = concat!(
+            "data: {\"tools\":[}\n\n",
+            "data: {\"type\":\"response.completed\"}\n\n",
+        );
+        let parsed = parse_sse_body_for_storage(body).unwrap();
+        assert_eq!(parsed["metadata"]["dropped_chunks"], 1);
+        assert_eq!(parsed["metadata"]["first_parse_error"]["chunk_index"], 0);
+        assert!(parsed["metadata"]["first_parse_error"]["message"].is_string());
+        assert_eq!(parsed["chunks"][0]["type"], "response.completed");
+        assert!(parsed.get("raw_response").is_none());
     }
 
     #[test]

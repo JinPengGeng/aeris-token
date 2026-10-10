@@ -1,5 +1,6 @@
 use super::*;
 
+mod dashboard_snapshot;
 #[cfg(test)]
 #[path = "recharge_restore_tests.rs"]
 mod recharge_restore_tests;
@@ -18,6 +19,10 @@ pub async fn export_postgres_jsonl(
 ) -> Result<String, DataLayerError> {
     let mut tx = pool.begin().await.map_sql_err()?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
+    sqlx::query("SET LOCAL TIME ZONE 'UTC'")
         .execute(&mut *tx)
         .await
         .map_sql_err()?;
@@ -55,6 +60,7 @@ pub async fn export_postgres_jsonl(
         }
     }
 
+    dashboard_snapshot::attach_manifest(&mut records)?;
     tx.commit().await.map_sql_err()?;
     encode_jsonl(&records)
 }
@@ -98,6 +104,11 @@ async fn import_postgres_plan_with_options(
             .await
             .map_sql_err()?;
     }
+    sqlx::query("SET LOCAL TIME ZONE 'UTC'")
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
+    dashboard_snapshot::prepare_restore(&mut tx, plan).await?;
     let identity_state = capture_postgres_identity_import_state(&mut tx, &identity_scope).await?;
     let mut imported = 0usize;
     let mut column_cache = BTreeMap::<String, PostgresImportColumns>::new();

@@ -1188,8 +1188,13 @@ async fn acquire_live_relay_admission(
             audit: Some(audit),
         });
     }
-    match ResponsesWebSocketTurnAdmission::acquire(state, &attempt.plan, context.trace_id.as_str())
-        .await
+    match ResponsesWebSocketTurnAdmission::acquire(
+        state,
+        &attempt.plan,
+        context.trace_id.as_str(),
+        None,
+    )
+    .await
     {
         Ok(capacity) => Ok(LiveRelayAdmission { capacity, audit }),
         Err(error) => Err(LiveRelayAdmissionFailure {
