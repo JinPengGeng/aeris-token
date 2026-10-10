@@ -5,6 +5,7 @@ mod adaptive;
 mod export;
 mod import;
 mod modules;
+mod navigation;
 mod proxy_nodes;
 mod templates;
 

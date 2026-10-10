@@ -214,6 +214,71 @@
         </div>
       </div>
 
+      <!-- 菜单管理（内置导航项显示/隐藏） -->
+      <div class="mt-10 mb-8">
+        <div class="flex items-center justify-between gap-3 mb-2">
+          <h3 class="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+            菜单管理
+          </h3>
+          <Button
+            variant="outline"
+            size="sm"
+            class="gap-1.5"
+            :disabled="navLoading"
+            @click="fetchNavigationPreferences"
+          >
+            <RefreshCw
+              class="w-3.5 h-3.5"
+              :class="{ 'animate-spin': navLoading }"
+            />
+            刷新
+          </Button>
+        </div>
+        <p class="text-xs text-muted-foreground mb-4">
+          逐项控制内置管理菜单在侧边栏的显示。隐藏仅影响菜单与面包屑展示，页面路由与权限保持不变，仍可通过链接直接访问。
+        </p>
+
+        <div
+          v-for="group in navigationMenuGroups"
+          :key="group.key"
+          class="mb-5"
+        >
+          <h4 class="text-xs font-medium text-muted-foreground mb-2">
+            {{ group.label }}
+          </h4>
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+            <div
+              v-for="item in group.items"
+              :key="item.key"
+              class="flex items-center justify-between gap-3 border rounded-xl px-4 py-3 bg-card"
+              :class="navigationStore.isItemHidden(item.key) ? 'border-muted bg-muted/40' : 'border-border'"
+            >
+              <div class="min-w-0">
+                <div class="text-sm font-medium truncate">
+                  {{ item.display_name }}
+                </div>
+                <div class="text-xs text-muted-foreground truncate font-mono">
+                  {{ item.href }}
+                </div>
+              </div>
+              <Switch
+                class="shrink-0"
+                :model-value="!navigationStore.isItemHidden(item.key)"
+                :disabled="navToggling[item.key] || navLoading"
+                @update:model-value="(val: boolean) => toggleNavItem(item.key, val)"
+              />
+            </div>
+          </div>
+        </div>
+
+        <p
+          v-if="navigationStore.items.length === 0 && !navLoading"
+          class="text-xs text-muted-foreground"
+        >
+          菜单显示配置加载失败，请点击“刷新”重试。
+        </p>
+      </div>
+
       <!-- 搜索无结果 -->
       <div
         v-if="filteredModules.length === 0 && filteredBuiltinTools.length === 0 && searchQuery && !loading"
@@ -260,6 +325,7 @@ import Input from '@/components/ui/input.vue'
 import { PageHeader, PageContainer } from '@/components/layout'
 import { useToast } from '@/composables/useToast'
 import { useModuleStore } from '@/stores/modules'
+import { useNavigationStore } from '@/stores/navigation'
 import { BUILTIN_TOOLS } from '@/config/builtin-tools'
 import { log } from '@/utils/logger'
 import { getErrorMessage } from '@/types/api-error'
@@ -269,10 +335,13 @@ const router = useRouter()
 const { success, error } = useToast()
 const { t } = useI18n()
 const moduleStore = useModuleStore()
+const navigationStore = useNavigationStore()
 
 const loading = ref(false)
 const toggling = ref<Record<string, boolean>>({})
 const searchQuery = ref('')
+const navLoading = ref(false)
+const navToggling = ref<Record<string, boolean>>({})
 const moduleOrder = ref<string[]>([])
 const orderSaving = ref(false)
 const draggedModuleName = ref<string | null>(null)
@@ -412,6 +481,58 @@ async function toggleModule(moduleName: string, enabled: boolean) {
   }
 }
 
+// ========== 菜单管理（内置导航项显示/隐藏，issue #573） ==========
+const NAVIGATION_MENU_GROUP_LABELS: Record<string, string> = {
+  overview: '概览',
+  management: '管理',
+  system: '系统',
+}
+
+const NAVIGATION_MENU_GROUP_ORDER = ['overview', 'management', 'system']
+
+// 按后端返回的 menu_group 分组排序，供菜单管理分区渲染
+const navigationMenuGroups = computed(() => {
+  const groups: Record<string, typeof navigationStore.items> = {}
+  for (const item of navigationStore.items) {
+    if (!groups[item.menu_group]) {
+      groups[item.menu_group] = []
+    }
+    groups[item.menu_group].push(item)
+  }
+  return NAVIGATION_MENU_GROUP_ORDER
+    .filter(groupKey => (groups[groupKey]?.length ?? 0) > 0)
+    .map(groupKey => ({
+      key: groupKey,
+      label: NAVIGATION_MENU_GROUP_LABELS[groupKey] ?? groupKey,
+      items: groups[groupKey],
+    }))
+})
+
+async function fetchNavigationPreferences() {
+  navLoading.value = true
+  try {
+    await navigationStore.fetchPreferences()
+  } catch (err) {
+    error('获取菜单显示配置失败')
+    log.error('获取菜单显示配置失败:', err)
+  } finally {
+    navLoading.value = false
+  }
+}
+
+async function toggleNavItem(itemKey: string, visible: boolean) {
+  navToggling.value[itemKey] = true
+  try {
+    await navigationStore.setNavItemHidden(itemKey, !visible)
+    success(visible ? '菜单项已显示' : '菜单项已隐藏')
+  } catch (err) {
+    error(getErrorMessage(err, '操作失败'))
+    log.error('切换菜单项显示状态失败:', err)
+  } finally {
+    navToggling.value[itemKey] = false
+  }
+}
+
 async function saveModuleOrder(nextOrder: string[]) {
   if (orderSaving.value) return
   const previousOrder = [...moduleOrder.value]
@@ -484,5 +605,6 @@ function handleModuleDrop(targetModuleName: string) {
 
 onMounted(() => {
   fetchModules()
+  void fetchNavigationPreferences()
 })
 </script>

@@ -500,6 +500,7 @@ import { useLocalStorage } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useModuleStore } from '@/stores/modules'
+import { useNavigationStore } from '@/stores/navigation'
 import { useSiteInfo } from '@/composables/useSiteInfo'
 import { useToast } from '@/composables/useToast'
 import { isDemoMode } from '@/config/demo'
@@ -544,6 +545,7 @@ const route = useRoute()
 const authStore = useAuthStore()
 const moduleStore = useModuleStore()
 const announcementStore = useAnnouncementStore()
+const navigationStore = useNavigationStore()
 const { siteName, siteSubtitle } = useSiteInfo()
 const { success, error: showError } = useToast()
 const { t, locale } = useI18n()
@@ -1250,6 +1252,13 @@ onMounted(() => {
   announcementPollTimer = window.setInterval(() => {
     if (!document.hidden) void announcementStore.refreshStatus()
   }, 60_000)
+  // 管理员预加载内置导航项隐藏配置（issue #573）。加载失败按“全部显示”兜底，
+  // 仅影响菜单展示，不阻塞管理端功能。
+  if (authStore.canAccessAdmin && !navigationStore.loaded && !navigationStore.loading) {
+    void navigationStore.fetchPreferences().catch(() => {
+      // 失败时菜单按默认行为渲染，可在 /admin/modules 重新加载。
+    })
+  }
 
   // 延迟检查更新，避免 GitHub Releases 检查和首屏业务数据争抢资源。
   updateCheckTimer = window.setTimeout(() => {
@@ -1310,6 +1319,7 @@ const navigation = computed(() => {
     canAccessAdmin: authStore.canAccessAdmin,
     modules: moduleStore.modules,
     isModuleActive: moduleStore.isActive,
+    isItemHidden: navigationStore.isItemHidden,
     t,
   })
 })

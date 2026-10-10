@@ -344,6 +344,32 @@ pub(super) fn classify_admin_system_family_route(
     } else if method == http::Method::GET
         && matches!(
             normalized_path,
+            "/api/admin/navigation/preferences" | "/api/admin/navigation/preferences/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "navigation_preferences_get",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::PUT
+        && matches!(
+            normalized_path,
+            "/api/admin/navigation/preferences" | "/api/admin/navigation/preferences/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "navigation_preferences_set",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
             "/api/admin/system/email/templates" | "/api/admin/system/email/templates/"
         )
     {

@@ -491,6 +491,7 @@ fn access_for_route(method: &http::Method, decision: &GatewayControlDecision) ->
                     | "settings_set"
                     | "config_set"
                     | "config_delete"
+                    | "navigation_preferences_set"
             )
         ) | (
             Some("admin:endpoints_manage"),
@@ -1435,6 +1436,11 @@ mod tests {
             (http::Method::DELETE, "admin:security", "whitelist_remove"),
             (http::Method::PUT, "admin:ldap", "set_config"),
             (http::Method::PUT, "admin:modules", "set_enabled"),
+            (
+                http::Method::PUT,
+                "admin:system",
+                "navigation_preferences_set",
+            ),
         ] {
             let scope = signature.trim_start_matches("admin:");
             let decision = GatewayControlDecision::synthetic(
