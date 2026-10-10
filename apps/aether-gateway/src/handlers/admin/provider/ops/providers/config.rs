@@ -203,9 +203,14 @@ pub(super) async fn admin_provider_ops_merge_credentials(
     provider: &StoredProviderCatalogProvider,
     mut request_credentials: serde_json::Map<String, serde_json::Value>,
 ) -> Result<AdminProviderOpsMergedCredentialSnapshot, String> {
+    // Carry the real failure category (invalid config vs. undecryptable saved
+    // credentials vs. storage failure) instead of one misleading blanket text.
     let snapshot = admin_provider_ops_credential_snapshot(state, provider)
         .await
-        .map_err(|_| "已保存的 Provider Ops 凭据无法解密或迁移".to_string())?;
+        .map_err(|error| match error {
+            GatewayError::Internal(message) => message,
+            other => format!("Provider Ops 已保存凭据读取失败: {}", other.into_message()),
+        })?;
     let mut saved_credentials = snapshot.credentials;
     let preserve_internal_runtime_fields =
         admin_provider_ops_pure::normalize_architecture_id(architecture_id) == "sub2api";
@@ -445,21 +450,56 @@ pub(super) async fn build_admin_provider_ops_saved_config_value(
         return Err("connector.auth_type 必须是合法的认证类型".to_string());
     }
 
-    let merged = admin_provider_ops_merge_credentials(
-        state,
-        normalized_architecture_id,
-        provider,
-        payload.connector.credentials,
-    )
-    .await?;
-    let canonical_base_url = payload
+    // 比照 verify 路径的「无 provider_ops 首次配置」分支：credential snapshot
+    // 依赖已存在的 provider_ops 配置，首次保存时没有可合并的已存凭据，必须跳过
+    // merge，直接以请求凭据构造新配置；否则 snapshot 会误报「配置格式无效」，
+    // 形成「验证成功但无法保存」的不对称。
+    let (merged_provider, mut merged_credentials, saved_binding, reused_saved_secret) =
+        match admin_provider_ops_config_object(provider) {
+            Some(_) => {
+                let merged = admin_provider_ops_merge_credentials(
+                    state,
+                    normalized_architecture_id,
+                    provider,
+                    payload.connector.credentials,
+                )
+                .await?;
+                (
+                    merged.provider,
+                    merged.credentials,
+                    Some(merged.saved_binding),
+                    merged.reused_saved_secret,
+                )
+            }
+            None => (provider.clone(), payload.connector.credentials, None, false),
+        };
+    let canonical_base_url = match payload
         .base_url
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| merged.saved_binding.destination.base_url());
+    {
+        Some(base_url) => base_url.to_string(),
+        None => match saved_binding.as_ref() {
+            Some(binding) => binding.destination.base_url().to_string(),
+            None => {
+                // 首次保存且请求未带 base_url 时，沿用 verify 的兜底链：
+                // provider 目录 endpoints → provider 配置 → provider website。
+                let endpoints = state
+                    .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(
+                        &provider.id,
+                    ))
+                    .await
+                    .map_err(|error| {
+                        format!("无法解析 Provider Ops base_url: {}", error.into_message())
+                    })?;
+                resolve_admin_provider_ops_base_url(provider, &endpoints, None)
+                    .ok_or_else(|| "请提供 API 地址".to_string())?
+            }
+        },
+    };
     let canonical_destination =
-        canonicalize_provider_ops_base_url(canonical_base_url).map_err(ToString::to_string)?;
+        canonicalize_provider_ops_base_url(&canonical_base_url).map_err(ToString::to_string)?;
 
     let actions = payload
         .actions
@@ -489,32 +529,33 @@ pub(super) async fn build_admin_provider_ops_saved_config_value(
     });
     // 保存 ops 配置会整体重建 provider_ops 对象；remote_quota（PR-A 远程配额）
     // 不属于本表单的编辑面，但必须原样保留，避免 UI 保存时静默丢失配置。
-    if let Some(remote_quota) = admin_provider_ops_config_object(&merged.provider)
+    if let Some(remote_quota) = admin_provider_ops_config_object(&merged_provider)
         .and_then(|config| config.get("remote_quota"))
         .cloned()
     {
         provider_ops_config["remote_quota"] = remote_quota;
     }
     let new_binding = admin_provider_ops_binding_from_config(
-        &merged.provider.id,
+        &merged_provider.id,
         provider_ops_config
             .as_object()
             .ok_or_else(|| "Provider Ops 配置格式无效".to_string())?,
         canonical_destination.base_url(),
     )?;
-    let same_secret_destination = merged.saved_binding.provider_id == new_binding.provider_id
-        && merged.saved_binding.architecture_id == new_binding.architecture_id
-        && merged.saved_binding.auth_type == new_binding.auth_type
-        && merged.saved_binding.destination == new_binding.destination;
-    if merged.reused_saved_secret && !same_secret_destination {
-        return Err("修改 Provider Ops 架构、认证类型或目标地址时必须重新填写凭据".to_string());
-    }
-    let mut merged_credentials = merged.credentials;
-    if merged.saved_binding != new_binding {
-        for field in PROVIDER_OPS_TRANSIENT_METADATA_FIELDS {
-            merged_credentials.remove(*field);
+    if let Some(saved_binding) = saved_binding.as_ref() {
+        let same_secret_destination = saved_binding.provider_id == new_binding.provider_id
+            && saved_binding.architecture_id == new_binding.architecture_id
+            && saved_binding.auth_type == new_binding.auth_type
+            && saved_binding.destination == new_binding.destination;
+        if reused_saved_secret && !same_secret_destination {
+            return Err("修改 Provider Ops 架构、认证类型或目标地址时必须重新填写凭据".to_string());
         }
-        merged_credentials.retain(|field, _| !field.starts_with("_cached_"));
+        if *saved_binding != new_binding {
+            for field in PROVIDER_OPS_TRANSIENT_METADATA_FIELDS {
+                merged_credentials.remove(*field);
+            }
+            merged_credentials.retain(|field, _| !field.starts_with("_cached_"));
+        }
     }
     let encrypted_credentials =
         admin_provider_ops_encrypt_credentials(state, &new_binding, merged_credentials)?;
@@ -522,7 +563,7 @@ pub(super) async fn build_admin_provider_ops_saved_config_value(
         serde_json::Value::Object(encrypted_credentials);
 
     Ok(AdminProviderOpsSavedConfigSnapshot {
-        provider: merged.provider,
+        provider: merged_provider,
         provider_ops_config,
     })
 }
@@ -647,8 +688,9 @@ pub(super) async fn build_admin_provider_ops_config_payload(
 #[cfg(test)]
 mod tests {
     use super::{
+        admin_provider_ops_binding_from_config, admin_provider_ops_config_object,
         admin_provider_ops_credential_snapshot, build_admin_provider_ops_saved_config_value,
-        open_provider_ops_credential,
+        open_provider_ops_credential, ProviderCatalogProviderConfigCasUpdate,
     };
     use crate::data::GatewayDataState;
     use crate::handlers::admin::provider::ops::providers::support::{
@@ -669,6 +711,7 @@ mod tests {
 
     const TEST_PROVIDER_ID: &str = "provider-ops-secret-test";
     const TEST_API_KEY: &str = "legacy-provider-ops-api-key";
+    const TEST_BASE_URL: &str = "https://provider.example.com";
 
     fn provider_with_api_key(api_key: &str) -> StoredProviderCatalogProvider {
         StoredProviderCatalogProvider::new(
@@ -690,7 +733,7 @@ mod tests {
             Some(json!({
                 "provider_ops": {
                     "architecture_id": "generic_api",
-                    "base_url": "https://provider.example.com",
+                    "base_url": TEST_BASE_URL,
                     "connector": {
                         "auth_type": "api_key",
                         "config": {},
@@ -704,6 +747,35 @@ mod tests {
                 }
             })),
         )
+    }
+
+    fn provider_without_provider_ops() -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            TEST_PROVIDER_ID.to_string(),
+            "Provider Ops Secret Test".to_string(),
+            Some(TEST_BASE_URL.to_string()),
+            "openai".to_string(),
+        )
+        .expect("provider should build")
+    }
+
+    fn save_payload(
+        credentials: serde_json::Value,
+        base_url: Option<&str>,
+    ) -> AdminProviderOpsSaveConfigRequest {
+        AdminProviderOpsSaveConfigRequest {
+            architecture_id: "generic_api".to_string(),
+            base_url: base_url.map(ToOwned::to_owned),
+            connector: AdminProviderOpsConnectorConfigRequest {
+                auth_type: "api_key".to_string(),
+                config: Default::default(),
+                credentials: serde_json::from_value(credentials)
+                    .expect("credentials should be a JSON object"),
+            },
+            actions: Default::default(),
+            schedule: Default::default(),
+            quota_alert: None,
+        }
     }
 
     fn state_with_provider(
@@ -854,5 +926,160 @@ mod tests {
                 .expect("save config should build");
 
         assert!(snapshot.provider_ops_config.get("remote_quota").is_none());
+    }
+
+    #[tokio::test]
+    async fn first_save_without_provider_ops_persists_decryptable_credentials() {
+        // 首次保存：provider 尚无 provider_ops 配置（也没有显式 base_url，需要
+        // 回退到 provider website 解析），必须跳过 merge 直接以请求凭据落库。
+        let provider = provider_without_provider_ops();
+        let (state, repository) = state_with_provider(provider.clone());
+        let admin_state = AdminAppState::new(&state);
+        let payload = save_payload(
+            json!({"api_key": TEST_API_KEY, "account_id": "account-1"}),
+            None,
+        );
+
+        let snapshot =
+            build_admin_provider_ops_saved_config_value(&admin_state, &provider, payload)
+                .await
+                .expect("first save should build without an existing provider_ops config");
+        assert_eq!(snapshot.provider.config, provider.config);
+        assert_eq!(
+            snapshot.provider_ops_config["base_url"],
+            json!(TEST_BASE_URL)
+        );
+        let encrypted = snapshot
+            .provider_ops_config
+            .pointer("/connector/credentials/api_key")
+            .and_then(serde_json::Value::as_str)
+            .expect("encrypted api_key should exist");
+        assert_ne!(encrypted, TEST_API_KEY);
+        assert!(encrypted.starts_with("aether-provider-ops-credential-v2:"));
+
+        // 模拟保存路由的 CAS 写入，然后回读验证凭据可解密。
+        let mut provider_config = snapshot
+            .provider
+            .config
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        provider_config.insert(
+            "provider_ops".to_string(),
+            snapshot.provider_ops_config.clone(),
+        );
+        let update = ProviderCatalogProviderConfigCasUpdate {
+            provider_id: snapshot.provider.id.clone(),
+            expected_config: snapshot.provider.config.clone(),
+            config: Some(serde_json::Value::Object(provider_config)),
+        };
+        assert!(
+            admin_state
+                .compare_and_swap_provider_catalog_provider_config(&update)
+                .await
+                .expect("compare and swap should run"),
+            "first save should apply against the untouched provider config"
+        );
+
+        let stored = stored_provider(repository.as_ref()).await;
+        let stored_ops = admin_provider_ops_config_object(&stored)
+            .cloned()
+            .expect("stored provider_ops config should exist");
+        let stored_base_url = stored_ops
+            .get("base_url")
+            .and_then(serde_json::Value::as_str)
+            .expect("stored base_url should exist");
+        let stored_ciphertext = stored_ops
+            .get("connector")
+            .and_then(|connector| connector.get("credentials"))
+            .and_then(|credentials| credentials.get("api_key"))
+            .and_then(serde_json::Value::as_str)
+            .expect("stored api_key ciphertext should exist");
+        let binding =
+            admin_provider_ops_binding_from_config(&stored.id, &stored_ops, stored_base_url)
+                .expect("stored provider_ops config should build a binding");
+        assert_eq!(
+            open_provider_ops_credential(&state, &binding, "api_key", stored_ciphertext)
+                .expect("persisted credential should decrypt")
+                .plaintext,
+            TEST_API_KEY
+        );
+        assert_eq!(
+            stored_ops
+                .get("connector")
+                .and_then(|connector| connector.get("credentials"))
+                .and_then(|credentials| credentials.get("account_id")),
+            Some(&json!("account-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn save_config_placeholder_reuses_saved_bound_credentials() {
+        // 行为回归：已有 provider_ops 时，占位符必须复用已存凭据（v2 绑定密文）。
+        let provider = provider_with_api_key(TEST_API_KEY);
+        let (state, _) = state_with_provider(provider.clone());
+        let admin_state = AdminAppState::new(&state);
+        let migrated = admin_provider_ops_credential_snapshot(&admin_state, &provider)
+            .await
+            .expect("legacy credentials should migrate");
+
+        let payload = save_payload(json!({"api_key": "********"}), Some(TEST_BASE_URL));
+        let snapshot =
+            build_admin_provider_ops_saved_config_value(&admin_state, &migrated.provider, payload)
+                .await
+                .expect("placeholder save should reuse saved credentials");
+        let encrypted = snapshot
+            .provider_ops_config
+            .pointer("/connector/credentials/api_key")
+            .and_then(serde_json::Value::as_str)
+            .expect("reused credential should be persisted");
+        assert_ne!(encrypted, TEST_API_KEY);
+        assert!(encrypted.starts_with("aether-provider-ops-credential-v2:"));
+        let binding = admin_provider_ops_binding_from_config(
+            &snapshot.provider.id,
+            snapshot
+                .provider_ops_config
+                .as_object()
+                .expect("provider_ops config should be an object"),
+            snapshot.provider_ops_config["base_url"]
+                .as_str()
+                .expect("base_url should exist"),
+        )
+        .expect("saved config should build a binding");
+        assert_eq!(
+            open_provider_ops_credential(&state, &binding, "api_key", encrypted)
+                .expect("reused credential should decrypt")
+                .plaintext,
+            TEST_API_KEY
+        );
+    }
+
+    #[tokio::test]
+    async fn save_config_reports_decrypt_failure_category() {
+        // 错误路径：已存凭据无法解密时，保存错误必须携带真实错误类别，
+        // 不再统一映射为误导性的「无法解密或迁移」文案。
+        let mut tampered =
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, TEST_API_KEY)
+                .expect("Provider Ops API key should encrypt");
+        tampered.replace_range(tampered.len() - 2.., "AA");
+        assert!(looks_like_python_fernet_ciphertext(&tampered));
+        let provider = provider_with_api_key(&tampered);
+        let (state, _) = state_with_provider(provider.clone());
+        let admin_state = AdminAppState::new(&state);
+        let payload = save_payload(json!({"api_key": "********"}), Some(TEST_BASE_URL));
+
+        let error =
+            match build_admin_provider_ops_saved_config_value(&admin_state, &provider, payload)
+                .await
+            {
+                Ok(_) => panic!("undecryptable saved credentials must fail the save"),
+                Err(error) => error,
+            };
+        assert!(error.contains("无法解密"), "unexpected error: {error}");
+        assert!(
+            !error.contains("无法解密或迁移"),
+            "error should not use the blanket migration text: {error}"
+        );
     }
 }
