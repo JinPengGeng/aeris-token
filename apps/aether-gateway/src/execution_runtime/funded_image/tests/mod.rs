@@ -59,6 +59,7 @@ impl Fixture {
             .unwrap();
         for table in [
             "users",
+            "user_preferences",
             "api_keys",
             "wallets",
             "billing_plans",

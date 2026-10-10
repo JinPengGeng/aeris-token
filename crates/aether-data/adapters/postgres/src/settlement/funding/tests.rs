@@ -41,6 +41,7 @@ pub(crate) async fn fixture() -> (PgPool, PgPool, PgPool, String) {
         .unwrap();
     for table in [
         "users",
+        "user_preferences",
         "api_keys",
         "wallets",
         "billing_plans",

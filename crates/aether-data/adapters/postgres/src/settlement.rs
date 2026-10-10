@@ -609,9 +609,19 @@ FOR UPDATE OF user_plan_entitlements
 
     let mut grants_with_remaining = Vec::new();
     let mut total_remaining = 0_u64;
+    // An explicit user preference overrides the entitlement snapshot; without
+    // a preference the snapshot's allow_wallet_overage remains the default.
+    let user_allow_wallet_overage = sqlx::query_scalar::<_, bool>(
+        "SELECT allow_wallet_overage FROM user_preferences WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_postgres_err()?;
     let mut allow_wallet_overage = true;
     for grant in grants {
-        allow_wallet_overage &= grant.allow_wallet_overage;
+        allow_wallet_overage &= user_allow_wallet_overage
+            .unwrap_or(grant.allow_wallet_overage);
         let used = sqlx::query_scalar::<_, i64>(
             r#"
 SELECT CEIL(COALESCE(SUM(amount_usd), 0) * 100000000)::bigint
@@ -1418,10 +1428,10 @@ WHERE retain_until <= TO_TIMESTAMP($1::double precision)
                     };
                     let mut quota_covered = 0.0_f64;
                     let mut wallet_consumed = 0.0_f64;
-                    let wallet_debit = 0.0_f64;
-                    let recharge_debit = 0.0_f64;
-                    let gift_debit = 0.0_f64;
-                    let overdraft = 0.0_f64;
+                    let mut wallet_debit = 0.0_f64;
+                    let mut recharge_debit = 0.0_f64;
+                    let mut gift_debit = 0.0_f64;
+                    let mut overdraft = 0.0_f64;
 
                     if final_billing_status == "settled" {
                         let api_key_id = input
@@ -1631,16 +1641,20 @@ LIMIT 1
                                     // write-off: the recharge balance may go negative and is
                                     // recovered by later recharge top-ups. Only the recharge
                                     // balance may overdraw; gift balances stop at zero.
-                                    let recharge_debit = required.min(available_recharge);
-                                    let gift_debit = (required - recharge_debit).min(available_gift);
-                                    let overdraft = required - recharge_debit - gift_debit;
+                                    let recharge_units = required.min(available_recharge);
+                                    let gift_units = (required - recharge_units).min(available_gift);
+                                    let overdraft_units = required - recharge_units - gift_units;
+                                    recharge_debit = aether_data_contracts::repository::settlement::request_funds_usd(recharge_units);
+                                    gift_debit = aether_data_contracts::repository::settlement::request_funds_usd(gift_units);
+                                    overdraft = aether_data_contracts::repository::settlement::request_funds_usd(overdraft_units);
+                                    wallet_debit = recharge_debit + gift_debit + overdraft;
                                     // Canonical integer subtraction preserves every unit owned
                                     // by another reservation (e.g. 0.30 - 0.10 must remain 0.20).
-                                    if recharge_debit > 0 || overdraft > 0 {
+                                    if recharge_units > 0 || overdraft_units > 0 {
                                         let before_units = aether_data_contracts::repository::settlement::request_funds_available_units(before_recharge.max(0.0))?;
                                         let after_units = before_units as i128
-                                            - recharge_debit as i128
-                                            - overdraft as i128;
+                                            - recharge_units as i128
+                                            - overdraft_units as i128;
                                         after_recharge = if after_units >= 0 {
                                             aether_data_contracts::repository::settlement::request_funds_usd(after_units as u64)
                                         } else {
@@ -1650,9 +1664,9 @@ LIMIT 1
                                             )
                                         };
                                     }
-                                    if gift_debit > 0 {
+                                    if gift_units > 0 {
                                         after_gift = aether_data_contracts::repository::settlement::request_funds_usd(
-                                            aether_data_contracts::repository::settlement::request_funds_available_units(before_gift)? - gift_debit,
+                                            aether_data_contracts::repository::settlement::request_funds_available_units(before_gift)? - gift_units,
                                         );
                                     }
                                 }

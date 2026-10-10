@@ -1194,7 +1194,7 @@ WHERE id = $1
 SELECT
     user_plan_entitlements.id,
     CAST(EXTRACT(EPOCH FROM user_plan_entitlements.starts_at) AS BIGINT) AS starts_at_unix_secs,
-    user_plan_entitlements.entitlements_snapshot,
+    user_plan_entitlements.entitlements_snapshot
 FROM user_plan_entitlements
 WHERE user_plan_entitlements.user_id = $1
     AND user_plan_entitlements.status = 'active'
@@ -1231,7 +1231,7 @@ ORDER BY user_plan_entitlements.expires_at ASC,
         let mut total_quota_usd = 0.0;
         let mut used_usd = 0.0;
         let mut remaining_usd = 0.0;
-        let mut allow_wallet_overage = sqlx::query_scalar::<_, bool>(
+        let allow_wallet_overage = sqlx::query_scalar::<_, bool>(
             "SELECT allow_wallet_overage FROM user_preferences WHERE user_id = $1",
         )
         .bind(user_id)
@@ -1240,7 +1240,6 @@ ORDER BY user_plan_entitlements.expires_at ASC,
         .map_postgres_err()?
         .unwrap_or(false);
         for grant in &grants {
-            allow_wallet_overage &= grant.allow_wallet_overage;
             let mut used = 0.0;
             for usage_date in &grant.usage_dates {
                 used += sqlx::query_scalar::<_, Option<f64>>(
