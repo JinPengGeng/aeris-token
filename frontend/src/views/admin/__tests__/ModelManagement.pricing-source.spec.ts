@@ -61,12 +61,19 @@ vi.mock('@/composables/useClipboard', () => ({
   useClipboard: () => ({ copyToClipboard: vi.fn() }),
 }))
 
+const dialogStubState = vi.hoisted(() => ({
+  lastProps: {} as Record<string, unknown>,
+}))
+
 vi.mock('@/features/models/components/GlobalModelFormDialog.vue', async () => {
   const { defineComponent } = await import('vue')
   return {
     default: defineComponent({
       name: 'ChildStub',
-      setup: () => () => null,
+      setup: (_, { attrs }) => () => {
+        dialogStubState.lastProps = { ...attrs }
+        return null
+      },
     }),
   }
 })
@@ -173,6 +180,7 @@ beforeEach(() => {
 
   for (const mock of Object.values(apiMocks)) mock.mockReset()
   for (const mock of Object.values(interactionMocks)) mock.mockReset()
+  dialogStubState.lastProps = {}
 
   apiMocks.listGlobalModels.mockImplementation(async () => ({
     models: [cloneModel(persistedModel)],
@@ -292,5 +300,62 @@ describe('ModelManagement pricing-source workflow', () => {
       'models_dev_pricing_source.provider_id',
       'openai',
     )
+  })
+})
+
+describe('ModelManagement copy-model entry (fork issue #570)', () => {
+  function getLastDialogProps(): Record<string, unknown> {
+    return dialogStubState.lastProps
+  }
+
+  function getDialogCopyFrom(): GlobalModelResponse | null {
+    const props = getLastDialogProps()
+    return (props['copy-from'] ?? props.copyFrom ?? null) as GlobalModelResponse | null
+  }
+
+  it('opens the create dialog with copyFrom from the row copy action', async () => {
+    mountView()
+    await settle()
+
+    const copyButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="model-copy-desktop-model-1"]',
+    )
+    if (!copyButton) throw new Error('Missing desktop copy button')
+    copyButton.click()
+    await settle()
+
+    expect(getLastDialogProps().open).toBe(true)
+    expect(getLastDialogProps().model ?? null).toBeNull()
+    expect(getDialogCopyFrom()).toMatchObject({ id: 'model-1', name: 'test-model' })
+
+    // 移动端卡片同样提供复制入口
+    const mobileCopyButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="model-copy-mobile-model-1"]',
+    )
+    expect(mobileCopyButton).not.toBeNull()
+  })
+
+  it('clears the copy source when opening a plain create dialog', async () => {
+    mountView()
+    await settle()
+
+    const copyButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="model-copy-desktop-model-1"]',
+    )
+    if (!copyButton) throw new Error('Missing desktop copy button')
+    copyButton.click()
+    await settle()
+    expect(getDialogCopyFrom()).not.toBeNull()
+
+    const createButton = document.body.querySelector<HTMLButtonElement>(
+      'button[title="创建模型"]',
+    )
+    if (!createButton) throw new Error('Missing create button')
+    createButton.click()
+    await settle()
+
+    expect(getLastDialogProps().open).toBe(true)
+    expect(getLastDialogProps().model ?? null).toBeNull()
+    expect(getDialogCopyFrom()).toBeNull()
   })
 })
