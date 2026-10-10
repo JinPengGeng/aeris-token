@@ -26,6 +26,8 @@ pub(crate) const IMPORTANT_NOTIFICATION_DEFAULT_CHANNEL_KEY: &str =
 pub(crate) const IMPORTANT_NOTIFICATION_ITEMS_KEY: &str = "module.important_notification.items";
 pub(crate) const PROVIDER_QUOTA_ALERT_ITEM_KEY: &str = "provider_quota_alert";
 pub(crate) const PROVIDER_POOL_ABNORMAL_ITEM_KEY: &str = "provider_pool_abnormal";
+pub(crate) const PROVIDER_CREDENTIAL_UNDECRYPTABLE_ITEM_KEY: &str =
+    "provider_credential_undecryptable";
 pub(crate) const USER_BALANCE_LOW_ITEM_KEY: &str = "user_balance_low";
 pub(crate) const USER_BALANCE_LOW_THRESHOLD_KEY: &str =
     "module.important_notification.user_balance_low_threshold";
@@ -660,6 +662,22 @@ fn default_notification_items() -> Vec<ImportantNotificationItemConfig> {
                 "号池 `{provider_name}` 出现异常，请检查服务状态。".to_string(),
             ),
             text_template: Some("号池 {provider_name} 出现异常，请检查服务状态。".to_string()),
+            user_email_enabled: false,
+        },
+        ImportantNotificationItemConfig {
+            key: PROVIDER_CREDENTIAL_UNDECRYPTABLE_ITEM_KEY.to_string(),
+            name: "号池凭据无法解密".to_string(),
+            enabled: true,
+            channel: None,
+            title_template: Some("号池凭据无法解密".to_string()),
+            markdown_template: Some(
+                "以下提供商密钥的凭据无法解密，请删除后重新添加这些密钥：{key_ids}\n\n受影响密钥数：{key_count}"
+                    .to_string(),
+            ),
+            text_template: Some(
+                "以下提供商密钥的凭据无法解密，请删除后重新添加这些密钥：{key_ids}（受影响密钥数：{key_count}）"
+                    .to_string(),
+            ),
             user_email_enabled: false,
         },
         ImportantNotificationItemConfig {

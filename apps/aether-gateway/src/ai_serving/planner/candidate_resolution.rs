@@ -23,6 +23,7 @@ use crate::ai_serving::{
 };
 use crate::orchestration::LocalExecutionCandidateMetadata;
 use crate::stage_metrics::observe_gateway_stage_ms;
+use crate::GatewayError;
 
 use super::candidate_ranking::{
     rank_eligible_local_execution_candidates, scheduler_ordering_config_for_routing_policy,
@@ -621,24 +622,74 @@ pub(crate) async fn read_candidate_transport_snapshot_arc(
         Ok(Some(transport)) => Some(transport),
         Ok(None) => None,
         Err(error) => {
-            warn!(
-                event_name = "candidate_resolution_transport_load_failed",
-                log_type = "event",
-                provider_id = %candidate.provider_id,
-                endpoint_id = %candidate.endpoint_id,
-                key_id = %candidate.key_id,
-                error = ?error,
-                "failed to load provider transport while evaluating local candidate eligibility"
-            );
+            log_candidate_transport_load_failure(candidate, &error);
             None
         }
     }
 }
 
+/// A stored provider credential that looks like valid ciphertext but fails to
+/// decrypt with every configured encryption key surfaces as a data-layer
+/// `UnexpectedValue` error. The gateway error conversion flattens that variant
+/// into `GatewayError::Internal`, so the category is recognized from the
+/// stable Display text emitted by the transport snapshot mapping layer, and
+/// the affected credential field is recovered from the same message.
+fn credential_undecryptable_field(error: &GatewayError) -> Option<&'static str> {
+    let GatewayError::Internal(message) = error else {
+        return None;
+    };
+    if !message.contains("unexpected database value") || !message.contains("failed to decrypt") {
+        return None;
+    }
+    if message.contains("provider_api_keys.auth_config") {
+        return Some("auth_config");
+    }
+    if message.contains("provider_api_keys.api_key") {
+        return Some("api_key");
+    }
+    Some("unknown")
+}
+
+/// Emit the candidate transport load failure. Credential decryption failures
+/// get their own searchable event category so operators can filter for
+/// undecryptable provider credentials directly instead of digging through the
+/// generic transport load failures.
+fn log_candidate_transport_load_failure(
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    error: &GatewayError,
+) {
+    if let Some(field) = credential_undecryptable_field(error) {
+        warn!(
+            event_name = "candidate_resolution_credential_undecryptable",
+            log_type = "event",
+            provider_id = %candidate.provider_id,
+            endpoint_id = %candidate.endpoint_id,
+            key_id = %candidate.key_id,
+            field,
+            error = ?error,
+            "provider credential cannot be decrypted with any configured encryption key; dropping local candidate"
+        );
+        return;
+    }
+    warn!(
+        event_name = "candidate_resolution_transport_load_failed",
+        log_type = "event",
+        provider_id = %candidate.provider_id,
+        endpoint_id = %candidate.endpoint_id,
+        key_id = %candidate.key_id,
+        error = ?error,
+        "failed to load provider transport while evaluating local candidate eligibility"
+    );
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{candidate_auth_channel_skip_reason, pool_group_common_transport_skip_reason};
+    use super::{
+        candidate_auth_channel_skip_reason, credential_undecryptable_field,
+        log_candidate_transport_load_failure, pool_group_common_transport_skip_reason,
+    };
     use crate::ai_serving::GatewayProviderTransportSnapshot;
+    use crate::GatewayError;
     use aether_provider_transport::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider,
@@ -723,6 +774,82 @@ mod tests {
             supports_streaming: true,
             mapping_matched_model: None,
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct WarnLogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for WarnLogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("warn log buffer should lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn captured_transport_load_failure_log(error: &GatewayError) -> serde_json::Value {
+        let buffer = WarnLogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            log_candidate_transport_load_failure(&sample_candidate(), error);
+        });
+        let bytes = buffer.0.lock().expect("warn log buffer should lock");
+        serde_json::from_slice(&bytes).expect("transport load failure log should be JSON")
+    }
+
+    #[test]
+    fn credential_undecryptable_load_failure_logs_dedicated_event() {
+        let error = GatewayError::Internal(
+            "unexpected database value: failed to decrypt provider_api_keys.api_key: invalid fernet token"
+                .to_string(),
+        );
+        assert_eq!(credential_undecryptable_field(&error), Some("api_key"));
+
+        let log = captured_transport_load_failure_log(&error);
+        let fields = &log["fields"];
+        assert_eq!(
+            fields["event_name"],
+            "candidate_resolution_credential_undecryptable"
+        );
+        assert_eq!(fields["provider_id"], "provider-1");
+        assert_eq!(fields["endpoint_id"], "endpoint-1");
+        assert_eq!(fields["key_id"], "key-1");
+        assert_eq!(fields["field"], "api_key");
+    }
+
+    #[test]
+    fn auth_config_undecryptable_failure_reports_auth_config_field() {
+        let error = GatewayError::Internal(
+            "unexpected database value: failed to decrypt provider_api_keys.auth_config: invalid fernet token"
+                .to_string(),
+        );
+        assert_eq!(credential_undecryptable_field(&error), Some("auth_config"));
+    }
+
+    #[test]
+    fn generic_transport_load_failure_keeps_original_event() {
+        let error = GatewayError::Internal("postgres error: connection refused".to_string());
+        assert_eq!(credential_undecryptable_field(&error), None);
+
+        let log = captured_transport_load_failure_log(&error);
+        let fields = &log["fields"];
+        assert_eq!(
+            fields["event_name"],
+            "candidate_resolution_transport_load_failed"
+        );
+        assert!(fields.get("field").is_none());
     }
 
     #[test]

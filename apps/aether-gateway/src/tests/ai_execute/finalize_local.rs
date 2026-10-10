@@ -910,11 +910,15 @@ async fn gateway_executes_openai_chat_cross_format_upstream_stream_via_local_fin
     assert_eq!(response_status, StatusCode::OK);
     let response_json: serde_json::Value =
         serde_json::from_str(&response_body).expect("body should parse");
+    let created = response_json["created"]
+        .as_i64()
+        .expect("created should be a unix timestamp");
     assert_eq!(
         response_json,
         json!({
             "id": "resp-gemini-chat-stream-123",
             "object": "chat.completion",
+            "created": created,
             "model": "gemini-2.5-pro-upstream",
             "choices": [{
                 "index": 0,
@@ -1373,11 +1377,15 @@ async fn gateway_executes_openai_chat_cross_format_tool_use_upstream_stream_via_
     assert_eq!(response_status, StatusCode::OK);
     let response_json: serde_json::Value =
         serde_json::from_str(&response_body).expect("body should parse");
+    let created = response_json["created"]
+        .as_i64()
+        .expect("created should be a unix timestamp");
     assert_eq!(
         response_json,
         json!({
             "id": "msg_tool_claude_123",
             "object": "chat.completion",
+            "created": created,
             "model": "claude-sonnet-4-upstream",
             "choices": [{
                 "index": 0,
@@ -1901,11 +1909,15 @@ async fn gateway_executes_openai_chat_antigravity_cross_format_sync_via_local_fi
     assert_eq!(response_status, StatusCode::OK);
     let response_json: serde_json::Value =
         serde_json::from_str(&response_body).expect("body should parse");
+    let created = response_json["created"]
+        .as_i64()
+        .expect("created should be a unix timestamp");
     assert_eq!(
         response_json,
         json!({
             "id": "resp-local-stream",
             "object": "chat.completion",
+            "created": created,
             "model": "claude-sonnet-4-5",
             "choices": [{
                 "index": 0,
@@ -2309,11 +2321,15 @@ async fn gateway_executes_openai_chat_cross_format_claude_upstream_sync_via_loca
     assert_eq!(response_status, StatusCode::OK);
     let response_json: serde_json::Value =
         serde_json::from_str(&response_body).expect("body should parse");
+    let created = response_json["created"]
+        .as_i64()
+        .expect("created should be a unix timestamp");
     assert_eq!(
         response_json,
         json!({
             "id": "msg_claude_direct_sync_123",
             "object": "chat.completion",
+            "created": created,
             "model": "claude-sonnet-4-upstream",
             "choices": [{
                 "index": 0,
@@ -2671,11 +2687,15 @@ async fn gateway_executes_openai_chat_cross_format_gemini_upstream_sync_via_loca
 
     assert_eq!(response.status(), StatusCode::OK);
     let response_json: serde_json::Value = response.json().await.expect("body should parse");
+    let created = response_json["created"]
+        .as_i64()
+        .expect("created should be a unix timestamp");
     assert_eq!(
         response_json,
         json!({
             "id": "resp_gemini_direct_sync_123",
             "object": "chat.completion",
+            "created": created,
             "model": "gemini-2.5-pro-upstream",
             "choices": [{
                 "index": 0,

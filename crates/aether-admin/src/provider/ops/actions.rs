@@ -207,21 +207,53 @@ fn parse_new_api_balance_payload(
         return Err("响应格式无效".to_string());
     };
     let quota_divisor = quota_divisor(action_config);
-    let available_field = configured_balance_field(action_config, "available", "quota");
-    let used_field = configured_balance_field(action_config, "used", "used_quota");
-    let granted_field = action_config
-        .get("balance_fields")
-        .and_then(Value::as_object)
-        .and_then(|fields| fields.get("granted"))
-        .and_then(Value::as_str)
-        .filter(|field| !field.trim().is_empty());
-    let total_granted = granted_field
+    let divide = |value: f64| value / quota_divisor;
+    // #606 balance_fields 显式映射优先于 #605 的默认字段回退链。
+    let configured_field = |key: &str| -> Option<&str> {
+        action_config
+            .get("balance_fields")
+            .and_then(Value::as_object)
+            .and_then(|fields| fields.get(key))
+            .and_then(Value::as_str)
+            .filter(|field| !field.trim().is_empty())
+    };
+    let quota_available = configured_field("available")
         .and_then(|field| admin_provider_ops_value_as_f64(user_data.get(field)))
-        .map(|value| value / quota_divisor);
-    let total_available = admin_provider_ops_value_as_f64(user_data.get(available_field))
-        .map(|value| value / quota_divisor);
-    let total_used = admin_provider_ops_value_as_f64(user_data.get(used_field))
-        .map(|value| value / quota_divisor);
+        .or_else(|| {
+            admin_provider_ops_value_as_f64(
+                user_data
+                    .get("quota")
+                    .or_else(|| user_data.get("remain_quota"))
+                    .or_else(|| user_data.get("remain")),
+            )
+        })
+        .map(divide);
+    let balance_available = admin_provider_ops_value_as_f64(user_data.get("balance"));
+    let total_available = quota_available.or(balance_available);
+    let total_used = configured_field("used")
+        .and_then(|field| admin_provider_ops_value_as_f64(user_data.get(field)))
+        .or_else(|| admin_provider_ops_value_as_f64(user_data.get("used_quota")))
+        .map(divide);
+    let total_granted = configured_field("granted")
+        .and_then(|field| admin_provider_ops_value_as_f64(user_data.get(field)))
+        .map(divide)
+        .or(match (quota_available, total_used) {
+            (Some(available), Some(used)) => Some(available + used),
+            _ => None,
+        });
+    let mut extra = Map::new();
+    for field in [
+        "quota",
+        "used_quota",
+        "remain_quota",
+        "remain",
+        "balance",
+        "group",
+    ] {
+        if let Some(value) = user_data.get(field) {
+            extra.insert(field.to_string(), value.clone());
+        }
+    }
     Ok(build_balance_data(
         total_granted,
         total_used,
@@ -230,7 +262,7 @@ fn parse_new_api_balance_payload(
             .get("currency")
             .and_then(Value::as_str)
             .unwrap_or("USD"),
-        Map::new(),
+        extra,
     ))
 }
 
@@ -555,6 +587,63 @@ mod tests {
     use serde_json::{json, Map};
 
     #[test]
+    fn new_api_parser_accepts_remain_quota_and_balance_fields() {
+        let config = json!({ "quota_divisor": 500000 })
+            .as_object()
+            .cloned()
+            .expect("config");
+        let payload = parse_query_balance_payload(
+            "new_api",
+            &config,
+            &json!({
+                "remain_quota": 1_000_000,
+                "used_quota": 500000,
+                "group": "default"
+            }),
+        )
+        .expect("payload should parse");
+
+        assert_eq!(payload["total_available"], json!(2.0));
+        assert_eq!(payload["total_used"], json!(1.0));
+        assert_eq!(payload["total_granted"], json!(3.0));
+        assert_eq!(payload["extra"]["remain_quota"], json!(1_000_000));
+        assert_eq!(payload["extra"]["group"], json!("default"));
+    }
+
+    #[test]
+    fn new_api_parser_accepts_balance_without_quota() {
+        let payload = parse_query_balance_payload(
+            "generic_api",
+            &Map::new(),
+            &json!({
+                "success": true,
+                "data": { "balance": 12.5 }
+            }),
+        )
+        .expect("payload should parse");
+
+        assert_eq!(payload["total_available"], json!(12.5));
+        assert_eq!(payload["total_granted"], json!(null));
+        assert_eq!(payload["extra"]["balance"], json!(12.5));
+    }
+
+    #[test]
+    fn new_api_parser_still_rejects_upstream_failure_messages() {
+        let config = Map::new();
+        let secret = "authorization=Bearer upstream-secret";
+
+        let error = parse_query_balance_payload(
+            "new_api",
+            &config,
+            &json!({"success": false, "message": secret}),
+        )
+        .expect_err("failure should be rejected");
+
+        assert_eq!(error, "业务状态码表示失败");
+        assert!(!error.contains("upstream-secret"));
+    }
+
+    #[test]
     fn anyrouter_single_request_parser_uses_usage_fields() {
         let payload = parse_query_balance_payload(
             "anyrouter",
@@ -844,6 +933,7 @@ mod tests {
 
         assert_eq!(payload["total_available"], json!(1.0));
         assert_eq!(payload["total_used"], json!(0.2));
-        assert_eq!(payload["total_granted"], json!(null));
+        // #605 基线：未配置 granted 映射时由 available + used 推导。
+        assert_eq!(payload["total_granted"], json!(1.2));
     }
 }
