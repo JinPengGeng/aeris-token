@@ -176,6 +176,20 @@ pub fn build_balance_data(
     })
 }
 
+fn configured_balance_field<'a>(
+    action_config: &'a Map<String, Value>,
+    key: &str,
+    default: &'a str,
+) -> &'a str {
+    action_config
+        .get("balance_fields")
+        .and_then(Value::as_object)
+        .and_then(|fields| fields.get(key))
+        .and_then(Value::as_str)
+        .filter(|field| !field.trim().is_empty())
+        .unwrap_or(default)
+}
+
 fn parse_new_api_balance_payload(
     action_config: &Map<String, Value>,
     response_json: &Value,
@@ -193,12 +207,23 @@ fn parse_new_api_balance_payload(
         return Err("响应格式无效".to_string());
     };
     let quota_divisor = quota_divisor(action_config);
-    let total_available =
-        admin_provider_ops_value_as_f64(user_data.get("quota")).map(|value| value / quota_divisor);
-    let total_used = admin_provider_ops_value_as_f64(user_data.get("used_quota"))
+    let available_field = configured_balance_field(action_config, "available", "quota");
+    let used_field = configured_balance_field(action_config, "used", "used_quota");
+    let granted_field = action_config
+        .get("balance_fields")
+        .and_then(Value::as_object)
+        .and_then(|fields| fields.get("granted"))
+        .and_then(Value::as_str)
+        .filter(|field| !field.trim().is_empty());
+    let total_granted = granted_field
+        .and_then(|field| admin_provider_ops_value_as_f64(user_data.get(field)))
+        .map(|value| value / quota_divisor);
+    let total_available = admin_provider_ops_value_as_f64(user_data.get(available_field))
+        .map(|value| value / quota_divisor);
+    let total_used = admin_provider_ops_value_as_f64(user_data.get(used_field))
         .map(|value| value / quota_divisor);
     Ok(build_balance_data(
-        None,
+        total_granted,
         total_used,
         total_available,
         action_config
@@ -225,7 +250,8 @@ fn parse_usage_api_balance_payload(
     }
 
     let quota = data.get("quota").and_then(Value::as_object);
-    let remaining = admin_provider_ops_value_as_f64(data.get("remaining"))
+    let remaining_field = configured_balance_field(action_config, "available", "remaining");
+    let remaining = admin_provider_ops_value_as_f64(data.get(remaining_field))
         .or_else(|| quota.and_then(|quota| admin_provider_ops_value_as_f64(quota.get("remaining"))))
         .or_else(|| admin_provider_ops_value_as_f64(data.get("balance")))
         .ok_or_else(|| "响应缺少余额字段".to_string())?;
@@ -768,5 +794,56 @@ mod tests {
         assert_eq!(sub2api_error, "查询用户信息失败");
         assert!(!generic_error.contains("upstream-secret"));
         assert!(!sub2api_error.contains("upstream-secret"));
+    }
+
+    #[test]
+    fn balance_field_mapping_overrides_default_fields() {
+        let config = json!({
+            "balance_fields": {
+                "available": "credits_left",
+                "used": "credits_spent",
+                "granted": "credits_total"
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("config");
+
+        let payload = parse_query_balance_payload(
+            "new_api",
+            &config,
+            &json!({
+                "success": true,
+                "data": {
+                    "credits_left": 250000.0,
+                    "credits_spent": 50000.0,
+                    "credits_total": 300000.0
+                }
+            }),
+        )
+        .expect("payload should parse with mapped fields");
+
+        assert_eq!(payload["total_available"], json!(0.5));
+        assert_eq!(payload["total_used"], json!(0.1));
+        assert_eq!(payload["total_granted"], json!(0.6));
+    }
+
+    #[test]
+    fn balance_field_mapping_defaults_to_quota_fields() {
+        let config = json!({}).as_object().cloned().expect("config");
+
+        let payload = parse_query_balance_payload(
+            "new_api",
+            &config,
+            &json!({
+                "success": true,
+                "data": { "quota": 500000.0, "used_quota": 100000.0 }
+            }),
+        )
+        .expect("payload should parse with default fields");
+
+        assert_eq!(payload["total_available"], json!(1.0));
+        assert_eq!(payload["total_used"], json!(0.2));
+        assert_eq!(payload["total_granted"], json!(null));
     }
 }

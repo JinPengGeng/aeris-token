@@ -387,6 +387,56 @@ fn forwarded_header_last(headers: &http::HeaderMap, name: &str) -> Option<String
         .map(ToOwned::to_owned)
 }
 
+/// Loopback / private / link-local base URLs make generated install
+/// commands useless on a remote node, so session creation rejects them
+/// and points the operator at `AETHER_PUBLIC_BASE_URL`.
+fn install_base_url_is_loopback_or_private(base_url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(base_url) else {
+        return true;
+    };
+    let Some(host) = parsed.host_str() else {
+        return true;
+    };
+    if let Ok(ip) = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    {
+        return !ip_is_public_routable(ip);
+    }
+    let lower = host.to_ascii_lowercase();
+    lower == "localhost"
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal")
+        || lower.ends_with(".lan")
+        || lower.ends_with(".home.arpa")
+}
+
+fn ip_is_public_routable(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || octets[0] == 0
+                || (octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000))
+        }
+        std::net::IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80)
+        }
+    }
+}
+
+const INSTALL_BASE_URL_CONFIG_GUIDANCE: &str =
+    "无法确定可公网访问的网关地址(解析结果为回环或内网地址)。请设置环境变量 AETHER_PUBLIC_BASE_URL(例如 https://gateway.example.com)后重试";
+
 fn normalize_public_base_url(value: &str) -> Option<String> {
     let value = value.trim().trim_end_matches('/');
     let parsed = url::Url::parse(value).ok()?;
@@ -888,13 +938,21 @@ pub(crate) async fn build_api_key_install_session_response(
 
     let code = generate_install_code();
     let expires_at_unix_secs = now_unix_secs.saturating_add(INSTALL_SESSION_TTL_SECS);
+    let resolved_base_url = base_url_from_request(headers, request_context, remote_addr);
+    if install_base_url_is_loopback_or_private(&resolved_base_url) {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            INSTALL_BASE_URL_CONFIG_GUIDANCE,
+            false,
+        );
+    }
     let session = StoredInstallSession {
         install_code: code.clone(),
         api_key_id: record.api_key_id.clone(),
         api_key_owner_user_id: record.user_id.clone(),
         api_key_is_standalone: record.is_standalone,
         api_key_hash: record.key_hash.clone(),
-        base_url: base_url_from_request(headers, request_context, remote_addr),
+        base_url: resolved_base_url.clone(),
         target_cli: payload.target_cli,
         target_system: payload.target_system,
         expires_at_unix_secs,
@@ -945,6 +1003,7 @@ pub(crate) async fn build_api_key_install_session_response(
             "target_system_label": system_label(session.target_system),
             "unix_command": format!("curl -fsSL {unix_url} | sh"),
             "powershell_command": format!("irm {powershell_url} | iex"),
+            "resolved_base_url": session.base_url,
         }))
         .into_response(),
     )
@@ -1018,9 +1077,24 @@ pub(crate) async fn build_proxy_node_install_session_response(
     }
     let code = generate_install_code();
     let expires_at_unix_secs = unix_secs_now().saturating_add(INSTALL_SESSION_TTL_SECS);
+    let resolved_aether_url = base_url_from_request(headers, request_context, remote_addr);
+    if install_base_url_is_loopback_or_private(&resolved_aether_url) {
+        discard_unused_tunnel_install_management_token(
+            state,
+            management_token_record,
+            &management_token,
+            current_user.security_version,
+        )
+        .await;
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            INSTALL_BASE_URL_CONFIG_GUIDANCE,
+            false,
+        );
+    }
     let session = StoredTunnelInstallSession {
         install_code: code.clone(),
-        aether_url: base_url_from_request(headers, request_context, remote_addr),
+        aether_url: resolved_aether_url,
         management_token_snapshot: management_token_record.clone(),
         management_token_user_security_version: current_user.security_version,
         management_token,
@@ -1632,6 +1706,38 @@ mod tests {
             base_url_from_request_metadata(&headers, Some("ignored.example"), true),
             "https://gateway.example"
         );
+    }
+
+    #[test]
+    fn install_base_url_rejects_loopback_and_private_hosts() {
+        for value in [
+            "http://localhost",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+            "http://10.0.0.8:8084",
+            "http://192.168.1.1",
+            "http://172.16.0.1",
+            "http://100.64.0.1",
+            "http://printer.local",
+            "http://gateway.internal",
+            "not a url",
+        ] {
+            assert!(
+                install_base_url_is_loopback_or_private(value),
+                "should reject: {value}"
+            );
+        }
+        for value in [
+            "http://aether.example",
+            "https://gateway.example.com",
+            "http://8.8.8.8:8084",
+        ] {
+            assert!(
+                !install_base_url_is_loopback_or_private(value),
+                "should accept: {value}"
+            );
+        }
     }
 
     #[test]

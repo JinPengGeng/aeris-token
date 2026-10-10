@@ -565,7 +565,11 @@ async fn run_vscodex_gateway_integration() {
     assert_eq!(disabled.status(), StatusCode::SERVICE_UNAVAILABLE);
     let disabled_payload: serde_json::Value =
         disabled.json().await.expect("disabled body should be JSON");
-    assert_eq!(disabled_payload["detail"], "服务暂不可用，请稍后重试");
+    assert_eq!(disabled_payload["vscodex_error"], json!("disabled"));
+    assert_eq!(
+        disabled_payload["detail"],
+        json!("VS Codex 服务未启用。需要设置 AETHER_VSCODEX_ENABLED=true、AETHER_VSCODEX_INTERNAL_URL 与 AETHER_VSCODEX_INTERNAL_TOKEN")
+    );
     assert_eq!(
         captured_requests
             .lock()
