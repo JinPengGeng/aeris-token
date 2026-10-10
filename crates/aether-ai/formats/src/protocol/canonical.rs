@@ -3909,10 +3909,22 @@ fn canonical_tool_result_to_openai_chat(block: &CanonicalContentBlock) -> Value 
             result_output.as_ref(),
             content_text.as_deref(),
         )
-    } else {
+    } else if is_openai_chat_tool_result(extensions) {
+        // Same-format round trip: openai:chat tool payloads are already valid
+        // tool message content, so preserve them verbatim instead of
+        // re-encoding structured output.
         result_output
             .clone()
             .unwrap_or_else(|| Value::String(content_text.clone().unwrap_or_default()))
+    } else {
+        // Cross-format sources (e.g. Gemini functionResponse) keep structured
+        // JSON objects in canonical output, which strict openai:chat upstreams
+        // reject as `messages.N.content`. Prefer the extracted text and
+        // otherwise stringify the structured output.
+        openai_chat_tool_result_content_from_structured_output(
+            result_output.as_ref(),
+            content_text.as_deref(),
+        )
     };
     output.insert("content".to_string(), content);
     Value::Object(output)
@@ -4110,6 +4122,22 @@ fn openai_responses_tool_result_content_for_chat(
         Some(Value::String(text)) => Value::String(text.clone()),
         Some(value) => Value::String(value.to_string()),
         None => Value::String(String::new()),
+    }
+}
+
+fn openai_chat_tool_result_content_from_structured_output(
+    output: Option<&Value>,
+    content_text: Option<&str>,
+) -> Value {
+    if let Some(text) = content_text.filter(|text| !text.trim().is_empty()) {
+        return Value::String(text.to_string());
+    }
+    match output {
+        Some(value @ (Value::Object(_) | Value::Array(_))) => Value::String(value.to_string()),
+        Some(Value::String(text)) => Value::String(text.clone()),
+        other => other
+            .cloned()
+            .unwrap_or_else(|| Value::String(String::new())),
     }
 }
 

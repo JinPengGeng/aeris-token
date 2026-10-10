@@ -124,7 +124,8 @@ pub fn normalize_architecture_id(architecture_id: &str) -> &'static str {
     match architecture_id.trim() {
         "" => "generic_api",
         "generic_api" => "generic_api",
-        "new_api" => "new_api",
+        "new_api" | "new-api" | "newapi" | "one_hub" | "onehub" | "one-api" | "veloera"
+        | "voapi" => "new_api",
         "cubence" => "cubence",
         "done_hub" => "done_hub",
         "yescode" => "yescode",
@@ -226,6 +227,24 @@ mod tests {
         assert_eq!(normalize_architecture_id("new_api"), "new_api");
         assert_eq!(normalize_architecture_id("usage_api"), "usage_api");
         assert_eq!(normalize_architecture_id("unknown"), "generic_api");
+    }
+
+    #[test]
+    fn normalize_architecture_id_maps_new_api_compatible_distros() {
+        for alias in [
+            "new-api", "newapi", "one_hub", "onehub", "one-api", "veloera", "voapi",
+        ] {
+            assert_eq!(normalize_architecture_id(alias), "new_api");
+        }
+    }
+
+    #[test]
+    fn new_api_compatible_aliases_resolve_to_new_api_spec() {
+        for alias in ["onehub", "veloera", "voapi"] {
+            let architecture = get_architecture(alias).expect("architecture should exist");
+            assert_eq!(architecture.architecture_id, "new_api");
+            assert_eq!(architecture.verify_endpoint, "/api/user/self");
+        }
     }
 
     #[test]

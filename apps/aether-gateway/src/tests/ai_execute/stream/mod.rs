@@ -27,3 +27,4 @@ use super::{
 mod decision;
 mod image;
 mod pii_redaction;
+mod pii_redaction_formats;

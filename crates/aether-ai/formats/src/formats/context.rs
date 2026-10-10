@@ -12,6 +12,19 @@ pub struct FormatContext {
     pub history_scope: Option<String>,
     /// Defer tool schema lowering to the private provider transport boundary.
     pub preserve_gemini_tool_schemas: bool,
+    /// Lossy degradation policy for OpenAI Responses cross-format input items
+    /// that have no lossless mapping in the target format (fork issue #568).
+    ///
+    /// `false` (default) keeps the historical fail-closed behavior: one
+    /// unmappable item (for example `item_reference`, `web_search_call`,
+    /// `mcp_call`, `compaction`) rejects the whole cross-format request.
+    /// `true` lets `convert_request` / `convert_request_pure_with_context`
+    /// drop those items from the converted request instead and record one
+    /// `ConversionFieldStatus::LossyDegraded` entry per skipped item (field
+    /// `input[index]`, detail naming the skipped item type) in the returned
+    /// [`ConversionReport`]. This is a deliberate lossy downgrade: content the
+    /// target format cannot represent is removed, never silently reinterpreted.
+    pub allow_lossy_responses_input_items: bool,
 }
 
 impl FormatContext {
@@ -40,6 +53,11 @@ impl FormatContext {
         self
     }
 
+    pub fn with_allow_lossy_responses_input_items(mut self, allow: bool) -> Self {
+        self.allow_lossy_responses_input_items = allow;
+        self
+    }
+
     pub fn without_runtime_request_edits(&self) -> Self {
         Self {
             mapped_model: None,
@@ -48,6 +66,9 @@ impl FormatContext {
             report_context: self.report_context.clone(),
             history_scope: self.history_scope.clone(),
             preserve_gemini_tool_schemas: false,
+            // Conversion policy travels with the context; only runtime edits
+            // are stripped here.
+            allow_lossy_responses_input_items: self.allow_lossy_responses_input_items,
         }
     }
 
@@ -77,6 +98,12 @@ pub enum ConversionFieldStatus {
     Unsupported,
     InvalidEnum,
     LossyBlocked,
+    /// Lossy degradation applied: the field carried data the target format has
+    /// no lossless mapping for and the caller opted into degradation via
+    /// `FormatContext::allow_lossy_responses_input_items`, so the data was
+    /// dropped from the converted request instead of failing the conversion.
+    /// `detail` names the skipped item type and its original input index.
+    LossyDegraded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
