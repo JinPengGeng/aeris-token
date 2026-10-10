@@ -2301,14 +2301,20 @@ mod tests {
         assert_eq!(
             model_ids,
             vec![
+                "gpt-6-astra",
+                "gpt-6.1-sol",
+                "gpt-6-sol",
+                "gpt-6-luna",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
+                "gpt-daybreak-blue-latest",
+                "gpt-daybreak-red-latest",
                 "gpt-5.5",
+                "codex-auto-review",
                 "gpt-5.4",
                 "gpt-5.4-mini",
                 "gpt-5.2",
-                "codex-auto-review",
             ]
         );
         let sol = models
@@ -2327,7 +2333,7 @@ mod tests {
         );
         assert_eq!(sol["multi_agent_version"], "v2");
         assert_eq!(sol["supports_image_detail_original"], true);
-        assert_eq!(sol["context_window"], 372_000);
+        assert_eq!(sol["context_window"], 272_000);
 
         for model_id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
             let model = models
@@ -2339,7 +2345,7 @@ mod tests {
             assert_eq!(model["experimental_supported_tools"], json!([]));
             assert_eq!(model["tool_mode"], "code_mode_only");
             assert_eq!(model["prefer_websockets"], true);
-            assert_eq!(model["reasoning_summary_format"], "experimental");
+            assert!(model.get("reasoning_summary_format").is_none());
             assert_eq!(model["truncation_policy"]["limit"], 10_000);
             assert_eq!(model["minimal_client_version"], "0.144.0");
             assert!(model.get("effective_context_window_percent").is_none());
@@ -2365,7 +2371,7 @@ mod tests {
         assert_eq!(auto_review["supported_in_api"], true);
         assert_eq!(auto_review["default_reasoning_level"], "medium");
         assert_eq!(auto_review["default_reasoning_summary"], "none");
-        assert_eq!(auto_review["use_responses_lite"], false);
+        assert_eq!(auto_review["use_responses_lite"], true);
     }
 
     #[test]

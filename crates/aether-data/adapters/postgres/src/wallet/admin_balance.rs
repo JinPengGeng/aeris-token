@@ -6,7 +6,8 @@ impl SqlxWalletRepository {
         &self,
         input: AdjustWalletBalanceInput,
         audit: Option<&aether_data_contracts::repository::audit::CreateAdminAuditLog>,
-    ) -> Result<Option<(StoredWalletSnapshot, StoredAdminWalletTransaction)>, DataLayerError> {
+    ) -> Result<Option<(StoredWalletSnapshot, Option<StoredAdminWalletTransaction>)>, DataLayerError>
+    {
         if !input.amount_usd.is_finite() || input.amount_usd == 0.0 {
             return Err(DataLayerError::InvalidInput(
                 "adjustment amount must be finite and non-zero".to_string(),
@@ -16,6 +17,58 @@ impl SqlxWalletRepository {
         self.tx_runner
             .run_read_write(|tx| {
                 Box::pin(async move {
+                    let batch_context = input.batch_context.clone();
+                    let mut batch_user_outcomes = if let Some(context) = &batch_context {
+                        let batch_row = sqlx::query(
+                            r#"
+SELECT target_user_ids, user_outcomes
+FROM admin_user_wallet_balance_batches
+WHERE admin_user_id = $1 AND idempotency_key = $2
+FOR UPDATE
+                            "#,
+                        )
+                        .bind(&context.admin_user_id)
+                        .bind(&context.idempotency_key)
+                        .fetch_optional(&mut **tx)
+                        .await
+                        .map_postgres_err()?
+                        .ok_or_else(|| {
+                            DataLayerError::InvalidInput(
+                                "admin wallet batch was not prepared".to_string(),
+                            )
+                        })?;
+                        let target_user_ids: Vec<String> =
+                            serde_json::from_value(row_get(&batch_row, "target_user_ids")?)
+                                .map_err(|error| {
+                                    DataLayerError::UnexpectedValue(format!(
+                                        "admin wallet batch target list is invalid: {error}"
+                                    ))
+                                })?;
+                        if !target_user_ids.iter().any(|id| id == &context.user_id) {
+                            return Err(DataLayerError::InvalidInput(
+                                "user is outside the prepared admin wallet batch".to_string(),
+                            ));
+                        }
+                        let outcomes: BTreeMap<String, AdminUserWalletBalanceBatchUserOutcome> =
+                            serde_json::from_value(row_get(&batch_row, "user_outcomes")?).map_err(
+                                |error| {
+                                    DataLayerError::UnexpectedValue(format!(
+                                        "admin wallet batch outcomes are invalid: {error}"
+                                    ))
+                                },
+                            )?;
+                        if let Some(outcome) = outcomes.get(&context.user_id) {
+                            match outcome {
+                                AdminUserWalletBalanceBatchUserOutcome::Succeeded => {}
+                                AdminUserWalletBalanceBatchUserOutcome::Failed(_) => {
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                        Some(outcomes)
+                    } else {
+                        None
+                    };
                     let Some(row) = sqlx::query(
                         r#"
 SELECT
@@ -30,13 +83,20 @@ SELECT
   CAST(total_recharged AS DOUBLE PRECISION) AS total_recharged,
   CAST(total_consumed AS DOUBLE PRECISION) AS total_consumed,
   CAST(total_refunded AS DOUBLE PRECISION) AS total_refunded,
-  CAST(total_adjusted AS DOUBLE PRECISION) AS total_adjusted
+  CAST(total_adjusted AS DOUBLE PRECISION) AS total_adjusted,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
 FROM wallets
 WHERE id = $1
+  AND ($2::character varying IS NULL OR user_id = $2::character varying)
 FOR UPDATE
                         "#,
                     )
                     .bind(&input.wallet_id)
+                    .bind(
+                        batch_context
+                            .as_ref()
+                            .map(|context| context.user_id.as_str()),
+                    )
                     .fetch_optional(&mut **tx)
                     .await
                     .map_postgres_err()?
@@ -57,14 +117,37 @@ FOR UPDATE
                             "wallet balance is invalid".to_string(),
                         ));
                     }
+                    let wallet = map_wallet_row(&row)?;
+                    let already_applied = batch_context.as_ref().is_some_and(|context| {
+                        batch_user_outcomes.as_ref().is_some_and(|outcomes| {
+                            outcomes.get(&context.user_id)
+                                == Some(&AdminUserWalletBalanceBatchUserOutcome::Succeeded)
+                        })
+                    });
+                    if already_applied {
+                        return Ok(Some((wallet, None)));
+                    }
+                    let amount_usd = effective_wallet_adjustment_amount(&input, before_total);
+                    if amount_usd == 0.0 {
+                        if let (Some(context), Some(outcomes)) =
+                            (batch_context.as_ref(), batch_user_outcomes.as_mut())
+                        {
+                            outcomes.insert(
+                                context.user_id.clone(),
+                                AdminUserWalletBalanceBatchUserOutcome::Succeeded,
+                            );
+                            persist_admin_wallet_batch_outcomes(tx, context, outcomes).await?;
+                        }
+                        return Ok(Some((wallet, None)));
+                    }
                     let mut after_recharge = before_recharge;
                     let mut after_gift = before_gift;
 
-                    if input.amount_usd > 0.0 {
+                    if amount_usd > 0.0 {
                         if input.balance_type.eq_ignore_ascii_case("gift") {
-                            after_gift += input.amount_usd;
+                            after_gift += amount_usd;
                         } else {
-                            after_recharge += input.amount_usd;
+                            after_recharge += amount_usd;
                         }
                     } else {
                         // Apply the same NUMERIC(20,8) scale as the adjustment ledger,
@@ -72,7 +155,7 @@ FOR UPDATE
                         let debit_usd: f64 = sqlx::query_scalar(
                             "SELECT (-$1::double precision)::numeric(20,8)::double precision",
                         )
-                        .bind(input.amount_usd)
+                        .bind(amount_usd)
                         .fetch_one(&mut **tx)
                         .await
                         .map_postgres_err()?;
@@ -111,7 +194,7 @@ FOR UPDATE
                         }
                     }
                     let after_total = after_recharge + after_gift;
-                    let after_total_adjusted = before_total_adjusted + input.amount_usd;
+                    let after_total_adjusted = before_total_adjusted + amount_usd;
                     crate::settlement::funding::ensure_wallet_holds_preserved(
                         tx,
                         &input.wallet_id,
@@ -157,7 +240,7 @@ RETURNING
                     .bind(&input.wallet_id)
                     .bind(after_recharge)
                     .bind(after_gift)
-                    .bind(input.amount_usd)
+                    .bind(amount_usd)
                     .fetch_one(&mut **tx)
                     .await
                     .map_postgres_err()?;
@@ -213,7 +296,7 @@ VALUES (
                     )
                     .bind(&transaction_id)
                     .bind(&input.wallet_id)
-                    .bind(input.amount_usd)
+                    .bind(amount_usd)
                     .bind(before_total)
                     .bind(after_total)
                     .bind(before_recharge)
@@ -227,16 +310,26 @@ VALUES (
                     .await
                     .map_postgres_err()?;
 
+                    if let (Some(context), Some(outcomes)) =
+                        (batch_context.as_ref(), batch_user_outcomes.as_mut())
+                    {
+                        outcomes.insert(
+                            context.user_id.clone(),
+                            AdminUserWalletBalanceBatchUserOutcome::Succeeded,
+                        );
+                        persist_admin_wallet_batch_outcomes(tx, context, outcomes).await?;
+                    }
+
                     enqueue_intent(tx, intent).await?;
 
                     Ok(Some((
                         wallet,
-                        StoredAdminWalletTransaction {
+                        Some(StoredAdminWalletTransaction {
                             id: transaction_id,
                             wallet_id: input.wallet_id,
                             category: "adjust".to_string(),
                             reason_code: "adjust_admin".to_string(),
-                            amount: input.amount_usd,
+                            amount: amount_usd,
                             balance_before: before_total,
                             balance_after: after_total,
                             recharge_balance_before: before_recharge,
@@ -250,7 +343,7 @@ VALUES (
                             operator_email: None,
                             description: Some(description),
                             created_at_unix_ms: Some(created_at),
-                        },
+                        }),
                     )))
                 })
             })

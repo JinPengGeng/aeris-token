@@ -12,7 +12,8 @@ use aether_scheduler_core::SendAdmissionSkipReason;
 
 use crate::execution_runtime::acquire_upstream_execution_gate;
 use crate::provider_pool_demand::{
-    acquire_provider_pool_execution_guard, ProviderPoolInFlightAdmission, ProviderPoolInFlightGuard,
+    acquire_provider_pool_execution_guard, acquire_provider_pool_execution_guard_unobserved,
+    ProviderPoolInFlightAdmission, ProviderPoolInFlightGuard,
 };
 use crate::scheduler::send_admission::{
     request_gateway_send_admission, GatewaySendAdmissionDecision, GatewaySendAdmissionGuard,
@@ -33,6 +34,7 @@ impl ResponsesWebSocketTurnAdmission {
         state: &AppState,
         plan: &ExecutionPlan,
         trace_id: &str,
+        observation_context: Option<&serde_json::Value>,
     ) -> Result<Self, GatewayError> {
         let upstream_execution = acquire_upstream_execution_gate(state, trace_id).await?;
         let upstream_target = match state
@@ -46,7 +48,13 @@ impl ResponsesWebSocketTurnAdmission {
                 return Err(error);
             }
         };
-        let provider_pool = match acquire_provider_pool_execution_guard(state, plan).await? {
+        let provider_admission = match observation_context {
+            Some(context) => {
+                acquire_provider_pool_execution_guard(state, plan, Some(context)).await?
+            }
+            None => acquire_provider_pool_execution_guard_unobserved(state, plan).await?,
+        };
+        let provider_pool = match provider_admission {
             ProviderPoolInFlightAdmission::Acquired(guard) => guard,
             ProviderPoolInFlightAdmission::Saturated { limit } => {
                 drop(upstream_target);
@@ -213,12 +221,14 @@ mod tests {
     #[tokio::test]
     async fn key_limit_releases_before_next_websocket_turn() {
         let state = state();
-        let first = ResponsesWebSocketTurnAdmission::acquire(&state, &plan("request-1"), "trace-1")
-            .await
-            .expect("first turn should acquire both independent gates");
+        let first =
+            ResponsesWebSocketTurnAdmission::acquire(&state, &plan("request-1"), "trace-1", None)
+                .await
+                .expect("first turn should acquire both independent gates");
 
         let second =
-            ResponsesWebSocketTurnAdmission::acquire(&state, &plan("request-2"), "trace-2").await;
+            ResponsesWebSocketTurnAdmission::acquire(&state, &plan("request-2"), "trace-2", None)
+                .await;
         assert!(matches!(
             second,
             Err(GatewayError::Client { status, .. }) if status == http::StatusCode::TOO_MANY_REQUESTS
@@ -226,7 +236,7 @@ mod tests {
 
         first.release().await;
         let replacement =
-            ResponsesWebSocketTurnAdmission::acquire(&state, &plan("request-3"), "trace-3")
+            ResponsesWebSocketTurnAdmission::acquire(&state, &plan("request-3"), "trace-3", None)
                 .await
                 .expect("released turn should restore both independent gates");
         replacement.release().await;

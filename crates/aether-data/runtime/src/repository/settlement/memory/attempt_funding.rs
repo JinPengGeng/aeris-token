@@ -467,6 +467,7 @@ pub(super) fn outcome(
                             billing_status: "pending".to_string(),
                             total_cost_usd: request_funds_usd(usage.total_cost_units),
                             actual_total_cost_usd: request_funds_usd(usage.actual_cost_units),
+                            billing_cost_usd: None,
                             finalized_at_unix_secs: Some(input.finalized_at_unix_secs),
                         },
                         reconciliation_facts: usage

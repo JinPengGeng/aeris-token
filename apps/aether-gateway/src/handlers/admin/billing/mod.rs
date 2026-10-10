@@ -17,8 +17,10 @@ mod collectors;
 mod payments;
 mod plans;
 mod presets;
+mod provider_accounts;
 mod provider_cost_catalogs;
 mod provider_costs;
+mod provider_expenses;
 mod routes;
 mod rules;
 mod wallets;
@@ -208,6 +210,15 @@ pub(crate) async fn maybe_build_local_admin_billing_response(
 
     if decision.route_family.as_deref() != Some("billing_manage") {
         return Ok(None);
+    }
+
+    if let Some(response) = provider_accounts::response(state, request_context).await? {
+        return Ok(Some(response));
+    }
+    if let Some(response) =
+        provider_expenses::response(state, request_context, request_body).await?
+    {
+        return Ok(Some(response));
     }
 
     let path = request_context.path();

@@ -17,6 +17,8 @@ on:
       - "aether-vscodex/**"
       - ".github/automation/**"
       - ".github/dependabot.yml"
+      - ".github/security/npm-audit-exceptions.json"
+      - ".github/scripts/npm-audit-gate.py"
       - ".github/workflows/dependency-audit.yml"
   pull_request:
   schedule:
@@ -138,17 +140,24 @@ jobs:
             > audit-artifacts/npm/audit.json \
             2> audit-artifacts/npm/audit.stderr
           audit_status=$?
+          set -e
+          gate_status=0
+          python3 "$GITHUB_WORKSPACE/.github/scripts/npm-audit-gate.py" \
+            --directory "${{ matrix.directory }}" \
+            --audit audit-artifacts/npm/audit.json \
+            || gate_status=$?
           jq -n \
             --arg directory "${{ matrix.directory }}" \
             --arg commit "$GITHUB_SHA" \
             --arg generated_at "$(date -u +%FT%TZ)" \
             --arg scanner "npm $(npm --version)" \
             --argjson exit_status "$audit_status" \
+            --argjson gate_status "$gate_status" \
             '{directory: $directory, commit: $commit,
               generated_at: $generated_at, scanner: $scanner,
-              exit_status: $exit_status}' \
+              exit_status: $exit_status, gate_status: $gate_status}' \
             > audit-artifacts/npm/metadata.json
-          exit "$audit_status"
+          exit "$gate_status"
 
       - name: Upload npm advisory evidence
         if: always()

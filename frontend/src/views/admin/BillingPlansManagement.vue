@@ -756,404 +756,421 @@
                 <Switch v-model="form.allow_wallet_overage" />
               </div>
               <div class="flex items-center justify-between rounded-xl border border-border/60 bg-card/50 p-3">
-                <div>
-                  <Label>额度结转</Label>
-                  <p class="mt-1 text-xs text-muted-foreground">
-                    未用完额度可在后续日期继续使用
-                  </p>
-                </div>
-                <Switch v-model="form.carry_over" />
-              </div>
-              <template v-if="form.carry_over">
-                <div class="space-y-1.5">
-                  <Label>结转保留天数</Label>
-                  <Select v-model="carryOverDaysSelectValue">
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem v-for="option in carryOverDayOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div class="space-y-1.5">
-                  <Label>最高累计倍数</Label>
-                  <Select v-model="carryOverLimitMultiplierSelectValue">
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem v-for="option in carryOverLimitMultiplierOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </template>
-              <div class="flex items-center justify-between rounded-xl border border-border/60 bg-card/50 p-3">
-                <div>
-                  <Label>允许自助重置</Label>
-                  <p class="mt-1 text-xs text-muted-foreground">
-                    用户可在额度耗尽后主动重置当日额度
-                  </p>
-                </div>
-                <Switch v-model="form.self_service_daily_quota_reset" />
-              </div>
-              <p class="rounded-xl border border-border/50 bg-card/60 px-3 py-2 text-xs leading-5 text-muted-foreground md:col-span-2">
-                {{ dailyQuotaDetailText }}
-              </p>
-            </div>
-          </div>
-
-          <div
-            v-if="showMembershipGroupConfig"
-            class="space-y-3 rounded-2xl border border-border/60 bg-muted/20 p-4"
-          >
-            <div class="flex items-center justify-between gap-3">
-              <div>
-                <Label class="text-sm font-medium">会员分组</Label>
-                <p class="mt-1 text-xs text-muted-foreground">
-                  {{ membershipSummaryText }}
+                <p class="rounded-xl border border-border/60 bg-card/50 p-3 text-xs leading-5 text-muted-foreground">
+                  套餐额度不足时是否使用钱包余额，由用户在个人设置中选择，默认关闭。
                 </p>
-              </div>
-              <Switch v-model="form.membership_group_enabled" />
-            </div>
-            <div
-              v-if="form.membership_group_enabled"
-              class="space-y-3"
-            >
-              <p class="rounded-xl border border-border/50 bg-card/60 px-3 py-2 text-xs leading-5 text-muted-foreground">
-                {{ membershipDetailText }}
-              </p>
-              <MultiSelect
-                v-model="form.grant_user_groups"
-                :options="userGroupOptions"
-                placeholder="选择要授予的用户分组"
-                empty-text="暂无用户分组"
-              />
-              <div class="grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
-                <Input
-                  v-model="manualGroupId"
-                  placeholder="手动输入分组 ID"
-                  @keyup.enter="addManualGroup"
-                />
-                <Button
-                  variant="outline"
-                  @click="addManualGroup"
-                >
-                  添加
-                </Button>
-              </div>
-              <div class="space-y-1.5">
-                <Label>套餐互斥组（可选）</Label>
-                <Input
-                  v-model="form.membership_group_replacement_group"
-                  maxlength="128"
-                  placeholder="pro-tier"
-                />
-                <p class="text-xs leading-5 text-muted-foreground">
-                  会员权益包本身已按类型互斥；填写后还可与其他权益类型的同名组整包互斥。
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div class="space-y-3 rounded-2xl border border-border/60 bg-muted/20 p-4">
-            <div class="flex items-center justify-between gap-3">
-              <div>
-                <Label class="text-sm font-medium">使用限制</Label>
-                <p class="mt-1 text-xs text-muted-foreground">
-                  消费额度、QPS、RPM、周期请求数和并发硬限制
-                </p>
-              </div>
-              <Switch v-model="form.usage_policy_enabled" />
-            </div>
-
-            <div
-              v-if="form.usage_policy_enabled"
-              class="space-y-3"
-            >
-              <div
-                v-for="(policy, policyIndex) in form.usage_policies"
-                :key="policy.local_id"
-                class="space-y-3 rounded-xl border border-border/60 bg-card/50 p-3"
-              >
-                <div class="flex items-center justify-between gap-3">
-                  <div class="text-sm font-medium">
-                    策略 {{ policyIndex + 1 }}
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    class="h-8 w-8 p-0"
-                    :aria-label="`删除策略 ${policyIndex + 1}`"
-                    :title="`删除策略 ${policyIndex + 1}`"
-                    @click="removeUsagePolicy(policyIndex)"
-                  >
-                    <Trash2 class="h-4 w-4" />
-                  </Button>
-                </div>
-
-                <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
-                  <div class="space-y-1.5">
-                    <Label>策略名称</Label>
-                    <Input
-                      v-model="policy.name"
-                      maxlength="128"
-                      placeholder="标准流量限制"
-                    />
-                  </div>
-                  <div class="space-y-1.5">
-                    <Label>策略标识</Label>
-                    <Input
-                      v-model="policy.policy_id"
-                      maxlength="128"
-                      placeholder="standard-traffic"
-                    />
-                  </div>
-                  <div class="space-y-1.5">
-                    <Label>套餐互斥组（可选）</Label>
-                    <Input
-                      v-model="policy.replacement_group"
-                      maxlength="128"
-                      placeholder="pro-tier"
-                    />
-                    <p class="text-xs leading-5 text-muted-foreground">
-                      同组套餐换购时旧套餐整包失效；留空时此策略可与其他策略同时生效，相同指标与窗口按较低上限执行。每日额度和会员权益仍按类型互斥。
+                <div class="flex items-center justify-between rounded-xl border border-border/60 bg-card/50 p-3 opacity-70">
+                  <div>
+                    <Label>额度结转</Label>
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      未用完额度可在后续日期继续使用
                     </p>
                   </div>
+                  <Switch v-model="form.carry_over" />
                 </div>
+                <template v-if="form.carry_over">
+                  <div class="space-y-1.5">
+                    <Label>结转保留天数</Label>
+                    <Select v-model="carryOverDaysSelectValue">
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem
+                          v-for="option in carryOverDayOptions"
+                          :key="option.value"
+                          :value="option.value"
+                        >
+                          {{ option.label }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="space-y-1.5">
+                    <Label>最高累计倍数</Label>
+                    <Select v-model="carryOverLimitMultiplierSelectValue">
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem
+                          v-for="option in carryOverLimitMultiplierOptions"
+                          :key="option.value"
+                          :value="option.value"
+                        >
+                          {{ option.label }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </template>
+                <div class="flex items-center justify-between rounded-xl border border-border/60 bg-card/50 p-3">
+                  <div>
+                    <Label>允许自助重置</Label>
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      用户可在额度耗尽后主动重置当日额度
+                    </p>
+                  </div>
+                  <Switch v-model="form.self_service_daily_quota_reset" />
+                </div>
+                <p class="rounded-xl border border-border/50 bg-card/60 px-3 py-2 text-xs leading-5 text-muted-foreground md:col-span-2">
+                  {{ dailyQuotaDetailText }}
+                </p>
+              </div>
+            </div>
 
-                <div class="space-y-3">
-                  <div class="space-y-3 lg:space-y-2">
-                    <div
-                      v-for="(rule, ruleIndex) in policy.rules"
-                      :key="rule.local_id"
-                      class="grid grid-cols-1 gap-3 rounded-xl border border-border/60 bg-background/50 p-3 lg:grid-cols-[150px_190px_minmax(260px,1fr)_110px_36px] lg:items-end lg:gap-2 lg:rounded-none lg:border-0 lg:bg-transparent lg:p-0"
+            <div
+              v-if="showMembershipGroupConfig"
+              class="space-y-3 rounded-2xl border border-border/60 bg-muted/20 p-4"
+            >
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <Label class="text-sm font-medium">会员分组</Label>
+                  <p class="mt-1 text-xs text-muted-foreground">
+                    {{ membershipSummaryText }}
+                  </p>
+                </div>
+                <Switch v-model="form.membership_group_enabled" />
+              </div>
+              <div
+                v-if="form.membership_group_enabled"
+                class="space-y-3"
+              >
+                <p class="rounded-xl border border-border/50 bg-card/60 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                  {{ membershipDetailText }}
+                </p>
+                <MultiSelect
+                  v-model="form.grant_user_groups"
+                  :options="userGroupOptions"
+                  placeholder="选择要授予的用户分组"
+                  empty-text="暂无用户分组"
+                />
+                <div class="grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
+                  <Input
+                    v-model="manualGroupId"
+                    placeholder="手动输入分组 ID"
+                    @keyup.enter="addManualGroup"
+                  />
+                  <Button
+                    variant="outline"
+                    @click="addManualGroup"
+                  >
+                    添加
+                  </Button>
+                </div>
+                <div class="space-y-1.5">
+                  <Label>套餐互斥组（可选）</Label>
+                  <Input
+                    v-model="form.membership_group_replacement_group"
+                    maxlength="128"
+                    placeholder="pro-tier"
+                  />
+                  <p class="text-xs leading-5 text-muted-foreground">
+                    会员权益包本身已按类型互斥；填写后还可与其他权益类型的同名组整包互斥。
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div class="space-y-3 rounded-2xl border border-border/60 bg-muted/20 p-4">
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <Label class="text-sm font-medium">使用限制</Label>
+                  <p class="mt-1 text-xs text-muted-foreground">
+                    消费额度、QPS、RPM、周期请求数和并发硬限制
+                  </p>
+                </div>
+                <Switch v-model="form.usage_policy_enabled" />
+              </div>
+
+              <div
+                v-if="form.usage_policy_enabled"
+                class="space-y-3"
+              >
+                <div
+                  v-for="(policy, policyIndex) in form.usage_policies"
+                  :key="policy.local_id"
+                  class="space-y-3 rounded-xl border border-border/60 bg-card/50 p-3"
+                >
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="text-sm font-medium">
+                      策略 {{ policyIndex + 1 }}
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="h-8 w-8 p-0"
+                      :aria-label="`删除策略 ${policyIndex + 1}`"
+                      :title="`删除策略 ${policyIndex + 1}`"
+                      @click="removeUsagePolicy(policyIndex)"
                     >
-                      <div class="space-y-1.5">
-                        <Label>指标</Label>
-                        <Select
-                          v-model="rule.metric"
-                          @update:model-value="onUsageMetricChanged(rule)"
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="request_count">
-                              请求数
-                            </SelectItem>
-                            <SelectItem value="actual_cost_usd">
-                              消费金额 (USD)
-                            </SelectItem>
-                            <SelectItem value="concurrency">
-                              并发数
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
+                      <Trash2 class="h-4 w-4" />
+                    </Button>
+                  </div>
 
-                      <div class="space-y-1.5">
-                        <Label>窗口</Label>
-                        <Select
-                          v-model="rule.window_kind"
-                          @update:model-value="onUsageWindowChanged(rule)"
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem
-                              v-if="rule.metric !== 'concurrency'"
-                              value="rolling"
-                            >
-                              滚动窗口
-                            </SelectItem>
-                            <SelectItem
-                              v-if="rule.metric !== 'concurrency'"
-                              value="calendar_day"
-                            >
-                              自然日
-                            </SelectItem>
-                            <SelectItem
-                              v-if="rule.metric !== 'concurrency'"
-                              value="calendar_week"
-                            >
-                              自然周
-                            </SelectItem>
-                            <SelectItem
-                              v-if="rule.metric !== 'concurrency'"
-                              value="calendar_month"
-                            >
-                              自然月
-                            </SelectItem>
-                            <SelectItem
-                              v-if="rule.metric !== 'concurrency'"
-                              value="subscription_period"
-                            >
-                              套餐周期
-                            </SelectItem>
-                            <SelectItem
-                              v-if="rule.metric === 'concurrency'"
-                              value="concurrent"
-                            >
-                              同时进行
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
+                  <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
+                    <div class="space-y-1.5">
+                      <Label>策略名称</Label>
+                      <Input
+                        v-model="policy.name"
+                        maxlength="128"
+                        placeholder="标准流量限制"
+                      />
+                    </div>
+                    <div class="space-y-1.5">
+                      <Label>策略标识</Label>
+                      <Input
+                        v-model="policy.policy_id"
+                        maxlength="128"
+                        placeholder="standard-traffic"
+                      />
+                    </div>
+                    <div class="space-y-1.5">
+                      <Label>套餐互斥组（可选）</Label>
+                      <Input
+                        v-model="policy.replacement_group"
+                        maxlength="128"
+                        placeholder="pro-tier"
+                      />
+                      <p class="text-xs leading-5 text-muted-foreground">
+                        同组套餐换购时旧套餐整包失效；留空时此策略可与其他策略同时生效，相同指标与窗口按较低上限执行。每日额度和会员权益仍按类型互斥。
+                      </p>
+                    </div>
+                  </div>
 
-                      <div class="space-y-1.5">
-                        <Label>{{ usageWindowParameterLabel(rule) }}</Label>
-                        <Input
-                          v-if="rule.window_kind === 'rolling'"
-                          v-model.number="rule.rolling_seconds"
-                          type="number"
-                          inputmode="numeric"
-                          min="1"
-                          max="2592000"
-                          step="1"
-                        />
-                        <div
-                          v-else-if="rule.window_kind === 'calendar_week'"
-                          class="grid grid-cols-[minmax(140px,1fr)_108px] gap-2"
-                        >
-                          <Input
-                            v-model="rule.timezone"
-                            placeholder="继承系统时区"
-                          />
+                  <div class="space-y-3">
+                    <div class="space-y-3 lg:space-y-2">
+                      <div
+                        v-for="(rule, ruleIndex) in policy.rules"
+                        :key="rule.local_id"
+                        class="grid grid-cols-1 gap-3 rounded-xl border border-border/60 bg-background/50 p-3 lg:grid-cols-[150px_190px_minmax(260px,1fr)_110px_36px] lg:items-end lg:gap-2 lg:rounded-none lg:border-0 lg:bg-transparent lg:p-0"
+                      >
+                        <div class="space-y-1.5">
+                          <Label>指标</Label>
                           <Select
-                            :model-value="String(rule.week_start)"
-                            @update:model-value="rule.week_start = Number($event)"
+                            v-model="rule.metric"
+                            @update:model-value="onUsageMetricChanged(rule)"
+                          >
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="request_count">
+                                请求数
+                              </SelectItem>
+                              <SelectItem value="actual_cost_usd">
+                                消费金额 (USD)
+                              </SelectItem>
+                              <SelectItem value="concurrency">
+                                并发数
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div class="space-y-1.5">
+                          <Label>窗口</Label>
+                          <Select
+                            v-model="rule.window_kind"
+                            @update:model-value="onUsageWindowChanged(rule)"
                           >
                             <SelectTrigger>
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem
-                                v-for="option in weekStartOptions"
-                                :key="option.value"
-                                :value="option.value"
+                                v-if="rule.metric !== 'concurrency'"
+                                value="rolling"
                               >
-                                {{ option.label }}
+                                滚动窗口
+                              </SelectItem>
+                              <SelectItem
+                                v-if="rule.metric !== 'concurrency'"
+                                value="calendar_day"
+                              >
+                                自然日
+                              </SelectItem>
+                              <SelectItem
+                                v-if="rule.metric !== 'concurrency'"
+                                value="calendar_week"
+                              >
+                                自然周
+                              </SelectItem>
+                              <SelectItem
+                                v-if="rule.metric !== 'concurrency'"
+                                value="calendar_month"
+                              >
+                                自然月
+                              </SelectItem>
+                              <SelectItem
+                                v-if="rule.metric !== 'concurrency'"
+                                value="subscription_period"
+                              >
+                                套餐周期
+                              </SelectItem>
+                              <SelectItem
+                                v-if="rule.metric === 'concurrency'"
+                                value="concurrent"
+                              >
+                                同时进行
                               </SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
-                        <Input
-                          v-else-if="rule.window_kind === 'calendar_day' || rule.window_kind === 'calendar_month'"
-                          v-model="rule.timezone"
-                          placeholder="继承系统时区"
-                        />
-                        <Input
-                          v-else
-                          model-value="-"
-                          disabled
-                        />
-                      </div>
 
-                      <div class="space-y-1.5">
-                        <Label>{{ rule.metric === 'actual_cost_usd' ? '上限 (USD)' : '上限' }}</Label>
-                        <Input
-                          v-model.number="rule.limit"
-                          type="number"
-                          inputmode="numeric"
-                          :min="rule.metric === 'actual_cost_usd' ? 0.00000001 : 1"
-                          :step="rule.metric === 'actual_cost_usd' ? 0.01 : 1"
-                        />
-                      </div>
+                        <div class="space-y-1.5">
+                          <Label>{{ usageWindowParameterLabel(rule) }}</Label>
+                          <Input
+                            v-if="rule.window_kind === 'rolling'"
+                            v-model.number="rule.rolling_seconds"
+                            type="number"
+                            inputmode="numeric"
+                            min="1"
+                            max="2592000"
+                            step="1"
+                          />
+                          <div
+                            v-else-if="rule.window_kind === 'calendar_week'"
+                            class="grid grid-cols-[minmax(140px,1fr)_108px] gap-2"
+                          >
+                            <Input
+                              v-model="rule.timezone"
+                              placeholder="继承系统时区"
+                            />
+                            <Select
+                              :model-value="String(rule.week_start)"
+                              @update:model-value="rule.week_start = Number($event)"
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem
+                                  v-for="option in weekStartOptions"
+                                  :key="option.value"
+                                  :value="option.value"
+                                >
+                                  {{ option.label }}
+                                </SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <Input
+                            v-else-if="rule.window_kind === 'calendar_day' || rule.window_kind === 'calendar_month'"
+                            v-model="rule.timezone"
+                            placeholder="继承系统时区"
+                          />
+                          <Input
+                            v-else
+                            model-value="-"
+                            disabled
+                          />
+                        </div>
 
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        class="h-9 w-9 justify-self-end p-0"
-                        :aria-label="`删除规则 ${ruleIndex + 1}`"
-                        :title="`删除规则 ${ruleIndex + 1}`"
-                        @click="removeUsagePolicyRule(policy, ruleIndex)"
-                      >
-                        <Trash2 class="h-4 w-4" />
-                      </Button>
+                        <div class="space-y-1.5">
+                          <Label>{{ rule.metric === 'actual_cost_usd' ? '上限 (USD)' : '上限' }}</Label>
+                          <Input
+                            v-model.number="rule.limit"
+                            type="number"
+                            inputmode="numeric"
+                            :min="rule.metric === 'actual_cost_usd' ? 0.00000001 : 1"
+                            :step="rule.metric === 'actual_cost_usd' ? 0.01 : 1"
+                          />
+                        </div>
+
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          class="h-9 w-9 justify-self-end p-0"
+                          :aria-label="`删除规则 ${ruleIndex + 1}`"
+                          :title="`删除规则 ${ruleIndex + 1}`"
+                          @click="removeUsagePolicyRule(policy, ruleIndex)"
+                        >
+                          <Trash2 class="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
+                  </div>
+
+                  <div class="flex flex-wrap items-center gap-2">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger as-child>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          :disabled="usagePolicyRuleLimitReached(policy)"
+                        >
+                          <Plus class="mr-2 h-4 w-4" />
+                          添加规则
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start">
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'qps')">
+                          QPS
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'rpm')">
+                          RPM
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'rolling_5h')">
+                          滚动 5 小时请求数
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'cost_5h')">
+                          5 小时消费额度
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'cost_daily')">
+                          每日消费额度
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'cost_weekly')">
+                          每周消费额度
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'cost_monthly')">
+                          每月消费额度
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'cost_subscription')">
+                          套餐周期消费额度
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'daily')">
+                          每日请求数
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'weekly')">
+                          每周请求数
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'monthly')">
+                          每月请求数
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'subscription')">
+                          套餐周期请求数
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @select="addUsagePolicyRule(policy, 'concurrency')">
+                          并发数
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    <span
+                      v-if="policy.rules.length >= MAX_USAGE_POLICY_RULES_PER_POLICY"
+                      class="text-xs text-muted-foreground"
+                    >每个策略最多 {{ MAX_USAGE_POLICY_RULES_PER_POLICY }} 条规则</span>
+                    <span
+                      v-else-if="totalUsagePolicyRules >= MAX_USAGE_POLICY_TOTAL_RULES"
+                      class="text-xs text-muted-foreground"
+                    >每个套餐的规则合计最多 {{ MAX_USAGE_POLICY_TOTAL_RULES }} 条</span>
                   </div>
                 </div>
 
-                <div class="flex flex-wrap items-center gap-2">
-                  <DropdownMenu>
-                    <DropdownMenuTrigger as-child>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        :disabled="usagePolicyRuleLimitReached(policy)"
-                      >
-                        <Plus class="mr-2 h-4 w-4" />
-                        添加规则
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'qps')">
-                        QPS
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'rpm')">
-                        RPM
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'rolling_5h')">
-                        滚动 5 小时请求数
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'cost_5h')">
-                        5 小时消费额度
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'cost_daily')">
-                        每日消费额度
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'cost_weekly')">
-                        每周消费额度
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'cost_monthly')">
-                        每月消费额度
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'cost_subscription')">
-                        套餐周期消费额度
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'daily')">
-                        每日请求数
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'weekly')">
-                        每周请求数
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'monthly')">
-                        每月请求数
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'subscription')">
-                        套餐周期请求数
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @select="addUsagePolicyRule(policy, 'concurrency')">
-                        并发数
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                  <span
-                    v-if="policy.rules.length >= MAX_USAGE_POLICY_RULES_PER_POLICY"
-                    class="text-xs text-muted-foreground"
-                  >每个策略最多 {{ MAX_USAGE_POLICY_RULES_PER_POLICY }} 条规则</span>
-                  <span
-                    v-else-if="totalUsagePolicyRules >= MAX_USAGE_POLICY_TOTAL_RULES"
-                    class="text-xs text-muted-foreground"
-                  >每个套餐的规则合计最多 {{ MAX_USAGE_POLICY_TOTAL_RULES }} 条</span>
-                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  :disabled="usagePolicyLimitReached"
+                  @click="addUsagePolicy"
+                >
+                  <Plus class="mr-2 h-4 w-4" />
+                  添加策略
+                </Button>
+                <span
+                  v-if="form.usage_policies.length >= MAX_USAGE_POLICY_ENTITLEMENTS"
+                  class="text-xs text-muted-foreground"
+                >每个套餐最多 {{ MAX_USAGE_POLICY_ENTITLEMENTS }} 份策略</span>
+                <span
+                  v-else-if="totalUsagePolicyRules >= MAX_USAGE_POLICY_TOTAL_RULES"
+                  class="text-xs text-muted-foreground"
+                >每个套餐的规则合计最多 {{ MAX_USAGE_POLICY_TOTAL_RULES }} 条</span>
               </div>
-
-              <Button
-                variant="outline"
-                size="sm"
-                :disabled="usagePolicyLimitReached"
-                @click="addUsagePolicy"
-              >
-                <Plus class="mr-2 h-4 w-4" />
-                添加策略
-              </Button>
-              <span
-                v-if="form.usage_policies.length >= MAX_USAGE_POLICY_ENTITLEMENTS"
-                class="text-xs text-muted-foreground"
-              >每个套餐最多 {{ MAX_USAGE_POLICY_ENTITLEMENTS }} 份策略</span>
-              <span
-                v-else-if="totalUsagePolicyRules >= MAX_USAGE_POLICY_TOTAL_RULES"
-                class="text-xs text-muted-foreground"
-              >每个套餐的规则合计最多 {{ MAX_USAGE_POLICY_TOTAL_RULES }} 条</span>
             </div>
           </div>
         </section>
@@ -1594,11 +1611,7 @@ const dailyQuotaSummaryText = computed(() =>
     : '每天独立 USD 消费用量，默认不结转'
 )
 
-const dailyQuotaDetailText = computed(() =>
-  form.allow_wallet_overage
-    ? '每日额度不足时会继续使用钱包余额，适合希望用户不中断请求的套餐。'
-    : '每日额度不足时不再继续扣钱包，适合严格封顶的月卡或体验卡。'
-)
+const dailyQuotaDetailText = '优先使用每日套餐额度；额度不足时是否使用钱包余额，由用户在个人设置中选择，默认关闭。'
 
 const membershipSummaryText = computed(() =>
   planMode.value === 'mixed'

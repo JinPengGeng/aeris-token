@@ -206,6 +206,8 @@ async fn wallet_adjust_and_manual_recharge_audit_are_atomic_and_preserve_replay_
         balance_type: "recharge".to_string(),
         operator_id: None,
         description: Some("private-wallet-description".to_string()),
+        batch_context: None,
+        clamp_deduction_to_available_balance: false,
     };
     let recharge = CreateManualWalletRechargeInput {
         wallet_id: "audit-wallet".to_string(),
@@ -475,6 +477,8 @@ async fn admin_debit_beyond_available_balance_records_recharge_debt() {
             balance_type: "recharge".to_string(),
             operator_id: Some("audit-operator".to_string()),
             description: Some("admin debt adjustment".to_string()),
+            batch_context: None,
+            clamp_deduction_to_available_balance: false,
         })
         .await
         .unwrap()
@@ -488,8 +492,15 @@ async fn admin_debit_beyond_available_balance_records_recharge_debt() {
         "recharge debt is recorded as negative balance"
     );
     assert_eq!(wallet.0.gift_balance, 0.0);
-    assert_eq!(wallet.1.recharge_balance_after, -7.0);
-    assert_eq!(wallet.1.amount, -20.0);
+    assert_eq!(
+        wallet
+            .1
+            .as_ref()
+            .expect("transaction")
+            .recharge_balance_after,
+        -7.0
+    );
+    assert_eq!(wallet.1.as_ref().expect("transaction").amount, -20.0);
     let (wallet, _) = repository
         .create_manual_wallet_recharge(CreateManualWalletRechargeInput {
             wallet_id: "audit-debt-wallet".to_string(),

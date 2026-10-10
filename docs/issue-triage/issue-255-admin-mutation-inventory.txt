@@ -148,6 +148,7 @@ admin_user_session_deleted
 admin_user_sessions_deleted
 admin_user_updated
 admin_users_batch_action_executed
+admin_user_wallet_balance_permission_denied
 admin_video_task_cancelled
 admin_video_task_detail_viewed
 admin_video_task_video_viewed

@@ -426,7 +426,8 @@ async fn live_attempt_funds_retry_late_charge_and_provider_rebuild_are_idempoten
         repo.record_request_attempt_funds_outcome(terminal_a.clone()).await.unwrap().unwrap();
         let done=summary(&first,"retry").await; assert_eq!((done.held_cost_units,done.unknown_attempts,done.known_actual_cost_units,done.collected_cost_units),(0,0,13_000_000,13_000_000)); assert_eq!(balance(&first).await,0.07);
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM usage").fetch_one(&first).await.unwrap(),1);
-        assert!(repo.settle_usage(UsageSettlementInput { request_id:"retry".to_string(),user_id:Some("owner".to_string()),api_key_id:Some("key-a".to_string()),api_key_is_standalone:false,provider_id:Some("p-b".to_string()),status:"completed".to_string(),billing_status:"pending".to_string(),total_cost_usd:0.13,actual_total_cost_usd:0.13,finalized_at_unix_secs:Some(terminal_a.finalized_at_unix_secs) }).await.is_err());
+        assert!(repo.settle_usage(UsageSettlementInput { request_id:"retry".to_string(),user_id:Some("owner".to_string()),api_key_id:Some("key-a".to_string()),api_key_is_standalone:false,provider_id:Some("p-b".to_string()),status:"completed".to_string(),billing_status:"pending".to_string(),total_cost_usd:0.13,actual_total_cost_usd:0.13,
+        billing_cost_usd: None,finalized_at_unix_secs:Some(terminal_a.finalized_at_unix_secs) }).await.is_err());
         assert!(repo.recover_insufficient_quota(RecoverInsufficientQuotaInput{request_id:"retry".to_string()}).await.is_err());
         assert!(repo.release_request_funds(ReleaseRequestFundsInput{identity:a.quote.identity.clone(),terminal_no_charge:true}).await.is_err());
         usage.flush_usage_counter_deltas(1000).await.unwrap();

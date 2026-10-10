@@ -148,7 +148,7 @@ name = "imported_at"
 type = "timestamp"
 default = { raw = "now()" }
 # Value-domain and price-component consistency CHECK constraints remain in
-# migration 20260920000000 and bootstrap/postgres/280_provider_cost_ledger.sql.
+# migration 20260918000200 and bootstrap/postgres/280_provider_cost_ledger.sql.
 [[table.provider_cost_snapshots.uniques]]
 name = "provider_cost_snapshots_request_provider_model_dimension_key"
 columns = ["request_id", "provider", "model", "dimension"]
@@ -247,7 +247,7 @@ name = "imported_at"
 type = "timestamp"
 default = { raw = "now()" }
 # Value-domain and price-component consistency CHECK constraints remain in
-# migration 20260920000000 and bootstrap/postgres/290_provider_cost_snapshot_imports.sql.
+# migration 20260919000100_add_provider_cost_snapshot_imports.sql and bootstrap/postgres/290_provider_cost_snapshot_imports.sql.
 [[table.provider_cost_snapshot_imports.indexes]]
 name = "provider_cost_snapshot_imports_identity_idx"
 columns = ["request_id", "provider", "model", "dimension", "imported_at"]

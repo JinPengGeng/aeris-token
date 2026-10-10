@@ -204,6 +204,7 @@ const CLAUDE_CODE_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy 
     api_format_inheritance: ProviderApiFormatInheritance::OAuth,
     enable_format_conversion_by_default: true,
     oauth_is_bearer_like: true,
+    supports_quota_refresh: true,
     supports_local_openai_chat_transport: false,
     supports_local_same_format_transport: false,
     ..STANDARD_RUNTIME_POLICY
@@ -603,7 +604,7 @@ pub fn provider_type_admin_oauth_template(provider_type: &str) -> Option<Provide
             authorize_url: "https://auth.openai.com/oauth/authorize",
             token_url: "https://auth.openai.com/oauth/token",
             client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
-            scopes: &["openid", "email", "profile", "offline_access"],
+            scopes: aether_oauth::provider::providers::CODEX_OAUTH_SCOPES,
             redirect_uri: "http://localhost:1455/auth/callback",
             use_pkce: true,
         }),
@@ -1009,7 +1010,7 @@ mod tests {
             );
         }
 
-        for provider_type in ["claude_code", "vertex_ai", "custom", "unknown"] {
+        for provider_type in ["vertex_ai", "custom", "unknown"] {
             assert!(
                 !provider_type_supports_quota_refresh(provider_type),
                 "{provider_type} should preserve unsupported quota refresh behavior"

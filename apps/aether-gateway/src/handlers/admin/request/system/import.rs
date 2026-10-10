@@ -7776,6 +7776,7 @@ impl<'a> AdminAppState<'a> {
                                         feature_settings: key
                                             .contains_key("feature_settings")
                                             .then(|| feature_settings.clone()),
+                                        routing_group_selection: None,
                                     },
                                 )
                                 .await?;

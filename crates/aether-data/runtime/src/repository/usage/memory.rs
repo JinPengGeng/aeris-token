@@ -5,10 +5,11 @@ use std::sync::RwLock;
 use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_data_contracts::repository::usage::{
     canonical_usage_body_ref_for, next_daily_cost_contribution, parse_usage_body_ref,
-    sanitize_usage_request_metadata, usage_body_ref, DailyActualCostCounts, DailyActualCostQuery,
-    DailyCostContribution, InsufficientQuotaWriteoffQuery, MarginReportQuery,
-    StoredInsufficientQuotaWriteoff, StoredMarginReportRow, StoredUsageAuditAggregation,
-    StoredUsageAuditSummary, StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
+    preserve_usage_routing_group_snapshot, sanitize_usage_request_metadata, usage_body_ref,
+    DailyActualCostCounts, DailyActualCostQuery, DailyCostContribution,
+    InsufficientQuotaWriteoffQuery, MarginReportQuery, StoredInsufficientQuotaWriteoff,
+    StoredMarginReportRow, StoredUsageAuditAggregation, StoredUsageAuditSummary,
+    StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
     StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
     StoredUsageDailyActualCostRollup, StoredUsageDashboardDailyBreakdownRow,
     StoredUsageDashboardProviderCount, StoredUsageDashboardSummary,
@@ -26,8 +27,10 @@ use aether_data_contracts::repository::usage::{
     UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
     UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery,
     UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
-    PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY, PROVIDER_REASONING_EFFORT_METADATA_KEY,
-    PROVIDER_SERVICE_TIER_METADATA_KEY, REQUESTED_REASONING_EFFORT_METADATA_KEY,
+    BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
+    PROVIDER_REASONING_EFFORT_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
+    REQUESTED_REASONING_EFFORT_METADATA_KEY, ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
+    ROUTING_GROUP_ID_METADATA_KEY, ROUTING_GROUP_NAME_METADATA_KEY,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -47,9 +50,12 @@ use super::{
 use crate::repository::auth::InMemoryAuthApiKeySnapshotRepository;
 use crate::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use crate::DataLayerError;
+mod analytics;
+mod dashboard_summary;
 
 #[derive(Debug, Default)]
 pub struct InMemoryUsageReadRepository {
+    dashboard_projection: RwLock<dashboard_summary::DashboardProjection>,
     by_request_id: RwLock<BTreeMap<String, StoredRequestUsageAudit>>,
     detached_bodies: RwLock<BTreeMap<String, Value>>,
     provider_usage_windows: RwLock<Vec<StoredProviderUsageWindow>>,
@@ -61,6 +67,12 @@ pub struct InMemoryUsageReadRepository {
     attempt_provider_contributions: RwLock<BTreeMap<String, ProviderApiKeyUsageContribution>>,
     // Financial retention is independent of the parent audit and detached bodies.
     daily_cost_contributions: RwLock<BTreeMap<String, DailyCostContribution>>,
+    analytics_users: RwLock<Vec<aether_data_contracts::repository::users::StoredUserSummary>>,
+    analytics_candidates:
+        RwLock<Vec<aether_data_contracts::repository::candidates::StoredRequestCandidate>>,
+    analytics_allocations: RwLock<
+        BTreeMap<String, aether_data_contracts::repository::usage::UsageAnalyticsAllocation>,
+    >,
 }
 
 impl InMemoryUsageReadRepository {
@@ -154,6 +166,13 @@ impl InMemoryUsageReadRepository {
         }
     }
 
+    fn analytics_key_flags(&self) -> BTreeMap<String, bool> {
+        self.auth_api_keys
+            .as_ref()
+            .map(|repository| repository.standalone_flags())
+            .unwrap_or_default()
+    }
+
     pub fn seed<I>(items: I) -> Self
     where
         I: IntoIterator<Item = StoredRequestUsageAudit>,
@@ -173,6 +192,7 @@ impl InMemoryUsageReadRepository {
             by_request_id.insert(item.request_id.clone(), item);
         }
         Self {
+            dashboard_projection: Default::default(),
             by_request_id: RwLock::new(by_request_id),
             detached_bodies: RwLock::new(BTreeMap::new()),
             provider_usage_windows: RwLock::new(Vec::new()),
@@ -181,6 +201,9 @@ impl InMemoryUsageReadRepository {
             attempt_funds: Default::default(),
             attempt_provider_contributions: Default::default(),
             daily_cost_contributions: RwLock::new(daily_cost_contributions),
+            analytics_users: Default::default(),
+            analytics_candidates: Default::default(),
+            analytics_allocations: Default::default(),
         }
     }
 
@@ -237,6 +260,7 @@ impl InMemoryUsageReadRepository {
             by_request_id.insert(request_id, item);
         }
         Self {
+            dashboard_projection: Default::default(),
             by_request_id: RwLock::new(by_request_id),
             detached_bodies: RwLock::new(detached_bodies),
             provider_usage_windows: RwLock::new(Vec::new()),
@@ -245,6 +269,9 @@ impl InMemoryUsageReadRepository {
             attempt_funds: Default::default(),
             attempt_provider_contributions: Default::default(),
             daily_cost_contributions: RwLock::new(daily_cost_contributions),
+            analytics_users: Default::default(),
+            analytics_candidates: Default::default(),
+            analytics_allocations: Default::default(),
         }
     }
 
@@ -253,6 +280,7 @@ impl InMemoryUsageReadRepository {
         I: IntoIterator<Item = StoredProviderUsageWindow>,
     {
         Self {
+            dashboard_projection: self.dashboard_projection,
             by_request_id: self.by_request_id,
             detached_bodies: self.detached_bodies,
             provider_usage_windows: RwLock::new(items.into_iter().collect()),
@@ -261,6 +289,9 @@ impl InMemoryUsageReadRepository {
             attempt_funds: self.attempt_funds,
             attempt_provider_contributions: self.attempt_provider_contributions,
             daily_cost_contributions: self.daily_cost_contributions,
+            analytics_users: self.analytics_users,
+            analytics_candidates: self.analytics_candidates,
+            analytics_allocations: self.analytics_allocations,
         }
     }
 
@@ -368,7 +399,48 @@ fn usage_has_admin_unknown_model_or_provider(item: &StoredRequestUsageAudit) -> 
     usage_admin_unknown_label(&item.model) || usage_admin_unknown_label(&item.provider_name)
 }
 
-fn usage_matches_list_query(item: &StoredRequestUsageAudit, query: &UsageAuditListQuery) -> bool {
+fn usage_matches_list_query(
+    item: &StoredRequestUsageAudit,
+    query: &UsageAuditListQuery,
+    keys: &BTreeMap<String, bool>,
+) -> bool {
+    if query
+        .provider_id
+        .as_ref()
+        .is_some_and(|id| item.provider_id.as_ref() != Some(id))
+        || query
+            .endpoint_kind
+            .as_ref()
+            .is_some_and(|value| item.endpoint_kind.as_ref() != Some(value))
+        || query
+            .request_type
+            .as_ref()
+            .is_some_and(|value| item.request_type.as_ref() != Some(value))
+        || query
+            .slow_threshold_ms
+            .is_some_and(|value| item.response_time_ms.is_none_or(|latency| latency < value))
+        || query
+            .has_format_conversion
+            .is_some_and(|value| item.has_format_conversion != value)
+        || query
+            .api_key_id
+            .as_ref()
+            .is_some_and(|id| item.api_key_id.as_ref() != Some(id))
+        || query
+            .request_id
+            .as_ref()
+            .is_some_and(|id| item.request_id != *id)
+        || query
+            .attribution_kind
+            .as_deref()
+            .is_some_and(|kind| analytics::attribution(item, keys) != kind)
+        || query
+            .actor_user_id
+            .as_deref()
+            .is_some_and(|id| analytics::actor(item, keys) != Some(id))
+    {
+        return false;
+    }
     // The field is historically named `created_at_unix_ms`, but usage audit rows
     // across gateway handlers, SQL repositories and tests are stored as epoch seconds.
     if let Some(created_from_unix_secs) = query.created_from_unix_secs {
@@ -456,7 +528,45 @@ fn usage_matches_list_query(item: &StoredRequestUsageAudit, query: &UsageAuditLi
 fn usage_matches_keyword_search_query(
     item: &StoredRequestUsageAudit,
     query: &UsageAuditKeywordSearchQuery,
+    keys: &BTreeMap<String, bool>,
 ) -> bool {
+    if query
+        .provider_id
+        .as_ref()
+        .is_some_and(|id| item.provider_id.as_ref() != Some(id))
+        || query
+            .endpoint_kind
+            .as_ref()
+            .is_some_and(|value| item.endpoint_kind.as_ref() != Some(value))
+        || query
+            .request_type
+            .as_ref()
+            .is_some_and(|value| item.request_type.as_ref() != Some(value))
+        || query
+            .slow_threshold_ms
+            .is_some_and(|value| item.response_time_ms.is_none_or(|latency| latency < value))
+        || query
+            .has_format_conversion
+            .is_some_and(|value| item.has_format_conversion != value)
+        || query
+            .api_key_id
+            .as_ref()
+            .is_some_and(|id| item.api_key_id.as_ref() != Some(id))
+        || query
+            .request_id
+            .as_ref()
+            .is_some_and(|id| item.request_id != *id)
+        || query
+            .attribution_kind
+            .as_deref()
+            .is_some_and(|kind| analytics::attribution(item, keys) != kind)
+        || query
+            .actor_user_id
+            .as_deref()
+            .is_some_and(|id| analytics::actor(item, keys) != Some(id))
+    {
+        return false;
+    }
     if let Some(created_from_unix_secs) = query.created_from_unix_secs {
         if item.created_at_unix_ms < created_from_unix_secs {
             return false;
@@ -626,6 +736,13 @@ fn usage_matches_summary_query(
             return false;
         }
     }
+    if query
+        .provider_names
+        .as_ref()
+        .is_some_and(|names| !names.contains(&item.provider_name))
+    {
+        return false;
+    }
     if let Some(provider_name) = query.provider_name.as_deref() {
         if item.provider_name != provider_name {
             return false;
@@ -661,6 +778,13 @@ fn usage_matches_time_series_query(
         {
             return false;
         }
+    }
+    if query
+        .provider_names
+        .as_ref()
+        .is_some_and(|names| !names.contains(&item.provider_name))
+    {
+        return false;
     }
     if let Some(provider_name) = query.provider_name.as_deref() {
         if item.provider_name != provider_name {
@@ -1042,6 +1166,13 @@ fn usage_matches_leaderboard_query(
             return false;
         }
     }
+    if query
+        .provider_names
+        .as_ref()
+        .is_some_and(|names| !names.contains(&item.provider_name))
+    {
+        return false;
+    }
     if let Some(provider_name) = query.provider_name.as_deref() {
         if item.provider_name != provider_name {
             return false;
@@ -1351,6 +1482,40 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
         Ok(counts)
     }
 
+    async fn query_dashboard_summary(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageDashboardAnalyticsQuery,
+    ) -> Result<aether_data_contracts::repository::usage::StoredDashboardSummary, DataLayerError>
+    {
+        self.dashboard_summary_query(query)
+    }
+
+    async fn query_dashboard_analytics(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageDashboardAnalyticsQuery,
+    ) -> Result<
+        aether_data_contracts::repository::usage::StoredUsageDashboardAnalytics,
+        DataLayerError,
+    > {
+        self.dashboard_analytics_query(query)
+    }
+
+    async fn query_usage_analytics(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageAnalyticsQuery,
+    ) -> Result<aether_data_contracts::repository::usage::StoredUsageAnalytics, DataLayerError>
+    {
+        self.analytics_query(query)
+    }
+
+    async fn summarize_health_observations(
+        &self,
+        query: &aether_data_contracts::repository::usage::HealthObservationQuery,
+    ) -> Result<aether_data_contracts::repository::usage::HealthObservationSummary, DataLayerError>
+    {
+        self.health_observations(query)
+    }
+
     async fn find_by_id(
         &self,
         id: &str,
@@ -1429,12 +1594,13 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
         &self,
         query: &UsageAuditListQuery,
     ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        let keys = self.analytics_key_flags();
         let mut items: Vec<_> = self
             .by_request_id
             .read()
             .expect("usage repository lock")
             .values()
-            .filter(|item| usage_matches_list_query(item, query))
+            .filter(|item| usage_matches_list_query(item, query, &keys))
             .cloned()
             .collect();
         sort_usage_items(&mut items, query.newest_first);
@@ -1497,12 +1663,13 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
         &self,
         query: &UsageAuditKeywordSearchQuery,
     ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        let keys = self.analytics_key_flags();
         let mut items: Vec<_> = self
             .by_request_id
             .read()
             .expect("usage repository lock")
             .values()
-            .filter(|item| usage_matches_keyword_search_query(item, query))
+            .filter(|item| usage_matches_keyword_search_query(item, query, &keys))
             .cloned()
             .collect();
         sort_usage_items(&mut items, query.newest_first);
@@ -1520,12 +1687,13 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
     }
 
     async fn count_usage_audits(&self, query: &UsageAuditListQuery) -> Result<u64, DataLayerError> {
+        let keys = self.analytics_key_flags();
         Ok(self
             .by_request_id
             .read()
             .expect("usage repository lock")
             .values()
-            .filter(|item| usage_matches_list_query(item, query))
+            .filter(|item| usage_matches_list_query(item, query, &keys))
             .count() as u64)
     }
 
@@ -1533,12 +1701,13 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
         &self,
         query: &UsageAuditKeywordSearchQuery,
     ) -> Result<u64, DataLayerError> {
+        let keys = self.analytics_key_flags();
         Ok(self
             .by_request_id
             .read()
             .expect("usage repository lock")
             .values()
-            .filter(|item| usage_matches_keyword_search_query(item, query))
+            .filter(|item| usage_matches_keyword_search_query(item, query, &keys))
             .count() as u64)
     }
 
@@ -3231,6 +3400,10 @@ fn retain_previous_request_audit_metadata(
         "request_path",
         "request_query_string",
         "request_path_and_query",
+        ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
+        BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY,
+        ROUTING_GROUP_ID_METADATA_KEY,
+        ROUTING_GROUP_NAME_METADATA_KEY,
     ] {
         if let Some(value) = metadata.get(key) {
             retained.insert(key.to_string(), value.clone());
@@ -3442,7 +3615,13 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                     .and_then(|existing| existing.request_metadata.clone())
             }
         });
-        let mut request_metadata = sanitize_memory_request_metadata(request_metadata);
+        let mut request_metadata =
+            sanitize_memory_request_metadata(preserve_usage_routing_group_snapshot(
+                request_metadata,
+                existing
+                    .as_ref()
+                    .and_then(|stored| stored.request_metadata.as_ref()),
+            ));
         if attempt_funds {
             let mut metadata = request_metadata
                 .take()
@@ -3730,6 +3909,10 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                 detached_bodies.remove(&body_ref);
             }
         }
+        self.dashboard_projection
+            .write()
+            .expect("dashboard projection lock")
+            .record(&stored, &self.analytics_key_flags());
         by_request_id.insert(stored.request_id.clone(), stored.clone());
         daily.insert(stored.request_id.clone(), contribution);
         if let Some(auth_api_keys) = self.auth_api_keys.as_ref() {

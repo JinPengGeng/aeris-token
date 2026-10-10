@@ -1296,6 +1296,8 @@ export const adminApi = {
 
   // Stats / Leaderboards
   async getLeaderboardUsers(params?: {
+    from?: string
+    to?: string
     start_date?: string
     end_date?: string
     preset?: string
@@ -1310,7 +1312,7 @@ export const adminApi = {
     include_inactive?: boolean
     exclude_admin?: boolean
     user_group_id?: string
-  }): Promise<LeaderboardResponse> {
+  }, options?: AdminAnalyticsRequestOptions): Promise<LeaderboardResponse> {
     const cacheKey = buildCacheKey('admin:stats:leaderboard:users', params)
     return cachedRequest(
       cacheKey,
@@ -1320,11 +1322,13 @@ export const adminApi = {
         })
         return response.data
       },
-      20 * 1000
+      options?.skipCache ? 0 : 20 * 1000
     )
   },
 
   async getLeaderboardUserGroups(params?: {
+    from?: string
+    to?: string
     start_date?: string
     end_date?: string
     preset?: string
@@ -1338,7 +1342,7 @@ export const adminApi = {
     model?: string
     include_inactive?: boolean
     exclude_admin?: boolean
-  }): Promise<LeaderboardResponse> {
+  }, options?: AdminAnalyticsRequestOptions): Promise<LeaderboardResponse> {
     const cacheKey = buildCacheKey('admin:stats:leaderboard:user-groups', params)
     return cachedRequest(
       cacheKey,
@@ -1349,7 +1353,7 @@ export const adminApi = {
         )
         return response.data
       },
-      20 * 1000
+      options?.skipCache ? 0 : 20 * 1000
     )
   },
 
@@ -1629,6 +1633,8 @@ export const adminApi = {
 
   async getTimeSeries(
     params?: {
+      from?: string
+      to?: string
       start_date?: string
       end_date?: string
       preset?: string

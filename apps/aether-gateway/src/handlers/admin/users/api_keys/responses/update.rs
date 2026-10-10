@@ -164,6 +164,7 @@ pub(crate) async fn build_admin_update_user_api_key_response(
             billing_multiplier_present: field_presence.contains("billing_multiplier"),
             billing_multiplier: Some(billing_multiplier.to_f64()),
             feature_settings,
+            routing_group_selection: None,
         })
         .await?
     else {

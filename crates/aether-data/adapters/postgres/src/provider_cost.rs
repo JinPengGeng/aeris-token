@@ -974,7 +974,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::raw_sql(include_str!(
-            "../migrations/20260919000000_add_provider_cost_snapshot_imports.sql"
+            "../migrations/20260919000100_add_provider_cost_snapshot_imports.sql"
         ))
         .execute(&mut *backfill_tx)
         .await
@@ -990,7 +990,7 @@ mod tests {
             1
         );
         sqlx::raw_sql(include_str!(
-            "../migrations/20260919000000_add_provider_cost_snapshot_imports.sql"
+            "../migrations/20260919000100_add_provider_cost_snapshot_imports.sql"
         ))
         .execute(&mut *backfill_tx)
         .await
