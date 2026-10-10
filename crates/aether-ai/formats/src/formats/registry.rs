@@ -7646,4 +7646,58 @@ mod tests {
         cells.push(current.trim().to_string());
         cells
     }
+
+    fn unix_now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or_default()
+    }
+
+    /// 严格 OpenAI 客户端把 `created` 视为 `chat.completion` 必填字段。跨格式
+    /// 非流式合成（claude/gemini → openai:chat）没有上游 `created` 可透传，
+    /// `to_raw` 必须回退当前 unix 秒（fork issue #569 / 上游 #738）。
+    #[test]
+    fn cross_format_sync_chat_responses_carry_created_unix_seconds() {
+        let claude_body = json!({
+            "id": "msg_created_123",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 1, "output_tokens": 2}
+        });
+        let gemini_body = json!({
+            "responseId": "resp_created_123",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [{
+                "index": 0,
+                "finishReason": "STOP",
+                "content": {"parts": [{"text": "hello"}]}
+            }]
+        });
+
+        for (source, body) in [
+            ("claude:messages", claude_body),
+            ("gemini:generate_content", gemini_body),
+        ] {
+            let before = unix_now_secs();
+            let converted = convert_response_pure(source, "openai:chat", &body)
+                .unwrap_or_else(|error| panic!("{source} -> openai:chat should convert: {error}"))
+                .value;
+            assert_eq!(
+                converted["object"], "chat.completion",
+                "{source} -> openai:chat must produce chat.completion"
+            );
+            let created = converted["created"].as_i64().unwrap_or_else(|| {
+                panic!("{source} -> openai:chat response missing created: {converted}")
+            });
+            assert!(
+                created >= before && created <= unix_now_secs(),
+                "{source}: created {created} must be a plausible unix second"
+            );
+        }
+    }
 }

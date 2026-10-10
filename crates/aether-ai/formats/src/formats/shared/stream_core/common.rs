@@ -1,6 +1,7 @@
 use aether_ai_formats::FormatId;
 use serde_json::{json, Map, Value};
 
+use crate::formats::openai::responses::response::openai_responses_current_timestamp;
 use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
 
 pub use aether_ai_formats::protocol::stream::{
@@ -525,6 +526,13 @@ pub fn parse_json_arguments_value(arguments: &str) -> Option<Value> {
     serde_json::from_str(trimmed).ok()
 }
 
+/// Synthetic `chat.completion.chunk` payloads have no upstream `created` to
+/// preserve, so every builder stamps the current unix time: strict OpenAI
+/// clients treat `created` as required and fail deserialization without it.
+fn synthetic_chunk_created() -> Value {
+    Value::from(openai_responses_current_timestamp())
+}
+
 pub fn build_openai_chat_chunk(
     id: &str,
     model: &str,
@@ -546,6 +554,7 @@ pub fn build_openai_chat_chunk(
     json!({
         "id": id,
         "object": "chat.completion.chunk",
+        "created": synthetic_chunk_created(),
         "model": model,
         "choices": [{
             "index": 0,
@@ -559,6 +568,7 @@ pub fn build_openai_chat_role_chunk(id: &str, model: &str) -> Value {
     json!({
         "id": id,
         "object": "chat.completion.chunk",
+        "created": synthetic_chunk_created(),
         "model": model,
         "choices": [{
             "index": 0,
@@ -574,6 +584,7 @@ pub fn build_openai_chat_finish_chunk(id: &str, model: &str, finish_reason: Opti
     json!({
         "id": id,
         "object": "chat.completion.chunk",
+        "created": synthetic_chunk_created(),
         "model": model,
         "choices": [{
             "index": 0,
@@ -625,6 +636,7 @@ pub fn build_openai_chat_usage_chunk_with_cache(
     json!({
         "id": id,
         "object": "chat.completion.chunk",
+        "created": synthetic_chunk_created(),
         "model": model,
         "choices": [],
         "usage": usage,

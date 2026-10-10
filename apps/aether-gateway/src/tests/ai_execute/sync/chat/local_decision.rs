@@ -1544,11 +1544,15 @@ async fn gateway_executes_openai_chat_sync_via_local_cross_format_gemini_candida
         Some(EXECUTION_PATH_EXECUTION_RUNTIME_SYNC)
     );
     let response_json: serde_json::Value = response.json().await.expect("body should parse");
+    let created = response_json["created"]
+        .as_i64()
+        .expect("created should be a unix timestamp");
     assert_eq!(
         response_json,
         json!({
             "id": "resp_openai_chat_gemini_local_123",
             "object": "chat.completion",
+            "created": created,
             "model": "gemini-2.5-pro-upstream",
             "choices": [{
                 "index": 0,
