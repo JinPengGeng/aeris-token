@@ -83,7 +83,7 @@ impl GatewayDataState {
     pub(crate) async fn apply_paid_order_referral_rewards(
         &self,
         order_id: &str,
-        config: ReferralRewardConfig,
+        config: Option<ReferralRewardConfig>,
     ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
         self.referrals()
             .apply_paid_order_referral_rewards(order_id, config)

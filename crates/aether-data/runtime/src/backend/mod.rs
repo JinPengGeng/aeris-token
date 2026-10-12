@@ -30,7 +30,8 @@ pub use read::DataReadRepositories;
 pub use referrals::{
     ReferralAdminStats, ReferralDataState, ReferralMutationStatus, ReferralReconciliationSummary,
     ReferralRelationshipListQuery, ReferralRelationshipRecord, ReferralRewardConfig,
-    ReferralRewardListQuery, ReferralRewardRecord, ReferralUserDashboard,
+    ReferralRewardListQuery, ReferralRewardRecord, ReferralRuleSnapshot, ReferralUserDashboard,
+    REFERRAL_RULE_SNAPSHOT_KEY,
 };
 pub use transactions::DataTransactionBackends;
 pub use write::DataWriteRepositories;

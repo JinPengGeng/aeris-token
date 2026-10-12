@@ -111,7 +111,7 @@ pub struct ReferralRewardListQuery {
     pub offset: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReferralRewardConfig {
     pub percent_enabled: bool,
     pub percent_rate: f64,
@@ -119,6 +119,166 @@ pub struct ReferralRewardConfig {
     pub headcount_amount_usd: f64,
     pub headcount_trigger: String,
     pub lifetime_reward_cap_usd: f64,
+}
+
+/// Key under which the referral rule snapshot is persisted inside
+/// `payment_orders.gateway_response` (JSONB). Chosen over a schema migration:
+/// the snapshot is settlement metadata, not a queryable column, and the
+/// allowlist-based gateway-response projection only runs while an order is
+/// still `pending`, so a snapshot written at settle time survives.
+pub const REFERRAL_RULE_SNAPSHOT_KEY: &str = "referral_rule_snapshot";
+
+fn referral_rule_snapshot_default_lifetime_cap() -> f64 {
+    100.0
+}
+
+/// The full set of referral rules that participate in paid-order settlement,
+/// frozen at (first) settle time. Historical orders without a snapshot fall
+/// back to the current rules with a warning instead of failing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReferralRuleSnapshot {
+    /// Whether the referral feature was enabled when the snapshot was taken.
+    /// A disabled snapshot suppresses rewards even if rules are enabled later.
+    pub enabled: bool,
+    #[serde(default)]
+    pub percent_enabled: bool,
+    #[serde(default)]
+    pub percent_rate: f64,
+    #[serde(default)]
+    pub headcount_enabled: bool,
+    #[serde(default)]
+    pub headcount_amount_usd: f64,
+    #[serde(default)]
+    pub headcount_trigger: String,
+    #[serde(default = "referral_rule_snapshot_default_lifetime_cap")]
+    pub lifetime_reward_cap_usd: f64,
+}
+
+impl ReferralRuleSnapshot {
+    pub fn from_config(config: Option<&ReferralRewardConfig>) -> Self {
+        match config {
+            Some(config) => Self {
+                enabled: true,
+                percent_enabled: config.percent_enabled,
+                percent_rate: config.percent_rate,
+                headcount_enabled: config.headcount_enabled,
+                headcount_amount_usd: config.headcount_amount_usd,
+                headcount_trigger: config.headcount_trigger.clone(),
+                lifetime_reward_cap_usd: config.lifetime_reward_cap_usd,
+            },
+            None => Self {
+                enabled: false,
+                ..Self::default_disabled()
+            },
+        }
+    }
+
+    fn default_disabled() -> Self {
+        Self {
+            enabled: false,
+            percent_enabled: false,
+            percent_rate: 0.0,
+            headcount_enabled: false,
+            headcount_amount_usd: 0.0,
+            headcount_trigger: String::new(),
+            lifetime_reward_cap_usd: referral_rule_snapshot_default_lifetime_cap(),
+        }
+    }
+
+    pub fn to_config(&self) -> Option<ReferralRewardConfig> {
+        if !self.enabled {
+            return None;
+        }
+        Some(ReferralRewardConfig {
+            percent_enabled: self.percent_enabled,
+            percent_rate: self.percent_rate,
+            headcount_enabled: self.headcount_enabled,
+            headcount_amount_usd: self.headcount_amount_usd,
+            headcount_trigger: self.headcount_trigger.clone(),
+            lifetime_reward_cap_usd: self.lifetime_reward_cap_usd,
+        })
+    }
+}
+
+/// Parse the snapshot stored in an order's `gateway_response`. `Ok(None)`
+/// means no snapshot is stored yet (historical order or first settle);
+/// `Err(())` means a snapshot key exists but is malformed.
+fn extract_referral_rule_snapshot(
+    gateway_response: Option<&serde_json::Value>,
+) -> Result<Option<ReferralRuleSnapshot>, ()> {
+    let Some(object) = gateway_response.and_then(serde_json::Value::as_object) else {
+        return Ok(None);
+    };
+    match object.get(REFERRAL_RULE_SNAPSHOT_KEY) {
+        None => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|_| ()),
+    }
+}
+
+/// Merge a snapshot into an order's `gateway_response` without dropping any
+/// existing keys. Returns `None` when the existing response is not a JSON
+/// object, in which case persisting would clobber gateway data.
+fn merge_referral_rule_snapshot(
+    gateway_response: Option<&serde_json::Value>,
+    snapshot: &ReferralRuleSnapshot,
+) -> Option<serde_json::Value> {
+    let mut object = match gateway_response {
+        Some(serde_json::Value::Object(object)) => object.clone(),
+        Some(_) => return None,
+        None => serde_json::Map::new(),
+    };
+    object.insert(
+        REFERRAL_RULE_SNAPSHOT_KEY.to_string(),
+        serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null),
+    );
+    Some(serde_json::Value::Object(object))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReferralRuleSnapshotSource {
+    StoredSnapshot,
+    PersistedCurrent,
+    FallbackCurrent,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ReferralRuleResolution {
+    effective: Option<ReferralRewardConfig>,
+    source: ReferralRuleSnapshotSource,
+    persist: Option<ReferralRuleSnapshot>,
+}
+
+/// Settlement must run on the rules that were in effect for the order, not
+/// on whatever the admin configured since. A stored snapshot always wins;
+/// when none exists (historical orders) the current rules apply and, when
+/// the order metadata can hold it, are frozen in as the snapshot.
+fn resolve_referral_rule_snapshot(
+    gateway_response: Option<&serde_json::Value>,
+    current: Option<&ReferralRewardConfig>,
+) -> ReferralRuleResolution {
+    match extract_referral_rule_snapshot(gateway_response) {
+        Ok(Some(snapshot)) => ReferralRuleResolution {
+            effective: snapshot.to_config(),
+            source: ReferralRuleSnapshotSource::StoredSnapshot,
+            persist: None,
+        },
+        Ok(None) => {
+            let snapshot = ReferralRuleSnapshot::from_config(current);
+            ReferralRuleResolution {
+                effective: snapshot.to_config(),
+                source: ReferralRuleSnapshotSource::PersistedCurrent,
+                persist: merge_referral_rule_snapshot(gateway_response, &snapshot)
+                    .map(|_| snapshot),
+            }
+        }
+        Err(()) => ReferralRuleResolution {
+            effective: current.cloned(),
+            source: ReferralRuleSnapshotSource::FallbackCurrent,
+            persist: None,
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +304,7 @@ struct ReferralPaymentOrderContext {
     payment_method: String,
     status: String,
     order_kind: String,
+    gateway_response: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -790,15 +951,22 @@ WHERE ($1::TEXT IS NULL OR inviter_user_id = $1)
             .await
     }
 
+    /// Settle paid-order referral rewards against the referral rules that
+    /// were snapshotted for this order, not against the current rules.
+    ///
+    /// The snapshot lives in `payment_orders.gateway_response` under
+    /// [`REFERRAL_RULE_SNAPSHOT_KEY`]. When an order carries no snapshot
+    /// (orders from before this feature), settlement falls back to the
+    /// current rules — first writer wins: the current rules are frozen into
+    /// the order metadata so later rule changes cannot retroactively alter
+    /// this order's settlement. Historical orders that can never gain a
+    /// snapshot keep falling back to the current rules with a warning.
     pub async fn apply_paid_order_referral_rewards(
         &self,
         order_id: &str,
-        config: ReferralRewardConfig,
+        config: Option<ReferralRewardConfig>,
     ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
         if self.backends.is_none() {
-            return Ok(Vec::new());
-        }
-        if !config.percent_enabled && !config.headcount_enabled {
             return Ok(Vec::new());
         }
         let Some(context) = self.find_referral_payment_order_context(order_id).await? else {
@@ -817,6 +985,49 @@ WHERE ($1::TEXT IS NULL OR inviter_user_id = $1)
             return Ok(Vec::new());
         }
         if referral_payment_method_excluded(&context.payment_method) {
+            return Ok(Vec::new());
+        }
+        let resolution =
+            resolve_referral_rule_snapshot(context.gateway_response.as_ref(), config.as_ref());
+        if let Some(snapshot) = resolution.persist.as_ref() {
+            match merge_referral_rule_snapshot(context.gateway_response.as_ref(), snapshot) {
+                Some(merged) => {
+                    if let Err(err) = self
+                        .persist_referral_rule_snapshot(&context.id, merged)
+                        .await
+                    {
+                        tracing::warn!(
+                            event_name = "referral_rule_snapshot_persist_failed",
+                            order_id = %context.id,
+                            error = %err,
+                            "failed to persist referral rule snapshot; settling with current rules"
+                        );
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        event_name = "referral_rule_snapshot_unpersistable",
+                        order_id = %context.id,
+                        "order gateway_response is not a JSON object; referral rule snapshot cannot be stored, settling with current rules"
+                    );
+                }
+            }
+        }
+        match resolution.source {
+            ReferralRuleSnapshotSource::StoredSnapshot => {}
+            ReferralRuleSnapshotSource::FallbackCurrent => {
+                tracing::warn!(
+                    event_name = "referral_rule_snapshot_fallback",
+                    order_id = %context.id,
+                    "malformed referral rule snapshot; falling back to current referral rules"
+                );
+            }
+            ReferralRuleSnapshotSource::PersistedCurrent => {}
+        }
+        let Some(config) = resolution.effective else {
+            return Ok(Vec::new());
+        };
+        if !config.percent_enabled && !config.headcount_enabled {
             return Ok(Vec::new());
         }
         let Some(relationship) = self
@@ -1913,7 +2124,7 @@ ON CONFLICT (idempotency_key) DO NOTHING
             let row = sqlx::query(
                 r#"
 SELECT id, user_id, CAST(amount_usd AS DOUBLE PRECISION) AS amount_usd,
-       payment_method, status, order_kind
+       payment_method, status, order_kind, gateway_response
 FROM payment_orders
 WHERE id = $1
 "#,
@@ -1925,6 +2136,27 @@ WHERE id = $1
             return row.map(payment_order_context_from_row).transpose();
         }
         Ok(None)
+    }
+
+    async fn persist_referral_rule_snapshot(
+        &self,
+        order_id: &str,
+        merged_gateway_response: serde_json::Value,
+    ) -> Result<(), DataLayerError> {
+        let Some(backends) = self.backends.as_ref() else {
+            return Ok(());
+        };
+        #[cfg(feature = "postgres")]
+        if let Some(backend) = backends.postgres() {
+            sqlx::query("UPDATE payment_orders SET gateway_response = $2 WHERE id = $1")
+                .bind(order_id)
+                .bind(merged_gateway_response)
+                .execute(&backend.pool_clone())
+                .await
+                .map_err(DataLayerError::postgres)?;
+            return Ok(());
+        }
+        Ok(())
     }
 
     async fn find_referral_payment_order_refund_context(
@@ -2782,6 +3014,7 @@ where
     for<'r> String: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     for<'r> Option<String>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     for<'r> f64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    for<'r> serde_json::Value: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
 {
     let Some(user_id) = row_optional_string!(row, "user_id") else {
         return Err(DataLayerError::InvalidInput(
@@ -2795,6 +3028,9 @@ where
         payment_method: row_string!(row, "payment_method"),
         status: row_string!(row, "status"),
         order_kind: row_string!(row, "order_kind"),
+        gateway_response: row
+            .try_get::<Option<serde_json::Value>, _>("gateway_response")
+            .map_err(DataLayerError::sql)?,
     })
 }
 
@@ -3080,5 +3316,147 @@ mod tests {
         assert_eq!(referral_page_bounds(0, 0), (1, 0));
         assert_eq!(referral_page_bounds(999, 4), (200, 4));
         assert_eq!(referral_page_bounds(20, usize::MAX), (20, i64::MAX));
+    }
+
+    fn test_referral_config(percent_rate: f64) -> ReferralRewardConfig {
+        ReferralRewardConfig {
+            percent_enabled: true,
+            percent_rate,
+            headcount_enabled: true,
+            headcount_amount_usd: 5.0,
+            headcount_trigger: "first_paid_order".to_string(),
+            lifetime_reward_cap_usd: 100.0,
+        }
+    }
+
+    #[test]
+    fn referral_rule_snapshot_round_trips_all_settlement_fields() {
+        let config = test_referral_config(10.0);
+        let snapshot = ReferralRuleSnapshot::from_config(Some(&config));
+        let stored = serde_json::to_value(&snapshot).expect("snapshot should serialize");
+        let stored_object = stored.as_object().expect("snapshot should be an object");
+        // Every field that participates in settlement must be frozen: mode
+        // flags, percent rate, headcount amount/trigger, and the lifetime cap.
+        for key in [
+            "enabled",
+            "percent_enabled",
+            "percent_rate",
+            "headcount_enabled",
+            "headcount_amount_usd",
+            "headcount_trigger",
+            "lifetime_reward_cap_usd",
+        ] {
+            assert!(stored_object.contains_key(key), "snapshot missing {key}");
+        }
+        let parsed: ReferralRuleSnapshot =
+            serde_json::from_value(stored).expect("snapshot should deserialize");
+        assert_eq!(parsed.to_config(), Some(config));
+    }
+
+    #[test]
+    fn referral_rule_snapshot_suppresses_rewards_when_disabled() {
+        let snapshot = ReferralRuleSnapshot::from_config(None);
+        assert!(!snapshot.enabled);
+        assert_eq!(snapshot.to_config(), None);
+
+        let stored = serde_json::json!({ REFERRAL_RULE_SNAPSHOT_KEY: snapshot });
+        let resolution =
+            resolve_referral_rule_snapshot(Some(&stored), Some(&test_referral_config(50.0)));
+        assert_eq!(resolution.effective, None);
+        assert_eq!(
+            resolution.source,
+            ReferralRuleSnapshotSource::StoredSnapshot
+        );
+    }
+
+    #[test]
+    fn referral_rule_snapshot_wins_over_changed_current_rules() {
+        // The order was paid while a 10% rate was in effect; the admin later
+        // raised the rate to 50%. Settlement must still use the snapshot.
+        let paid_time_config = test_referral_config(10.0);
+        let snapshot = ReferralRuleSnapshot::from_config(Some(&paid_time_config));
+        let gateway_response = serde_json::json!({ REFERRAL_RULE_SNAPSHOT_KEY: snapshot, "checkout_session": "cs_test" });
+
+        let resolution = resolve_referral_rule_snapshot(
+            Some(&gateway_response),
+            Some(&test_referral_config(50.0)),
+        );
+        assert_eq!(resolution.effective, Some(paid_time_config));
+        assert_eq!(
+            resolution.source,
+            ReferralRuleSnapshotSource::StoredSnapshot
+        );
+        assert_eq!(resolution.persist, None);
+    }
+
+    #[test]
+    fn referral_rule_snapshot_missing_falls_back_and_freezes_current_rules() {
+        // Historical order without a snapshot settles with the current rules
+        // and freezes them in, so later changes cannot retroactively alter
+        // this order.
+        let current = test_referral_config(50.0);
+        let resolution = resolve_referral_rule_snapshot(None, Some(&current));
+        assert_eq!(resolution.effective, Some(current.clone()));
+        assert_eq!(
+            resolution.source,
+            ReferralRuleSnapshotSource::PersistedCurrent
+        );
+        assert_eq!(
+            resolution.persist,
+            Some(ReferralRuleSnapshot::from_config(Some(&current)))
+        );
+    }
+
+    #[test]
+    fn referral_rule_snapshot_malformed_falls_back_without_freezing() {
+        let gateway_response =
+            serde_json::json!({ REFERRAL_RULE_SNAPSHOT_KEY: "not-a-rule-object" });
+        let current = test_referral_config(50.0);
+        let resolution = resolve_referral_rule_snapshot(Some(&gateway_response), Some(&current));
+        assert_eq!(resolution.effective, Some(current));
+        assert_eq!(
+            resolution.source,
+            ReferralRuleSnapshotSource::FallbackCurrent
+        );
+        // A malformed snapshot must never be overwritten implicitly: only a
+        // human decision (clearing the key) may replace it.
+        assert_eq!(resolution.persist, None);
+    }
+
+    #[test]
+    fn referral_rule_snapshot_merge_preserves_gateway_keys() {
+        let snapshot = ReferralRuleSnapshot::from_config(Some(&test_referral_config(10.0)));
+        let existing =
+            serde_json::json!({ "checkout_session": "cs_test", "payment_method_types": ["card"] });
+        let merged = merge_referral_rule_snapshot(Some(&existing), &snapshot)
+            .expect("object gateway response should accept the snapshot");
+        assert_eq!(merged["checkout_session"], "cs_test");
+        assert_eq!(merged["payment_method_types"], serde_json::json!(["card"]));
+        assert!(merged.get(REFERRAL_RULE_SNAPSHOT_KEY).is_some());
+
+        // A non-object gateway response must not be clobbered.
+        assert_eq!(
+            merge_referral_rule_snapshot(Some(&serde_json::json!("legacy-string")), &snapshot),
+            None
+        );
+    }
+
+    #[test]
+    fn referral_rule_snapshot_tolerates_legacy_partial_fields() {
+        // Snapshots written by earlier versions (or hand-edited rows) may
+        // lack newer fields; serde defaults keep settlement working.
+        let partial = serde_json::json!({
+            "enabled": true,
+            "percent_enabled": true,
+            "percent_rate": 10.0,
+        });
+        let parsed: ReferralRuleSnapshot =
+            serde_json::from_value(partial).expect("partial snapshot should parse");
+        assert_eq!(parsed.lifetime_reward_cap_usd, 100.0);
+        assert!(!parsed.headcount_enabled);
+        assert_eq!(parsed.headcount_trigger, "");
+        let config = parsed.to_config().expect("enabled snapshot should settle");
+        assert_eq!(config.percent_rate, 10.0);
+        assert_eq!(config.lifetime_reward_cap_usd, 100.0);
     }
 }
