@@ -70,17 +70,18 @@ pub fn convert_claude_messages_to_conversation_state(
         }));
     }
 
-    let Some((last_message_index, last_message_role)) = messages.iter().enumerate().rev().find_map(
-        |(index, message)| {
-            let role = message
-                .as_object()
-                .and_then(|message| message.get("role"))
-                .and_then(Value::as_str)?;
-            matches!(role, "user" | "assistant").then_some((index, role))
-        },
-    ) else {
-        return None;
-    };
+    let (last_message_index, last_message_role) =
+        messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, message)| {
+                let role = message
+                    .as_object()
+                    .and_then(|message| message.get("role"))
+                    .and_then(Value::as_str)?;
+                matches!(role, "user" | "assistant").then_some((index, role))
+            })?;
     let last_is_assistant = last_message_role == "assistant";
     let history_end_index = if last_is_assistant {
         messages.len()
@@ -756,15 +757,13 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("hi")
         );
-        assert!(
-            conversation_state
-                .get("history")
-                .and_then(Value::as_array)
-                .and_then(|history| history.first())
-                .and_then(|value| value.get("userInputMessage"))
-                .and_then(|value| value.get("content"))
-                .and_then(Value::as_str)
-                .is_some_and(|content| content.contains("Use the Kiro envelope."))
-        );
+        assert!(conversation_state
+            .get("history")
+            .and_then(Value::as_array)
+            .and_then(|history| history.first())
+            .and_then(|value| value.get("userInputMessage"))
+            .and_then(|value| value.get("content"))
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.contains("Use the Kiro envelope.")));
     }
 }
