@@ -9,6 +9,16 @@
       "expires_on": "2026-11-09",
       "review_cadence": "at least every 30 days and on each braces/tailwindcss release",
       "rationale": "braces has no fixed release for GHSA-vfj7-8cjw-p6xm (affects all published versions). It only reaches the frontend through the tailwindcss 3.x -> chokidar/fast-glob build-time dependency chain, so the pattern-parsing DoS is not reachable from production runtime or CI build inputs. Moving to tailwindcss 4.x is a breaking migration tracked separately; dependabot PR #597 (dompurify) is unrelated. This PR additionally fixes the fixable frontend advisories (vue, @vue/server-renderer, brace-expansion) and the aether-vscodex/web advisories (brace-expansion, source-map-js) via npm audit fix."
+    },
+    {
+      "directory": "frontend",
+      "package": "postcss-selector-parser",
+      "ghsa_id": "GHSA-rj75-hqrm-r3gf",
+      "owner": "aeris-token maintainers",
+      "created_on": "2026-10-12",
+      "expires_on": "2026-11-09",
+      "review_cadence": "at least every 30 days and on each postcss-selector-parser/tailwindcss release",
+      "rationale": "postcss-selector-parser < 7.1.6 (GHSA-rj75-hqrm-r3gf, quadratic-complexity CPU exhaustion in flat selector parsing) reaches the frontend only as a build-time transitive dev dependency and is not reachable from production runtime or CI build inputs. The remaining vulnerable chain is tailwindcss 3.x -> postcss-nested, which pins postcss-selector-parser@6.1.4; the fix requires the tailwindcss 4.x breaking migration tracked together with the braces exemption (same expiry date and review round). The parallel eslint-plugin-vue chain is fixable via npm audit fix but drags eslint-plugin-vue 10.5.1 -> 10.11.1 plus vue-eslint-parser/eslint-utils/semver upgrades, deferred to a dedicated dependency-hygiene pass rather than bundled into a security exemption."
     }
   ]
 }
