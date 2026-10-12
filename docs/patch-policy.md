@@ -85,6 +85,7 @@ fork 修复并验证（急用先落地）
 | embedding/rerank 放行 per-format auth_type 覆盖（裁剪） | #617 | 裁剪移植上游 fawney19/Aether#626（Kayphoon）：仅取 conversion.rs 路由改动 + auth.rs 测试 + 前端 `formatSupportsAuthOverride` 放宽；**剔除** kilo_free/opencode_free 免费 provider 全部代码 | 跟踪上游 fawney19/Aether#626，上游合并后 sync 回销（免费 provider 部分仍不取） |
 | 健康历史状态条全窗口分段聚合 | #618 | 移植自上游 fawney19/Aether#884（AAEE86）：新增 `aggregate_usage_health_timeline` 仓储契约 + postgres FLOOR 分桶 SQL（过滤语义与 summarize_usage_breakdown_raw 逐字对齐）+ 内存实现 + catalog_helpers 四条路径切换（失败回退事件样本 + warn）；剔除上游纯 import 重排 3 个 hunk | 跟踪上游 fawney19/Aether#884，上游合并后 sync 回销 |
 | 失败请求展示候选级上游错误详情 | #619 | 移植自上游 fawney19/Aether#588（RWDai）：usage 详情 payload 增候选级 upstream_response 提取/candidate_failure_summary/候选感知 no_upstream_attempt/调度失败标题分级 + 前端失败通知与时间线展示；保留我方脱敏策略（sanitize allowlist 增 client_response）、信封结构与可诊断错误富文本 | 跟踪上游 fawney19/Aether#588，上游合并后 sync 回销 |
+| 返利规则快照落库（#620 阶段 1） | #623 | 语义吸收自上游 fawney19/Aether#886（open）的 fork 自有实现：`payment_orders.gateway_response` 顶层键 `referral_rule_snapshot`（无 schema 迁移），首次结算时 first-writer-wins 合并写入，结算以快照为准；`ReferralRuleSnapshot` + `resolve/merge_referral_rule_snapshot` 纯函数（`crates/aether-data/runtime/src/backend/referrals.rs`）；无快照历史订单回退当前规则并冻结、malformed 快照回退 + warn 不阻断 | fork 自有功能，不回销上游；阶段 2（退款返利冲回预览）后续 PR 续做 |
 
 ## 5. 当前深度定制跟踪表（定制轨道）
 
