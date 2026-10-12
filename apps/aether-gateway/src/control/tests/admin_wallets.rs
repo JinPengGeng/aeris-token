@@ -254,3 +254,51 @@ fn classifies_admin_wallets_fail_refund_as_admin_proxy_route() {
     );
     assert!(!decision.is_execution_runtime_candidate());
 }
+
+#[test]
+fn classifies_admin_wallets_referral_clawback_preview_as_admin_proxy_route() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/wallets/wallet-123/refunds/refund-1/referral-preview"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::GET, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(decision.route_family.as_deref(), Some("wallets_manage"));
+    assert_eq!(
+        decision.route_kind.as_deref(),
+        Some("referral_clawback_preview")
+    );
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("admin:wallets")
+    );
+    assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
+fn read_only_permissions_allow_referral_clawback_preview() {
+    use crate::control::{
+        read_only_management_token_permissions, validate_management_token_admin_route_permission,
+        GatewayControlDecision,
+    };
+
+    let permissions = read_only_management_token_permissions();
+    let decision = GatewayControlDecision::synthetic(
+        "/api/admin/wallets/wallet-123/refunds/refund-1/referral-preview",
+        Some("admin_proxy".into()),
+        Some("wallets_manage".into()),
+        Some("referral_clawback_preview".into()),
+        Some("admin:wallets".into()),
+    );
+    assert!(
+        validate_management_token_admin_route_permission(
+            &http::Method::GET,
+            &decision,
+            Some(&permissions)
+        )
+        .is_ok(),
+        "read-only tokens must be able to preview referral clawback"
+    );
+}

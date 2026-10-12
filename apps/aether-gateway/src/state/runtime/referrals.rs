@@ -283,6 +283,17 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn preview_referral_clawback(
+        &self,
+        order_id: &str,
+        refund_amount_usd: f64,
+    ) -> Result<Vec<crate::data::state::ReferralClawbackPreviewItem>, GatewayError> {
+        self.data
+            .preview_referral_clawback(order_id, refund_amount_usd)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn reconcile_referral_rewards_once(
         &self,
     ) -> Result<crate::data::state::ReferralReconciliationSummary, GatewayError> {

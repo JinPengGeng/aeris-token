@@ -4,9 +4,9 @@ use aether_data::DataLayerError;
 use super::GatewayDataState;
 
 pub(crate) use aether_data::backend::{
-    ReferralAdminStats, ReferralMutationStatus, ReferralReconciliationSummary,
-    ReferralRelationshipListQuery, ReferralRelationshipRecord, ReferralRewardConfig,
-    ReferralRewardListQuery, ReferralRewardRecord, ReferralUserDashboard,
+    ReferralAdminStats, ReferralClawbackPreviewItem, ReferralMutationStatus,
+    ReferralReconciliationSummary, ReferralRelationshipListQuery, ReferralRelationshipRecord,
+    ReferralRewardConfig, ReferralRewardListQuery, ReferralRewardRecord, ReferralUserDashboard,
 };
 
 impl GatewayDataState {
@@ -119,6 +119,16 @@ impl GatewayDataState {
     ) -> Result<Vec<ReferralRewardRecord>, DataLayerError> {
         self.referrals()
             .reverse_referral_rewards_for_order(order_id, amount_usd)
+            .await
+    }
+
+    pub(crate) async fn preview_referral_clawback(
+        &self,
+        order_id: &str,
+        refund_amount_usd: f64,
+    ) -> Result<Vec<ReferralClawbackPreviewItem>, DataLayerError> {
+        self.referrals()
+            .preview_referral_clawback(order_id, refund_amount_usd)
             .await
     }
 
