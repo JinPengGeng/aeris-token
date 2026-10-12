@@ -472,7 +472,20 @@ impl<'a> AdminAppState<'a> {
         &self,
         mode: SystemExportMode,
     ) -> Result<serde_json::Value, GatewayError> {
-        let users = self.list_non_admin_export_users().await?;
+        self.build_admin_system_users_export_payload_with_admin_scope(mode, false)
+            .await
+    }
+
+    async fn build_admin_system_users_export_payload_with_admin_scope(
+        &self,
+        mode: SystemExportMode,
+        include_admin_users: bool,
+    ) -> Result<serde_json::Value, GatewayError> {
+        let users = if include_admin_users {
+            self.list_export_users().await?
+        } else {
+            self.list_non_admin_export_users().await?
+        };
         let user_ids = users.iter().map(|user| user.id.clone()).collect::<Vec<_>>();
         let user_usage_totals = self
             .app
@@ -676,7 +689,9 @@ impl<'a> AdminAppState<'a> {
         mode: SystemExportMode,
     ) -> Result<serde_json::Value, GatewayError> {
         let config_data = self.build_admin_system_config_export_payload(mode).await?;
-        let user_data = self.build_admin_system_users_export_payload(mode).await?;
+        let user_data = self
+            .build_admin_system_users_export_payload_with_admin_scope(mode, true)
+            .await?;
 
         Ok(json!({
             "version": ADMIN_SYSTEM_DATA_EXPORT_VERSION,
