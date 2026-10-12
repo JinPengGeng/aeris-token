@@ -65,12 +65,16 @@ pub const DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES: usize = usize::MAX;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsageBodyCapturePolicy {
     pub record_level: UsageRequestRecordLevel,
+    pub compact_base64_images: bool,
+    pub max_body_bytes: Option<usize>,
 }
 
 impl Default for UsageBodyCapturePolicy {
     fn default() -> Self {
         Self {
             record_level: UsageRequestRecordLevel::Basic,
+            compact_base64_images: false,
+            max_body_bytes: None,
         }
     }
 }
@@ -13788,6 +13792,7 @@ mod tests {
         apply_usage_body_capture_policy_to_event(
             UsageBodyCapturePolicy {
                 record_level: UsageRequestRecordLevel::Full,
+                ..UsageBodyCapturePolicy::default()
             },
             &mut event,
         );
@@ -15557,6 +15562,7 @@ mod tests {
         apply_usage_body_capture_policy_to_event(
             UsageBodyCapturePolicy {
                 record_level: UsageRequestRecordLevel::Full,
+                ..UsageBodyCapturePolicy::default()
             },
             &mut event,
         );
