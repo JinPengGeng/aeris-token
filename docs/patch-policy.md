@@ -45,6 +45,13 @@ fork 修复并验证（急用先落地）
 - 合并方法纪律：sync/\* 分支的同步 PR 只允许 merge commit，其余 PR 一律 squash。`main-linear-history` ruleset 移除后（#175 决策候选②），该纪律由评审约定、automation 契约测试 pin、以及合并后 `git rev-list --count origin/main..upstream/main == 0` 校验共同约束。
 - 冲突解决原则：以上游为基座，逐定制点重新落位；语义冲突时以上游为准重设计定制。
 
+### 3.1 gh/远端解析防漂移（2026-10-11 起）
+
+- 本仓已于 2026-10-10 脱离 fork 网络（GitHub 侧 `fork:false`），`gh pr create` 不再默认指向 fawney19/Aether。
+- **主 checkout 不登记 `upstream` 命名远端**：gh 的远端解析优先级里 `upstream` 排在 `origin` 前，登记后未设默认库的机器上 `gh` 命令会打到上游仓库（2026-10-10 实测发生）。需要上游对象时用 URL fetch（`git fetch https://github.com/fawney19/Aether.git main`），或只在 `~/.agents/tmp` 的临时 worktree 里操作。
+- 每台新机器 clone 后执行一次 `gh repo set-default JinPengGeng/aeris-token`（写入本机 git config，幂等）。
+- 自动化/agent 的 `gh` 命令一律显式 `--repo JinPengGeng/aeris-token`，不依赖任何本机默认库配置。
+
 ## 4. 当前补丁跟踪表（补丁轨道）
 
 | 补丁 | fork PR | 内容 | 上游化状态 |
