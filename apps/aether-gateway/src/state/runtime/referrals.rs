@@ -254,9 +254,7 @@ impl AppState {
         &self,
         order: &aether_data::repository::wallet::StoredAdminPaymentOrder,
     ) -> Result<Vec<ReferralRewardRecord>, GatewayError> {
-        let Some(config) = self.referral_reward_config().await? else {
-            return Ok(Vec::new());
-        };
+        let config = self.referral_reward_config().await?;
         self.data
             .apply_paid_order_referral_rewards(&order.id, config)
             .await
@@ -267,9 +265,7 @@ impl AppState {
         &self,
         order_id: &str,
     ) -> Result<Vec<ReferralRewardRecord>, GatewayError> {
-        let Some(config) = self.referral_reward_config().await? else {
-            return Ok(Vec::new());
-        };
+        let config = self.referral_reward_config().await?;
         self.data
             .apply_paid_order_referral_rewards(order_id, config)
             .await
