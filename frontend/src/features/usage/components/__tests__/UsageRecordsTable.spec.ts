@@ -535,7 +535,8 @@ describe('UsageRecordsTable', () => {
     expect(badges.length).toBeGreaterThanOrEqual(2)
     expect(badges.every(badge => !badge.hasAttribute('title'))).toBe(true)
     expect(badges.every(badge => badge.getAttribute('aria-label') === '失败')).toBe(true)
-=======
+  })
+
   it('shows failed instead of streaming when an active row has a timeout error message', () => {
     const root = mountUsageRecordsTable([buildRecord({
       status: 'streaming',

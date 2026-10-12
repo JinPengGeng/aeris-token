@@ -1384,10 +1384,18 @@ const normalizeUpstreamResponseDisplay = (value: unknown): Record<string, unknow
   const statusCode = readNumberField(raw, 'status_code') ?? readNumberField(raw, 'statusCode')
   const headers = raw.headers ?? raw.header
   const body = normalizeUpstreamBodyDisplay(raw.body)
+  const bodyRef = readStringField(raw, 'body_ref') ?? readStringField(raw, 'bodyRef')
+  const bodyState = readStringField(raw, 'body_state') ?? readStringField(raw, 'bodyState')
+  const meaningfulBodyState = bodyState && bodyState.toLowerCase() !== 'none'
+    ? bodyState
+    : ''
 
   if (
+    statusCode == null &&
     !hasRenderableValue(headers) &&
-    !hasRenderableValue(body)
+    !hasRenderableValue(body) &&
+    !bodyRef &&
+    !meaningfulBodyState
   ) {
     return null
   }
@@ -1396,6 +1404,8 @@ const normalizeUpstreamResponseDisplay = (value: unknown): Record<string, unknow
   if (statusCode != null) data.status_code = statusCode
   if (hasRenderableValue(headers)) data.headers = headers
   if (hasRenderableValue(body)) data.body = body
+  if (bodyRef) data.body_ref = bodyRef
+  if (meaningfulBodyState) data.body_state = meaningfulBodyState
 
   return data
 }
@@ -1858,10 +1868,25 @@ const currentAttemptRequestError = computed<{
     fallbackMessage,
     diagnosticMessage,
   )
-  const message = formatAttemptErrorMessage(rawMessage, statusCode) || fallbackType
+  const resolvedFailureMessage = clientErrorMessage
+    ? resolveFailureReason({
+      message: clientErrorMessage,
+      type: upstreamErrorType,
+      statusCode,
+    })
+    : resolveFailureReason({
+      message: upstreamErrorMessage || flowMessage || fallbackMessage,
+      type: upstreamErrorType,
+      code: upstreamErrorCode,
+      statusCode,
+    })
+  const formattedMessage = formatAttemptErrorMessage(rawMessage, statusCode)
+  const message = (isActionableDiagnosticMessage(rawMessage)
+    ? formattedMessage
+    : resolvedFailureMessage || formattedMessage)
+    || fallbackType
     || clientErrorMessage || upstreamErrorMessage
     || '本次尝试失败，链路追踪未包含详细错误内容。'
-  const preferClientResponse = Boolean(clientErrorMessage)
   const upstreamResponseDisplay = preferClientResponse
     ? normalizeUpstreamResponseDisplay(extra?.client_response) ?? normalizeUpstreamResponseDisplay(extra?.upstream_response)
     : normalizeUpstreamResponseDisplay(extra?.upstream_response) ?? normalizeUpstreamResponseDisplay(extra?.client_response)

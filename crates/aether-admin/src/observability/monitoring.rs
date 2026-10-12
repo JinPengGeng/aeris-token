@@ -731,10 +731,7 @@ fn admin_monitoring_trace_response_data(
         response.insert("body_ref".to_string(), json!(body_ref));
     }
     if let Some(body_state) = body_state {
-        response.insert(
-            "body_state".to_string(),
-            json!(body_state.as_str()),
-        );
+        response.insert("body_state".to_string(), json!(body_state.as_str()));
     }
     Some(Value::Object(response))
 }

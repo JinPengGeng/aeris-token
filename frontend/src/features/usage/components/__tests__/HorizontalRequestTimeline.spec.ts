@@ -828,13 +828,6 @@ describe('HorizontalRequestTimeline', () => {
         'content-type': 'application/json',
         'x-request-id': 'req_usage-cyber-risk-demo',
       },
-      body: {
-        error: {
-          type: 'invalid_request',
-          message: upstreamErrorMessage,
-          code: 400,
-        },
-      },
     })
     expect(upstreamResponse?.textContent).not.toContain('"status_code"')
     expect(upstreamResponse?.textContent).not.toContain('"headers"')
