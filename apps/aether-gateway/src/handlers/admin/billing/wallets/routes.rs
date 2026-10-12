@@ -5,8 +5,9 @@ use super::mutations::{
 };
 use super::reads::{
     build_admin_wallet_detail_response, build_admin_wallet_ledger_response,
-    build_admin_wallet_list_response, build_admin_wallet_refund_requests_response,
-    build_admin_wallet_refunds_response, build_admin_wallet_transactions_response,
+    build_admin_wallet_list_response, build_admin_wallet_refund_referral_preview_response,
+    build_admin_wallet_refund_requests_response, build_admin_wallet_refunds_response,
+    build_admin_wallet_transactions_response,
 };
 use super::shared::build_admin_wallets_data_unavailable_response;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -39,6 +40,9 @@ pub(super) async fn maybe_build_local_admin_wallets_routes_response(
                 path,
                 "/api/admin/wallets/refund-requests" | "/api/admin/wallets/refund-requests/"
             ))
+        || (request_context.method() == http::Method::GET
+            && path.starts_with("/api/admin/wallets/")
+            && path.ends_with("/referral-preview"))
         || (request_context.method() == http::Method::GET
             && path.starts_with("/api/admin/wallets/")
             && path.ends_with("/transactions"))
@@ -92,6 +96,13 @@ pub(super) async fn maybe_build_local_admin_wallets_routes_response(
     {
         return Ok(Some(
             build_admin_wallet_refund_requests_response(state, request_context).await?,
+        ));
+    }
+    if decision.route_kind.as_deref() == Some("referral_clawback_preview")
+        && request_context.method() == http::Method::GET
+    {
+        return Ok(Some(
+            build_admin_wallet_refund_referral_preview_response(state, request_context).await?,
         ));
     }
     if decision.route_kind.as_deref() == Some("list_wallet_transactions")

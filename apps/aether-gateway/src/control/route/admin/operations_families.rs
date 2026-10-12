@@ -575,6 +575,19 @@ pub(super) fn classify_admin_operations_family_route(
             "admin:wallets",
             false,
         ))
+    } else if method == http::Method::GET
+        && normalized_path.starts_with("/api/admin/wallets/")
+        && normalized_path.contains("/refunds/")
+        && normalized_path.ends_with("/referral-preview")
+        && normalized_path.matches('/').count() == 7
+    {
+        Some(classified(
+            "admin_proxy",
+            "wallets_manage",
+            "referral_clawback_preview",
+            "admin:wallets",
+            false,
+        ))
     } else if method == http::Method::POST
         && normalized_path.starts_with("/api/admin/wallets/")
         && normalized_path.ends_with("/adjust")

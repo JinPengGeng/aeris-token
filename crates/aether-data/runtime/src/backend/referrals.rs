@@ -92,6 +92,27 @@ pub struct ReferralReconciliationSummary {
     pub deferred: u64,
 }
 
+/// Read-only projection of the referral clawback impact for one refund,
+/// computed before an admin approves it. Amounts mirror the real reversal
+/// path (`apply_referral_reward_reversal`): `deductible_amount_usd` is taken
+/// from the inviter's gift balance only, and `shortfall_amount_usd` is the
+/// remainder that would become durable pending-reversal debt retried by
+/// later reconciliation passes — principal (recharge balance) is never touched.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReferralClawbackPreviewItem {
+    pub reward_id: String,
+    pub inviter_user_id: String,
+    pub inviter_username: Option<String>,
+    pub reward_type: String,
+    pub reward_amount_usd: f64,
+    pub already_reversed_amount_usd: f64,
+    pub already_pending_amount_usd: f64,
+    pub expected_reversal_amount_usd: f64,
+    pub available_gift_usd: f64,
+    pub deductible_amount_usd: f64,
+    pub shortfall_amount_usd: f64,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ReferralRelationshipListQuery {
     pub inviter: Option<String>,
@@ -733,6 +754,75 @@ fn referral_reversal_target(
     reward_amount_usd * (refunded_amount_usd / order_amount_usd).clamp(0.0, 1.0)
 }
 
+/// Split one reward's clawback due into the part covered by the inviter's
+/// remaining gift balance and the shortfall that would become pending
+/// reversal debt. Matches `apply_referral_reward_reversal`, which never lets
+/// a reversal drive `gift_balance` below zero.
+fn referral_clawback_allocation(due_amount_usd: f64, gift_available_usd: f64) -> (f64, f64) {
+    if !due_amount_usd.is_finite() || due_amount_usd <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let gift = if gift_available_usd.is_finite() {
+        gift_available_usd.max(0.0)
+    } else {
+        0.0
+    };
+    let deductible = gift.min(due_amount_usd);
+    (deductible, due_amount_usd - deductible)
+}
+
+/// Compute the per-reward clawback impact of refunding `refund_amount_usd`
+/// more on an order that has `refunded_amount_usd` already refunded. Rewards
+/// are processed in settlement order and share the inviter's gift balance,
+/// so earlier rewards consume gift before later ones — exactly the order the
+/// real reversal path applies them in.
+fn build_referral_clawback_preview(
+    rewards: &[ReferralRewardRecord],
+    inviter_username: Option<String>,
+    order_amount_usd: f64,
+    refunded_amount_usd: f64,
+    refund_amount_usd: f64,
+    gift_balance_usd: f64,
+) -> Vec<ReferralClawbackPreviewItem> {
+    let simulated_refunded = if refund_amount_usd.is_finite() && refund_amount_usd > 0.0 {
+        (refunded_amount_usd + refund_amount_usd).clamp(0.0, order_amount_usd)
+    } else {
+        refunded_amount_usd.clamp(0.0, order_amount_usd)
+    };
+    let mut gift_remaining = if gift_balance_usd.is_finite() {
+        gift_balance_usd.max(0.0)
+    } else {
+        0.0
+    };
+    rewards
+        .iter()
+        .map(|reward| {
+            let due = referral_reversal_delta(
+                reward.amount_usd,
+                order_amount_usd,
+                simulated_refunded,
+                reward.reversed_amount_usd,
+                reward.pending_reversal_amount_usd,
+            );
+            let (deductible, shortfall) = referral_clawback_allocation(due, gift_remaining);
+            gift_remaining = (gift_remaining - deductible).max(0.0);
+            ReferralClawbackPreviewItem {
+                reward_id: reward.id.clone(),
+                inviter_user_id: reward.inviter_user_id.clone(),
+                inviter_username: inviter_username.clone(),
+                reward_type: reward.reward_type.clone(),
+                reward_amount_usd: reward.amount_usd,
+                already_reversed_amount_usd: reward.reversed_amount_usd,
+                already_pending_amount_usd: reward.pending_reversal_amount_usd,
+                expected_reversal_amount_usd: due,
+                available_gift_usd: gift_remaining + deductible,
+                deductible_amount_usd: deductible,
+                shortfall_amount_usd: shortfall,
+            }
+        })
+        .collect()
+}
+
 impl ReferralDataState<'_> {
     pub fn has_referral_data_backend(&self) -> bool {
         self.backends.is_some()
@@ -1241,6 +1331,53 @@ WHERE ($1::TEXT IS NULL OR inviter_user_id = $1)
             }
         }
         Ok(reversed)
+    }
+
+    /// Read-only preview of the referral clawback impact for refunding
+    /// `refund_amount_usd` more on this order. Never mutates anything;
+    /// amounts mirror what `reverse_referral_rewards_for_order` would deduct
+    /// (gift balance only, remainder as pending reversal debt).
+    pub async fn preview_referral_clawback(
+        &self,
+        order_id: &str,
+        refund_amount_usd: f64,
+    ) -> Result<Vec<ReferralClawbackPreviewItem>, DataLayerError> {
+        if self.backends.is_none() {
+            return Ok(Vec::new());
+        }
+        let Some(refund_context) = self
+            .find_referral_payment_order_refund_context(order_id)
+            .await?
+        else {
+            return Ok(Vec::new());
+        };
+        if !referral_refund_context_valid(&refund_context) {
+            return Ok(Vec::new());
+        }
+        let rewards = self
+            .find_applied_referral_rewards_by_order(order_id)
+            .await?;
+        if rewards.is_empty() {
+            return Ok(Vec::new());
+        }
+        // All rewards on one order belong to a single inviter; resolve the
+        // gift balance once and share it across the allocation, mirroring
+        // the sequential wallet deduction of the real reversal path.
+        let inviter_user_id = rewards
+            .first()
+            .map(|reward| reward.inviter_user_id.clone())
+            .unwrap_or_default();
+        let (inviter_username, gift_balance_usd) = self
+            .find_referral_inviter_gift_balance(&inviter_user_id)
+            .await?;
+        Ok(build_referral_clawback_preview(
+            &rewards,
+            inviter_username,
+            refund_context.amount_usd,
+            refund_context.refunded_amount_usd,
+            refund_amount_usd,
+            gift_balance_usd,
+        ))
     }
 
     /// Reconcile durable referral obligations left behind by an interrupted
@@ -1961,6 +2098,44 @@ LIMIT 1
             return row.map(|row| reward_from_row!(&row)).transpose();
         }
         Ok(None)
+    }
+
+    async fn find_referral_inviter_gift_balance(
+        &self,
+        inviter_user_id: &str,
+    ) -> Result<(Option<String>, f64), DataLayerError> {
+        let Some(backends) = self.backends.as_ref() else {
+            return Ok((None, 0.0));
+        };
+        #[cfg(feature = "postgres")]
+        if let Some(backend) = backends.postgres() {
+            let row = sqlx::query(
+                r#"
+SELECT inviter.username,
+       CAST(wallets.gift_balance AS DOUBLE PRECISION) AS gift_balance
+FROM wallets
+JOIN users inviter ON inviter.id = wallets.user_id
+  AND inviter.is_active IS TRUE AND inviter.is_deleted IS FALSE
+WHERE wallets.user_id = $1
+  AND wallets.status = 'active'
+"#,
+            )
+            .bind(inviter_user_id)
+            .fetch_optional(&backend.pool_clone())
+            .await
+            .map_err(DataLayerError::postgres)?;
+            return match row {
+                Some(row) => Ok((
+                    row_optional_string!(row, "username"),
+                    row_f64!(row, "gift_balance"),
+                )),
+                // No usable wallet: the real reversal path records the full
+                // amount as pending debt in this case; the preview mirrors it
+                // by leaving zero gift available.
+                None => Ok((None, 0.0)),
+            };
+        }
+        Ok((None, 0.0))
     }
 
     async fn find_applied_referral_rewards_by_order(
@@ -3316,6 +3491,121 @@ mod tests {
         assert_eq!(referral_page_bounds(0, 0), (1, 0));
         assert_eq!(referral_page_bounds(999, 4), (200, 4));
         assert_eq!(referral_page_bounds(20, usize::MAX), (20, i64::MAX));
+    }
+
+    fn test_reward(id: &str, reward_type: &str, amount_usd: f64) -> ReferralRewardRecord {
+        ReferralRewardRecord {
+            id: id.to_string(),
+            referral_id: "referral-1".to_string(),
+            inviter_user_id: "inviter-1".to_string(),
+            invitee_user_id: "invitee-1".to_string(),
+            reward_type: reward_type.to_string(),
+            source_order_id: Some("order-1".to_string()),
+            trigger_point: "paid_order".to_string(),
+            amount_usd,
+            status: "applied".to_string(),
+            wallet_transaction_id: Some("tx-1".to_string()),
+            idempotency_key: format!("key-{id}"),
+            reversed_amount_usd: 0.0,
+            pending_reversal_amount_usd: 0.0,
+            admin_operator_id: None,
+            admin_note: None,
+            created_at_unix_secs: 1,
+            updated_at_unix_secs: 1,
+        }
+    }
+
+    #[test]
+    fn referral_clawback_full_refund_reverses_whole_reward_from_gift() {
+        let rewards = vec![test_reward("r1", "percent", 10.0)];
+        let items = build_referral_clawback_preview(
+            &rewards,
+            Some("inviter".to_string()),
+            100.0,
+            0.0,
+            100.0,
+            25.0,
+        );
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.expected_reversal_amount_usd, 10.0);
+        assert_eq!(item.deductible_amount_usd, 10.0);
+        assert_eq!(item.shortfall_amount_usd, 0.0);
+        assert_eq!(item.available_gift_usd, 25.0);
+        assert_eq!(item.inviter_username.as_deref(), Some("inviter"));
+    }
+
+    #[test]
+    fn referral_clawback_partial_refund_reverses_proportional_amount() {
+        let rewards = vec![test_reward("r1", "percent", 10.0)];
+        let items = build_referral_clawback_preview(&rewards, None, 100.0, 0.0, 30.0, 25.0);
+        assert_eq!(items[0].expected_reversal_amount_usd, 3.0);
+        assert_eq!(items[0].deductible_amount_usd, 3.0);
+        assert_eq!(items[0].shortfall_amount_usd, 0.0);
+    }
+
+    #[test]
+    fn referral_clawback_accumulates_on_top_of_already_reversed() {
+        let mut reward = test_reward("r1", "percent", 10.0);
+        reward.reversed_amount_usd = 2.0;
+        let items = build_referral_clawback_preview(&[reward], None, 100.0, 50.0, 50.0, 25.0);
+        // Cumulative target for the full order is 10; 2 already reversed.
+        assert_eq!(items[0].expected_reversal_amount_usd, 8.0);
+        assert_eq!(items[0].already_reversed_amount_usd, 2.0);
+    }
+
+    #[test]
+    fn referral_clawback_insufficient_gift_shows_shortfall_as_pending_debt() {
+        // Two rewards share one inviter wallet with only 2.0 gift. The first
+        // reward consumes all of it; the second is fully short. The system
+        // never drives gift below zero: shortfall stays pending-reversal debt.
+        let rewards = vec![
+            test_reward("r1", "percent", 10.0),
+            test_reward("r2", "headcount", 5.0),
+        ];
+        let items = build_referral_clawback_preview(&rewards, None, 100.0, 0.0, 100.0, 2.0);
+        assert_eq!(items[0].expected_reversal_amount_usd, 10.0);
+        assert_eq!(items[0].deductible_amount_usd, 2.0);
+        assert_eq!(items[0].shortfall_amount_usd, 8.0);
+        assert_eq!(items[0].available_gift_usd, 2.0);
+        assert_eq!(items[1].expected_reversal_amount_usd, 5.0);
+        assert_eq!(items[1].deductible_amount_usd, 0.0);
+        assert_eq!(items[1].shortfall_amount_usd, 5.0);
+        assert_eq!(items[1].available_gift_usd, 0.0);
+    }
+
+    #[test]
+    fn referral_clawback_treats_negative_or_missing_gift_as_zero() {
+        assert_eq!(referral_clawback_allocation(5.0, -1.0), (0.0, 5.0));
+        assert_eq!(referral_clawback_allocation(5.0, f64::NAN), (0.0, 5.0));
+        assert_eq!(referral_clawback_allocation(0.0, 5.0), (0.0, 0.0));
+        assert_eq!(referral_clawback_allocation(f64::INFINITY, 5.0), (0.0, 0.0));
+
+        let rewards = vec![test_reward("r1", "percent", 10.0)];
+        let items = build_referral_clawback_preview(&rewards, None, 100.0, 0.0, 100.0, -3.0);
+        assert_eq!(items[0].deductible_amount_usd, 0.0);
+        assert_eq!(items[0].shortfall_amount_usd, 10.0);
+    }
+
+    #[test]
+    fn referral_clawback_refund_beyond_order_total_clamps_to_full_reward() {
+        let rewards = vec![test_reward("r1", "percent", 10.0)];
+        let items = build_referral_clawback_preview(&rewards, None, 100.0, 0.0, 150.0, 25.0);
+        assert_eq!(items[0].expected_reversal_amount_usd, 10.0);
+    }
+
+    #[test]
+    fn referral_clawback_zero_amount_previews_already_refunded_state() {
+        // A succeeded refund previews with amount 0: only outstanding pending
+        // or unreversed debt from previously recorded refunds shows up.
+        let mut reward = test_reward("r1", "percent", 10.0);
+        reward.reversed_amount_usd = 4.0;
+        reward.pending_reversal_amount_usd = 1.5;
+        let items = build_referral_clawback_preview(&[reward], None, 100.0, 40.0, 0.0, 25.0);
+        // Cumulative target at 40% refunded is 4.0, all reversed; the pending
+        // 1.5 remains due as durable debt.
+        assert_eq!(items[0].expected_reversal_amount_usd, 1.5);
+        assert_eq!(items[0].shortfall_amount_usd, 0.0);
     }
 
     fn test_referral_config(percent_rate: f64) -> ReferralRewardConfig {
