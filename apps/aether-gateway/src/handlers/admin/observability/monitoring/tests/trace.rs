@@ -774,7 +774,15 @@ async fn admin_monitoring_trace_request_exposes_failed_candidate_response_payloa
         "redirect blocked"
     );
     assert!(extra["upstream_response"].get("body_ref").is_none());
-    assert!(extra.get("client_response").is_none());
+    assert_eq!(extra["client_response"]["status_code"], json!(502));
+    assert_eq!(
+        extra["client_response"]["headers"]["content-type"],
+        json!("application/json")
+    );
+    assert_eq!(
+        extra["client_response"]["body"]["error"]["message"],
+        json!("execution runtime stream returned non-success status 302")
+    );
     assert!(extra.get("provider_response").is_none());
 }
 

@@ -535,6 +535,18 @@ describe('UsageRecordsTable', () => {
     expect(badges.length).toBeGreaterThanOrEqual(2)
     expect(badges.every(badge => !badge.hasAttribute('title'))).toBe(true)
     expect(badges.every(badge => badge.getAttribute('aria-label') === '失败')).toBe(true)
+=======
+  it('shows failed instead of streaming when an active row has a timeout error message', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'streaming',
+      status_code: 200,
+      error_message: 'UpstreamRequest("provider stream first byte timeout after 10000 ms")',
+      response_time_ms: null,
+      first_byte_time_ms: 500,
+    })])
+
+    expect(root.textContent).toContain('失败')
+    expect(root.textContent).not.toContain('传输中')
   })
 
   it('renders output TPS in the non-admin usage table', () => {
