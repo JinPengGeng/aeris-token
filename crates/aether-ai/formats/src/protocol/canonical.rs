@@ -7392,11 +7392,11 @@ mod tests {
         from_gemini_to_canonical_request, from_gemini_to_canonical_response,
         from_openai_chat_to_canonical_request, from_openai_chat_to_canonical_response,
         from_openai_responses_to_canonical_request, from_openai_responses_to_canonical_response,
-        CanonicalContentBlock, CanonicalEmbedding, CanonicalEmbeddingContent,
-        CanonicalEmbeddingInput, CanonicalEmbeddingRequest, CanonicalGenerationConfig,
-        CanonicalRole, CanonicalUsage, write_openai_generation_config,
+        write_openai_generation_config, CanonicalContentBlock, CanonicalEmbedding,
+        CanonicalEmbeddingContent, CanonicalEmbeddingInput, CanonicalEmbeddingRequest,
+        CanonicalGenerationConfig, CanonicalRole, CanonicalUsage,
     };
-    use serde_json::{Map, json, Value};
+    use serde_json::{json, Map, Value};
 
     #[test]
     fn canonical_embedding_request_accepts_axonhub_input_shapes() {
