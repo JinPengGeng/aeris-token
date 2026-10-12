@@ -593,7 +593,7 @@
               </Card>
 
               <!-- 请求链路追踪卡片 -->
-              <div>
+              <div class="space-y-2">
                 <div
                   v-if="authStore.isAdmin && traceTimelineRequestId"
                   class="mb-2 space-y-2"
@@ -621,6 +621,12 @@
                   <p class="text-xs text-muted-foreground">
                     {{ showAllCandidates ? '包含已记录但未执行、未使用或被跳过的候选；不代表所有候选都向上游发起了请求。' : '仅查看实际开始尝试的候选。' }}
                   </p>
+                </div>
+                <div
+                  v-if="shouldShowFailureTimelineHint"
+                  class="rounded-lg border border-red-200 bg-red-50/50 px-3 py-2 text-xs leading-5 text-red-700 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-200"
+                >
+                  请求已失败，具体原因请查看下方链路追踪中选中的失败节点；点击红色节点可切换候选或重试的错误详情。
                 </div>
                 <HorizontalRequestTimeline
                   v-if="showTimeline && traceTimelineRequestId"
@@ -1709,6 +1715,10 @@ const detailCyberPolicyError = computed(() => {
 const processingTierPriceMultiplier = computed(() => (
   resolveProcessingTierPriceMultiplier(detail.value)
 ))
+const shouldShowFailureTimelineHint = computed(() => {
+  if (!detail.value || !traceTimelineRequestId.value || !timelineHasTrace.value) return false
+  return resolveRequestStateStatusFromDetail(detail.value) === 'failed'
+})
 
 const settlementInfo = computed<JsonRecord | null>(() =>
   asRecord(detail.value?.settlement ?? null),

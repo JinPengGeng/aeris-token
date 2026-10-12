@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -572,9 +573,22 @@ fn build_admin_monitoring_trace_candidate_extra_data(
             if let Some(response) = admin_monitoring_trace_response_data(
                 "upstream_response",
                 candidate_status_code,
+                None,
+                None,
+                None,
                 usage.response_body_state,
             ) {
                 merge_admin_monitoring_trace_response(extra_object, "upstream_response", response);
+            }
+            if let Some(response) = admin_monitoring_trace_response_data(
+                "client_response",
+                admin_monitoring_usage_client_response_status_code(usage),
+                usage.client_response_headers.as_ref(),
+                usage.client_response_body.as_ref(),
+                usage.client_response_body_ref.as_deref(),
+                usage.client_response_body_state,
+            ) {
+                merge_admin_monitoring_trace_response(extra_object, "client_response", response);
             }
         }
 
@@ -615,20 +629,111 @@ fn build_admin_monitoring_trace_candidate_extra_data(
     }
 }
 
-fn admin_monitoring_trace_response_data(
-    source: &str,
-    status_code: Option<u16>,
-    body_state: Option<aether_data_contracts::repository::usage::UsageBodyCaptureState>,
+fn admin_monitoring_usage_client_response_status_code(
+    usage: &StoredRequestUsageAudit,
+) -> Option<u16> {
+    usage
+        .request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("client_response_status_code"))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+        })
+        .and_then(|value| u16::try_from(value).ok())
+        .or(usage.status_code)
+}
+
+fn admin_monitoring_trace_response_body(
+    headers: Option<&Value>,
+    body: Option<&Value>,
 ) -> Option<Value> {
-    if status_code.is_none() && body_state.is_none() {
+    let body = body?;
+    admin_monitoring_decode_connect_json_error_body(headers, body).or_else(|| Some(body.clone()))
+}
+
+fn admin_monitoring_decode_connect_json_error_body(
+    headers: Option<&Value>,
+    body: &Value,
+) -> Option<Value> {
+    if !admin_monitoring_headers_indicate_connect_json(headers) {
         return None;
     }
 
-    Some(json!({
-        "source": source,
-        "status_code": status_code,
-        "body_state": body_state.map(|state| state.as_str()),
-    }))
+    let body_base64 = match body {
+        Value::String(value) => Some(value.as_str()),
+        Value::Object(object) => object
+            .get("encoding")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("base64"))
+            .then(|| object.get("data").and_then(Value::as_str))
+            .flatten(),
+        _ => None,
+    }?
+    .trim();
+    if body_base64.is_empty() {
+        return None;
+    }
+
+    let body_bytes = BASE64_STANDARD.decode(body_base64).ok()?;
+    aether_ai_formats::api::extract_provider_private_stream_error_body(None, &body_bytes)
+}
+
+fn admin_monitoring_headers_indicate_connect_json(headers: Option<&Value>) -> bool {
+    headers
+        .and_then(Value::as_object)
+        .and_then(|object| {
+            object.iter().find_map(|(key, value)| {
+                key.eq_ignore_ascii_case("content-type")
+                    .then(|| value.as_str())
+                    .flatten()
+            })
+        })
+        .map(str::trim)
+        .is_some_and(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("application/connect+json") || value.contains("+connect+json")
+        })
+}
+
+fn admin_monitoring_trace_response_data(
+    source: &str,
+    status_code: Option<u16>,
+    headers: Option<&Value>,
+    body: Option<&Value>,
+    body_ref: Option<&str>,
+    body_state: Option<aether_data_contracts::repository::usage::UsageBodyCaptureState>,
+) -> Option<Value> {
+    if status_code.is_none()
+        && headers.is_none()
+        && body.is_none()
+        && body_ref.is_none()
+        && body_state.is_none()
+    {
+        return None;
+    }
+
+    let body = admin_monitoring_trace_response_body(headers, body);
+    let mut response = serde_json::Map::new();
+    response.insert("source".to_string(), json!(source));
+    if let Some(status_code) = status_code {
+        response.insert("status_code".to_string(), json!(status_code));
+    }
+    if let Some(headers) = headers {
+        response.insert("headers".to_string(), headers.clone());
+    }
+    if let Some(body) = body {
+        response.insert("body".to_string(), body);
+    }
+    if let Some(body_ref) = body_ref {
+        response.insert("body_ref".to_string(), json!(body_ref));
+    }
+    if let Some(body_state) = body_state {
+        response.insert("body_state".to_string(), json!(body_state.as_str()));
+    }
+    Some(Value::Object(response))
 }
 
 fn merge_admin_monitoring_trace_response(

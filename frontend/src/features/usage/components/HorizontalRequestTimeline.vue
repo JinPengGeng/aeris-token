@@ -479,7 +479,7 @@
 
                 <!-- 错误信息：将实际上游响应头和响应体作为同一个对象展示 -->
                 <div
-                  v-if="currentAttempt.status === 'failed' && currentAttemptRequestError"
+                  v-if="currentAttemptDisplayStatus === 'failed' && currentAttemptRequestError"
                   class="error-block"
                 >
                   <div class="error-heading">
@@ -509,6 +509,19 @@
                     class="error-msg"
                   >
                     {{ currentAttemptRequestError.message }}
+                  </div>
+                  <div
+                    v-if="currentAttemptRequestError.fields.length > 0"
+                    class="error-fields"
+                  >
+                    <div
+                      v-for="field in currentAttemptRequestError.fields"
+                      :key="field.label"
+                      class="error-field"
+                    >
+                      <span class="error-field-label">{{ field.label }}</span>
+                      <span class="error-field-value">{{ field.value }}</span>
+                    </div>
                   </div>
                   <div
                     v-if="currentAttemptRequestError.upstreamResponse"
@@ -600,6 +613,7 @@ import { useDarkMode } from '@/composables/useDarkMode'
 import { resolveTimelineFinalStatus } from '../utils/status'
 import { useClipboard } from '@/composables/useClipboard'
 import { buildFailureDiagnosticBundle, diagnosticPathFromMessage, visibleFailureRecords } from '../utils/failureDiagnostic'
+import { formatFailureCodeLabel, formatFailureTypeLabel, resolveFailureReason } from '../utils/failureDisplay'
 import { prepareDiagnosticExport, sanitizeDiagnostic } from '../utils/diagnosticExport'
 import { formatCandidateSkipReason } from '../utils/skipReason'
 import {
@@ -1201,6 +1215,21 @@ const readNumberField = (obj: Record<string, unknown>, key: string): number | un
   return undefined
 }
 
+const readNestedValue = (value: unknown, ...path: string[]): unknown => {
+  let current: unknown = value
+  for (const key of path) {
+    const object = extractObject(current)
+    if (!object) return undefined
+    current = object[key]
+  }
+  return current
+}
+
+const readNestedString = (value: unknown, ...path: string[]): string | undefined => {
+  const nested = readNestedValue(value, ...path)
+  return typeof nested === 'string' && nested.trim() ? nested.trim() : undefined
+}
+
 const hasRenderableValue = (value: unknown): boolean => {
   if (value == null) return false
   if (typeof value === 'string') return value.trim().length > 0
@@ -1319,12 +1348,42 @@ watch(
   { immediate: true },
 )
 
+const normalizeUpstreamBodyDisplay = (value: unknown): unknown => {
+  if (!hasRenderableValue(value)) return null
+
+  const body = extractObject(value)
+  if (!body) return value
+
+  const display: Record<string, unknown> = { ...body }
+  const error = extractObject(display.error)
+  if (error) {
+    const errorDisplay: Record<string, unknown> = { ...error }
+    delete errorDisplay.code
+    delete errorDisplay.type
+    delete errorDisplay.message
+    delete errorDisplay.param
+    if (Object.keys(errorDisplay).length > 0) {
+      display.error = errorDisplay
+    } else {
+      delete display.error
+    }
+  }
+
+  delete display.code
+  delete display.type
+  delete display.message
+  delete display.detail
+  delete display.param
+
+  return Object.keys(display).length > 0 ? display : null
+}
+
 const normalizeUpstreamResponseDisplay = (value: unknown): Record<string, unknown> | null => {
   const raw = extractObject(value)
   if (!raw) return null
   const statusCode = readNumberField(raw, 'status_code') ?? readNumberField(raw, 'statusCode')
   const headers = raw.headers ?? raw.header
-  const body = raw.body
+  const body = normalizeUpstreamBodyDisplay(raw.body)
   const bodyRef = readStringField(raw, 'body_ref') ?? readStringField(raw, 'bodyRef')
   const bodyState = readStringField(raw, 'body_state') ?? readStringField(raw, 'bodyState')
   const meaningfulBodyState = bodyState && bodyState.toLowerCase() !== 'none'
@@ -1712,6 +1771,21 @@ const formatAttemptErrorMessage = (message: string, statusCode?: number): string
   return normalized
 }
 
+const buildCurrentAttemptErrorFields = (
+  errorFlow: Record<string, unknown> | null,
+  errorType?: string,
+  errorParam?: string,
+  hideErrorType = false,
+): Array<{ label: string, value: string }> => {
+  const errorTypeLabel = formatFailureTypeLabel(errorType)
+  const fields = [
+    errorTypeLabel && !hideErrorType ? { label: '错误类型', value: errorTypeLabel } : null,
+    errorParam ? { label: '错误参数', value: errorParam } : null,
+    readStringField(errorFlow ?? {}, 'source') ? { label: '错误来源', value: readStringField(errorFlow ?? {}, 'source') as string } : null,
+  ].filter((field): field is { label: string, value: string } => Boolean(field))
+  return fields
+}
+
 const shouldShowAttemptMessageWithUpstreamResponse = (
   rawMessage: string,
   upstreamResponse: Record<string, unknown> | null,
@@ -1727,19 +1801,35 @@ const currentAttemptRequestError = computed<{
   statusCode?: number
   upstreamStatusCode?: number
   finalStatusCode?: number
+  fields: Array<{ label: string, value: string }>
   upstreamResponse: Record<string, unknown> | null
   diagnostic: Record<string, unknown> | null
 } | null>(() => {
   const attempt = currentAttempt.value
-  if (!attempt || attempt.status !== 'failed') return null
+  if (!attempt || getDisplayStatus(attempt) !== 'failed') return null
 
   const extra = extractObject(attempt.extra_data)
   const upstreamResponse = extractObject(extra?.upstream_response)
+  const clientResponse = extractObject(extra?.client_response)
   const errorFlow = extractObject(extra?.error_flow)
   const upstreamStatusCode = readNumberField(upstreamResponse ?? {}, 'status_code')
     ?? readNumberField(upstreamResponse ?? {}, 'statusCode')
+  const upstreamBody = upstreamResponse?.body
+  const clientBody = clientResponse?.body
+  const clientErrorMessage = readNestedString(clientBody, 'error', 'message')
+    ?? readNestedString(clientBody, 'message')
+    ?? readNestedString(clientBody, 'detail')
+  const upstreamErrorMessage = readNestedString(upstreamBody, 'error', 'message')
+    ?? readNestedString(upstreamBody, 'message')
+    ?? readNestedString(upstreamBody, 'detail')
+  const preferClientResponse = Boolean(clientErrorMessage)
+  const primaryResponse = preferClientResponse ? clientResponse : upstreamResponse
+  const secondaryResponse = preferClientResponse ? upstreamResponse : clientResponse
   const statusCode = attempt.status_code
-    ?? upstreamStatusCode
+    ?? readNumberField(primaryResponse ?? {}, 'status_code')
+    ?? readNumberField(primaryResponse ?? {}, 'statusCode')
+    ?? readNumberField(secondaryResponse ?? {}, 'status_code')
+    ?? readNumberField(secondaryResponse ?? {}, 'statusCode')
     ?? readNumberField(errorFlow ?? {}, 'status_code')
     ?? readNumberField(errorFlow ?? {}, 'statusCode')
   const finalStatusCode = !['pending', 'streaming'].includes(computedFinalStatus.value)
@@ -1749,6 +1839,23 @@ const currentAttemptRequestError = computed<{
   const flowMessage = errorFlow
     ? readStringField(errorFlow, 'message')
     : ''
+  const upstreamErrorType = readNestedString(clientBody, 'error', 'type')
+    ?? readNestedString(clientBody, 'type')
+    ?? readNestedString(upstreamBody, 'error', 'type')
+    ?? readNestedString(upstreamBody, 'type')
+    ?? readStringField(errorFlow ?? {}, 'type')
+    ?? (typeof attempt.error_type === 'string' && attempt.error_type.trim() ? attempt.error_type.trim() : undefined)
+  const upstreamErrorCode = readNestedValue(clientBody, 'error', 'code')
+    ?? readNestedValue(clientBody, 'code')
+    ?? readNestedValue(upstreamBody, 'error', 'code')
+    ?? readNestedValue(upstreamBody, 'code')
+    ?? readNestedValue(errorFlow, 'code')
+  const upstreamErrorCodeLabel = formatFailureCodeLabel(upstreamErrorCode)
+  const upstreamErrorParam = readNestedString(clientBody, 'error', 'param')
+    ?? readNestedString(clientBody, 'param')
+    ?? readNestedString(upstreamBody, 'error', 'param')
+    ?? readNestedString(upstreamBody, 'param')
+    ?? readStringField(errorFlow ?? {}, 'param')
   const fallbackMessage = typeof attempt.error_message === 'string' && attempt.error_message.trim()
     ? attempt.error_message.trim()
     : ''
@@ -1756,10 +1863,33 @@ const currentAttemptRequestError = computed<{
     ? attempt.error_type.trim()
     : ''
   const diagnosticMessage = extractVisibleDiagnosticMessage(extra)
-  const rawMessage = chooseAttemptRawErrorMessage(flowMessage || '', fallbackMessage, diagnosticMessage)
-  const message = formatAttemptErrorMessage(rawMessage, statusCode) || fallbackType
+  const rawMessage = chooseAttemptRawErrorMessage(
+    clientErrorMessage || flowMessage || '',
+    fallbackMessage,
+    diagnosticMessage,
+  )
+  const resolvedFailureMessage = clientErrorMessage
+    ? resolveFailureReason({
+      message: clientErrorMessage,
+      type: upstreamErrorType,
+      statusCode,
+    })
+    : resolveFailureReason({
+      message: upstreamErrorMessage || flowMessage || fallbackMessage,
+      type: upstreamErrorType,
+      code: upstreamErrorCode,
+      statusCode,
+    })
+  const formattedMessage = formatAttemptErrorMessage(rawMessage, statusCode)
+  const message = (isActionableDiagnosticMessage(rawMessage)
+    ? formattedMessage
+    : resolvedFailureMessage || formattedMessage)
+    || fallbackType
+    || clientErrorMessage || upstreamErrorMessage
     || '本次尝试失败，链路追踪未包含详细错误内容。'
-  const upstreamResponseDisplay = normalizeUpstreamResponseDisplay(extra?.upstream_response)
+  const upstreamResponseDisplay = preferClientResponse
+    ? normalizeUpstreamResponseDisplay(extra?.client_response) ?? normalizeUpstreamResponseDisplay(extra?.upstream_response)
+    : normalizeUpstreamResponseDisplay(extra?.upstream_response) ?? normalizeUpstreamResponseDisplay(extra?.client_response)
   const visibleDiagnosticObjects = extractVisibleDiagnosticObjects(extra)
   const shouldAttachDiagnostic = Boolean(
     visibleDiagnosticObjects.length
@@ -1782,6 +1912,12 @@ const currentAttemptRequestError = computed<{
   const response = Object.keys(upstreamResponseData).length > 0
     ? upstreamResponseData
     : null
+  const fields = buildCurrentAttemptErrorFields(
+    errorFlow,
+    upstreamErrorType,
+    upstreamErrorParam,
+    Boolean(upstreamErrorCodeLabel),
+  )
   const showMessage = shouldShowAttemptMessageWithUpstreamResponse(
     rawMessage || fallbackType,
     upstreamResponseDisplay,
@@ -1792,6 +1928,7 @@ const currentAttemptRequestError = computed<{
     statusCode,
     upstreamStatusCode,
     finalStatusCode,
+    fields,
     upstreamResponse: response,
     diagnostic,
   }
@@ -2510,11 +2647,31 @@ const getStatusColorClass = (status: string) => {
   return classes[status] || 'status-available'
 }
 
-// 展示状态：进行中态优先（包括 started 但未 finished 的中间态），再按 HTTP 状态码兜底
+// 展示状态：错误信号优先，其次进行中态，再按 HTTP 状态码兜底
+function readImageProgressPhase(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+  const phase = (value as { phase?: unknown }).phase
+  return typeof phase === 'string' ? phase.trim().toLowerCase() : ''
+}
+
+function hasCandidateFailureSignal(attempt: CandidateRecord): boolean {
+  if (typeof attempt.status_code === 'number' && attempt.status_code >= 300) return true
+  if (typeof attempt.error_message === 'string' && attempt.error_message.trim()) return true
+  const extraData = attempt.extra_data
+  const extraProgress = extraData && typeof extraData === 'object' && !Array.isArray(extraData)
+    ? (extraData as { image_progress?: unknown }).image_progress
+    : null
+  return readImageProgressPhase(attempt.image_progress) === 'failed' ||
+    readImageProgressPhase(extraProgress) === 'failed'
+}
+
 function getDisplayStatus(attempt: CandidateRecord | null | undefined): string {
   if (!attempt) return 'available'
   const code = attempt.status_code
   const isTerminalSuccessCode = typeof code === 'number' && code >= 200 && code < 300
+  if ((attempt.status === 'pending' || attempt.status === 'streaming') && hasCandidateFailureSignal(attempt)) {
+    return 'failed'
+  }
 
   if (attempt.status === 'success') {
     if (typeof code === 'number' && !isTerminalSuccessCode) {
@@ -3492,6 +3649,38 @@ function getDisplayStatus(attempt: CandidateRecord | null | undefined): string {
   font-size: 0.85rem;
   color: #dc2626;
   word-break: break-word;
+}
+
+.error-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-top: 0.625rem;
+}
+
+.error-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 100%;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid #ef44442f;
+  border-radius: 999px;
+  background: hsl(var(--background) / 0.72);
+  font-size: 0.72rem;
+}
+
+.error-field-label {
+  color: hsl(var(--muted-foreground));
+}
+
+.error-field-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: hsl(var(--foreground));
+  font-family: ui-monospace, monospace;
 }
 
 .error-json {

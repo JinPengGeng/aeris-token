@@ -896,6 +896,7 @@ pub fn sanitize_request_candidate_extra_data_for_persistence(
     let mut sanitized = sanitize_candidate_extra_data_object(object);
     for (key, fields) in [
         ("upstream_response", &["headers", "body"][..]),
+        ("client_response", &["headers", "body"][..]),
         ("error_flow", &["message"][..]),
         (
             "failure_diagnostic",
@@ -1095,6 +1096,12 @@ fn sanitize_candidate_extra_data_object(
         .and_then(sanitize_candidate_upstream_response)
     {
         sanitized.insert("upstream_response".to_string(), summary);
+    }
+    if let Some(summary) = object
+        .get("client_response")
+        .and_then(sanitize_candidate_upstream_response)
+    {
+        sanitized.insert("client_response".to_string(), summary);
     }
     if let Some(progress) = object
         .get("image_progress")
