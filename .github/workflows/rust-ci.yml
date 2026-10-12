@@ -58,33 +58,6 @@ on:
       - ".github/workflows/*.yml"
       - ".github/workflows/*.yaml"
   pull_request:
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".cargo/**"
-      - "crates/**"
-      - "apps/**"
-      - "*.sql"
-      - "install.sh"
-      - "deploy.sh"
-      - "update.sh"
-      - "generate_keys.sh"
-      - ".env.example"
-      - "README.md"
-      - "Dockerfile.app"
-      - "docker-compose.yml"
-      - "docker-compose.single-node.yml"
-      - "docker-compose.local.yml"
-      - "docker-compose.release-local.yml"
-      - "tests/compose_database_config_test.py"
-      - "tests/install_*_test.sh"
-      - "tests/deploy_*_test.sh"
-      - "tests/update_*_test.sh"
-      - "tests/release_supply_chain_test.sh"
-      - "tests/tunnel_installer_config_security_test.sh"
-      - ".github/workflows/*.yml"
-      - ".github/workflows/*.yaml"
 
 concurrency:
   group: rust-ci-${{ github.event_name }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
