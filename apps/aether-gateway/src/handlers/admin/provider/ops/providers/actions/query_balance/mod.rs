@@ -174,6 +174,9 @@ pub(super) async fn admin_provider_ops_run_query_balance_action(
     ) {
         Ok(data) => data,
         Err(message) => {
+            let hint = format!(
+                "{message}(上游 HTTP 200;可尝试在 provider_ops.action_config.balance_fields 中配置字段映射,默认字段: quota / used_quota / remaining / balance)"
+            );
             return admin_provider_ops_action_error(
                 if matches!(
                     architecture.architecture_id,
@@ -184,7 +187,7 @@ pub(super) async fn admin_provider_ops_run_query_balance_action(
                     "parse_error"
                 },
                 "query_balance",
-                message,
+                hint,
                 response_time_ms,
             );
         }

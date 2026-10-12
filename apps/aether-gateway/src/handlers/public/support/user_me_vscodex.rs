@@ -36,6 +36,40 @@ const VSCODEX_WS_MAX_CONNECTIONS: usize = 256;
 const VSCODEX_WS_MAX_CONNECTIONS_PER_IP: usize = 16;
 const VSCODEX_DEVICE_PATH_PREFIX: &str = "/api/users/me/vscodex/devices/";
 const VSCODEX_CLIENT_IP_HEADER: &str = "x-aether-client-ip";
+const VSCODEX_CONFIG_HINT: &str =
+    "需要设置 AETHER_VSCODEX_ENABLED=true、AETHER_VSCODEX_INTERNAL_URL 与 AETHER_VSCODEX_INTERNAL_TOKEN";
+
+/// Builds a client-visible 503 with a machine-readable `vscodex_error`
+/// classification so the UI can distinguish "disabled" from
+/// "misconfigured" instead of collapsing both into a generic failure.
+fn build_vscodex_unavailable_response(misconfigured: bool, detail: Option<&str>) -> Response<Body> {
+    let (kind, detail_text) = if misconfigured {
+        (
+            "misconfigured",
+            format!(
+                "VS Codex 服务配置不完整:{}{}",
+                detail
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(""),
+                VSCODEX_CONFIG_HINT
+            ),
+        )
+    } else {
+        (
+            "disabled",
+            format!("VS Codex 服务未启用。{VSCODEX_CONFIG_HINT}"),
+        )
+    };
+    build_auth_json_response(
+        http::StatusCode::SERVICE_UNAVAILABLE,
+        json!({
+            "detail": detail_text,
+            "vscodex_error": kind,
+        }),
+        None,
+    )
+}
 
 static VSCODEX_HTTP_CLIENT: LazyLock<Result<reqwest::Client, reqwest::Error>> =
     LazyLock::new(|| {
@@ -207,30 +241,18 @@ pub(crate) async fn vscodex_ws_proxy(
     let config = match load_vscodex_sidecar_config() {
         Ok(Some(value)) => value,
         Ok(None) => {
-            return build_auth_error_response(
-                http::StatusCode::SERVICE_UNAVAILABLE,
-                "VS Codex 服务未启用",
-                false,
-            )
+            return build_vscodex_unavailable_response(false, None);
         }
         Err(detail) => {
             warn!(error = %detail, "VS Codex WebSocket sidecar configuration is invalid");
-            return build_auth_error_response(
-                http::StatusCode::SERVICE_UNAVAILABLE,
-                "VS Codex 服务配置不完整",
-                false,
-            );
+            return build_vscodex_unavailable_response(true, Some(&detail));
         }
     };
     let sidecar_url = match build_vscodex_websocket_url(&config.base_url) {
         Ok(value) => value,
         Err(detail) => {
             warn!(error = %detail, "could not build VS Codex sidecar WebSocket URL");
-            return build_auth_error_response(
-                http::StatusCode::SERVICE_UNAVAILABLE,
-                "VS Codex 服务配置不完整",
-                false,
-            );
+            return build_vscodex_unavailable_response(true, Some(&detail));
         }
     };
     let mut sidecar_request = match sidecar_url.as_str().into_client_request() {
@@ -325,22 +347,14 @@ pub(super) async fn maybe_build_local_vscodex_response(
     let config = match load_vscodex_sidecar_config() {
         Ok(Some(value)) => value,
         Ok(None) => {
-            return Some(build_auth_error_response(
-                http::StatusCode::SERVICE_UNAVAILABLE,
-                "VS Codex 服务未启用",
-                false,
-            ))
+            return Some(build_vscodex_unavailable_response(false, None));
         }
         Err(detail) => {
             warn!(
                 error = %detail,
                 "VS Codex sidecar configuration is invalid"
             );
-            return Some(build_auth_error_response(
-                http::StatusCode::SERVICE_UNAVAILABLE,
-                "VS Codex 服务配置不完整",
-                false,
-            ));
+            return Some(build_vscodex_unavailable_response(true, Some(&detail)));
         }
     };
     let payload = match parse_pairing_exchange_request(request_body) {
@@ -377,11 +391,7 @@ pub(super) async fn handle_users_me_vscodex_request(
     let config = match load_vscodex_sidecar_config() {
         Ok(Some(value)) => value,
         Ok(None) => {
-            return build_auth_error_response(
-                http::StatusCode::SERVICE_UNAVAILABLE,
-                "VS Codex 服务未启用",
-                false,
-            )
+            return build_vscodex_unavailable_response(false, None);
         }
         Err(detail) => {
             warn!(
@@ -389,11 +399,7 @@ pub(super) async fn handle_users_me_vscodex_request(
                 error = %detail,
                 "VS Codex sidecar configuration is invalid"
             );
-            return build_auth_error_response(
-                http::StatusCode::SERVICE_UNAVAILABLE,
-                "VS Codex 服务配置不完整",
-                false,
-            );
+            return build_vscodex_unavailable_response(true, Some(&detail));
         }
     };
 

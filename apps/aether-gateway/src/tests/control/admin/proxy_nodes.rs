@@ -1042,6 +1042,8 @@ async fn proxy_node_install_session_requires_admin_and_preserves_parent_token_co
             "{gateway_url}/api/admin/proxy-nodes/install-sessions"
         ))
         .header(GATEWAY_HEADER, "rust-phase3b")
+        .header("x-forwarded-host", "gateway.example.com")
+        .header("x-forwarded-proto", "https")
         .bearer_auth(admin_raw_token)
         .json(&json!({ "node_name": "constrained-node" }))
         .send()

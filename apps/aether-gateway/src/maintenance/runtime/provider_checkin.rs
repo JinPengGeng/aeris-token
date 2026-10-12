@@ -12,6 +12,9 @@ use crate::important_notification::{
     ImportantNotification, PROVIDER_POOL_ABNORMAL_ITEM_KEY,
 };
 use crate::{AppState, GatewayError};
+use aether_admin::provider::ops::{
+    get_architecture, normalize_architecture_id, ProviderOpsCheckinMode,
+};
 
 use super::{system_config_bool, PROVIDER_CHECKIN_CONCURRENCY};
 
@@ -163,6 +166,17 @@ async fn run_provider_checkin_for_provider(
     endpoints: Vec<StoredProviderCatalogEndpoint>,
 ) -> ProviderCheckinOutcome {
     let provider_id = provider.id.clone();
+    let checkin_mode = provider
+        .config
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|config| config.get("provider_ops"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|config| config.get("architecture_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(normalize_architecture_id)
+        .and_then(get_architecture)
+        .map(|architecture| architecture.checkin_mode);
     let admin_state = AdminAppState::new(state);
     let payload = admin_provider_ops_local_action_response(
         &admin_state,
@@ -173,7 +187,14 @@ async fn run_provider_checkin_for_provider(
         None,
     )
     .await;
-    provider_checkin_outcome_from_payload(&provider_id, &payload)
+    let mut outcome = provider_checkin_outcome_from_payload(&provider_id, &payload);
+    if checkin_mode == Some(ProviderOpsCheckinMode::None)
+        && outcome.status == ProviderCheckinStatus::Skipped
+        && outcome.message == "未执行签到"
+    {
+        outcome.message = "architecture_not_supported: 当前架构不支持自动签到".to_string();
+    }
+    outcome
 }
 
 fn provider_checkin_outcome_from_payload(

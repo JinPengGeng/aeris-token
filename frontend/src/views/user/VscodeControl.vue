@@ -72,8 +72,12 @@
     >
       <span class="flex items-center gap-2">
         <AlertCircle class="h-4 w-4 shrink-0" />
-        {{ t('vscodex.devices.loadFailed') }}
+        {{ loadErrorLabel }}
       </span>
+      <span
+        v-if="loadError.message"
+        class="w-full text-xs text-destructive/80"
+      >{{ loadError.message }}</span>
       <Button
         variant="outline"
         size="sm"
@@ -288,7 +292,8 @@ const { isDark } = useDarkMode()
 const devices = ref<VscodexDevice[]>([])
 const selectedDeviceId = ref('')
 const loadingDevices = ref(true)
-const loadError = ref(false)
+type VscodexLoadErrorKind = 'disabled' | 'misconfigured' | 'network' | 'unknown'
+const loadError = ref<{ kind: VscodexLoadErrorKind; message: string } | null>(null)
 const pairing = ref<VscodexPairing | null>(null)
 const pairingCreatedAt = ref(0)
 const creatingPairing = ref(false)
@@ -336,6 +341,30 @@ function statusDotClass(status: VscodexDeviceStatus): string {
   return 'bg-muted-foreground/50'
 }
 
+function classifyLoadError(error: unknown): { kind: VscodexLoadErrorKind; message: string } {
+  const responseData = (error as { response?: { data?: { vscodex_error?: string; detail?: string } } })
+    ?.response?.data
+  if (responseData?.vscodex_error === 'disabled') {
+    return { kind: 'disabled', message: responseData.detail ?? '' }
+  }
+  if (responseData?.vscodex_error === 'misconfigured') {
+    return { kind: 'misconfigured', message: responseData.detail ?? '' }
+  }
+  const axiosError = error as { code?: string; message?: string }
+  if (axiosError?.code === 'ERR_NETWORK' || !responseData) {
+    return { kind: 'network', message: axiosError?.message ?? '' }
+  }
+  return { kind: 'unknown', message: responseData?.detail ?? '' }
+}
+
+const loadErrorLabel = computed(() => {
+  if (!loadError.value) return ''
+  if (loadError.value.kind === 'disabled') return t('vscodex.errors.disabled')
+  if (loadError.value.kind === 'misconfigured') return t('vscodex.errors.misconfigured')
+  if (loadError.value.kind === 'network') return t('vscodex.errors.network')
+  return t('vscodex.devices.loadFailed')
+})
+
 function stopPairingPoll(): void {
   if (pairingPollTimer) {
     clearInterval(pairingPollTimer)
@@ -365,7 +394,7 @@ async function refreshDevices(options: { silent?: boolean } = {}): Promise<void>
   const requestVersion = ++deviceRequestVersion
   if (!options.silent) {
     loadingDevices.value = true
-    loadError.value = false
+    loadError.value = null
   }
 
   try {
@@ -385,9 +414,9 @@ async function refreshDevices(options: { silent?: boolean } = {}): Promise<void>
       pairingError.value = false
       stopPairingPoll()
     }
-  } catch {
+  } catch (error) {
     if (!disposed && requestVersion === deviceRequestVersion && !options.silent) {
-      loadError.value = true
+      loadError.value = classifyLoadError(error)
     }
   } finally {
     if (!disposed && requestVersion === deviceRequestVersion && !options.silent) {

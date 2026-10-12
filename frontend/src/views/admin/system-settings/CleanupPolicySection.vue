@@ -525,12 +525,14 @@ function formatDuration(value: number | null): string {
 
 function cleanupSummaryText(summary: Record<string, unknown>): string {
   const total = typeof summary.total === 'number' ? summary.total : null
-  if (total !== null) return `影响 ${total} 行`
+  if (total !== null) {
+    return total > 0 ? `影响 ${total} 行` : '没有符合条件的数据'
+  }
 
   const entries = Object.entries(summary)
     .filter(([, value]) => typeof value === 'number' && value > 0)
     .map(([key, value]) => `${summaryLabel(key)} ${value}`)
-  return entries.length > 0 ? entries.join(' / ') : '无数据变更'
+  return entries.length > 0 ? entries.join(' / ') : '没有符合条件的数据'
 }
 
 function summaryLabel(key: string): string {
